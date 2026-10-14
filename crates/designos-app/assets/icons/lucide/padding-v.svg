@@ -1,6 +1,5 @@
-<!-- @license lucide-static v0.468.0 - ISC -->
+<!-- Composed by designos for Figma UI3 Vertical Padding (24x24 viewBox). -->
 <svg
-  class="lucide lucide-move-vertical"
   xmlns="http://www.w3.org/2000/svg"
   width="24"
   height="24"
@@ -11,7 +10,7 @@
   stroke-linecap="round"
   stroke-linejoin="round"
 >
-  <path d="M12 2v20" />
-  <path d="m8 18 4 4 4-4" />
-  <path d="m8 6 4-4 4 4" />
+  <path d="M4 4h16" />
+  <path d="M4 20h16" />
+  <rect x="8" y="9" width="8" height="6" rx="1" />
 </svg>

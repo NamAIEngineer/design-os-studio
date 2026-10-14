@@ -87,6 +87,9 @@ struct Lk<'a> {
     /// Property definition id (including the `parentPropDefId` aliases that
     /// variants carry) -> (`Name#s:l`, REST type).
     prop_defs: HashMap<String, (String, &'static str)>,
+    /// Node guid (`s:l`) -> Dev Mode handoff status (`READY_FOR_DEV` / `COMPLETED`)
+    /// from `CANVAS.handoffStatusMap`.
+    handoff_status: HashMap<String, &'static str>,
 }
 
 impl<'a> Lk<'a> {
@@ -99,6 +102,7 @@ impl<'a> Lk<'a> {
             style_nodes: HashMap::new(),
             style_by_id: HashMap::new(),
             prop_defs: HashMap::new(),
+            handoff_status: HashMap::new(),
         };
         let mut aliases: Vec<(String, String)> = Vec::new();
         for e in entries {
@@ -106,6 +110,21 @@ impl<'a> Lk<'a> {
             let key = fstr(j, "key").filter(|k| !k.is_empty());
             if fstr(j, "styleType").is_some() {
                 lk.style_by_id.insert(e.id.as_str(), j);
+            }
+            for h in j.get("handoffStatusMap").map(|m| rest_import::farr(m, "entries")).unwrap_or(&[]) {
+                let Some(gid) = h.get("guid").and_then(guid_str) else { continue };
+                let status = h
+                    .get("handoffStatus")
+                    .and_then(|s| fstr(s, "status").or_else(|| s.as_str()))
+                    .or_else(|| fstr(h, "status"));
+                let mapped = match status {
+                    Some("BUILD" | "READY_FOR_DEV") => Some("READY_FOR_DEV"),
+                    Some("COMPLETED") => Some("COMPLETED"),
+                    _ => None,
+                };
+                if let Some(st) = mapped {
+                    lk.handoff_status.insert(gid, st);
+                }
             }
             match (fstr(j, "type"), key) {
                 (Some("VARIABLE"), Some(k)) => {
@@ -398,6 +417,11 @@ fn convert_node(nc: &Value, id: &str, lk: &Lk) -> Option<Map<String, Value>> {
     if let Some(g) = convert_guides(nc) {
         m.insert("guides".into(), g);
     }
+    if let Some(ds) = nc.get("devStatus") {
+        m.insert("devStatus".into(), ds.clone());
+    } else if let Some(&st) = lk.handoff_status.get(id) {
+        m.insert("devStatus".into(), json!({"type": st}));
+    }
     if ty == "CANVAS" {
         copy(&mut m, nc, "backgroundColor", "backgroundColor");
         return Some(m);
@@ -570,23 +594,37 @@ fn convert_node(nc: &Value, id: &str, lk: &Lk) -> Option<Map<String, Value>> {
     Some(m)
 }
 
-/// `boundVariables` (REST shape) from `variableConsumptionMap` entries
-/// (`{variableField, variableData: {dataType: ALIAS, value: {alias}}}`) and
-/// the `colorVar` of fill, stroke and effect colors.
+/// `boundVariables` (REST shape) from `variableConsumptionMap` and
+/// `parameterConsumptionMap` entries (`{variableField, variableData: {dataType: ALIAS, value: {alias}}}`)
+/// and the `colorVar` of fill, stroke and effect colors.
 fn bound_variables(nc: &Value, lk: &Lk) -> Option<Value> {
+    fn alias_target(data: &Value) -> Option<&Value> {
+        let v = data.get("value")?;
+        if let Some(a) = v.get("alias") {
+            return Some(a);
+        }
+        let fs = v.get("fontStyleValue")?;
+        fs.get("asFloat")
+            .and_then(|inner| inner.get("value")?.get("alias"))
+            .or_else(|| fs.get("asString").and_then(|inner| inner.get("value")?.get("alias")))
+    }
     let alias = |data: &Value| -> Option<Value> {
-        let a = data.get("value")?.get("alias")?;
+        let a = alias_target(data)?;
         Some(json!({"type": "VARIABLE_ALIAS", "id": lk.variable_id(a)?}))
     };
     let mut out = Map::new();
-    let entries = nc.get("variableConsumptionMap").map(|m| rest_import::farr(m, "entries")).unwrap_or(&[]);
-    for e in entries {
+    let var_entries = nc.get("variableConsumptionMap").map(|m| rest_import::farr(m, "entries")).unwrap_or(&[]);
+    let param_entries = nc.get("parameterConsumptionMap").map(|m| rest_import::farr(m, "entries")).unwrap_or(&[]);
+    for e in var_entries.iter().chain(param_entries.iter()) {
         let (Some(field), Some(a)) = (fstr(e, "variableField"), e.get("variableData").and_then(alias)) else { continue };
         let keys: &[&str] = match field {
             "STACK_PADDING_LEFT" => &["paddingLeft"],
             "STACK_PADDING_RIGHT" => &["paddingRight"],
             "STACK_PADDING_TOP" => &["paddingTop"],
             "STACK_PADDING_BOTTOM" => &["paddingBottom"],
+            "STACK_HORIZONTAL_PADDING" => &["paddingLeft", "paddingRight"],
+            "STACK_VERTICAL_PADDING" => &["paddingTop", "paddingBottom"],
+            "STACK_PADDING" => &["paddingLeft", "paddingRight", "paddingTop", "paddingBottom"],
             "STACK_SPACING" => &["itemSpacing"],
             "STACK_COUNTER_SPACING" => &["counterAxisSpacing"],
             "RECTANGLE_TOP_LEFT_CORNER_RADIUS" => &["topLeftRadius"],
@@ -596,13 +634,19 @@ fn bound_variables(nc: &Value, lk: &Lk) -> Option<Value> {
             "CORNER_RADIUS" => &["topLeftRadius", "topRightRadius", "bottomLeftRadius", "bottomRightRadius"],
             "WIDTH" => &["width"],
             "HEIGHT" => &["height"],
+            "MIN_WIDTH" => &["minWidth"],
+            "MAX_WIDTH" => &["maxWidth"],
+            "MIN_HEIGHT" => &["minHeight"],
+            "MAX_HEIGHT" => &["maxHeight"],
             "OPACITY" => &["opacity"],
             "STROKE_WEIGHT" => &["strokeWeight"],
             "FONT_SIZE" => &["fontSize"],
             "FONT_FAMILY" => &["fontFamily"],
-            "FONT_WEIGHT" => &["fontWeight"],
+            "FONT_WEIGHT" | "FONT_STYLE" => &["fontWeight"],
             "LINE_HEIGHT" => &["lineHeight"],
             "LETTER_SPACING" => &["letterSpacing"],
+            "PARAGRAPH_SPACING" => &["paragraphSpacing"],
+            "PARAGRAPH_INDENT" => &["paragraphIndent"],
             _ => &[],
         };
         for k in keys {
@@ -767,6 +811,20 @@ fn guid_path(o: &Value) -> Vec<String> {
     list.map(|a| a.iter().filter_map(guid_str).collect()).unwrap_or_default()
 }
 
+fn stack_align(s: Option<&str>) -> &'static str {
+    match s {
+        Some("CENTER") => "CENTER",
+        Some("MAX") => "MAX",
+        Some("SPACE_BETWEEN") | Some("SPACE_EVENLY") => "SPACE_BETWEEN",
+        Some("BASELINE") => "BASELINE",
+        _ => "MIN",
+    }
+}
+
+fn stack_sizing(s: Option<&str>) -> &'static str {
+    if s.map(|s| s.starts_with("RESIZE_TO_FIT")).unwrap_or(false) { "AUTO" } else { "FIXED" }
+}
+
 /// Partial REST node fields from an override / derived-data entry: only keys
 /// present in the entry are emitted.
 fn convert_override(o: &Value, lk: &Lk) -> Map<String, Value> {
@@ -776,6 +834,9 @@ fn convert_override(o: &Value, lk: &Lk) -> Map<String, Value> {
         copy(&mut m, o, k, k);
     }
     copy(&mut m, o, "mask", "isMask");
+    if let Some(d) = rest_import::fbool(o, "frameMaskDisabled") {
+        m.insert("clipsContent".into(), (!d).into());
+    }
     if let Some(t) = o.get("transform") {
         m.insert("relativeTransform".into(), matrix_json(t));
     }
@@ -787,6 +848,33 @@ fn convert_override(o: &Value, lk: &Lk) -> Map<String, Value> {
             m.insert(dst.into(), Value::Array(rest_import::farr(sn, "fillPaints").iter().filter_map(convert_paint).collect()));
         }
     }
+    if o.get("borderStrokeWeightsIndependent").and_then(Value::as_bool) == Some(true)
+        || ["borderTopWeight", "borderRightWeight", "borderBottomWeight", "borderLeftWeight"].iter().any(|k| o.get(*k).is_some())
+    {
+        let w = fnum(o, "strokeWeight").unwrap_or(1.0);
+        let g = |k: &str| fnum(o, k).unwrap_or(w);
+        m.insert(
+            "individualStrokeWeights".into(),
+            json!({"top": g("borderTopWeight"), "right": g("borderRightWeight"), "bottom": g("borderBottomWeight"), "left": g("borderLeftWeight")}),
+        );
+    }
+    if o.get("rectangleCornerRadiiIndependent").and_then(Value::as_bool) == Some(true)
+        || ["rectangleTopLeftCornerRadius", "rectangleTopRightCornerRadius", "rectangleBottomRightCornerRadius", "rectangleBottomLeftCornerRadius"]
+            .iter()
+            .any(|k| o.get(*k).is_some())
+    {
+        let base = fnum(o, "cornerRadius").unwrap_or(0.0);
+        let g = |k: &str| fnum(o, k).unwrap_or(base);
+        m.insert(
+            "rectangleCornerRadii".into(),
+            json!([
+                g("rectangleTopLeftCornerRadius"),
+                g("rectangleTopRightCornerRadius"),
+                g("rectangleBottomRightCornerRadius"),
+                g("rectangleBottomLeftCornerRadius")
+            ]),
+        );
+    }
     if o.get("effects").is_some() {
         m.insert("effects".into(), Value::Array(rest_import::farr(o, "effects").iter().filter_map(convert_effect).collect()));
     }
@@ -795,6 +883,74 @@ fn convert_override(o: &Value, lk: &Lk) -> Map<String, Value> {
             m.insert(k.into(), g);
         }
     }
+    if let Some(bv) = bound_variables(o, lk) {
+        m.insert("boundVariables".into(), bv);
+    }
+    if let Some(modes) = explicit_modes(o, lk) {
+        m.insert("explicitVariableModes".into(), modes);
+    }
+    if let Some(cid) = o
+        .get("overriddenSymbolID")
+        .and_then(guid_str)
+        .or_else(|| o.get("symbolData").and_then(|s| s.get("symbolID")).and_then(guid_str))
+    {
+        m.insert("componentId".into(), cid.into());
+    }
+    component_props(&mut m, o, lk);
+    // Auto-layout overrides: full stack when `stackMode` is present, plus individual
+    // overridden stack / child-layout fields when `stackMode` is inherited from the master.
+    if o.get("stackMode").is_some() {
+        convert_stack(&mut m, o);
+    }
+    copy(&mut m, o, "stackSpacing", "itemSpacing");
+    copy(&mut m, o, "stackCounterSpacing", "counterAxisSpacing");
+    let p = fnum(o, "stackPadding");
+    let h = fnum(o, "stackHorizontalPadding").or(p);
+    let v = fnum(o, "stackVerticalPadding").or(p);
+    for (k, val) in [
+        ("paddingLeft", fnum(o, "stackPaddingLeft").or(h)),
+        ("paddingTop", fnum(o, "stackPaddingTop").or(v)),
+        ("paddingRight", fnum(o, "stackPaddingRight").or(h)),
+        ("paddingBottom", fnum(o, "stackPaddingBottom").or(v)),
+    ] {
+        if let Some(x) = val {
+            m.insert(k.into(), x.into());
+        }
+    }
+    if let Some(s) = fstr(o, "stackPrimaryAlignItems") {
+        m.insert("primaryAxisAlignItems".into(), stack_align(Some(s)).into());
+    }
+    if let Some(s) = fstr(o, "stackCounterAlignItems") {
+        m.insert("counterAxisAlignItems".into(), stack_align(Some(s)).into());
+    }
+    if let Some(s) = fstr(o, "stackPrimarySizing") {
+        m.insert("primaryAxisSizingMode".into(), stack_sizing(Some(s)).into());
+    }
+    if let Some(s) = fstr(o, "stackCounterSizing") {
+        m.insert("counterAxisSizingMode".into(), stack_sizing(Some(s)).into());
+    }
+    if let Some(w) = fstr(o, "stackWrap") {
+        m.insert("layoutWrap".into(), (if w == "WRAP" { "WRAP" } else { "NO_WRAP" }).into());
+    } else if let Some(b) = rest_import::fbool(o, "stackWrap") {
+        m.insert("layoutWrap".into(), (if b { "WRAP" } else { "NO_WRAP" }).into());
+    }
+    if let Some(b) = rest_import::fbool(o, "bordersTakeSpace") {
+        m.insert("strokesIncludedInLayout".into(), b.into());
+    }
+    if let Some(b) = rest_import::fbool(o, "stackReverseZIndex") {
+        m.insert("itemReverseZIndex".into(), b.into());
+    }
+    if let Some(g) = fnum(o, "stackChildPrimaryGrow") {
+        m.insert("layoutGrow".into(), g.into());
+    }
+    if let Some(a) = fstr(o, "stackChildAlignSelf") {
+        m.insert("layoutAlign".into(), a.into());
+    }
+    if let Some(pos) = fstr(o, "stackPositioning") {
+        m.insert("layoutPositioning".into(), pos.into());
+    }
+    copy(&mut m, o, "layoutSizingHorizontal", "layoutSizingHorizontal");
+    copy(&mut m, o, "layoutSizingVertical", "layoutSizingVertical");
     // Text.
     let mut st = convert_type_style(o, None);
     st.remove("fills");
@@ -849,39 +1005,34 @@ fn convert_stack(m: &mut Map<String, Value>, nc: &Value) {
     m.insert("layoutMode".into(), mode.into());
     copy(m, nc, "stackSpacing", "itemSpacing");
     copy(m, nc, "stackCounterSpacing", "counterAxisSpacing");
-    let h = fnum(nc, "stackHorizontalPadding");
-    let v = fnum(nc, "stackVerticalPadding");
+    let p = fnum(nc, "stackPadding");
+    let h = fnum(nc, "stackHorizontalPadding").or(p);
+    let v = fnum(nc, "stackVerticalPadding").or(p);
     let ins = |m: &mut Map<String, Value>, k: &str, x: Option<f32>| {
         if let Some(x) = x {
             m.insert(k.into(), x.into());
         }
     };
-    ins(m, "paddingLeft", h);
+    ins(m, "paddingLeft", fnum(nc, "stackPaddingLeft").or(h));
+    ins(m, "paddingTop", fnum(nc, "stackPaddingTop").or(v));
     ins(m, "paddingRight", fnum(nc, "stackPaddingRight").or(h));
-    ins(m, "paddingTop", v);
     ins(m, "paddingBottom", fnum(nc, "stackPaddingBottom").or(v));
-    let align = |s: Option<&str>| -> &'static str {
-        match s {
-            Some("CENTER") => "CENTER",
-            Some("MAX") => "MAX",
-            Some("SPACE_BETWEEN") | Some("SPACE_EVENLY") => "SPACE_BETWEEN",
-            Some("BASELINE") => "BASELINE",
-            _ => "MIN",
-        }
-    };
-    m.insert("primaryAxisAlignItems".into(), align(fstr(nc, "stackPrimaryAlignItems")).into());
-    m.insert("counterAxisAlignItems".into(), align(fstr(nc, "stackCounterAlignItems")).into());
-    let sizing = |s: Option<&str>| if s.map(|s| s.starts_with("RESIZE_TO_FIT")).unwrap_or(false) { "AUTO" } else { "FIXED" };
+    m.insert("primaryAxisAlignItems".into(), stack_align(fstr(nc, "stackPrimaryAlignItems")).into());
+    m.insert("counterAxisAlignItems".into(), stack_align(fstr(nc, "stackCounterAlignItems")).into());
     // Real files only ever write `FIXED` for the primary axis (absent = hug) and
     // `RESIZE_TO_FIT_WITH_IMPLICIT_SIZE` for the counter axis (absent = fixed).
     let primary = if fstr(nc, "stackPrimarySizing") == Some("FIXED") { "FIXED" } else { "AUTO" };
     m.insert("primaryAxisSizingMode".into(), primary.into());
-    m.insert("counterAxisSizingMode".into(), sizing(fstr(nc, "stackCounterSizing")).into());
-    if nc.get("stackWrap").and_then(Value::as_bool) == Some(true) {
+    m.insert("counterAxisSizingMode".into(), stack_sizing(fstr(nc, "stackCounterSizing")).into());
+    if fstr(nc, "stackWrap") == Some("WRAP") || rest_import::fbool(nc, "stackWrap") == Some(true) {
         m.insert("layoutWrap".into(), "WRAP".into());
     }
-    copy(m, nc, "stackReverseZIndex", "itemReverseZIndex");
-    copy(m, nc, "bordersTakeSpace", "strokesIncludedInLayout");
+    if let Some(b) = rest_import::fbool(nc, "stackReverseZIndex") {
+        m.insert("itemReverseZIndex".into(), b.into());
+    }
+    if let Some(b) = rest_import::fbool(nc, "bordersTakeSpace") {
+        m.insert("strokesIncludedInLayout".into(), b.into());
+    }
 }
 
 // ------------------------------------------------------------------ paint / effect

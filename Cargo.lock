@@ -1021,6 +1021,7 @@ version = "0.1.0"
 dependencies = [
  "designos-doc",
  "designos-export",
+ "designos-fig",
  "designos-library",
  "rmcp",
  "serde",

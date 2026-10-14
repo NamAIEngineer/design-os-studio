@@ -138,7 +138,17 @@ pub fn resolve_drop(doc: &Document, rows: &[Row], drop: Drop, dragged: &[NodeId]
 pub(crate) fn kind_icon(k: &NodeKind) -> Icon {
     match k {
         NodeKind::Page { .. } => Icon::Page,
-        NodeKind::Frame(_) => Icon::Frame,
+        NodeKind::Frame(f) => {
+            if let Some(al) = &f.auto_layout {
+                if al.direction == designos_doc::LayoutDirection::Horizontal {
+                    Icon::AutoLayoutH
+                } else {
+                    Icon::AutoLayoutV
+                }
+            } else {
+                Icon::Frame
+            }
+        }
         NodeKind::Group => Icon::Group,
         NodeKind::Section => Icon::Section,
         NodeKind::Rectangle => Icon::Rectangle,
@@ -149,7 +159,8 @@ pub(crate) fn kind_icon(k: &NodeKind) -> Icon {
         NodeKind::Vector { .. } => Icon::Vector,
         NodeKind::Text(_) => Icon::Text,
         NodeKind::BooleanOp(_) => Icon::Boolean,
-        NodeKind::Component(_) | NodeKind::ComponentSet(_) => Icon::Component,
+        NodeKind::Component(_) => Icon::Component,
+        NodeKind::ComponentSet(_) => Icon::ComponentSet,
         NodeKind::Instance { .. } => Icon::Instance,
         NodeKind::Sticky(_) => Icon::Sticky,
         NodeKind::Connector(_) => Icon::Connector,
@@ -519,5 +530,23 @@ mod tests {
         // moving b above the frame: dragged sibling before index is discounted
         let (p, i) = resolve_drop(&d, &rows, Drop { row: 1, kind: DropKind::Before }, &[b]).unwrap();
         assert_eq!((p, i), (page, 1));
+    }
+
+    #[test]
+    fn kind_icon_maps_auto_layout_and_component_set() {
+        use designos_doc::{AutoLayout, FrameProps, LayoutDirection};
+        let plain = NodeKind::Frame(FrameProps::default());
+        assert_eq!(kind_icon(&plain), Icon::Frame);
+
+        let mut h_frame = FrameProps::default();
+        h_frame.auto_layout = Some(AutoLayout { direction: LayoutDirection::Horizontal, ..AutoLayout::default() });
+        assert_eq!(kind_icon(&NodeKind::Frame(h_frame)), Icon::AutoLayoutH);
+
+        let mut v_frame = FrameProps::default();
+        v_frame.auto_layout = Some(AutoLayout { direction: LayoutDirection::Vertical, ..AutoLayout::default() });
+        assert_eq!(kind_icon(&NodeKind::Frame(v_frame)), Icon::AutoLayoutV);
+
+        assert_eq!(kind_icon(&NodeKind::Component(FrameProps::default())), Icon::Component);
+        assert_eq!(kind_icon(&NodeKind::ComponentSet(FrameProps::default())), Icon::ComponentSet);
     }
 }

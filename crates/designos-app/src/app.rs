@@ -55,6 +55,7 @@ impl View {
 pub enum RailItem {
     File,
     Assets,
+    Specs,
     Tools,
     Variables,
     Plugins,
@@ -164,6 +165,8 @@ pub struct App {
     /// Board (whiteboard) mode: tool settings, magnet dots and popovers.
     pub board: crate::board::BoardState,
     pub decks: crate::decks::DecksState,
+    /// Native EaseUI-styled Spec Reader & Agentic Hub state.
+    pub specs: crate::specs::SpecsState,
 }
 
 impl App {
@@ -211,6 +214,7 @@ impl App {
             dev: Default::default(),
             board: Default::default(),
             decks: Default::default(),
+            specs: Default::default(),
         }
     }
 

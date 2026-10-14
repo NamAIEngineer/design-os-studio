@@ -1,6 +1,5 @@
-<!-- @license lucide-static v0.468.0 - ISC -->
+<!-- Composed by designos for Figma UI3 Master Component 4-diamond rosette (24x24 viewBox). -->
 <svg
-  class="lucide lucide-component"
   xmlns="http://www.w3.org/2000/svg"
   width="24"
   height="24"
@@ -11,8 +10,8 @@
   stroke-linecap="round"
   stroke-linejoin="round"
 >
-  <path d="M15.536 11.293a1 1 0 0 0 0 1.414l2.376 2.377a1 1 0 0 0 1.414 0l2.377-2.377a1 1 0 0 0 0-1.414l-2.377-2.377a1 1 0 0 0-1.414 0z" />
-  <path d="M2.297 11.293a1 1 0 0 0 0 1.414l2.377 2.377a1 1 0 0 0 1.414 0l2.377-2.377a1 1 0 0 0 0-1.414L6.088 8.916a1 1 0 0 0-1.414 0z" />
-  <path d="M8.916 17.912a1 1 0 0 0 0 1.415l2.377 2.376a1 1 0 0 0 1.414 0l2.377-2.376a1 1 0 0 0 0-1.415l-2.377-2.376a1 1 0 0 0-1.414 0z" />
-  <path d="M8.916 4.674a1 1 0 0 0 0 1.414l2.377 2.376a1 1 0 0 0 1.414 0l2.377-2.376a1 1 0 0 0 0-1.414l-2.377-2.377a1 1 0 0 0-1.414 0z" />
+  <path d="M12 2 L15.5 5.5 L12 9 L8.5 5.5 Z" fill="currentColor" />
+  <path d="M18.5 8.5 L22 12 L18.5 15.5 L15 12 Z" fill="currentColor" />
+  <path d="M12 15 L15.5 18.5 L12 22 L8.5 18.5 Z" fill="currentColor" />
+  <path d="M5.5 8.5 L9 12 L5.5 15.5 L2 12 Z" fill="currentColor" />
 </svg>

@@ -872,7 +872,7 @@ impl Ctx {
         // Instances whose component is unknown still honour their own overrides.
         let rest: Vec<NodeId> = self.overrides.keys().copied().filter(|i| !done.contains(i)).collect();
         for inst in rest {
-            self.apply_overrides(inst);
+            self.apply_overrides(inst, &targets, &mut done);
         }
         self.apply_rest_overrides();
         self.resolve_proto();
@@ -1009,7 +1009,7 @@ impl Ctx {
         }
         // Property values first: an instance swap changes which nodes the overrides address.
         self.apply_props(inst, targets, done);
-        self.apply_overrides(inst);
+        self.apply_overrides(inst, targets, done);
     }
 
     /// Scales the copied children of an instance made with the scale tool
@@ -1218,17 +1218,17 @@ impl Ctx {
 
     /// Applies `.fig` `symbolOverrides` and then `derivedSymbolData` to the
     /// instance's copied subtree.
-    fn apply_overrides(&mut self, inst: NodeId) {
+    fn apply_overrides(&mut self, inst: NodeId, targets: &BTreeMap<NodeId, NodeId>, done: &mut BTreeSet<NodeId>) {
         let Some(ov) = self.overrides.remove(&inst) else { return };
         for e in &ov.set {
             if let Some(t) = self.resolve_path(inst, &e.path) {
-                self.apply_override(t, &e.set, false);
+                self.apply_override(t, &e.set, false, targets, done);
             }
         }
         // Figma's computed results for resized instances win over the raw overrides.
         for e in &ov.derived {
             if let Some(t) = self.resolve_path(inst, &e.path) {
-                self.apply_override(t, &e.set, true);
+                self.apply_override(t, &e.set, true, targets, done);
             }
         }
     }
@@ -1275,7 +1275,22 @@ impl Ctx {
 
     /// Applies partial REST node fields to an existing node. `derived_only`
     /// restricts to size, transform and geometry.
-    fn apply_override(&mut self, id: NodeId, set: &Value, derived_only: bool) {
+    fn apply_override(&mut self, id: NodeId, set: &Value, derived_only: bool, targets: &BTreeMap<NodeId, NodeId>, done: &mut BTreeSet<NodeId>) {
+        if !derived_only {
+            if let Some(cid) = fstr(set, "componentId") {
+                if let Some(&target_comp) = self.ids.get(cid) {
+                    self.swap_nested(id, target_comp, targets, done);
+                }
+            }
+        }
+        let parent_dir = self
+            .doc
+            .get(id)
+            .and_then(|n| n.parent)
+            .and_then(|p| self.doc.get(p))
+            .and_then(|p| p.kind.frame_props())
+            .and_then(|f| f.auto_layout)
+            .map(|a| a.direction);
         let Some(n) = self.doc.get_mut(id) else { return };
         let keep = |k: &str| !derived_only || matches!(k, "size" | "relativeTransform" | "fillGeometry" | "strokeGeometry");
         let has = |k: &str| keep(k) && set.get(k).is_some();
@@ -1331,6 +1346,7 @@ impl Ctx {
             n.is_mask = b;
         }
         if set.get("fills").is_some() {
+            n.variables.bindings.retain(|k, _| !k.starts_with("fills/"));
             let fills = parse_paints(set.get("fills"));
             match &mut n.kind {
                 NodeKind::Text(t) => t.style.fills = fills,
@@ -1338,10 +1354,20 @@ impl Ctx {
             }
         }
         if set.get("strokes").is_some() {
+            n.variables.bindings.retain(|k, _| !k.starts_with("strokes/"));
             n.stroke.paints = parse_paints(set.get("strokes"));
+        }
+        if set.get("boundVariables").is_some() || set.get("explicitVariableModes").is_some() {
+            let ov_vars = crate::variables::parse_node_variables(set);
+            n.variables.bindings.extend(ov_vars.bindings);
+            n.variables.modes.extend(ov_vars.modes);
         }
         if let Some(w) = fnum(set, "strokeWeight") {
             n.stroke.weight = w;
+        }
+        if let Some(iw) = set.get("individualStrokeWeights") {
+            let g = |k: &str| fnum(iw, k).unwrap_or(0.0);
+            n.stroke.side_weights = Some([g("top"), g("right"), g("bottom"), g("left")]);
         }
         if let Some(a) = fstr(set, "strokeAlign") {
             n.stroke.align = match a {
@@ -1359,6 +1385,109 @@ impl Ctx {
             }
         } else if let Some(r) = fnum(set, "cornerRadius") {
             n.corner_radii = [r; 4];
+        }
+        if let Some(fp) = n.kind.frame_props_mut() {
+            if let Some(c) = fbool(set, "clipsContent") {
+                fp.clips_content = c;
+            }
+            if set.get("layoutGrids").is_some() {
+                fp.grids = farr(set, "layoutGrids").iter().filter_map(parse_grid).collect();
+            }
+            if set.get("layoutMode").is_some() {
+                fp.auto_layout = frame_props(set).auto_layout;
+            } else if let Some(al) = fp.auto_layout.as_mut() {
+                let align = |s: &str| match s {
+                    "CENTER" => LayoutAlign::Center,
+                    "MAX" => LayoutAlign::End,
+                    "SPACE_BETWEEN" => LayoutAlign::SpaceBetween,
+                    "BASELINE" => LayoutAlign::Baseline,
+                    _ => LayoutAlign::Start,
+                };
+                let sizing = |s: &str| if s == "AUTO" { Sizing::Hug } else { Sizing::Fixed };
+                if let Some(x) = fnum(set, "itemSpacing") {
+                    al.item_spacing = x;
+                }
+                if let Some(x) = fnum(set, "counterAxisSpacing") {
+                    al.counter_spacing = x;
+                }
+                for (idx, k) in [(0, "paddingTop"), (1, "paddingRight"), (2, "paddingBottom"), (3, "paddingLeft")] {
+                    if let Some(x) = fnum(set, k) {
+                        al.padding[idx] = x;
+                    }
+                }
+                if let Some(s) = fstr(set, "primaryAxisAlignItems") {
+                    al.primary_align = align(s);
+                }
+                if let Some(s) = fstr(set, "counterAxisAlignItems") {
+                    al.counter_align = align(s);
+                }
+                if let Some(s) = fstr(set, "primaryAxisSizingMode") {
+                    al.primary_sizing = sizing(s);
+                }
+                if let Some(s) = fstr(set, "counterAxisSizingMode") {
+                    al.counter_sizing = sizing(s);
+                }
+                if let Some(w) = fstr(set, "layoutWrap") {
+                    al.wrap = w == "WRAP";
+                }
+                if let Some(b) = fbool(set, "strokesIncludedInLayout") {
+                    al.stroke_included = b;
+                }
+                if let Some(b) = fbool(set, "itemReverseZIndex") {
+                    al.reverse_z = b;
+                }
+            }
+        }
+        if let Some(al) = n.kind.frame_props().and_then(|fp| fp.auto_layout) {
+            let prim_h = al.direction == LayoutDirection::Horizontal;
+            if set.get("primaryAxisSizingMode").is_some() {
+                let slot = if prim_h { &mut n.layout_child.horizontal } else { &mut n.layout_child.vertical };
+                if *slot != Sizing::Fill {
+                    *slot = al.primary_sizing;
+                }
+            }
+            if set.get("counterAxisSizingMode").is_some() {
+                let slot = if prim_h { &mut n.layout_child.vertical } else { &mut n.layout_child.horizontal };
+                if *slot != Sizing::Fill {
+                    *slot = al.counter_sizing;
+                }
+            }
+        }
+        if let Some(g) = fnum(set, "layoutGrow") {
+            n.layout_child.grow = g;
+            if g > 0.0 {
+                match parent_dir {
+                    Some(LayoutDirection::Horizontal) => n.layout_child.horizontal = Sizing::Fill,
+                    Some(LayoutDirection::Vertical) => n.layout_child.vertical = Sizing::Fill,
+                    None => {}
+                }
+            }
+        }
+        if let Some(a) = fstr(set, "layoutAlign") {
+            if a == "STRETCH" {
+                match parent_dir {
+                    Some(LayoutDirection::Horizontal) => n.layout_child.vertical = Sizing::Fill,
+                    Some(LayoutDirection::Vertical) => n.layout_child.horizontal = Sizing::Fill,
+                    None => {}
+                }
+            }
+        }
+        if let Some(p) = fstr(set, "layoutPositioning") {
+            n.layout_child.absolute = p == "ABSOLUTE";
+        }
+        if let Some(h) = fstr(set, "layoutSizingHorizontal") {
+            n.layout_child.horizontal = match h {
+                "FILL" => Sizing::Fill,
+                "HUG" => Sizing::Hug,
+                _ => Sizing::Fixed,
+            };
+        }
+        if let Some(v) = fstr(set, "layoutSizingVertical") {
+            n.layout_child.vertical = match v {
+                "FILL" => Sizing::Fill,
+                "HUG" => Sizing::Hug,
+                _ => Sizing::Fixed,
+            };
         }
         if let NodeKind::Text(t) = &mut n.kind {
             if let Some(st) = set.get("style") {
@@ -1387,6 +1516,16 @@ impl Ctx {
             if set.get("characterStyleOverrides").is_some() {
                 let ids: Vec<u64> = farr(set, "characterStyleOverrides").iter().map(|x| x.as_u64().unwrap_or(0)).collect();
                 t.runs = build_runs(&t.content, &t.style, &ids, set.get("styleOverrideTable"));
+            }
+        }
+        if set.get("componentProperties").is_some() || set.get("componentPropertyReferences").is_some() {
+            if let Some(mut node_copy) = self.doc.get(id).cloned() {
+                self.parse_component_props(&mut node_copy, set);
+                if let Some(n) = self.doc.get_mut(id) {
+                    n.component = node_copy.component;
+                }
+                self.resolve_swaps();
+                self.apply_props(id, targets, done);
             }
         }
     }

@@ -1,6 +1,5 @@
-<!-- @license lucide-static v0.468.0 - ISC -->
+<!-- Composed by designos for Figma UI3 Frame (24x24 viewBox). -->
 <svg
-  class="lucide lucide-move-horizontal"
   xmlns="http://www.w3.org/2000/svg"
   width="24"
   height="24"
@@ -11,7 +10,8 @@
   stroke-linecap="round"
   stroke-linejoin="round"
 >
-  <path d="m18 8 4 4-4 4" />
-  <path d="M2 12h20" />
-  <path d="m6 8-4 4 4 4" />
+  <path d="M6 2v20" />
+  <path d="M18 2v20" />
+  <path d="M2 6h20" />
+  <path d="M2 18h20" />
 </svg>

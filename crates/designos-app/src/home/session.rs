@@ -9,7 +9,7 @@ use std::hash::{Hash, Hasher};
 use std::path::PathBuf;
 
 /// Seconds without a document change before a library file is autosaved.
-pub const AUTOSAVE_IDLE: f64 = 0.6;
+pub const AUTOSAVE_IDLE: f64 = 1.5;
 /// Seconds of calm after which a revision change is compared with the saved document.
 const PROBE_DELAY: f64 = 0.3;
 

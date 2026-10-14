@@ -114,6 +114,19 @@ impl Session {
         Ok(parent.join(requested.file_name().ok_or("Render path needs a filename")?))
     }
 
+    fn fig_output_path(&self, path: &str) -> Result<PathBuf, String> {
+        let requested = self.root.join(path);
+        if requested.extension().and_then(|x| x.to_str()) != Some("fig") {
+            return Err("Export path must end in .fig".into());
+        }
+        let parent =
+            requested.parent().ok_or("Export path needs a parent directory")?.canonicalize().map_err(|e| format!("Export directory must already exist: {e}"))?;
+        if !parent.starts_with(&self.root) {
+            return Err("Path must stay inside the configured workspace".into());
+        }
+        Ok(parent.join(requested.file_name().ok_or("Export path needs a filename")?))
+    }
+
     pub fn call(&mut self, name: &str, args: Value) -> Result<Value, String> {
         match name {
             "designos_open_file" => {
@@ -199,6 +212,19 @@ impl Session {
                     return Err(format!("Cannot write PNG: {e}"));
                 }
                 Ok(json!({"path": path, "node_id": a.node_id, "scale": a.scale, "bytes": png.len(), "rendered": true}))
+            }
+            "designos_export_fig_file" | "export_fig_file" => {
+                let a: crate::engine::ExportFigArgs = parse(args)?;
+                let path = self.fig_output_path(&a.output_path)?;
+                let bytes = designos_fig::export_fig(&self.engine.doc).map_err(|e| format!("Failed to export .fig: {e}"))?;
+                let mut file = fs::OpenOptions::new()
+                    .write(true)
+                    .create(true)
+                    .truncate(true)
+                    .open(&path)
+                    .map_err(|e| format!("Cannot write .fig file: {e}"))?;
+                file.write_all(&bytes).and_then(|_| file.sync_all()).map_err(|e| format!("Cannot write .fig file: {e}"))?;
+                Ok(json!({"output_path": path, "path": path, "bytes": bytes.len(), "saved": true}))
             }
             _ => {
                 let result = self.engine.call(name, args)?;

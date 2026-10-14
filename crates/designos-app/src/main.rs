@@ -28,6 +28,7 @@ mod protovars;
 mod richtext;
 mod shell;
 mod showcase;
+mod specs;
 mod styles;
 mod textedit;
 mod textmeasure;
@@ -266,6 +267,16 @@ fn run_agent_cli(opts: &cli::Options) -> Result<(), String> {
         let json = serde_json::to_string_pretty(&spec).map_err(|e| format!("Cannot serialize spec: {e}"))?;
         std::fs::write(out_path, json).map_err(|e| format!("Cannot write {}: {e}", out_path.display()))?;
         let out = serde_json::json!({ "exported_node_id": target_id.0, "path": out_path });
+        println!("{}", serde_json::to_string_pretty(&out).unwrap());
+    }
+
+    if let Some(out_path) = &opts.export_fig {
+        let bytes = designos_fig::export_fig(&doc).map_err(|e| format!("Cannot export .fig: {e}"))?;
+        if let Some(parent) = out_path.parent().filter(|p| !p.as_os_str().is_empty()) {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        std::fs::write(out_path, &bytes).map_err(|e| format!("Cannot write {}: {e}", out_path.display()))?;
+        let out = serde_json::json!({ "exported_fig": true, "path": out_path, "bytes": bytes.len() });
         println!("{}", serde_json::to_string_pretty(&out).unwrap());
     }
 

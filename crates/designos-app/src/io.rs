@@ -48,11 +48,16 @@ pub fn ensure_page(doc: &mut Document) {
     }
 }
 
-/// Writes the native format; returns the final path (extension enforced).
+/// Writes the native format (or `.fig` binary when the extension is `.fig`); returns the final path.
 pub fn save_path(doc: &Document, path: &Path) -> Result<PathBuf, String> {
     let mut p = path.to_path_buf();
     if p.extension().is_none() {
         p.set_extension(NATIVE_EXT);
+    }
+    if p.extension().and_then(|e| e.to_str()).is_some_and(|e| e.eq_ignore_ascii_case("fig")) {
+        let bytes = designos_fig::export_fig(doc).map_err(|e| format!("Cannot export .fig: {e}"))?;
+        std::fs::write(&p, bytes).map_err(|e| format!("Cannot write {}: {e}", p.display()))?;
+        return Ok(p);
     }
     let json = doc.to_json().map_err(|e| format!("Cannot serialize: {e}"))?;
     std::fs::write(&p, json).map_err(|e| format!("Cannot write {}: {e}", p.display()))?;
@@ -72,6 +77,7 @@ pub fn pick_open() -> Option<PathBuf> {
 pub fn pick_save(default_name: &str) -> Option<PathBuf> {
     rfd::FileDialog::new()
         .add_filter("DESIGN:OS Studio", &[NATIVE_EXT, LEGACY_EXT])
+        .add_filter("Figma file", &["fig"])
         .set_file_name(format!("{default_name}.{NATIVE_EXT}"))
         .save_file()
 }
@@ -144,5 +150,21 @@ mod tests {
         let mut d = Document::new("E");
         ensure_page(&mut d);
         assert_eq!(d.pages.len(), 1);
+    }
+
+    #[test]
+    fn fig_roundtrip() {
+        let mut d = Document::new("FigDoc");
+        let page = d.add_page("Page 1");
+        let id = d.alloc_id();
+        d.insert(page, Node::rectangle(id, Rect::new(10.0, 20.0, 120.0, 80.0))).unwrap();
+        let p = save_path(&d, &tmp("roundtrip.fig")).unwrap();
+        assert_eq!(p.extension().unwrap(), "fig");
+        let raw = std::fs::read(&p).unwrap();
+        assert!(raw.starts_with(b"PK") || raw.starts_with(b"fig-kiwi"));
+        let back = load_path(&p).unwrap();
+        assert!(!back.pages.is_empty());
+        assert!(back.nodes.len() >= 2);
+        std::fs::remove_file(p).ok();
     }
 }

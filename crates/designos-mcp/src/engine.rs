@@ -280,6 +280,16 @@ impl Engine {
                 self.exec(Command::Update { node: Box::new(node) })?;
                 Ok(json!({"node_id": a.node_id, "dev": self.doc.get(NodeId(a.node_id)).map(|n| &n.dev), "changed": true}))
             }
+            "designos_export_fig_file" | "export_fig_file" => {
+                let a: ExportFigArgs = parse(args)?;
+                let path = std::path::Path::new(&a.output_path);
+                if path.extension().and_then(|x| x.to_str()) != Some("fig") {
+                    return Err("output_path must end in .fig".into());
+                }
+                let bytes = designos_fig::export_fig(&self.doc).map_err(|e| format!("Failed to export .fig: {e}"))?;
+                std::fs::write(path, &bytes).map_err(|e| format!("Cannot write .fig file: {e}"))?;
+                Ok(json!({"output_path": a.output_path, "path": a.output_path, "bytes": bytes.len(), "saved": true}))
+            }
             "designos_undo" | "designos_redo" => {
                 let _: Empty = parse(args)?;
                 let changed =
@@ -537,6 +547,12 @@ struct SetDevStatusArgs {
     status: Option<String>,
     annotation: Option<String>,
 }
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ExportFigArgs {
+    #[serde(alias = "path")]
+    pub output_path: String,
+}
 
 /// JSON tool descriptors kept beside the argument validators.
 pub fn tools() -> Vec<Value> {
@@ -644,6 +660,14 @@ pub fn tools() -> Vec<Value> {
         vec!["node_id"],
         false,
         false,
+    );
+    add(
+        "export_fig_file",
+        "Export the current session document to a Figma binary .fig container (with fig-kiwi header and deflate chunks) inside the workspace.",
+        json!({"output_path":{"type":"string","description":"Destination .fig path inside the workspace."}}),
+        vec!["output_path"],
+        false,
+        true,
     );
     add("undo", "Undo the latest successful edit in this session; returns changed=false if the stack is empty.", json!({}), vec![], false, false);
     add("redo", "Redo the most recently undone edit in this session; returns changed=false if the stack is empty.", json!({}), vec![], false, false);

@@ -13,12 +13,17 @@ fn enum_def(b: &mut SchemaBuilder, name: &str, variants: &[&str]) {
     }
 }
 
-/// A reduced version of Figma's schema (same names for the fields we read).
+/// A reduced version of Figma's schema (same names for the fields we read and write).
 pub fn figma_like_schema() -> Schema {
     use Native::*;
     let mut b = SchemaBuilder::new();
     // Enum index 0 must exist: enum fields reference definition 0 in the binary form.
     enum_def(&mut b, "Phase", &["CREATED", "REMOVED"]);
+    enum_def(
+        &mut b,
+        "MessageType",
+        &["JOIN_START", "NODE_CHANGES", "USER_CHANGES", "JOIN_END", "SIGNAL", "STYLE", "BROADCAST"],
+    );
     enum_def(
         &mut b,
         "NodeType",
@@ -42,22 +47,29 @@ pub fn figma_like_schema() -> Schema {
             "INSTANCE",
             "SECTION",
             "STICKY",
+            "SHAPE_WITH_TEXT",
+            "CONNECTOR",
+            "STAMP",
+            "VARIABLE",
+            "VARIABLE_SET",
+            "VARIABLE_OVERRIDE",
         ],
     );
     enum_def(&mut b, "PaintType", &["SOLID", "GRADIENT_LINEAR", "GRADIENT_RADIAL", "GRADIENT_ANGULAR", "GRADIENT_DIAMOND", "IMAGE"]);
     enum_def(&mut b, "StrokeAlign", &["CENTER", "INSIDE", "OUTSIDE"]);
     enum_def(&mut b, "StrokeJoin", &["MITER", "BEVEL", "ROUND"]);
     enum_def(&mut b, "StrokeCap", &["NONE", "ROUND", "SQUARE", "ARROW_LINES", "ARROW_EQUILATERAL"]);
-    enum_def(&mut b, "EffectType", &["INNER_SHADOW", "DROP_SHADOW", "FOREGROUND_BLUR", "BACKGROUND_BLUR"]);
+    enum_def(&mut b, "EffectType", &["INNER_SHADOW", "DROP_SHADOW", "FOREGROUND_BLUR", "BACKGROUND_BLUR", "NOISE", "TEXTURE", "GLASS"]);
     enum_def(&mut b, "StackMode", &["NONE", "HORIZONTAL", "VERTICAL"]);
-    enum_def(&mut b, "StackAlign", &["MIN", "CENTER", "MAX", "SPACE_BETWEEN", "BASELINE"]);
+    enum_def(&mut b, "StackAlign", &["MIN", "CENTER", "MAX", "SPACE_BETWEEN", "BASELINE", "SPACE_EVENLY"]);
     enum_def(&mut b, "StackSize", &["FIXED", "RESIZE_TO_FIT", "RESIZE_TO_FIT_WITH_IMPLICIT_SIZE"]);
     enum_def(&mut b, "StackCounterAlign", &["STRETCH", "AUTO"]);
     enum_def(&mut b, "StackPositioning", &["AUTO", "ABSOLUTE"]);
+    enum_def(&mut b, "StackWrap", &["NO_WRAP", "WRAP"]);
     enum_def(&mut b, "TextAlignHorizontal", &["LEFT", "CENTER", "RIGHT", "JUSTIFIED"]);
     enum_def(&mut b, "TextAlignVertical", &["TOP", "CENTER", "BOTTOM"]);
-    enum_def(&mut b, "TextAutoResize", &["NONE", "WIDTH_AND_HEIGHT", "HEIGHT"]);
-    enum_def(&mut b, "TextCase", &["ORIGINAL", "UPPER", "LOWER", "TITLE"]);
+    enum_def(&mut b, "TextAutoResize", &["NONE", "WIDTH_AND_HEIGHT", "HEIGHT", "TRUNCATE"]);
+    enum_def(&mut b, "TextCase", &["ORIGINAL", "UPPER", "LOWER", "TITLE", "SMALL_CAPS", "SMALL_CAPS_FORCED"]);
     enum_def(&mut b, "TextDecoration", &["NONE", "UNDERLINE", "STRIKETHROUGH"]);
     enum_def(&mut b, "NumberUnits", &["RAW", "PIXELS", "PERCENT"]);
     enum_def(
@@ -89,9 +101,17 @@ pub fn figma_like_schema() -> Schema {
     enum_def(&mut b, "StyleType", &["NONE", "FILL", "TEXT", "EFFECT", "EXPORT", "GRID"]);
     enum_def(&mut b, "GridPattern", &["GRID", "COLUMNS", "ROWS"]);
     enum_def(&mut b, "ImageScaleMode", &["STRETCH", "FIT", "FILL", "TILE"]);
-    enum_def(&mut b, "WindingRule", &["NONZERO", "ODD"]);
+    enum_def(&mut b, "WindingRule", &["NONZERO", "ODD", "EVENODD"]);
     enum_def(&mut b, "ConstraintType", &["MIN", "CENTER", "MAX", "STRETCH", "SCALE"]);
-    enum_def(&mut b, "BooleanOperation", &["UNION", "INTERSECT", "SUBTRACT", "XOR"]);
+    enum_def(&mut b, "BooleanOperation", &["UNION", "INTERSECT", "SUBTRACT", "XOR", "EXCLUDE"]);
+    enum_def(&mut b, "ExportImageType", &["PNG", "JPEG", "SVG", "PDF"]);
+    enum_def(&mut b, "ExportConstraintType", &["CONTENT_SCALE", "CONTENT_WIDTH", "CONTENT_HEIGHT", "SCALE", "WIDTH", "HEIGHT"]);
+    enum_def(&mut b, "GuideAxis", &["X", "Y"]);
+    enum_def(&mut b, "VariableResolvedDataType", &["BOOLEAN", "FLOAT", "STRING", "COLOR", "MAP", "SYMBOL_ID", "FONT_STYLE"]);
+    enum_def(&mut b, "VariableDataType", &["BOOLEAN", "FLOAT", "STRING", "COLOR", "ALIAS", "NODE_FIELD_ALIAS", "FONT_STYLE"]);
+    enum_def(&mut b, "ComponentPropType", &["BOOL", "TEXT", "INSTANCE_SWAP", "VARIANT"]);
+    enum_def(&mut b, "ComponentPropNodeField", &["VISIBLE", "TEXT_DATA", "OVERRIDDEN_SYMBOL_ID"]);
+    enum_def(&mut b, "HandoffStatusType", &["NONE", "BUILD", "READY_FOR_DEV", "COMPLETED"]);
 
     let nat = FieldType::Native;
     let def = |b: &SchemaBuilder, n: &str| FieldType::Def(b.index(n));
@@ -133,9 +153,58 @@ pub fn figma_like_schema() -> Schema {
     b.field(arc, "startingAngle", nat(Float), false, 1);
     b.field(arc, "endingAngle", nat(Float), false, 2);
     b.field(arc, "innerRadius", nat(Float), false, 3);
+
+    let aref = b.define("AssetRef", DefKind::Message);
+    b.field(aref, "key", nat(String), false, 1);
+    b.field(aref, "version", nat(String), false, 2);
     let sid = b.define("StyleId", DefKind::Message);
-    let gt = def(&b, "GUID");
+    let (gt, art) = (def(&b, "GUID"), def(&b, "AssetRef"));
     b.field(sid, "guid", gt, false, 1);
+    b.field(sid, "assetRef", art, false, 2);
+
+    // Variable data structures (defined before Paint/Effect so colorVar can reference VariableData).
+    let vd = b.define("VariableData", DefKind::Message);
+    let vdv = b.define("VariableDataValue", DefKind::Message);
+    let fsv = b.define("FontStyleVarValue", DefKind::Message);
+    b.field(fsv, "asFloat", FieldType::Def(vd), false, 1);
+    b.field(fsv, "asString", FieldType::Def(vd), false, 2);
+    let (ct, sidt) = (def(&b, "Color"), def(&b, "StyleId"));
+    b.field(vdv, "boolValue", nat(Bool), false, 1);
+    b.field(vdv, "floatValue", nat(Float), false, 2);
+    b.field(vdv, "textValue", nat(String), false, 3);
+    b.field(vdv, "colorValue", ct, false, 4);
+    b.field(vdv, "alias", sidt, false, 5);
+    b.field(vdv, "fontStyleValue", FieldType::Def(fsv), false, 6);
+    let (vdt, vrdt) = (def(&b, "VariableDataType"), def(&b, "VariableResolvedDataType"));
+    b.field(vd, "dataType", vdt, false, 1);
+    b.field(vd, "resolvedDataType", vrdt, false, 2);
+    b.field(vd, "value", FieldType::Def(vdv), false, 3);
+
+    let vce = b.define("VariableConsumptionEntry", DefKind::Message);
+    b.field(vce, "variableData", FieldType::Def(vd), false, 1);
+    b.field(vce, "variableField", nat(String), false, 2);
+    let vcm = b.define("VariableConsumptionMap", DefKind::Message);
+    b.field(vcm, "entries", FieldType::Def(vce), true, 1);
+
+    let vmse = b.define("VariableModeBySetEntry", DefKind::Message);
+    let (sidt, gt) = (def(&b, "StyleId"), def(&b, "GUID"));
+    b.field(vmse, "variableSetID", sidt, false, 1);
+    b.field(vmse, "variableModeID", gt, false, 2);
+    let vmsm = b.define("VariableModeBySetMap", DefKind::Message);
+    b.field(vmsm, "entries", FieldType::Def(vmse), true, 1);
+
+    let vsm = b.define("VariableSetMode", DefKind::Message);
+    let gt = def(&b, "GUID");
+    b.field(vsm, "id", gt, false, 1);
+    b.field(vsm, "name", nat(String), false, 2);
+    b.field(vsm, "sortPosition", nat(String), false, 3);
+
+    let vdve = b.define("VariableDataValueEntry", DefKind::Message);
+    let gt = def(&b, "GUID");
+    b.field(vdve, "modeID", gt, false, 1);
+    b.field(vdve, "variableData", FieldType::Def(vd), false, 2);
+    let vdvs = b.define("VariableDataValues", DefKind::Message);
+    b.field(vdvs, "entries", FieldType::Def(vdve), true, 1);
 
     let paint = b.define("Paint", DefKind::Message);
     let t = def(&b, "PaintType");
@@ -154,6 +223,8 @@ pub fn figma_like_schema() -> Schema {
     b.field(paint, "image", t, false, 8);
     let t = def(&b, "ImageScaleMode");
     b.field(paint, "imageScaleMode", t, false, 9);
+    b.field(paint, "colorVar", FieldType::Def(vd), false, 10);
+    b.field(paint, "imageHash", nat(String), false, 11);
 
     let eff = b.define("Effect", DefKind::Message);
     let t = def(&b, "EffectType");
@@ -166,6 +237,7 @@ pub fn figma_like_schema() -> Schema {
     b.field(eff, "spread", nat(Float), false, 5);
     b.field(eff, "visible", nat(Bool), false, 6);
     b.field(eff, "showShadowBehindNode", nat(Bool), false, 7);
+    b.field(eff, "colorVar", FieldType::Def(vd), false, 8);
 
     let fg = b.define("FillGeometry", DefKind::Message);
     let t = def(&b, "WindingRule");
@@ -195,11 +267,79 @@ pub fn figma_like_schema() -> Schema {
     b.field(so, "fillPaints", t, true, 4);
     let t = def(&b, "TextDecoration");
     b.field(so, "textDecoration", t, false, 5);
+    let (tc, nm, sc, sj) = (def(&b, "TextCase"), def(&b, "Number"), def(&b, "StrokeCap"), def(&b, "StrokeJoin"));
+    b.field(so, "textCase", tc, false, 6);
+    b.field(so, "letterSpacing", nm, false, 7);
+    b.field(so, "lineHeight", nm, false, 8);
+    b.field(so, "strokeCap", sc, false, 9);
+    b.field(so, "strokeJoin", sj, false, 10);
+    b.field(so, "cornerRadius", nat(Float), false, 11);
+    b.field(so, "handleMirroring", nat(String), false, 12);
+
+    let vdata = b.define("VectorData", DefKind::Message);
+    let (vt, sot) = (def(&b, "Vector"), def(&b, "StyleOverride"));
+    b.field(vdata, "vectorNetworkBlob", nat(Uint), false, 1);
+    b.field(vdata, "normalizedSize", vt, false, 2);
+    b.field(vdata, "styleOverrideTable", sot, true, 3);
+
+    let exc = b.define("ExportConstraint", DefKind::Message);
+    let ect = def(&b, "ExportConstraintType");
+    b.field(exc, "type", ect, false, 1);
+    b.field(exc, "value", nat(Float), false, 2);
+    let exs = b.define("ExportSettings", DefKind::Message);
+    let (eit, exct) = (def(&b, "ExportImageType"), def(&b, "ExportConstraint"));
+    b.field(exs, "suffix", nat(String), false, 1);
+    b.field(exs, "imageType", eit, false, 2);
+    b.field(exs, "constraint", exct, false, 3);
+
+    let gd = b.define("Guide", DefKind::Message);
+    let gat = def(&b, "GuideAxis");
+    b.field(gd, "axis", gat, false, 1);
+    b.field(gd, "offset", nat(Float), false, 2);
+
+    let opt_sz = b.define("OptionalSize", DefKind::Message);
+    b.field(opt_sz, "x", nat(Float), false, 1);
+    b.field(opt_sz, "y", nat(Float), false, 2);
+
+    let cptv = b.define("ComponentPropTextValue", DefKind::Message);
+    b.field(cptv, "characters", nat(String), false, 1);
+    let cpv = b.define("ComponentPropValue", DefKind::Message);
+    let (gt, cptvt) = (def(&b, "GUID"), def(&b, "ComponentPropTextValue"));
+    b.field(cpv, "boolValue", nat(Bool), false, 1);
+    b.field(cpv, "textValue", cptvt, false, 2);
+    b.field(cpv, "guidValue", gt, false, 3);
+    let cpd = b.define("ComponentPropDef", DefKind::Message);
+    let (gt, cptt, cpvt) = (def(&b, "GUID"), def(&b, "ComponentPropType"), def(&b, "ComponentPropValue"));
+    b.field(cpd, "id", gt, false, 1);
+    b.field(cpd, "name", nat(String), false, 2);
+    b.field(cpd, "type", cptt, false, 3);
+    b.field(cpd, "initialValue", cpvt, false, 4);
+    b.field(cpd, "parentPropDefId", gt, false, 5);
+    let cpa = b.define("ComponentPropAssignment", DefKind::Message);
+    b.field(cpa, "defID", gt, false, 1);
+    b.field(cpa, "value", cpvt, false, 2);
+    let cpr = b.define("ComponentPropRef", DefKind::Message);
+    let cpnf = def(&b, "ComponentPropNodeField");
+    b.field(cpr, "defID", gt, false, 1);
+    b.field(cpr, "componentPropNodeField", cpnf, false, 2);
+    let sgpvo = b.define("StateGroupPropertyValueOrder", DefKind::Message);
+    b.field(sgpvo, "property", nat(String), false, 1);
+    b.field(sgpvo, "values", nat(String), true, 2);
+
+    let hs = b.define("HandoffStatus", DefKind::Message);
+    let hst = def(&b, "HandoffStatusType");
+    b.field(hs, "status", hst, false, 1);
+    let hse = b.define("HandoffStatusEntry", DefKind::Message);
+    let (gt, hsm_t) = (def(&b, "GUID"), def(&b, "HandoffStatus"));
+    b.field(hse, "guid", gt, false, 1);
+    b.field(hse, "handoffStatus", hsm_t, false, 2);
+    let hsm = b.define("HandoffStatusMap", DefKind::Message);
+    b.field(hsm, "entries", FieldType::Def(hse), true, 1);
 
     enum_def(&mut b, "LineType", &["PLAIN", "ORDERED_LIST", "UNORDERED_LIST"]);
     enum_def(&mut b, "Directionality", &["AUTO", "LTR", "RTL"]);
     enum_def(&mut b, "LeadingTrim", &["NONE", "CAP_HEIGHT"]);
-    enum_def(&mut b, "OpenTypeFeature", &["LIGA", "SS01", "TNUM"]);
+    enum_def(&mut b, "OpenTypeFeature", &["LIGA", "SS01", "TNUM", "ONUM", "LNUM", "PNUM", "FRAC", "AFRC", "ZERO", "SMCP", "C2SC"]);
     let tl = b.define("TextLine", DefKind::Message);
     let t = def(&b, "LineType");
     b.field(tl, "lineType", t, false, 1);
@@ -323,14 +463,79 @@ pub fn figma_like_schema() -> Schema {
     f(&mut b, "guidPath", gpt, false);
     // Overrides are NodeChange-shaped messages.
     b.field(sd, "symbolOverrides", FieldType::Def(nc), true, 2);
+    b.field(sd, "uniformScaleFactor", nat(Float), false, 3);
     f(&mut b, "derivedSymbolData", FieldType::Def(nc), true);
+    // Additional NodeChange fields for 1:1 .fig export & import parity:
+    let (gt, swt, oszt, exst, gdt, vdt_node, cpdt, cpat, cprt, sgpvot, vcmt, vmsmt, vsmt, vrdtt, vdtt, vdvt, hsmt) = (
+        def(&b, "GUID"),
+        def(&b, "StackWrap"),
+        def(&b, "OptionalSize"),
+        def(&b, "ExportSettings"),
+        def(&b, "Guide"),
+        def(&b, "VectorData"),
+        def(&b, "ComponentPropDef"),
+        def(&b, "ComponentPropAssignment"),
+        def(&b, "ComponentPropRef"),
+        def(&b, "StateGroupPropertyValueOrder"),
+        def(&b, "VariableConsumptionMap"),
+        def(&b, "VariableModeBySetMap"),
+        def(&b, "VariableSetMode"),
+        def(&b, "VariableResolvedDataType"),
+        def(&b, "VariableDataType"),
+        def(&b, "VariableDataValues"),
+        def(&b, "HandoffStatusMap"),
+    );
+    f(&mut b, "overrideKey", gt, false);
+    f(&mut b, "overriddenSymbolID", gt, false);
+    f(&mut b, "componentKey", nat(String), false);
+    f(&mut b, "sourceLibraryKey", nat(String), false);
+    f(&mut b, "strokeMiterAngle", nat(Float), false);
+    f(&mut b, "miterLimit", nat(Float), false);
+    f(&mut b, "borderStrokeWeightsIndependent", nat(Bool), false);
+    for n in ["borderTopWeight", "borderRightWeight", "borderBottomWeight", "borderLeftWeight"] {
+        f(&mut b, n, nat(Float), false);
+    }
+    f(&mut b, "stackPadding", nat(Float), false);
+    f(&mut b, "stackPaddingLeft", nat(Float), false);
+    f(&mut b, "stackPaddingTop", nat(Float), false);
+    f(&mut b, "stackWrap", swt, false);
+    f(&mut b, "bordersTakeSpace", nat(Bool), false);
+    f(&mut b, "stackReverseZIndex", nat(Bool), false);
+    f(&mut b, "minSize", oszt, false);
+    f(&mut b, "maxSize", oszt, false);
+    f(&mut b, "exportSettings", exst, true);
+    f(&mut b, "guides", gdt, true);
+    f(&mut b, "vectorData", vdt_node, false);
+    f(&mut b, "paragraphSpacing", nat(Float), false);
+    f(&mut b, "listSpacing", nat(Float), false);
+    f(&mut b, "hangingPunctuation", nat(Bool), false);
+    f(&mut b, "hangingList", nat(Bool), false);
+    f(&mut b, "componentPropDefs", cpdt, true);
+    f(&mut b, "componentPropAssignments", cpat, true);
+    f(&mut b, "componentPropRefs", cprt, true);
+    f(&mut b, "stateGroupPropertyValueOrders", sgpvot, true);
+    f(&mut b, "variableConsumptionMap", vcmt, false);
+    f(&mut b, "parameterConsumptionMap", vcmt, false);
+    f(&mut b, "variableModeBySetMap", vmsmt, false);
+    f(&mut b, "variableSetModes", vsmt, true);
+    f(&mut b, "variableSetID", sidt, false);
+    f(&mut b, "variableResolvedType", vrdtt, false);
+    f(&mut b, "variableDataType", vdtt, false);
+    f(&mut b, "variableScopes", nat(String), true);
+    f(&mut b, "variableDataValues", vdvt, false);
+    f(&mut b, "sortPosition", nat(String), false);
+    f(&mut b, "description", nat(String), false);
+    f(&mut b, "handoffStatusMap", hsmt, false);
 
     let blob = b.define("Blob", DefKind::Message);
     b.field(blob, "bytes", nat(Byte), true, 1);
     let msg = b.define("Message", DefKind::Message);
-    let (nct, bt) = (def(&b, "NodeChange"), def(&b, "Blob"));
+    let (nct, bt, mtt) = (def(&b, "NodeChange"), def(&b, "Blob"), def(&b, "MessageType"));
     b.field(msg, "nodeChanges", nct, true, 1);
     b.field(msg, "blobs", bt, true, 2);
+    b.field(msg, "type", mtt, false, 3);
+    b.field(msg, "sessionID", nat(Uint), false, 4);
+    b.field(msg, "ackID", nat(Uint), false, 5);
     b.build()
 }
 

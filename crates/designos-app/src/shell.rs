@@ -187,6 +187,14 @@ impl Shell {
             }
         }
         match opts.panel.as_deref() {
+            Some("specs") => {
+                app.ui.rail = Some(crate::app::RailItem::Specs);
+                app.specs.open = true;
+                app.specs.ensure_loaded();
+            }
+            Some("assets") => {
+                app.ui.rail = Some(crate::app::RailItem::Assets);
+            }
             Some("interaction") => {
                 app.ui.right_tab = Some(crate::app::RightTab::Prototype);
                 crate::protovars::open_editor(&mut app);
@@ -642,9 +650,15 @@ impl Shell {
             let content = Rect::from_min_max(Pos2::new(rail_rect.right(), full.top()), full.max);
             crate::variables::view::show(&mut self.app, ui, content);
         } else {
-            canvas::show(&mut self.app, ui, canvas_rect);
-            if deck {
-                crate::decks::ui::notes(&mut self.app, ui, notes_rect);
+            let specs_reader_open = self.app.ui.rail == Some(crate::app::RailItem::Specs) && self.app.specs.open;
+            if specs_reader_open {
+                self.app.canvas_rect = canvas_rect;
+                crate::specs::show_reader(&mut self.app, ui, canvas_rect);
+            } else {
+                canvas::show(&mut self.app, ui, canvas_rect);
+                if deck {
+                    crate::decks::ui::notes(&mut self.app, ui, notes_rect);
+                }
             }
             rail::show(&mut self.app, ui, rail_rect);
             if self.app.ui.left_collapsed {
@@ -666,15 +680,21 @@ impl Shell {
                 left::show(&mut self.app, ui, left_rect);
             }
             if board {
-                crate::board::toolbar::show(&mut self.app, ui, canvas_rect_for_toolbar(full));
-                crate::board::bar::show(&mut self.app, ui, canvas_rect);
-                crate::board::canvas::zoom_pill(&mut self.app, ui, canvas_rect);
+                if !specs_reader_open {
+                    crate::board::toolbar::show(&mut self.app, ui, canvas_rect_for_toolbar(full));
+                    crate::board::bar::show(&mut self.app, ui, canvas_rect);
+                    crate::board::canvas::zoom_pill(&mut self.app, ui, canvas_rect);
+                }
             } else {
                 right::show(&mut self.app, ui, right_rect);
-                toolbar::show(&mut self.app, ui, if deck { canvas_rect } else { canvas_rect_for_toolbar(full) });
+                if !specs_reader_open {
+                    toolbar::show(&mut self.app, ui, if deck { canvas_rect } else { canvas_rect_for_toolbar(full) });
+                }
             }
-            crate::history::banner::show(&mut self.app, ui, canvas_rect);
-            self.context_menu(ui, canvas_rect);
+            if !specs_reader_open {
+                crate::history::banner::show(&mut self.app, ui, canvas_rect);
+                self.context_menu(ui, canvas_rect);
+            }
             menus::show(&mut self.app, &ctx);
             panels::context::show(&mut self.app, &ctx);
             // the floating panel (or only the inspector's binding picker when closed)

@@ -38,6 +38,10 @@ fn saved_file_roundtrip_and_unsaved_changes_guard() {
     let rendered = s.call("designos_render_png", json!({"path":"preview.png","node_id":node["node"]["id"],"scale":2.0})).unwrap();
     assert_eq!(rendered["rendered"], true);
     assert!(dir.0.join("preview.png").exists());
+    let fig_exported = s.call("designos_export_fig_file", json!({"output_path":"exported.fig"})).unwrap();
+    assert_eq!(fig_exported["saved"], true);
+    assert!(fig_exported["bytes"].as_u64().unwrap() > 16);
+    assert!(dir.0.join("exported.fig").exists());
 }
 
 #[test]

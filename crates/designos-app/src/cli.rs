@@ -74,6 +74,8 @@ pub struct Options {
     pub apply_spec: Option<PathBuf>,
     /// Headless agent CLI: export `--select` (or first screen/page) to a declarative `NodeSpec` JSON file.
     pub export_spec: Option<PathBuf>,
+    /// Headless agent CLI: export the document to a native `.fig` binary file (`fig-kiwi` + ZIP).
+    pub export_fig: Option<PathBuf>,
     pub help: bool,
 }
 
@@ -87,6 +89,7 @@ impl Options {
             || self.resolve_comment.is_some()
             || self.apply_spec.is_some()
             || self.export_spec.is_some()
+            || self.export_fig.is_some()
     }
 
     /// Whether a launch with these options starts on the home screen: explicitly
@@ -98,9 +101,11 @@ impl Options {
     }
 }
 
-/// Values of `--panel`: `variables` / `variables-floating` open the local variables view,
+/// Values of `--panel`: `specs`, `assets`, `variables` / `variables-floating` open the local views,
 /// `libraries` the Libraries modal; the others are inspector popups opened on the selection for screenshots.
-pub const PANELS: [&str; 20] = [
+pub const PANELS: [&str; 22] = [
+    "specs",
+    "assets",
     "plugins",
     "plugin-install",
     "interaction",
@@ -224,6 +229,7 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Options, String> 
             "--resolve" => o.resolve = true,
             "--apply-spec" => o.apply_spec = Some(it.next().ok_or("--apply-spec needs a spec JSON path")?.into()),
             "--export-spec" => o.export_spec = Some(it.next().ok_or("--export-spec needs an output JSON path")?.into()),
+            "--export-fig" => o.export_fig = Some(it.next().ok_or("--export-fig needs an output .fig path")?.into()),
             "-h" | "--help" => o.help = true,
             s if s.starts_with("--") => return Err(format!("unknown option {s}")),
             _ => {
@@ -237,7 +243,7 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Options, String> 
     Ok(o)
 }
 
-pub const USAGE: &str = "usage: designos [FILE] [--screenshot OUT.png] [--size WxH] [--scale FACTOR] [--select LAYER|none] [--menu main|main/File|shape|palette] [--panel interaction|present-variables|variables|variables-floating|libraries|picker|picker-page|fill-d9|picker-gradient|effects-menu|stroke-settings|type-details|effect-noise|effect-texture|effect-glass|version-history|dev-annotate|dev-compare]\n               [--zoom PERCENT] [--rulers] [--grid] [--gpu] [--home] [--library DIR] [--layout-grid grid|columns|rows] [--edit-text LAYER [--select-text START-END]]\n               [--inspect-json] [--comments-json] [--add-comment TEXT] [--reply-comment ID [--message TEXT] [--resolve]] [--resolve-comment ID] [--apply-spec SPEC.json] [--export-spec OUT.json]\n  FILE  .fig, .json (Figma REST or native), .svg or .designos; without a file the projects home screen opens
+pub const USAGE: &str = "usage: designos [FILE] [--screenshot OUT.png] [--size WxH] [--scale FACTOR] [--select LAYER|none] [--menu main|main/File|shape|palette] [--panel specs|assets|plugins|interaction|present-variables|variables|variables-floating|libraries|picker|picker-page|fill-d9|picker-gradient|effects-menu|stroke-settings|type-details|effect-noise|effect-texture|effect-glass|version-history|dev-annotate|dev-compare]\n               [--zoom PERCENT] [--rulers] [--grid] [--gpu] [--home] [--library DIR] [--layout-grid grid|columns|rows] [--edit-text LAYER [--select-text START-END]]\n               [--inspect-json] [--comments-json] [--add-comment TEXT] [--reply-comment ID [--message TEXT] [--resolve]] [--resolve-comment ID] [--apply-spec SPEC.json] [--export-spec OUT.json] [--export-fig OUT.fig]\n  FILE  .fig, .json (Figma REST or native), .svg or .designos; without a file the projects home screen opens
   --scale    with --screenshot: device pixel ratio (2 writes a PNG twice --size, rendered crisp rather than upscaled)
   --home     show the home screen (also in --screenshot mode)
   --present  open presentation preview; --fullscreen starts it in native fullscreen (F11 toggles, Esc returns)
@@ -246,7 +252,7 @@ pub const USAGE: &str = "usage: designos [FILE] [--screenshot OUT.png] [--size W
   --dev      open Dev mode with a code language (css|tailwind|swiftui|compose|react); --dev-demo marks the selection Ready for dev with an annotation
   --seed-library  write the showcase sample files (a project with three files) into DIR and exit
   --find     open the Find and replace panel searching for TEXT (--replace-with TEXT shows the replace row)
-  --inspect-json / --comments-json / --apply-spec / --export-spec  headless Agent CLI inspection and mutation";
+  --inspect-json / --comments-json / --apply-spec / --export-spec / --export-fig  headless Agent CLI inspection and mutation";
 
 #[cfg(test)]
 mod tests {
@@ -319,6 +325,8 @@ mod tests {
 
     #[test]
     fn parses_panel() {
+        assert_eq!(p(&["--panel", "specs"]).unwrap().panel.as_deref(), Some("specs"));
+        assert_eq!(p(&["--panel", "assets"]).unwrap().panel.as_deref(), Some("assets"));
         assert_eq!(p(&["--panel", "variables"]).unwrap().panel.as_deref(), Some("variables"));
         assert_eq!(p(&["--panel", "variables-floating"]).unwrap().panel.as_deref(), Some("variables-floating"));
         assert!(p(&["--panel", "nope"]).is_err());
@@ -375,6 +383,8 @@ mod tests {
             "in.json",
             "--export-spec",
             "out.json",
+            "--export-fig",
+            "out.fig",
             "--reply-comment",
             "t-1",
             "--message",
@@ -382,11 +392,12 @@ mod tests {
             "--resolve",
         ])
         .unwrap();
-        assert!(o.is_agent_cli());
+        assert!(o.is_agent_cli() && o.has_headless_action());
         assert!(!o.wants_home());
         assert!(o.inspect_json && o.comments_json && o.resolve);
         assert_eq!(o.apply_spec, Some("in.json".into()));
         assert_eq!(o.export_spec, Some("out.json".into()));
+        assert_eq!(o.export_fig, Some("out.fig".into()));
         assert_eq!(o.reply_comment.as_deref(), Some("t-1"));
         assert_eq!(o.message.as_deref(), Some("Fixed spacing"));
     }
