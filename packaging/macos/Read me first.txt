@@ -1,0 +1,28 @@
+designos - install and first launch
+==================================
+
+1. Drag designos into the Applications folder (the arrow in this window).
+2. Open Applications and double-click designos.
+3. The first time, macOS says it cannot verify the app. This is because the
+   build is not notarized by Apple yet (the source is public and the release
+   is built by GitHub Actions). Click Done, then:
+     - open System Settings -> Privacy & Security,
+     - scroll down to the message about "designos" and click Open Anyway,
+     - confirm with your password or Touch ID, then click Open.
+   You only need to do this once.
+
+Prefer Terminal? This does the same thing in one line:
+
+    xattr -dr com.apple.quarantine /Applications/designos.app
+
+Command-line tool
+-----------------
+designos-diff is inside the app. Run it from Terminal with:
+
+    /Applications/designos.app/Contents/MacOS/designos-diff --help
+
+or link it onto your PATH:
+
+    ln -s /Applications/designos.app/Contents/MacOS/designos-diff /usr/local/bin/designos-diff
+
+More: https://github.com/jangtrinh/design-os-studio/blob/main/docs/install.md

@@ -1,0 +1,13 @@
+/target
+**/*.rs.bk
+.DS_Store
+*.fig.tmp
+/out
+/dist
+/.claude/
+
+# Figma UI captures: local pixel references only, not redistributed
+/reference/screens/
+
+# Private design files used for local import checks: never committed
+/reference/*.fig

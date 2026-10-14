@@ -1,0 +1,51 @@
+# Releasing
+
+Releases are tag-driven. Pushing a tag `vX.Y.Z` runs `.github/workflows/release.yml`.
+
+## Checklist
+
+1. Make sure `main` is green (tests on Linux, Windows and macOS, Clippy).
+2. Bump `version` under `[workspace.package]` in the root `Cargo.toml`, run `cargo build --workspace` so `Cargo.lock` updates, and commit both (`release: 0.2.0`).
+3. Tag and push:
+
+   ```sh
+   git tag -a v0.2.0 -m "designos 0.2.0"
+   git push origin v0.2.0
+   ```
+
+   A tag containing a hyphen (`v0.2.0-rc.1`) is published as a pre-release.
+4. Watch the Release workflow. When all builds pass, a GitHub Release is created with auto-generated notes. Edit the notes if needed.
+
+## What gets built
+
+| Job | Runner | Output |
+|---|---|---|
+| `build` `x86_64-pc-windows-msvc` | `windows-latest` | `designos-<version>-<target>.zip` (the exe has the icon and version info embedded by `crates/designos-app/build.rs`) |
+| `build` `x86_64-unknown-linux-gnu` | `ubuntu-latest` | `designos-<version>-<target>.tar.gz` (adds `designos.desktop`, `icons/`, `install.sh`) |
+| `macos` | `macos-14` (builds `aarch64-apple-darwin` and cross-compiles `x86_64-apple-darwin`; `macos-13` is retired) | `designos-<version>-macos.dmg` and `designos-<version>-macos-universal.tar.gz` |
+
+The Windows and Linux archives hold `designos`, `designos-diff`, `LICENSE-MIT`, `LICENSE-APACHE` and `README.md`. They are packaged by `scripts/package.sh <target> <version>`, which you can run locally after a release build.
+
+The macOS job runs `scripts/package-macos.sh <version>`. It `lipo`s a universal `designos` and `designos-diff`, assembles `designos.app` (bundle id `os.design.studio`, `Info.plist` from `packaging/macos/Info.plist.in`, `designos.icns` built with `iconutil` from `assets/icon/designos.iconset`), ad-hoc signs it, and writes the `.dmg` (app, `Applications` link, `Read me first.txt`) and the universal `.tar.gz` (app, licenses, README). It needs a Mac, so test changes to it with a dry run (below).
+
+The release carries a combined `SHA256SUMS` covering every file (verify with `sha256sum -c SHA256SUMS`).
+
+## App icons
+
+The masters are `assets/icon/designos-icon.svg` (full bleed, Windows and Linux) and `assets/icon/designos-icon-macos.svg` (824 px tile on a 1024 canvas). All generated files are committed; regenerate them after editing a master with:
+
+```sh
+cargo run -p designos-app --example gen_icons
+```
+
+This rewrites `assets/icon/png/`, `designos.ico`, `designos.iconset/` and `designos.icns`. The window icon is the embedded 256 px PNG.
+
+## Dry run
+
+Run the workflow from the Actions tab (Release, Run workflow) on any branch. It builds and packages everything and uploads the archives as workflow artifacts, but creates no release. Run it after any change to `scripts/package-macos.sh` or the macOS plist, then open the downloaded `.dmg` on a Mac to check the icon, the drag-to-Applications layout and the Open Anyway flow. The version is stamped `0.0.0-dev.<sha>`.
+
+## Not covered yet
+
+- macOS: the app is ad-hoc signed but not signed with a Developer ID or notarized, so Gatekeeper asks for a one-time Open Anyway. Double-clicking a file in Finder does not pass it to designos (winit 0.30 does not expose `application:openFiles:`); "Open With" lists designos through `CFBundleDocumentTypes`.
+- Windows binaries are unsigned (SmartScreen warning). There is no installer; the zip is the download.
+- Linux binaries link the build runner's glibc; they run on that distribution or newer.

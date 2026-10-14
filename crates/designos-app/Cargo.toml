@@ -1,0 +1,53 @@
+[package]
+name = "designos-app"
+description = "DESIGN:OS Studio desktop editor"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+default-run = "designos-studio"
+
+[[bin]]
+name = "designos-studio"
+path = "src/main.rs"
+
+[[bin]]
+name = "designos"
+path = "src/main.rs"
+
+[features]
+default = ["open-url"]
+# Opens Present links in the system browser (after a confirmation).
+open-url = ["dep:open"]
+# Plays H.264 video fills in Present through Cisco's OpenH264 (C++ sources compiled by the
+# `openh264` crate, so it needs a C++ compiler). Off by default: the default build stays pure Rust
+# and still plays Motion JPEG; other codecs show their poster with an "Unsupported codec" badge.
+video = ["dep:openh264"]
+
+[dependencies]
+open = { version = "5", optional = true }
+openh264 = { version = "0.9", optional = true }
+designos-doc.workspace = true
+designos-render.workspace = true
+designos-fig.workspace = true
+designos-library.workspace = true
+designos-fonts.workspace = true
+designos-export.workspace = true
+designos-svg.workspace = true
+designos-gpu.workspace = true
+arboard = "3"
+eframe = "0.35.0"
+rfd = "0.17.2"
+image = { workspace = true, features = ["jpeg", "webp"] }
+cosmic-text = "0.19.0"
+unicode-segmentation = "1"
+serde_json.workspace = true
+serde.workspace = true
+ureq = "2"
+url = "2"
+uuid = { version = "1", features = ["v4"] }
+roxmltree = "0.20"
+egui = "0.35"
+resvg = { version = "0.45", default-features = false }
+
+[build-dependencies]
+winresource = "0.1"

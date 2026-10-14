@@ -1,0 +1,719 @@
+//! Spatial index of world-space bounds per page, plus a node snapshot used to
+//! work out which page regions changed between document revisions.
+//!
+//! The index is hierarchical: every node stores the AABB of its whole drawn
+//! subtree (including stroke / shadow / blur overflow, clipped by clipping
+//! frames). The renderer walks the normal tree but skips any child whose
+//! subtree box misses the window being painted.
+
+use crate::geom::{to_sk_transform, transformed_bounds};
+use designos_doc::{Document, Effect, Node, NodeId, NodeKind};
+use std::collections::HashMap;
+use std::hash::{BuildHasherDefault, Hasher};
+use tiny_skia as sk;
+
+/// Multiplicative hasher for dense integer ids (SipHash is needlessly slow
+/// for the per-node maps rebuilt on every revision).
+#[derive(Default, Clone, Copy)]
+pub(crate) struct IdHasher(u64);
+
+impl Hasher for IdHasher {
+    fn write(&mut self, bytes: &[u8]) {
+        for b in bytes {
+            self.write_u64(*b as u64);
+        }
+    }
+    fn write_u64(&mut self, n: u64) {
+        self.0 = (self.0.rotate_left(5) ^ n).wrapping_mul(0x517c_c1b7_2722_0a95);
+    }
+    fn finish(&self) -> u64 {
+        // fold the high bits down: hashbrown uses both ends
+        self.0 ^ (self.0 >> 32)
+    }
+}
+
+pub(crate) type IdMap<V> = HashMap<NodeId, V, BuildHasherDefault<IdHasher>>;
+
+/// Axis-aligned box in page space: (x0, y0, x1, y1).
+pub(crate) type B = (f32, f32, f32, f32);
+
+pub(crate) const EMPTY: B = (f32::MAX, f32::MAX, f32::MIN, f32::MIN);
+
+const GRID_CELL: f32 = 2048.0;
+
+fn grid_range(b: B) -> (i32, i32, i32, i32) {
+    let cx0 = (b.0 / GRID_CELL).floor() as i32;
+    let cy0 = (b.1 / GRID_CELL).floor() as i32;
+    let cx1 = (b.2 / GRID_CELL).floor() as i32;
+    let cy1 = (b.3 / GRID_CELL).floor() as i32;
+    (cx0, cy0, cx1, cy1)
+}
+
+pub(crate) fn is_empty(b: B) -> bool {
+    b.0 > b.2 || b.1 > b.3
+}
+
+pub(crate) fn union(a: B, b: B) -> B {
+    (a.0.min(b.0), a.1.min(b.1), a.2.max(b.2), a.3.max(b.3))
+}
+
+pub(crate) fn intersect(a: B, b: B) -> B {
+    (a.0.max(b.0), a.1.max(b.1), a.2.min(b.2), a.3.min(b.3))
+}
+
+pub(crate) fn overlaps(a: B, b: B) -> bool {
+    a.0 <= b.2 && b.0 <= a.2 && a.1 <= b.3 && b.1 <= a.3 && !is_empty(a) && !is_empty(b)
+}
+
+/// Extra extent (local units) around the node bounds touched by strokes and
+/// effects. Shared with the renderer's own culling so both agree exactly.
+pub(crate) fn node_margin(n: &Node) -> f32 {
+    let mut m = 0.0f32;
+    let has_stroke_paint = n.stroke.paints.iter().any(|p| p.visible) && (n.stroke.weight > 0.0 || n.stroke.side_weights.is_some());
+    if has_stroke_paint {
+        let sw = n.stroke.side_weights.map(|s| s.iter().cloned().fold(0.0, f32::max)).unwrap_or(0.0);
+        m = m.max(n.stroke.weight.max(sw) * 2.0);
+    }
+    for e in &n.effects {
+        match e {
+            Effect::DropShadow { offset, radius, spread, visible: true, .. } => {
+                m = m.max(offset.x.abs().max(offset.y.abs()) + spread.max(0.0) + radius * 1.6 + 2.0)
+            }
+            Effect::LayerBlur { radius, visible: true } => m = m.max(radius * 1.6 + 2.0),
+            Effect::Texture(t) if t.visible => m = m.max(t.radius.max(0.0) + 2.0),
+            _ => {}
+        }
+    }
+    if let NodeKind::Text(t) = &n.kind {
+        m = m.max(t.style.font_size * 2.0);
+    }
+    if matches!(n.kind, NodeKind::Sticky(_)) {
+        m = m.max(crate::board::sticky_shadow_reach(n.size));
+    }
+    m
+}
+
+/// How far (local units) pixels of this node's effects depend on content
+/// outside the node's own footprint. A tile must be rendered with at least
+/// this much padding for blurs to match a full-page render.
+fn blur_reach(n: &Node) -> f32 {
+    let mut r = 0.0f32;
+    for e in &n.effects {
+        match e {
+            Effect::DropShadow { offset, radius, spread, visible: true, .. } => {
+                r = r.max(offset.x.abs().max(offset.y.abs()) + spread.max(0.0) + radius * 1.6 + 2.0)
+            }
+            Effect::InnerShadow { offset, radius, spread, visible: true, .. } => {
+                r = r.max(offset.x.abs().max(offset.y.abs()) + spread.abs() + radius * 1.6 + 2.0)
+            }
+            Effect::LayerBlur { radius, visible: true } | Effect::BackgroundBlur { radius, visible: true } if *radius > 0.0 => r = r.max(radius * 1.6 + 2.0),
+            Effect::Texture(t) if t.visible => r = r.max(t.radius.max(0.0) + 2.0),
+            Effect::Glass(g) if g.visible => r = r.max(g.frost.max(0.0) * 1.6 + g.depth.max(0.0) * 2.0 + 6.0),
+            _ => {}
+        }
+    }
+    r
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct Entry {
+    /// Page-space bounds of the node and everything it draws (empty if hidden).
+    pub bounds: B,
+    pub parent: Option<NodeId>,
+    /// Has a visible layer blur: any change below it spreads over its bounds.
+    pub blur_container: bool,
+    pub mask: bool,
+    pub boolean: bool,
+}
+
+/// Cached world bounds for one page, rebuilt when the revision changes.
+#[derive(Default)]
+pub struct SceneIndex {
+    page: Option<NodeId>,
+    rev: u64,
+    built: bool,
+    pub(crate) entries: IdMap<Entry>,
+    /// Nodes with blur-like effects: (subtree bounds, reach in page units).
+    pub(crate) blurry: Vec<(B, f32)>,
+    /// Bounds of nodes with a background blur (they read what is beneath).
+    pub(crate) bg_blur: Vec<B>,
+    pub(crate) top_grid: HashMap<(i32, i32), Vec<NodeId>, BuildHasherDefault<IdHasher>>,
+    pub(crate) top_large: Vec<NodeId>,
+}
+
+impl SceneIndex {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Rebuilds if `rev` or `page` differ from the cached build. Returns the
+    /// previous entries when a rebuild happened.
+    pub(crate) fn ensure_prev(&mut self, doc: &Document, page: NodeId, rev: u64) -> Option<IdMap<Entry>> {
+        if self.built && self.page == Some(page) && self.rev == rev {
+            return None;
+        }
+        let prev = std::mem::take(&mut self.entries);
+        self.entries.reserve(prev.len().max(64));
+        self.blurry.clear();
+        self.bg_blur.clear();
+        self.top_grid.clear();
+        self.top_large.clear();
+        self.page = Some(page);
+        self.rev = rev;
+        self.built = true;
+        if let Some(p) = doc.get(page) {
+            let id = sk::Transform::identity();
+            for c in &p.children {
+                self.build(doc, *c, id, Some(page));
+            }
+        }
+        self.rebuild_top_grid(doc, page);
+        Some(prev)
+    }
+
+    fn rebuild_top_grid(&mut self, doc: &Document, page: NodeId) {
+        self.top_grid.clear();
+        self.top_large.clear();
+        let Some(p) = doc.get(page) else { return };
+        for &cid in &p.children {
+            let Some(n) = doc.get(cid) else { continue };
+            if !n.visible {
+                continue;
+            }
+            let Some(entry) = self.entries.get(&cid) else { continue };
+            if is_empty(entry.bounds) {
+                continue;
+            }
+            let (cx0, cy0, cx1, cy1) = grid_range(entry.bounds);
+            let cells = (cx1 as i64 - cx0 as i64 + 1).max(1).saturating_mul((cy1 as i64 - cy0 as i64 + 1).max(1));
+            if cells > 64 {
+                self.top_large.push(cid);
+            } else {
+                for cy in cy0..=cy1 {
+                    for cx in cx0..=cx1 {
+                        self.top_grid.entry((cx, cy)).or_default().push(cid);
+                    }
+                }
+            }
+        }
+    }
+
+    pub fn ensure(&mut self, doc: &Document, page: NodeId, rev: u64) {
+        self.ensure_prev(doc, page, rev);
+    }
+
+    /// Forgets the cached build so the next `ensure` rebuilds.
+    pub fn clear(&mut self) {
+        self.built = false;
+        self.entries.clear();
+        self.top_grid.clear();
+        self.top_large.clear();
+    }
+
+    /// True unless the subtree of `id` is known to miss `win`.
+    pub(crate) fn may_touch(&self, id: NodeId, win: B) -> bool {
+        match self.entries.get(&id) {
+            Some(e) => overlaps(e.bounds, win),
+            None => true,
+        }
+    }
+
+    /// Page-space bounds (x0, y0, x1, y1) of a node's drawn subtree, if indexed and visible.
+    pub fn bounds_of(&self, id: NodeId) -> Option<(f32, f32, f32, f32)> {
+        self.entries.get(&id).map(|e| e.bounds).filter(|b| !is_empty(*b))
+    }
+
+    /// Appends all indexed `NodeId`s whose `bounds` overlap `rect`.
+    pub fn query_rect(&self, rect: (f32, f32, f32, f32), out: &mut Vec<NodeId>) {
+        if is_empty(rect) {
+            return;
+        }
+        for (&id, entry) in &self.entries {
+            if overlaps(entry.bounds, rect) {
+                out.push(id);
+            }
+        }
+    }
+
+    /// Appends top-level page children whose `Entry.bounds` overlap `rect`,
+    /// querying `top_grid` cells overlapping `rect` plus `top_large` and deduplicating.
+    pub fn query_top_level(&self, rect: (f32, f32, f32, f32), out: &mut Vec<NodeId>) {
+        if is_empty(rect) {
+            return;
+        }
+        let (cx0, cy0, cx1, cy1) = grid_range(rect);
+        let mut seen: IdMap<()> = IdMap::default();
+        let cells = (cx1 as i64 - cx0 as i64 + 1).max(1).saturating_mul((cy1 as i64 - cy0 as i64 + 1).max(1));
+        if cells <= 4096 {
+            for cy in cy0..=cy1 {
+                for cx in cx0..=cx1 {
+                    if let Some(bucket) = self.top_grid.get(&(cx, cy)) {
+                        for &id in bucket {
+                            if seen.insert(id, ()).is_none()
+                                && self.entries.get(&id).is_some_and(|e| e.parent == self.page && overlaps(e.bounds, rect))
+                            {
+                                out.push(id);
+                            }
+                        }
+                    }
+                }
+            }
+        } else {
+            for (&(cx, cy), bucket) in &self.top_grid {
+                if cx >= cx0 && cx <= cx1 && cy >= cy0 && cy <= cy1 {
+                    for &id in bucket {
+                        if seen.insert(id, ()).is_none()
+                            && self.entries.get(&id).is_some_and(|e| e.parent == self.page && overlaps(e.bounds, rect))
+                        {
+                            out.push(id);
+                        }
+                    }
+                }
+            }
+        }
+        for &id in &self.top_large {
+            if seen.insert(id, ()).is_none()
+                && self.entries.get(&id).is_some_and(|e| e.parent == self.page && overlaps(e.bounds, rect))
+            {
+                out.push(id);
+            }
+        }
+    }
+
+    /// Incrementally rebuilds `dirty_id`'s subtree and updates ancestor `Entry.bounds`
+    /// up to `self.page`, stopping early when an ancestor's `bounds` does not change.
+    pub fn update_subtree(&mut self, doc: &Document, dirty_id: NodeId, rev: u64) -> bool {
+        if !self.built {
+            return false;
+        }
+        let Some(page) = self.page else {
+            return false;
+        };
+        if dirty_id == page || doc.get(dirty_id).is_none() {
+            return false;
+        }
+        let mut ancestors: Vec<NodeId> = Vec::new();
+        let mut cur = dirty_id;
+        loop {
+            let Some(p) = doc
+                .get(cur)
+                .and_then(|n| n.parent)
+                .or_else(|| self.entries.get(&cur).and_then(|e| e.parent))
+            else {
+                return false;
+            };
+            if p == page {
+                break;
+            }
+            if ancestors.len() >= 1024 || p == dirty_id || ancestors.contains(&p) {
+                return false;
+            }
+            ancestors.push(p);
+            cur = p;
+        }
+        let top_id = ancestors.last().copied().unwrap_or(dirty_id);
+        if !doc.get(page).is_some_and(|p| p.children.contains(&top_id)) {
+            return false;
+        }
+
+        let mut ancestor_transforms: Vec<(NodeId, sk::Transform)> = Vec::with_capacity(ancestors.len());
+        let mut parent_ts = sk::Transform::identity();
+        for &aid in ancestors.iter().rev() {
+            if !self.entries.contains_key(&aid) {
+                return false;
+            }
+            let Some(an) = doc.get(aid) else {
+                return false;
+            };
+            let an = &*designos_doc::resolve_node(doc, an);
+            let drawn = an.visible && !matches!(an.kind, NodeKind::Unknown { .. } | NodeKind::Page { .. });
+            if !drawn {
+                return false;
+            }
+            parent_ts = parent_ts.pre_concat(to_sk_transform(&an.transform));
+            ancestor_transforms.push((aid, parent_ts));
+        }
+
+        let old_top_bounds = self.entries.get(&top_id).map(|e| e.bounds);
+        let parent = Some(ancestors.first().copied().unwrap_or(page));
+        self.build(doc, dirty_id, parent_ts, parent);
+
+        for &(aid, ts) in ancestor_transforms.iter().rev() {
+            let Some(an) = doc.get(aid) else {
+                break;
+            };
+            let an = &*designos_doc::resolve_node(doc, an);
+            let boolean = matches!(an.kind, NodeKind::BooleanOp(_));
+            let m = node_margin(an);
+            let mut sub = transformed_bounds(&ts, -m, -m, an.size.x + 2.0 * m, an.size.y + 2.0 * m);
+            let draws_kids = !an.children.is_empty() && !boolean;
+            let mut kids = EMPTY;
+            if draws_kids {
+                for c in &an.children {
+                    let cb = self.entries.get(c).map(|e| e.bounds).unwrap_or(EMPTY);
+                    kids = union(kids, cb);
+                }
+            }
+            if !is_empty(kids) {
+                if an.kind.frame_props().map(|f| f.clips_content).unwrap_or(false) {
+                    kids = intersect(kids, transformed_bounds(&ts, 0.0, 0.0, an.size.x, an.size.y));
+                }
+                if !is_empty(kids) {
+                    sub = union(sub, kids);
+                }
+            }
+            let Some(entry) = self.entries.get_mut(&aid) else {
+                break;
+            };
+            if entry.bounds == sub {
+                break;
+            }
+            entry.bounds = sub;
+        }
+
+        if self.entries.get(&top_id).map(|e| e.bounds) != old_top_bounds {
+            self.rebuild_top_grid(doc, page);
+        }
+        self.rev = rev;
+        true
+    }
+
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    fn build(&mut self, doc: &Document, id: NodeId, parent_ts: sk::Transform, parent: Option<NodeId>) -> B {
+        let Some(n) = doc.get(id) else { return EMPTY };
+        let n = &*designos_doc::resolve_node(doc, n);
+        let drawn = n.visible && !matches!(n.kind, NodeKind::Unknown { .. } | NodeKind::Page { .. });
+        let boolean = matches!(n.kind, NodeKind::BooleanOp(_));
+        if !drawn {
+            self.entries.insert(id, Entry { bounds: EMPTY, parent, blur_container: false, mask: n.is_mask, boolean });
+            return EMPTY;
+        }
+        let ts = parent_ts.pre_concat(to_sk_transform(&n.transform));
+        let m = node_margin(n);
+        let mut sub = transformed_bounds(&ts, -m, -m, n.size.x + 2.0 * m, n.size.y + 2.0 * m);
+        let draws_kids = !n.children.is_empty() && !boolean;
+        let mut kids = EMPTY;
+        for c in &n.children {
+            let cb = self.build(doc, *c, ts, Some(id));
+            if draws_kids {
+                kids = union(kids, cb);
+            }
+        }
+        if !is_empty(kids) {
+            if n.kind.frame_props().map(|f| f.clips_content).unwrap_or(false) {
+                kids = intersect(kids, transformed_bounds(&ts, 0.0, 0.0, n.size.x, n.size.y));
+            }
+            if !is_empty(kids) {
+                sub = union(sub, kids);
+            }
+        }
+        let layer_blur = n.effects.iter().any(|e| matches!(e, Effect::LayerBlur { visible: true, radius } if *radius > 0.0));
+        if !is_empty(sub) {
+            let reach = blur_reach(n);
+            if reach > 0.0 {
+                // `ts` is a pure scale/rotation here; take its uniform scale
+                let sc = (ts.sx * ts.sy - ts.kx * ts.ky).abs().sqrt().max(1e-6);
+                self.blurry.push((sub, reach * sc));
+            }
+            if n.effects
+                .iter()
+                .any(|e| matches!(e, Effect::BackgroundBlur { visible: true, radius } if *radius > 0.0) || matches!(e, Effect::Glass(g) if g.visible))
+            {
+                self.bg_blur.push(sub);
+            }
+        }
+        self.entries.insert(id, Entry { bounds: sub, parent, blur_container: layer_blur, mask: n.is_mask, boolean });
+        sub
+    }
+}
+
+/// Snapshot of every node of the page as of the last sync; compared against
+/// the live document to find what changed.
+#[derive(Default)]
+pub(crate) struct Differ {
+    snap: IdMap<Node>,
+}
+
+/// Result of comparing a revision against the previous one.
+pub(crate) struct Changes {
+    /// Nothing is known about the previous state: drop everything.
+    pub all: bool,
+    /// Page-space regions whose pixels may differ.
+    pub rects: Vec<B>,
+}
+
+fn same_ignoring_structure(a: &Node, b: &Node) -> bool {
+    if a == b {
+        return true;
+    }
+    let mut t = b.clone();
+    t.children = a.children.clone();
+    t.parent = a.parent;
+    t == *a
+}
+
+impl Differ {
+    pub fn reset(&mut self) {
+        self.snap.clear();
+    }
+
+    /// Compares the live page (indexed in `new`, previously indexed in `old`)
+    /// with the snapshot and refreshes the snapshot.
+    pub fn diff(&mut self, doc: &Document, page: NodeId, old: &IdMap<Entry>, new: &SceneIndex) -> Changes {
+        let first = self.snap.is_empty();
+        let mut rects: Vec<B> = Vec::new();
+        // nodes whose change can spread to ancestors (blur layers, masks, boolean ops)
+        let mut spread: Vec<NodeId> = Vec::new();
+        let mut all = first;
+
+        let obounds = |id: &NodeId| old.get(id).map(|e| e.bounds).unwrap_or(EMPTY);
+        let nbounds = |id: &NodeId| new.entries.get(id).map(|e| e.bounds).unwrap_or(EMPTY);
+        let is_mask = |id: &NodeId| new.entries.get(id).is_some_and(|e| e.mask) || old.get(id).is_some_and(|e| e.mask);
+
+        // page node itself (background colour etc.)
+        if let (Some(p), Some(s)) = (doc.get(page), self.snap.get(&page)) {
+            if !same_ignoring_structure(s, p) {
+                all = true;
+            }
+        }
+        if let Some(p) = doc.get(page) {
+            let changed_children = self.snap.get(&page).map(|s| s.children != p.children).unwrap_or(true);
+            if changed_children {
+                self.children_delta(
+                    self.snap.get(&page).map(|s| s.children.clone()).unwrap_or_default(),
+                    &p.children,
+                    &obounds,
+                    &nbounds,
+                    &is_mask,
+                    &mut rects,
+                    &mut spread,
+                );
+            }
+            self.snap.insert(page, p.clone());
+        }
+
+        for (id, ne) in new.entries.iter() {
+            let Some(live) = doc.get(*id) else { continue };
+            // Compare with variable bindings applied, so editing a variable or a
+            // mode dirties exactly the nodes whose drawn values changed.
+            let live = &*designos_doc::resolve_node(doc, live);
+            match self.snap.get(id) {
+                None => {
+                    rects.push(ne.bounds);
+                    spread.push(*id);
+                    self.snap.insert(*id, live.clone());
+                }
+                Some(s) if s == live => {}
+                Some(s) => {
+                    let props_changed = !same_ignoring_structure(s, live);
+                    if props_changed {
+                        rects.push(obounds(id));
+                        rects.push(ne.bounds);
+                        spread.push(*id);
+                        if s.is_mask != live.is_mask {
+                            spread.push(*id);
+                        }
+                    }
+                    if s.children != live.children {
+                        self.children_delta(s.children.clone(), &live.children, &obounds, &nbounds, &is_mask, &mut rects, &mut spread);
+                        spread.push(*id);
+                    }
+                    self.snap.insert(*id, live.clone());
+                }
+            }
+        }
+        // removed nodes
+        let gone: Vec<NodeId> = self.snap.keys().filter(|k| **k != page && !new.entries.contains_key(k)).copied().collect();
+        for g in gone {
+            rects.push(obounds(&g));
+            self.snap.remove(&g);
+        }
+
+        if !all {
+            // ancestors that re-blur / re-mask / re-union what changed below them
+            let mut extra: Vec<B> = Vec::new();
+            for id in spread {
+                let Some(e) = new.entries.get(&id).or_else(|| old.get(&id)) else { continue };
+                if e.mask {
+                    // a mask clips every sibling that follows it
+                    if let Some(sibs) = e.parent.and_then(|p| doc.get(p)).map(|p| &p.children) {
+                        if let Some(pos) = sibs.iter().position(|c| *c == id) {
+                            for c in &sibs[pos + 1..] {
+                                extra.push(obounds(c));
+                                extra.push(nbounds(c));
+                            }
+                        }
+                    }
+                }
+                let mut parent = e.parent;
+                while let Some(p) = parent {
+                    let Some(pe) = new.entries.get(&p) else { break };
+                    if pe.blur_container || pe.boolean {
+                        extra.push(pe.bounds);
+                        extra.push(obounds(&p));
+                    }
+                    parent = pe.parent;
+                }
+            }
+            rects.extend(extra);
+            rects.retain(|r| !is_empty(*r));
+            // background blurs resample whatever lies beneath them
+            if !new.bg_blur.is_empty() && !rects.is_empty() {
+                let hits: Vec<B> = new.bg_blur.iter().copied().filter(|b| rects.iter().any(|r| overlaps(*r, *b))).collect();
+                rects.extend(hits);
+            }
+        }
+        Changes { all, rects }
+    }
+
+    /// Dirty regions for an edit of a child list: everything between the first
+    /// and last position that differs (inserts, removals, z-order moves).
+    #[allow(clippy::too_many_arguments)]
+    fn children_delta(
+        &self,
+        old: Vec<NodeId>,
+        new: &[NodeId],
+        obounds: &dyn Fn(&NodeId) -> B,
+        nbounds: &dyn Fn(&NodeId) -> B,
+        is_mask: &dyn Fn(&NodeId) -> bool,
+        rects: &mut Vec<B>,
+        spread: &mut Vec<NodeId>,
+    ) {
+        let pre = old.iter().zip(new).take_while(|(a, b)| a == b).count();
+        let suf = old[pre..].iter().rev().zip(new[pre..].iter().rev()).take_while(|(a, b)| a == b).count();
+        let mut masks = false;
+        for id in &old[pre..old.len() - suf] {
+            rects.push(obounds(id));
+            spread.push(*id);
+            masks |= is_mask(id);
+        }
+        for id in &new[pre..new.len() - suf] {
+            rects.push(nbounds(id));
+            spread.push(*id);
+            masks |= is_mask(id);
+        }
+        if masks {
+            // a mask added / removed / moved changes every sibling after it
+            for id in &new[pre..] {
+                rects.push(nbounds(id));
+                rects.push(obounds(id));
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use designos_doc::{Affine, Rect, Vec2};
+
+    #[test]
+    fn query_top_level_and_update_subtree_match_full_ensure() {
+        let mut doc = Document::new("test");
+        let page = doc.add_page("page-1");
+        let other_page = doc.add_page("page-2");
+
+        // Top-level frame 1 (unclipped) in cell (0, 0)
+        let f1_id = doc.alloc_id();
+        let mut f1 = Node::frame(f1_id, Rect::new(100.0, 100.0, 400.0, 400.0));
+        if let NodeKind::Frame(fp) = &mut f1.kind {
+            fp.clips_content = false;
+        }
+        let f1_id = doc.insert(page, f1).unwrap();
+
+        let g1_id = doc.alloc_id();
+        let mut g1 = Node::new(g1_id, NodeKind::Group);
+        g1.size = Vec2 { x: 100.0, y: 100.0 };
+        g1.transform = Affine::translate(50.0, 50.0);
+        let g1_id = doc.insert(f1_id, g1).unwrap();
+
+        let child1_id = doc.alloc_id();
+        let child1 = doc.insert(g1_id, Node::rectangle(child1_id, Rect::new(10.0, 10.0, 80.0, 80.0))).unwrap();
+
+        // Top-level frame 2 (clipped) spanning into cell (1, 0)
+        let f2_id = doc.alloc_id();
+        let mut f2 = Node::frame(f2_id, Rect::new(1900.0, 200.0, 500.0, 500.0));
+        if let NodeKind::Frame(fp) = &mut f2.kind {
+            fp.clips_content = true;
+        }
+        let f2_id = doc.insert(page, f2).unwrap();
+
+        let child2_id = doc.alloc_id();
+        let child2 = doc.insert(f2_id, Node::rectangle(child2_id, Rect::new(20.0, 20.0, 100.0, 100.0))).unwrap();
+
+        // Top-level node in negative grid cell (-2, -2)
+        let neg_id = doc.alloc_id();
+        let neg_id = doc.insert(page, Node::rectangle(neg_id, Rect::new(-3500.0, -3500.0, 300.0, 300.0))).unwrap();
+
+        // Large top-level node spanning > 64 grid cells (stored in `top_large`)
+        let large_id = doc.alloc_id();
+        let large_id = doc.insert(page, Node::rectangle(large_id, Rect::new(-10000.0, -10000.0, 25000.0, 25000.0))).unwrap();
+
+        // Node on a different page
+        let other_node_id = doc.alloc_id();
+        let other_node_id = doc.insert(other_page, Node::rectangle(other_node_id, Rect::new(0.0, 0.0, 50.0, 50.0))).unwrap();
+
+        let mut inc_idx = SceneIndex::new();
+        assert!(!inc_idx.update_subtree(&doc, child1, 1));
+
+        inc_idx.ensure(&doc, page, 1);
+        assert!(inc_idx.top_large.contains(&large_id));
+        assert!(!inc_idx.update_subtree(&doc, page, 2));
+        assert!(!inc_idx.update_subtree(&doc, other_node_id, 2));
+
+        let query_rects = [
+            (0.0, 0.0, 600.0, 600.0),
+            (1800.0, 100.0, 2500.0, 800.0),
+            (-4000.0, -4000.0, -3000.0, -3000.0),
+            (5000.0, 5000.0, 5500.0, 5500.0),
+        ];
+
+        // 1. Move deep child `child1` far outside unclipped `f1` so `g1` and `f1` bounds expand across cells
+        doc.get_mut(child1).unwrap().transform = Affine::translate(2600.0, 2600.0);
+        assert!(inc_idx.update_subtree(&doc, child1, 2));
+
+        // 2. Move `child2` inside clipped `f2` (stopped early by clipping / unchanged ancestor bounds)
+        doc.get_mut(child2).unwrap().transform = Affine::translate(60.0, 60.0);
+        assert!(inc_idx.update_subtree(&doc, child2, 3));
+
+        // 3. Move top-level `neg_id` to a new grid cell
+        doc.get_mut(neg_id).unwrap().transform = Affine::translate(5100.0, 5100.0);
+        assert!(inc_idx.update_subtree(&doc, neg_id, 4));
+
+        let mut full_idx = SceneIndex::new();
+        full_idx.ensure(&doc, page, 4);
+
+        for id in [f1_id, g1_id, child1, f2_id, child2, neg_id, large_id] {
+            assert_eq!(inc_idx.bounds_of(id), full_idx.bounds_of(id), "bounds mismatch for {:?}", id);
+        }
+
+        for r in query_rects {
+            let mut inc_out = Vec::new();
+            let mut full_out = Vec::new();
+            inc_idx.query_top_level(r, &mut inc_out);
+            full_idx.query_top_level(r, &mut full_out);
+            inc_out.sort_by_key(|n| n.0);
+            full_out.sort_by_key(|n| n.0);
+            assert_eq!(inc_out, full_out, "query_top_level mismatch for rect {:?}", r);
+
+            // Also verify against brute-force scan of top-level page children
+            let mut expected: Vec<NodeId> = doc
+                .get(page)
+                .unwrap()
+                .children
+                .iter()
+                .copied()
+                .filter(|&cid| full_idx.bounds_of(cid).is_some_and(|b| overlaps(b, r)))
+                .collect();
+            expected.sort_by_key(|n| n.0);
+            assert_eq!(inc_out, expected);
+        }
+    }
+}

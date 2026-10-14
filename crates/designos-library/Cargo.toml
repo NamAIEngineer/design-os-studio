@@ -1,0 +1,15 @@
+[package]
+name = "designos-library"
+description = "On-disk projects library: files, folders, thumbnails, trash, version history and published libraries"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+designos-doc.workspace = true
+designos-fig.workspace = true
+designos-svg.workspace = true
+dirs = "5"
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true

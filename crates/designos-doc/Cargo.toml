@@ -1,0 +1,12 @@
+[package]
+name = "designos-doc"
+description = "Document model: scene graph, styles, undo/redo"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+regex = "1"
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true

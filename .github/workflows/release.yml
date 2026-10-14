@@ -1,0 +1,164 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  # Dry run: builds and packages everything, uploads workflow artifacts, and
+  # creates no GitHub Release.
+  workflow_dispatch:
+
+env:
+  RUST_VERSION: "1.93.1"
+  CARGO_TERM_COLOR: always
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Linux system libraries
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config libxkbcommon-dev libwayland-dev libx11-dev \
+            libxcursor-dev libxrandr-dev libxi-dev libgl1-mesa-dev \
+            libfontconfig1-dev
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-${{ matrix.target }}
+
+      # On Windows, crates/designos-app/build.rs embeds the icon and version info
+      # (rc.exe ships with the runner's Windows SDK); it fails the build under CI
+      # if that step breaks, so an icon-less exe is never released.
+      - name: Build designos and designos-diff
+        run: cargo build --release --locked --target ${{ matrix.target }} -p designos-app -p designos-diff
+
+      - name: Resolve version
+        id: version
+        shell: bash
+        run: |
+          if [ "${GITHUB_REF_TYPE}" = tag ]; then
+            echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+          else
+            echo "version=0.0.0-dev.${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Package
+        shell: bash
+        run: scripts/package.sh "${{ matrix.target }}" "${{ steps.version.outputs.version }}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: designos-${{ matrix.target }}
+          path: |
+            dist/*.zip
+            dist/*.tar.gz
+            dist/*.sha256
+          if-no-files-found: error
+
+  # One job builds both Apple architectures and packages a universal designos.app
+  # (.dmg for people, .tar.gz for scripts). macos-13 runners are retired, so the
+  # Intel half is cross-compiled on the arm64 runner.
+  macos:
+    name: Build macOS universal app
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-macos-universal
+
+      - name: Build both architectures
+        run: |
+          for t in aarch64-apple-darwin x86_64-apple-darwin; do
+            cargo build --release --locked --target "$t" -p designos-app -p designos-diff
+          done
+
+      - name: Resolve version
+        id: version
+        run: |
+          if [ "${GITHUB_REF_TYPE}" = tag ]; then
+            echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+          else
+            echo "version=0.0.0-dev.${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Package designos.app (.dmg and .tar.gz)
+        run: scripts/package-macos.sh "${{ steps.version.outputs.version }}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: designos-macos-universal
+          path: |
+            dist/*.dmg
+            dist/*.tar.gz
+            dist/*.sha256
+          if-no-files-found: error
+
+  release:
+    name: Publish release
+    needs: [build, macos]
+    # Tags only: manual (workflow_dispatch) runs stop after uploading artifacts.
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Combine checksums
+        working-directory: dist
+        run: |
+          cat *.sha256 | sort -k2 > SHA256SUMS
+          rm -f *.sha256
+          cat SHA256SUMS
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          # Shown above the generated notes.
+          body: |
+            ### Installing
+
+            Download the file for your platform below. These builds are **not code-signed yet**, so the first launch shows a warning:
+
+            - **macOS (Apple Silicon and Intel):** download `designos-<version>-macos.dmg`, open it and drag **designos** to **Applications**. The first time, open it from Applications, then go to **System Settings → Privacy & Security** and click **Open Anyway**. Or run `xattr -dr com.apple.quarantine /Applications/designos.app`.
+            - **Windows:** unzip `designos-<version>-x86_64-pc-windows-msvc.zip` and run `designos.exe`. In the SmartScreen dialog, click **More info → Run anyway**.
+            - **Linux:** unpack `designos-<version>-x86_64-unknown-linux-gnu.tar.gz`, then run `./install.sh` (no sudo) or just `./designos`.
+
+            Full instructions: [docs/install.md](https://github.com/jangtrinh/design-os-studio/blob/main/docs/install.md). Check downloads against `SHA256SUMS`.
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          files: |
+            dist/*.zip
+            dist/*.tar.gz
+            dist/*.dmg
+            dist/SHA256SUMS

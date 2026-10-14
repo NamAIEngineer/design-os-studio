@@ -1,0 +1,18 @@
+[package]
+name = "designos-gpu"
+description = "GPU canvas renderer (wgpu + lyon) for designos documents; the CPU renderer stays the deterministic reference"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+bytemuck = { version = "1", features = ["derive"] }
+designos-doc.workspace = true
+designos-render.workspace = true
+lyon_tessellation = "1"
+pollster = "0.4"
+wgpu = "29"
+
+[dev-dependencies]
+designos-diff = { path = "../designos-diff" }
+image.workspace = true

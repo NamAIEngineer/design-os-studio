@@ -1,0 +1,1095 @@
+{
+  "_note": "Measured from the Figma web editor (UI3, dark theme, dpr 1) via DOM computed styles. Values are px. Panels anchored: rail+left panel to the left edge, right panel to the right edge, toolbelt centered on the window and 12px from the bottom.",
+  "font": {
+    "family": "Inter",
+    "weight_default": 450,
+    "weight_strong": 550,
+    "body_small": {
+      "size": 9,
+      "line": 14,
+      "tracking": 0.045,
+      "weight": 450,
+      "strong_weight": 500,
+      "strong_tracking": 0.27
+    },
+    "body_medium": {
+      "size": 11,
+      "line": 16,
+      "tracking": 0.055
+    },
+    "body_large": {
+      "size": 13,
+      "line": 22,
+      "tracking": -0.032
+    },
+    "heading_small": {
+      "size": 13,
+      "line": 22,
+      "weight": 550,
+      "tracking": -0.032
+    },
+    "heading_medium": {
+      "size": 15,
+      "line": 25,
+      "weight": 550,
+      "tracking": -0.075
+    },
+    "heading_large": {
+      "size": 24,
+      "line": 32,
+      "weight": 550,
+      "tracking": -0.408
+    },
+    "mono": "Roboto Mono"
+  },
+  "radius": {
+    "small": 2,
+    "medium": 5,
+    "large": 13,
+    "full": 9999
+  },
+  "spacer": [
+    0,
+    4,
+    8,
+    12,
+    16,
+    24,
+    32,
+    40
+  ],
+  "color": {
+    "bg": "#2c2c2c",
+    "bg_secondary": "#383838",
+    "bg_tertiary": "#444444",
+    "bg_hover": "#383838",
+    "bg_pressed": "#444444",
+    "bg_elevated": "#1e1e1e",
+    "bg_menu": "#1e1e1e",
+    "bg_menu_hover": "#2c2c2c",
+    "bg_selected": "#394360",
+    "bg_selected_hover": "#4a5878",
+    "bg_selected_secondary": "#32394d",
+    "bg_brand": "#0c8ce9",
+    "bg_brand_hover": "#0a6dc2",
+    "bg_brand_pressed": "#105cad",
+    "bg_disabled": "#757575",
+    "bg_toolbar": "#2c2c2c",
+    "bg_toolbar_hover": "#111111",
+    "bg_toolbar_selected": "#0c8ce9",
+    "bg_toolbar_mode_switcher": "#444444",
+    "bg_transparent_hover": "#ffffff0d",
+    "bg_selected_area": "#0d99ff33",
+    "border": "#444444",
+    "border_menu": "#383838",
+    "border_selected": "#0c8ce9",
+    "border_strong": "#ffffffe5",
+    "border_translucent": "#ffffff1a",
+    "text": "#ffffff",
+    "text_secondary": "#ffffffb2",
+    "text_tertiary": "#ffffff66",
+    "text_disabled": "#ffffff66",
+    "text_brand": "#7cc4f8",
+    "text_component": "#d1a8ff",
+    "icon": "#ffffff",
+    "icon_secondary": "#ffffffb2",
+    "icon_tertiary": "#ffffff66",
+    "icon_selected": "#7cc4f8",
+    "canvas_selection": "#0d99ff",
+    "component": "#9747ff",
+    "danger": "#f24822",
+    "text_on_light_canvas": "#000000e5",
+    "text_on_light_canvas_secondary": "#0000004d",
+    "text_on_dark_canvas": "#ffffffe5"
+  },
+  "elevation": {
+    "100": [
+      [
+        0,
+        1,
+        3,
+        0,
+        "#00000066"
+      ],
+      [
+        0,
+        0,
+        0.5,
+        0,
+        "#00000080"
+      ],
+      [
+        "inset",
+        0,
+        0,
+        0.5,
+        0,
+        "#ffffff4d"
+      ],
+      [
+        "inset",
+        0,
+        0.5,
+        0,
+        0,
+        "#ffffff1a"
+      ]
+    ],
+    "200": [
+      [
+        0,
+        1,
+        3,
+        0,
+        "#00000080"
+      ],
+      [
+        0,
+        3,
+        8,
+        0,
+        "#00000059"
+      ],
+      [
+        "inset",
+        0,
+        0,
+        0.5,
+        0,
+        "#ffffff4d"
+      ],
+      [
+        "inset",
+        0,
+        0.5,
+        0,
+        0,
+        "#ffffff14"
+      ]
+    ],
+    "300": [
+      [
+        0,
+        1,
+        3,
+        0,
+        "#00000080"
+      ],
+      [
+        0,
+        5,
+        12,
+        0,
+        "#00000059"
+      ],
+      [
+        "inset",
+        0,
+        0,
+        0.5,
+        0,
+        "#ffffff4d"
+      ],
+      [
+        "inset",
+        0,
+        0.5,
+        0,
+        0,
+        "#ffffff14"
+      ]
+    ],
+    "400": [
+      [
+        0,
+        2,
+        5,
+        0,
+        "#00000059"
+      ],
+      [
+        0,
+        10,
+        16,
+        0,
+        "#00000059"
+      ],
+      [
+        "inset",
+        0,
+        0,
+        0.5,
+        0,
+        "#ffffff59"
+      ],
+      [
+        "inset",
+        0,
+        0.5,
+        0,
+        0,
+        "#ffffff14"
+      ]
+    ],
+    "500": [
+      [
+        0,
+        3,
+        5,
+        0,
+        "#00000059"
+      ],
+      [
+        0,
+        10,
+        24,
+        0,
+        "#00000073"
+      ],
+      [
+        "inset",
+        0,
+        0,
+        0.5,
+        0,
+        "#ffffff59"
+      ],
+      [
+        "inset",
+        0,
+        0.5,
+        0,
+        0,
+        "#ffffff14"
+      ]
+    ]
+  },
+  "layout": {
+    "rail": {
+      "width": 56,
+      "border_right": 1,
+      "bg": "bg",
+      "menu_button": {
+        "x": 12,
+        "y": 8,
+        "size": 32,
+        "radius": 5
+      },
+      "items": {
+        "x": 0,
+        "first_y": 56,
+        "size": 56,
+        "labels": [
+          "File",
+          "Assets",
+          "Tools"
+        ],
+        "label_font": "body_small",
+        "group_gap": 16
+      },
+      "bottom_items": "help/account pinned to bottom"
+    },
+    "left_panel": {
+      "x": 57,
+      "width": 240,
+      "border_right": 1,
+      "bg": "bg",
+      "header_height": 65,
+      "pages_header": {
+        "y": 73,
+        "title_x_pad": 16,
+        "title_font": "body_medium strong",
+        "action_button": {
+          "size": 24,
+          "radius": 5,
+          "right_pad": 8
+        }
+      },
+      "page_row": {
+        "x_inset": 8,
+        "height": 24,
+        "radius": 5,
+        "text_x_pad": 8,
+        "font": "body_medium/24"
+      },
+      "layers_header": {
+        "height": 40,
+        "action_button": {
+          "size": 24,
+          "radius": 5
+        }
+      },
+      "layer_row": {
+        "height": 32,
+        "chevron": {
+          "x_pad": 8,
+          "size": 24
+        },
+        "icon_size": 16,
+        "icon_gap": -4,
+        "indent": 16,
+        "font": "body_medium",
+        "icon_color": "icon_tertiary",
+        "component_text": "text_component",
+        "selected_bg": "bg_selected",
+        "hover_outline": "border"
+      }
+    },
+    "canvas": {
+      "x": 298
+    },
+    "right_panel": {
+      "width": 240,
+      "border_left": 1,
+      "bg": "bg",
+      "anchor": "right",
+      "header": {
+        "avatar": {
+          "x_from_panel": 9,
+          "y": 12,
+          "w": 50,
+          "h": 24,
+          "radius": 50
+        },
+        "present_button": {
+          "x_from_right": 116,
+          "y": 8,
+          "w": 32,
+          "h": 32,
+          "radius": [
+            5,
+            0,
+            0,
+            5
+          ],
+          "chevron_w": 16
+        },
+        "share_button": {
+          "x_from_right": 63,
+          "y": 8,
+          "w": 55,
+          "h": 32,
+          "radius": 5,
+          "bg": "bg_brand",
+          "font": "body_medium weight 450"
+        }
+      },
+      "tabs": {
+        "y": 48,
+        "h": 24,
+        "radius": 5,
+        "x_from_panel": 9,
+        "active": {
+          "bg": "bg_secondary",
+          "font_weight": 550,
+          "color": "text"
+        },
+        "inactive": {
+          "color": "text_secondary",
+          "font_weight": 450
+        },
+        "zoom_dropdown": {
+          "x_from_right": 63,
+          "w": 55
+        }
+      },
+      "content_top": 81,
+      "section": {
+        "title_font": "body_medium strong",
+        "title_height": 40,
+        "padding_x": 16,
+        "action_button": {
+          "size": 24,
+          "radius": 5,
+          "right_pad": 8
+        }
+      },
+      "input": {
+        "height": 24,
+        "radius": 5,
+        "font": "body_medium",
+        "bg": "bg_secondary",
+        "hover_border": "border"
+      },
+      "_selection_note": "x values below are relative to the panel's left edge (the 1px border is at x=0). Measured from a reference design file with an instance selected.",
+      "selection_header": {
+        "y": 93,
+        "name_field": {
+          "x": 9,
+          "w": 136,
+          "h": 24,
+          "font": "body_large",
+          "radius": 5,
+          "bg": "bg"
+        },
+        "action_buttons": {
+          "x": [
+            153,
+            181,
+            209
+          ],
+          "size": 24,
+          "radius": 5
+        }
+      },
+      "property_section": {
+        "title_row": {
+          "x": 1,
+          "w": 240,
+          "h": 40,
+          "text_x": 17,
+          "text_y_offset": 12,
+          "font": "body_medium strong"
+        },
+        "empty_section": {
+          "row_h": 32,
+          "pitch": 41,
+          "title_color": "text_secondary",
+          "plus_button": {
+            "x": 209,
+            "size": 24
+          }
+        },
+        "separator": "1px border between sections (pitch = height + 1)",
+        "sublabel": {
+          "font": "body_medium",
+          "color": "text_secondary",
+          "h": 16
+        },
+        "content_x": 17,
+        "content_w": 184,
+        "trailing_button_x": 209
+      },
+      "fields": {
+        "two_col": {
+          "x": [
+            17,
+            113
+          ],
+          "w": 88,
+          "h": 24,
+          "gap": 8,
+          "bg": "bg_secondary",
+          "radius": 5,
+          "font": "body_medium weight 450",
+          "prefix_label_w": 23
+        },
+        "row_pitch_with_label": 48,
+        "segmented": {
+          "button_w": 29,
+          "h": 24,
+          "x_start": 17,
+          "group_gap": 8,
+          "bg": "bg_secondary",
+          "first_radius": [
+            5,
+            0,
+            0,
+            5
+          ],
+          "last_radius": [
+            0,
+            5,
+            5,
+            0
+          ]
+        },
+        "dimension_value": {
+          "w": 48,
+          "radius": 2
+        }
+      },
+      "section_order_with_selection": [
+        "Properties (component)",
+        "Position",
+        "Auto layout",
+        "Appearance",
+        "Fill",
+        "Stroke",
+        "Effects",
+        "Selection colors",
+        "Layout guide",
+        "Export"
+      ],
+      "section_y_example": {
+        "Position": 166,
+        "Auto layout": 375,
+        "Appearance": 676,
+        "Fill": 779,
+        "Stroke": 820,
+        "Effects": 861
+      }
+    },
+    "canvas_selection": {
+      "frame_outline": "#0d99ff",
+      "component_or_instance_outline": "#9747ff",
+      "size_badge": {
+        "bg": "same as outline color",
+        "text": "#ffffff",
+        "font": "body_small strong",
+        "radius": 2,
+        "offset_below": 4,
+        "format": "{w} × {h}"
+      }
+    },
+    "toolbelt": {
+      "height": 48,
+      "bottom_margin": 12,
+      "radius": 13,
+      "bg": "bg_toolbar",
+      "padding": 8,
+      "width_example": 512,
+      "shadow": [
+        [
+          0,
+          3,
+          8,
+          0,
+          "#00000059"
+        ],
+        [
+          0,
+          1,
+          3,
+          0,
+          "#00000080"
+        ],
+        [
+          "inset",
+          0,
+          1,
+          0,
+          0,
+          "#ffffff14"
+        ]
+      ],
+      "tool_button": {
+        "size": 32,
+        "radius": 5,
+        "selected_bg": "bg_toolbar_selected",
+        "icon": "icon_toolbar"
+      },
+      "chevron_button": {
+        "w": 16,
+        "h": 32,
+        "gap_before": 1
+      },
+      "group_gap": 8,
+      "mode_switcher": {
+        "bg": "bg_toolbar_mode_switcher",
+        "right_side": true
+      }
+    }
+  },
+  "menus": {
+    "_note": "Measured from Figma UI3 dark at 800x600 dpr 1: toolbar shape dropdown and main (logo) menu.",
+    "panel": {
+      "bg": "bg_menu",
+      "radius": 13,
+      "padding_y": 8,
+      "shadow": "elevation.400"
+    },
+    "row": {
+      "height": 24,
+      "padding_x": 8,
+      "font": "body_medium weight 450",
+      "text": "#ffffff",
+      "text_dim": "#ffffffe5"
+    },
+    "highlight": {
+      "bg": "bg_menu_selected",
+      "inset_x": 8,
+      "radius": 5,
+      "text": "#ffffff",
+      "shortcut": "#ffffffcc"
+    },
+    "check_column": {
+      "x": 12,
+      "size": 16
+    },
+    "icon_column": {
+      "x": 32,
+      "box": 24
+    },
+    "label_x_with_icon": 60,
+    "label_x_plain": 16,
+    "shortcut": {
+      "align": "right",
+      "right_pad": 16,
+      "color": "text_secondary"
+    },
+    "submenu_chevron": {
+      "size": 24,
+      "right_pad": 8,
+      "color": "icon_secondary"
+    },
+    "separator": {
+      "height": 1,
+      "color": "border_menu",
+      "margin_y": 8,
+      "full_width": true
+    },
+    "examples": {
+      "toolbar_shape_menu": {
+        "width": 232,
+        "anchor": "above the tool button, left aligned to its chevron group",
+        "rows": [
+          "Rectangle R",
+          "Line L",
+          "Arrow Shift+L",
+          "Ellipse O",
+          "Polygon",
+          "Star",
+          "Image/video… Ctrl+Shift+K"
+        ],
+        "checked_row_is_highlighted": true
+      },
+      "main_menu": {
+        "x": 12,
+        "y": 44,
+        "width": 210,
+        "sections": [
+          [
+            "Back to files"
+          ],
+          [
+            "Actions… Ctrl+K"
+          ],
+          [
+            "File >",
+            "Edit >",
+            "View >",
+            "Object >",
+            "Text >",
+            "Arrange >",
+            "Vector >"
+          ],
+          [
+            "Plugins >",
+            "Widgets >",
+            "Preferences >",
+            "Libraries"
+          ],
+          [
+            "Open in desktop app",
+            "AI balance >",
+            "Help and account >"
+          ]
+        ]
+      }
+    }
+  },
+  "right_panel_no_selection": {
+    "_note": "Nothing selected (page level), 800x600 capture.",
+    "sections": [
+      "Page",
+      "Styles",
+      "Export"
+    ],
+    "page_row": {
+      "swatch": 12,
+      "hex_field": {
+        "x": 17,
+        "w": 120,
+        "h": 24
+      },
+      "opacity_field": {
+        "w": 48
+      },
+      "visibility_toggle_x": 209
+    },
+    "page_title_action": "icon button at x=209 (page settings)",
+    "styles_groups": "group label 'Color styles' in text_secondary, rows 32px with 16px swatch circle + name"
+  },
+  "variables_view": {
+    "_note": "Figma UI3 local variables, measured at 800x600 dpr 1 (reference/screens/figma-800x600-variables.png). It is a full view, not a modal: it replaces the left panel, canvas and right panel; the rail stays with Variables active. URL state view=variables.",
+    "rail": {
+      "active_item": "Variables",
+      "active_tile": "bg_selected"
+    },
+    "sidebar": {
+      "x": 57,
+      "width": 240,
+      "border_right": 1,
+      "bg": "bg",
+      "header": {
+        "file_name": "same as editor left header (13px w550), sidebar-toggle icon at right"
+      },
+      "collections_title": {
+        "text": "Collections",
+        "x": 72,
+        "y": 61,
+        "font": "body_medium weight 600"
+      },
+      "collections_actions": {
+        "icons": [
+          "collection settings (sliders)",
+          "+ new collection"
+        ],
+        "size": 24,
+        "right_pad": 8,
+        "y": 57
+      },
+      "collection_row": {
+        "x": 57,
+        "w": 240,
+        "h": 32,
+        "pad_x": 15,
+        "font": "body_medium weight 600",
+        "selected_bg": "bg_secondary",
+        "selected_inset_x": 10,
+        "radius": 5,
+        "count": {
+          "align": "right",
+          "color": "text_secondary",
+          "font": "body_medium weight 400"
+        }
+      },
+      "section_separator": {
+        "y": 129,
+        "color": "border"
+      },
+      "groups_title": {
+        "text": "Groups",
+        "x": 73,
+        "y": 142,
+        "font": "body_medium weight 550"
+      },
+      "group_row": {
+        "x": 65,
+        "w": 224,
+        "h": 32,
+        "pad_x": 8,
+        "font": "body_medium weight 600",
+        "selected_bg": "bg_selected",
+        "radius": 5,
+        "count": {
+          "align": "right",
+          "color": "text_secondary"
+        },
+        "first_row": "All",
+        "nesting": "groups from '/' in names, indented 16px per level, disclosure chevrons"
+      }
+    },
+    "top_bar": {
+      "x": 298,
+      "h": 48,
+      "border_bottom": 1,
+      "title": {
+        "text": "<collection name>",
+        "x": 318,
+        "font": "body_large (13px w450)",
+        "rename_on_double_click": true
+      },
+      "search": {
+        "x_from_right": 289,
+        "y": 12,
+        "w": 151,
+        "h": 24,
+        "bg": "bg_secondary",
+        "radius": [
+          5,
+          0,
+          0,
+          5
+        ],
+        "placeholder": "Search",
+        "icon": "magnifier left"
+      },
+      "filter_button": {
+        "w": 24,
+        "h": 24,
+        "attached_right_of_search": true,
+        "radius": [
+          0,
+          5,
+          5,
+          0
+        ],
+        "bg": "bg_secondary",
+        "icon": "filter (lines in circle)"
+      },
+      "collapse_button": {
+        "x_from_right": 101,
+        "y": 12,
+        "size": 24,
+        "radius": 5,
+        "icon": "collapse arrows (exit full view)"
+      },
+      "_no_share": "Figma shows Share here; designos has no sharing, omit it and keep spacing balanced"
+    },
+    "table": {
+      "x": 298,
+      "header_y": 49,
+      "header_h": 40,
+      "header_bg": "bg",
+      "header_font": "body_medium weight 600",
+      "header_text_x_pad": 16,
+      "columns": {
+        "name": {
+          "x": 298,
+          "w": 201
+        },
+        "mode": {
+          "w": 280,
+          "repeat_per_mode": true,
+          "header_text": "mode name ('Value' when one default mode)"
+        },
+        "add_mode": {
+          "w": 40,
+          "icon": "+",
+          "header_only": true
+        }
+      },
+      "grid_lines": {
+        "color": "border",
+        "width": 1,
+        "vertical_between_columns": true,
+        "horizontal_between_rows": true
+      },
+      "row": {
+        "first_y": 89,
+        "pitch": 41,
+        "h": 40,
+        "hover_bg": "bg_hover",
+        "selected_bg": "bg_selected"
+      },
+      "name_cell": {
+        "icon": {
+          "x_pad": 16,
+          "size": 16,
+          "kinds": {
+            "color": "palette",
+            "number": "#-ish number",
+            "string": "Aa text",
+            "boolean": "toggle"
+          },
+          "color": "icon_secondary"
+        },
+        "text_x": 44,
+        "font": "body_medium weight 400"
+      },
+      "value_cell": {
+        "pad_x": 16,
+        "swatch": {
+          "size": 16,
+          "radius": "20%",
+          "x": 17
+        },
+        "hex_field": {
+          "x": 36,
+          "w": 140,
+          "h": 24,
+          "radius": 5,
+          "hover_bg": "bg_secondary"
+        },
+        "opacity_field": {
+          "x_from_cell_right": 74,
+          "w": 62,
+          "h": 24,
+          "bg": "bg_secondary",
+          "radius": 5,
+          "shown": "on row hover / focus"
+        },
+        "alias": "pill with variable name, bg bg_secondary, radius 5"
+      },
+      "group_header_row": "when 'All' is selected, variables are grouped under bold group-name rows",
+      "scrollbar": "thin overlay, horizontal when mode columns overflow"
+    },
+    "bottom_bar": {
+      "h": 41,
+      "border_top": 1,
+      "create_button": {
+        "x_from_table": 8,
+        "y_from_bottom": 8,
+        "h": 24,
+        "radius": 5,
+        "pad": [
+          0,
+          8,
+          0,
+          4
+        ],
+        "icon": "+",
+        "label": "Create variable",
+        "font": "body_medium"
+      }
+    }
+  },
+  "color_picker": {
+    "_note": "Figma UI3 color picker, 800x600 dpr 1 (reference/screens/figma-800x600-color-picker.png: page background, solid only). The full fill picker (reference/screens/figma-fill-picker-user.png, from the owner) adds Custom|Libraries tabs, + and a paint-type icon row.",
+    "panel": {
+      "w": 240,
+      "h_solid": 472,
+      "bg": "bg",
+      "radius": 13,
+      "shadow": "elevation.400",
+      "anchor": "left of the inspector row that opened it, top aligned near the row, kept on screen"
+    },
+    "header": {
+      "h": 40,
+      "tab": {
+        "x": 8,
+        "y": 8,
+        "h": 24,
+        "radius": 5,
+        "font": "body_medium weight 550",
+        "active_bg": "bg_secondary",
+        "labels": [
+          "Custom",
+          "Libraries"
+        ]
+      },
+      "actions_right": [
+        "+ (add style)",
+        "close X"
+      ],
+      "action_size": 24,
+      "separator_below": true
+    },
+    "paint_types_row": {
+      "h": 40,
+      "icon_buttons": 24,
+      "first_x": 8,
+      "pitch": 28,
+      "kinds": [
+        "Solid",
+        "Linear",
+        "Radial",
+        "Angular",
+        "Diamond",
+        "Image",
+        "Video (omit or disable)"
+      ],
+      "right": [
+        "blend mode (drop)",
+        "remove/none"
+      ],
+      "active_bg": "bg_secondary",
+      "separator_below": true
+    },
+    "color_area": {
+      "x": 16,
+      "w": 208,
+      "h": 208,
+      "radius": 5,
+      "thumb": {
+        "size": 14,
+        "ring": "2px white",
+        "shadow": "0 0 0 1px #0000004d"
+      }
+    },
+    "sliders": {
+      "eyedropper": {
+        "x": 16,
+        "size": 24,
+        "radius": 5
+      },
+      "x": 52,
+      "w": 172,
+      "hue_y_offset": -2,
+      "track_h": 12,
+      "radius": 6,
+      "gap": 16,
+      "alpha_track": "checkerboard 4px + gradient",
+      "thumb": {
+        "size": 16,
+        "ring": "3px white",
+        "fill": "current color"
+      }
+    },
+    "value_row": {
+      "y_offset_after_sliders": 20,
+      "format_dropdown": {
+        "x": 16,
+        "w": 55,
+        "h": 24,
+        "bg": "bg",
+        "border": "1px border",
+        "radius": 5,
+        "options": [
+          "Hex",
+          "RGB",
+          "CSS",
+          "HSL",
+          "HSB"
+        ]
+      },
+      "hex": {
+        "x": 80,
+        "w": 89,
+        "h": 24,
+        "bg": "bg_secondary",
+        "radius": [
+          5,
+          0,
+          0,
+          5
+        ],
+        "text_x": 8
+      },
+      "opacity": {
+        "x": 170,
+        "w": 54,
+        "h": 24,
+        "bg": "bg_secondary",
+        "radius": [
+          0,
+          5,
+          5,
+          0
+        ],
+        "value_x": 8,
+        "suffix": "%",
+        "suffix_color": "text_secondary",
+        "divider": "1px bg between hex and opacity"
+      }
+    },
+    "swatches_section": {
+      "separator_above": true,
+      "source_dropdown": {
+        "x": 16,
+        "w": 208,
+        "h": 24,
+        "bg": "bg",
+        "border": "1px border",
+        "radius": 5,
+        "label": "On this page",
+        "options": [
+          "On this page",
+          "Document colors",
+          "<library names>"
+        ]
+      },
+      "grid": {
+        "x": 16,
+        "y_offset": 32,
+        "size": 16,
+        "radius": "20%",
+        "pitch": 24,
+        "per_row": 9,
+        "inner_ring": "inset 0 0 0 2px #ffffff1a on dark swatches"
+      }
+    }
+  },
+  "input_fields": {
+    "_note": "Inspector inputs (Figma UI3). Values and placeholders must be vertically centred on the 24px field: 11px Inter 450, line 16, text baseline at y+16 roughly; never clipped.",
+    "height": 24,
+    "radius": 5,
+    "bg": "bg_secondary",
+    "hover_border": "1px border",
+    "focus_border": "1px bg_brand",
+    "prefix": {
+      "x": 8,
+      "w": 16,
+      "kinds": "letter (X,Y,W,H) in text_secondary or a 16px icon",
+      "value_x": 24
+    },
+    "plain_value_x": 8,
+    "suffix_gap": 4,
+    "suffix_color": "text_secondary",
+    "placeholder_color": "text_tertiary",
+    "mixed": "'Mixed' in text_secondary",
+    "number_format": "integers without decimals; up to 2 decimals trimmed (12.5 not 12.50); angles with ° ; percentages as 100 + separate %"
+  }
+}
