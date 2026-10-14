@@ -56,14 +56,45 @@ pub struct Options {
     pub dev_demo: bool,
     /// Write the showcase sample files into this library directory and exit (screenshot aid).
     pub seed_library: Option<PathBuf>,
+    /// Headless agent CLI: dump document/pages/screens summary as JSON and exit.
+    pub inspect_json: bool,
+    /// Headless agent CLI: dump resolved canvas comment threads and their target nodes/frames as JSON and exit.
+    pub comments_json: bool,
+    /// Headless agent CLI: pin a new comment thread (anchored to `--select` or first page) and exit.
+    pub add_comment: Option<String>,
+    /// Headless agent CLI: reply to an existing comment thread id and exit.
+    pub reply_comment: Option<String>,
+    /// Headless agent CLI: reply message text used with `--reply-comment`.
+    pub message: Option<String>,
+    /// Headless agent CLI: mark a comment thread id resolved and exit.
+    pub resolve_comment: Option<String>,
+    /// Headless agent CLI: with `--reply-comment`, also mark the thread resolved.
+    pub resolve: bool,
+    /// Headless agent CLI: apply a declarative `NodeSpec` JSON file into the document and save in-place.
+    pub apply_spec: Option<PathBuf>,
+    /// Headless agent CLI: export `--select` (or first screen/page) to a declarative `NodeSpec` JSON file.
+    pub export_spec: Option<PathBuf>,
     pub help: bool,
 }
 
 impl Options {
+    /// Whether this invocation runs a headless Agent CLI command and exits without opening a window.
+    pub fn is_agent_cli(&self) -> bool {
+        self.inspect_json
+            || self.comments_json
+            || self.add_comment.is_some()
+            || self.reply_comment.is_some()
+            || self.resolve_comment.is_some()
+            || self.apply_spec.is_some()
+            || self.export_spec.is_some()
+    }
+
     /// Whether a launch with these options starts on the home screen: explicitly
     /// with `--home`, or interactively with nothing else to open.
     pub fn wants_home(&self) -> bool {
-        self.open_id.is_none() && (self.home || (self.file.is_none() && self.screenshot.is_none() && self.fixture.is_none()))
+        !self.is_agent_cli()
+            && self.open_id.is_none()
+            && (self.home || (self.file.is_none() && self.screenshot.is_none() && self.fixture.is_none()))
     }
 }
 
@@ -184,6 +215,15 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Options, String> 
             }
             "--dev-demo" => o.dev_demo = true,
             "--seed-library" => o.seed_library = Some(it.next().ok_or("--seed-library needs a directory")?.into()),
+            "--inspect-json" => o.inspect_json = true,
+            "--comments-json" => o.comments_json = true,
+            "--add-comment" => o.add_comment = Some(it.next().ok_or("--add-comment needs comment text")?),
+            "--reply-comment" => o.reply_comment = Some(it.next().ok_or("--reply-comment needs a thread id")?),
+            "--message" => o.message = Some(it.next().ok_or("--message needs reply text")?),
+            "--resolve-comment" => o.resolve_comment = Some(it.next().ok_or("--resolve-comment needs a thread id")?),
+            "--resolve" => o.resolve = true,
+            "--apply-spec" => o.apply_spec = Some(it.next().ok_or("--apply-spec needs a spec JSON path")?.into()),
+            "--export-spec" => o.export_spec = Some(it.next().ok_or("--export-spec needs an output JSON path")?.into()),
             "-h" | "--help" => o.help = true,
             s if s.starts_with("--") => return Err(format!("unknown option {s}")),
             _ => {
@@ -197,7 +237,7 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Options, String> 
     Ok(o)
 }
 
-pub const USAGE: &str = "usage: designos [FILE] [--screenshot OUT.png] [--size WxH] [--scale FACTOR] [--select LAYER|none] [--menu main|main/File|shape|palette] [--panel interaction|present-variables|variables|variables-floating|libraries|picker|picker-page|fill-d9|picker-gradient|effects-menu|stroke-settings|type-details|effect-noise|effect-texture|effect-glass|version-history|dev-annotate|dev-compare]\n               [--zoom PERCENT] [--rulers] [--grid] [--gpu] [--home] [--library DIR] [--layout-grid grid|columns|rows] [--edit-text LAYER [--select-text START-END]]\n  FILE  .fig, .json (Figma REST or native), .svg or .designos; without a file the projects home screen opens
+pub const USAGE: &str = "usage: designos [FILE] [--screenshot OUT.png] [--size WxH] [--scale FACTOR] [--select LAYER|none] [--menu main|main/File|shape|palette] [--panel interaction|present-variables|variables|variables-floating|libraries|picker|picker-page|fill-d9|picker-gradient|effects-menu|stroke-settings|type-details|effect-noise|effect-texture|effect-glass|version-history|dev-annotate|dev-compare]\n               [--zoom PERCENT] [--rulers] [--grid] [--gpu] [--home] [--library DIR] [--layout-grid grid|columns|rows] [--edit-text LAYER [--select-text START-END]]\n               [--inspect-json] [--comments-json] [--add-comment TEXT] [--reply-comment ID [--message TEXT] [--resolve]] [--resolve-comment ID] [--apply-spec SPEC.json] [--export-spec OUT.json]\n  FILE  .fig, .json (Figma REST or native), .svg or .designos; without a file the projects home screen opens
   --scale    with --screenshot: device pixel ratio (2 writes a PNG twice --size, rendered crisp rather than upscaled)
   --home     show the home screen (also in --screenshot mode)
   --present  open presentation preview; --fullscreen starts it in native fullscreen (F11 toggles, Esc returns)
@@ -205,7 +245,8 @@ pub const USAGE: &str = "usage: designos [FILE] [--screenshot OUT.png] [--size W
   --library  use DIR as the projects library instead of the default location
   --dev      open Dev mode with a code language (css|tailwind|swiftui|compose|react); --dev-demo marks the selection Ready for dev with an annotation
   --seed-library  write the showcase sample files (a project with three files) into DIR and exit
-  --find     open the Find and replace panel searching for TEXT (--replace-with TEXT shows the replace row)";
+  --find     open the Find and replace panel searching for TEXT (--replace-with TEXT shows the replace row)
+  --inspect-json / --comments-json / --apply-spec / --export-spec  headless Agent CLI inspection and mutation";
 
 #[cfg(test)]
 mod tests {
@@ -322,6 +363,32 @@ mod tests {
         let o = p(&["--find", "quarter", "--replace-with", "period"]).unwrap();
         assert_eq!((o.find.as_deref(), o.replace_with.as_deref()), (Some("quarter"), Some("period")));
         assert!(p(&["--find"]).is_err() && p(&["--replace-with"]).is_err());
+    }
+
+    #[test]
+    fn parses_agent_cli_flags() {
+        let o = p(&[
+            "doc.designos",
+            "--inspect-json",
+            "--comments-json",
+            "--apply-spec",
+            "in.json",
+            "--export-spec",
+            "out.json",
+            "--reply-comment",
+            "t-1",
+            "--message",
+            "Fixed spacing",
+            "--resolve",
+        ])
+        .unwrap();
+        assert!(o.is_agent_cli());
+        assert!(!o.wants_home());
+        assert!(o.inspect_json && o.comments_json && o.resolve);
+        assert_eq!(o.apply_spec, Some("in.json".into()));
+        assert_eq!(o.export_spec, Some("out.json".into()));
+        assert_eq!(o.reply_comment.as_deref(), Some("t-1"));
+        assert_eq!(o.message.as_deref(), Some("Fixed spacing"));
     }
 
     #[test]

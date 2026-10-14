@@ -9,7 +9,7 @@ use std::hash::{Hash, Hasher};
 use std::path::PathBuf;
 
 /// Seconds without a document change before a library file is autosaved.
-pub const AUTOSAVE_IDLE: f64 = 1.5;
+pub const AUTOSAVE_IDLE: f64 = 0.6;
 /// Seconds of calm after which a revision change is compared with the saved document.
 const PROBE_DELAY: f64 = 0.3;
 
@@ -35,6 +35,10 @@ pub struct Autosave {
     pub saved_hash: u64,
     /// Number of autosaves performed (tests).
     pub saves: u32,
+    /// Last observed on-disk modification timestamp of the active file.
+    pub disk_mtime: Option<std::time::SystemTime>,
+    /// Last `self.now` timestamp when the disk mtime was polled.
+    pub last_mtime_poll: f64,
 }
 
 impl Autosave {
@@ -363,6 +367,17 @@ impl App {
         self.ui.ctx_menu = None;
     }
 
+    /// Disk path of the currently open document (library file or external path) for live hot-reload polling.
+    fn watched_disk_path(&self) -> Option<PathBuf> {
+        if let (Some(lib), Some(lf)) = (&self.lib, &self.lib_file) {
+            Some(lib.path("projects").join(&lf.project_id).join("files").join(format!("{}.designos", lf.id)))
+        } else if let Some(p) = &self.file_path {
+            Some(p.clone())
+        } else {
+            None
+        }
+    }
+
     /// Opens a library file in the editor.
     pub fn open_library_file(&mut self, id: &str) {
         let Some(lib) = self.lib.clone() else { return };
@@ -380,6 +395,7 @@ impl App {
         self.replace_document(doc, None);
         self.lib_file = Some(LibFile { id: entry.id.clone(), project_id: entry.project.clone(), project, name: entry.name.clone() });
         self.autosave = Autosave { seen_rev: self.canvas.tiles.rev(), saved_hash: doc_hash(&self.doc), ..Default::default() };
+        self.autosave.disk_mtime = self.watched_disk_path().and_then(|p| std::fs::metadata(p).ok()).and_then(|m| m.modified().ok());
         self.history_open_file();
         let _ = lib.mark_opened(id);
         self.home = None;
@@ -467,6 +483,7 @@ impl App {
         lib.save_file(&lf.id, &self.doc).map_err(|e| format!("Cannot save: {e}"))?;
         self.autosave.saved_hash = doc_hash(&self.doc);
         self.autosave.changed_at = None;
+        self.autosave.disk_mtime = self.watched_disk_path().and_then(|p| std::fs::metadata(p).ok()).and_then(|m| m.modified().ok());
         thumb::refresh_in_background(lib, lf.id, self.export_doc().into_owned());
         Ok(())
     }
@@ -497,15 +514,64 @@ impl App {
 
     /// Called every frame: debounced autosave of the open library file.
     pub fn autosave_tick(&mut self, ctx: &egui::Context) {
-        if self.lib_file.is_none() || self.home.is_some() || self.history.viewing.is_some() {
+        if self.home.is_some() || self.history.viewing.is_some() {
             self.autosave.changed_at = None;
             return;
         }
-        let rev = self.canvas.tiles.rev();
-        if rev != self.autosave.seen_rev {
-            self.autosave.seen_rev = rev;
-            self.autosave.changed_at = Some(self.now);
-            self.autosave.confirmed = false;
+        if self.lib_file.is_some() {
+            let rev = self.canvas.tiles.rev();
+            if rev != self.autosave.seen_rev {
+                self.autosave.seen_rev = rev;
+                self.autosave.changed_at = Some(self.now);
+                self.autosave.confirmed = false;
+            }
+        } else {
+            self.autosave.changed_at = None;
+        }
+        if !self.autosave.pending() && self.now - self.autosave.last_mtime_poll >= 0.5 {
+            self.autosave.last_mtime_poll = self.now;
+            if let Some(path) = self.watched_disk_path() {
+                let mtime = std::fs::metadata(&path).ok().and_then(|m| m.modified().ok());
+                if self.autosave.disk_mtime.is_none() {
+                    self.autosave.disk_mtime = mtime;
+                    if self.autosave.saved_hash == 0 {
+                        self.autosave.saved_hash = doc_hash(&self.doc);
+                    }
+                } else if mtime.is_some() && mtime != self.autosave.disk_mtime {
+                    self.autosave.disk_mtime = mtime;
+                    let loaded_doc = if self.lib_file.is_some() {
+                        self.lib.as_ref().zip(self.lib_file.as_ref()).and_then(|(l, lf)| l.load_file(&lf.id).ok())
+                    } else {
+                        crate::io::load_path(&path).ok()
+                    };
+                    if let Some(mut new_doc) = loaded_doc {
+                        if let Some(lf) = &self.lib_file {
+                            new_doc.name = lf.name.clone();
+                        }
+                        let new_hash = doc_hash(&new_doc);
+                        if new_hash != self.autosave.saved_hash {
+                            let old_page = self.page;
+                            let old_sel = self.selection.clone();
+                            self.doc = new_doc;
+                            if !self.doc.pages.contains(&old_page) {
+                                if let Some(&p) = self.doc.pages.first() {
+                                    self.page = p;
+                                }
+                            }
+                            self.selection = old_sel.into_iter().filter(|id| self.doc.get(*id).is_some()).collect();
+                            self.changed();
+                            self.autosave.saved_hash = new_hash;
+                            self.autosave.seen_rev = self.canvas.tiles.rev();
+                            self.autosave.changed_at = None;
+                            self.show_toast("Synced external agent changes", false);
+                            ctx.request_repaint();
+                        }
+                    }
+                }
+            }
+        }
+        if self.watched_disk_path().is_some() {
+            ctx.request_repaint_after(std::time::Duration::from_millis(500));
         }
         let Some(t) = self.autosave.changed_at else { return };
         let busy = ctx.input(|i| i.pointer.any_down()) || self.canvas.text.is_some();
@@ -562,6 +628,7 @@ impl App {
                 let project_name = lib.project(project).map(|p| p.name).unwrap_or_default();
                 self.lib_file = Some(LibFile { id: e.id.clone(), project_id: project.to_string(), project: project_name.clone(), name: e.name });
                 self.autosave = Autosave { seen_rev: self.canvas.tiles.rev(), saved_hash: doc_hash(&self.doc), ..Default::default() };
+                self.autosave.disk_mtime = self.watched_disk_path().and_then(|p| std::fs::metadata(p).ok()).and_then(|m| m.modified().ok());
                 self.history_open_file();
                 self.file_path = None;
                 thumb::refresh_in_background(lib, e.id, self.export_doc().into_owned());

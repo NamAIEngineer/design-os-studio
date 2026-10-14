@@ -1,5 +1,7 @@
 //! Typed, local document operations shared by the MCP transport and future bridges.
-use designos_doc::{Command, Document, History, Node, NodeId, NodeKind, Rect, TextStyle};
+use designos_doc::{
+    Annotation, Command, Comment, CommentAnchor, CommentThread, DevStatus, Document, History, Node, NodeId, NodeKind, NodeSpec, Rect, TextStyle, Vec2,
+};
 use serde::{de::DeserializeOwned, Deserialize};
 use serde_json::{json, Value};
 
@@ -24,6 +26,7 @@ impl Engine {
                 Ok(json!({"name":self.doc.name,"kind":self.doc.kind,
                     "pages":self.doc.pages.iter().filter_map(|id|self.doc.get(*id)).map(summary).collect::<Vec<_>>(),
                     "node_count":self.doc.nodes.len(),"variable_count":self.doc.variables.len(),
+                    "comment_count":self.doc.comments.len(),
                     "can_undo":self.history.can_undo(),"can_redo":self.history.can_redo()}))
             }
             "designos_list_nodes" => {
@@ -102,6 +105,181 @@ impl Engine {
                 self.exec(Command::Remove { id })?;
                 Ok(json!({"node_id":id,"deleted":true}))
             }
+            "designos_list_comments" => {
+                let a: ListCommentsArgs = parse(args)?;
+                let list: Vec<_> = self
+                    .doc
+                    .resolve_comment_targets()
+                    .into_iter()
+                    .filter(|c| a.resolved.is_none_or(|r| c.resolved == r))
+                    .filter(|c| a.page_id.is_none_or(|pid| c.page_id == pid))
+                    .filter(|c| a.node_id.is_none_or(|nid| c.target_node_id == Some(nid) || c.target_frame_id == Some(nid)))
+                    .collect();
+                let total = list.len();
+                Ok(json!({"comments": list, "total": total}))
+            }
+            "designos_add_comment" => {
+                let a: AddCommentArgs = parse(args)?;
+                if a.text.trim().is_empty() {
+                    return Err("text must not be empty".into());
+                }
+                bounded_text("text", &a.text, 10_000)?;
+                if let Some(author) = &a.author {
+                    bounded_text("author", author, 256)?;
+                }
+                if !a.x.is_finite() || !a.y.is_finite() {
+                    return Err("x and y must be finite".into());
+                }
+                let page = if let Some(nid) = a.node_id {
+                    self.node(nid)?;
+                    self.doc.page_of(NodeId(nid)).ok_or_else(|| format!("node {nid} does not belong to a page"))?
+                } else if let Some(pid) = a.page_id {
+                    let p = NodeId(pid);
+                    if !self.doc.pages.contains(&p) {
+                        return Err(format!("page {pid} not found"));
+                    }
+                    p
+                } else {
+                    self.doc.pages.first().copied().ok_or("Document has no pages")?
+                };
+                let anchor = CommentAnchor {
+                    page,
+                    node: a.node_id.map(NodeId),
+                    offset: Vec2::new(a.x, a.y),
+                };
+                let mut seq = self.doc.comments.len() + 1;
+                let thread_id = loop {
+                    let candidate = format!("t{seq}");
+                    if !self.doc.comments.iter().any(|t| t.id == candidate) {
+                        break candidate;
+                    }
+                    seq += 1;
+                };
+                let msg_id = format!("{thread_id}-1");
+                let mut comments = self.doc.comments.clone();
+                comments.push(CommentThread {
+                    id: thread_id.clone(),
+                    anchor,
+                    messages: vec![Comment {
+                        id: msg_id,
+                        author: a.author.unwrap_or_else(|| "Agent".into()),
+                        text: a.text.trim().into(),
+                        created: "2026-10-14T23:30:00Z".into(),
+                        edited: None,
+                    }],
+                    resolved: false,
+                });
+                self.exec(Command::SetComments { comments })?;
+                let resolved = self
+                    .doc
+                    .resolve_comment_targets()
+                    .into_iter()
+                    .find(|t| t.id == thread_id)
+                    .ok_or("Failed to resolve comment thread")?;
+                let mut out = serde_json::to_value(&resolved).map_err(|e| e.to_string())?;
+                if let Some(obj) = out.as_object_mut() {
+                    obj.insert("thread".into(), serde_json::to_value(&resolved).map_err(|e| e.to_string())?);
+                    obj.insert("changed".into(), json!(true));
+                }
+                Ok(out)
+            }
+            "designos_reply_comment" => {
+                let a: ReplyCommentArgs = parse(args)?;
+                if a.text.trim().is_empty() {
+                    return Err("text must not be empty".into());
+                }
+                bounded_text("text", &a.text, 10_000)?;
+                if let Some(author) = &a.author {
+                    bounded_text("author", author, 256)?;
+                }
+                let mut comments = self.doc.comments.clone();
+                let t = comments
+                    .iter_mut()
+                    .find(|t| t.id == a.thread_id)
+                    .ok_or_else(|| format!("comment thread '{}' not found", a.thread_id))?;
+                let msg_id = format!("{}-{}", t.id, t.messages.len() + 1);
+                t.messages.push(Comment {
+                    id: msg_id,
+                    author: a.author.unwrap_or_else(|| "Agent".into()),
+                    text: a.text.trim().into(),
+                    created: "2026-10-14T23:30:00Z".into(),
+                    edited: None,
+                });
+                if let Some(resolved) = a.resolved {
+                    t.resolved = resolved;
+                }
+                self.exec(Command::SetComments { comments })?;
+                let resolved_thread = self
+                    .doc
+                    .resolve_comment_targets()
+                    .into_iter()
+                    .find(|t| t.id == a.thread_id)
+                    .ok_or("Failed to resolve comment thread")?;
+                Ok(json!({"thread": resolved_thread, "changed": true}))
+            }
+            "designos_resolve_comment" => {
+                let a: ResolveCommentArgs = parse(args)?;
+                let mut comments = self.doc.comments.clone();
+                let t = comments
+                    .iter_mut()
+                    .find(|t| t.id == a.thread_id)
+                    .ok_or_else(|| format!("comment thread '{}' not found", a.thread_id))?;
+                let changed = t.resolved != a.resolved;
+                t.resolved = a.resolved;
+                if changed {
+                    self.exec(Command::SetComments { comments })?;
+                }
+                Ok(json!({"thread_id": a.thread_id, "resolved": a.resolved, "changed": changed}))
+            }
+            "designos_apply_spec" => {
+                let a: ApplySpecArgs = parse(args)?;
+                let parent = a
+                    .parent_id
+                    .map(NodeId)
+                    .or_else(|| self.doc.pages.first().copied())
+                    .ok_or_else(|| "Document has no pages".to_string())?;
+                if !self.node(parent.0)?.kind.is_container() {
+                    return Err("parent_id must identify a container".into());
+                }
+                let mut trial = self.doc.clone();
+                let root_id = trial.apply_spec(parent, &a.spec)?;
+                let mut nodes = Vec::new();
+                trial.walk(root_id, |n, _| nodes.push(n.clone()));
+                let index = self.doc.get(parent).ok_or("parent not found")?.children.len();
+                self.exec(Command::Insert { parent, index, nodes })?;
+                self.doc.relayout_subtree(parent);
+                Ok(json!({"root_node_id": root_id, "node": self.doc.get(root_id), "changed": true}))
+            }
+            "designos_export_spec" => {
+                let a: NodeArgs = parse(args)?;
+                let spec = self.doc.export_spec(NodeId(a.node_id))?;
+                Ok(json!({"node_id": a.node_id, "spec": spec}))
+            }
+            "designos_set_dev_status" => {
+                let a: SetDevStatusArgs = parse(args)?;
+                let mut node = self.node(a.node_id)?.clone();
+                if let Some(status) = &a.status {
+                    node.dev.status = match status.trim().to_ascii_lowercase().as_str() {
+                        "ready" | "ready_for_dev" | "readyfordev" => Some(DevStatus::ReadyForDev),
+                        "completed" | "done" => Some(DevStatus::Completed),
+                        "clear" | "none" | "" => None,
+                        other => return Err(format!("status must be 'ready', 'completed', or 'clear' (got '{other}')")),
+                    };
+                }
+                if let Some(annotation) = &a.annotation {
+                    let trimmed = annotation.trim();
+                    if !trimmed.is_empty() {
+                        bounded_text("annotation", trimmed, 10_000)?;
+                        node.dev.annotations.push(Annotation {
+                            text: trimmed.to_string(),
+                            properties: Vec::new(),
+                            category: None,
+                        });
+                    }
+                }
+                self.exec(Command::Update { node: Box::new(node) })?;
+                Ok(json!({"node_id": a.node_id, "dev": self.doc.get(NodeId(a.node_id)).map(|n| &n.dev), "changed": true}))
+            }
             "designos_undo" | "designos_redo" => {
                 let _: Empty = parse(args)?;
                 let changed =
@@ -159,6 +337,9 @@ impl Engine {
             props.content = text;
         }
         self.exec(Command::Insert { parent: NodeId(a.parent_id), index, nodes: vec![node] })?;
+        if let Some(page_id) = self.doc.page_of(id) {
+            self.doc.relayout_subtree(page_id);
+        }
         Ok(json!({"node":self.doc.get(id),"changed":true}))
     }
 
@@ -204,9 +385,13 @@ impl Engine {
                 props.lists.clear();
             }
         }
-        let changed = self.doc.get(node.id) != Some(&node);
+        let id = node.id;
+        let changed = self.doc.get(id) != Some(&node);
         if changed {
             self.exec(Command::Update { node: Box::new(node) })?;
+            if let Some(page_id) = self.doc.page_of(id) {
+                self.doc.relayout_subtree(page_id);
+            }
         }
         Ok(json!({"node":self.doc.get(NodeId(a.node_id)),"changed":changed}))
     }
@@ -242,6 +427,9 @@ fn default_limit() -> usize {
 }
 fn default_size() -> f32 {
     100.0
+}
+fn default_true() -> bool {
+    true
 }
 
 #[derive(Deserialize)]
@@ -302,6 +490,53 @@ struct UpdateArgs {
     visible: Option<bool>,
     opacity: Option<f32>,
 }
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ListCommentsArgs {
+    resolved: Option<bool>,
+    page_id: Option<u64>,
+    node_id: Option<u64>,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AddCommentArgs {
+    text: String,
+    author: Option<String>,
+    node_id: Option<u64>,
+    page_id: Option<u64>,
+    #[serde(default)]
+    x: f32,
+    #[serde(default)]
+    y: f32,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ReplyCommentArgs {
+    thread_id: String,
+    text: String,
+    author: Option<String>,
+    resolved: Option<bool>,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ResolveCommentArgs {
+    thread_id: String,
+    #[serde(default = "default_true")]
+    resolved: bool,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ApplySpecArgs {
+    parent_id: Option<u64>,
+    spec: NodeSpec,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SetDevStatusArgs {
+    node_id: u64,
+    status: Option<String>,
+    annotation: Option<String>,
+}
 
 /// JSON tool descriptors kept beside the argument validators.
 pub fn tools() -> Vec<Value> {
@@ -350,6 +585,62 @@ pub fn tools() -> Vec<Value> {
         "delete_node",
         "Remove a non-page layer and its entire subtree. Supports undo; changes remain in memory until saved.",
         json!({"node_id":id}),
+        vec!["node_id"],
+        false,
+        false,
+    );
+    add(
+        "list_comments",
+        "List canvas comment threads enriched with resolved world coordinates, target node ID/name/kind, and top-level frame ID/name. Filter by resolved state, page_id, or node_id.",
+        json!({"resolved":{"type":"boolean"},"page_id":id,"node_id":id}),
+        vec![],
+        true,
+        true,
+    );
+    add(
+        "add_comment",
+        "Pin a new comment thread to a node (with local offset x/y) or page coordinates. Supports undo.",
+        json!({"text":{"type":"string","minLength":1,"maxLength":10000},"author":{"type":"string","maxLength":256},"node_id":id,"page_id":id,"x":coordinate,"y":coordinate}),
+        vec!["text"],
+        false,
+        false,
+    );
+    add(
+        "reply_comment",
+        "Append a reply message to an existing canvas comment thread and optionally mark it resolved/unresolved. Supports undo.",
+        json!({"thread_id":{"type":"string","minLength":1},"text":{"type":"string","minLength":1,"maxLength":10000},"author":{"type":"string","maxLength":256},"resolved":{"type":"boolean"}}),
+        vec!["thread_id", "text"],
+        false,
+        false,
+    );
+    add(
+        "resolve_comment",
+        "Mark a canvas comment thread resolved (default true) or unresolved (false). Supports undo.",
+        json!({"thread_id":{"type":"string","minLength":1},"resolved":{"type":"boolean","default":true}}),
+        vec!["thread_id"],
+        false,
+        true,
+    );
+    add(
+        "apply_spec",
+        "Build a complete UI subtree from a declarative NodeSpec (supports EaseUI BrainWave 2.0 presets like easeui-screen/easeui-card/easeui-button-primary, $easeui.* tokens, and Auto-Layout 5.0 row/column/wrap/hug/fill) in a single atomic undoable step.",
+        json!({"parent_id":id,"spec":{"type":"object","description":"Declarative NodeSpec tree (kind, name, preset, width, height, width_sizing, height_sizing, fill, stroke, corner_radius, text, font_size, layout, dev_status, annotations, children)."}}),
+        vec!["spec"],
+        false,
+        false,
+    );
+    add(
+        "export_spec",
+        "Export a node and its descendants as a declarative NodeSpec JSON tree, enriched with Dev Mode status/annotations and any canvas comment threads pinned within the subtree.",
+        json!({"node_id":id}),
+        vec!["node_id"],
+        true,
+        true,
+    );
+    add(
+        "set_dev_status",
+        "Set a layer's Dev Mode handoff status ('ready', 'completed', or 'clear') and/or append a developer annotation. Supports undo.",
+        json!({"node_id":id,"status":{"type":"string","enum":["ready","completed","clear","none"]},"annotation":{"type":"string","maxLength":10000}}),
         vec!["node_id"],
         false,
         false,
@@ -467,5 +758,117 @@ mod tests {
         }
         assert!(e.call("designos_list_nodes", json!({"limit":501})).is_err());
         assert!(e.call("designos_get_node", json!({"node_id":"2"})).is_err());
+    }
+
+    #[test]
+    fn spec_and_comments_workflow_round_trips() {
+        let mut e = Engine::default();
+        let applied = e
+            .call(
+                "designos_apply_spec",
+                json!({
+                    "parent_id": 1,
+                    "spec": {
+                        "name": "IAM · Login Screen",
+                        "preset": "easeui-screen",
+                        "dev_status": "ready",
+                        "annotations": ["Use BrainWave 2.0 dark tokens"],
+                        "children": [
+                            {
+                                "name": "Login Card",
+                                "preset": "easeui-card",
+                                "width": 400.0,
+                                "height_sizing": "hug",
+                                "children": [
+                                    {
+                                        "kind": "text",
+                                        "text": "Sign in to DESIGN:OS",
+                                        "font_size": 20.0,
+                                        "font_weight": 600,
+                                        "text_color": "$easeui.text.primary"
+                                    },
+                                    {
+                                        "name": "Submit Button",
+                                        "preset": "easeui-button-primary",
+                                        "width_sizing": "fill",
+                                        "text": "Continue"
+                                    }
+                                ]
+                            }
+                        ]
+                    }
+                }),
+            )
+            .unwrap();
+        let screen_id = applied["root_node_id"].as_u64().unwrap();
+        assert_eq!(applied["changed"], true);
+
+        let btn_list = e.call("designos_list_nodes", json!({"query":"Submit Button"})).unwrap();
+        let btn_id = btn_list["nodes"][0]["node_id"].as_u64().unwrap();
+        assert_eq!(btn_list["nodes"][0]["width"], 360.0);
+
+        let added = e
+            .call(
+                "designos_add_comment",
+                json!({
+                    "node_id": btn_id,
+                    "author": "Jang",
+                    "text": "Make this CTA use $easeui.accent.orange and full width",
+                    "x": 12.0,
+                    "y": 8.0
+                }),
+            )
+            .unwrap();
+        assert_eq!(added["id"], "t1");
+        assert_eq!(added["target_node_id"], btn_id);
+        assert_eq!(added["target_frame_id"], screen_id);
+
+        let listed = e.call("designos_list_comments", json!({"resolved": false, "node_id": screen_id})).unwrap();
+        assert_eq!(listed["total"], 1);
+
+        let replied = e
+            .call(
+                "designos_reply_comment",
+                json!({
+                    "thread_id": "t1",
+                    "author": "Agent",
+                    "text": "Verified: CTA uses easeui-button-primary with Fill width (360px)."
+                }),
+            )
+            .unwrap();
+        assert_eq!(replied["thread"]["messages"].as_array().unwrap().len(), 2);
+
+        let resolved = e.call("designos_resolve_comment", json!({"thread_id": "t1", "resolved": true})).unwrap();
+        assert_eq!(resolved["resolved"], true);
+        assert_eq!(resolved["changed"], true);
+
+        let unresolved_list = e.call("designos_list_comments", json!({"resolved": false})).unwrap();
+        assert_eq!(unresolved_list["total"], 0);
+
+        let dev_updated = e
+            .call(
+                "designos_set_dev_status",
+                json!({
+                    "node_id": screen_id,
+                    "status": "completed",
+                    "annotation": "Implemented in EaseUI React"
+                }),
+            )
+            .unwrap();
+        assert_eq!(dev_updated["dev"]["status"], "Completed");
+        assert_eq!(dev_updated["dev"]["annotations"].as_array().unwrap().len(), 2);
+
+        let exported = e.call("designos_export_spec", json!({"node_id": screen_id})).unwrap();
+        assert_eq!(exported["spec"]["name"], "IAM · Login Screen");
+        assert_eq!(exported["spec"]["dev_status"], "Completed");
+        assert_eq!(exported["spec"]["children"][0]["children"][1]["comments"][0]["id"], "t1");
+        assert_eq!(exported["spec"]["children"][0]["children"][1]["comments"][0]["resolved"], true);
+
+        // Undo set_dev_status, resolve_comment, reply_comment, add_comment, and apply_spec
+        for _ in 0..5 {
+            e.call("designos_undo", json!({})).unwrap();
+        }
+        assert!(e.doc.get(NodeId(screen_id)).is_none());
+        assert!(e.doc.comments.is_empty());
     }
 }

@@ -10,7 +10,7 @@ async fn stdio_handshake_discovery_edit_and_error_recovery() {
         let client = ().serve(TokioChildProcess::new(command).unwrap()).await.unwrap();
         assert_eq!(client.peer_info().unwrap().server_info.as_ref().unwrap().name, "designos-mcp");
         let tools = client.list_all_tools().await.unwrap();
-        assert_eq!(tools.len(), 14);
+        assert_eq!(tools.len(), 21);
         assert!(tools.iter().all(|t| t.annotations.is_some()));
         let call = |name: &'static str, args: Value| CallToolRequestParams::new(name).with_arguments(args.as_object().unwrap().clone());
         let doc = client.call_tool(call("designos_get_document", json!({}))).await.unwrap();
@@ -28,6 +28,10 @@ async fn stdio_handshake_discovery_edit_and_error_recovery() {
         client.call_tool(call("designos_redo", json!({}))).await.unwrap();
         let restored = client.call_tool(call("designos_get_node", json!({"node_id":id}))).await.unwrap();
         assert_eq!(restored.is_error, Some(false));
+        let applied = client.call_tool(call("designos_apply_spec", json!({"spec":{"name":"Stdio Screen","preset":"easeui-card","children":[{"name":"Title","kind":"text","text":"Hello MCP"}]}}))).await.unwrap();
+        assert_eq!(applied.is_error, Some(false));
+        let comments = client.call_tool(call("designos_list_comments", json!({}))).await.unwrap();
+        assert_eq!(comments.is_error, Some(false));
         client.cancel().await.unwrap();
     })
     .await

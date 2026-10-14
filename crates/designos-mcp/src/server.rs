@@ -31,6 +31,8 @@ struct OpenArgs {
 #[serde(deny_unknown_fields)]
 struct SaveArgs {
     path: String,
+    #[serde(default)]
+    overwrite: bool,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -75,7 +77,7 @@ impl Session {
         Ok(path)
     }
 
-    fn output_path(&self, path: &str) -> Result<PathBuf, String> {
+    fn output_path_allow_overwrite(&self, path: &str, overwrite: bool) -> Result<PathBuf, String> {
         let requested = self.root.join(path);
         if !matches!(requested.extension().and_then(|x| x.to_str()), Some("designos")) {
             return Err("Save path must end in .designos".into());
@@ -85,7 +87,18 @@ impl Session {
         if !parent.starts_with(&self.root) {
             return Err("Path must stay inside the configured workspace".into());
         }
-        Ok(parent.join(requested.file_name().ok_or("Save path needs a filename")?))
+        let resolved = parent.join(requested.file_name().ok_or("Save path needs a filename")?);
+        if overwrite && resolved.exists() {
+            let meta = fs::symlink_metadata(&resolved).map_err(|e| format!("Cannot inspect target path: {e}"))?;
+            if meta.file_type().is_symlink() || !meta.is_file() {
+                return Err("Cannot overwrite symlink or non-regular file".into());
+            }
+            let canon = resolved.canonicalize().map_err(|e| format!("Cannot resolve path: {e}"))?;
+            if !canon.starts_with(&self.root) {
+                return Err("Path must stay inside the configured workspace".into());
+            }
+        }
+        Ok(resolved)
     }
 
     fn png_output_path(&self, path: &str) -> Result<PathBuf, String> {
@@ -134,18 +147,28 @@ impl Session {
             }
             "designos_save_file" => {
                 let a: SaveArgs = parse(args)?;
-                let path = self.output_path(&a.path)?;
+                let path = self.output_path_allow_overwrite(&a.path, a.overwrite)?;
                 let bytes = self.engine.doc.to_json().map_err(|e| e.to_string())?;
-                // create_new also rejects existing symlinks and never truncates a user's file.
-                let mut file = fs::OpenOptions::new()
-                    .write(true)
-                    .create_new(true)
-                    .open(&path)
-                    .map_err(|e| format!("Cannot create file (choose an unused .designos or .designos filename): {e}"))?;
-                if let Err(e) = file.write_all(bytes.as_bytes()).and_then(|_| file.sync_all()) {
-                    drop(file);
-                    let _ = fs::remove_file(&path);
-                    return Err(format!("Cannot save design: {e}"));
+                if a.overwrite {
+                    let mut file = fs::OpenOptions::new()
+                        .write(true)
+                        .create(true)
+                        .truncate(true)
+                        .open(&path)
+                        .map_err(|e| format!("Cannot save file: {e}"))?;
+                    file.write_all(bytes.as_bytes()).and_then(|_| file.sync_all()).map_err(|e| format!("Cannot save design: {e}"))?;
+                } else {
+                    // create_new also rejects existing symlinks and never truncates a user's file.
+                    let mut file = fs::OpenOptions::new()
+                        .write(true)
+                        .create_new(true)
+                        .open(&path)
+                        .map_err(|e| format!("Cannot create file (choose an unused .designos or .designos filename, or set overwrite=true): {e}"))?;
+                    if let Err(e) = file.write_all(bytes.as_bytes()).and_then(|_| file.sync_all()) {
+                        drop(file);
+                        let _ = fs::remove_file(&path);
+                        return Err(format!("Cannot save design: {e}"));
+                    }
                 }
                 self.dirty = false;
                 Ok(json!({"path": path, "saved": true}))
@@ -179,8 +202,19 @@ impl Session {
             }
             _ => {
                 let result = self.engine.call(name, args)?;
-                if matches!(name, "designos_create_node" | "designos_update_node" | "designos_delete_node" | "designos_undo" | "designos_redo")
-                    && result.get("changed").and_then(Value::as_bool) != Some(false)
+                if matches!(
+                    name,
+                    "designos_create_node"
+                        | "designos_update_node"
+                        | "designos_delete_node"
+                        | "designos_apply_spec"
+                        | "designos_add_comment"
+                        | "designos_reply_comment"
+                        | "designos_resolve_comment"
+                        | "designos_set_dev_status"
+                        | "designos_undo"
+                        | "designos_redo"
+                ) && result.get("changed").and_then(Value::as_bool) != Some(false)
                 {
                     self.dirty = true;
                 }
@@ -237,7 +271,7 @@ pub fn tools() -> Vec<Tool> {
     let mut raw = crate::engine::tools();
     for (name, description, properties, required) in [
         ("designos_open_file", "Import a .designos, .designos, .fig, SVG or Figma REST JSON file inside the workspace into this isolated session. Does not control an open editor. Unsaved changes require discard_changes=true.", json!({"path":{"type":"string"},"discard_changes":{"type":"boolean","default":false}}), vec!["path"]),
-        ("designos_save_file", "Save this session to a NEW .designos or .designos file inside the workspace. Existing files are never overwritten. Parent directory must exist.", json!({"path":{"type":"string"}}), vec!["path"]),
+        ("designos_save_file", "Save this session to a .designos file inside the workspace. Existing files are not overwritten unless overwrite=true. Parent directory must exist.", json!({"path":{"type":"string"},"overwrite":{"type":"boolean","default":false}}), vec!["path"]),
         ("designos_render_png", "Rasterize a frame or layer to a NEW .png file inside the workspace using DESIGN:OS Studio's deterministic renderer. Existing files are never overwritten.", json!({"path":{"type":"string"},"node_id":{"type":"integer","minimum":1},"scale":{"type":"number","minimum":0.25,"maximum":4.0,"default":1.0}}), vec!["path", "node_id"]),
         ("designos_new_document", "Start a blank document with one page. Unsaved changes require discard_changes=true.", json!({"name":{"type":"string","minLength":1,"maxLength":1024},"discard_changes":{"type":"boolean","default":false}}), vec!["name"]),
     ] {

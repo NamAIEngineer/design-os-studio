@@ -45,11 +45,41 @@
       Opens Figma <code>.fig</code> archives (<code>fig-kiwi</code> binary schema, DEFLATE/Zstd) and REST JSON directly. Our compact <code>.designos</code> / <code>.designos</code> serializer shrinks 6.8 GB workspaces down to <b>242 MB (-96.5%)</b>.
     </td>
     <td width="25%" valign="top">
-      <h3>🤖 AI & MCP Ready</h3>
-      Ships with <code>designos-mcp</code> (and <code>designos-mcp</code> alias) — a local stdio Model Context Protocol server exposing 13 tools for inspecting layers, resolving design tokens, generating React/Tailwind/SwiftUI code, and mutating documents.
+      <h3>🤖 Agent-First Spec + Canvas Loop</h3>
+      Build screens declaratively from JSON specs (<code>--apply-spec</code> / <code>designos_apply_spec</code>) with EaseUI presets &amp; Auto-Layout 5.0, review visually on the GPU canvas with 500ms live hot-reload, and resolve human pin-comments via CLI or 21 MCP tools.
     </td>
   </tr>
 </table>
+
+---
+
+## Agent-First Workflow: Spec-Driven EaseUI + Canvas Feedback Loop
+
+DESIGN:OS Studio is architected for an **Agent-First** workflow where AI agents and developers author, mutate, and inspect screens via CLI (`designos`) or MCP (`designos-mcp`), while the native GPU Canvas serves as an interactive visual review, pin-comment, and feedback surface with **500ms live disk hot-reload**.
+
+<p align="center">
+  <img src="docs/images/designos-agent-spec.png" alt="EaseUI Agent-First Spec Console generated from declarative JSON spec and rendered natively on the GPU canvas" width="960">
+  <br>
+  <sub><b>Declarative Spec -> Auto-Layout 5.0 -> GPU Canvas:</b> Above screen generated in 1 command from <a href="examples/specs/easeui-agent-console.spec.json"><code>examples/specs/easeui-agent-console.spec.json</code></a> using EaseUI BrainWave 2.0 tokens (<code>$easeui.*</code>) and presets (<code>easeui-screen</code>, <code>easeui-panel</code>, <code>easeui-card</code>, <code>easeui-badge</code>, <code>easeui-button-primary</code>).</sub>
+</p>
+
+```bash
+# 1. Generate or update a screen from a declarative EaseUI NodeSpec JSON
+designos app.designos --apply-spec examples/specs/easeui-agent-console.spec.json
+
+# 2. Inspect document hierarchy, screen frames, and Dev Mode status as JSON
+designos app.designos --inspect-json
+
+# 3. Read human feedback pins from the Canvas (resolved to exact NodeId + parent Screen Frame)
+designos app.designos --comments-json
+
+# 4. Pin a comment, reply to human feedback, and mark the thread resolved
+designos app.designos --select "Apply Spec CTA" --add-comment "Switch CTA to Syncing state while agent runs"
+designos app.designos --reply-comment t1 --message "Updated spec and auto-reloaded on Canvas!" --resolve
+
+# 5. Export any canvas frame back to a clean, diffable NodeSpec JSON
+designos app.designos --select "EaseUI — Agent-First Spec Console" --export-spec out.spec.json
+```
 
 ---
 
@@ -116,17 +146,17 @@ DESIGN:OS Studio combines a deterministic CPU reference renderer (`tiny-skia`) w
 
 | Crate | Path | Responsibility |
 |---|---|---|
-| **`designos-doc`** | `crates/designos-doc` | Core scene graph (`Document`, `Node`, `NodeId`, `NodeKind`), compact `.designos`/`.designos` serializer, orphan GC (`prune_unreachable`), styles, variables, prototyping, undo/redo. |
+| **`designos-doc`** | `crates/designos-doc` | Core scene graph (`Document`, `Node`, `NodeId`, `NodeKind`), Spec-Driven EaseUI builder (`NodeSpec`, `LayoutSpec`, Auto-Layout 5.0 `relayout_subtree`), spatial comment target resolver (`resolve_comment_targets`), compact `.designos` serializer. |
 | **`designos-fig`** | `crates/designos-fig` | Figma `.fig` (`fig-kiwi` binary container + DEFLATE/Zstd) and Figma REST JSON importer/exporter, VectorNetwork converter, component instance resolver. |
 | **`designos-render`** | `crates/designos-render` | Deterministic CPU renderer (`tiny-skia`), `SceneIndex` (`2048×2048` spatial grid + incremental `update_subtree`), parallel `TileCache`, `i_overlay` boolean ops, `cosmic-text`. |
 | **`designos-gpu`** | `crates/designos-gpu` | `wgpu` GPU canvas compiler (`SceneCompiler`), canonical `GeomCache` (`lyon_tessellation` + 8ms frame budget), `PaintCache`, and custom WGSL multi-pass renderer. |
-| **`designos-app`** | `crates/designos-app` | Native `egui`/`eframe` desktop studio (`designos-studio` & `designos`), EaseUI BrainWave 2.0 theme, virtualized Layers tree, Inspector, Dev Mode, Whiteboard, Decks, CLI. |
+| **`designos-app`** | `crates/designos-app` | Native `egui`/`eframe` desktop studio (`designos-studio` & `designos`), EaseUI BrainWave 2.0 theme, 500ms live disk hot-reload, headless Agent CLI, virtualized Layers tree, Inspector, Dev Mode. |
 | **`designos-library`** | `crates/designos-library` | Local project library (`Recents`, `Starred`, folders, thumbnails, 8 KB fast header probe, zero-alloc `HashSerializer` autosave). |
 | **`designos-fonts`** | `crates/designos-fonts` | Bundled Inter variable font, asynchronous Fontsource downloader & local cache, metric-compatible font substitution. |
 | **`designos-export`** | `crates/designos-export` | PNG, JPG, PDF, and vector SVG exporters + Dev Mode code generators (React, Tailwind, CSS, SwiftUI, Jetpack Compose). |
 | **`designos-svg`** | `crates/designos-svg` | SVG parser and scene-graph importer. |
 | **`designos-diff`** | `crates/designos-diff` | Perceptual image diffing library and CLI (`designos-diff`) with SSIM and anti-aliased edge tolerance. |
-| **`designos-mcp`** | `crates/designos-mcp` | Local stdio Model Context Protocol server (`designos-mcp` & `designos-mcp`) with 13 tools for AI agents. |
+| **`designos-mcp`** | `crates/designos-mcp` | Local stdio Model Context Protocol server (`designos-mcp`) with 21 tools for AI agents (including spec-driven building and canvas comment feedback loops). |
 
 ---
 
@@ -189,7 +219,7 @@ Configure in your MCP client (`mcpServers`):
 }
 ```
 
-See [crates/designos-mcp/README.md](crates/designos-mcp/README.md) for the full list of 13 MCP tools (`designos_open_file`, `designos_get_document`, `designos_list_nodes`, `designos_get_node`, `designos_get_variables`, `designos_generate_code`, `designos_create_node`, `designos_update_node`, `designos_delete_node`, `designos_undo`, `designos_redo`, `designos_save_file`).
+See [crates/designos-mcp/README.md](crates/designos-mcp/README.md) for the full list of 21 MCP tools (`designos_open_file`, `designos_get_document`, `designos_list_nodes`, `designos_get_node`, `designos_get_variables`, `designos_generate_code`, `designos_create_node`, `designos_update_node`, `designos_delete_node`, `designos_apply_spec`, `designos_export_spec`, `designos_list_comments`, `designos_add_comment`, `designos_reply_comment`, `designos_resolve_comment`, `designos_set_dev_status`, `designos_undo`, `designos_redo`, `designos_save_file`, etc.).
 
 ---
 
