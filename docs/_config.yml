@@ -1,0 +1,33 @@
+# GitHub Pages site for design-os-studio, built from this docs/ folder.
+# _layouts/default.html wraps every Markdown page in the landing's design language;
+# index.html is a hand-built page (layout: null) sharing assets/site.css.
+# jekyll-seo-tag emits <title>, <meta name="description">, Open Graph and JSON-LD;
+# jekyll-sitemap emits sitemap.xml for Google Search Console.
+title: design-os-studio
+description: Local-first Rust/wgpu interface design studio with 387/387 Figma UI3 & .fig v106 binary read/write parity, native Agentic PTY Chat UI, 11-stage Spec Reader, and 22 MCP tools.
+url: https://jangtrinh.github.io
+baseurl: /design-os-studio
+lang: en
+repository: jangtrinh/design-os-studio
+repository_url: https://github.com/jangtrinh/design-os-studio
+wordmark: DESIGN:OS
+wordmark_url: https://jangtrinh.github.io/design-os/
+eyebrow: DESIGN:OS Toolchain          # short product family label, e.g. design:os
+logo: /images/cover.png          # a real capture under docs/images/
+nav:                        # one entry per Markdown page under docs/, in reading order
+  - { title: Deep dive, url: /deep-dive.html }
+footer:
+  - { title: GitHub, url: https://github.com/jangtrinh/design-os-studio }
+  - { title: MIT, url: https://github.com/jangtrinh/design-os-studio/blob/main/LICENSE }
+plugins:
+  - jekyll-seo-tag
+  - jekyll-sitemap
+  - jekyll-relative-links
+relative_links:
+  enabled: true
+  collections: false
+defaults:
+  - scope: { path: "" }
+    values: { layout: default }
+  - scope: { path: "google*.html" }
+    values: { sitemap: false }

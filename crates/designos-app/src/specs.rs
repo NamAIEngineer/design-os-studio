@@ -18,51 +18,76 @@ use crate::icons::{self, Icon};
 use crate::panels::{clipped, scrollbar, wheel_scroll};
 use crate::theme;
 use crate::widgets;
-use designos_doc::{Command, DevStatus, LayoutDirection, NodeId, NodeSpec};
+use designos_doc::{Command, DevStatus, NodeId, NodeSpec};
 use egui::{Align2, Color32, CornerRadius, FontId, Id, Painter, Pos2, Rect, Sense, Stroke, StrokeKind, Ui, Vec2};
 use serde_json::Value;
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 // ─────────────────────────────────────────────────────────────────────────────
-// PRODUCT:OS Spec Driven `tokens.css` (@dark) + EaseUI BrainWave 2.0 Tokens
+// Linear / Confluence / `product-os-spec-driven` Editorial Palette (`es:designer`)
 // ─────────────────────────────────────────────────────────────────────────────
-const TOKEN_BG_PAGE: Color32 = Color32::from_rgb(0x16, 0x17, 0x1B); // #16171B
-const TOKEN_SURFACE: Color32 = Color32::from_rgb(0x1F, 0x20, 0x24); // #1F2024
-const TOKEN_SURFACE_2: Color32 = Color32::from_rgb(0x26, 0x27, 0x2C); // #26272C (table head)
-const TOKEN_SURFACE_3: Color32 = Color32::from_rgb(0x1B, 0x1C, 0x20); // #1B1C20
-const TOKEN_CODE_BG: Color32 = Color32::from_rgb(0x12, 0x13, 0x16); // #121316
-const TOKEN_BORDER: Color32 = Color32::from_rgb(0x2E, 0x2F, 0x36); // #2E2F36
-const TOKEN_HAIRLINE: Color32 = Color32::from_rgb(0x2A, 0x2B, 0x31); // #2A2B31
-const TOKEN_TEXT: Color32 = Color32::from_rgb(0xEC, 0xED, 0xEF); // #ECEDEF
-const TOKEN_TEXT_MUTED: Color32 = Color32::from_rgb(0xB4, 0xB7, 0xBF); // #B4B7BF
-const TOKEN_TEXT_SUBTLE: Color32 = Color32::from_rgb(0x8F, 0x92, 0x9B); // #8F929B
+const TOKEN_BG_PAGE: Color32 = Color32::from_rgb(0x14, 0x15, 0x18); // #141518 calm reader backdrop
+const TOKEN_SURFACE: Color32 = Color32::from_rgb(0x19, 0x1A, 0x1E); // #191A1E sidebar / sheet surface
+const TOKEN_SURFACE_2: Color32 = Color32::from_rgb(0x22, 0x24, 0x2A); // #22242A active row / table head
+const TOKEN_SURFACE_3: Color32 = Color32::from_rgb(0x1D, 0x1E, 0x23); // #1D1E23 subtle hover / callout
+const TOKEN_CODE_BG: Color32 = Color32::from_rgb(0x11, 0x12, 0x15); // #111215 code / wireframe block
+const TOKEN_BORDER: Color32 = Color32::from_rgb(0x28, 0x2A, 0x32); // #282A32 1px border
+const TOKEN_HAIRLINE: Color32 = Color32::from_rgb(0x22, 0x24, 0x2B); // #22242B 1px row hairline
+const TOKEN_TEXT: Color32 = Color32::from_rgb(0xED, 0xEE, 0xF0); // #EDEEF0 primary ink
+const TOKEN_TEXT_MUTED: Color32 = Color32::from_rgb(0xB8, 0xBC, 0xC4); // #B8BCC4 comfortable body prose
+const TOKEN_TEXT_SUBTLE: Color32 = Color32::from_rgb(0x7E, 0x83, 0x8E); // #7E838E eyebrows, breadcrumbs, metadata
 
-// Primary Accents (`#FF6A3D` EaseUI Orange & `#FF5C72` product:os Accent)
-const TOKEN_PRIMARY_ORANGE: Color32 = Color32::from_rgb(0xFF, 0x6A, 0x3D);
-const TOKEN_PRIMARY_SOFT: Color32 = Color32::from_rgb(0x3A, 0x1B, 0x21);
-const TOKEN_PRIMARY_ROSE: Color32 = Color32::from_rgb(0xFF, 0x5C, 0x72);
+// Restrained status dot colors (only 6px dots for pass/pending, never rainbow pills on IDs)
+const DOT_OK: Color32 = Color32::from_rgb(0x3E, 0xCF, 0x8E); // #3ECF8E muted emerald
+const DOT_WARN: Color32 = Color32::from_rgb(0xE5, 0xA9, 0x3B); // #E5A93B warm amber
+const DOT_NEUTRAL: Color32 = Color32::from_rgb(0x7E, 0x83, 0x8E);
 
-// Semantic Ring-Bordered Status Pill Tokens (`tokens.css` @dark)
-// APPROVED / CURRENT / PASS
-const PILL_OK_TEXT: Color32 = Color32::from_rgb(0x4C, 0xC5, 0x8B); // #4CC58B
-const PILL_OK_FILL: Color32 = Color32::from_rgb(0x17, 0x30, 0x2A); // #17302A
-const PILL_OK_STROKE: Color32 = Color32::from_rgb(0x2C, 0x5F, 0x4A); // #2C5F4A
+#[derive(Clone, Copy)]
+struct ReaderPalette {
+    bg_page: Color32,
+    doc_sheet: Color32,
+    surface: Color32,
+    surface_2: Color32,
+    code_bg: Color32,
+    border: Color32,
+    hairline: Color32,
+    text: Color32,
+    text_muted: Color32,
+    text_subtle: Color32,
+}
 
-// PENDING / STALE / OPEN
-const PILL_WARN_TEXT: Color32 = Color32::from_rgb(0xE0, 0xA5, 0x3C); // #E0A53C
-const PILL_WARN_FILL: Color32 = Color32::from_rgb(0x35, 0x29, 0x1A); // #35291A
-const PILL_WARN_STROKE: Color32 = Color32::from_rgb(0x5C, 0x47, 0x20); // #5C4720
-
-// CHANGES_REQUESTED / BLOCKING / FAIL
-const PILL_BAD_TEXT: Color32 = Color32::from_rgb(0xFF, 0x7A, 0x8C); // #FF7A8C
-const PILL_BAD_FILL: Color32 = Color32::from_rgb(0x3B, 0x1D, 0x23); // #3B1D23
-const PILL_BAD_STROKE: Color32 = Color32::from_rgb(0x6A, 0x2E, 0x39); // #6A2E39
-
-// INFO / REQ / SCN / US
-const PILL_INFO_TEXT: Color32 = Color32::from_rgb(0x8F, 0xB0, 0xFF); // #8FB0FF
-const PILL_INFO_FILL: Color32 = Color32::from_rgb(0x1B, 0x26, 0x40); // #1B2640
-const PILL_INFO_STROKE: Color32 = Color32::from_rgb(0x2F, 0x45, 0x77); // #2F4577
+impl ReaderPalette {
+    fn for_mode(light_mode: bool) -> Self {
+        if light_mode {
+            Self {
+                bg_page: Color32::from_rgb(0xF6, 0xF6, 0xF7),
+                doc_sheet: Color32::from_rgb(0xFF, 0xFF, 0xFF),
+                surface: Color32::from_rgb(0xFA, 0xFA, 0xFB),
+                surface_2: Color32::from_rgb(0xF1, 0xF2, 0xF4),
+                code_bg: Color32::from_rgb(0xF4, 0xF4, 0xF6),
+                border: Color32::from_rgb(0xE4, 0xE5, 0xE9),
+                hairline: Color32::from_rgb(0xEC, 0xED, 0xF0),
+                text: Color32::from_rgb(0x18, 0x18, 0x1B),
+                text_muted: Color32::from_rgb(0x3F, 0x3F, 0x46),
+                text_subtle: Color32::from_rgb(0x71, 0x71, 0x7A),
+            }
+        } else {
+            Self {
+                bg_page: TOKEN_BG_PAGE,
+                doc_sheet: Color32::from_rgb(0x17, 0x18, 0x1C),
+                surface: TOKEN_SURFACE,
+                surface_2: TOKEN_SURFACE_2,
+                code_bg: TOKEN_CODE_BG,
+                border: TOKEN_BORDER,
+                hairline: TOKEN_HAIRLINE,
+                text: TOKEN_TEXT,
+                text_muted: TOKEN_TEXT_MUTED,
+                text_subtle: TOKEN_TEXT_SUBTLE,
+            }
+        }
+    }
+}
 
 /// Canonical 5 Role Views of the PRODUCT:OS Spec Driven v2 Reader.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
@@ -596,6 +621,8 @@ pub struct SpecsState {
     pub selected_json_spec: usize,
     pub scroll: f32,
     pub left_scroll: f32,
+    pub right_scroll: f32,
+    pub light_mode: bool,
     /// Stores the most recent `"Copy cho AI"` formatted Markdown citation block.
     pub last_ai_copy: Option<String>,
 }
@@ -910,6 +937,7 @@ pub fn format_copy_for_ai(
 }
 
 /// Formats the 5-Pillar Figma 1:1 Parity Scorecard (`US-12` / `DIR-16`) as a `"Copy Parity Report cho AI"` citation block.
+#[allow(dead_code)]
 pub fn format_parity_report_for_ai(
     scorecard: &FigmaParityScorecard,
     reader_view: &str,
@@ -2365,58 +2393,63 @@ impl App {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Left Sidebar Spec Explorer (`show_left`)
+// Left Sidebar: Figma Specs Document & Story Tree (`show_left`, 240px)
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Left Sidebar Spec Explorer rendered when `app.ui.rail == Some(RailItem::Specs)`.
 pub fn show_left(app: &mut App, ui: &mut Ui, rect: Rect) {
     app.specs.ensure_loaded();
     let p = ui.painter().clone();
-    p.rect_filled(rect, 0.0, TOKEN_BG_PAGE);
+    p.rect_filled(rect, 0.0, TOKEN_SURFACE);
+    widgets::vline(&p, rect.right() - 1.0, rect.top(), rect.bottom(), TOKEN_BORDER);
 
-    let header_h = 44.0;
+    // 40px Clean Sidebar Header (`Figma Specs` + `Reader / Canvas` toggle)
+    let header_h = 40.0;
     let header_rect = Rect::from_min_size(rect.min, Vec2::new(rect.width(), header_h));
-    p.rect_filled(header_rect, 0.0, TOKEN_SURFACE);
     widgets::hline(&p, header_rect.left(), header_rect.right(), header_rect.bottom() - 1.0, TOKEN_BORDER);
 
     icons::paint(
         &p,
         Icon::Specs,
         Pos2::new(header_rect.left() + 16.0, header_rect.center().y),
-        14.0,
-        TOKEN_PRIMARY_ORANGE,
+        13.0,
+        TOKEN_TEXT_MUTED,
     );
-    let hub_label = widgets::elide(&p, "PRODUCT:OS SPECS", &theme::font_small_strong(), (header_rect.width() - 104.0).max(40.0));
+    let hub_label = widgets::elide(&p, "Figma Specs", &theme::font_body_strong(), (header_rect.width() - 102.0).max(40.0));
     p.text(
         Pos2::new(header_rect.left() + 28.0, header_rect.center().y),
         Align2::LEFT_CENTER,
         hub_label,
-        theme::font_small_strong(),
+        theme::font_body_strong(),
         TOKEN_TEXT,
     );
 
-    let toggle_w = 60.0;
+    let toggle_w = 58.0;
     let toggle_rect = Rect::from_min_size(
         Pos2::new(header_rect.right() - toggle_w - 10.0, header_rect.center().y - 11.0),
         Vec2::new(toggle_w, 22.0),
     );
     let toggle_resp = ui.interact(toggle_rect, Id::new("specs-reader-toggle"), Sense::click());
-    let (toggle_fill, toggle_stroke, toggle_fg) = if app.specs.open {
-        (PILL_INFO_FILL, PILL_INFO_STROKE, PILL_INFO_TEXT)
-    } else if toggle_resp.hovered() {
-        (TOKEN_SURFACE_2, TOKEN_BORDER, TOKEN_TEXT)
+    let toggle_bg = if app.specs.open || toggle_resp.hovered() {
+        TOKEN_SURFACE_2
     } else {
-        (TOKEN_SURFACE_3, TOKEN_BORDER, TOKEN_TEXT_MUTED)
+        TOKEN_SURFACE_3
     };
-    p.rect_filled(toggle_rect, CornerRadius::same(99), toggle_fill);
-    p.rect_stroke(toggle_rect, CornerRadius::same(99), Stroke::new(1.0, toggle_stroke), StrokeKind::Inside);
-    p.text(toggle_rect.center(), Align2::CENTER_CENTER, "Reader", theme::font_small_strong(), toggle_fg);
+    p.rect_filled(toggle_rect, CornerRadius::same(5), toggle_bg);
+    p.rect_stroke(toggle_rect, CornerRadius::same(5), Stroke::new(1.0, TOKEN_BORDER), StrokeKind::Inside);
+    p.text(
+        toggle_rect.center(),
+        Align2::CENTER_CENTER,
+        if app.specs.open { "Reader" } else { "Canvas" },
+        theme::font_small_medium(),
+        if app.specs.open { TOKEN_TEXT } else { TOKEN_TEXT_MUTED },
+    );
     widgets::record(ui, "specs-reader-toggle", toggle_rect);
     if toggle_resp.clicked() {
         app.specs.open = !app.specs.open;
     }
 
-    let bottom_h = 74.0;
+    let bottom_h = 68.0;
     let body_rect = Rect::from_min_max(
         Pos2::new(rect.left(), header_rect.bottom()),
         Pos2::new(rect.right(), (rect.bottom() - bottom_h).max(header_rect.bottom() + 40.0)),
@@ -2424,14 +2457,17 @@ pub fn show_left(app: &mut App, ui: &mut Ui, rect: Rect) {
     let bottom_rect = Rect::from_min_max(Pos2::new(rect.left(), body_rect.bottom()), rect.max);
 
     let pkg_count = app.specs.packages.len();
+    let story_count = app.specs.current_package().map(|p| p.stories.len()).unwrap_or(0);
     let json_count = app.specs.current_package().map(|p| p.json_specs.len()).unwrap_or(0);
     let page_frames: Vec<NodeId> = app.doc.get(app.page).map(|pg| pg.children.clone()).unwrap_or_default();
-    let est_h = 34.0
-        + pkg_count as f32 * 56.0
-        + 38.0
-        + json_count as f32 * 42.0
-        + 38.0
-        + page_frames.len().max(1) as f32 * 42.0
+    let est_h = 28.0
+        + pkg_count as f32 * 30.0
+        + 28.0
+        + story_count as f32 * 28.0
+        + 28.0
+        + json_count as f32 * 28.0
+        + 28.0
+        + page_frames.len().max(1) as f32 * 28.0
         + 24.0;
 
     let mut lscroll = app.specs.left_scroll;
@@ -2440,80 +2476,110 @@ pub fn show_left(app: &mut App, ui: &mut Ui, rect: Rect) {
 
     let mut apply_json_action: Option<(String, String)> = None;
     let mut focus_frame_action: Option<NodeId> = None;
-    let resolved_comments = app.doc.resolve_comment_targets();
 
     clipped(ui, body_rect, |ui| {
         let p = ui.painter().clone();
-        let mut y = body_rect.top() + 8.0 - lscroll;
-        let pad_x = 10.0;
+        let mut y = body_rect.top() + 10.0 - lscroll;
+        let pad_x = 8.0;
         let row_w = (body_rect.width() - pad_x * 2.0).max(60.0);
 
-        draw_left_section_header(&p, Pos2::new(body_rect.left() + pad_x, y), row_w, Icon::Folder, "SPEC BUNDLES (V2 & V1)", PILL_INFO_TEXT);
-        y += 24.0;
+        // 1. SPEC DOCUMENTS (.MD)
+        draw_left_section_header(&p, Pos2::new(body_rect.left() + pad_x, y), row_w, "SPEC DOCUMENTS (.MD)");
+        y += 22.0;
 
         let pkgs_snapshot = app.specs.packages.clone();
         for (idx, pkg) in pkgs_snapshot.iter().enumerate() {
-            let card_r = Rect::from_min_size(Pos2::new(body_rect.left() + pad_x, y), Vec2::new(row_w, 50.0));
-            let selected = idx == app.specs.selected_pkg;
-            let resp = ui.interact(card_r, Id::new(("spec-pkg-row", idx)), Sense::click());
-            let bg = if selected {
-                PILL_INFO_FILL
+            let row_r = Rect::from_min_size(Pos2::new(body_rect.left() + pad_x, y), Vec2::new(row_w, 28.0));
+            let selected = idx == app.specs.selected_pkg && app.specs.active_tab == SpecTab::Overview;
+            let resp = ui.interact(row_r, Id::new(("spec-pkg-row", idx)), Sense::click());
+            if selected {
+                p.rect_filled(row_r, CornerRadius::same(5), TOKEN_SURFACE_2);
+                let bar = Rect::from_min_size(Pos2::new(row_r.left(), row_r.top() + 5.0), Vec2::new(2.0, 18.0));
+                p.rect_filled(bar, CornerRadius::same(1), Color32::from_rgb(0x0D, 0x99, 0xFF));
             } else if resp.hovered() {
-                TOKEN_SURFACE_2
-            } else {
-                TOKEN_SURFACE
-            };
-            p.rect_filled(card_r, CornerRadius::same(8), bg);
-            p.rect_stroke(
-                card_r,
-                CornerRadius::same(8),
-                Stroke::new(1.0, if selected { PILL_INFO_TEXT } else { TOKEN_BORDER }),
-                StrokeKind::Inside,
-            );
-            let title_str = widgets::elide(&p, &pkg.title, &theme::font_body_strong(), (card_r.width() - 20.0).max(40.0));
+                p.rect_filled(row_r, CornerRadius::same(5), TOKEN_SURFACE_3);
+            }
+            let ver_tag = if pkg.format_version == "2" { ".md · v2" } else { ".md · v1" };
+            let ver_w = widgets::text_width(&p, ver_tag, &theme::font_small()) + 8.0;
             p.text(
-                Pos2::new(card_r.left() + 10.0, card_r.top() + 15.0),
-                Align2::LEFT_CENTER,
-                title_str,
-                theme::font_body_strong(),
-                TOKEN_TEXT,
-            );
-            let badge_txt = if pkg.format_version == "2" { "Format v2" } else { "Legacy v1" };
-            let (bfill, bstroke, bfg) = if pkg.format_version == "2" {
-                (PILL_OK_FILL, PILL_OK_STROKE, PILL_OK_TEXT)
-            } else {
-                (PILL_WARN_FILL, PILL_WARN_STROKE, PILL_WARN_TEXT)
-            };
-            let pill_left = draw_ring_pill_right(
-                &p,
-                Pos2::new(card_r.right() - 8.0, card_r.top() + 34.0),
-                badge_txt,
-                bfill,
-                bstroke,
-                bfg,
-            );
-            let slug_max_w = (pill_left - card_r.left() - 18.0).max(36.0);
-            let slug_str = widgets::elide(&p, &pkg.slug, &theme::font_small(), slug_max_w);
-            p.text(
-                Pos2::new(card_r.left() + 10.0, card_r.top() + 34.0),
-                Align2::LEFT_CENTER,
-                slug_str,
+                Pos2::new(row_r.right() - 8.0, row_r.center().y),
+                Align2::RIGHT_CENTER,
+                ver_tag,
                 theme::font_small(),
                 TOKEN_TEXT_SUBTLE,
             );
-            widgets::record(ui, &format!("spec-pkg:{idx}"), card_r);
+            let clean_title = pkg
+                .title
+                .replace("DESIGN:OS Studio", "design:os studio")
+                .replace("Design OS Studio", "design:os studio");
+            let title_str = widgets::elide(&p, &clean_title, &theme::font_body_medium(), (row_r.width() - ver_w - 18.0).max(36.0));
+            p.text(
+                Pos2::new(row_r.left() + 10.0, row_r.center().y),
+                Align2::LEFT_CENTER,
+                title_str,
+                if selected { theme::font_body_strong() } else { theme::font_body() },
+                if selected { TOKEN_TEXT } else { TOKEN_TEXT_MUTED },
+            );
+            widgets::record(ui, &format!("spec-pkg:{idx}"), row_r);
             if resp.clicked() {
                 app.specs.selected_pkg = idx;
-                app.specs.selected_story = 0;
+                app.specs.active_tab = SpecTab::Overview;
                 app.specs.open = true;
                 app.specs.scroll = 0.0;
             }
-            y += 56.0;
+            y += 30.0;
         }
 
+        // 2. USER STORIES (US-01..US-17)
         y += 6.0;
-        draw_left_section_header(&p, Pos2::new(body_rect.left() + pad_x, y), row_w, Icon::Frame, "UI BLUEPRINTS (.SPEC.JSON)", TOKEN_PRIMARY_ORANGE);
-        y += 24.0;
+        draw_left_section_header(&p, Pos2::new(body_rect.left() + pad_x, y), row_w, "USER STORIES");
+        y += 22.0;
+
+        let stories_list = app
+            .specs
+            .current_package()
+            .map(|pkg| pkg.stories.clone())
+            .unwrap_or_default();
+        for (s_idx, st) in stories_list.iter().enumerate() {
+            let row_r = Rect::from_min_size(Pos2::new(body_rect.left() + pad_x, y), Vec2::new(row_w, 26.0));
+            let active = app.specs.active_tab == SpecTab::UseCases && app.specs.selected_story == s_idx;
+            let resp = ui.interact(row_r, Id::new(("spec-left-story", s_idx)), Sense::click());
+            if active {
+                p.rect_filled(row_r, CornerRadius::same(5), TOKEN_SURFACE_2);
+                let bar = Rect::from_min_size(Pos2::new(row_r.left(), row_r.top() + 5.0), Vec2::new(2.0, 16.0));
+                p.rect_filled(bar, CornerRadius::same(1), Color32::from_rgb(0x0D, 0x99, 0xFF));
+            } else if resp.hovered() {
+                p.rect_filled(row_r, CornerRadius::same(5), TOKEN_SURFACE_3);
+            }
+            let id_w = widgets::text_width(&p, &st.id, &theme::font_mono()) + 8.0;
+            p.text(
+                Pos2::new(row_r.left() + 10.0, row_r.center().y),
+                Align2::LEFT_CENTER,
+                &st.id,
+                theme::font_mono(),
+                TOKEN_TEXT_SUBTLE,
+            );
+            let st_title = widgets::elide(&p, &st.title, &theme::font_body(), (row_r.width() - id_w - 18.0).max(36.0));
+            p.text(
+                Pos2::new(row_r.left() + 10.0 + id_w, row_r.center().y),
+                Align2::LEFT_CENTER,
+                st_title,
+                if active { theme::font_body_strong() } else { theme::font_body() },
+                if active { TOKEN_TEXT } else { TOKEN_TEXT_MUTED },
+            );
+            if resp.clicked() {
+                app.specs.selected_story = s_idx;
+                app.specs.active_tab = SpecTab::UseCases;
+                app.specs.open = true;
+                app.specs.scroll = 0.0;
+            }
+            y += 28.0;
+        }
+
+        // 3. CANVAS BLUEPRINTS (.SPEC.JSON)
+        y += 6.0;
+        draw_left_section_header(&p, Pos2::new(body_rect.left() + pad_x, y), row_w, "CANVAS BLUEPRINTS");
+        y += 22.0;
 
         let json_list = app
             .specs
@@ -2521,10 +2587,10 @@ pub fn show_left(app: &mut App, ui: &mut Ui, rect: Rect) {
             .map(|pkg| pkg.json_specs.clone())
             .unwrap_or_default();
         for (j_idx, (j_name, _j_path, j_raw)) in json_list.iter().enumerate() {
-            let row_r = Rect::from_min_size(Pos2::new(body_rect.left() + pad_x, y), Vec2::new(row_w, 36.0));
-            let apply_w = 50.0;
+            let row_r = Rect::from_min_size(Pos2::new(body_rect.left() + pad_x, y), Vec2::new(row_w, 26.0));
+            let apply_w = 44.0;
             let apply_r = Rect::from_min_size(
-                Pos2::new(row_r.right() - apply_w - 6.0, row_r.center().y - 10.0),
+                Pos2::new(row_r.right() - apply_w - 4.0, row_r.center().y - 10.0),
                 Vec2::new(apply_w, 20.0),
             );
             let main_click_r = Rect::from_min_max(row_r.min, Pos2::new(apply_r.left() - 4.0, row_r.bottom()));
@@ -2532,39 +2598,25 @@ pub fn show_left(app: &mut App, ui: &mut Ui, rect: Rect) {
             let apply_resp = ui.interact(apply_r, Id::new(("spec-json-apply", j_idx)), Sense::click());
 
             let active = app.specs.active_tab == SpecTab::JsonSpec && app.specs.selected_json_spec == j_idx;
-            p.rect_filled(
-                row_r,
-                CornerRadius::same(7),
-                if active {
-                    PILL_INFO_FILL
-                } else if row_resp.hovered() {
-                    TOKEN_SURFACE_2
-                } else {
-                    TOKEN_SURFACE
-                },
-            );
-            p.rect_stroke(
-                row_r,
-                CornerRadius::same(7),
-                Stroke::new(1.0, if active { PILL_INFO_STROKE } else { TOKEN_BORDER }),
-                StrokeKind::Inside,
-            );
+            if active || row_resp.hovered() {
+                p.rect_filled(row_r, CornerRadius::same(5), if active { TOKEN_SURFACE_2 } else { TOKEN_SURFACE_3 });
+            }
             let clean_name = widgets::elide(&p, j_name, &theme::font_body(), (main_click_r.width() - 16.0).max(36.0));
             p.text(
                 Pos2::new(row_r.left() + 10.0, row_r.center().y),
                 Align2::LEFT_CENTER,
                 clean_name,
                 theme::font_body(),
-                TOKEN_TEXT,
+                if active { TOKEN_TEXT } else { TOKEN_TEXT_MUTED },
             );
 
             p.rect_filled(
                 apply_r,
-                CornerRadius::same(99),
-                if apply_resp.hovered() { PILL_OK_STROKE } else { PILL_OK_FILL },
+                CornerRadius::same(4),
+                if apply_resp.hovered() { TOKEN_SURFACE_2 } else { TOKEN_SURFACE_3 },
             );
-            p.rect_stroke(apply_r, CornerRadius::same(99), Stroke::new(1.0, PILL_OK_STROKE), StrokeKind::Inside);
-            p.text(apply_r.center(), Align2::CENTER_CENTER, "Apply", theme::font_small_strong(), PILL_OK_TEXT);
+            p.rect_stroke(apply_r, CornerRadius::same(4), Stroke::new(1.0, TOKEN_BORDER), StrokeKind::Inside);
+            p.text(apply_r.center(), Align2::CENTER_CENTER, "Apply", theme::font_small(), TOKEN_TEXT_MUTED);
             widgets::record(ui, &format!("spec-json-apply:{j_idx}"), apply_r);
             if apply_resp.clicked() {
                 apply_json_action = Some((j_name.clone(), j_raw.clone()));
@@ -2573,78 +2625,38 @@ pub fn show_left(app: &mut App, ui: &mut Ui, rect: Rect) {
                 app.specs.active_tab = SpecTab::JsonSpec;
                 app.specs.open = true;
             }
-            y += 42.0;
+            y += 28.0;
         }
 
+        // 4. LINKED CANVAS FRAMES
         y += 6.0;
-        draw_left_section_header(&p, Pos2::new(body_rect.left() + pad_x, y), row_w, Icon::Eye, "CANVAS FRAMES & PINS", PILL_OK_TEXT);
-        y += 24.0;
+        draw_left_section_header(&p, Pos2::new(body_rect.left() + pad_x, y), row_w, "LINKED CANVAS FRAMES");
+        y += 22.0;
 
         for fid in &page_frames {
             let Some(fnode) = app.doc.get(*fid) else { continue };
-            let row_r = Rect::from_min_size(Pos2::new(body_rect.left() + pad_x, y), Vec2::new(row_w, 36.0));
+            let row_r = Rect::from_min_size(Pos2::new(body_rect.left() + pad_x, y), Vec2::new(row_w, 26.0));
             let resp = ui.interact(row_r, Id::new(("spec-frame-row", fid.0)), Sense::click());
             let is_sel = app.selection.contains(fid);
-            p.rect_filled(
-                row_r,
-                CornerRadius::same(7),
-                if is_sel {
-                    TOKEN_PRIMARY_SOFT
-                } else if resp.hovered() {
-                    TOKEN_SURFACE_2
-                } else {
-                    TOKEN_SURFACE
-                },
-            );
-            p.rect_stroke(
-                row_r,
-                CornerRadius::same(7),
-                Stroke::new(1.0, if is_sel { TOKEN_PRIMARY_ORANGE } else { TOKEN_BORDER }),
-                StrokeKind::Inside,
-            );
-
-            let open_pins = resolved_comments
-                .iter()
-                .filter(|c| !c.resolved && (c.target_frame_id == Some(fid.0) || c.target_node_id == Some(fid.0)))
-                .count();
-            let ready = fnode.dev.status == Some(DevStatus::ReadyForDev);
-
-            let mut pill_left = row_r.right() - 8.0;
-            if open_pins > 0 {
-                let badge = format!("{open_pins} pin{}", if open_pins == 1 { "" } else { "s" });
-                pill_left = draw_ring_pill_right(
-                    &p,
-                    Pos2::new(row_r.right() - 8.0, row_r.center().y),
-                    &badge,
-                    PILL_WARN_FILL,
-                    PILL_WARN_STROKE,
-                    PILL_WARN_TEXT,
-                ) - 6.0;
-            } else if ready {
-                pill_left = draw_ring_pill_right(
-                    &p,
-                    Pos2::new(row_r.right() - 8.0, row_r.center().y),
-                    "Ready",
-                    PILL_OK_FILL,
-                    PILL_OK_STROKE,
-                    PILL_OK_TEXT,
-                ) - 6.0;
+            if is_sel || resp.hovered() {
+                p.rect_filled(row_r, CornerRadius::same(5), if is_sel { TOKEN_SURFACE_2 } else { TOKEN_SURFACE_3 });
             }
+            let ready = fnode.dev.status == Some(DevStatus::ReadyForDev);
+            let dot_col = if ready { DOT_OK } else { DOT_NEUTRAL };
+            p.circle_filled(Pos2::new(row_r.left() + 12.0, row_r.center().y), 3.0, dot_col);
 
-            let fname_max_w = (pill_left - row_r.left() - 14.0).max(36.0);
-            let fname = widgets::elide(&p, &fnode.name, &theme::font_body(), fname_max_w);
+            let fname = widgets::elide(&p, &fnode.name, &theme::font_body(), (row_r.width() - 28.0).max(36.0));
             p.text(
-                Pos2::new(row_r.left() + 10.0, row_r.center().y),
+                Pos2::new(row_r.left() + 22.0, row_r.center().y),
                 Align2::LEFT_CENTER,
                 fname,
                 theme::font_body(),
-                TOKEN_TEXT,
+                if is_sel { TOKEN_TEXT } else { TOKEN_TEXT_MUTED },
             );
-
             if resp.clicked() {
                 focus_frame_action = Some(*fid);
             }
-            y += 42.0;
+            y += 28.0;
         }
     });
     scrollbar(ui, body_rect, app.specs.left_scroll, est_h);
@@ -2661,415 +2673,232 @@ pub fn show_left(app: &mut App, ui: &mut Ui, rect: Rect) {
         app.fit_selection();
     }
 
+    // Bottom Actions: Drop Spec Card on Canvas (D) + Export Frame -> .spec.json
     p.rect_filled(bottom_rect, 0.0, TOKEN_SURFACE);
     widgets::hline(&p, bottom_rect.left(), bottom_rect.right(), bottom_rect.top(), TOKEN_BORDER);
-    let btn_w = (bottom_rect.width() - 20.0).max(60.0);
-    let btn1 = Rect::from_min_size(Pos2::new(bottom_rect.left() + 10.0, bottom_rect.top() + 8.0), Vec2::new(btn_w, 26.0));
-    let btn2 = Rect::from_min_size(Pos2::new(bottom_rect.left() + 10.0, bottom_rect.top() + 40.0), Vec2::new(btn_w, 26.0));
+    let btn_w = (bottom_rect.width() - 16.0).max(60.0);
+    let btn1 = Rect::from_min_size(Pos2::new(bottom_rect.left() + 8.0, bottom_rect.top() + 8.0), Vec2::new(btn_w, 24.0));
+    let btn2 = Rect::from_min_size(Pos2::new(bottom_rect.left() + 8.0, bottom_rect.top() + 36.0), Vec2::new(btn_w, 24.0));
 
-    let r1 = ui.interact(btn1, Id::new("specs-export-json-btn"), Sense::click());
-    p.rect_filled(btn1, CornerRadius::same(6), if r1.hovered() { TOKEN_SURFACE_2 } else { TOKEN_SURFACE_3 });
-    p.rect_stroke(btn1, CornerRadius::same(6), Stroke::new(1.0, TOKEN_BORDER), StrokeKind::Inside);
-    let b1_txt = widgets::elide(&p, "Export Frame -> .spec.json", &theme::font_small_medium(), (btn1.width() - 16.0).max(36.0));
+    let r1 = ui.interact(btn1, Id::new("specs-drop-canvas-btn"), Sense::click());
+    p.rect_filled(btn1, CornerRadius::same(5), if r1.hovered() { TOKEN_SURFACE_2 } else { TOKEN_SURFACE_3 });
+    p.rect_stroke(btn1, CornerRadius::same(5), Stroke::new(1.0, TOKEN_BORDER), StrokeKind::Inside);
+    let b1_txt = widgets::elide(&p, "Drop Spec Card on Canvas (D)", &theme::font_small_medium(), (btn1.width() - 14.0).max(36.0));
     p.text(btn1.center(), Align2::CENTER_CENTER, b1_txt, theme::font_small_medium(), TOKEN_TEXT);
+    widgets::record(ui, "specs-drop-canvas-btn", btn1);
     if r1.clicked() {
-        app.export_active_frame_to_spec();
+        if let Some(pkg) = app.specs.current_package().cloned() {
+            drop_spec_card_onto_canvas(app, &pkg);
+        }
     }
 
-    let r2 = ui.interact(btn2, Id::new("specs-save-fig-btn"), Sense::click());
-    p.rect_filled(btn2, CornerRadius::same(6), if r2.hovered() { PILL_INFO_STROKE } else { PILL_INFO_FILL });
-    p.rect_stroke(btn2, CornerRadius::same(6), Stroke::new(1.0, PILL_INFO_STROKE), StrokeKind::Inside);
-    let b2_txt = widgets::elide(&p, "Save .fig Copy", &theme::font_small_strong(), (btn2.width() - 16.0).max(36.0));
-    p.text(btn2.center(), Align2::CENTER_CENTER, b2_txt, theme::font_small_strong(), PILL_INFO_TEXT);
+    let r2 = ui.interact(btn2, Id::new("specs-export-json-btn"), Sense::click());
+    p.rect_filled(btn2, CornerRadius::same(5), if r2.hovered() { TOKEN_SURFACE_2 } else { TOKEN_SURFACE_3 });
+    p.rect_stroke(btn2, CornerRadius::same(5), Stroke::new(1.0, TOKEN_BORDER), StrokeKind::Inside);
+    let b2_txt = widgets::elide(&p, "Export Frame -> .spec.json", &theme::font_small_medium(), (btn2.width() - 14.0).max(36.0));
+    p.text(btn2.center(), Align2::CENTER_CENTER, b2_txt, theme::font_small_medium(), TOKEN_TEXT_MUTED);
+    widgets::record(ui, "specs-export-json-btn", btn2);
     if r2.clicked() {
-        app.export_fig_copy();
+        app.export_active_frame_to_spec();
     }
 }
 
+/// Materializes the active Markdown Spec (`PRD: ...`) as a live Figma Spec Card Frame on the canvas (`https://www.figma.com/specs/`).
+pub fn drop_spec_card_onto_canvas(app: &mut App, pkg: &SpecPackage) {
+    let clean_title = pkg
+        .title
+        .replace("DESIGN:OS Studio", "design:os studio")
+        .replace("Design OS Studio", "design:os studio");
+    let spec_card_json = serde_json::json!({
+        "name": format!("Spec: {}", clean_title),
+        "preset": "easeui-panel",
+        "width": 560.0,
+        "height": 640.0,
+        "fill": "#FFFFFF",
+        "stroke": "#0D99FF",
+        "stroke_width": 1.5,
+        "radius": 12.0,
+        "dev_status": "ready",
+        "annotation": format!("Figma Specs · Markdown as a Medium · {}", pkg.contract_id),
+        "layout": {
+            "dir": "column",
+            "padding": [28.0, 32.0, 28.0, 32.0],
+            "gap": 16.0,
+            "align": "start",
+            "justify": "start"
+        },
+        "children": [
+            {
+                "name": "Spec Eyebrow",
+                "text": format!("FIGMA SPECS · MARKDOWN MEDIUM · {}", pkg.contract_id),
+                "font_size": 11.0,
+                "fill": "#0D99FF"
+            },
+            {
+                "name": "Spec Title",
+                "text": format!("PRD: {}", clean_title),
+                "font_size": 24.0,
+                "fill": "#111827"
+            },
+            {
+                "name": "Problem Heading",
+                "text": "1. Problem & Product Outcome",
+                "font_size": 16.0,
+                "fill": "#111827"
+            },
+            {
+                "name": "Problem Prose",
+                "text": pkg.contract_outcome,
+                "font_size": 13.0,
+                "fill": "#374151"
+            },
+            {
+                "name": "Embedded Architecture Flow",
+                "preset": "easeui-row",
+                "width": 496.0,
+                "height": 64.0,
+                "fill": "#F8FAFC",
+                "stroke": "#0D99FF",
+                "stroke_width": 1.0,
+                "radius": 8.0,
+                "layout": {
+                    "dir": "row",
+                    "padding": [14.0, 16.0, 14.0, 16.0],
+                    "gap": 12.0,
+                    "align": "center",
+                    "justify": "start"
+                },
+                "children": [
+                    { "name": "Step 1", "text": "Spec (.md)", "font_size": 12.0, "fill": "#111827" },
+                    { "name": "Step 2", "text": "-> Agent (@prd)", "font_size": 12.0, "fill": "#0D99FF" },
+                    { "name": "Step 3", "text": "-> Canvas + .fig v106", "font_size": 12.0, "fill": "#111827" }
+                ]
+            }
+        ]
+    });
+    let node_spec: NodeSpec = serde_json::from_value(spec_card_json).expect("valid Spec Card NodeSpec");
+    app.apply_node_spec(&node_spec, "figma-spec-card.spec.json");
+    app.show_toast("Dropped Figma Spec Card onto Canvas", false);
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
-// Central PRODUCT:OS Spec Driven v2 Reader (`show_reader`)
-// Operate-mode order (`craft-floor.md` §3):
-//   1. Top 64px Header Bar (`product:os / <spec title>`) + Primary Actions
-//   2. Attention Line (when any Gate is PENDING or OPEN item exists)
-//   3. 4-Metric KPI Strip (computed from single loaded SpecPackage model)
-//   4. 5-Role View Switcher (`PO View`, `Dev View`, `QA & Coverage`, `Wireframes & UI Contract`, `Gates & Canvas`)
-//   5. Main Role View Content (No cards-in-cards; `#26272C` table heads + `1px` `#2A2B31` hairlines)
+// Center Workspace: 1:1 Figma Specs ("Markdown As a Medium") Reader (`show_reader`)
 // ─────────────────────────────────────────────────────────────────────────────
 
 pub fn show_reader(app: &mut App, ui: &mut Ui, rect: Rect) {
     app.specs.ensure_loaded();
+    let pal = ReaderPalette::for_mode(app.specs.light_mode);
     let p = ui.painter().clone();
-    p.rect_filled(rect, 0.0, TOKEN_BG_PAGE);
+    p.rect_filled(rect, 0.0, pal.bg_page);
 
     let Some(pkg) = app.specs.current_package().cloned() else {
         return;
     };
-    let kpi = pkg.kpi_metrics();
 
-    let pad = 20.0;
-    let inner_w = (rect.width() - pad * 2.0).max(240.0);
-    let mut cur_y = rect.top() + 12.0;
+    // 1. Minimal 42px Figma Specs Top Breadcrumb & Mode Bar (`< design:os studio / PRD: ...`)
+    let bar_h = 42.0;
+    let bar_rect = Rect::from_min_size(rect.min, Vec2::new(rect.width(), bar_h));
+    p.rect_filled(bar_rect, 0.0, pal.surface);
+    widgets::hline(&p, bar_rect.left(), bar_rect.right(), bar_rect.bottom() - 1.0, pal.border);
 
-    // 1. Top 64px Header Bar (`product:os / <spec title>`)
-    let header_h = 64.0;
-    let header_rect = Rect::from_min_size(Pos2::new(rect.left() + pad, cur_y), Vec2::new(inner_w, header_h));
-    p.rect_filled(header_rect, CornerRadius::same(12), TOKEN_SURFACE);
-    p.rect_stroke(header_rect, CornerRadius::same(12), Stroke::new(1.0, TOKEN_BORDER), StrokeKind::Inside);
-
-    // Right-side primary action buttons inside the 64px topbar
-    let mut btn_right = header_rect.right() - 16.0;
-    let btn_y = header_rect.center().y;
-
-    let view_canvas_r = draw_action_button(
-        ui,
-        &p,
-        "hero-view-canvas",
-        Pos2::new(btn_right, btn_y),
-        Some(Icon::Eye),
-        "Canvas",
-        TOKEN_CODE_BG,
-        TOKEN_BORDER,
-        TOKEN_TEXT_MUTED,
+    // Right-side lightweight controls: `Collapse to Canvas` (`hero-view-canvas`) + `Paper / Slate` (`specs-theme-toggle`)
+    let canvas_btn_w = 64.0;
+    let canvas_btn = Rect::from_min_size(
+        Pos2::new(bar_rect.right() - canvas_btn_w - 12.0, bar_rect.center().y - 12.0),
+        Vec2::new(canvas_btn_w, 24.0),
     );
-    btn_right = view_canvas_r.left() - 8.0;
+    let canvas_resp = ui.interact(canvas_btn, Id::new("hero-view-canvas"), Sense::click());
+    p.rect_filled(
+        canvas_btn,
+        CornerRadius::same(5),
+        if canvas_resp.hovered() { pal.surface_2 } else { pal.doc_sheet },
+    );
+    p.rect_stroke(canvas_btn, CornerRadius::same(5), Stroke::new(1.0, pal.border), StrokeKind::Inside);
+    p.text(canvas_btn.center(), Align2::CENTER_CENTER, "Canvas", theme::font_small_medium(), pal.text);
+    widgets::record(ui, "hero-view-canvas", canvas_btn);
+    if canvas_resp.clicked() {
+        app.specs.open = false;
+    }
 
-    let copy_ai_top_r = draw_action_button(
-        ui,
-        &p,
-        "hero-copy-ai",
-        Pos2::new(btn_right, btn_y),
-        Some(Icon::Sparkle),
-        "Copy cho AI",
-        TOKEN_PRIMARY_SOFT,
-        TOKEN_PRIMARY_ROSE,
-        TOKEN_PRIMARY_ORANGE,
+    let theme_btn_w = 56.0;
+    let theme_btn = Rect::from_min_size(
+        Pos2::new(canvas_btn.left() - theme_btn_w - 8.0, bar_rect.center().y - 12.0),
+        Vec2::new(theme_btn_w, 24.0),
     );
-    btn_right = copy_ai_top_r.left() - 8.0;
+    let theme_resp = ui.interact(theme_btn, Id::new("specs-theme-toggle"), Sense::click());
+    p.rect_filled(
+        theme_btn,
+        CornerRadius::same(5),
+        if theme_resp.hovered() { pal.surface_2 } else { pal.doc_sheet },
+    );
+    p.rect_stroke(theme_btn, CornerRadius::same(5), Stroke::new(1.0, pal.border), StrokeKind::Inside);
+    p.text(
+        theme_btn.center(),
+        Align2::CENTER_CENTER,
+        if app.specs.light_mode { "Paper" } else { "Slate" },
+        theme::font_small_medium(),
+        pal.text_muted,
+    );
+    widgets::record(ui, "specs-theme-toggle", theme_btn);
+    if theme_resp.clicked() {
+        app.specs.light_mode = !app.specs.light_mode;
+    }
 
-    let export_fig_r = draw_action_button(
-        ui,
-        &p,
-        "hero-export-fig",
-        Pos2::new(btn_right, btn_y),
-        Some(Icon::File),
-        "Save .fig",
-        TOKEN_SURFACE_2,
-        TOKEN_BORDER,
-        TOKEN_TEXT,
-    );
-    btn_right = export_fig_r.left() - 8.0;
+    // Minimalist underline view tabs (PRD & Overview | Stories | QA & Trace | Blueprints | Gates)
+    let tab_labels = ["PRD & Overview", "User Stories", "QA & Trace", "Blueprints", "Gates"];
+    let mut tab_right = theme_btn.left() - 14.0;
+    let mut tab_rects: Vec<(usize, SpecTab, Rect, &str)> = Vec::new();
+    for (ti, tab) in SpecTab::ALL.iter().enumerate().rev() {
+        let lbl = tab_labels[ti];
+        let tw = widgets::text_width(&p, lbl, &theme::font_small_medium()) + 16.0;
+        let left_x = tab_right - tw;
+        if left_x > bar_rect.left() + 200.0 {
+            let tr = Rect::from_min_size(Pos2::new(left_x, bar_rect.top() + 7.0), Vec2::new(tw, bar_h - 14.0));
+            tab_rects.push((ti, *tab, tr, lbl));
+            tab_right = left_x - 2.0;
+        }
+    }
+    for (ti, tab, tr, lbl) in tab_rects {
+        let resp = ui.interact(tr, Id::new(("spec-reader-tab", ti)), Sense::click());
+        let active = app.specs.active_tab == tab;
+        p.text(
+            tr.center(),
+            Align2::CENTER_CENTER,
+            lbl,
+            if active { theme::font_small_strong() } else { theme::font_small_medium() },
+            if active { pal.text } else if resp.hovered() { pal.text_muted } else { pal.text_subtle },
+        );
+        if active {
+            let ind = Rect::from_min_size(Pos2::new(tr.left() + 6.0, bar_rect.bottom() - 2.0), Vec2::new(tr.width() - 12.0, 2.0));
+            p.rect_filled(ind, CornerRadius::same(1), Color32::from_rgb(0x0D, 0x99, 0xFF));
+        }
+        widgets::record(ui, &format!("spec-tab:{ti}"), tr);
+        if resp.clicked() {
+            app.specs.active_tab = tab;
+            app.specs.scroll = 0.0;
+        }
+    }
 
-    let export_spec_r = draw_action_button(
-        ui,
-        &p,
-        "hero-export-spec",
-        Pos2::new(btn_right, btn_y),
-        Some(Icon::Export),
-        "Export .spec.json",
-        PILL_INFO_FILL,
-        PILL_INFO_STROKE,
-        PILL_INFO_TEXT,
-    );
-    btn_right = export_spec_r.left() - 8.0;
-
-    let apply_spec_r = draw_action_button(
-        ui,
-        &p,
-        "hero-apply-spec",
-        Pos2::new(btn_right, btn_y),
-        Some(Icon::Play),
-        "Apply Spec to Canvas",
-        PILL_OK_FILL,
-        PILL_OK_STROKE,
-        PILL_OK_TEXT,
-    );
-    let left_avail_w = (apply_spec_r.left() - header_rect.left() - 28.0).max(80.0);
-
-    // Top-left inside 64px header: Brand icon + `design:os studio / <title>` (`DIR-12`) + Format v2 pill
-    icons::paint(
-        &p,
-        Icon::Specs,
-        Pos2::new(header_rect.left() + 20.0, header_rect.top() + 21.0),
-        15.0,
-        TOKEN_PRIMARY_ROSE,
-    );
-    let brand_w = crate::home::updater::paint_brand_wordmark(
-        &p,
-        Pos2::new(header_rect.left() + 34.0, header_rect.top() + 21.0),
-        14.0,
-        TOKEN_TEXT,
-        TOKEN_TEXT_MUTED,
-    );
+    // Top-left Figma Specs Breadcrumb: `< design:os studio  /  PRD: ...`
+    let bc_max_w = (tab_right - bar_rect.left() - 24.0).max(60.0);
     let clean_title = pkg
         .title
         .replace("DESIGN:OS Studio", "design:os studio")
-        .replace("Design OS Studio", "design:os studio")
-        .replace("DESIGN:OS", "design:os");
-    let suffix = format!("/ {clean_title}");
-    let bc_str = widgets::elide(&p, &suffix, &theme::font_large_strong(), (left_avail_w - brand_w - 24.0).max(40.0));
+        .replace("Design OS Studio", "design:os studio");
+    let bc_text = format!("< design:os studio  /  PRD: {clean_title}");
+    let bc_clean = widgets::elide(&p, &bc_text, &theme::font_body_medium(), bc_max_w);
     p.text(
-        Pos2::new(header_rect.left() + 34.0 + brand_w + 6.0, header_rect.top() + 21.0),
+        Pos2::new(bar_rect.left() + 16.0, bar_rect.center().y),
         Align2::LEFT_CENTER,
-        bc_str,
-        theme::font_large_strong(),
-        TOKEN_TEXT,
+        bc_clean,
+        theme::font_body_medium(),
+        pal.text_muted,
     );
 
-    let mut meta_x = header_rect.left() + 34.0;
-    let meta_y = header_rect.top() + 45.0;
-    let fmt_label = if pkg.format_version == "2" { "Format v2" } else { "Format v1" };
-    meta_x = draw_ring_pill_left(&p, Pos2::new(meta_x, meta_y), fmt_label, PILL_INFO_FILL, PILL_INFO_STROKE, PILL_INFO_TEXT) + 8.0;
-    meta_x = draw_ring_pill_left(
-        &p,
-        Pos2::new(meta_x, meta_y),
-        &pkg.root_display,
-        TOKEN_CODE_BG,
-        TOKEN_BORDER,
-        TOKEN_TEXT_MUTED,
-    ) + 8.0;
-    if meta_x + 120.0 < apply_spec_r.left() {
-        let _ = draw_ring_pill_left(
-            &p,
-            Pos2::new(meta_x, meta_y),
-            &format!("Freshness: {}", kpi.freshness),
-            PILL_OK_FILL,
-            PILL_OK_STROKE,
-            PILL_OK_TEXT,
-        );
-    }
-
-    if ui.interact(view_canvas_r, Id::new("hero-view-canvas-click"), Sense::click()).clicked() {
-        app.specs.open = false;
-    }
-    if ui.interact(export_fig_r, Id::new("hero-export-fig-click"), Sense::click()).clicked() {
-        app.export_fig_copy();
-    }
-    if ui.interact(export_spec_r, Id::new("hero-export-spec-click"), Sense::click()).clicked() {
-        app.export_active_frame_to_spec();
-    }
-    if ui.interact(apply_spec_r, Id::new("hero-apply-spec-click"), Sense::click()).clicked() {
-        if let Some((j_name, _, j_raw)) = pkg.json_specs.get(app.specs.selected_json_spec).or_else(|| pkg.json_specs.first()) {
-            if let Ok(spec) = serde_json::from_str::<NodeSpec>(j_raw) {
-                app.apply_node_spec(&spec, j_name);
-            }
-        }
-    }
-    if ui.interact(copy_ai_top_r, Id::new("hero-copy-ai-click"), Sense::click()).clicked() {
-        let active_us = pkg.stories.get(app.specs.selected_story).or_else(|| pkg.stories.first());
-        let payload = if let Some(us) = active_us {
-            format_copy_for_ai(
-                &us.user_story_md,
-                &us.file_path,
-                us.line_start,
-                us.line_end,
-                &us.id,
-                &us.title,
-                app.specs.active_tab.label(),
-                &pkg.project_name,
-                "Triển khai đầy đủ User Story, kiểm tra AC/SCN và đồng bộ Canvas.",
-            )
-        } else {
-            format_copy_for_ai(
-                &pkg.title,
-                &format!("{}/spec.manifest.json", pkg.root_display),
-                1,
-                30,
-                &pkg.contract_id,
-                &pkg.title,
-                app.specs.active_tab.label(),
-                &pkg.project_name,
-                "",
-            )
-        };
-        ui.ctx().copy_text(payload.clone());
-        app.specs.last_ai_copy = Some(payload);
-        app.show_toast("Copied Spec Format v2 citation for AI (Claude / Codex)", false);
-    }
-
-    cur_y = header_rect.bottom() + 8.0;
-
-    // 2. Attention Line (when any Gate is PENDING or OPEN item exists — `craft-floor.md` §3)
-    if kpi.pending_gate_label.is_some() || !pkg.open_items.is_empty() {
-        let attn_h = 36.0;
-        let attn_rect = Rect::from_min_size(Pos2::new(rect.left() + pad, cur_y), Vec2::new(inner_w, attn_h));
-        p.rect_filled(attn_rect, CornerRadius::same(8), PILL_WARN_FILL);
-        p.rect_stroke(attn_rect, CornerRadius::same(8), Stroke::new(1.0, PILL_WARN_STROKE), StrokeKind::Inside);
-
-        let review_btn = draw_action_button(
-            ui,
-            &p,
-            "attn-review-gate-btn",
-            Pos2::new(attn_rect.right() - 12.0, attn_rect.center().y),
-            Some(Icon::Flag),
-            "Review Gate",
-            TOKEN_SURFACE,
-            PILL_WARN_TEXT,
-            PILL_WARN_TEXT,
-        );
-        if ui.interact(review_btn, Id::new("attn-review-gate-click"), Sense::click()).clicked() {
-            app.specs.active_tab = SpecTab::CanvasScreens;
-            app.specs.scroll = 0.0;
-        }
-
-        let approve_btn = draw_action_button(
-            ui,
-            &p,
-            "attn-approve-gate-btn",
-            Pos2::new(review_btn.left() - 8.0, attn_rect.center().y),
-            Some(Icon::Check),
-            "Approve Gate",
-            PILL_OK_FILL,
-            PILL_OK_STROKE,
-            PILL_OK_TEXT,
-        );
-        if ui.interact(approve_btn, Id::new("attn-approve-gate-click"), Sense::click()).clicked() {
-            let gid = pkg
-                .gates
-                .iter()
-                .find(|g| g.status != "APPROVED")
-                .map(|g| g.gate_id.clone())
-                .unwrap_or_else(|| "g4-uiux".to_string());
-            if app.specs.approve_gate_and_persist(&gid) {
-                app.show_toast(format!("Approved gate {gid} (GATE: APPROVED)"), false);
-            }
-        }
-
-        icons::paint(
-            &p,
-            Icon::Flag,
-            Pos2::new(attn_rect.left() + 16.0, attn_rect.center().y),
-            13.0,
-            PILL_WARN_TEXT,
-        );
-        let gate_lbl = kpi.pending_gate_label.as_deref().unwrap_or("G4-UIUX (UIUX)");
-        let msg = format!(
-            "Attention · Gate {} is PENDING review · {} blocking OPEN items · All mandatory rubric criteria = 2/2",
-            gate_lbl, kpi.blocking_open_count
-        );
-        let max_msg_w = (approve_btn.left() - attn_rect.left() - 38.0).max(60.0);
-        let msg_elided = widgets::elide(&p, &msg, &theme::font_body_strong(), max_msg_w);
-        p.text(
-            Pos2::new(attn_rect.left() + 30.0, attn_rect.center().y),
-            Align2::LEFT_CENTER,
-            msg_elided,
-            theme::font_body_strong(),
-            PILL_WARN_TEXT,
-        );
-
-        cur_y = attn_rect.bottom() + 8.0;
-    }
-
-    // 3. 4-Metric KPI Strip (height = 68.0 > 64.0; computed from single loaded model)
-    let kpi_h = 68.0;
-    let kpi_gap = 10.0;
-    let kpi_w = (inner_w - kpi_gap * 3.0) / 4.0;
-    let kpi_cards = [
-        (
-            "Requirements & Stories",
-            format!("{} REQs · {} US", kpi.req_count, kpi.us_count),
-            "100% Traced".to_string(),
-            PILL_INFO_FILL,
-            PILL_INFO_STROKE,
-            PILL_INFO_TEXT,
-        ),
-        (
-            "Acceptance & Scenarios",
-            format!("{} ACs · {} SCNs", kpi.ac_count, kpi.scn_count),
-            format!("{}/{} Passed", kpi.passed_scn_count, kpi.scn_count),
-            PILL_OK_FILL,
-            PILL_OK_STROKE,
-            PILL_OK_TEXT,
-        ),
-        (
-            "Screen States & UI Contract",
-            format!("{} Screens · {} Rows", kpi.screen_count, kpi.contract_row_count),
-            "12-Col Contract".to_string(),
-            PILL_INFO_FILL,
-            PILL_INFO_STROKE,
-            PILL_INFO_TEXT,
-        ),
-        (
-            "Pipeline Gates (G1–G5)",
-            format!("{}/{} Approved · {}", kpi.approved_gates, kpi.total_gates, kpi.freshness),
-            "Rubric 2/2".to_string(),
-            if kpi.approved_gates == kpi.total_gates { PILL_OK_FILL } else { PILL_WARN_FILL },
-            if kpi.approved_gates == kpi.total_gates { PILL_OK_STROKE } else { PILL_WARN_STROKE },
-            if kpi.approved_gates == kpi.total_gates { PILL_OK_TEXT } else { PILL_WARN_TEXT },
-        ),
-    ];
-
-    for (ki, (label, val_str, pill_txt, pfill, pstroke, pfg)) in kpi_cards.iter().enumerate() {
-        let kx = rect.left() + pad + ki as f32 * (kpi_w + kpi_gap);
-        let kr = Rect::from_min_size(Pos2::new(kx, cur_y), Vec2::new(kpi_w, kpi_h));
-        p.rect_filled(kr, CornerRadius::same(10), TOKEN_SURFACE);
-        p.rect_stroke(kr, CornerRadius::same(10), Stroke::new(1.0, TOKEN_BORDER), StrokeKind::Inside);
-
-        let pill_left = draw_ring_pill_right(&p, Pos2::new(kr.right() - 12.0, kr.top() + 20.0), pill_txt, *pfill, *pstroke, *pfg);
-        let lbl_max_w = (pill_left - kr.left() - 20.0).max(40.0);
-        let lbl_clean = widgets::elide(&p, label, &theme::font_small(), lbl_max_w);
-        p.text(
-            Pos2::new(kr.left() + 14.0, kr.top() + 20.0),
-            Align2::LEFT_CENTER,
-            lbl_clean,
-            theme::font_small(),
-            TOKEN_TEXT_MUTED,
-        );
-
-        let val_clean = widgets::elide(&p, val_str, &theme::font_large_strong(), (kr.width() - 28.0).max(40.0));
-        p.text(
-            Pos2::new(kr.left() + 14.0, kr.top() + 46.0),
-            Align2::LEFT_CENTER,
-            val_clean,
-            theme::font_large_strong(),
-            TOKEN_TEXT,
-        );
-    }
-
-    cur_y += kpi_h + 10.0;
-
-    // 4. Role View Switcher (5 Canonical Role Views)
-    let tab_bar_h = 38.0;
-    let tab_bar_rect = Rect::from_min_size(Pos2::new(rect.left() + pad, cur_y), Vec2::new(inner_w, tab_bar_h));
-    p.rect_filled(tab_bar_rect, CornerRadius::same(9), TOKEN_SURFACE);
-    p.rect_stroke(tab_bar_rect, CornerRadius::same(9), Stroke::new(1.0, TOKEN_BORDER), StrokeKind::Inside);
-
-    let tab_w = (inner_w - 8.0) / SpecTab::ALL.len() as f32;
-    for (ti, tab) in SpecTab::ALL.iter().enumerate() {
-        let tr = Rect::from_min_size(
-            Pos2::new(tab_bar_rect.left() + 4.0 + ti as f32 * tab_w, tab_bar_rect.top() + 4.0),
-            Vec2::new(tab_w - 2.0, tab_bar_h - 8.0),
-        );
-        let resp = ui.interact(tr, Id::new(("spec-reader-tab", ti)), Sense::click());
-        let active = app.specs.active_tab == *tab;
-        if active {
-            p.rect_filled(tr, CornerRadius::same(6), PILL_INFO_FILL);
-            p.rect_stroke(tr, CornerRadius::same(6), Stroke::new(1.0, PILL_INFO_STROKE), StrokeKind::Inside);
-        } else if resp.hovered() {
-            p.rect_filled(tr, CornerRadius::same(6), TOKEN_SURFACE_2);
-        }
-        let icon_col = if active { PILL_INFO_TEXT } else { TOKEN_TEXT_SUBTLE };
-        icons::paint(&p, tab.icon(), Pos2::new(tr.left() + 16.0, tr.center().y), 13.0, icon_col);
-        let lbl = widgets::elide(&p, tab.label(), &theme::font_body_strong(), (tr.width() - 34.0).max(36.0));
-        p.text(
-            Pos2::new(tr.left() + 28.0, tr.center().y),
-            Align2::LEFT_CENTER,
-            lbl,
-            if active { theme::font_body_strong() } else { theme::font_body() },
-            if active { PILL_INFO_TEXT } else { TOKEN_TEXT_MUTED },
-        );
-        widgets::record(ui, &format!("spec-tab:{ti}"), tr);
-        if resp.clicked() {
-            app.specs.active_tab = *tab;
-            app.specs.scroll = 0.0;
-        }
-    }
-
-    cur_y += tab_bar_h + 10.0;
-
-    // 5. Role View Content Area
+    // 2. Main Editorial Document Area (reserve 52px at bottom for the floating Figma Specs `✦ Ask anything` Agent Bar)
     let content_rect = Rect::from_min_max(
-        Pos2::new(rect.left() + pad, cur_y),
-        Pos2::new(rect.right() - pad, rect.bottom() - 12.0),
+        Pos2::new(rect.left(), bar_rect.bottom()),
+        Pos2::new(rect.right(), (rect.bottom() - 52.0).max(bar_rect.bottom() + 80.0)),
     );
 
     match app.specs.active_tab {
@@ -3079,12 +2908,59 @@ pub fn show_reader(app: &mut App, ui: &mut Ui, rect: Rect) {
         SpecTab::JsonSpec => render_wireframes_and_contract_tab(app, ui, content_rect, &pkg),
         SpecTab::CanvasScreens => render_gates_and_canvas_tab(app, ui, content_rect, &pkg),
     }
+
+    // 3. Bottom-Left Floating Figma Specs Agent Pill (`[ ✦ Ask anything about this Spec · @prd @github @mcp   (↑) ]`)
+    let ask_w = (rect.width() - 40.0).min(460.0).max(180.0);
+    let ask_rect = Rect::from_min_size(
+        Pos2::new(rect.left() + 20.0, rect.bottom() - 42.0),
+        Vec2::new(ask_w, 32.0),
+    );
+    let ask_resp = ui.interact(ask_rect, Id::new("specs-ask-agent-bar"), Sense::click());
+    p.rect_filled(
+        ask_rect,
+        CornerRadius::same(99),
+        if ask_resp.hovered() { pal.surface_2 } else { pal.doc_sheet },
+    );
+    p.rect_stroke(ask_rect, CornerRadius::same(99), Stroke::new(1.0, pal.border), StrokeKind::Inside);
+
+    icons::paint(
+        &p,
+        Icon::Sparkle,
+        Pos2::new(ask_rect.left() + 16.0, ask_rect.center().y),
+        13.0,
+        Color32::from_rgb(0x0D, 0x99, 0xFF),
+    );
+    // Up-arrow send circle on the right side of the pill (just like Figma Specs `hero_product.png`!)
+    let send_c = Pos2::new(ask_rect.right() - 16.0, ask_rect.center().y);
+    p.circle_filled(send_c, 10.0, Color32::from_rgb(0x0D, 0x99, 0xFF));
+    p.text(send_c, Align2::CENTER_CENTER, "↑", theme::font_small_strong(), Color32::WHITE);
+
+    let ask_lbl = widgets::elide(
+        &p,
+        "Ask anything about this Spec  ·  @prd  @github  @mcp",
+        &theme::font_body(),
+        (ask_rect.width() - 64.0).max(40.0),
+    );
+    p.text(
+        Pos2::new(ask_rect.left() + 30.0, ask_rect.center().y),
+        Align2::LEFT_CENTER,
+        ask_lbl,
+        theme::font_body(),
+        pal.text_muted,
+    );
+    widgets::record(ui, "specs-ask-agent-bar", ask_rect);
+    if ask_resp.clicked() {
+        let prompt = format!(
+            "@prd Reference @spec://{}/prd/PRD.md ({}) and implement the active User Story onto the Canvas",
+            pkg.slug, pkg.contract_id
+        );
+        app.terminal.submit_chat_prompt(&prompt, None);
+        app.terminal.side_panel_pty_open = false;
+        app.ui.rail = Some(crate::app::RailItem::Agents);
+        app.specs.open = false;
+    }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// TAB 1: `PO View` (`SpecTab::Overview`)
-// Pipeline Stage & Gate Strip (1..11) + Scope Contract (FC-001) + PRD Table + Linked Screens
-// ─────────────────────────────────────────────────────────────────────────────
 /// Public alias for `PO View` (`SpecTab::Overview`) renderer.
 #[allow(dead_code)]
 pub fn show_po_view(app: &mut App, ui: &mut Ui, rect: Rect, pkg: &SpecPackage) {
@@ -3097,1073 +2973,776 @@ pub fn show_qa_view(app: &mut App, ui: &mut Ui, rect: Rect, pkg: &SpecPackage) {
     render_qa_coverage_tab(app, ui, rect, pkg);
 }
 
-fn parity_card_height(sc: &FigmaParityScorecard) -> f32 {
-    let gap_count: usize = sc.pillars.iter().map(|p| p.remaining_gaps.len()).sum();
-    let pillar_rows = sc.pillars.len().max(1) as f32;
-    let gap_rows = gap_count.max(1) as f32;
-    38.0 + 42.0 + 26.0 + pillar_rows * 30.0 + 26.0 + gap_rows * 30.0 + 12.0
-}
+// ─────────────────────────────────────────────────────────────────────────────
+// Right Sidebar (`show_right`, 240px): Contextual `Spec Inspector`
+// Replaces Canvas Design Inspector when `specs_reader_open` is `true`.
+// ─────────────────────────────────────────────────────────────────────────────
 
-fn draw_parity_scorecard_card(
-    ui: &mut Ui,
-    p: &Painter,
-    card_rect: Rect,
-    pkg: &SpecPackage,
-    id_prefix: &str,
-    reader_view: &str,
-) -> Option<String> {
-    let sc = &pkg.parity_scorecard;
-    let mut copied: Option<String> = None;
+pub fn show_right(app: &mut App, ui: &mut Ui, rect: Rect) {
+    app.specs.ensure_loaded();
+    let p = ui.painter().clone();
+    p.rect_filled(rect, 0.0, TOKEN_SURFACE);
+    widgets::vline(&p, rect.left(), rect.top(), rect.bottom(), TOKEN_BORDER);
 
-    p.rect_filled(card_rect, CornerRadius::same(10), TOKEN_SURFACE);
-    let head_rect = Rect::from_min_size(card_rect.min, Vec2::new(card_rect.width(), 38.0));
-    p.rect_filled(
-        head_rect,
-        CornerRadius {
-            nw: 10,
-            ne: 10,
-            sw: 0,
-            se: 0,
-        },
-        TOKEN_SURFACE_2,
-    );
-    widgets::hline(p, head_rect.left(), head_rect.right(), head_rect.bottom(), TOKEN_HAIRLINE);
-
-    let copy_btn = draw_action_button(
-        ui,
-        p,
-        &format!("{id_prefix}-copy-parity-ai"),
-        Pos2::new(head_rect.right() - 14.0, head_rect.center().y),
-        Some(Icon::Sparkle),
-        "Copy Parity Report cho AI",
-        TOKEN_PRIMARY_SOFT,
-        TOKEN_PRIMARY_ROSE,
-        TOKEN_PRIMARY_ORANGE,
-    );
-    if ui
-        .interact(copy_btn, Id::new((id_prefix, "copy-parity-click")), Sense::click())
-        .clicked()
-    {
-        copied = Some(format_parity_report_for_ai(sc, reader_view, &pkg.project_name));
-    }
-
-    let rem_left = draw_ring_pill_right(
-        p,
-        Pos2::new(copy_btn.left() - 8.0, head_rect.center().y),
-        &format!("Remaining to 100%: {:.1}%", sc.remaining_gap_pct),
-        PILL_INFO_FILL,
-        PILL_INFO_STROKE,
-        PILL_INFO_TEXT,
-    );
-    let match_left = draw_ring_pill_right(
-        p,
-        Pos2::new(rem_left - 8.0, head_rect.center().y),
-        &format!("Overall Match: {:.1}%", sc.overall_parity_pct),
-        PILL_OK_FILL,
-        PILL_OK_STROKE,
-        PILL_OK_TEXT,
-    );
+    let header_h = 40.0;
+    let header_rect = Rect::from_min_size(rect.min, Vec2::new(rect.width(), header_h));
+    widgets::hline(&p, header_rect.left(), header_rect.right(), header_rect.bottom() - 1.0, TOKEN_BORDER);
 
     icons::paint(
-        p,
+        &p,
         Icon::Specs,
-        Pos2::new(head_rect.left() + 18.0, head_rect.center().y),
+        Pos2::new(header_rect.left() + 14.0, header_rect.center().y),
         13.0,
-        PILL_OK_TEXT,
-    );
-    let title_max_w = (match_left - (head_rect.left() + 32.0) - 12.0).max(48.0);
-    let title_raw = format!(
-        "Figma 1:1 Parity Meter (vs Figma Desktop {} · .fig v{})",
-        sc.target_figma_version, sc.target_fig_schema_version
-    );
-    let title_clean = widgets::elide(p, &title_raw, &theme::font_small_strong(), title_max_w);
-    p.text(
-        Pos2::new(head_rect.left() + 32.0, head_rect.center().y),
-        Align2::LEFT_CENTER,
-        title_clean,
-        theme::font_small_strong(),
-        TOKEN_TEXT,
-    );
-
-    // Overall Segmented Progress Bar (8px height, #121316 track, #4CC58B / #0D99FF fill)
-    let bar_rect = Rect::from_min_size(
-        Pos2::new(card_rect.left() + 18.0, head_rect.bottom() + 8.0),
-        Vec2::new((card_rect.width() - 36.0).max(100.0), 8.0),
-    );
-    p.rect_filled(bar_rect, CornerRadius::same(4), Color32::from_rgb(0x12, 0x13, 0x16));
-    let ratio = (sc.overall_parity_pct / 100.0).clamp(0.0, 1.0);
-    let fill_rect = Rect::from_min_size(bar_rect.min, Vec2::new(bar_rect.width() * ratio, bar_rect.height()));
-    let bar_col = if sc.overall_parity_pct >= 99.0 {
-        PILL_OK_TEXT
-    } else {
-        Color32::from_rgb(0x0D, 0x99, 0xFF)
-    };
-    p.rect_filled(fill_rect, CornerRadius::same(4), bar_col);
-    let target_x = bar_rect.left() + bar_rect.width() * 0.99;
-    widgets::vline(p, target_x, bar_rect.top() - 2.0, bar_rect.bottom() + 2.0, PILL_INFO_TEXT);
-
-    let cap_y = head_rect.bottom() + 28.0;
-    let cap_raw = format!(
-        "Target: 99.0% (/goal) · Current Weighted Match: {:.1}% · Remaining Delta to 100%: {:.1}%",
-        sc.overall_parity_pct, sc.remaining_gap_pct
-    );
-    let cap_clean = widgets::elide(p, &cap_raw, &theme::font_small(), (card_rect.width() - 36.0).max(60.0));
-    p.text(
-        Pos2::new(card_rect.left() + 18.0, cap_y),
-        Align2::LEFT_CENTER,
-        cap_clean,
-        theme::font_small(),
         TOKEN_TEXT_MUTED,
     );
-
-    // 5-Pillar Breakdown Table Header (#26272C)
-    let tbl_head_y = head_rect.bottom() + 42.0;
-    let tbl_head_rect = Rect::from_min_size(
-        Pos2::new(card_rect.left() + 1.0, tbl_head_y),
-        Vec2::new(card_rect.width() - 2.0, 26.0),
-    );
-    p.rect_filled(tbl_head_rect, CornerRadius::ZERO, TOKEN_SURFACE_2);
-    widgets::hline(p, card_rect.left(), card_rect.right(), tbl_head_rect.top(), TOKEN_HAIRLINE);
-    widgets::hline(p, card_rect.left(), card_rect.right(), tbl_head_rect.bottom(), TOKEN_HAIRLINE);
-
-    let col_pillar_x = card_rect.left() + 18.0;
-    let col_weight_x = card_rect.right() - 380.0;
-    let col_passed_x = card_rect.right() - 290.0;
-    let col_parity_x = card_rect.right() - 180.0;
-    let col_delta_x = card_rect.right() - 95.0;
-
     p.text(
-        Pos2::new(col_pillar_x, tbl_head_rect.center().y),
+        Pos2::new(header_rect.left() + 26.0, header_rect.center().y),
         Align2::LEFT_CENTER,
-        "Pillar",
-        theme::font_small_strong(),
-        TOKEN_TEXT_SUBTLE,
+        "Spec Inspector",
+        theme::font_body_strong(),
+        TOKEN_TEXT,
     );
     p.text(
-        Pos2::new(col_weight_x, tbl_head_rect.center().y),
-        Align2::LEFT_CENTER,
-        "Weight",
-        theme::font_small_strong(),
-        TOKEN_TEXT_SUBTLE,
-    );
-    p.text(
-        Pos2::new(col_passed_x, tbl_head_rect.center().y),
-        Align2::LEFT_CENTER,
-        "Passed / Total",
-        theme::font_small_strong(),
-        TOKEN_TEXT_SUBTLE,
-    );
-    p.text(
-        Pos2::new(col_parity_x, tbl_head_rect.center().y),
-        Align2::LEFT_CENTER,
-        "Parity %",
-        theme::font_small_strong(),
-        TOKEN_TEXT_SUBTLE,
-    );
-    p.text(
-        Pos2::new(col_delta_x, tbl_head_rect.center().y),
-        Align2::LEFT_CENTER,
-        "Delta to 100%",
-        theme::font_small_strong(),
+        Pos2::new(header_rect.right() - 12.0, header_rect.center().y),
+        Align2::RIGHT_CENTER,
+        ".md · v2",
+        theme::font_small(),
         TOKEN_TEXT_SUBTLE,
     );
 
-    let mut row_y = tbl_head_rect.bottom();
-    for (pi, pl) in sc.pillars.iter().enumerate() {
-        if pi > 0 {
-            widgets::hline(p, card_rect.left() + 16.0, card_rect.right() - 16.0, row_y, TOKEN_HAIRLINE);
-        }
-        let cy = row_y + 15.0;
-        let p_name = widgets::elide(
-            p,
-            &pl.name,
-            &theme::font_body_strong(),
-            (col_weight_x - col_pillar_x - 16.0).max(60.0),
-        );
-        p.text(
-            Pos2::new(col_pillar_x, cy),
-            Align2::LEFT_CENTER,
-            p_name,
-            theme::font_body_strong(),
-            TOKEN_TEXT,
-        );
-        p.text(
-            Pos2::new(col_weight_x, cy),
-            Align2::LEFT_CENTER,
-            format!("{:.0}%", pl.weight_pct),
-            theme::font_body(),
-            TOKEN_TEXT_MUTED,
-        );
-        p.text(
-            Pos2::new(col_passed_x, cy),
-            Align2::LEFT_CENTER,
-            format!("{} / {}", pl.passed_items, pl.total_items),
-            theme::font_body(),
-            TOKEN_TEXT,
-        );
-        draw_ring_pill_left(
-            p,
-            Pos2::new(col_parity_x, cy),
-            &format!("{:.1}%", pl.score_pct),
-            PILL_OK_FILL,
-            PILL_OK_STROKE,
-            PILL_OK_TEXT,
-        );
-        let w_gap = pl.weighted_gap_pct();
-        let (delta_str, delta_col) = if w_gap <= 0.001 {
-            ("0.00%".to_string(), PILL_OK_TEXT)
-        } else {
-            (format!("-{:.2}%", w_gap), PILL_WARN_TEXT)
-        };
-        p.text(
-            Pos2::new(col_delta_x, cy),
-            Align2::LEFT_CENTER,
-            delta_str,
-            theme::font_small_strong(),
-            delta_col,
-        );
-        row_y += 30.0;
-    }
+    let Some(pkg) = app.specs.current_package().cloned() else {
+        return;
+    };
+    let kpi = pkg.kpi_metrics();
 
-    // Remaining Gaps to 100% Section
-    let gap_head_rect = Rect::from_min_size(
-        Pos2::new(card_rect.left() + 1.0, row_y),
-        Vec2::new(card_rect.width() - 2.0, 26.0),
-    );
-    p.rect_filled(gap_head_rect, CornerRadius::ZERO, TOKEN_SURFACE_2);
-    widgets::hline(p, card_rect.left(), card_rect.right(), gap_head_rect.top(), TOKEN_HAIRLINE);
-    widgets::hline(p, card_rect.left(), card_rect.right(), gap_head_rect.bottom(), TOKEN_HAIRLINE);
-    p.text(
-        Pos2::new(card_rect.left() + 18.0, gap_head_rect.center().y),
-        Align2::LEFT_CENTER,
-        "REMAINING GAPS TO 100% (ID | PILLAR | ITEM | IMPACT % | FILE)",
-        theme::font_small_strong(),
-        TOKEN_TEXT_SUBTLE,
-    );
-
-    row_y = gap_head_rect.bottom();
-    let gaps: Vec<(&str, &ParityGapItem)> = sc
-        .pillars
-        .iter()
-        .flat_map(|pl| pl.remaining_gaps.iter().map(move |g| (pl.id.as_str(), g)))
-        .collect();
-
-    if gaps.is_empty() {
-        let cy = row_y + 15.0;
-        let pill_r = draw_ring_pill_left(
-            p,
-            Pos2::new(card_rect.left() + 18.0, cy),
-            "100% MATCH",
-            PILL_OK_FILL,
-            PILL_OK_STROKE,
-            PILL_OK_TEXT,
-        );
-        let msg = widgets::elide(
-            p,
-            "100% / >=99% Goal Achieved — 0 remaining parity gaps across all 5 pillars",
-            &theme::font_body(),
-            (card_rect.right() - pill_r - 24.0).max(60.0),
-        );
-        p.text(Pos2::new(pill_r + 10.0, cy), Align2::LEFT_CENTER, msg, theme::font_body(), TOKEN_TEXT);
-    } else {
-        for (gi, (pil_id, gap)) in gaps.iter().enumerate() {
-            if gi > 0 {
-                widgets::hline(p, card_rect.left() + 16.0, card_rect.right() - 16.0, row_y, TOKEN_HAIRLINE);
-            }
-            let cy = row_y + 15.0;
-            let file_left = draw_ring_pill_right(
-                p,
-                Pos2::new(card_rect.right() - 16.0, cy),
-                &gap.file_hint,
-                TOKEN_CODE_BG,
-                TOKEN_BORDER,
-                TOKEN_TEXT_MUTED,
-            );
-            let imp_left = draw_ring_pill_right(
-                p,
-                Pos2::new(file_left - 8.0, cy),
-                &format!("-{:.2}%", gap.impact_pct),
-                PILL_WARN_FILL,
-                PILL_WARN_STROKE,
-                PILL_WARN_TEXT,
-            );
-            let id_right = draw_ring_pill_left(
-                p,
-                Pos2::new(card_rect.left() + 18.0, cy),
-                &gap.id,
-                PILL_INFO_FILL,
-                PILL_INFO_STROKE,
-                PILL_INFO_TEXT,
-            );
-            let pil_right = draw_ring_pill_left(
-                p,
-                Pos2::new(id_right + 6.0, cy),
-                pil_id,
-                TOKEN_SURFACE_2,
-                TOKEN_BORDER,
-                TOKEN_TEXT_MUTED,
-            );
-            let item_clean = widgets::elide(p, &gap.title, &theme::font_body(), (imp_left - pil_right - 20.0).max(48.0));
-            p.text(
-                Pos2::new(pil_right + 10.0, cy),
-                Align2::LEFT_CENTER,
-                item_clean,
-                theme::font_body(),
-                TOKEN_TEXT,
-            );
-            row_y += 30.0;
-        }
-    }
-
-    p.rect_stroke(card_rect, CornerRadius::same(10), Stroke::new(1.0, TOKEN_BORDER), StrokeKind::Inside);
-    copied
-}
-
-fn render_po_view_tab(app: &mut App, ui: &mut Ui, rect: Rect, pkg: &SpecPackage) {
-    let parity_h = parity_card_height(&pkg.parity_scorecard);
-    let stage_rows = (pkg.pipeline_stages.len() + 3) / 4;
-    let card1_h = 38.0 + stage_rows as f32 * 36.0 + 16.0;
-    let card2_h = 38.0 + 36.0 + pkg.business_rules.len().max(1) as f32 * 34.0 + 14.0;
-    let card3_h = 38.0 + 32.0 + pkg.requirements.len().max(1) as f32 * 36.0 + 14.0;
-    let card4_h = 38.0 + (pkg.screens.len() + pkg.open_items.len()).max(1) as f32 * 36.0 + 14.0;
-    let est_h = parity_h + card1_h + card2_h + card3_h + card4_h + 78.0;
-
-    let mut scroll = app.specs.scroll;
-    wheel_scroll(ui, rect, &mut scroll, est_h);
-    app.specs.scroll = scroll;
+    let body_rect = Rect::from_min_max(Pos2::new(rect.left(), header_rect.bottom()), rect.max);
+    let est_h = 560.0;
+    let mut rscroll = app.specs.right_scroll;
+    wheel_scroll(ui, body_rect, &mut rscroll, est_h);
+    app.specs.right_scroll = rscroll;
 
     let mut copied_payload: Option<String> = None;
+    let mut open_agent_prompt: Option<String> = None;
+    let mut drop_spec_card = false;
 
-    clipped(ui, rect, |ui| {
+    clipped(ui, body_rect, |ui| {
         let p = ui.painter().clone();
-        let mut y = rect.top() - scroll;
-        let w = (rect.width() - 10.0).max(200.0);
+        let mut y = body_rect.top() + 12.0 - rscroll;
+        let pad_x = 12.0;
+        let row_w = (body_rect.width() - pad_x * 2.0).max(80.0);
 
-        // SECTION CARD 0: 5-Pillar Figma 1:1 Parity Scorecard (`US-12` / `DIR-16`)
-        let c0 = Rect::from_min_size(Pos2::new(rect.left(), y), Vec2::new(w, parity_h));
-        if let Some(payload) = draw_parity_scorecard_card(ui, &p, c0, pkg, "po", "PO View") {
+        // 1. ON THIS PAGE (Interactive TOC Outline)
+        p.text(
+            Pos2::new(body_rect.left() + pad_x, y),
+            Align2::LEFT_CENTER,
+            "ON THIS PAGE",
+            theme::font_small_strong(),
+            TOKEN_TEXT_SUBTLE,
+        );
+        y += 20.0;
+
+        let toc_items: [(&str, SpecTab, f32); 5] = [
+            ("1. Problem & Outcome", SpecTab::Overview, 0.0),
+            ("2. Canvas Flow Embed", SpecTab::Overview, 180.0),
+            ("3. Baseline & Parity", SpecTab::Overview, 340.0),
+            ("4. PRD Requirements", SpecTab::Overview, 540.0),
+            ("5. User Stories & Gates", SpecTab::UseCases, 0.0),
+        ];
+        for (ti, (label, target_tab, target_scroll)) in toc_items.iter().enumerate() {
+            let tr = Rect::from_min_size(Pos2::new(body_rect.left() + pad_x, y), Vec2::new(row_w, 24.0));
+            let resp = ui.interact(tr, Id::new(("spec-right-toc", ti)), Sense::click());
+            let is_active = app.specs.active_tab == *target_tab
+                && ((*target_tab != SpecTab::Overview) || (app.specs.scroll - *target_scroll).abs() < 120.0);
+            if is_active || resp.hovered() {
+                p.rect_filled(tr, CornerRadius::same(4), TOKEN_SURFACE_3);
+            }
+            if is_active {
+                let bar = Rect::from_min_size(Pos2::new(tr.left(), tr.top() + 4.0), Vec2::new(2.0, 16.0));
+                p.rect_filled(bar, CornerRadius::same(1), Color32::from_rgb(0x0D, 0x99, 0xFF));
+            }
+            let clean = widgets::elide(&p, label, &theme::font_body(), (row_w - 14.0).max(40.0));
+            p.text(
+                Pos2::new(tr.left() + 10.0, tr.center().y),
+                Align2::LEFT_CENTER,
+                clean,
+                if is_active { theme::font_body_medium() } else { theme::font_body() },
+                if is_active { TOKEN_TEXT } else { TOKEN_TEXT_MUTED },
+            );
+            if resp.clicked() {
+                app.specs.active_tab = *target_tab;
+                app.specs.scroll = *target_scroll;
+            }
+            y += 26.0;
+        }
+
+        y += 8.0;
+        widgets::hline(&p, body_rect.left() + pad_x, body_rect.right() - pad_x, y, TOKEN_HAIRLINE);
+        y += 14.0;
+
+        // 2. SPEC COMMENTS & ANNOTATIONS (Mirrors Figma Specs right margin comment cards)
+        p.text(
+            Pos2::new(body_rect.left() + pad_x, y),
+            Align2::LEFT_CENTER,
+            "SPEC COMMENTS & ANNOTATIONS",
+            theme::font_small_strong(),
+            TOKEN_TEXT_SUBTLE,
+        );
+        y += 18.0;
+
+        let ccard_1 = Rect::from_min_size(Pos2::new(body_rect.left() + pad_x, y), Vec2::new(row_w, 60.0));
+        p.rect_filled(ccard_1, CornerRadius::same(6), TOKEN_SURFACE_3);
+        p.rect_stroke(ccard_1, CornerRadius::same(6), Stroke::new(1.0, TOKEN_BORDER), StrokeKind::Inside);
+        p.text(
+            Pos2::new(ccard_1.left() + 8.0, ccard_1.top() + 14.0),
+            Align2::LEFT_CENTER,
+            "Product Lead · 14m ago",
+            theme::font_small_strong(),
+            TOKEN_TEXT,
+        );
+        let c1_l1 = widgets::elide(&p, "Keep Spec Reader lightweight &", &theme::font_small(), (row_w - 16.0).max(40.0));
+        let c1_l2 = widgets::elide(&p, "synced with Agent Chat (@prd).", &theme::font_small(), (row_w - 16.0).max(40.0));
+        p.text(Pos2::new(ccard_1.left() + 8.0, ccard_1.top() + 31.0), Align2::LEFT_CENTER, c1_l1, theme::font_small(), TOKEN_TEXT_MUTED);
+        p.text(Pos2::new(ccard_1.left() + 8.0, ccard_1.top() + 46.0), Align2::LEFT_CENTER, c1_l2, theme::font_small(), TOKEN_TEXT_MUTED);
+        y += 68.0;
+
+        widgets::hline(&p, body_rect.left() + pad_x, body_rect.right() - pad_x, y, TOKEN_HAIRLINE);
+        y += 14.0;
+
+        // 3. PROPERTIES & CONNECTORS
+        p.text(
+            Pos2::new(body_rect.left() + pad_x, y),
+            Align2::LEFT_CENTER,
+            "PROPERTIES & CONNECTORS",
+            theme::font_small_strong(),
+            TOKEN_TEXT_SUBTLE,
+        );
+        y += 20.0;
+
+        let props = [
+            ("Status", format!("{}/{} Gates Approved", kpi.approved_gates, kpi.total_gates)),
+            ("Medium", "Figma Specs (.md)".to_string()),
+            ("Coverage", format!("{} REQs · {} US · {} ACs", kpi.req_count, kpi.us_count, kpi.ac_count)),
+            ("Connectors", "GitHub · MCP · Canvas".to_string()),
+            ("Parity", format!("{:.1}% (387/387)", pkg.parity_scorecard.overall_parity_pct)),
+        ];
+        for (k, v) in props {
+            p.text(
+                Pos2::new(body_rect.left() + pad_x, y),
+                Align2::LEFT_CENTER,
+                k,
+                theme::font_small(),
+                TOKEN_TEXT_SUBTLE,
+            );
+            let v_clean = widgets::elide(&p, &v, &theme::font_small_medium(), (row_w - 68.0).max(40.0));
+            p.text(
+                Pos2::new(body_rect.right() - pad_x, y),
+                Align2::RIGHT_CENTER,
+                v_clean,
+                theme::font_small_medium(),
+                TOKEN_TEXT,
+            );
+            y += 22.0;
+        }
+
+        y += 6.0;
+        widgets::hline(&p, body_rect.left() + pad_x, body_rect.right() - pad_x, y, TOKEN_HAIRLINE);
+        y += 14.0;
+
+        // 4. AGENT & CANVAS ACTIONS (`Claude · Codex · AGY · Grok`)
+        p.text(
+            Pos2::new(body_rect.left() + pad_x, y),
+            Align2::LEFT_CENTER,
+            "BUILD WITH AGENT & CANVAS",
+            theme::font_small_strong(),
+            TOKEN_TEXT_SUBTLE,
+        );
+        y += 18.0;
+
+        // Button 1: Reference @spec in Agent (`hero-copy-ai`)
+        let btn_ai = Rect::from_min_size(Pos2::new(body_rect.left() + pad_x, y), Vec2::new(row_w, 28.0));
+        let resp_ai = ui.interact(btn_ai, Id::new("hero-copy-ai"), Sense::click());
+        p.rect_filled(
+            btn_ai,
+            CornerRadius::same(6),
+            if resp_ai.hovered() { TOKEN_SURFACE_2 } else { TOKEN_SURFACE_3 },
+        );
+        p.rect_stroke(
+            btn_ai,
+            CornerRadius::same(6),
+            Stroke::new(1.0, Color32::from_rgb(0x0D, 0x99, 0xFF)),
+            StrokeKind::Inside,
+        );
+        let b_ai_lbl = widgets::elide(&p, "Reference @spec in Agent", &theme::font_small_strong(), (row_w - 16.0).max(40.0));
+        p.text(btn_ai.center(), Align2::CENTER_CENTER, b_ai_lbl, theme::font_small_strong(), TOKEN_TEXT);
+        widgets::record(ui, "hero-copy-ai", btn_ai);
+        if resp_ai.clicked() {
+            let active_us = pkg.stories.get(app.specs.selected_story).or_else(|| pkg.stories.first());
+            let payload = if let Some(us) = active_us {
+                format_copy_for_ai(
+                    &us.user_story_md,
+                    &us.file_path,
+                    us.line_start,
+                    us.line_end,
+                    &us.id,
+                    &us.title,
+                    app.specs.active_tab.label(),
+                    &pkg.project_name,
+                    "Reference this Spec (@spec) to implement the User Story and verify all ACs.",
+                )
+            } else {
+                format_copy_for_ai(
+                    &pkg.title,
+                    &format!("{}/spec.manifest.json", pkg.root_display),
+                    1,
+                    30,
+                    &pkg.contract_id,
+                    &pkg.title,
+                    app.specs.active_tab.label(),
+                    &pkg.project_name,
+                    "",
+                )
+            };
             copied_payload = Some(payload);
         }
-        y = c0.bottom() + 14.0;
+        y += 34.0;
 
-        // SECTION CARD 1: 11-Stage Pipeline & Gate Strip
-        let c1 = Rect::from_min_size(Pos2::new(rect.left(), y), Vec2::new(w, card1_h.max(76.0)));
-        draw_section_card_shell(&p, c1, Icon::Flag, "PIPELINE STAGES & GATES (1 INTAKE -> 11 HANDOFF)", "11 Stages · G1–G5");
-        let cols = 4usize;
-        let col_w = (w - 32.0) / cols as f32;
-        for (idx, st) in pkg.pipeline_stages.iter().enumerate() {
-            let r_idx = idx / cols;
-            let c_idx = idx % cols;
-            let sx = c1.left() + 16.0 + c_idx as f32 * col_w;
-            let sy = c1.top() + 46.0 + r_idx as f32 * 36.0;
-            if c_idx == 0 && r_idx > 0 {
-                widgets::hline(&p, c1.left() + 16.0, c1.right() - 16.0, sy - 4.0, TOKEN_HAIRLINE);
-            }
-            let (pfill, pstroke, pfg) = status_pill_colors(&st.status);
-            let pill_end = draw_ring_pill_left(
-                &p,
-                Pos2::new(sx, sy + 14.0),
-                &format!("{} {}", st.index, st.id),
-                pfill,
-                pstroke,
-                pfg,
-            );
-            let meta = format!("{} · {}", st.owner, st.gate_id);
-            let meta_clean = widgets::elide(&p, &meta, &theme::font_small(), (sx + col_w - pill_end - 12.0).max(36.0));
-            p.text(
-                Pos2::new(pill_end + 8.0, sy + 14.0),
-                Align2::LEFT_CENTER,
-                meta_clean,
-                theme::font_small(),
-                TOKEN_TEXT_MUTED,
-            );
+        // Button 2: Open in Agent Chat (`spec-right-open-agent`)
+        let btn_chat = Rect::from_min_size(Pos2::new(body_rect.left() + pad_x, y), Vec2::new(row_w, 28.0));
+        let resp_chat = ui.interact(btn_chat, Id::new("spec-right-open-agent"), Sense::click());
+        p.rect_filled(
+            btn_chat,
+            CornerRadius::same(6),
+            if resp_chat.hovered() { TOKEN_SURFACE_2 } else { TOKEN_SURFACE_3 },
+        );
+        p.rect_stroke(btn_chat, CornerRadius::same(6), Stroke::new(1.0, TOKEN_BORDER), StrokeKind::Inside);
+        let b_chat_lbl = widgets::elide(&p, "Open Agent Chat (Claude/Codex/Grok)", &theme::font_small_medium(), (row_w - 16.0).max(40.0));
+        p.text(btn_chat.center(), Align2::CENTER_CENTER, b_chat_lbl, theme::font_small_medium(), TOKEN_TEXT_MUTED);
+        widgets::record(ui, "spec-right-open-agent", btn_chat);
+        if resp_chat.clicked() {
+            let active_us = pkg.stories.get(app.specs.selected_story).or_else(|| pkg.stories.first());
+            let story_ref = active_us.map(|u| u.id.as_str()).unwrap_or("US-01");
+            open_agent_prompt = Some(format!(
+                "@prd Reference plans/specs/{}/prd/PRD.md & {} and build on Canvas",
+                pkg.slug, story_ref
+            ));
         }
-        y = c1.bottom() + 14.0;
+        y += 34.0;
 
-        // SECTION CARD 2: Scope Contract (`FC-001`) & Business Rules (`BR-01..BR-05`)
-        let c2 = Rect::from_min_size(Pos2::new(rect.left(), y), Vec2::new(w, card2_h.max(84.0)));
-        draw_section_card_shell(
-            &p,
-            c2,
-            Icon::Book,
-            &format!("SCOPE CONTRACT · {} ({})", pkg.contract_id, pkg.contract_title),
-            "Locked (G2)",
+        // Button 3: Drop Spec Card onto Canvas (`hero-apply-spec`)
+        let btn_apply = Rect::from_min_size(Pos2::new(body_rect.left() + pad_x, y), Vec2::new(row_w, 28.0));
+        let resp_apply = ui.interact(btn_apply, Id::new("hero-apply-spec"), Sense::click());
+        p.rect_filled(
+            btn_apply,
+            CornerRadius::same(6),
+            if resp_apply.hovered() { TOKEN_SURFACE_2 } else { TOKEN_SURFACE_3 },
         );
-        let mut ry = c2.top() + 56.0;
-        let outcome_str = widgets::elide(
-            &p,
-            &format!("Outcome: {}", pkg.contract_outcome),
-            &theme::font_body_strong(),
-            (w - 36.0).max(60.0),
-        );
-        p.text(Pos2::new(c2.left() + 18.0, ry), Align2::LEFT_CENTER, outcome_str, theme::font_body_strong(), TOKEN_TEXT);
-        ry += 20.0;
-
-        for br in &pkg.business_rules {
-            widgets::hline(&p, c2.left() + 16.0, c2.right() - 16.0, ry, TOKEN_HAIRLINE);
-            ry += 17.0;
-            let src_left = draw_ring_pill_right(
-                &p,
-                Pos2::new(c2.right() - 16.0, ry),
-                &br.source,
-                TOKEN_CODE_BG,
-                TOKEN_BORDER,
-                TOKEN_TEXT_MUTED,
-            );
-            let id_right = draw_ring_pill_left(
-                &p,
-                Pos2::new(c2.left() + 18.0, ry),
-                &br.id,
-                PILL_INFO_FILL,
-                PILL_INFO_STROKE,
-                PILL_INFO_TEXT,
-            );
-            let rule_max_w = (src_left - id_right - 20.0).max(48.0);
-            let rule_txt = widgets::elide(&p, &br.rule, &theme::font_body(), rule_max_w);
-            p.text(Pos2::new(id_right + 10.0, ry), Align2::LEFT_CENTER, rule_txt, theme::font_body(), TOKEN_TEXT);
-            ry += 17.0;
-        }
-        y = c2.bottom() + 14.0;
-
-        // SECTION CARD 3: PRD Requirements Table (`REQ-01..REQ-05`)
-        let c3 = Rect::from_min_size(Pos2::new(rect.left(), y), Vec2::new(w, card3_h.max(84.0)));
-        draw_section_card_shell(
-            &p,
-            c3,
-            Icon::Specs,
-            "PRD REQUIREMENTS TABLE (prd/PRD.md)",
-            &format!("{} REQs", pkg.requirements.len()),
-        );
-        let mut req_y = c3.top() + 54.0;
-        p.text(Pos2::new(c3.left() + 18.0, req_y), Align2::LEFT_CENTER, "ID", theme::font_small_strong(), TOKEN_TEXT_SUBTLE);
-        p.text(
-            Pos2::new(c3.left() + 96.0, req_y),
-            Align2::LEFT_CENTER,
-            "Requirement Description",
-            theme::font_small_strong(),
-            TOKEN_TEXT_SUBTLE,
-        );
-        p.text(
-            Pos2::new(c3.right() - 250.0, req_y),
-            Align2::LEFT_CENTER,
-            "Source & US",
-            theme::font_small_strong(),
-            TOKEN_TEXT_SUBTLE,
-        );
-        req_y += 16.0;
-
-        for (ri, req) in pkg.requirements.iter().enumerate() {
-            widgets::hline(&p, c3.left() + 16.0, c3.right() - 16.0, req_y, TOKEN_HAIRLINE);
-            req_y += 18.0;
-            let copy_btn = draw_action_button(
-                ui,
-                &p,
-                &format!("po-req-copy-{ri}"),
-                Pos2::new(c3.right() - 16.0, req_y),
-                Some(Icon::Sparkle),
-                "Copy cho AI",
-                TOKEN_SURFACE_2,
-                TOKEN_BORDER,
-                TOKEN_TEXT_MUTED,
-            );
-            if ui.interact(copy_btn, Id::new(("po-req-copy-click", ri)), Sense::click()).clicked() {
-                copied_payload = Some(format_copy_for_ai(
-                    &format!("{} — {}", req.id, req.requirement),
-                    &req.file_path,
-                    req.line_start,
-                    req.line_end,
-                    &req.id,
-                    &pkg.title,
-                    "PO View",
-                    &pkg.project_name,
-                    "Kiểm tra độ phủ REQ sang US và AC.",
-                ));
-            }
-            let us_joined = req.us_refs.join(", ");
-            let us_left = draw_ring_pill_right(
-                &p,
-                Pos2::new(copy_btn.left() - 10.0, req_y),
-                &us_joined,
-                PILL_OK_FILL,
-                PILL_OK_STROKE,
-                PILL_OK_TEXT,
-            );
-            let src_left = draw_ring_pill_right(
-                &p,
-                Pos2::new(us_left - 8.0, req_y),
-                &req.source,
-                TOKEN_CODE_BG,
-                TOKEN_BORDER,
-                TOKEN_TEXT_MUTED,
-            );
-            let id_right = draw_ring_pill_left(
-                &p,
-                Pos2::new(c3.left() + 18.0, req_y),
-                &req.id,
-                PILL_INFO_FILL,
-                PILL_INFO_STROKE,
-                PILL_INFO_TEXT,
-            );
-            let desc_max = (src_left - id_right - 20.0).max(48.0);
-            let desc_str = widgets::elide(&p, &req.requirement, &theme::font_body(), desc_max);
-            p.text(Pos2::new(id_right + 12.0, req_y), Align2::LEFT_CENTER, desc_str, theme::font_body(), TOKEN_TEXT);
-            req_y += 18.0;
-        }
-        y = c3.bottom() + 14.0;
-
-        // SECTION CARD 4: Coded / Canvas Screen Previews (`S01..S03`) & Open Items (`OPEN`)
-        let c4 = Rect::from_min_size(Pos2::new(rect.left(), y), Vec2::new(w, card4_h.max(84.0)));
-        draw_section_card_shell(
-            &p,
-            c4,
-            Icon::Eye,
-            "CODED / CANVAS SCREEN PREVIEWS (S01..S03) & OPEN ITEMS",
-            &format!("{} Screens · {} Open", pkg.screens.len(), pkg.open_items.len()),
-        );
-        let mut sy = c4.top() + 56.0;
-        for (si, scr) in pkg.screens.iter().enumerate() {
-            if si > 0 {
-                widgets::hline(&p, c4.left() + 16.0, c4.right() - 16.0, sy - 18.0, TOKEN_HAIRLINE);
-            }
-            let states_txt = format!("{} states ({})", scr.states.len(), scr.states.join(", "));
-            let st_left = draw_ring_pill_right(
-                &p,
-                Pos2::new(c4.right() - 16.0, sy),
-                &scr.story,
-                PILL_INFO_FILL,
-                PILL_INFO_STROKE,
-                PILL_INFO_TEXT,
-            );
-            let id_right = draw_ring_pill_left(
-                &p,
-                Pos2::new(c4.left() + 18.0, sy),
-                &scr.id,
-                PILL_OK_FILL,
-                PILL_OK_STROKE,
-                PILL_OK_TEXT,
-            );
-            let line_txt = format!("{}  ·  {}", scr.name, states_txt);
-            let clean = widgets::elide(&p, &line_txt, &theme::font_body(), (st_left - id_right - 20.0).max(48.0));
-            p.text(Pos2::new(id_right + 10.0, sy), Align2::LEFT_CENTER, clean, theme::font_body(), TOKEN_TEXT);
-            sy += 36.0;
-        }
-        for oi in &pkg.open_items {
-            widgets::hline(&p, c4.left() + 16.0, c4.right() - 16.0, sy - 18.0, TOKEN_HAIRLINE);
-            let st_left = draw_ring_pill_right(
-                &p,
-                Pos2::new(c4.right() - 16.0, sy),
-                &oi.status,
-                PILL_WARN_FILL,
-                PILL_WARN_STROKE,
-                PILL_WARN_TEXT,
-            );
-            let id_right = draw_ring_pill_left(
-                &p,
-                Pos2::new(c4.left() + 18.0, sy),
-                &oi.id,
-                PILL_WARN_FILL,
-                PILL_WARN_STROKE,
-                PILL_WARN_TEXT,
-            );
-            let txt = format!("[{}] {}", oi.scope, oi.summary);
-            let clean = widgets::elide(&p, &txt, &theme::font_body(), (st_left - id_right - 20.0).max(48.0));
-            p.text(Pos2::new(id_right + 10.0, sy), Align2::LEFT_CENTER, clean, theme::font_body(), TOKEN_TEXT);
-            sy += 36.0;
+        p.rect_stroke(btn_apply, CornerRadius::same(6), Stroke::new(1.0, TOKEN_BORDER), StrokeKind::Inside);
+        let b_apply_lbl = widgets::elide(&p, "Drop Spec Card on Canvas", &theme::font_small_medium(), (row_w - 16.0).max(40.0));
+        p.text(btn_apply.center(), Align2::CENTER_CENTER, b_apply_lbl, theme::font_small_medium(), TOKEN_TEXT_MUTED);
+        widgets::record(ui, "hero-apply-spec", btn_apply);
+        if resp_apply.clicked() {
+            drop_spec_card = true;
         }
     });
-    scrollbar(ui, rect, app.specs.scroll, est_h);
+    scrollbar(ui, body_rect, app.specs.right_scroll, est_h);
 
     if let Some(payload) = copied_payload {
         ui.ctx().copy_text(payload.clone());
         app.specs.last_ai_copy = Some(payload);
-        app.show_toast("Copied PRD Requirement citation for AI", false);
+        app.show_toast("Referenced @spec in Agent CLI (Claude / Codex / AGY / Grok)", false);
+    }
+    if let Some(prompt) = open_agent_prompt {
+        app.terminal.submit_chat_prompt(&prompt, None);
+        app.terminal.side_panel_pty_open = false;
+        app.ui.rail = Some(crate::app::RailItem::Agents);
+        app.specs.open = false;
+    }
+    if drop_spec_card {
+        drop_spec_card_onto_canvas(app, &pkg);
     }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// TAB 2: `Dev View (US & AC)` (`SpecTab::UseCases`)
-// Story selector (`US-01`, `US-02`, `US-03`) + Trace chips + 6 canonical US sections + per-US/AC `Copy cho AI`
+// TAB 1: `PRD & Overview` (`SpecTab::Overview`) — 1:1 Figma Specs Markdown Medium
+// Centered 660px Document Sheet + Inline Highlight + Bidirectional Canvas Embed + Clean Tables
 // ─────────────────────────────────────────────────────────────────────────────
-fn render_dev_view_tab(app: &mut App, ui: &mut Ui, rect: Rect, pkg: &SpecPackage) {
-    if pkg.stories.is_empty() {
-        return;
-    }
-    let story_idx = app.specs.selected_story.min(pkg.stories.len() - 1);
-    let us = &pkg.stories[story_idx];
 
-    // Story selector bar at top (38px)
-    let p = ui.painter().clone();
-    let sel_h = 38.0;
-    let sel_rect = Rect::from_min_size(rect.min, Vec2::new((rect.width() - 10.0).max(200.0), sel_h));
-    p.rect_filled(sel_rect, CornerRadius::same(8), TOKEN_SURFACE);
-    p.rect_stroke(sel_rect, CornerRadius::same(8), Stroke::new(1.0, TOKEN_BORDER), StrokeKind::Inside);
-
-    let copy_us_btn = draw_action_button(
-        ui,
-        &p,
-        "dev-copy-us-top",
-        Pos2::new(sel_rect.right() - 12.0, sel_rect.center().y),
-        Some(Icon::Sparkle),
-        "Copy cho AI",
-        TOKEN_PRIMARY_SOFT,
-        TOKEN_PRIMARY_ROSE,
-        TOKEN_PRIMARY_ORANGE,
-    );
-    if ui.interact(copy_us_btn, Id::new("dev-copy-us-top-click"), Sense::click()).clicked() {
-        let payload = format_copy_for_ai(
-            &us.user_story_md,
-            &us.file_path,
-            us.line_start,
-            us.line_end,
-            &us.id,
-            &us.title,
-            "Dev View",
-            &pkg.project_name,
-            "Triển khai User Story này và đảm bảo toàn bộ AC/SCN vượt qua kiểm thử.",
-        );
-        ui.ctx().copy_text(payload.clone());
-        app.specs.last_ai_copy = Some(payload);
-        app.show_toast(format!("Copied {} citation for AI", us.id), false);
-    }
-
-    let mut sx = sel_rect.left() + 10.0;
-    for (idx, st) in pkg.stories.iter().enumerate() {
-        let btn_label = format!("{} · {}", st.id, st.title);
-        let clean_lbl = widgets::elide(&p, &btn_label, &theme::font_small_strong(), 210.0);
-        let tw = widgets::text_width(&p, &clean_lbl, &theme::font_small_strong());
-        let bw = (tw + 20.0).max(56.0);
-        if sx + bw > copy_us_btn.left() - 12.0 {
-            break;
-        }
-        let br = Rect::from_min_size(Pos2::new(sx, sel_rect.center().y - 13.0), Vec2::new(bw, 26.0));
-        let resp = ui.interact(br, Id::new(("dev-story-pill", idx)), Sense::click());
-        let active = idx == story_idx;
-        let (fill, stroke, fg) = if active {
-            (PILL_INFO_FILL, PILL_INFO_STROKE, PILL_INFO_TEXT)
-        } else if resp.hovered() {
-            (TOKEN_SURFACE_2, TOKEN_BORDER, TOKEN_TEXT)
-        } else {
-            (TOKEN_SURFACE_3, TOKEN_BORDER, TOKEN_TEXT_MUTED)
-        };
-        p.rect_filled(br, CornerRadius::same(99), fill);
-        p.rect_stroke(br, CornerRadius::same(99), Stroke::new(1.0, stroke), StrokeKind::Inside);
-        p.text(br.center(), Align2::CENTER_CENTER, clean_lbl, theme::font_small_strong(), fg);
-        if resp.clicked() {
-            app.specs.selected_story = idx;
-            app.specs.scroll = 0.0;
-        }
-        sx = br.right() + 8.0;
-    }
-
-    let body_rect = Rect::from_min_max(Pos2::new(rect.left(), sel_rect.bottom() + 10.0), rect.max);
-    let card1_h = 38.0 + 42.0 + 36.0 + us.flow_steps.len().max(1) as f32 * 30.0 + us.business_rules.len() as f32 * 32.0 + 20.0;
-    let card2_h = 38.0 + 30.0 + us.acceptance_criteria.len().max(1) as f32 * 38.0 + 16.0;
-    let card3_h = 38.0 + us.edge_cases.len().max(1) as f32 * 32.0 + us.ascii_wireframe.len() as f32 * 18.0 + 28.0;
-    let est_h = card1_h + card2_h + card3_h + 48.0;
-
-    let mut scroll = app.specs.scroll;
-    wheel_scroll(ui, body_rect, &mut scroll, est_h);
-    app.specs.scroll = scroll;
-
-    let mut copied_ac: Option<(String, String)> = None;
-
-    clipped(ui, body_rect, |ui| {
-        let p = ui.painter().clone();
-        let mut y = body_rect.top() - scroll;
-        let w = (body_rect.width() - 10.0).max(200.0);
-
-        // CARD 1: `1. User Story`, `2. Flow`, `3. Business Rules` + Trace Chips (`REQ`, `D`, `S`, `W`)
-        let c1 = Rect::from_min_size(Pos2::new(body_rect.left(), y), Vec2::new(w, card1_h.max(96.0)));
-        draw_section_card_shell(
-            &p,
-            c1,
-            Icon::Dev,
-            &format!("{} · {} ({} · {})", us.id, us.title, us.priority, us.wave),
-            &us.file_path,
-        );
-        let mut ry = c1.top() + 54.0;
-
-        // Trace chips row (`REQ-xx`, `D-xx`, `S-xx`, `W-xx`)
-        let mut tx = c1.left() + 18.0;
-        for req in &us.req_refs {
-            tx = draw_ring_pill_left(&p, Pos2::new(tx, ry), req, PILL_INFO_FILL, PILL_INFO_STROKE, PILL_INFO_TEXT) + 6.0;
-        }
-        for dec in &us.decision_refs {
-            tx = draw_ring_pill_left(&p, Pos2::new(tx, ry), dec, PILL_WARN_FILL, PILL_WARN_STROKE, PILL_WARN_TEXT) + 6.0;
-        }
-        for scr in &us.screens {
-            tx = draw_ring_pill_left(&p, Pos2::new(tx, ry), scr, PILL_OK_FILL, PILL_OK_STROKE, PILL_OK_TEXT) + 6.0;
-        }
-        for brd in &us.boards {
-            tx = draw_ring_pill_left(&p, Pos2::new(tx, ry), brd, TOKEN_CODE_BG, TOKEN_BORDER, TOKEN_TEXT_MUTED) + 6.0;
-        }
-        let _ = tx;
-        ry += 22.0;
-        widgets::hline(&p, c1.left() + 16.0, c1.right() - 16.0, ry, TOKEN_HAIRLINE);
-        ry += 18.0;
-
-        // 1. User Story
-        let us_tag_r = draw_ring_pill_left(
-            &p,
-            Pos2::new(c1.left() + 18.0, ry),
-            "1. User Story",
-            PILL_INFO_FILL,
-            PILL_INFO_STROKE,
-            PILL_INFO_TEXT,
-        );
-        let us_line = widgets::elide(&p, &us.user_story_md, &theme::font_body_strong(), (c1.right() - us_tag_r - 24.0).max(48.0));
-        p.text(Pos2::new(us_tag_r + 10.0, ry), Align2::LEFT_CENTER, us_line, theme::font_body_strong(), TOKEN_TEXT);
-        ry += 20.0;
-
-        // 2. Flow steps
-        for (fi, step) in us.flow_steps.iter().enumerate() {
-            widgets::hline(&p, c1.left() + 16.0, c1.right() - 16.0, ry, TOKEN_HAIRLINE);
-            ry += 15.0;
-            let f_tag = draw_ring_pill_left(
-                &p,
-                Pos2::new(c1.left() + 18.0, ry),
-                &format!("2. Flow #{}", fi + 1),
-                TOKEN_SURFACE_2,
-                TOKEN_BORDER,
-                TOKEN_TEXT_MUTED,
-            );
-            let f_line = widgets::elide(&p, step, &theme::font_body(), (c1.right() - f_tag - 24.0).max(48.0));
-            p.text(Pos2::new(f_tag + 10.0, ry), Align2::LEFT_CENTER, f_line, theme::font_body(), TOKEN_TEXT);
-            ry += 15.0;
-        }
-
-        // 3. Business Rules (`BR-01..`)
-        for br in &us.business_rules {
-            widgets::hline(&p, c1.left() + 16.0, c1.right() - 16.0, ry, TOKEN_HAIRLINE);
-            ry += 16.0;
-            let src_l = draw_ring_pill_right(
-                &p,
-                Pos2::new(c1.right() - 16.0, ry),
-                &br.source,
-                TOKEN_CODE_BG,
-                TOKEN_BORDER,
-                TOKEN_TEXT_MUTED,
-            );
-            let br_r = draw_ring_pill_left(
-                &p,
-                Pos2::new(c1.left() + 18.0, ry),
-                &format!("3. {}", br.id),
-                PILL_WARN_FILL,
-                PILL_WARN_STROKE,
-                PILL_WARN_TEXT,
-            );
-            let br_txt = widgets::elide(&p, &br.rule, &theme::font_body(), (src_l - br_r - 20.0).max(48.0));
-            p.text(Pos2::new(br_r + 10.0, ry), Align2::LEFT_CENTER, br_txt, theme::font_body(), TOKEN_TEXT);
-            ry += 16.0;
-        }
-        y = c1.bottom() + 14.0;
-
-        // CARD 2: `4. Acceptance Criteria` Table (`ID | Given | When | Then | Scenario | Copy cho AI`)
-        let c2 = Rect::from_min_size(Pos2::new(body_rect.left(), y), Vec2::new(w, card2_h.max(88.0)));
-        draw_section_card_shell(
-            &p,
-            c2,
-            Icon::Check,
-            "4. ACCEPTANCE CRITERIA (ID | GIVEN | WHEN | THEN | SCENARIO)",
-            &format!("{} ACs · {} SCNs", us.acceptance_criteria.len(), us.scenarios.len()),
-        );
-        let mut ac_y = c2.top() + 54.0;
-        p.text(Pos2::new(c2.left() + 18.0, ac_y), Align2::LEFT_CENTER, "AC", theme::font_small_strong(), TOKEN_TEXT_SUBTLE);
-        p.text(
-            Pos2::new(c2.left() + 88.0, ac_y),
-            Align2::LEFT_CENTER,
-            "Given / When / Then Specification",
-            theme::font_small_strong(),
-            TOKEN_TEXT_SUBTLE,
-        );
-        p.text(
-            Pos2::new(c2.right() - 220.0, ac_y),
-            Align2::LEFT_CENTER,
-            "Scenario & AI Citation",
-            theme::font_small_strong(),
-            TOKEN_TEXT_SUBTLE,
-        );
-        ac_y += 14.0;
-
-        for (ai, ac) in us.acceptance_criteria.iter().enumerate() {
-            widgets::hline(&p, c2.left() + 16.0, c2.right() - 16.0, ac_y, TOKEN_HAIRLINE);
-            ac_y += 19.0;
-            let copy_btn = draw_action_button(
-                ui,
-                &p,
-                &format!("dev-ac-copy-{}-{ai}", us.id),
-                Pos2::new(c2.right() - 16.0, ac_y),
-                Some(Icon::Sparkle),
-                "Copy cho AI",
-                TOKEN_PRIMARY_SOFT,
-                TOKEN_PRIMARY_ROSE,
-                TOKEN_PRIMARY_ORANGE,
-            );
-            if ui.interact(copy_btn, Id::new(("dev-ac-copy-click", &us.id, ai)), Sense::click()).clicked() {
-                let quote = format!(
-                    "| {} | Given {} | When {} | Then {} | {} |",
-                    ac.id, ac.given, ac.when, ac.then, ac.scenario
-                );
-                let section_id = format!("{}, {}", us.id, ac.id);
-                let payload = format_copy_for_ai(
-                    &quote,
-                    &us.file_path,
-                    ac.line_start,
-                    ac.line_end,
-                    &section_id,
-                    &us.title,
-                    "Dev View",
-                    &pkg.project_name,
-                    "Viết kiểm thử và đảm bảo điều kiện nghiệm thu AC này đạt PASS.",
-                );
-                copied_ac = Some(( format!("{}.{}", us.id, ac.id), payload ));
-            }
-
-            let scn_left = draw_ring_pill_right(
-                &p,
-                Pos2::new(copy_btn.left() - 8.0, ac_y),
-                &ac.scenario,
-                PILL_OK_FILL,
-                PILL_OK_STROKE,
-                PILL_OK_TEXT,
-            );
-            let ac_right = draw_ring_pill_left(
-                &p,
-                Pos2::new(c2.left() + 18.0, ac_y),
-                &ac.id,
-                PILL_INFO_FILL,
-                PILL_INFO_STROKE,
-                PILL_INFO_TEXT,
-            );
-            let gwt = format!("Given {} · When {} -> Then {}", ac.given, ac.when, ac.then);
-            let gwt_clean = widgets::elide(&p, &gwt, &theme::font_body(), (scn_left - ac_right - 20.0).max(48.0));
-            p.text(Pos2::new(ac_right + 10.0, ac_y), Align2::LEFT_CENTER, gwt_clean, theme::font_body(), TOKEN_TEXT);
-            ac_y += 19.0;
-        }
-        y = c2.bottom() + 14.0;
-
-        // CARD 3: `5. Edge Cases` (`normal / empty / loading / error`) & `6. UI` ASCII Wireframe
-        let c3 = Rect::from_min_size(Pos2::new(body_rect.left(), y), Vec2::new(w, card3_h.max(88.0)));
-        draw_section_card_shell(
-            &p,
-            c3,
-            Icon::Frame,
-            "5. EDGE CASES & 6. ASCII WIREFRAME",
-            &format!("{} States · Wireframe", us.edge_cases.len()),
-        );
-        let mut ey = c3.top() + 54.0;
-        for (ei, (state_lbl, desc)) in us.edge_cases.iter().enumerate() {
-            if ei > 0 {
-                widgets::hline(&p, c3.left() + 16.0, c3.right() - 16.0, ey - 16.0, TOKEN_HAIRLINE);
-            }
-            let st_r = draw_ring_pill_left(
-                &p,
-                Pos2::new(c3.left() + 18.0, ey),
-                state_lbl,
-                PILL_WARN_FILL,
-                PILL_WARN_STROKE,
-                PILL_WARN_TEXT,
-            );
-            let d_clean = widgets::elide(&p, desc, &theme::font_body(), (c3.right() - st_r - 24.0).max(48.0));
-            p.text(Pos2::new(st_r + 10.0, ey), Align2::LEFT_CENTER, d_clean, theme::font_body(), TOKEN_TEXT);
-            ey += 32.0;
-        }
-        if !us.ascii_wireframe.is_empty() {
-            widgets::hline(&p, c3.left() + 16.0, c3.right() - 16.0, ey - 10.0, TOKEN_HAIRLINE);
-            for wf_line in &us.ascii_wireframe {
-                let clean = widgets::elide(&p, wf_line, &theme::font_mono(), (c3.width() - 36.0).max(48.0));
-                p.text(Pos2::new(c3.left() + 18.0, ey), Align2::LEFT_CENTER, clean, theme::font_mono(), PILL_INFO_TEXT);
-                ey += 18.0;
-            }
-        }
-    });
-    scrollbar(ui, body_rect, app.specs.scroll, est_h);
-
-    if let Some((ac_label, payload)) = copied_ac {
-        ui.ctx().copy_text(payload.clone());
-        app.specs.last_ai_copy = Some(payload);
-        app.show_toast(format!("Copied {ac_label} citation for AI (Claude / Codex)"), false);
-    }
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// TAB 3: `QA & Coverage` (`SpecTab::Plan`)
-// Traceability & Coverage Matrix: REQ -> US -> AC -> SCN -> Screen/State -> Method -> Status & Freshness
-// ─────────────────────────────────────────────────────────────────────────────
-fn render_qa_coverage_tab(app: &mut App, ui: &mut Ui, rect: Rect, pkg: &SpecPackage) {
-    let parity_h = parity_card_height(&pkg.parity_scorecard);
-    let total_ac_rows: usize = pkg.stories.iter().map(|s| s.acceptance_criteria.len().max(1)).sum();
-    let card1_h = 38.0 + 30.0 + total_ac_rows.max(1) as f32 * 38.0 + 18.0;
-    let card2_h = 38.0 + pkg.gates.len().max(1) as f32 * 36.0 + 18.0;
-    let est_h = parity_h + card1_h + card2_h + 54.0;
+fn render_po_view_tab(app: &mut App, ui: &mut Ui, rect: Rect, pkg: &SpecPackage) {
+    let pal = ReaderPalette::for_mode(app.specs.light_mode);
+    let kpi = pkg.kpi_metrics();
+    let est_h = 360.0 + pkg.requirements.len() as f32 * 44.0 + pkg.business_rules.len().min(10) as f32 * 38.0 + 180.0;
 
     let mut scroll = app.specs.scroll;
     wheel_scroll(ui, rect, &mut scroll, est_h);
     app.specs.scroll = scroll;
 
-    let mut copied_scn: Option<String> = None;
+    let mut focus_canvas = false;
 
     clipped(ui, rect, |ui| {
         let p = ui.painter().clone();
-        let mut y = rect.top() - scroll;
-        let w = (rect.width() - 10.0).max(200.0);
-
-        // SECTION CARD 0: 5-Pillar Figma 1:1 Parity Scorecard (`US-12` / `DIR-16`)
-        let c0 = Rect::from_min_size(Pos2::new(rect.left(), y), Vec2::new(w, parity_h));
-        if let Some(payload) = draw_parity_scorecard_card(ui, &p, c0, pkg, "qa", "QA & Coverage") {
-            copied_scn = Some(payload);
-        }
-        y = c0.bottom() + 14.0;
-
-        // SECTION CARD 1: Traceability & Coverage Matrix
-        let c1 = Rect::from_min_size(Pos2::new(rect.left(), y), Vec2::new(w, card1_h.max(92.0)));
-        draw_section_card_shell(
-            &p,
-            c1,
-            Icon::Check,
-            "TRACEABILITY & COVERAGE MATRIX (REQ -> US -> AC -> SCN -> SCREEN/STATE -> METHOD -> STATUS)",
-            "100% Coverage · CURRENT",
+        let col_w = (rect.width() - 64.0).min(680.0).max(240.0);
+        let col_x = rect.center().x - col_w * 0.5;
+        let sheet_rect = Rect::from_min_size(
+            Pos2::new((col_x - 28.0).max(rect.left() + 8.0), rect.top() + 12.0),
+            Vec2::new((col_w + 56.0).min(rect.width() - 16.0), (rect.height() - 16.0).max(120.0)),
         );
-        let mut ry = c1.top() + 54.0;
-        p.text(
-            Pos2::new(c1.left() + 18.0, ry),
-            Align2::LEFT_CENTER,
-            "Trace Chain (REQ -> US -> AC -> SCN)",
-            theme::font_small_strong(),
-            TOKEN_TEXT_SUBTLE,
+        p.rect_filled(sheet_rect, CornerRadius::same(10), pal.doc_sheet);
+        p.rect_stroke(sheet_rect, CornerRadius::same(10), Stroke::new(1.0, pal.border), StrokeKind::Inside);
+
+        let mut y = rect.top() + 34.0 - scroll;
+
+        // Eyebrow Metadata (`FIGMA SPECS · MARKDOWN AS A MEDIUM · FC-001`)
+        let eyebrow = format!(
+            "FIGMA SPECS · MARKDOWN AS A MEDIUM · {} · UPDATED OCT 15, 2026",
+            pkg.contract_id
         );
-        p.text(
-            Pos2::new(c1.left() + 340.0, ry),
-            Align2::LEFT_CENTER,
-            "Screen States & Expected Outcome",
-            theme::font_small_strong(),
-            TOKEN_TEXT_SUBTLE,
-        );
-        p.text(
-            Pos2::new(c1.right() - 250.0, ry),
-            Align2::LEFT_CENTER,
-            "Method · Status & Freshness",
-            theme::font_small_strong(),
-            TOKEN_TEXT_SUBTLE,
-        );
-        ry += 14.0;
+        let eb_clean = widgets::elide(&p, &eyebrow, &theme::font_mono(), col_w);
+        p.text(Pos2::new(col_x, y), Align2::LEFT_CENTER, eb_clean, theme::font_mono(), pal.text_subtle);
+        y += 28.0;
 
-        let mut row_idx = 0usize;
-        for us in &pkg.stories {
-            let req_id = us.req_refs.first().cloned().unwrap_or_else(|| "REQ-01".to_string());
-            let scr_id = us.screens.first().cloned().unwrap_or_else(|| "S01".to_string());
-            for ac in &us.acceptance_criteria {
-                widgets::hline(&p, c1.left() + 16.0, c1.right() - 16.0, ry, TOKEN_HAIRLINE);
-                ry += 19.0;
-
-                let copy_btn = draw_action_button(
-                    ui,
-                    &p,
-                    &format!("qa-row-copy-{row_idx}"),
-                    Pos2::new(c1.right() - 16.0, ry),
-                    Some(Icon::Sparkle),
-                    "Copy cho AI",
-                    TOKEN_SURFACE_2,
-                    TOKEN_BORDER,
-                    TOKEN_TEXT_MUTED,
-                );
-                if ui.interact(copy_btn, Id::new(("qa-row-copy-click", row_idx)), Sense::click()).clicked() {
-                    copied_scn = Some(format_copy_for_ai(
-                        &format!("{} -> {}.{} -> {} ({}/normal, empty, loading, error): {}", req_id, us.id, ac.id, ac.scenario, scr_id, ac.then),
-                        &us.file_path,
-                        ac.line_start,
-                        ac.line_end,
-                        &format!("{}.{}", us.id, ac.id),
-                        &ac.scenario,
-                        "QA & Coverage",
-                        &pkg.project_name,
-                        "Chạy kịch bản kiểm thử tự động và cập nhật bằng chứng CURRENT.",
-                    ));
-                }
-
-                let status_left = draw_ring_pill_right(
-                    &p,
-                    Pos2::new(copy_btn.left() - 8.0, ry),
-                    "PASSED · CURRENT",
-                    PILL_OK_FILL,
-                    PILL_OK_STROKE,
-                    PILL_OK_TEXT,
-                );
-                let method_left = draw_ring_pill_right(
-                    &p,
-                    Pos2::new(status_left - 6.0, ry),
-                    "auto",
-                    PILL_INFO_FILL,
-                    PILL_INFO_STROKE,
-                    PILL_INFO_TEXT,
-                );
-
-                let mut cx = c1.left() + 18.0;
-                cx = draw_ring_pill_left(&p, Pos2::new(cx, ry), &req_id, PILL_INFO_FILL, PILL_INFO_STROKE, PILL_INFO_TEXT) + 6.0;
-                cx = draw_ring_pill_left(&p, Pos2::new(cx, ry), &us.id, TOKEN_SURFACE_2, TOKEN_BORDER, TOKEN_TEXT) + 6.0;
-                cx = draw_ring_pill_left(&p, Pos2::new(cx, ry), &ac.id, PILL_INFO_FILL, PILL_INFO_STROKE, PILL_INFO_TEXT) + 6.0;
-                cx = draw_ring_pill_left(&p, Pos2::new(cx, ry), &ac.scenario, PILL_OK_FILL, PILL_OK_STROKE, PILL_OK_TEXT) + 10.0;
-
-                let state_summary = format!("{scr_id}/normal, empty, error, loading · {}", ac.then);
-                let clean = widgets::elide(&p, &state_summary, &theme::font_body(), (method_left - cx - 14.0).max(48.0));
-                p.text(Pos2::new(cx, ry), Align2::LEFT_CENTER, clean, theme::font_body(), TOKEN_TEXT);
-
-                ry += 19.0;
-                row_idx += 1;
+        // H1 Document Title (`PRD: design:os studio ...`) + Left Gutter 6-Dot Grip Handle
+        for dr in [-3.5_f32, 0.0, 3.5] {
+            for dc in [-14.0_f32, -10.5] {
+                p.circle_filled(Pos2::new(col_x + dc, y + dr), 1.1, pal.text_subtle);
             }
         }
-        y = c1.bottom() + 14.0;
+        let clean_title = pkg
+            .title
+            .replace("DESIGN:OS Studio", "design:os studio")
+            .replace("Design OS Studio", "design:os studio");
+        let h1_str = widgets::elide(&p, &format!("PRD: {clean_title}"), &FontId::proportional(22.0), col_w);
+        p.text(Pos2::new(col_x, y), Align2::LEFT_CENTER, h1_str, FontId::proportional(22.0), pal.text);
+        y += 28.0;
+        widgets::hline(&p, col_x, col_x + col_w, y, pal.hairline);
+        y += 22.0;
 
-        // SECTION CARD 2: Gate Eval & TDD Verification Commands
-        let c2 = Rect::from_min_size(Pos2::new(rect.left(), y), Vec2::new(w, card2_h.max(88.0)));
-        draw_section_card_shell(
-            &p,
-            c2,
-            Icon::Play,
-            "TDD & GATE VERIFICATION CHECKLIST (review/gates/*.md)",
-            "All Evals Exit 0",
-        );
-        let mut gy = c2.top() + 56.0;
-        for (gi, g) in pkg.gates.iter().enumerate() {
-            if gi > 0 {
-                widgets::hline(&p, c2.left() + 16.0, c2.right() - 16.0, gy - 18.0, TOKEN_HAIRLINE);
+        // Section 1: Problem & Product Outcome (with Figma Specs inline yellow highlight!)
+        for dr in [-3.5_f32, 0.0, 3.5] {
+            for dc in [-14.0_f32, -10.5] {
+                p.circle_filled(Pos2::new(col_x + dc, y + dr), 1.1, pal.text_subtle);
             }
-            let (pfill, pstroke, pfg) = status_pill_colors(&g.status);
-            let st_left = draw_ring_pill_right(&p, Pos2::new(c2.right() - 16.0, gy), &g.status, pfill, pstroke, pfg);
-            let v_left = draw_ring_pill_right(
-                &p,
-                Pos2::new(st_left - 8.0, gy),
-                &format!("VERDICT: {}", g.verdict),
-                PILL_OK_FILL,
-                PILL_OK_STROKE,
-                PILL_OK_TEXT,
+        }
+        p.text(
+            Pos2::new(col_x, y),
+            Align2::LEFT_CENTER,
+            "Problem & product outcome",
+            FontId::proportional(16.0),
+            pal.text,
+        );
+        y += 24.0;
+
+        // Highlighted thesis sentence (Figma Specs yellow highlight on annotated sentence)
+        let hl_text = "Written product intent, live Canvas frames, and AI coding agents must share one Markdown container.";
+        let hl_clean = widgets::elide(&p, hl_text, &theme::font_body_medium(), col_w - 12.0);
+        let hl_w = widgets::text_width(&p, &hl_clean, &theme::font_body_medium()) + 10.0;
+        let hl_bg = if app.specs.light_mode {
+            Color32::from_rgb(0xFE, 0xF0, 0x8A)
+        } else {
+            Color32::from_rgba_unmultiplied(0xF5, 0xC5, 0x42, 46)
+        };
+        let hl_rect = Rect::from_min_size(Pos2::new(col_x - 4.0, y - 10.0), Vec2::new(hl_w.min(col_w), 20.0));
+        p.rect_filled(hl_rect, CornerRadius::same(3), hl_bg);
+        p.text(Pos2::new(col_x, y), Align2::LEFT_CENTER, hl_clean, theme::font_body_medium(), pal.text);
+        y += 22.0;
+
+        y = draw_wrapped_prose(&p, Pos2::new(col_x, y), col_w, &pkg.contract_outcome, &theme::font_body(), pal.text_muted, 20.0);
+        y += 18.0;
+
+        // Section 2: Bidirectional Figma Canvas Flow Embed inside the Markdown Spec (`1px #0D99FF` selection frame!)
+        p.text(
+            Pos2::new(col_x, y),
+            Align2::LEFT_CENTER,
+            "Architecture & live canvas flow",
+            FontId::proportional(16.0),
+            pal.text,
+        );
+        y += 20.0;
+
+        let embed_h = 92.0;
+        let embed_rect = Rect::from_min_size(Pos2::new(col_x, y), Vec2::new(col_w, embed_h));
+        let embed_resp = ui.interact(embed_rect, Id::new("spec-inline-canvas-embed"), Sense::click());
+        p.rect_filled(embed_rect, CornerRadius::same(6), pal.surface);
+        p.rect_stroke(
+            embed_rect,
+            CornerRadius::same(6),
+            Stroke::new(1.5, Color32::from_rgb(0x0D, 0x99, 0xFF)),
+            StrokeKind::Inside,
+        );
+        p.text(
+            Pos2::new(embed_rect.left() + 12.0, embed_rect.top() + 14.0),
+            Align2::LEFT_CENTER,
+            "LIVE CANVAS EMBED  ·  Click to focus on Canvas",
+            theme::font_mono(),
+            Color32::from_rgb(0x0D, 0x99, 0xFF),
+        );
+        let stages = ["1. Spec (.md)", "2. Agent (@prd)", "3. NodeSpec", "4. Auto-Layout", "5. .fig v106"];
+        let box_gap = 8.0;
+        let box_w = ((col_w - 24.0 - box_gap * 4.0) / 5.0).max(36.0);
+        for (si, st_lbl) in stages.iter().enumerate() {
+            let bx = embed_rect.left() + 12.0 + si as f32 * (box_w + box_gap);
+            let br = Rect::from_min_size(Pos2::new(bx, embed_rect.top() + 34.0), Vec2::new(box_w, 42.0));
+            p.rect_filled(br, CornerRadius::same(5), pal.doc_sheet);
+            p.rect_stroke(br, CornerRadius::same(5), Stroke::new(1.0, pal.border), StrokeKind::Inside);
+            let st_clean = widgets::elide(&p, st_lbl, &theme::font_small_medium(), (box_w - 8.0).max(24.0));
+            p.text(br.center(), Align2::CENTER_CENTER, st_clean, theme::font_small_medium(), pal.text);
+        }
+        if embed_resp.clicked() {
+            focus_canvas = true;
+        }
+        y += embed_h + 26.0;
+
+        // Section 3: Recent Baseline & Verification Table (Mirrors Figma Specs `prod_1.png` / `blog_4.png` rounded table)
+        p.text(
+            Pos2::new(col_x, y),
+            Align2::LEFT_CENTER,
+            "Baseline & verification metrics",
+            FontId::proportional(16.0),
+            pal.text,
+        );
+        y += 18.0;
+
+        let metrics_rows = [
+            (
+                "Figma 126.9.13 UI3 & .fig v106 binary parity",
+                format!("{:.1}% (387 / 387)", pkg.parity_scorecard.overall_parity_pct),
+            ),
+            ("PRD requirements & user stories", format!("{} REQs · {} US", kpi.req_count, kpi.us_count)),
+            (
+                "Acceptance criteria & Gherkin scenarios",
+                format!("{}/{} passed", kpi.passed_scn_count, kpi.scn_count),
+            ),
+            (
+                "Behavioral UI contract selector coverage",
+                format!("{} screens · {} rows", kpi.screen_count, kpi.contract_row_count),
+            ),
+            (
+                "Pipeline quality gates (G1–G5)",
+                format!("{}/{} approved ({})", kpi.approved_gates, kpi.total_gates, kpi.freshness),
+            ),
+        ];
+        let tbl_h = 30.0 + metrics_rows.len() as f32 * 30.0;
+        let tbl_rect = Rect::from_min_size(Pos2::new(col_x, y), Vec2::new(col_w, tbl_h));
+        p.rect_filled(tbl_rect, CornerRadius::same(8), pal.surface);
+        p.rect_stroke(tbl_rect, CornerRadius::same(8), Stroke::new(1.0, pal.border), StrokeKind::Inside);
+
+        let th_y = tbl_rect.top() + 15.0;
+        p.text(Pos2::new(tbl_rect.left() + 14.0, th_y), Align2::LEFT_CENTER, "Measure", theme::font_small_strong(), pal.text);
+        p.text(
+            Pos2::new(tbl_rect.right() - 14.0, th_y),
+            Align2::RIGHT_CENTER,
+            "Verified total",
+            theme::font_small_strong(),
+            pal.text,
+        );
+        let mut ry = tbl_rect.top() + 30.0;
+        for (m_lbl, m_val) in &metrics_rows {
+            widgets::hline(&p, tbl_rect.left() + 1.0, tbl_rect.right() - 1.0, ry, pal.hairline);
+            let cy = ry + 15.0;
+            let val_w = widgets::text_width(&p, m_val, &theme::font_mono()) + 16.0;
+            p.text(Pos2::new(tbl_rect.right() - 14.0, cy), Align2::RIGHT_CENTER, m_val, theme::font_mono(), pal.text);
+            let lbl_clean = widgets::elide(&p, m_lbl, &theme::font_body(), (col_w - val_w - 28.0).max(48.0));
+            p.text(Pos2::new(tbl_rect.left() + 14.0, cy), Align2::LEFT_CENTER, lbl_clean, theme::font_body(), pal.text_muted);
+            ry += 30.0;
+        }
+        y = tbl_rect.bottom() + 28.0;
+
+        // Section 4: PRD Requirements (`prd/PRD.md`)
+        p.text(
+            Pos2::new(col_x, y),
+            Align2::LEFT_CENTER,
+            "Product requirements (prd/PRD.md)",
+            FontId::proportional(16.0),
+            pal.text,
+        );
+        y += 18.0;
+
+        for req in &pkg.requirements {
+            widgets::hline(&p, col_x, col_x + col_w, y, pal.hairline);
+            y += 12.0;
+            let us_joined = req.us_refs.join(", ");
+            let us_w = widgets::text_width(&p, &us_joined, &theme::font_mono()) + 12.0;
+            p.text(
+                Pos2::new(col_x + col_w, y + 8.0),
+                Align2::RIGHT_CENTER,
+                &us_joined,
+                theme::font_mono(),
+                pal.text_subtle,
             );
-            icons::paint(&p, Icon::Check, Pos2::new(c2.left() + 24.0, gy), 13.0, PILL_OK_TEXT);
-            let txt = format!("{} ({}) · Freshness {} · {}", g.gate_id, g.stage, g.freshness, g.file_path);
-            let clean = widgets::elide(&p, &txt, &theme::font_body(), (v_left - c2.left() - 48.0).max(48.0));
-            p.text(Pos2::new(c2.left() + 38.0, gy), Align2::LEFT_CENTER, clean, theme::font_body(), TOKEN_TEXT);
-            gy += 36.0;
+            p.text(
+                Pos2::new(col_x, y + 8.0),
+                Align2::LEFT_CENTER,
+                &req.id,
+                theme::font_mono(),
+                pal.text,
+            );
+            let prose_x = col_x + 64.0;
+            let prose_w = (col_w - 64.0 - us_w).max(60.0);
+            y = draw_wrapped_prose(&p, Pos2::new(prose_x, y + 8.0), prose_w, &req.requirement, &theme::font_body(), pal.text_muted, 19.0);
+            y += 6.0;
+        }
+
+        y += 18.0;
+
+        // Section 5: Core Business Rules (`contract/FC-001.md`)
+        p.text(
+            Pos2::new(col_x, y),
+            Align2::LEFT_CENTER,
+            "Business rules (contract/FC-001.md)",
+            FontId::proportional(16.0),
+            pal.text,
+        );
+        y += 18.0;
+
+        for br in pkg.business_rules.iter().take(10) {
+            widgets::hline(&p, col_x, col_x + col_w, y, pal.hairline);
+            y += 12.0;
+            p.text(Pos2::new(col_x, y + 8.0), Align2::LEFT_CENTER, &br.id, theme::font_mono(), pal.text);
+            let prose_x = col_x + 58.0;
+            let prose_w = (col_w - 58.0).max(60.0);
+            y = draw_wrapped_prose(&p, Pos2::new(prose_x, y + 8.0), prose_w, &br.rule, &theme::font_body(), pal.text_muted, 19.0);
+            y += 6.0;
         }
     });
     scrollbar(ui, rect, app.specs.scroll, est_h);
 
-    if let Some(payload) = copied_scn {
-        ui.ctx().copy_text(payload.clone());
-        app.specs.last_ai_copy = Some(payload);
-        app.show_toast("Copied QA Scenario citation for AI", false);
+    if focus_canvas {
+        app.specs.open = false;
     }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// TAB 4: `Wireframes & UI Contract` (`SpecTab::JsonSpec` / `SpecTab::UiSpecs`)
-// Declarative `.spec.json` (`NodeSpec`) Apply + Screen Inventory + 12-Column `ui-contract.md` Table
+// TAB 2: `User Stories` (`SpecTab::UseCases`) — Clean Markdown Story Sheet
 // ─────────────────────────────────────────────────────────────────────────────
+
+fn render_dev_view_tab(app: &mut App, ui: &mut Ui, rect: Rect, pkg: &SpecPackage) {
+    if pkg.stories.is_empty() {
+        return;
+    }
+    let pal = ReaderPalette::for_mode(app.specs.light_mode);
+    let story_idx = app.specs.selected_story.min(pkg.stories.len() - 1);
+    let us = &pkg.stories[story_idx];
+
+    let est_h = 340.0
+        + us.flow_steps.len() as f32 * 38.0
+        + us.business_rules.len() as f32 * 38.0
+        + us.acceptance_criteria.len() as f32 * 48.0
+        + us.edge_cases.len() as f32 * 32.0
+        + us.ascii_wireframe.len() as f32 * 18.0;
+
+    let mut scroll = app.specs.scroll;
+    wheel_scroll(ui, rect, &mut scroll, est_h);
+    app.specs.scroll = scroll;
+
+    let mut next_story: Option<usize> = None;
+
+    clipped(ui, rect, |ui| {
+        let p = ui.painter().clone();
+        let col_w = (rect.width() - 64.0).min(680.0).max(240.0);
+        let col_x = rect.center().x - col_w * 0.5;
+        let sheet_rect = Rect::from_min_size(
+            Pos2::new((col_x - 28.0).max(rect.left() + 8.0), rect.top() + 12.0),
+            Vec2::new((col_w + 56.0).min(rect.width() - 16.0), (rect.height() - 16.0).max(120.0)),
+        );
+        p.rect_filled(sheet_rect, CornerRadius::same(10), pal.doc_sheet);
+        p.rect_stroke(sheet_rect, CornerRadius::same(10), Stroke::new(1.0, pal.border), StrokeKind::Inside);
+
+        let mut y = rect.top() + 34.0 - scroll;
+
+        // Eyebrow + Prev/Next Story Navigation
+        let meta = format!(
+            "{}  ·  {}  ·  {}  ·  {}  ·  {}",
+            us.id,
+            us.priority,
+            us.wave,
+            us.req_refs.join(", "),
+            us.file_path
+        );
+        let meta_clean = widgets::elide(&p, &meta, &theme::font_mono(), (col_w - 110.0).max(60.0));
+        p.text(Pos2::new(col_x, y), Align2::LEFT_CENTER, meta_clean, theme::font_mono(), pal.text_subtle);
+
+        let next_btn = Rect::from_min_size(Pos2::new(col_x + col_w - 46.0, y - 10.0), Vec2::new(46.0, 20.0));
+        let prev_btn = Rect::from_min_size(Pos2::new(next_btn.left() - 50.0, y - 10.0), Vec2::new(46.0, 20.0));
+        if ui.interact(prev_btn, Id::new("us-prev-btn"), Sense::click()).clicked() && story_idx > 0 {
+            next_story = Some(story_idx - 1);
+        }
+        if ui.interact(next_btn, Id::new("us-next-btn"), Sense::click()).clicked() && story_idx + 1 < pkg.stories.len() {
+            next_story = Some(story_idx + 1);
+        }
+        p.rect_filled(prev_btn, CornerRadius::same(4), pal.surface);
+        p.rect_stroke(prev_btn, CornerRadius::same(4), Stroke::new(1.0, pal.border), StrokeKind::Inside);
+        p.text(prev_btn.center(), Align2::CENTER_CENTER, "Prev", theme::font_small(), pal.text_muted);
+
+        p.rect_filled(next_btn, CornerRadius::same(4), pal.surface);
+        p.rect_stroke(next_btn, CornerRadius::same(4), Stroke::new(1.0, pal.border), StrokeKind::Inside);
+        p.text(next_btn.center(), Align2::CENTER_CENTER, "Next", theme::font_small(), pal.text_muted);
+
+        y += 28.0;
+
+        // H1 Story Title
+        let h1 = widgets::elide(&p, &format!("{}: {}", us.id, us.title), &FontId::proportional(20.0), col_w);
+        p.text(Pos2::new(col_x, y), Align2::LEFT_CENTER, h1, FontId::proportional(20.0), pal.text);
+        y += 24.0;
+        widgets::hline(&p, col_x, col_x + col_w, y, pal.hairline);
+        y += 20.0;
+
+        // 1. User Story Callout (`2px` left vertical bar)
+        let bar_top = y - 4.0;
+        y = draw_wrapped_prose(
+            &p,
+            Pos2::new(col_x + 14.0, y + 6.0),
+            col_w - 14.0,
+            &us.user_story_md,
+            &theme::font_body_medium(),
+            pal.text,
+            20.0,
+        );
+        let bar_rect = Rect::from_min_max(Pos2::new(col_x, bar_top), Pos2::new(col_x + 2.0, y));
+        p.rect_filled(bar_rect, CornerRadius::same(1), Color32::from_rgb(0x0D, 0x99, 0xFF));
+        y += 20.0;
+
+        // 2. Interaction Flow
+        p.text(Pos2::new(col_x, y), Align2::LEFT_CENTER, "Interaction flow", FontId::proportional(15.0), pal.text);
+        y += 18.0;
+        for (fi, step) in us.flow_steps.iter().enumerate() {
+            let num = format!("{}.", fi + 1);
+            p.text(Pos2::new(col_x, y + 8.0), Align2::LEFT_CENTER, num, theme::font_mono(), pal.text_subtle);
+            y = draw_wrapped_prose(&p, Pos2::new(col_x + 24.0, y + 8.0), col_w - 24.0, step, &theme::font_body(), pal.text_muted, 19.0);
+            y += 4.0;
+        }
+        y += 16.0;
+
+        // 3. Acceptance Criteria Table
+        p.text(Pos2::new(col_x, y), Align2::LEFT_CENTER, "Acceptance criteria", FontId::proportional(15.0), pal.text);
+        y += 18.0;
+        for ac in &us.acceptance_criteria {
+            widgets::hline(&p, col_x, col_x + col_w, y, pal.hairline);
+            y += 12.0;
+            let head = format!("{} · {}", ac.id, ac.scenario);
+            p.text(Pos2::new(col_x, y + 8.0), Align2::LEFT_CENTER, head, theme::font_mono(), pal.text);
+            let gwt = format!("Given {}, when {}, then {}.", ac.given, ac.when, ac.then);
+            y = draw_wrapped_prose(&p, Pos2::new(col_x + 128.0, y + 8.0), (col_w - 128.0).max(60.0), &gwt, &theme::font_body(), pal.text_muted, 19.0);
+            y += 6.0;
+        }
+
+        // 4. ASCII Wireframe
+        if !us.ascii_wireframe.is_empty() {
+            y += 16.0;
+            p.text(Pos2::new(col_x, y), Align2::LEFT_CENTER, "Wireframe specification", FontId::proportional(15.0), pal.text);
+            y += 16.0;
+            let wf_h = us.ascii_wireframe.len() as f32 * 18.0 + 16.0;
+            let wf_rect = Rect::from_min_size(Pos2::new(col_x, y), Vec2::new(col_w, wf_h));
+            p.rect_filled(wf_rect, CornerRadius::same(6), pal.code_bg);
+            p.rect_stroke(wf_rect, CornerRadius::same(6), Stroke::new(1.0, pal.border), StrokeKind::Inside);
+            let mut wy = wf_rect.top() + 14.0;
+            for wf_line in &us.ascii_wireframe {
+                let clean = widgets::elide(&p, wf_line, &theme::font_mono(), (col_w - 24.0).max(40.0));
+                p.text(Pos2::new(wf_rect.left() + 12.0, wy), Align2::LEFT_CENTER, clean, theme::font_mono(), pal.text_muted);
+                wy += 18.0;
+            }
+        }
+    });
+    scrollbar(ui, rect, app.specs.scroll, est_h);
+
+    if let Some(idx) = next_story {
+        app.specs.selected_story = idx;
+        app.specs.scroll = 0.0;
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// TAB 3: `QA & Trace` (`SpecTab::Plan`) — Clean Editorial Traceability Table
+// ─────────────────────────────────────────────────────────────────────────────
+
+fn render_qa_coverage_tab(app: &mut App, ui: &mut Ui, rect: Rect, pkg: &SpecPackage) {
+    let pal = ReaderPalette::for_mode(app.specs.light_mode);
+    let total_ac_rows: usize = pkg.stories.iter().map(|s| s.acceptance_criteria.len().max(1)).sum();
+    let est_h = 260.0 + pkg.parity_scorecard.pillars.len() as f32 * 30.0 + total_ac_rows as f32 * 30.0 + 80.0;
+
+    let mut scroll = app.specs.scroll;
+    wheel_scroll(ui, rect, &mut scroll, est_h);
+    app.specs.scroll = scroll;
+
+    clipped(ui, rect, |ui| {
+        let p = ui.painter().clone();
+        let col_w = (rect.width() - 64.0).min(680.0).max(240.0);
+        let col_x = rect.center().x - col_w * 0.5;
+        let sheet_rect = Rect::from_min_size(
+            Pos2::new((col_x - 28.0).max(rect.left() + 8.0), rect.top() + 12.0),
+            Vec2::new((col_w + 56.0).min(rect.width() - 16.0), (rect.height() - 16.0).max(120.0)),
+        );
+        p.rect_filled(sheet_rect, CornerRadius::same(10), pal.doc_sheet);
+        p.rect_stroke(sheet_rect, CornerRadius::same(10), Stroke::new(1.0, pal.border), StrokeKind::Inside);
+
+        let mut y = rect.top() + 34.0 - scroll;
+
+        p.text(
+            Pos2::new(col_x, y),
+            Align2::LEFT_CENTER,
+            "QUALITY ASSURANCE · TRACEABILITY & PARITY SCORECARD",
+            theme::font_mono(),
+            pal.text_subtle,
+        );
+        y += 26.0;
+        p.text(
+            Pos2::new(col_x, y),
+            Align2::LEFT_CENTER,
+            "Verification & Traceability Matrix",
+            FontId::proportional(20.0),
+            pal.text,
+        );
+        y += 24.0;
+        widgets::hline(&p, col_x, col_x + col_w, y, pal.hairline);
+        y += 20.0;
+
+        // 5-Pillar Parity Table
+        p.text(Pos2::new(col_x, y), Align2::LEFT_CENTER, "5-pillar Figma 126.9.13 parity breakdown", FontId::proportional(15.0), pal.text);
+        y += 18.0;
+        for pl in &pkg.parity_scorecard.pillars {
+            widgets::hline(&p, col_x, col_x + col_w, y, pal.hairline);
+            y += 15.0;
+            let right_str = format!("{}/{} ({:.1}%)", pl.passed_items, pl.total_items, pl.score_pct);
+            let rw = widgets::text_width(&p, &right_str, &theme::font_mono()) + 14.0;
+            p.text(Pos2::new(col_x + col_w, y), Align2::RIGHT_CENTER, right_str, theme::font_mono(), pal.text);
+            let clean = widgets::elide(&p, &pl.name, &theme::font_body(), (col_w - rw - 10.0).max(48.0));
+            p.text(Pos2::new(col_x, y), Align2::LEFT_CENTER, clean, theme::font_body(), pal.text_muted);
+            y += 15.0;
+        }
+
+        y += 22.0;
+        p.text(
+            Pos2::new(col_x, y),
+            Align2::LEFT_CENTER,
+            "Requirement -> Story -> Acceptance -> Scenario trace",
+            FontId::proportional(15.0),
+            pal.text,
+        );
+        y += 18.0;
+
+        for us in &pkg.stories {
+            let req_id = us.req_refs.first().cloned().unwrap_or_else(|| "REQ-01".to_string());
+            for ac in &us.acceptance_criteria {
+                widgets::hline(&p, col_x, col_x + col_w, y, pal.hairline);
+                y += 15.0;
+                let chain = format!("{req_id} -> {}.{} -> {}", us.id, ac.id, ac.scenario);
+                let cw = widgets::text_width(&p, &chain, &theme::font_mono()) + 12.0;
+                p.text(Pos2::new(col_x, y), Align2::LEFT_CENTER, chain, theme::font_mono(), pal.text);
+                p.circle_filled(Pos2::new(col_x + col_w - 4.0, y), 3.0, DOT_OK);
+                let clean = widgets::elide(&p, &ac.then, &theme::font_body(), (col_w - cw - 18.0).max(40.0));
+                p.text(Pos2::new(col_x + cw, y), Align2::LEFT_CENTER, clean, theme::font_body(), pal.text_muted);
+                y += 15.0;
+            }
+        }
+    });
+    scrollbar(ui, rect, app.specs.scroll, est_h);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// TAB 4: `Blueprints` (`SpecTab::JsonSpec`) — Declarative `.spec.json` & UI Contract
+// ─────────────────────────────────────────────────────────────────────────────
+
 fn render_wireframes_and_contract_tab(app: &mut App, ui: &mut Ui, rect: Rect, pkg: &SpecPackage) {
-    let wf_lines_count: usize = pkg.stories.iter().map(|s| s.ascii_wireframe.len()).sum();
-    let card1_h = 38.0 + 48.0 + 18.0;
-    let card2_h = 38.0 + pkg.screens.len().max(1) as f32 * 36.0 + wf_lines_count.min(24) as f32 * 18.0 + 24.0;
-    let card3_h = 38.0 + 30.0 + pkg.ui_contract.len().max(1) as f32 * 34.0 + 18.0;
-    let est_h = card1_h + card2_h + card3_h + 48.0;
+    let pal = ReaderPalette::for_mode(app.specs.light_mode);
+    let est_h = 240.0 + pkg.screens.len() as f32 * 30.0 + pkg.ui_contract.len().min(36) as f32 * 28.0 + 80.0;
 
     let mut scroll = app.specs.scroll;
     wheel_scroll(ui, rect, &mut scroll, est_h);
@@ -4173,10 +3752,36 @@ fn render_wireframes_and_contract_tab(app: &mut App, ui: &mut Ui, rect: Rect, pk
 
     clipped(ui, rect, |ui| {
         let p = ui.painter().clone();
-        let mut y = rect.top() - scroll;
-        let w = (rect.width() - 10.0).max(200.0);
+        let col_w = (rect.width() - 64.0).min(680.0).max(240.0);
+        let col_x = rect.center().x - col_w * 0.5;
+        let sheet_rect = Rect::from_min_size(
+            Pos2::new((col_x - 28.0).max(rect.left() + 8.0), rect.top() + 12.0),
+            Vec2::new((col_w + 56.0).min(rect.width() - 16.0), (rect.height() - 16.0).max(120.0)),
+        );
+        p.rect_filled(sheet_rect, CornerRadius::same(10), pal.doc_sheet);
+        p.rect_stroke(sheet_rect, CornerRadius::same(10), Stroke::new(1.0, pal.border), StrokeKind::Inside);
 
-        // SECTION CARD 1: Declarative `.spec.json` (`NodeSpec`) Blueprints with 1-Click Apply
+        let mut y = rect.top() + 34.0 - scroll;
+
+        p.text(
+            Pos2::new(col_x, y),
+            Align2::LEFT_CENTER,
+            "DECLARATIVE BLUEPRINTS (.SPEC.JSON) & UI CONTRACT",
+            theme::font_mono(),
+            pal.text_subtle,
+        );
+        y += 26.0;
+        p.text(
+            Pos2::new(col_x, y),
+            Align2::LEFT_CENTER,
+            "Canvas Blueprints & Behavioral UI Contract",
+            FontId::proportional(20.0),
+            pal.text,
+        );
+        y += 24.0;
+        widgets::hline(&p, col_x, col_x + col_w, y, pal.hairline);
+        y += 20.0;
+
         if let Some((j_name, _j_path, j_raw)) = pkg
             .json_specs
             .get(app.specs.selected_json_spec)
@@ -4184,167 +3789,42 @@ fn render_wireframes_and_contract_tab(app: &mut App, ui: &mut Ui, rect: Rect, pk
             .cloned()
         {
             let summary = summarize_json_spec(&j_raw);
-            let c1 = Rect::from_min_size(Pos2::new(rect.left(), y), Vec2::new(w, card1_h.max(92.0)));
-            draw_section_card_shell(
-                &p,
-                c1,
-                Icon::Frame,
-                &format!("DECLARATIVE NODESPEC BLUEPRINT · {} ({})", j_name, summary.root_name),
-                &format!("{} Nodes · {} Presets", summary.total_nodes, summary.presets.len()),
-            );
-            let row_y = c1.top() + 64.0;
-            let apply_btn = draw_action_button(
-                ui,
-                &p,
-                "json-tab-apply-btn",
-                Pos2::new(c1.right() - 16.0, row_y),
-                Some(Icon::Play),
-                "Apply to Canvas",
-                PILL_OK_FILL,
-                PILL_OK_STROKE,
-                PILL_OK_TEXT,
-            );
-            if ui.interact(apply_btn, Id::new("json-tab-apply-click"), Sense::click()).clicked() {
+            let box_r = Rect::from_min_size(Pos2::new(col_x, y), Vec2::new(col_w, 54.0));
+            p.rect_filled(box_r, CornerRadius::same(6), pal.surface);
+            p.rect_stroke(box_r, CornerRadius::same(6), Stroke::new(1.0, pal.border), StrokeKind::Inside);
+
+            let apply_btn = Rect::from_min_size(Pos2::new(box_r.right() - 118.0, box_r.center().y - 12.0), Vec2::new(106.0, 24.0));
+            let resp = ui.interact(apply_btn, Id::new("json-tab-apply-btn"), Sense::click());
+            p.rect_filled(apply_btn, CornerRadius::same(5), if resp.hovered() { pal.surface_2 } else { pal.doc_sheet });
+            p.rect_stroke(apply_btn, CornerRadius::same(5), Stroke::new(1.0, pal.border), StrokeKind::Inside);
+            p.text(apply_btn.center(), Align2::CENTER_CENTER, "Apply to Canvas", theme::font_small_medium(), pal.text);
+            widgets::record(ui, "json-tab-apply-btn", apply_btn);
+            if resp.clicked() {
                 apply_json_action = Some((j_name.clone(), j_raw.clone()));
             }
-            let mut bx = c1.left() + 18.0;
-            bx = draw_ring_pill_left(
-                &p,
-                Pos2::new(bx, row_y),
-                &format!("{} Nodes", summary.total_nodes),
-                PILL_INFO_FILL,
-                PILL_INFO_STROKE,
-                PILL_INFO_TEXT,
-            ) + 8.0;
-            bx = draw_ring_pill_left(
-                &p,
-                Pos2::new(bx, row_y),
-                &format!("{} Presets", summary.presets.len()),
-                PILL_OK_FILL,
-                PILL_OK_STROKE,
-                PILL_OK_TEXT,
-            ) + 8.0;
-            bx = draw_ring_pill_left(
-                &p,
-                Pos2::new(bx, row_y),
-                &format!("{} $easeui.* Tokens", summary.easeui_tokens.len()),
-                TOKEN_PRIMARY_SOFT,
-                TOKEN_PRIMARY_ROSE,
-                TOKEN_PRIMARY_ORANGE,
-            ) + 8.0;
-            for tok in summary.easeui_tokens.iter().take(3) {
-                if bx + 120.0 > apply_btn.left() {
-                    break;
-                }
-                bx = draw_ring_pill_left(&p, Pos2::new(bx, row_y), tok, TOKEN_CODE_BG, TOKEN_BORDER, TOKEN_TEXT_MUTED) + 6.0;
-            }
-            y = c1.bottom() + 14.0;
+
+            let info = format!(
+                "{}  ·  {} nodes  ·  {} tokens",
+                j_name,
+                summary.total_nodes,
+                summary.easeui_tokens.len()
+            );
+            let clean = widgets::elide(&p, &info, &theme::font_body_medium(), (apply_btn.left() - box_r.left() - 24.0).max(48.0));
+            p.text(Pos2::new(box_r.left() + 14.0, box_r.center().y), Align2::LEFT_CENTER, clean, theme::font_body_medium(), pal.text);
+            y = box_r.bottom() + 24.0;
         }
 
-        // SECTION CARD 2: Screen Inventory (`S01..S03` × States) & ASCII Wireframes
-        let c2 = Rect::from_min_size(Pos2::new(rect.left(), y), Vec2::new(w, card2_h.max(92.0)));
-        draw_section_card_shell(
-            &p,
-            c2,
-            Icon::Eye,
-            "SCREEN INVENTORY (ux/screen-inventory.md) & ASCII WIREFRAMES",
-            &format!("{} Screens", pkg.screens.len()),
-        );
-        let mut sy = c2.top() + 56.0;
-        for (si, scr) in pkg.screens.iter().enumerate() {
-            if si > 0 {
-                widgets::hline(&p, c2.left() + 16.0, c2.right() - 16.0, sy - 18.0, TOKEN_HAIRLINE);
-            }
-            let us_left = draw_ring_pill_right(
-                &p,
-                Pos2::new(c2.right() - 16.0, sy),
-                &scr.story,
-                PILL_INFO_FILL,
-                PILL_INFO_STROKE,
-                PILL_INFO_TEXT,
-            );
-            let id_right = draw_ring_pill_left(
-                &p,
-                Pos2::new(c2.left() + 18.0, sy),
-                &scr.id,
-                PILL_OK_FILL,
-                PILL_OK_STROKE,
-                PILL_OK_TEXT,
-            );
-            let txt = format!("{}  ·  States: {}", scr.name, scr.states.join(" · "));
-            let clean = widgets::elide(&p, &txt, &theme::font_body_strong(), (us_left - id_right - 20.0).max(48.0));
-            p.text(Pos2::new(id_right + 10.0, sy), Align2::LEFT_CENTER, clean, theme::font_body_strong(), TOKEN_TEXT);
-            sy += 36.0;
-        }
-        widgets::hline(&p, c2.left() + 16.0, c2.right() - 16.0, sy - 12.0, TOKEN_HAIRLINE);
-        for wf_line in pkg.stories.iter().flat_map(|s| s.ascii_wireframe.iter()).take(24) {
-            let clean = widgets::elide(&p, wf_line, &theme::font_mono(), (c2.width() - 36.0).max(48.0));
-            p.text(Pos2::new(c2.left() + 18.0, sy), Align2::LEFT_CENTER, clean, theme::font_mono(), PILL_INFO_TEXT);
-            sy += 18.0;
-        }
-        y = c2.bottom() + 14.0;
-
-        // SECTION CARD 3: 12-Column Behavioral `ui-contract.md` Table
-        let c3 = Rect::from_min_size(Pos2::new(rect.left(), y), Vec2::new(w, card3_h.max(92.0)));
-        draw_section_card_shell(
-            &p,
-            c3,
-            Icon::Specs,
-            "12-COLUMN BEHAVIORAL UI CONTRACT (ux/ui-contract.md)",
-            &format!("{} Selector Rows", pkg.ui_contract.len()),
-        );
-        let mut cy = c3.top() + 54.0;
-        p.text(
-            Pos2::new(c3.left() + 18.0, cy),
-            Align2::LEFT_CENTER,
-            "Screen · State · US",
-            theme::font_small_strong(),
-            TOKEN_TEXT_SUBTLE,
-        );
-        p.text(
-            Pos2::new(c3.left() + 210.0, cy),
-            Align2::LEFT_CENTER,
-            "Route · Roles · Scope · Element · Kind · Components · Patterns · Target",
-            theme::font_small_strong(),
-            TOKEN_TEXT_SUBTLE,
-        );
-        p.text(
-            Pos2::new(c3.right() - 120.0, cy),
-            Align2::LEFT_CENTER,
-            "SCN",
-            theme::font_small_strong(),
-            TOKEN_TEXT_SUBTLE,
-        );
-        cy += 14.0;
-
-        for row in &pkg.ui_contract {
-            widgets::hline(&p, c3.left() + 16.0, c3.right() - 16.0, cy, TOKEN_HAIRLINE);
-            cy += 17.0;
-            let scn_left = draw_ring_pill_right(
-                &p,
-                Pos2::new(c3.right() - 16.0, cy),
-                &row.scn,
-                PILL_OK_FILL,
-                PILL_OK_STROKE,
-                PILL_OK_TEXT,
-            );
-            let mut lx = c3.left() + 18.0;
-            lx = draw_ring_pill_left(&p, Pos2::new(lx, cy), &row.screen, PILL_INFO_FILL, PILL_INFO_STROKE, PILL_INFO_TEXT) + 6.0;
-            let (sfill, sstroke, sfg) = match row.state.as_str() {
-                "normal" | "focus" => (PILL_OK_FILL, PILL_OK_STROKE, PILL_OK_TEXT),
-                "error" => (PILL_BAD_FILL, PILL_BAD_STROKE, PILL_BAD_TEXT),
-                _ => (PILL_WARN_FILL, PILL_WARN_STROKE, PILL_WARN_TEXT),
-            };
-            lx = draw_ring_pill_left(&p, Pos2::new(lx, cy), &row.state, sfill, sstroke, sfg) + 6.0;
-            lx = draw_ring_pill_left(&p, Pos2::new(lx, cy), &row.us, TOKEN_SURFACE_2, TOKEN_BORDER, TOKEN_TEXT) + 10.0;
-
-            let summary = format!(
-                "{} [{} · {}] {} ({} · {} · {}) -> {}",
-                row.route, row.roles, row.scope, row.element, row.kind, row.components, row.patterns, row.target
-            );
-            let clean = widgets::elide(&p, &summary, &theme::font_body(), (scn_left - lx - 14.0).max(48.0));
-            p.text(Pos2::new(lx, cy), Align2::LEFT_CENTER, clean, theme::font_body(), TOKEN_TEXT);
-            cy += 17.0;
+        p.text(Pos2::new(col_x, y), Align2::LEFT_CENTER, "Screen inventory (ux/screen-inventory.md)", FontId::proportional(15.0), pal.text);
+        y += 18.0;
+        for scr in &pkg.screens {
+            widgets::hline(&p, col_x, col_x + col_w, y, pal.hairline);
+            y += 15.0;
+            p.text(Pos2::new(col_x, y), Align2::LEFT_CENTER, &scr.id, theme::font_mono(), pal.text);
+            p.text(Pos2::new(col_x + col_w, y), Align2::RIGHT_CENTER, &scr.story, theme::font_mono(), pal.text_subtle);
+            let line = format!("{} ({})", scr.name, scr.states.join(", "));
+            let clean = widgets::elide(&p, &line, &theme::font_body(), (col_w - 110.0).max(48.0));
+            p.text(Pos2::new(col_x + 48.0, y), Align2::LEFT_CENTER, clean, theme::font_body(), pal.text_muted);
+            y += 15.0;
         }
     });
     scrollbar(ui, rect, app.specs.scroll, est_h);
@@ -4357,240 +3837,85 @@ fn render_wireframes_and_contract_tab(app: &mut App, ui: &mut Ui, rect: Rect, pk
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// TAB 5: `Gates, Decisions & Canvas` (`SpecTab::CanvasScreens` / `SpecTab::CanvasLinks`)
-// Gate Records (`G1..G5`) + SHA-256 Digest + Rubric (`2/2`) + Decision Ledger (`D1..D5`) + Linked Canvas Frames
+// TAB 5: `Gates` (`SpecTab::CanvasScreens`) — Gates (G1–G5), Decisions & Canvas Sync
 // ─────────────────────────────────────────────────────────────────────────────
-fn render_gates_and_canvas_tab(app: &mut App, ui: &mut Ui, rect: Rect, pkg: &SpecPackage) {
-    let page_children: Vec<NodeId> = app.doc.get(app.page).map(|p| p.children.clone()).unwrap_or_default();
-    let resolved_comments = app.doc.resolve_comment_targets();
 
-    let card1_h = 38.0 + pkg.gates.len().max(1) as f32 * 56.0 + 16.0;
-    let card2_h = 38.0 + pkg.decisions.len().max(1) as f32 * 36.0 + 16.0;
-    let card3_h = 38.0 + page_children.len().max(1) as f32 * 48.0 + 16.0;
-    let est_h = card1_h + card2_h + card3_h + 48.0;
+fn render_gates_and_canvas_tab(app: &mut App, ui: &mut Ui, rect: Rect, pkg: &SpecPackage) {
+    let pal = ReaderPalette::for_mode(app.specs.light_mode);
+    let est_h = 240.0 + pkg.gates.len() as f32 * 36.0 + pkg.decisions.len() as f32 * 32.0 + 80.0;
 
     let mut scroll = app.specs.scroll;
     wheel_scroll(ui, rect, &mut scroll, est_h);
     app.specs.scroll = scroll;
 
-    let mut focus_target: Option<NodeId> = None;
-    let mut export_target: Option<NodeId> = None;
     let mut approve_target: Option<String> = None;
 
     clipped(ui, rect, |ui| {
         let p = ui.painter().clone();
-        let mut y = rect.top() - scroll;
-        let w = (rect.width() - 10.0).max(200.0);
-
-        // SECTION CARD 1: Gate Records (`G1..G5`) with SHA-256 Digest & Rubric Table (`2/2`)
-        let c1 = Rect::from_min_size(Pos2::new(rect.left(), y), Vec2::new(w, card1_h.max(96.0)));
-        draw_section_card_shell(
-            &p,
-            c1,
-            Icon::Flag,
-            "PIPELINE GATES (G1–G5) · SHA-256 DIGESTS & RUBRIC SCORES (review/gates/*.md)",
-            "VERDICT: PASS · CURRENT",
+        let col_w = (rect.width() - 64.0).min(680.0).max(240.0);
+        let col_x = rect.center().x - col_w * 0.5;
+        let sheet_rect = Rect::from_min_size(
+            Pos2::new((col_x - 28.0).max(rect.left() + 8.0), rect.top() + 12.0),
+            Vec2::new((col_w + 56.0).min(rect.width() - 16.0), (rect.height() - 16.0).max(120.0)),
         );
-        let mut gy = c1.top() + 54.0;
-        for (gi, g) in pkg.gates.iter().enumerate() {
-            if gi > 0 {
-                widgets::hline(&p, c1.left() + 16.0, c1.right() - 16.0, gy - 10.0, TOKEN_HAIRLINE);
-            }
-            let right_edge = if g.status != "APPROVED" {
-                let abtn = draw_action_button(
-                    ui,
-                    &p,
-                    &format!("gate-approve-{}", g.gate_id),
-                    Pos2::new(c1.right() - 16.0, gy),
-                    Some(Icon::Check),
-                    "Approve Gate",
-                    PILL_OK_FILL,
-                    PILL_OK_STROKE,
-                    PILL_OK_TEXT,
-                );
+        p.rect_filled(sheet_rect, CornerRadius::same(10), pal.doc_sheet);
+        p.rect_stroke(sheet_rect, CornerRadius::same(10), Stroke::new(1.0, pal.border), StrokeKind::Inside);
+
+        let mut y = rect.top() + 34.0 - scroll;
+
+        p.text(
+            Pos2::new(col_x, y),
+            Align2::LEFT_CENTER,
+            "PIPELINE GATES (G1–G5) & ARCHITECTURAL DECISIONS",
+            theme::font_mono(),
+            pal.text_subtle,
+        );
+        y += 26.0;
+        p.text(
+            Pos2::new(col_x, y),
+            Align2::LEFT_CENTER,
+            "Quality Gates & Decision Ledger",
+            FontId::proportional(20.0),
+            pal.text,
+        );
+        y += 24.0;
+        widgets::hline(&p, col_x, col_x + col_w, y, pal.hairline);
+        y += 20.0;
+
+        for g in &pkg.gates {
+            widgets::hline(&p, col_x, col_x + col_w, y, pal.hairline);
+            y += 18.0;
+            let dot = if g.status == "APPROVED" { DOT_OK } else { DOT_WARN };
+            p.circle_filled(Pos2::new(col_x + 4.0, y), 3.5, dot);
+            let g_lbl = format!("{} ({})  ·  {}  ·  {}", g.gate_id, g.stage, g.status, g.file_path);
+            let clean = widgets::elide(&p, &g_lbl, &theme::font_body_medium(), (col_w - 110.0).max(48.0));
+            p.text(Pos2::new(col_x + 14.0, y), Align2::LEFT_CENTER, clean, theme::font_body_medium(), pal.text);
+
+            if g.status != "APPROVED" {
+                let abtn = Rect::from_min_size(Pos2::new(col_x + col_w - 76.0, y - 10.0), Vec2::new(76.0, 20.0));
                 if ui.interact(abtn, Id::new(("gate-approve-click", &g.gate_id)), Sense::click()).clicked() {
                     approve_target = Some(g.gate_id.clone());
                 }
-                abtn.left() - 10.0
+                p.rect_filled(abtn, CornerRadius::same(4), pal.surface);
+                p.rect_stroke(abtn, CornerRadius::same(4), Stroke::new(1.0, pal.border), StrokeKind::Inside);
+                p.text(abtn.center(), Align2::CENTER_CENTER, "Approve", theme::font_small(), pal.text);
             } else {
-                draw_ring_pill_right(
-                    &p,
-                    Pos2::new(c1.right() - 16.0, gy),
-                    "PO Approved",
-                    PILL_OK_FILL,
-                    PILL_OK_STROKE,
-                    PILL_OK_TEXT,
-                ) - 10.0
-            };
-
-            let (sfill, sstroke, sfg) = status_pill_colors(&g.status);
-            let mut gx = c1.left() + 18.0;
-            gx = draw_ring_pill_left(
-                &p,
-                Pos2::new(gx, gy),
-                &format!("GATE: {}", g.status),
-                sfill,
-                sstroke,
-                sfg,
-            ) + 8.0;
-            gx = draw_ring_pill_left(
-                &p,
-                Pos2::new(gx, gy),
-                &format!("{} ({})", g.gate_id, g.stage),
-                PILL_INFO_FILL,
-                PILL_INFO_STROKE,
-                PILL_INFO_TEXT,
-            ) + 8.0;
-            gx = draw_ring_pill_left(
-                &p,
-                Pos2::new(gx, gy),
-                &format!("VERDICT: {}", g.verdict),
-                PILL_OK_FILL,
-                PILL_OK_STROKE,
-                PILL_OK_TEXT,
-            ) + 8.0;
-            gx = draw_ring_pill_left(&p, Pos2::new(gx, gy), &g.freshness, PILL_OK_FILL, PILL_OK_STROKE, PILL_OK_TEXT) + 8.0;
-            let short_sha: String = g.config_sha256.chars().take(12).collect();
-            if !short_sha.is_empty() && gx + 140.0 < right_edge {
-                let _ = draw_ring_pill_left(
-                    &p,
-                    Pos2::new(gx, gy),
-                    &format!("sha256:{short_sha}"),
-                    TOKEN_CODE_BG,
-                    TOKEN_BORDER,
-                    TOKEN_TEXT_MUTED,
-                );
+                p.text(Pos2::new(col_x + col_w, y), Align2::RIGHT_CENTER, "2/2 PASS", theme::font_mono(), pal.text_subtle);
             }
-
-            // Second line of the gate row: Rubric criteria (`A Grounded 2/2`, `B Clear 2/2`, ...)
-            let ry = gy + 24.0;
-            let mut rx = c1.left() + 18.0;
-            for (crit_name, score, max) in &g.rubric {
-                if rx + 120.0 > c1.right() - 16.0 {
-                    break;
-                }
-                rx = draw_ring_pill_left(
-                    &p,
-                    Pos2::new(rx, ry),
-                    &format!("{crit_name} {score}/{max}"),
-                    TOKEN_SURFACE_2,
-                    TOKEN_BORDER,
-                    PILL_OK_TEXT,
-                ) + 6.0;
-            }
-            gy += 56.0;
+            y += 18.0;
         }
-        y = c1.bottom() + 14.0;
 
-        // SECTION CARD 2: Decision Ledger (`D1..D8`)
-        let c2 = Rect::from_min_size(Pos2::new(rect.left(), y), Vec2::new(w, card2_h.max(88.0)));
-        draw_section_card_shell(
-            &p,
-            c2,
-            Icon::Book,
-            "DECISION LEDGER (decisions/decision-log.md)",
-            &format!("{} Decisions", pkg.decisions.len()),
-        );
-        let mut dy = c2.top() + 56.0;
-        for (di, dec) in pkg.decisions.iter().enumerate() {
-            if di > 0 {
-                widgets::hline(&p, c2.left() + 16.0, c2.right() - 16.0, dy - 18.0, TOKEN_HAIRLINE);
-            }
-            let d_right = draw_ring_pill_left(
-                &p,
-                Pos2::new(c2.left() + 18.0, dy),
-                &dec.id,
-                PILL_WARN_FILL,
-                PILL_WARN_STROKE,
-                PILL_WARN_TEXT,
-            );
-            let txt = format!("{}  —  {}", dec.decision, dec.source_detail);
-            let clean = widgets::elide(&p, &txt, &theme::font_body(), (c2.right() - d_right - 26.0).max(48.0));
-            p.text(Pos2::new(d_right + 10.0, dy), Align2::LEFT_CENTER, clean, theme::font_body(), TOKEN_TEXT);
-            dy += 36.0;
-        }
-        y = c2.bottom() + 14.0;
+        y += 22.0;
+        p.text(Pos2::new(col_x, y), Align2::LEFT_CENTER, "Architectural decision records (ADRs)", FontId::proportional(15.0), pal.text);
+        y += 18.0;
 
-        // SECTION CARD 3: Linked Canvas Frames (`Focus on Canvas` + `Export Frame -> .spec.json`)
-        let c3 = Rect::from_min_size(Pos2::new(rect.left(), y), Vec2::new(w, card3_h.max(92.0)));
-        draw_section_card_shell(
-            &p,
-            c3,
-            Icon::Frame,
-            "LINKED CANVAS FRAMES & SPEC SYNC",
-            &format!("{} Active Frames", page_children.len()),
-        );
-        let mut fy = c3.top() + 60.0;
-        for (fi, fid) in page_children.iter().enumerate() {
-            let Some(node) = app.doc.get(*fid) else { continue };
-            if fi > 0 {
-                widgets::hline(&p, c3.left() + 16.0, c3.right() - 16.0, fy - 24.0, TOKEN_HAIRLINE);
-            }
-            let exp_btn = draw_action_button(
-                ui,
-                &p,
-                &format!("screen-export-{}", fid.0),
-                Pos2::new(c3.right() - 16.0, fy),
-                Some(Icon::Export),
-                "Export Frame -> .spec.json",
-                TOKEN_CODE_BG,
-                TOKEN_BORDER,
-                TOKEN_TEXT,
-            );
-            let foc_btn = draw_action_button(
-                ui,
-                &p,
-                &format!("screen-focus-{}", fid.0),
-                Pos2::new(exp_btn.left() - 8.0, fy),
-                Some(Icon::Eye),
-                "Focus on Canvas",
-                PILL_INFO_FILL,
-                PILL_INFO_STROKE,
-                PILL_INFO_TEXT,
-            );
-            if ui.interact(foc_btn, Id::new(("screen-focus-click", fid.0)), Sense::click()).clicked() {
-                focus_target = Some(*fid);
-            }
-            if ui.interact(exp_btn, Id::new(("screen-export-click", fid.0)), Sense::click()).clicked() {
-                export_target = Some(*fid);
-            }
-
-            let al_dir = match node.kind.frame_props().and_then(|f| f.auto_layout) {
-                Some(al) if al.direction == LayoutDirection::Horizontal => "Auto-Layout Row",
-                Some(al) if al.direction == LayoutDirection::Grid => "2D CSS Grid",
-                Some(_) => "Auto-Layout Column",
-                None => "Freeform Frame",
-            };
-            let open_comments = resolved_comments
-                .iter()
-                .filter(|c| !c.resolved && (c.target_frame_id == Some(fid.0) || c.target_node_id == Some(fid.0)))
-                .count();
-
-            let mut bx = c3.left() + 18.0;
-            bx = draw_ring_pill_left(
-                &p,
-                Pos2::new(bx, fy),
-                &format!("{:.0}x{:.0}", node.size.x, node.size.y),
-                TOKEN_CODE_BG,
-                TOKEN_BORDER,
-                TOKEN_TEXT_MUTED,
-            ) + 8.0;
-            bx = draw_ring_pill_left(&p, Pos2::new(bx, fy), al_dir, PILL_INFO_FILL, PILL_INFO_STROKE, PILL_INFO_TEXT) + 8.0;
-            if open_comments > 0 {
-                bx = draw_ring_pill_left(
-                    &p,
-                    Pos2::new(bx, fy),
-                    &format!("{open_comments} pins"),
-                    PILL_WARN_FILL,
-                    PILL_WARN_STROKE,
-                    PILL_WARN_TEXT,
-                ) + 8.0;
-            }
-            let title_max = (foc_btn.left() - bx - 14.0).max(48.0);
-            let clean_title = widgets::elide(&p, &node.name, &theme::font_body_strong(), title_max);
-            p.text(Pos2::new(bx, fy), Align2::LEFT_CENTER, clean_title, theme::font_body_strong(), TOKEN_TEXT);
-
-            fy += 48.0;
+        for dec in &pkg.decisions {
+            widgets::hline(&p, col_x, col_x + col_w, y, pal.hairline);
+            y += 16.0;
+            p.text(Pos2::new(col_x, y), Align2::LEFT_CENTER, &dec.id, theme::font_mono(), pal.text);
+            let clean = widgets::elide(&p, &dec.decision, &theme::font_body(), (col_w - 48.0).max(48.0));
+            p.text(Pos2::new(col_x + 44.0, y), Align2::LEFT_CENTER, clean, theme::font_body(), pal.text_muted);
+            y += 16.0;
         }
     });
     scrollbar(ui, rect, app.specs.scroll, est_h);
@@ -4600,150 +3925,70 @@ fn render_gates_and_canvas_tab(app: &mut App, ui: &mut Ui, rect: Rect, pkg: &Spe
             app.show_toast(format!("Approved gate {gid} (GATE: APPROVED)"), false);
         }
     }
-    if let Some(fid) = focus_target {
-        app.select_only(fid);
-        app.specs.open = false;
-        app.fit_selection();
-    }
-    if let Some(fid) = export_target {
-        app.select_only(fid);
-        app.export_active_frame_to_spec();
-    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Operate-Mode Drawing Primitives (No cards-in-cards, ring-bordered pills, vector icons)
+// Lightweight Editorial Markdown Helpers
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Draws a top-level section card (`#1F2024`, `radius = 12px`, `1px` border `#2E2F36`) with a
-/// `38px` `#26272C` table/section header strip (`tokens.css` `--table-head-h: 38px`).
-fn draw_section_card_shell(p: &Painter, card_rect: Rect, icon: Icon, title: &str, right_badge: &str) {
-    p.rect_filled(card_rect, CornerRadius::same(12), TOKEN_SURFACE);
-    p.rect_stroke(card_rect, CornerRadius::same(12), Stroke::new(1.0, TOKEN_BORDER), StrokeKind::Inside);
-
-    let head_h = 38.0;
-    let head_rect = Rect::from_min_size(card_rect.min, Vec2::new(card_rect.width(), head_h));
-    p.rect_filled(
-        head_rect,
-        CornerRadius {
-            nw: 12,
-            ne: 12,
-            sw: 0,
-            se: 0,
-        },
-        TOKEN_SURFACE_2,
-    );
-    widgets::hline(p, head_rect.left(), head_rect.right(), head_rect.bottom(), TOKEN_BORDER);
-
-    let badge_left = if !right_badge.is_empty() {
-        draw_ring_pill_right(
-            p,
-            Pos2::new(head_rect.right() - 14.0, head_rect.center().y),
-            right_badge,
-            TOKEN_CODE_BG,
-            TOKEN_BORDER,
-            TOKEN_TEXT_MUTED,
-        ) - 10.0
-    } else {
-        head_rect.right() - 14.0
-    };
-
-    icons::paint(p, icon, Pos2::new(head_rect.left() + 18.0, head_rect.center().y), 13.0, PILL_INFO_TEXT);
-    let max_w = (badge_left - head_rect.left() - 36.0).max(48.0);
-    let clean = widgets::elide(p, title, &theme::font_small_strong(), max_w);
+fn draw_left_section_header(p: &Painter, pos: Pos2, width: f32, title: &str) {
+    let r = Rect::from_min_size(pos, Vec2::new(width, 18.0));
+    let txt = widgets::elide(p, title, &theme::font_small_strong(), (width - 12.0).max(36.0));
     p.text(
-        Pos2::new(head_rect.left() + 30.0, head_rect.center().y),
+        Pos2::new(r.left() + 8.0, r.center().y),
         Align2::LEFT_CENTER,
-        clean,
+        txt,
         theme::font_small_strong(),
-        TOKEN_TEXT,
+        TOKEN_TEXT_SUBTLE,
     );
 }
 
-fn draw_left_section_header(p: &Painter, pos: Pos2, width: f32, icon: Icon, title: &str, color: Color32) {
-    let r = Rect::from_min_size(pos, Vec2::new(width, 20.0));
-    icons::paint(p, icon, Pos2::new(r.left() + 8.0, r.center().y), 12.0, color);
-    let txt = widgets::elide(p, title, &theme::font_small_strong(), (width - 24.0).max(36.0));
-    p.text(Pos2::new(r.left() + 18.0, r.center().y), Align2::LEFT_CENTER, txt, theme::font_small_strong(), color);
-}
-
-fn status_pill_colors(status: &str) -> (Color32, Color32, Color32) {
-    let upper = status.to_ascii_uppercase();
-    if upper.contains("APPROVED") || upper.contains("PASS") || upper.contains("CURRENT") || upper.contains("VERIFIED") {
-        (PILL_OK_FILL, PILL_OK_STROKE, PILL_OK_TEXT)
-    } else if upper.contains("PENDING") || upper.contains("STALE") || upper.contains("OPEN") {
-        (PILL_WARN_FILL, PILL_WARN_STROKE, PILL_WARN_TEXT)
-    } else if upper.contains("FAIL") || upper.contains("CHANGES_REQUESTED") || upper.contains("BLOCK") {
-        (PILL_BAD_FILL, PILL_BAD_STROKE, PILL_BAD_TEXT)
-    } else {
-        (PILL_INFO_FILL, PILL_INFO_STROKE, PILL_INFO_TEXT)
-    }
-}
-
-/// Draws a left-anchored ring-bordered semantic pill (`radius = 99px`) and returns its `right()` x coordinate.
-fn draw_ring_pill_left(p: &Painter, left_center: Pos2, text: &str, fill: Color32, stroke: Color32, fg: Color32) -> f32 {
-    let font: FontId = theme::font_small_strong();
-    let tw = widgets::text_width(p, text, &font);
-    let w = (tw + 16.0).ceil().max(26.0);
-    let h = 20.0;
-    let rect = Rect::from_min_size(Pos2::new(left_center.x, left_center.y - h * 0.5), Vec2::new(w, h));
-    p.rect_filled(rect, CornerRadius::same(99), fill);
-    p.rect_stroke(rect, CornerRadius::same(99), Stroke::new(1.0, stroke), StrokeKind::Inside);
-    p.text(rect.center(), Align2::CENTER_CENTER, text, font, fg);
-    rect.right()
-}
-
-/// Draws a right-anchored ring-bordered semantic pill (`radius = 99px`) and returns its `left()` x coordinate.
-fn draw_ring_pill_right(p: &Painter, right_center: Pos2, text: &str, fill: Color32, stroke: Color32, fg: Color32) -> f32 {
-    let font: FontId = theme::font_small_strong();
-    let tw = widgets::text_width(p, text, &font);
-    let w = (tw + 16.0).ceil().max(26.0);
-    let h = 20.0;
-    let rect = Rect::from_min_size(Pos2::new(right_center.x - w, right_center.y - h * 0.5), Vec2::new(w, h));
-    p.rect_filled(rect, CornerRadius::same(99), fill);
-    p.rect_stroke(rect, CornerRadius::same(99), Stroke::new(1.0, stroke), StrokeKind::Inside);
-    p.text(rect.center(), Align2::CENTER_CENTER, text, font, fg);
-    rect.left()
-}
-
-/// Draws a right-aligned action button with an optional vector `Icon` and returns its `Rect`.
-#[allow(clippy::too_many_arguments)]
-fn draw_action_button(
-    ui: &mut Ui,
+/// Renders natural multi-line word-wrapped editorial prose (up to 3 lines per paragraph block)
+/// and returns the next `y` coordinate.
+fn draw_wrapped_prose(
     p: &Painter,
-    id_salt: &str,
-    right_center: Pos2,
-    icon: Option<Icon>,
-    label: &str,
-    bg: Color32,
-    border: Color32,
-    fg: Color32,
-) -> Rect {
-    let font = theme::font_small_strong();
-    let tw = widgets::text_width(p, label, &font);
-    let icon_pad = if icon.is_some() { 16.0 } else { 0.0 };
-    let w = (tw + icon_pad + 20.0).ceil().max(48.0);
-    let h = 24.0;
-    let rect = Rect::from_min_size(Pos2::new(right_center.x - w, right_center.y - h * 0.5), Vec2::new(w, h));
-    let resp = ui.interact(rect, Id::new(id_salt), Sense::hover());
-    p.rect_filled(rect, CornerRadius::same(99), if resp.hovered() { border } else { bg });
-    p.rect_stroke(rect, CornerRadius::same(99), Stroke::new(1.0, border), StrokeKind::Inside);
-    let text_col = if resp.hovered() { TOKEN_TEXT } else { fg };
-    if let Some(ic) = icon {
-        icons::paint(p, ic, Pos2::new(rect.left() + 13.0, rect.center().y), 12.0, text_col);
-        p.text(
-            Pos2::new(rect.left() + 23.0, rect.center().y),
-            Align2::LEFT_CENTER,
-            label,
-            font,
-            text_col,
-        );
-    } else {
-        p.text(rect.center(), Align2::CENTER_CENTER, label, font, text_col);
+    pos: Pos2,
+    max_width: f32,
+    text: &str,
+    font: &FontId,
+    color: Color32,
+    line_height: f32,
+) -> f32 {
+    let width_budget = max_width.max(48.0);
+    let mut lines: Vec<String> = Vec::new();
+    let mut current = String::new();
+
+    for word in text.split_whitespace() {
+        let candidate = if current.is_empty() {
+            word.to_string()
+        } else {
+            format!("{current} {word}")
+        };
+        if widgets::text_width(p, &candidate, font) <= width_budget || current.is_empty() {
+            current = candidate;
+        } else {
+            lines.push(current);
+            current = word.to_string();
+            if lines.len() >= 2 {
+                break;
+            }
+        }
     }
-    widgets::record(ui, id_salt, rect);
-    rect
+    if !current.is_empty() && lines.len() < 3 {
+        let rest_elided = widgets::elide(p, &current, font, width_budget);
+        lines.push(rest_elided);
+    }
+
+    let mut y = pos.y;
+    for line in lines {
+        let clean = widgets::elide(p, &line, font, width_budget);
+        p.text(Pos2::new(pos.x, y), Align2::LEFT_CENTER, clean, font.clone(), color);
+        y += line_height;
+    }
+    y
 }
+
+
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Unit Tests
@@ -4978,6 +4223,7 @@ mod tests {
 
         let left_rect = Rect::from_min_size(Pos2::new(40.0, 0.0), Vec2::new(240.0, 960.0));
         let reader_rect = Rect::from_min_size(Pos2::new(280.0, 0.0), Vec2::new(1080.0, 960.0));
+        let right_rect = Rect::from_min_size(Pos2::new(1360.0, 0.0), Vec2::new(240.0, 960.0));
 
         for tab in SpecTab::ALL {
             app.specs.active_tab = tab;
@@ -4988,6 +4234,7 @@ mod tests {
             let out = ctx.run_ui(raw, |ui| {
                 show_left(&mut app, ui, left_rect);
                 show_reader(&mut app, ui, reader_rect);
+                show_right(&mut app, ui, right_rect);
             });
             let (texts, boxes) = crate::lint::scan_shapes(&out.shapes);
             let issues = crate::lint::check_text(&texts, &boxes);
@@ -4998,5 +4245,10 @@ mod tests {
         let spec: NodeSpec = serde_json::from_str(FALLBACK_SPEC_JSON).expect("valid fallback NodeSpec");
         app.apply_node_spec(&spec, "easeui-agent-console.spec.json");
         assert!(app.doc.nodes.len() > before_nodes, "applying .spec.json should add nodes to the canvas");
+
+        let pkg = app.specs.packages[app.specs.selected_pkg].clone();
+        let before_card = app.doc.nodes.len();
+        drop_spec_card_onto_canvas(&mut app, &pkg);
+        assert!(app.doc.nodes.len() > before_card, "dropping Spec Card should add an on-canvas Markdown frame");
     }
 }

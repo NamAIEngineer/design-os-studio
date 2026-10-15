@@ -36,7 +36,8 @@
     "DIR-19",
     "DIR-20",
     "DIR-21",
-    "DIR-22"
+    "DIR-22",
+    "DIR-23"
   ],
   "requirements": [
     "REQ-01",
@@ -57,7 +58,8 @@
     "REQ-16",
     "REQ-17",
     "REQ-18",
-    "REQ-19"
+    "REQ-19",
+    "REQ-20"
   ],
   "stories": [
     {

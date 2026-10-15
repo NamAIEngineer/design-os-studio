@@ -1,24 +1,24 @@
 ---
 id: decision-log
 type: decisions
-title: "Decision Ledger & Open Items Tracker (D1..D19)"
-status: Current to D19
+title: "Decision Ledger & Open Items Tracker (D1..D20)"
+status: Current to D20
 updated: 2026-10-15
 ledger: true
 trace:
-  amendments: [A-01, A-02, A-03, A-04, A-05, A-06, A-07, A-08, A-09, A-10, A-11]
+  amendments: [A-01, A-02, A-03, A-04, A-05, A-06, A-07, A-08, A-09, A-10, A-11, A-12]
 topics:
   - id: architecture
     name: Architecture, REA, Binary Format, Auto-Update, Multi-Tab State, AI PTY Core, Parity Meter & Cross-Platform Release Packaging
     note: Figma binary v106, REA pipeline, Dual-Layer Auto-Update, Multi-Tab Project isolation, Native PTY AI Core, 5-Pillar Parity Meter, Pure PTY Chat Wrapper, Cross-Platform Installers (macOS/Windows/Linux), and Spec Format v2 decisions
     ids: [D1, D3, D5, D7, D9, D11, D12, D13, D14, D16, D18, D19]
   - id: craft
-    name: UI3 Design Craft, Brand Typography, Unified Phosphor Icons, Agents Side Panel & Headless QA
-    note: Figma UI3 tokens, design:os studio lowercase+bold brand rule, Operate-mode tokens, Unified Phosphor Icons, Agents Left Side Panel, Copy cho AI, and background capture
-    ids: [D2, D4, D6, D8, D10, D15, D17]
+    name: UI3 Design Craft, Brand Typography, Unified Phosphor Icons, Agents Side Panel, Headless QA & 16-Capture Visual Proof Gallery
+    note: Figma UI3 tokens, design:os studio lowercase+bold brand rule, Operate-mode tokens, Unified Phosphor Icons, Agents Left Side Panel, Copy cho AI, background capture, and design-os-github-page 16-capture visual proof showcase
+    ids: [D2, D4, D6, D8, D10, D15, D17, D20]
 ---
 
-## 1. Settled Decisions (D1..D19)
+## 1. Settled Decisions (D1..D20)
 
 | Id | Decision | Source and detail |
 |---|---|---|
@@ -41,6 +41,7 @@ topics:
 | D17 | Unify 100% of **`design`:os studio** icons (`crate::icons::Icon`, except the `Icon::Logo` brand mark) onto official Phosphor Icons (`https://phosphoricons.com/`, `@phosphor-icons/core` `viewBox="0 0 256 256"`, `fill="currentColor"`) vendored in `crates/designos-app/assets/icons/phosphor/*.svg` and rasterized via `resvg` with DPR-aware `(Icon, physical_px)` texture caching and `round_to_pixel` snapping across all 13 screens `S01..S13` (`DIR-19`) | Owner round R8, 2026-10-15: amendment A-09, [contract](../contract/FC-001.md) BR-22, [US-14](../us/US-14.md). |
 | D18 | Pure Chat UI Wrapper Over Live PTY Shell (`Claude Code` `claude`, `Codex` `codex`, `Antigravity CLI` `agy`) with ANSI-Stripped Live Stdout Streaming: implement `RailItem::Agents` (`S13`) as a native Chat UI wrapper (`AgentChatTurn` / `AgentChatRole`) directly on top of the active `portable-pty` + `vt100` shell with 1-click CLI runtime selector pills (`Claude Code \| Codex \| Antigravity`), `sync_chat_from_pty` + `strip_ansi_codes` live stdout streaming, inline `NodeSpec` detection & 1-click/auto Canvas apply badge inside chat bubbles, `+` Selection + Pin-Comment context attachment, and instant toggle between clean Chat thread view and raw VT100 terminal screen (`DIR-21`) | Owner round R9, 2026-10-15: amendment A-10, [contract](../contract/FC-001.md) BR-23, [US-15](../us/US-15.md). |
 | D19 | Final Cross-Platform Release Build & User-Installable Packaging Workflow (`macOS`, `Windows`, `Linux` · `DIR-22`): bundle all 4 binaries (`designos-studio`, `designos`, `designos-mcp`, `designos-diff`) into native user installers via `scripts/package-macos.sh` (`.app` `os.design.studio` + drag-to-Applications `.dmg` + `install-cli.command` + `.tar.gz`), `scripts/package-windows.ps1` + `packaging/windows/installer.nsi` (NSIS `-setup.exe` + PowerShell `install.ps1`/`uninstall.ps1` + `.zip`), `scripts/package-linux.sh` (`.deb` + `.tar.gz` with `./install.sh`, `.desktop`, MIME XML, `AppRun`), and orchestrate via `scripts/build-release.sh` + `.github/workflows/release.yml` emitting `dist/release-manifest.json` + `SHA256SUMS` for `updater.rs` Layer 1 self-update | Owner round R10, 2026-10-15: amendment A-11, [contract](../contract/FC-001.md) BR-24, [US-09](../us/US-09.md). |
+| D20 | 16-Capture Retina 2x Visual Proof Suite via `scripts/capture-visual-proof.sh` & `design-os-github-page` 5-Gate `D1..D5` + SEO/AEO/GEO `G1..G5` Compliance (`DIR-23`): regenerate all 16 Retina 2x (`3200×2000`) headless screenshots (`docs/assets/screenshots/*.png`) across `S01..S13` + 3 Spec Reader Role Views (`PO View`, `Dev View`, `QA & Coverage`) with `with_visible(false).with_active(false)`, and structure `README.md` + `docs/index.html` (`llms.txt`, `sitemap.xml`, `robots.txt`) strictly according to `https://github.com/jangtrinh/design-os-github-page` (12-Section AI-Ready README & 9-Tier GitHub Pages hierarchy) | Owner round R11, 2026-10-15: amendment A-12, [contract](../contract/FC-001.md) BR-25, [US-08](../us/US-08.md), [US-15](../us/US-15.md). |
 
 ## 2. Open Items (`OPEN` / `OPEN[blocking]` Tracker)
 

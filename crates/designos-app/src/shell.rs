@@ -787,7 +787,11 @@ impl Shell {
                     crate::board::canvas::zoom_pill(&mut self.app, ui, main_canvas_rect);
                 }
             } else {
-                right::show(&mut self.app, ui, right_rect);
+                if specs_reader_open {
+                    crate::specs::show_right(&mut self.app, ui, right_rect);
+                } else {
+                    right::show(&mut self.app, ui, right_rect);
+                }
                 if !specs_reader_open && !self.app.terminal.dock_open {
                     toolbar::show(&mut self.app, ui, if deck { main_canvas_rect } else { canvas_rect_for_toolbar(full) });
                 }

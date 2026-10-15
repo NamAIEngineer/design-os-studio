@@ -30,6 +30,7 @@
 | `REQ-17` | `US-14` | `S01..S13` | `D17` | `BR-22` | `SCN-14-01..03` | `crates/designos-app/src/icons.rs` + `crates/designos-app/assets/icons/phosphor/*.svg` (`DIR-19` Unified Phosphor Icons System) |
 | `REQ-18` | `US-15` | `S13`, `S03`, `S01` | `D18` | `BR-23` | `SCN-15-01..03` | `crates/designos-app/src/terminal.rs` + `crates/designos-app/src/panels/left.rs` (`DIR-21` Pure Chat UI Wrapper over PTY `claude` / `codex` / `agy`, `AgentChatTurn`, `sync_chat_from_pty`, `strip_ansi_codes`) |
 | `REQ-19` | `US-09` | `S09`, `S04`, `S01` | `D19`, `D9` | `BR-24`, `BR-13` | `SCN-09-01..03` | `scripts/build-release.sh`, `scripts/package-macos.sh`, `scripts/package-windows.ps1`, `scripts/package-linux.sh`, `packaging/windows/installer.nsi`, `.github/workflows/release.yml` (`DIR-22` Cross-Platform Release Installers) |
+| `REQ-20` | `US-08`, `US-15` | `S01..S13` | `D20`, `D8` | `BR-25`, `BR-11`, `BR-12` | `SCN-08-01..03`, `SCN-15-01..03` | `scripts/capture-visual-proof.sh`, `docs/screenshots/*.png` (16 Retina 2x captures), `README.md` (12-Section AI-Ready README), `docs/index.html` (9-Tier GitHub Pages · `DIR-23`) |
 
 ---
 
@@ -45,14 +46,17 @@ grep -E '^\| S(0[1-9]|1[0-3]) \|' plans/specs/designos-studio-v2/ux/ui-contract.
 # 3. Verify 5-Pillar Quantitative Figma Parity Scorecard
 python3 scripts/figma_parity_meter.py
 
-# 4. Build Cross-Platform Release Installers & SHA256SUMS (macOS .app/.dmg, Windows -setup.exe, Linux .deb/.tar.gz)
+# 4. Regenerate 16-capture Retina 2x headless visual proof suite (with_visible(false).with_active(false))
+./scripts/capture-visual-proof.sh
+
+# 5. Build Cross-Platform Release Installers & SHA256SUMS (macOS .app/.dmg, Windows -setup.exe, Linux .deb/.tar.gz)
 ./scripts/build-release.sh
 ```
 
 ---
 
 ## 3. Handoff Sign-Off Checklist
-- [x] All 22 directives (`DIR-01..DIR-22`) traced to `EP-01..EP-16`, `REQ-01..REQ-19`, and `US-01..US-15`.
+- [x] All 23 directives (`DIR-01..DIR-23`) traced to `EP-01..EP-17`, `REQ-01..REQ-20`, and `US-01..US-15`.
 - [x] Brand typography rule (`DIR-12` / `BR-14` / `D10`): always all-lowercase **`design`:os studio** with bold **`design`** (`700`) and regular `:os studio` (`400`).
 - [x] Multiple Tab Project Workspace (`DIR-13` / `EP-10` / `REQ-12` / `US-10` / `S10` / `BR-15`): `36px` Desktop Tab Strip with 100% per-tab state isolation.
 - [x] 1:1 Figma AI Agent Suite (`DIR-14`, `DIR-15` / `US-11` / `S11`) & Quantitative 5-Pillar Figma Parity Scorecard (`DIR-16` / `US-12` / `S12`).
@@ -60,9 +64,10 @@ python3 scripts/figma_parity_meter.py
 - [x] Unified Phosphor Icons System (`DIR-19` / `EP-14` / `REQ-17` / `US-14` / `BR-22` / `D17`): 100% `crate::icons::Icon` variants (except `Icon::Logo`) mapped to `@phosphor-icons/core` SVGs (`256×256`) in `crates/designos-app/assets/icons/phosphor/*.svg` and rasterized via `resvg` with DPR-aware pixel snapping across `S01..S13`.
 - [x] Pure Chat UI Wrapper Over Native PTY Terminal Shell (`DIR-21` / `EP-15` / `REQ-18` / `US-15` / `BR-23` / `D18`): `RailItem::Agents` (`S13`) wraps live `Claude Code (claude)`, `Codex (codex)`, and `Antigravity CLI (agy)` PTY shells with 1-click runtime pills, ANSI-stripped stdout chat bubbles (`AgentChatTurn` / `sync_chat_from_pty` / `strip_ansi_codes`), inline `NodeSpec` Canvas apply badge, Selection + Pin-Comment context attachment (`+`), and instant Chat/VT100 terminal toggle.
 - [x] Final Cross-Platform Release Build & User-Installable Packaging Workflow (`DIR-22` / `EP-16` / `REQ-19` / `US-09` / `BR-24` / `D19`): macOS `.app` + `.dmg` + `install-cli.command`, Windows NSIS `-setup.exe` + `install.ps1`, Linux `.deb` + `.tar.gz` + `install.sh`, `scripts/build-release.sh`, and `.github/workflows/release.yml` generating `dist/release-manifest.json` + `SHA256SUMS`.
-- [x] Wave 7 (`W7`) Verified: `387/387` (`100.00%`) 5-Pillar Quantitative Figma Parity Meter (`DIR-20`..`DIR-22`).
-- [x] Contract `FC-001.md` Locked (`BR-01..BR-24`, Amendments `A-01..A-11`).
-- [x] Decision Log `D1..D19` recorded with zero blocking `OPEN` items.
+- [x] 16-Capture Retina 2x Visual Proof Suite & `design-os-github-page` Showcase (`DIR-23` / `EP-17` / `REQ-20` / `US-08`, `US-15` / `BR-25` / `D20`): `scripts/capture-visual-proof.sh` regenerates all 16 Retina 2x PNGs in `docs/screenshots/*.png` headlessly (`with_visible(false).with_active(false)`), and `README.md` (12-Section AI-Ready README, 5-Gate `D1..D5`) + `docs/index.html` (9-Tier GitHub Pages, SEO/AEO/GEO `G1..G5`) pass all `https://github.com/jangtrinh/design-os-github-page` gates.
+- [x] Wave 8 (`W8 Complete`) Verified: `387/387` (`100.00%`) 5-Pillar Quantitative Figma Parity Meter (`DIR-20`..`DIR-23`).
+- [x] Contract `FC-001.md` Locked (`BR-01..BR-25`, Amendments `A-01..A-12`).
+- [x] Decision Log `D1..D20` recorded with zero blocking `OPEN` items.
 - [x] Screen Inventory (`S01..S13`) and UI Contract (`78` rows = `13 screens × 6 states`) complete.
 - [x] Test Plan (`46` scenarios `SCN-01-01..SCN-15-03`) mapped 1:1 to acceptance criteria.
 - [x] All 5 Quality Gates (`g1-intake` .. `g5-handoff`) audited with SHA-256 artifact digests and 6-criteria `2/2` rubric scores.

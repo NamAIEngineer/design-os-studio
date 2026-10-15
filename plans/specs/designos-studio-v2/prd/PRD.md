@@ -80,6 +80,7 @@ flowchart LR
 |---|---|---|---|
 | REQ-09 | Thực thi quy trình dịch ngược (`morluto/rea`) đối với `/Applications/Figma.app` (`app.asar`) và `/Users/jangtrinh/Downloads/VSF - PCP.fig` để trích xuất và kiểm chứng tự động schema nhị phân Kiwi v106, bảng ánh xạ biến và hệ token UI3. | contract BR-10 (D7) | US-07 |
 | REQ-10 | Đảm bảo mọi lệnh chụp ảnh màn hình và kiểm thử giao diện tự động (`--screenshot`, `--panel`, `--menu`, `--popover`, `--parity-report`) chạy hoàn toàn ở chế độ nền (`with_visible(false).with_active(false)`), không chiếm quyền điều khiển cửa sổ macOS và kiểm chứng 99%+ parity cho Gate `G4`/`G5`. | contract BR-11, BR-12 (D8) | US-08 |
+| REQ-20 | Tái tạo tự động bộ 16 ảnh bằng chứng thị giác Retina 2x (`docs/screenshots/*.png`) ở chế độ nền (`with_visible(false).with_active(false)`) thông qua `scripts/capture-visual-proof.sh` phản ánh đầy đủ Phosphor Icons (`DIR-19`), `Agents` Pure PTY Chat Wrapper (`DIR-21`), `387/387 (100.00%)` Parity (`DIR-20`), đóng gói đa nền tảng (`DIR-22`), và nâng cấp `README.md` (12-Section AI-Ready README, 5-Gate `D1..D5`) cùng `docs/index.html` (9-Tier GitHub Pages, SEO/AEO/GEO `G1..G5`) theo chuẩn `https://github.com/jangtrinh/design-os-github-page` (`DIR-23`). | contract BR-25 (D20) | US-08, US-15 |
 
 ### 4.6 Cơ chế Tự động Cập nhật Kép & Đóng gói Bản phát hành Đa nền tảng (`Dual-Layer Auto-Update & Cross-Platform Release Packaging` · `DIR-11`, `DIR-22`)
 
@@ -112,6 +113,7 @@ flowchart LR
 
 ## 5. Phụ thuộc, Giả định và Bàn giao (Dependencies & Handoff)
 
-- **Phụ thuộc nội bộ**: `crates/designos-doc`, `crates/designos-fig`, `crates/designos-render`, `crates/designos-gpu`, `crates/designos-export`, `crates/designos-app` (`src/icons.rs`, `src/terminal.rs`, `src/updater.rs`, `assets/icons/phosphor/*.svg`), `crates/designos-mcp`, `scripts/build-release.sh`, `scripts/package-macos.sh`, `scripts/package-windows.ps1`, `scripts/package-linux.sh`, `.github/workflows/release.yml`.
-- **Bàn giao**: Toàn bộ 19 yêu cầu `REQ-01..REQ-19` được phân rã vào `US-01..US-15`, kiểm chứng qua 46 kịch bản `SCN-01-01..SCN-15-03` và chốt tại `handoff/READY.md`.
+- **Phụ thuộc nội bộ**: `crates/designos-doc`, `crates/designos-fig`, `crates/designos-render`, `crates/designos-gpu`, `crates/designos-export`, `crates/designos-app` (`src/icons.rs`, `src/terminal.rs`, `src/updater.rs`, `assets/icons/phosphor/*.svg`), `crates/designos-mcp`, `scripts/build-release.sh`, `scripts/package-macos.sh`, `scripts/package-windows.ps1`, `scripts/package-linux.sh`, `scripts/capture-visual-proof.sh`, `README.md`, `docs/index.html`, `.github/workflows/release.yml`.
+- **Bàn giao**: Toàn bộ 20 yêu cầu `REQ-01..REQ-20` được phân rã vào `US-01..US-15`, kiểm chứng qua 46 kịch bản `SCN-01-01..SCN-15-03` và chốt tại `handoff/READY.md`.
+
 

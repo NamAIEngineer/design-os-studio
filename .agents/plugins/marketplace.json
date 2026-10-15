@@ -1,0 +1,20 @@
+{
+  "name": "design-os-studio",
+  "interface": {
+    "displayName": "DESIGN:OS Studio"
+  },
+  "plugins": [
+    {
+      "name": "design-os-studio",
+      "source": {
+        "source": "local",
+        "path": "./"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Developer Tools"
+    }
+  ]
+}

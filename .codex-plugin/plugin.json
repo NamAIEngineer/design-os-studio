@@ -1,0 +1,43 @@
+{
+  "name": "design-os-studio",
+  "description": "Native GPU-accelerated interface design studio, Figma .fig v106 binary read/write engine, Agentic PTY Chat UI, Spec Reader, and 22-tool MCP server built in Rust.",
+  "version": "0.2.0",
+  "author": {
+    "name": "Jang Trinh",
+    "url": "https://github.com/jangtrinh"
+  },
+  "homepage": "https://jangtrinh.github.io/design-os-studio/",
+  "repository": "https://github.com/jangtrinh/design-os-studio",
+  "license": "MIT OR Apache-2.0",
+  "keywords": [
+    "design-os",
+    "figma",
+    "rust",
+    "wgpu",
+    "mcp-server",
+    "ai-agents",
+    "claude-code",
+    "codex"
+  ],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "DESIGN:OS Studio",
+    "shortDescription": "Native GPU-accelerated interface design studio, Figma .fig v106 binary read/write engine, and 22-tool MCP server built in Rust.",
+    "longDescription": "Open and save 700k+ record enterprise Figma .fig v106 binary archives in ~1.5s with 0.0% idle CPU, run Claude Code / Codex / Antigravity inside the native Agentic PTY Chat UI, inspect 11-stage PRODUCT:OS Spec Driven v2 packages, generate multi-target Dev Mode code, and automate headless GPU visual QA.",
+    "developerName": "DESIGN:OS",
+    "category": "Developer Tools",
+    "capabilities": [
+      "Read",
+      "Write"
+    ],
+    "websiteURL": "https://jangtrinh.github.io/design-os-studio/",
+    "privacyPolicyURL": "https://github.com/jangtrinh/design-os-studio/blob/main/PRIVACY.md",
+    "defaultPrompt": [
+      "Apply examples/specs/easeui-agent-console.spec.json onto the canvas, export a verified Figma .fig binary archive, and capture a 1600x1000 GPU screenshot.",
+      "Open the 11-stage PRODUCT:OS Spec Driven v2 Reader and verify all User Stories, Gherkin scenarios, and g1..g5 verification gates.",
+      "Inspect the selected frame in Dev Mode, generate React and SwiftUI code, and resolve all open canvas pin-comments."
+    ],
+    "brandColor": "#202020",
+    "logo": "./docs/images/designos-hero.png"
+  }
+}

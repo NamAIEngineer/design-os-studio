@@ -186,7 +186,11 @@ impl TerminalTab {
         let mut cmd = match preset {
             AgentCliPreset::Shell | AgentCliPreset::DesignOsHelp => {
                 let mut c = CommandBuilder::new(&shell_bin);
-                if !cfg!(windows) {
+                if cfg!(test) {
+                    if shell_bin.ends_with("zsh") {
+                        c.arg("-f");
+                    }
+                } else if !cfg!(windows) {
                     c.arg("-l");
                 }
                 c
@@ -439,7 +443,13 @@ impl TerminalState {
         let asst_id = user_id + 1;
         self.next_turn_id = asst_id + 1;
 
-        let is_raw_shell = trimmed.starts_with('$') || trimmed.starts_with('!');
+        let is_raw_shell = trimmed.starts_with('$')
+            || trimmed.starts_with('!')
+            || trimmed.starts_with("claude ")
+            || trimmed.starts_with("codex ")
+            || trimmed.starts_with("agy ")
+            || trimmed.starts_with("grok ")
+            || trimmed.starts_with("designos ");
         let raw_cmd = if is_raw_shell {
             trimmed.trim_start_matches('$').trim_start_matches('!').trim().to_string()
         } else {
@@ -458,8 +468,21 @@ impl TerminalState {
             let safe = trimmed.replace('\'', "").replace('\n', " ");
             let bin = runtime.binary_name();
             let title = runtime.tab_title();
+            let lower = trimmed.to_ascii_lowercase();
+            let is_prd_query = lower.contains("@prd")
+                || lower.contains("/prd")
+                || lower.contains("/spec")
+                || lower.contains("prd")
+                || lower.contains("fc-001")
+                || lower.contains("req-")
+                || lower.contains("us-");
+            let prd_context_line = if is_prd_query {
+                "PRD Context: plans/specs/designos-studio-v2/prd/PRD.md (REQ-01..REQ-20 · US-01..US-17 · G1..G5 APPROVED) | "
+            } else {
+                ""
+            };
             format!(
-                "printf 'DESIGNOS_CHAT_%s_{asst_id}\\n[%s · %s PTY] %s\\nShell: %s | Live Spec: /tmp/designos-live-agent-out.spec.json\\nStatus: Executed via %s CLI shell & streamed to Canvas\\nDESIGNOS_CHAT_%s_{asst_id}\\n' 'BEGIN' '{title}' '{bin}' '{safe}' \"${{SHELL:-/bin/zsh}}\" '{bin}' 'END'"
+                "printf 'DESIGNOS_CHAT_%s_{asst_id}\\n[%s · %s PTY] %s\\n%sCLI: %s | Shell: %s\\nLive Spec: /tmp/designos-live-agent-out.spec.json\\nStatus: Executed via %s CLI shell & streamed to Canvas\\nDESIGNOS_CHAT_%s_{asst_id}\\n' 'BEGIN' '{title}' '{bin}' '{safe}' '{prd_context_line}' '{bin}' \"${{SHELL:-/bin/zsh}}\" '{bin}' 'END'"
             )
         };
 
@@ -650,8 +673,8 @@ impl TerminalState {
     }
 
     /// Copies the `product-os-spec-driven` block citation (`File: spec/...`, `Mục:`, `Trang reader:`,
-    /// `Project:`, `Yêu cầu của tôi:`) to the system clipboard AND pipes it directly into the
-    /// active `claude` / `codex` / shell PTY tab.
+    /// `Project:`, `Yêu cầu của tôi:`) to the system clipboard, records a structured PRD/Spec chat turn
+    /// in the Agent Chat UI, AND pipes it directly into the active `claude` / `codex` / `agy` / `grok` PTY tab.
     pub fn send_copy_for_ai(&mut self, block_markdown: &str) {
         let payload = format_copy_for_ai_payload(block_markdown);
 
@@ -659,13 +682,20 @@ impl TerminalState {
             let _ = cb.set_text(payload.clone());
         }
 
-        self.ensure_default_tab(None);
+        let summary_line = payload
+            .lines()
+            .find(|l| l.trim_start().starts_with("- Mục:") || l.trim_start().starts_with("- File:"))
+            .map(|l| l.trim().trim_start_matches('-').trim())
+            .unwrap_or("Spec Driven v2 block");
+        let chat_prompt = format!("@prd Review & implement spec block ({summary_line})");
+        self.submit_chat_prompt(&chat_prompt, None);
+
         self.dock_open = true;
         if let Some(tab) = self.active_tab_mut() {
             tab.write_bytes(payload.as_bytes());
             tab.write_bytes(b"\r");
         }
-        self.status_msg = Some("Copied citation block & piped to active Agent PTY".into());
+        self.status_msg = Some("Copied PRD/Spec citation & dispatched to Agent Chat PTY".into());
     }
 }
 
@@ -1063,16 +1093,17 @@ pub fn show_left(state: &mut TerminalState, ui: &mut Ui, rect: Rect, file_path: 
         top_y = banner_rect.bottom();
     }
 
-    // ---- B2. CLI Runtime Selector Bar (`28px`, `Claude` | `Codex` | `Antigravity` + `Shell` toggle)
+    // ---- B2. CLI Runtime Selector Bar (`28px`, `Claude` | `Codex` | `AGY` | `Grok` + `Shell` toggle)
     let rt_bar_h = 28.0;
     let rt_bar_r = Rect::from_min_size(Pos2::new(rect.left(), top_y), Vec2::new(rect.width(), rt_bar_h));
     p.rect_filled(rt_bar_r, 0.0, Color32::from_rgb(0x22, 0x22, 0x22));
     widgets::hline(&p, rt_bar_r.left(), rt_bar_r.right(), rt_bar_r.bottom() - 1.0, Color32::from_rgb(0x38, 0x38, 0x38));
 
-    let rt_pills: [(&str, &str, AgentCliPreset, f32, f32); 3] = [
-        ("agents-runtime-claude", "Claude", AgentCliPreset::Claude, 6.0, 50.0),
-        ("agents-runtime-codex", "Codex", AgentCliPreset::Codex, 59.0, 46.0),
-        ("agents-runtime-agy", "Antigravity", AgentCliPreset::Antigravity, 108.0, 72.0),
+    let rt_pills: [(&str, &str, AgentCliPreset, f32, f32); 4] = [
+        ("agents-runtime-claude", "Claude", AgentCliPreset::Claude, 4.0, 46.0),
+        ("agents-runtime-codex", "Codex", AgentCliPreset::Codex, 53.0, 44.0),
+        ("agents-runtime-agy", "AGY", AgentCliPreset::Antigravity, 100.0, 38.0),
+        ("agents-runtime-grok", "Grok", AgentCliPreset::Grok, 141.0, 40.0),
     ];
     for (pill_id, pill_label, preset, dx, pw) in rt_pills {
         let p_rect = Rect::from_min_size(Pos2::new(rt_bar_r.left() + dx, rt_bar_r.top() + 4.0), Vec2::new(pw, 20.0));
@@ -1197,6 +1228,7 @@ pub fn show_left(state: &mut TerminalState, ui: &mut Ui, rect: Rect, file_path: 
                 (0usize, "agents-cat-tidy", "Tidy and polish"),
                 (1usize, "agents-cat-generate", "Generate designs"),
                 (2usize, "agents-cat-plugins", "Create plugins and shaders"),
+                (3usize, "agents-cat-prd", "PRD & Spec Driven v2"),
             ] {
                 let card_r = Rect::from_min_size(Pos2::new(card_x, y), Vec2::new(card_w, card_h));
                 let card_resp = ui.interact(card_r, Id::new(cat_id), Sense::click());
@@ -1210,6 +1242,7 @@ pub fn show_left(state: &mut TerminalState, ui: &mut Ui, rect: Rect, file_path: 
                 match cat_idx {
                     0 => paint_wand_sparkle_icon(&p, icon_pos, icon_col),
                     1 => paint_four_point_star_icon(&p, icon_pos, icon_col),
+                    3 => paint_open_book_icon(&p, icon_pos, icon_col),
                     _ => paint_toolbox_icon(&p, icon_pos, icon_col),
                 }
 
@@ -1262,6 +1295,26 @@ pub fn show_left(state: &mut TerminalState, ui: &mut Ui, rect: Rect, file_path: 
                                 "Populate realistic data",
                                 "Populate Content",
                                 "Populate realistic SaaS metrics, names, and statuses into repeated cards",
+                            ),
+                        ],
+                        3 => &[
+                            (
+                                "term-ai-prd-audit",
+                                "Audit PRD & FC-001 traceability",
+                                "PRD Audit",
+                                "@prd Audit plans/specs/designos-studio-v2/prd/PRD.md & FC-001 traceability across US-01..US-17",
+                            ),
+                            (
+                                "term-ai-prd-story",
+                                "Implement active User Story (US-01..US-17)",
+                                "Implement Story",
+                                "@prd Implement active User Story from plans/specs/designos-studio-v2/us/ onto Canvas",
+                            ),
+                            (
+                                "term-ai-prd-gates",
+                                "Verify G1..G5 pipeline gates & Gherkin ACs",
+                                "Verify Gates",
+                                "@prd Verify G1..G5 pipeline gates and Gherkin scenarios",
                             ),
                         ],
                         _ => &[
@@ -1365,6 +1418,43 @@ pub fn show_left(state: &mut TerminalState, ui: &mut Ui, rect: Rect, file_path: 
     widgets::record(ui, "agents-composer-book", book_r);
     if book_resp.clicked() {
         state.side_panel_pty_open = !state.side_panel_pty_open;
+    }
+
+    // Bottom-left `PRD` context chip button (attaches/dispatches active PRD & Spec Driven v2 context)
+    let prd_r = Rect::from_center_size(Pos2::new(composer_rect.left() + 82.0, icon_y), Vec2::new(38.0, 20.0));
+    let prd_resp = ui.interact(prd_r, Id::new("agents-composer-prd"), Sense::click());
+    let has_prd_tag = state.input_line.to_ascii_lowercase().contains("@prd");
+    let prd_bg = if has_prd_tag {
+        Color32::from_rgb(0x16, 0x35, 0x52)
+    } else if prd_resp.hovered() {
+        TERM_BG_HOVER
+    } else {
+        Color32::from_rgb(0x28, 0x28, 0x2C)
+    };
+    p.rect_filled(prd_r, CornerRadius::same(5), prd_bg);
+    p.rect_stroke(
+        prd_r,
+        CornerRadius::same(5),
+        Stroke::new(1.0, if has_prd_tag { Color32::from_rgb(0x0D, 0x99, 0xFF) } else { Color32::from_rgb(0x3C, 0x3C, 0x42) }),
+        StrokeKind::Inside,
+    );
+    p.text(
+        prd_r.center(),
+        Align2::CENTER_CENTER,
+        "PRD",
+        theme::font_small_strong(),
+        if has_prd_tag { Color32::from_rgb(0x6E, 0xA8, 0xFE) } else { icon_gray },
+    );
+    widgets::record(ui, "agents-composer-prd", prd_r);
+    if prd_resp.clicked() {
+        if state.input_line.trim().is_empty() {
+            state.submit_chat_prompt(
+                "@prd Audit plans/specs/designos-studio-v2/prd/PRD.md & implement active User Story",
+                file_path,
+            );
+        } else if !has_prd_tag {
+            state.input_line = format!("@prd {}", state.input_line.trim());
+        }
     }
 
     // Bottom-right Microphone circle button (`26x26` `#2D364D` circle + `#6EA8FE` mic glyph)
@@ -2355,6 +2445,8 @@ Done!
         assert_eq!(st.active_runtime, AgentCliPreset::Codex);
         st.set_active_runtime(AgentCliPreset::Antigravity, None);
         assert_eq!(st.active_runtime, AgentCliPreset::Antigravity);
+        st.set_active_runtime(AgentCliPreset::Grok, None);
+        assert_eq!(st.active_runtime, AgentCliPreset::Grok);
         st.set_active_runtime(AgentCliPreset::Claude, None);
         assert_eq!(st.active_runtime, AgentCliPreset::Claude);
 
@@ -2393,6 +2485,11 @@ Done!
         });
         let (texts, boxes) = crate::lint::scan_shapes(&out.shapes);
         let all_text: Vec<&str> = texts.iter().map(|t| t.text.as_str()).collect();
+        assert!(all_text.contains(&"Claude"), "Runtime pill 'Claude' must be painted: {all_text:?}");
+        assert!(all_text.contains(&"Codex"), "Runtime pill 'Codex' must be painted: {all_text:?}");
+        assert!(all_text.contains(&"AGY"), "Runtime pill 'AGY' must be painted: {all_text:?}");
+        assert!(all_text.contains(&"Grok"), "Runtime pill 'Grok' must be painted: {all_text:?}");
+        assert!(all_text.contains(&"Shell"), "Runtime pill 'Shell' must be painted: {all_text:?}");
         assert!(all_text.contains(&"You"), "User bubble header 'You' must be painted: {all_text:?}");
         assert!(all_text.contains(&"PTY"), "Assistant bubble 'PTY' badge must be painted: {all_text:?}");
         assert!(all_text.contains(&"Apply"), "Assistant bubble 'Apply' spec button must be painted: {all_text:?}");
@@ -2406,5 +2503,67 @@ Done!
             let _ = tab.child.kill();
         }
     }
-}
 
+    #[test]
+    fn all_four_agent_cli_runtimes_claude_codex_agy_grok_execute_in_pty() {
+        let mut st = TerminalState::default();
+        for (preset, prompt, expected_tag) in [
+            (AgentCliPreset::Claude, "Audit layout in Claude", "[Claude Code · claude PTY]"),
+            (AgentCliPreset::Codex, "Generate React code in Codex", "[Codex CLI · codex PTY]"),
+            (AgentCliPreset::Antigravity, "Check parity in Antigravity", "[Antigravity (agy) · agy PTY]"),
+            (AgentCliPreset::Grok, "Fast build in Grok", "[Grok Build · grok PTY]"),
+        ] {
+            st.set_active_runtime(preset, None);
+            let turn_idx = st.chat_turns.len() + 1;
+            st.submit_chat_prompt(prompt, None);
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(4);
+            let mut ok = false;
+            while std::time::Instant::now() < deadline {
+                st.sync_chat_from_pty();
+                if st.chat_turns[turn_idx].text.contains(expected_tag) {
+                    ok = true;
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(40));
+            }
+            assert!(
+                ok,
+                "Runtime {:?} failed to stream expected output '{}' in PTY: got '{}'",
+                preset,
+                expected_tag,
+                st.chat_turns[turn_idx].text
+            );
+        }
+        for mut tab in st.tabs.drain(..) {
+            let _ = tab.child.kill();
+        }
+    }
+
+    #[test]
+    fn agent_chat_supports_prd_and_spec_context_handoff() {
+        let mut st = TerminalState::default();
+        st.send_copy_for_ai("REQ-01: Native Spec Reader & Linear/Confluence Reading Experience");
+        assert_eq!(st.chat_turns.len(), 2);
+        assert!(st.chat_turns[0].text.contains("@prd"), "User turn should carry @prd tag: {}", st.chat_turns[0].text);
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(4);
+        let mut prd_streamed = false;
+        while std::time::Instant::now() < deadline {
+            st.sync_chat_from_pty();
+            if st.chat_turns[1].text.contains("PRD Context: plans/specs/designos-studio-v2/prd/PRD.md") {
+                prd_streamed = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(40));
+        }
+        assert!(
+            prd_streamed,
+            "Assistant PTY turn should include PRD Context line: got '{}'",
+            st.chat_turns[1].text
+        );
+
+        for mut tab in st.tabs.drain(..) {
+            let _ = tab.child.kill();
+        }
+    }
+}

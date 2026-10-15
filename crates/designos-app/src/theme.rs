@@ -127,6 +127,9 @@ pub fn font_small_strong() -> FontId {
 pub fn font_body() -> FontId {
     FontId::new(FONT_SIZE_BODY, FontFamily::Proportional)
 }
+pub fn font_body_medium() -> FontId {
+    FontId::new(FONT_SIZE_BODY, FontFamily::Name(FAMILY_MEDIUM.into()))
+}
 /// Menu rows: Inter at the medium instance.
 pub fn font_menu() -> FontId {
     FontId::new(FONT_SIZE_BODY, FontFamily::Name(FAMILY_MEDIUM.into()))

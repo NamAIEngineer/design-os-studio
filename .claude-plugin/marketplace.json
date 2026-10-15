@@ -1,0 +1,15 @@
+{
+  "name": "design-os-studio",
+  "metadata": {
+    "description": "Native GPU-accelerated interface design studio, Figma .fig v106 binary read/write engine, Agentic PTY Chat UI, Spec Reader, and 22-tool MCP server built in Rust."
+  },
+  "owner": {
+    "name": "Jang Trinh"
+  },
+  "plugins": [
+    {
+      "name": "design-os-studio",
+      "source": "./"
+    }
+  ]
+}
