@@ -1315,7 +1315,9 @@ impl Ctx {
         // `.fig` override paths use override keys; REST-derived ids use the tail of the source id.
         let matches = |c: NodeId, g: &String| -> bool {
             if let Some(k) = self.override_keys.get(&c) {
-                return k == g;
+                if k == g {
+                    return true;
+                }
             }
             self.doc.get(c).is_some_and(|n| {
                 let s = n.source_id.as_deref().unwrap_or("");
@@ -1340,7 +1342,13 @@ impl Ctx {
                         }
                         stack.extend(nn.children.iter().rev().copied());
                     }
-                    found?
+                    if let Some(f) = found {
+                        f
+                    } else if cur == inst && (matches(inst, g) || node.component.source.is_some_and(|src| matches(src, g))) {
+                        inst
+                    } else {
+                        return None;
+                    }
                 }
             };
         }
@@ -1368,8 +1376,17 @@ impl Ctx {
         let Some(n) = self.doc.get_mut(id) else { return };
         let keep = |k: &str| !derived_only || matches!(k, "size" | "relativeTransform" | "fillGeometry" | "strokeGeometry");
         let has = |k: &str| keep(k) && set.get(k).is_some();
+        let is_vec_or_bool = matches!(n.kind, NodeKind::Vector { .. } | NodeKind::BooleanOp(_));
         if has("size") {
             if let Some(sz) = set.get("size").and_then(vec2) {
+                if n.size != sz && !is_vec_or_bool {
+                    if !has("fillGeometry") {
+                        n.fill_geometry = None;
+                    }
+                    if !has("strokeGeometry") {
+                        n.stroke_geometry = None;
+                    }
+                }
                 n.size = sz;
             }
         }
@@ -1438,10 +1455,16 @@ impl Ctx {
         }
         if let Some(w) = fnum(set, "strokeWeight") {
             n.stroke.weight = w;
+            if !has("strokeGeometry") {
+                n.stroke_geometry = None;
+            }
         }
         if let Some(iw) = set.get("individualStrokeWeights") {
             let g = |k: &str| fnum(iw, k).unwrap_or(0.0);
             n.stroke.side_weights = Some([g("top"), g("right"), g("bottom"), g("left")]);
+            if !has("strokeGeometry") {
+                n.stroke_geometry = None;
+            }
         }
         if let Some(a) = fstr(set, "strokeAlign") {
             n.stroke.align = match a {
@@ -1457,8 +1480,14 @@ impl Ctx {
             for (i, x) in r.iter().enumerate() {
                 n.corner_radii[i] = num(x).unwrap_or(0.0);
             }
+            if !is_vec_or_bool && !has("fillGeometry") {
+                n.fill_geometry = None;
+            }
         } else if let Some(r) = fnum(set, "cornerRadius") {
             n.corner_radii = [r; 4];
+            if !is_vec_or_bool && !has("fillGeometry") {
+                n.fill_geometry = None;
+            }
         }
         if let Some(fp) = n.kind.frame_props_mut() {
             if let Some(c) = fbool(set, "clipsContent") {
@@ -1510,6 +1539,20 @@ impl Ctx {
                 if let Some(b) = fbool(set, "itemReverseZIndex") {
                     al.reverse_z = b;
                 }
+                if let Some(s) = fstr(set, "gridColumnsSizing") {
+                    let (cols, tracks) = parse_grid_sizing(s);
+                    if cols > 0 {
+                        al.grid_columns = cols;
+                        al.grid_col_tracks = tracks;
+                    }
+                }
+                if let Some(s) = fstr(set, "gridRowsSizing") {
+                    let (rows, tracks) = parse_grid_sizing(s);
+                    if rows > 0 {
+                        al.grid_rows = rows;
+                        al.grid_row_tracks = tracks;
+                    }
+                }
                 if let Some(c) = set.get("gridColumns").and_then(Value::as_u64) {
                     al.grid_columns = c as u32;
                 }
@@ -1518,6 +1561,22 @@ impl Ctx {
                 }
             }
         }
+        let non_fill_sizing = |kind: &NodeKind, dir_h: bool| -> Sizing {
+            match kind {
+                NodeKind::Text(t) => match t.auto_resize {
+                    TextAutoResize::WidthAndHeight => Sizing::Hug,
+                    TextAutoResize::Height if !dir_h => Sizing::Hug,
+                    _ => Sizing::Fixed,
+                },
+                k => match k.frame_props().and_then(|f| f.auto_layout) {
+                    Some(al) => {
+                        let along = (al.direction == LayoutDirection::Horizontal) == dir_h;
+                        if along { al.primary_sizing } else { al.counter_sizing }
+                    }
+                    None => Sizing::Fixed,
+                },
+            }
+        };
         if let Some(al) = n.kind.frame_props().and_then(|fp| fp.auto_layout) {
             let prim_h = al.direction == LayoutDirection::Horizontal;
             if set.get("primaryAxisSizingMode").is_some() {
@@ -1541,6 +1600,16 @@ impl Ctx {
                     Some(LayoutDirection::Vertical) => n.layout_child.vertical = Sizing::Fill,
                     None => {}
                 }
+            } else {
+                match parent_dir {
+                    Some(LayoutDirection::Horizontal | LayoutDirection::Grid) if n.layout_child.horizontal == Sizing::Fill => {
+                        n.layout_child.horizontal = non_fill_sizing(&n.kind, true);
+                    }
+                    Some(LayoutDirection::Vertical) if n.layout_child.vertical == Sizing::Fill => {
+                        n.layout_child.vertical = non_fill_sizing(&n.kind, false);
+                    }
+                    _ => {}
+                }
             }
         }
         if let Some(a) = fstr(set, "layoutAlign") {
@@ -1549,6 +1618,16 @@ impl Ctx {
                     Some(LayoutDirection::Horizontal | LayoutDirection::Grid) => n.layout_child.vertical = Sizing::Fill,
                     Some(LayoutDirection::Vertical) => n.layout_child.horizontal = Sizing::Fill,
                     None => {}
+                }
+            } else {
+                match parent_dir {
+                    Some(LayoutDirection::Horizontal | LayoutDirection::Grid) if n.layout_child.vertical == Sizing::Fill => {
+                        n.layout_child.vertical = non_fill_sizing(&n.kind, false);
+                    }
+                    Some(LayoutDirection::Vertical) if n.layout_child.horizontal == Sizing::Fill => {
+                        n.layout_child.horizontal = non_fill_sizing(&n.kind, true);
+                    }
+                    _ => {}
                 }
             }
         }
@@ -1733,6 +1812,8 @@ pub(crate) fn override_field(key: &str, is_text: bool) -> Option<OverrideField> 
         | "layoutSizingVertical"
         | "gridColumns"
         | "gridRows"
+        | "gridColumnsSizing"
+        | "gridRowsSizing"
         | "gridColumnSpan"
         | "gridRowSpan"
         | "gridColumnAnchorIndex"
@@ -1772,6 +1853,90 @@ fn parse_geometry(items: &[Value]) -> Vec<Path> {
         .collect()
 }
 
+/// Parses `.fig` v106 CSS-grid track strings (e.g. `"1fr 2fr 120px auto"`,
+/// `"repeat(3, 1fr)"`, `"minmax(0, 1fr)"`) into track count + up to 8 [`GridTrack`]s.
+fn parse_grid_sizing(s: &str) -> (u32, [GridTrack; 8]) {
+    fn parse_one(tok: &str) -> GridTrack {
+        let t = tok.trim();
+        let lower = t.to_ascii_lowercase();
+        if let Some(inner) = lower.strip_prefix("minmax(").and_then(|r| r.strip_suffix(')')) {
+            if let Some((_, max_part)) = inner.rsplit_once(',') {
+                return parse_one(max_part);
+            }
+        }
+        if matches!(lower.as_str(), "auto" | "min-content" | "max-content" | "fit-content") {
+            GridTrack::Hug
+        } else if let Some(fr) = lower.strip_suffix("fr") {
+            GridTrack::Flex(fr.trim().parse::<f32>().unwrap_or(1.0).max(0.01))
+        } else if let Some(px) = lower.strip_suffix("px") {
+            GridTrack::Fixed(px.trim().parse::<f32>().unwrap_or(0.0).max(0.0))
+        } else if let Ok(v) = lower.parse::<f32>() {
+            GridTrack::Fixed(v.max(0.0))
+        } else {
+            GridTrack::Flex(1.0)
+        }
+    }
+
+    fn collect_tokens(input: &str, out: &mut Vec<GridTrack>) {
+        let mut rest = input.trim();
+        while !rest.is_empty() {
+            let lower = rest.to_ascii_lowercase();
+            if lower.starts_with("repeat(") {
+                let mut depth = 0usize;
+                let mut end_idx = None;
+                for (i, ch) in rest.char_indices() {
+                    match ch {
+                        '(' => depth += 1,
+                        ')' => {
+                            depth = depth.saturating_sub(1);
+                            if depth == 0 {
+                                end_idx = Some(i);
+                                break;
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                if let Some(end) = end_idx {
+                    let inner = &rest["repeat(".len()..end];
+                    if let Some((cnt_str, pat)) = inner.split_once(',') {
+                        let cnt = cnt_str.trim().parse::<usize>().unwrap_or(1).min(64);
+                        let mut sub = Vec::new();
+                        collect_tokens(pat, &mut sub);
+                        for _ in 0..cnt {
+                            out.extend_from_slice(&sub);
+                        }
+                    }
+                    rest = rest[end + 1..].trim_start();
+                    continue;
+                }
+            }
+            if lower.starts_with("minmax(") {
+                if let Some(end) = rest.find(')') {
+                    out.push(parse_one(&rest[..=end]));
+                    rest = rest[end + 1..].trim_start();
+                    continue;
+                }
+            }
+            if let Some(ws) = rest.find(char::is_whitespace) {
+                out.push(parse_one(&rest[..ws]));
+                rest = rest[ws..].trim_start();
+            } else {
+                out.push(parse_one(rest));
+                break;
+            }
+        }
+    }
+
+    let mut list = Vec::new();
+    collect_tokens(s, &mut list);
+    let mut tracks = [GridTrack::default(); 8];
+    for (i, t) in list.iter().copied().take(8).enumerate() {
+        tracks[i] = t;
+    }
+    (list.len() as u32, tracks)
+}
+
 fn frame_props(v: &Value) -> FrameProps {
     let dir = match fstr(v, "layoutMode") {
         Some("HORIZONTAL") => Some(LayoutDirection::Horizontal),
@@ -1789,7 +1954,10 @@ fn frame_props(v: &Value) -> FrameProps {
         };
         let sizing = |s: Option<&str>| if s == Some("AUTO") { Sizing::Hug } else { Sizing::Fixed };
         let p = |k: &str| fnum(v, k).unwrap_or(0.0);
-        let u = |k: &str| v.get(k).and_then(Value::as_u64).unwrap_or(0) as u32;
+        let (sizing_cols, grid_col_tracks) = fstr(v, "gridColumnsSizing").map(parse_grid_sizing).unwrap_or_default();
+        let (sizing_rows, grid_row_tracks) = fstr(v, "gridRowsSizing").map(parse_grid_sizing).unwrap_or_default();
+        let grid_columns = v.get("gridColumns").and_then(Value::as_u64).map(|x| x as u32).filter(|&x| x > 0).unwrap_or(sizing_cols);
+        let grid_rows = v.get("gridRows").and_then(Value::as_u64).map(|x| x as u32).filter(|&x| x > 0).unwrap_or(sizing_rows);
         AutoLayout {
             direction,
             wrap: fstr(v, "layoutWrap") == Some("WRAP"),
@@ -1802,9 +1970,10 @@ fn frame_props(v: &Value) -> FrameProps {
             counter_sizing: sizing(fstr(v, "counterAxisSizingMode")),
             stroke_included: fbool(v, "strokesIncludedInLayout").unwrap_or(false),
             reverse_z: fbool(v, "itemReverseZIndex").unwrap_or(false),
-            grid_columns: u("gridColumns"),
-            grid_rows: u("gridRows"),
-            ..Default::default()
+            grid_columns,
+            grid_rows,
+            grid_col_tracks,
+            grid_row_tracks,
         }
     });
     FrameProps { clips_content: fbool(v, "clipsContent").unwrap_or(false), auto_layout, grids: farr(v, "layoutGrids").iter().filter_map(parse_grid).collect() }

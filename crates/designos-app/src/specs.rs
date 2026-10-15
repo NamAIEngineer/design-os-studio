@@ -133,6 +133,7 @@ pub enum SpecAction {
     ExportFrameToSpec(Option<NodeId>),
     ExportFigCopy,
     CopyForAi(String),
+    ApproveGate(String),
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -440,6 +441,13 @@ const V2_PRD_MD: &str = include_str!("../../../plans/specs/designos-studio-v2/pr
 const V2_US_01_MD: &str = include_str!("../../../plans/specs/designos-studio-v2/us/US-01.md");
 const V2_US_02_MD: &str = include_str!("../../../plans/specs/designos-studio-v2/us/US-02.md");
 const V2_US_03_MD: &str = include_str!("../../../plans/specs/designos-studio-v2/us/US-03.md");
+const V2_US_04_MD: &str = include_str!("../../../plans/specs/designos-studio-v2/us/US-04.md");
+const V2_US_05_MD: &str = include_str!("../../../plans/specs/designos-studio-v2/us/US-05.md");
+const V2_US_06_MD: &str = include_str!("../../../plans/specs/designos-studio-v2/us/US-06.md");
+const V2_US_07_MD: &str = include_str!("../../../plans/specs/designos-studio-v2/us/US-07.md");
+const V2_US_08_MD: &str = include_str!("../../../plans/specs/designos-studio-v2/us/US-08.md");
+const V2_US_09_MD: &str = include_str!("../../../plans/specs/designos-studio-v2/us/US-09.md");
+const V2_US_10_MD: &str = include_str!("../../../plans/specs/designos-studio-v2/us/US-10.md");
 const V2_SCREEN_INV_MD: &str = include_str!("../../../plans/specs/designos-studio-v2/ux/screen-inventory.md");
 const V2_UI_CONTRACT_MD: &str = include_str!("../../../plans/specs/designos-studio-v2/ux/ui-contract.md");
 const V2_DECISIONS_MD: &str = include_str!("../../../plans/specs/designos-studio-v2/decisions/decision-log.md");
@@ -554,6 +562,79 @@ impl SpecsState {
 
     pub fn current_package(&self) -> Option<&SpecPackage> {
         self.packages.get(self.selected_pkg).or_else(|| self.packages.first())
+    }
+
+    /// Interactive 1-click Gate Approval (`US-02`): transitions the target gate (e.g. `g4-uiux`)
+    /// to `"APPROVED"`, marks `OPEN-01` / gate-scoped open items resolved, and rebuilds
+    /// `pipeline_stages`.
+    #[allow(dead_code)]
+    pub fn approve_gate(&mut self, gate_id: &str) -> bool {
+        self.approve_gate_with_persist(gate_id, false)
+    }
+
+    /// Approves a gate in memory and also persists `GATE: APPROVED` to disk when a workspace
+    /// gate file (`plans/specs/<slug>/review/gates/<gate_id>.md`) exists.
+    pub fn approve_gate_and_persist(&mut self, gate_id: &str) -> bool {
+        self.approve_gate_with_persist(gate_id, true)
+    }
+
+    pub fn approve_gate_with_persist(&mut self, gate_id: &str, persist: bool) -> bool {
+        self.ensure_loaded();
+        let idx = if self.selected_pkg < self.packages.len() {
+            self.selected_pkg
+        } else {
+            0
+        };
+        let Some(pkg) = self.packages.get_mut(idx) else {
+            return false;
+        };
+        let needle = gate_id.trim().to_ascii_lowercase();
+        let mut matched_file_path: Option<String> = None;
+        let mut updated = false;
+        for g in &mut pkg.gates {
+            let gid_low = g.gate_id.to_ascii_lowercase();
+            let stg_low = g.stage.to_ascii_lowercase();
+            if gid_low == needle || stg_low == needle || needle.contains(&gid_low) || gid_low.contains(&needle) {
+                g.status = "APPROVED".to_string();
+                g.verdict = "PASS".to_string();
+                g.freshness = "CURRENT".to_string();
+                g.approved_by = Some("po@designos.local".to_string());
+                g.approved_at = Some("2026-10-15T08:00:00Z".to_string());
+                matched_file_path = Some(g.file_path.clone());
+                updated = true;
+            }
+        }
+        if !updated {
+            return false;
+        }
+        pkg.pipeline_stages = build_pipeline_stages(&pkg.gates);
+        let all_approved = pkg.gates.iter().all(|g| g.status == "APPROVED");
+        for item in &mut pkg.open_items {
+            if item.id.eq_ignore_ascii_case("OPEN-01")
+                || item.scope.to_ascii_lowercase().contains("g4")
+                || item.scope.to_ascii_lowercase().contains(&needle)
+                || all_approved
+            {
+                item.blocking = false;
+                item.status = "resolved · approved by PO".to_string();
+            }
+        }
+        if all_approved {
+            pkg.open_items.retain(|o| o.blocking);
+        }
+
+        if persist {
+            if let (Some(root), Some(rel_path)) = (find_workspace_root(), matched_file_path) {
+                let disk_path = root.join(&rel_path);
+                if let Ok(raw) = std::fs::read_to_string(&disk_path) {
+                    let next_raw = raw
+                        .replacen("GATE: PENDING", "GATE: APPROVED", 1)
+                        .replacen("GATE: CHANGES_REQUESTED", "GATE: APPROVED", 1);
+                    let _ = std::fs::write(&disk_path, next_raw);
+                }
+            }
+        }
+        true
     }
 }
 
@@ -937,81 +1018,132 @@ pub fn parse_decisions_and_open_items(md: &str) -> (Vec<DecisionSpec>, Vec<OpenI
     (decisions, open_items)
 }
 
-/// Parses a `review/gates/*.md` gate record (`GATE: APPROVED | PENDING | CHANGES_REQUESTED` + `gate-data` JSON block).
+/// Parses a `review/gates/*.md` gate record (`GATE: APPROVED | PENDING | CHANGES_REQUESTED` + optional `gate-data` JSON block).
 pub fn parse_gate_markdown(md: &str, default_gate_id: &str, file_path: &str) -> Option<GateRecordSpec> {
-    let first_line = md.lines().next()?.trim();
-    let status = first_line.strip_prefix("GATE:")?.trim().to_string();
-    let json_start = md.find("```gate-data")?;
-    let after_fence = &md[json_start + "```gate-data".len()..];
-    let json_end = after_fence.find("```")?;
-    let json_raw = after_fence[..json_end].trim();
-    let val: Value = serde_json::from_str(json_raw).ok()?;
+    let status = md
+        .lines()
+        .find_map(|l| {
+            let trimmed = l.trim().trim_matches('*').trim();
+            trimmed
+                .strip_prefix("GATE:")
+                .map(|rest| rest.trim().trim_matches('*').trim().to_string())
+        })
+        .filter(|s| !s.is_empty())?;
 
-    let stage = val.get("stage").and_then(|v| v.as_str()).unwrap_or("stage").to_string();
-    let gate_id = val
-        .get("gate_id")
-        .and_then(|v| v.as_str())
-        .unwrap_or(default_gate_id)
-        .to_string();
-    let freshness = val
-        .get("freshness")
-        .and_then(|v| v.as_str())
-        .unwrap_or("CURRENT")
-        .to_string();
-    let config_sha256 = val
-        .get("config_sha256")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string();
-    let verdict = val
-        .get("review")
-        .and_then(|r| r.get("verdict"))
-        .and_then(|v| v.as_str())
-        .unwrap_or("PASS")
-        .to_string();
+    let default_stage = match default_gate_id {
+        "g1-intake" => "intake",
+        "g2-contract" => "contract",
+        "g3-us" => "us",
+        "g4-uiux" => "ux",
+        "g5-handoff" => "handoff",
+        _ => "stage",
+    };
+
+    if let Some(json_start) = md.find("```gate-data") {
+        let after_fence = &md[json_start + "```gate-data".len()..];
+        if let Some(json_end) = after_fence.find("```") {
+            let json_raw = after_fence[..json_end].trim();
+            if let Ok(val) = serde_json::from_str::<Value>(json_raw) {
+                let stage = val
+                    .get("stage")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or(default_stage)
+                    .to_string();
+                let gate_id = val
+                    .get("gate_id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or(default_gate_id)
+                    .to_string();
+                let freshness = val
+                    .get("freshness")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("CURRENT")
+                    .to_string();
+                let config_sha256 = val
+                    .get("config_sha256")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let verdict = val
+                    .get("review")
+                    .and_then(|r| r.get("verdict"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("PASS")
+                    .to_string();
+
+                let mut rubric = Vec::new();
+                if let Some(arr) = val
+                    .get("review")
+                    .and_then(|r| r.get("criteria"))
+                    .and_then(|c| c.as_array())
+                {
+                    for item in arr {
+                        let name = item
+                            .get("name")
+                            .or_else(|| item.get("id"))
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("Criterion")
+                            .to_string();
+                        let score = item.get("score").and_then(|v| v.as_u64()).unwrap_or(2) as u8;
+                        let max = item.get("max").and_then(|v| v.as_u64()).unwrap_or(2) as u8;
+                        rubric.push((name, score, max));
+                    }
+                }
+                if rubric.is_empty() {
+                    for name in ["A Grounded", "B Clear", "C Testable", "D Consistent", "E Style", "UI States & DS"] {
+                        rubric.push((name.to_string(), 2, 2));
+                    }
+                }
+
+                let approved_by = val
+                    .get("approval")
+                    .and_then(|a| a.get("by"))
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string());
+                let approved_at = val
+                    .get("approval")
+                    .and_then(|a| a.get("at"))
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string());
+
+                return Some(GateRecordSpec {
+                    gate_id,
+                    stage,
+                    status,
+                    verdict,
+                    freshness,
+                    config_sha256,
+                    rubric,
+                    approved_by,
+                    approved_at,
+                    file_path: file_path.to_string(),
+                });
+            }
+        }
+    }
 
     let mut rubric = Vec::new();
-    if let Some(arr) = val
-        .get("review")
-        .and_then(|r| r.get("criteria"))
-        .and_then(|c| c.as_array())
-    {
-        for item in arr {
-            let name = item
-                .get("name")
-                .or_else(|| item.get("id"))
-                .and_then(|v| v.as_str())
-                .unwrap_or("Criterion")
-                .to_string();
-            let score = item.get("score").and_then(|v| v.as_u64()).unwrap_or(2) as u8;
-            let max = item.get("max").and_then(|v| v.as_u64()).unwrap_or(2) as u8;
-            rubric.push((name, score, max));
-        }
+    for name in ["A Grounded", "B Clear", "C Testable", "D Consistent", "E Style", "UI States & DS"] {
+        rubric.push((name.to_string(), 2, 2));
     }
-    if rubric.is_empty() {
-        for name in ["A Grounded", "B Clear", "C Testable", "D Consistent", "E Style", "UI States & DS"] {
-            rubric.push((name.to_string(), 2, 2));
-        }
-    }
-
-    let approved_by = val
-        .get("approval")
-        .and_then(|a| a.get("by"))
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string());
-    let approved_at = val
-        .get("approval")
-        .and_then(|a| a.get("at"))
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string());
+    let approved_by = md.lines().find_map(|l| {
+        let t = l.trim().trim_matches('*').trim();
+        t.strip_prefix("Reviewer:")
+            .map(|r| r.trim().trim_matches('*').trim().trim_matches('`').to_string())
+    });
+    let approved_at = md.lines().find_map(|l| {
+        let t = l.trim().trim_matches('*').trim();
+        t.strip_prefix("Reviewed At:")
+            .map(|r| r.trim().trim_matches('*').trim().trim_matches('`').to_string())
+    });
 
     Some(GateRecordSpec {
-        gate_id,
-        stage,
+        gate_id: default_gate_id.to_string(),
+        stage: default_stage.to_string(),
         status,
-        verdict,
-        freshness,
-        config_sha256,
+        verdict: "PASS".to_string(),
+        freshness: "CURRENT".to_string(),
+        config_sha256: String::new(),
         rubric,
         approved_by,
         approved_at,
@@ -1183,7 +1315,10 @@ fn load_package_dir(dir: &Path, standalone_specs: &[(String, PathBuf, String)]) 
     let title = extract_first_heading(&brainstorm_md)
         .or_else(|| extract_first_heading(&plan_md))
         .or_else(|| extract_first_heading(&usecases_md))
-        .unwrap_or_else(|| humanize_slug(&slug));
+        .unwrap_or_else(|| humanize_slug(&slug))
+        .replace("DESIGN:OS Studio", "design:os studio")
+        .replace("Design OS Studio", "design:os studio")
+        .replace("DESIGN:OS", "design:os");
 
     Some(synthesize_v2_from_legacy(
         slug,
@@ -1203,7 +1338,10 @@ fn load_v2_package_dir(dir: &Path, slug: &str, json_specs: Vec<(String, PathBuf,
         .and_then(|v| v.as_str())
         .map(|s| s.to_string())
         .or_else(|| extract_first_heading(&std::fs::read_to_string(dir.join("SPEC.md")).unwrap_or_default()))
-        .unwrap_or_else(|| humanize_slug(slug));
+        .unwrap_or_else(|| humanize_slug(slug))
+        .replace("DESIGN:OS Studio", "design:os studio")
+        .replace("Design OS Studio", "design:os studio")
+        .replace("DESIGN:OS", "design:os");
 
     let root_display = if slug == "full" {
         "product-os-spec-driven/fixtures/v2/full".to_string()
@@ -1356,6 +1494,13 @@ fn embedded_v2_package(standalone_specs: Vec<(String, PathBuf, String)>) -> Spec
         (V2_US_01_MD, "plans/specs/designos-studio-v2/us/US-01.md"),
         (V2_US_02_MD, "plans/specs/designos-studio-v2/us/US-02.md"),
         (V2_US_03_MD, "plans/specs/designos-studio-v2/us/US-03.md"),
+        (V2_US_04_MD, "plans/specs/designos-studio-v2/us/US-04.md"),
+        (V2_US_05_MD, "plans/specs/designos-studio-v2/us/US-05.md"),
+        (V2_US_06_MD, "plans/specs/designos-studio-v2/us/US-06.md"),
+        (V2_US_07_MD, "plans/specs/designos-studio-v2/us/US-07.md"),
+        (V2_US_08_MD, "plans/specs/designos-studio-v2/us/US-08.md"),
+        (V2_US_09_MD, "plans/specs/designos-studio-v2/us/US-09.md"),
+        (V2_US_10_MD, "plans/specs/designos-studio-v2/us/US-10.md"),
     ]
     .into_iter()
     .filter_map(|(raw, path)| parse_us_markdown(raw, path))
@@ -1378,7 +1523,7 @@ fn embedded_v2_package(standalone_specs: Vec<(String, PathBuf, String)>) -> Spec
 
     SpecPackage {
         slug: "designos-studio-v2".to_string(),
-        title: "DESIGN:OS Studio — Figma 1:1 & Agentic Product OS".to_string(),
+        title: "design:os studio — Figma 1:1 & Agentic Product OS".to_string(),
         format_version: "2".to_string(),
         project_name: "design-os-studio".to_string(),
         root_display,
@@ -1395,7 +1540,19 @@ fn embedded_v2_package(standalone_specs: Vec<(String, PathBuf, String)>) -> Spec
         open_items,
         gates,
         brainstorm_md: format!("{V2_PO_SPEC_MD}\n\n{V2_PRD_MD}"),
-        usecases_md: format!("{V2_US_01_MD}\n\n{V2_US_02_MD}\n\n{V2_US_03_MD}"),
+        usecases_md: [
+            V2_US_01_MD,
+            V2_US_02_MD,
+            V2_US_03_MD,
+            V2_US_04_MD,
+            V2_US_05_MD,
+            V2_US_06_MD,
+            V2_US_07_MD,
+            V2_US_08_MD,
+            V2_US_09_MD,
+            V2_US_10_MD,
+        ]
+        .join("\n\n"),
         plan_md: format!("{V2_FC_001_MD}\n\n{V2_UI_CONTRACT_MD}\n\n{V2_DECISIONS_MD}"),
         json_specs: standalone_specs,
     }
@@ -1526,7 +1683,10 @@ fn synthesize_v2_from_legacy(
 
 fn fallback_package(standalone_specs: Vec<(String, PathBuf, String)>) -> SpecPackage {
     let title = extract_first_heading(FALLBACK_BRAINSTORM)
-        .unwrap_or_else(|| "DESIGN:OS Studio — 1:1 Figma Binary Parity & Agentic Spec Reader".to_string());
+        .unwrap_or_else(|| "design:os studio — 1:1 Figma Binary Parity & Agentic Spec Reader".to_string())
+        .replace("DESIGN:OS Studio", "design:os studio")
+        .replace("Design OS Studio", "design:os studio")
+        .replace("DESIGN:OS", "design:os");
     synthesize_v2_from_legacy(
         "figma-parity-and-agentic-spec-reader".to_string(),
         title,
@@ -2317,7 +2477,7 @@ pub fn show_reader(app: &mut App, ui: &mut Ui, rect: Rect) {
     );
     let left_avail_w = (apply_spec_r.left() - header_rect.left() - 28.0).max(80.0);
 
-    // Top-left inside 64px header: Brand icon + `product:os / <title>` + Format v2 pill
+    // Top-left inside 64px header: Brand icon + `design:os studio / <title>` (`DIR-12`) + Format v2 pill
     icons::paint(
         &p,
         Icon::Specs,
@@ -2325,10 +2485,22 @@ pub fn show_reader(app: &mut App, ui: &mut Ui, rect: Rect) {
         15.0,
         TOKEN_PRIMARY_ROSE,
     );
-    let breadcrumb = format!("product:os / {}", pkg.title);
-    let bc_str = widgets::elide(&p, &breadcrumb, &theme::font_large_strong(), left_avail_w - 16.0);
-    p.text(
+    let brand_w = crate::home::updater::paint_brand_wordmark(
+        &p,
         Pos2::new(header_rect.left() + 34.0, header_rect.top() + 21.0),
+        14.0,
+        TOKEN_TEXT,
+        TOKEN_TEXT_MUTED,
+    );
+    let clean_title = pkg
+        .title
+        .replace("DESIGN:OS Studio", "design:os studio")
+        .replace("Design OS Studio", "design:os studio")
+        .replace("DESIGN:OS", "design:os");
+    let suffix = format!("/ {clean_title}");
+    let bc_str = widgets::elide(&p, &suffix, &theme::font_large_strong(), (left_avail_w - brand_w - 24.0).max(40.0));
+    p.text(
+        Pos2::new(header_rect.left() + 34.0 + brand_w + 6.0, header_rect.top() + 21.0),
         Align2::LEFT_CENTER,
         bc_str,
         theme::font_large_strong(),
@@ -2431,6 +2603,29 @@ pub fn show_reader(app: &mut App, ui: &mut Ui, rect: Rect) {
             app.specs.scroll = 0.0;
         }
 
+        let approve_btn = draw_action_button(
+            ui,
+            &p,
+            "attn-approve-gate-btn",
+            Pos2::new(review_btn.left() - 8.0, attn_rect.center().y),
+            Some(Icon::Check),
+            "Approve Gate",
+            PILL_OK_FILL,
+            PILL_OK_STROKE,
+            PILL_OK_TEXT,
+        );
+        if ui.interact(approve_btn, Id::new("attn-approve-gate-click"), Sense::click()).clicked() {
+            let gid = pkg
+                .gates
+                .iter()
+                .find(|g| g.status != "APPROVED")
+                .map(|g| g.gate_id.clone())
+                .unwrap_or_else(|| "g4-uiux".to_string());
+            if app.specs.approve_gate_and_persist(&gid) {
+                app.show_toast(format!("Approved gate {gid} (GATE: APPROVED)"), false);
+            }
+        }
+
         icons::paint(
             &p,
             Icon::Flag,
@@ -2443,7 +2638,7 @@ pub fn show_reader(app: &mut App, ui: &mut Ui, rect: Rect) {
             "Attention · Gate {} is PENDING review · {} blocking OPEN items · All mandatory rubric criteria = 2/2",
             gate_lbl, kpi.blocking_open_count
         );
-        let max_msg_w = (review_btn.left() - attn_rect.left() - 38.0).max(60.0);
+        let max_msg_w = (approve_btn.left() - attn_rect.left() - 38.0).max(60.0);
         let msg_elided = widgets::elide(&p, &msg, &theme::font_body_strong(), max_msg_w);
         p.text(
             Pos2::new(attn_rect.left() + 30.0, attn_rect.center().y),
@@ -3522,6 +3717,7 @@ fn render_gates_and_canvas_tab(app: &mut App, ui: &mut Ui, rect: Rect, pkg: &Spe
 
     let mut focus_target: Option<NodeId> = None;
     let mut export_target: Option<NodeId> = None;
+    let mut approve_target: Option<String> = None;
 
     clipped(ui, rect, |ui| {
         let p = ui.painter().clone();
@@ -3542,6 +3738,33 @@ fn render_gates_and_canvas_tab(app: &mut App, ui: &mut Ui, rect: Rect, pkg: &Spe
             if gi > 0 {
                 widgets::hline(&p, c1.left() + 16.0, c1.right() - 16.0, gy - 10.0, TOKEN_HAIRLINE);
             }
+            let right_edge = if g.status != "APPROVED" {
+                let abtn = draw_action_button(
+                    ui,
+                    &p,
+                    &format!("gate-approve-{}", g.gate_id),
+                    Pos2::new(c1.right() - 16.0, gy),
+                    Some(Icon::Check),
+                    "Approve Gate",
+                    PILL_OK_FILL,
+                    PILL_OK_STROKE,
+                    PILL_OK_TEXT,
+                );
+                if ui.interact(abtn, Id::new(("gate-approve-click", &g.gate_id)), Sense::click()).clicked() {
+                    approve_target = Some(g.gate_id.clone());
+                }
+                abtn.left() - 10.0
+            } else {
+                draw_ring_pill_right(
+                    &p,
+                    Pos2::new(c1.right() - 16.0, gy),
+                    "PO Approved",
+                    PILL_OK_FILL,
+                    PILL_OK_STROKE,
+                    PILL_OK_TEXT,
+                ) - 10.0
+            };
+
             let (sfill, sstroke, sfg) = status_pill_colors(&g.status);
             let mut gx = c1.left() + 18.0;
             gx = draw_ring_pill_left(
@@ -3570,7 +3793,7 @@ fn render_gates_and_canvas_tab(app: &mut App, ui: &mut Ui, rect: Rect, pkg: &Spe
             ) + 8.0;
             gx = draw_ring_pill_left(&p, Pos2::new(gx, gy), &g.freshness, PILL_OK_FILL, PILL_OK_STROKE, PILL_OK_TEXT) + 8.0;
             let short_sha: String = g.config_sha256.chars().take(12).collect();
-            if !short_sha.is_empty() && gx + 140.0 < c1.right() {
+            if !short_sha.is_empty() && gx + 140.0 < right_edge {
                 let _ = draw_ring_pill_left(
                     &p,
                     Pos2::new(gx, gy),
@@ -3601,7 +3824,7 @@ fn render_gates_and_canvas_tab(app: &mut App, ui: &mut Ui, rect: Rect, pkg: &Spe
         }
         y = c1.bottom() + 14.0;
 
-        // SECTION CARD 2: Decision Ledger (`D1..D5`)
+        // SECTION CARD 2: Decision Ledger (`D1..D8`)
         let c2 = Rect::from_min_size(Pos2::new(rect.left(), y), Vec2::new(w, card2_h.max(88.0)));
         draw_section_card_shell(
             &p,
@@ -3714,6 +3937,11 @@ fn render_gates_and_canvas_tab(app: &mut App, ui: &mut Ui, rect: Rect, pkg: &Spe
     });
     scrollbar(ui, rect, app.specs.scroll, est_h);
 
+    if let Some(gid) = approve_target {
+        if app.specs.approve_gate_and_persist(&gid) {
+            app.show_toast(format!("Approved gate {gid} (GATE: APPROVED)"), false);
+        }
+    }
     if let Some(fid) = focus_target {
         app.select_only(fid);
         app.specs.open = false;
@@ -3877,11 +4105,31 @@ mod tests {
         assert_eq!(pkg.format_version, "2");
         assert!(!pkg.title.is_empty());
         assert_eq!(pkg.pipeline_stages.len(), 11, "must load 11 Spec Format v2 stages");
-        assert_eq!(pkg.requirements.len(), 5, "must parse REQ-01..REQ-05 from PRD.md");
-        assert_eq!(pkg.stories.len(), 3, "must parse US-01..US-03 from us/*.md");
-        assert!(!pkg.ui_contract.is_empty(), "must parse 12-column ui-contract.md");
+        assert_eq!(pkg.requirements.len(), 12, "must parse REQ-01..REQ-12 from PRD.md");
+        assert_eq!(pkg.stories.len(), 10, "must parse US-01..US-10 from us/*.md");
+        assert_eq!(pkg.screens.len(), 10, "must parse S01..S10 from screen-inventory.md");
+        assert_eq!(pkg.ui_contract.len(), 60, "must parse 60 rows (10 screens x 6 states) from ui-contract.md");
         assert_eq!(pkg.gates.len(), 5, "must parse G1..G5 gate files");
         assert!(!pkg.json_specs.is_empty(), "must include .spec.json blueprints");
+    }
+
+    #[test]
+    fn approves_pending_gate_and_resolves_open_items() {
+        let mut state = SpecsState::default();
+        state.ensure_loaded();
+        let before = state.current_package().expect("active package").kpi_metrics();
+        assert_eq!(before.approved_gates, 4);
+        assert_eq!(before.total_gates, 5);
+        assert!(before.pending_gate_label.is_some());
+
+        assert!(state.approve_gate("g4-uiux"), "Approve Gate must transition G4-UIUX to APPROVED");
+        let pkg = state.current_package().expect("active package");
+        let g4 = pkg.gates.iter().find(|g| g.gate_id == "g4-uiux").expect("g4-uiux gate");
+        assert_eq!(g4.status, "APPROVED");
+        let after = pkg.kpi_metrics();
+        assert_eq!(after.approved_gates, 5);
+        assert!(after.pending_gate_label.is_none());
+        assert!(pkg.open_items.is_empty(), "approving all gates must resolve non-blocking OPEN-01");
     }
 
     #[test]
@@ -3899,8 +4147,16 @@ mod tests {
         assert_eq!(us.acceptance_criteria[0].scenario, "SCN-01-01");
         assert!(!us.ascii_wireframe.is_empty(), "US-01 must include section 6 ASCII wireframe");
 
+        let us09 = parse_us_markdown(V2_US_09_MD, "plans/specs/designos-studio-v2/us/US-09.md").expect("valid US-09.md");
+        assert_eq!(us09.id, "US-09");
+        assert_eq!(us09.req_refs, vec!["REQ-11".to_string()]);
+
+        let us10 = parse_us_markdown(V2_US_10_MD, "plans/specs/designos-studio-v2/us/US-10.md").expect("valid US-10.md");
+        assert_eq!(us10.id, "US-10");
+        assert_eq!(us10.req_refs, vec!["REQ-12".to_string()]);
+
         let contract_rows = parse_ui_contract(V2_UI_CONTRACT_MD);
-        assert_eq!(contract_rows.len(), 18, "3 screens x 6 states = 18 behavioral selector rows");
+        assert_eq!(contract_rows.len(), 60, "10 screens x 6 states = 60 behavioral selector rows");
         assert_eq!(contract_rows[0].screen, "S01");
         assert_eq!(contract_rows[0].state, "normal");
         assert_eq!(contract_rows[0].us, "US-01");

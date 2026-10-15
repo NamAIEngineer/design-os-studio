@@ -14,6 +14,6 @@
 - [x] **Task B3**: Implement `crates/designos-app/src/cmdk.rs` — floating In-Canvas `Cmd+K` Agent Bar (`synthesize_spec_from_prompt`) + Live VSF/EaseUI Design Gate Audit (`run_design_gate_audit`) with 1-click Auto-Fix.
 
 ### Workstream C (`studio-integration-and-qa`) — UI Wiring & GPU Visual Verification
-- [ ] **Task C1**: Wire `LayoutDirection::Grid` solver into `crates/designos-app/src/layout.rs` and expose Grid / Variable Axes / OpenType / Scoped Variable controls in `crates/designos-app/src/panels/inspector/`.
-- [ ] **Task C2**: Wire `RailItem::Terminal` (`--panel terminal` + bottom split dock `Ctrl+\``) and `Cmd+K` (`cmdk::show`) into `crates/designos-app/src/{app.rs,shell.rs,cli.rs,icons.rs,panels/rail.rs,panels/left.rs}`.
-- [ ] **Task C3**: Run full workspace tests (`cargo test --workspace`) and capture GPU screenshots of the Embedded PTY Agent Terminal, In-Canvas `Cmd+K` Design Gate, and 2D CSS Grid Inspector.
+- [x] **Task C1**: Wire `LayoutDirection::Grid` solver into `crates/designos-app/src/layout.rs` and expose Grid / Variable Axes / OpenType / Scoped Variable controls in `crates/designos-app/src/panels/inspector/`.
+- [x] **Task C2**: Wire `RailItem::Terminal` (`--panel terminal` + bottom split dock `Ctrl+\``) and `Cmd+K` (`cmdk::show`) into `crates/designos-app/src/{app.rs,shell.rs,cli.rs,icons.rs,panels/rail.rs,panels/left.rs}`.
+- [x] **Task C3**: Run full workspace tests (`cargo test --workspace`) and capture GPU screenshots of the Embedded PTY Agent Terminal, In-Canvas `Cmd+K` Design Gate, and 2D CSS Grid Inspector.

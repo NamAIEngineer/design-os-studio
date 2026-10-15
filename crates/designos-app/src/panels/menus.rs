@@ -443,8 +443,8 @@ fn main_nodes(app: &App) -> Vec<Node> {
     let help = vec![
         leaf("Command palette", "Ctrl+K", Action::OpenPalette),
         leaf("Keyboard shortcuts", "", Action::Shortcuts).sep(),
-        leaf("About DESIGN:OS Studio", "", Action::AboutDesignOS),
-        leaf("DESIGN:OS Studio on GitHub", "", Action::OpenGithub),
+        leaf("About design:os studio", "", Action::AboutDesignOS),
+        leaf("design:os studio on GitHub", "", Action::OpenGithub),
     ];
     vec![
         leaf("Back to files", "", Action::BackToFiles).sep(),
@@ -512,6 +512,10 @@ pub fn preset_menu(ctx: &Context, app: &mut App, spec: &str, screen: Rect) -> bo
             app.ui.menu_anchor = Some(super::toolbar::chevron_rect(screen, g));
         }
         "palette" => run(app, ctx, Action::OpenPalette),
+        "zoom" => {
+            app.ui.menu = Some(MenuKind::Zoom);
+            app.ui.menu_anchor = Some(Rect::from_min_size(Pos2::new(screen.right() - 68.0, 12.0), Vec2::new(56.0, 28.0)));
+        }
         _ => return false,
     }
     true
@@ -547,16 +551,178 @@ fn file_items(app: &App) -> Vec<(MenuItem, Option<Action>)> {
     items
 }
 
-fn zoom_items() -> Vec<(MenuItem, Option<Action>)> {
-    vec![
-        (MenuItem::new("Zoom in").shortcut("Ctrl+="), Some(Action::ZoomIn)),
-        (MenuItem::new("Zoom out").shortcut("Ctrl+-").sep(), Some(Action::ZoomOut)),
-        (MenuItem::new("Zoom to fit").shortcut("Shift+1"), Some(Action::FitAll)),
-        (MenuItem::new("Zoom to selection").shortcut("Shift+2").sep(), Some(Action::FitSelection)),
-        (MenuItem::new("Zoom to 50%"), Some(Action::ZoomTo(0.5))),
-        (MenuItem::new("Zoom to 100%").shortcut("Shift+0"), Some(Action::Zoom100)),
-        (MenuItem::new("Zoom to 200%"), Some(Action::ZoomTo(2.0))),
-    ]
+struct ZoomRowSpec {
+    label: &'static str,
+    shortcut: &'static str,
+    action: Option<Action>,
+    checked: bool,
+    has_sub: bool,
+    sep_after: bool,
+}
+
+/// Renders the 1:1 Figma UI3 Zoom / View menu (`figma_ui3_zoom_menu.png`) with an editable
+/// zoom percentage box at the top (`#0D99FF` active border ring), Zoom presets, View toggles,
+/// and Collaboration overlays.
+fn show_zoom_menu(app: &mut App, ctx: &Context, id: Id, anchor: Option<Rect>) {
+    let rows = [
+        ZoomRowSpec { label: "Zoom in", shortcut: "⌘+", action: Some(Action::ZoomIn), checked: false, has_sub: false, sep_after: false },
+        ZoomRowSpec { label: "Zoom out", shortcut: "⌘-", action: Some(Action::ZoomOut), checked: false, has_sub: false, sep_after: false },
+        ZoomRowSpec { label: "Zoom to fit", shortcut: "⇧1", action: Some(Action::FitAll), checked: false, has_sub: false, sep_after: false },
+        ZoomRowSpec { label: "Zoom to 50%", shortcut: "", action: Some(Action::ZoomTo(0.5)), checked: false, has_sub: false, sep_after: false },
+        ZoomRowSpec { label: "Zoom to 100%", shortcut: "⌘0", action: Some(Action::Zoom100), checked: false, has_sub: false, sep_after: false },
+        ZoomRowSpec { label: "Zoom to 200%", shortcut: "", action: Some(Action::ZoomTo(2.0)), checked: false, has_sub: false, sep_after: true },
+        ZoomRowSpec { label: "Pixel preview", shortcut: "⇧⌘P", action: None, checked: false, has_sub: true, sep_after: false },
+        ZoomRowSpec {
+            label: "Pixel grid",
+            shortcut: "⌘'",
+            action: Some(Action::TogglePixelGrid),
+            checked: app.ui.pixel_grid,
+            has_sub: false,
+            sep_after: false,
+        },
+        ZoomRowSpec {
+            label: "Snap to pixel grid",
+            shortcut: "⇧⌘'",
+            action: Some(Action::ToggleSnapPixel),
+            checked: !app.ui.no_pixel_snap,
+            has_sub: false,
+            sep_after: false,
+        },
+        ZoomRowSpec {
+            label: "Layout guides",
+            shortcut: "⌃G",
+            action: Some(Action::ToggleLayoutGrids),
+            checked: !app.ui.hide_layout_grids,
+            has_sub: false,
+            sep_after: false,
+        },
+        ZoomRowSpec { label: "Rulers", shortcut: "⇧R", action: Some(Action::ToggleRulers), checked: app.ui.rulers, has_sub: false, sep_after: false },
+        ZoomRowSpec { label: "Outlines", shortcut: "⇧O", action: None, checked: false, has_sub: true, sep_after: false },
+        ZoomRowSpec { label: "Multiplayer cursors", shortcut: "⌥⌘\\", action: None, checked: true, has_sub: false, sep_after: false },
+        ZoomRowSpec { label: "Additional labels", shortcut: "", action: None, checked: false, has_sub: false, sep_after: true },
+        ZoomRowSpec {
+            label: "Comments",
+            shortcut: "⇧C",
+            action: Some(Action::Tool(Tool::Comment)),
+            checked: app.tool == Tool::Comment,
+            has_sub: false,
+            sep_after: false,
+        },
+        ZoomRowSpec { label: "Annotations", shortcut: "⇧Y", action: None, checked: false, has_sub: false, sep_after: false },
+    ];
+
+    let screen = ctx.content_rect();
+    let w = 212.0;
+    let row_h = theme::MENU_ITEM_HEIGHT;
+    let sep_h = widgets::menu::SEP_H;
+    let top_input_h = 34.0;
+    let seps = rows.iter().filter(|r| r.sep_after).count() as f32;
+    let h = theme::MENU_PADDING * 2.0 + top_input_h + sep_h + rows.len() as f32 * row_h + seps * sep_h;
+    let a = anchor.unwrap_or_else(|| Rect::from_min_size(Pos2::new(screen.right() - 68.0, 12.0), Vec2::new(56.0, 28.0)));
+    let x = (a.right() - w).clamp(screen.left() + 8.0, (screen.right() - w - 8.0).max(screen.left() + 8.0));
+    let y = (a.bottom() + 4.0).min((screen.bottom() - h - 8.0).max(screen.top() + 8.0));
+    let rect = Rect::from_min_size(Pos2::new(x, y), Vec2::new(w, h));
+
+    let mut picked: Option<Action> = None;
+    let mut custom_zoom: Option<f32> = None;
+    let esc = ctx.input(|i| i.key_pressed(Key::Escape));
+
+    egui::Area::new(id).order(egui::Order::Foreground).fixed_pos(rect.min).interactable(true).show(ctx, |ui| {
+        ui.allocate_exact_size(rect.size(), Sense::hover());
+        let p = ui.painter().clone();
+        menu_panel(&p, rect, theme::MENU_RADIUS);
+
+        // Top editable Zoom percentage input box (`#0D99FF` active border ring)
+        let input_box = Rect::from_min_size(Pos2::new(rect.left() + 8.0, rect.top() + 8.0), Vec2::new(w - 16.0, 26.0));
+        p.rect_filled(input_box, egui::CornerRadius::same(5), theme::BG_SECONDARY);
+        p.rect_stroke(input_box, egui::CornerRadius::same(5), egui::Stroke::new(1.0, theme::BORDER_SELECTED), egui::StrokeKind::Inside);
+
+        let buf_id = id.with("zoom-input-buf");
+        let default_pct = format!("{}%", (app.view.zoom * 100.0).round() as i32);
+        let mut buf = ui.data(|d| d.get_temp::<String>(buf_id)).unwrap_or_else(|| default_pct.clone());
+        let te = egui::TextEdit::singleline(&mut buf)
+            .id(id.with("zoom-input"))
+            .font(theme::font_body())
+            .text_color(theme::TEXT)
+            .frame(egui::Frame::NONE)
+            .margin(egui::Margin::symmetric(8, 0))
+            .vertical_align(egui::Align::Center)
+            .desired_width(input_box.width() - 16.0);
+        let resp = ui.put(input_box, te);
+        ui.data_mut(|d| d.insert_temp(buf_id, buf.clone()));
+        if resp.lost_focus() && ctx.input(|i| i.key_pressed(Key::Enter)) {
+            let trimmed = buf.trim().trim_end_matches('%').trim();
+            if let Ok(v) = trimmed.parse::<f32>() {
+                custom_zoom = Some((v / 100.0).clamp(0.02, 256.0));
+            }
+        }
+
+        let sep0_y = input_box.bottom() + 4.0 + theme::MENU_SEP_MARGIN;
+        widgets::hline(&p, rect.left(), rect.right(), sep0_y, theme::BORDER_MENU);
+        let mut ry = input_box.bottom() + 4.0 + sep_h;
+        let font = theme::font_menu();
+
+        for (idx, r) in rows.iter().enumerate() {
+            let r_rect = Rect::from_min_size(Pos2::new(rect.left(), ry), Vec2::new(w, row_h));
+            let row_resp = ui.interact(r_rect, id.with(("zrow", idx)), Sense::click());
+            if row_resp.hovered() {
+                p.rect_filled(r_rect.shrink2(Vec2::new(theme::MENU_PILL_INSET, 0.0)), theme::cr(theme::MENU_PILL_RADIUS), theme::BG_MENU_SELECTED);
+            }
+            if r.checked {
+                icons::paint(&p, Icon::Check, Pos2::new(r_rect.left() + 18.0, r_rect.center().y), 12.0, theme::TEXT);
+            }
+            p.text(Pos2::new(r_rect.left() + 32.0, r_rect.center().y), Align2::LEFT_CENTER, r.label, font.clone(), theme::TEXT);
+            if r.has_sub {
+                icons::paint(&p, Icon::ChevronRight, Pos2::new(r_rect.right() - 16.0, r_rect.center().y), 11.0, theme::ICON_SECONDARY);
+                if !r.shortcut.is_empty() {
+                    p.text(
+                        Pos2::new(r_rect.right() - 28.0, r_rect.center().y),
+                        Align2::RIGHT_CENTER,
+                        r.shortcut,
+                        font.clone(),
+                        if row_resp.hovered() { theme::MENU_SHORTCUT_HIGHLIGHT } else { theme::TEXT_SECONDARY },
+                    );
+                }
+            } else if !r.shortcut.is_empty() {
+                p.text(
+                    Pos2::new(r_rect.right() - theme::MENU_SHORTCUT_PAD, r_rect.center().y),
+                    Align2::RIGHT_CENTER,
+                    r.shortcut,
+                    font.clone(),
+                    if row_resp.hovered() { theme::MENU_SHORTCUT_HIGHLIGHT } else { theme::TEXT_SECONDARY },
+                );
+            }
+            if row_resp.clicked() {
+                if let Some(act) = r.action {
+                    picked = Some(act);
+                }
+            }
+            ry += row_h;
+            if r.sep_after {
+                widgets::hline(&p, rect.left(), rect.right(), ry + theme::MENU_SEP_MARGIN, theme::BORDER_MENU);
+                ry += sep_h;
+            }
+        }
+    });
+
+    if let Some(z) = custom_zoom {
+        ctx.data_mut(|d| d.remove::<String>(id.with("zoom-input-buf")));
+        app.ui.menu = None;
+        app.zoom_to(z);
+        return;
+    }
+    if let Some(act) = picked {
+        ctx.data_mut(|d| d.remove::<String>(id.with("zoom-input-buf")));
+        app.ui.menu = None;
+        run(app, ctx, act);
+        return;
+    }
+    let outside =
+        ctx.input(|i| i.pointer.any_pressed() && i.pointer.interact_pos().is_some_and(|p| !rect.contains(p) && !anchor.is_some_and(|ar| ar.contains(p))));
+    if esc || outside {
+        ctx.data_mut(|d| d.remove::<String>(id.with("zoom-input-buf")));
+        app.ui.menu = None;
+    }
 }
 
 /// Shows the currently open menu (if any) and executes picked entries.
@@ -567,6 +733,7 @@ pub fn show(app: &mut App, ctx: &Context) {
     let screen = ctx.content_rect();
     match kind {
         MenuKind::Palette => palette(app, ctx),
+        MenuKind::Zoom => show_zoom_menu(app, ctx, id, anchor),
         MenuKind::ToolGroup(g) => {
             let nodes = tool_nodes(app, g);
             let items = to_items(&nodes);
@@ -598,10 +765,7 @@ pub fn show(app: &mut App, ctx: &Context) {
             }
         }
         other => {
-            let entries = match other {
-                MenuKind::Zoom => zoom_items(),
-                _ => file_items(app),
-            };
+            let entries = file_items(app);
             let items: Vec<MenuItem> = entries.iter().map(|e| e.0.clone()).collect();
             let a = anchor.unwrap_or(Rect::NOTHING);
             let pos = match other {
@@ -666,7 +830,10 @@ fn commands(app: &App) -> Vec<Command> {
 }
 
 const PALETTE_ROWS: usize = 8;
-const PALETTE_SEARCH_H: f32 = 32.0;
+const PALETTE_SEARCH_H: f32 = 38.0;
+const PALETTE_TAB_H: f32 = 34.0;
+const PALETTE_SEC_H: f32 = 22.0;
+const PALETTE_MODAL_W: f32 = 520.0;
 
 fn matches_query(label: &str, q: &str) -> bool {
     let l = label.to_lowercase();
@@ -676,7 +843,20 @@ fn matches_query(label: &str, q: &str) -> bool {
 fn palette(app: &mut App, ctx: &Context) {
     let cmds = commands(app);
     let q = app.ui.palette_query.to_lowercase();
-    let list: Vec<usize> = (0..cmds.len()).filter(|i| matches_query(&cmds[*i].label, &q)).collect();
+    let tab_id = Id::new("palette-active-tab");
+    let mut active_tab = ctx.data(|d| d.get_temp::<usize>(tab_id)).unwrap_or(0);
+    let list: Vec<usize> = (0..cmds.len())
+        .filter(|i| {
+            let c = &cmds[*i];
+            let tab_match = match active_tab {
+                1 => c.label.contains("Component") || c.label.contains("instance") || c.label.contains("variant") || c.label.contains("library"),
+                2 => c.label.contains("Plugin") || c.label.contains("Export") || c.label.contains("Find"),
+                3 => c.label.contains("Auto layout") || c.label.contains("Frame") || c.label.contains("Component") || c.label.contains("Find"),
+                _ => true,
+            };
+            (tab_match || !q.is_empty()) && matches_query(&c.label, &q)
+        })
+        .collect();
     let n = list.len();
     let (down, up, enter, esc) = ctx.input_mut(|i| {
         let m = Modifiers::NONE;
@@ -695,30 +875,31 @@ fn palette(app: &mut App, ctx: &Context) {
     let shown = n.saturating_sub(first).min(PALETTE_ROWS);
     let screen = ctx.content_rect();
     let list_h = if n == 0 { theme::MENU_ITEM_HEIGHT } else { shown as f32 * theme::MENU_ITEM_HEIGHT };
-    let h = theme::MENU_PADDING + PALETTE_SEARCH_H + widgets::menu::SEP_H + list_h + theme::MENU_PADDING;
-    let rect =
-        Rect::from_min_size(Pos2::new(screen.center().x - theme::PALETTE_WIDTH / 2.0, screen.top() + theme::PALETTE_TOP), Vec2::new(theme::PALETTE_WIDTH, h));
+    let h = PALETTE_SEARCH_H + 1.0 + PALETTE_TAB_H + 1.0 + PALETTE_SEC_H + list_h + theme::MENU_PADDING;
+    let modal_w = PALETTE_MODAL_W.min((screen.width() - 32.0).max(320.0));
+    // Anchored at the bottom-center of the viewport right above the bottom floating toolbar (`screen.bottom() - 68.0`)
+    let rect = Rect::from_min_size(Pos2::new(screen.center().x - modal_w / 2.0, (screen.bottom() - 68.0 - h).max(20.0)), Vec2::new(modal_w, h));
     let font = theme::font_body();
     let mut pick: Option<usize> = None;
     let mut hover: Option<usize> = None;
     let moved = ctx.input(|i| i.pointer.delta() != Vec2::ZERO);
     let ptr = ctx.input(|i| i.pointer.hover_pos());
+    let bg_surface = egui::Color32::from_rgb(0x2C, 0x2C, 0x2C);
+    let border_col = egui::Color32::from_rgb(0x38, 0x38, 0x38);
+    let tab_active_bg = egui::Color32::from_rgb(0x38, 0x38, 0x38);
+
     egui::Area::new(Id::new("palette")).order(egui::Order::Foreground).fixed_pos(rect.min).interactable(true).show(ctx, |ui| {
         ui.allocate_exact_size(rect.size(), Sense::hover());
         let p = ui.painter().clone();
-        menu_panel(&p, rect, theme::MENU_RADIUS);
-        let srow = Rect::from_min_size(Pos2::new(rect.left(), rect.top() + theme::MENU_PADDING), Vec2::new(rect.width(), PALETTE_SEARCH_H));
-        icons::paint(
-            &p,
-            Icon::Search,
-            Pos2::new(srow.left() + theme::MENU_ICON_X_PLAIN + theme::MENU_ICON_BOX / 2.0, srow.center().y),
-            theme::MENU_ICON_SIZE,
-            theme::ICON_SECONDARY,
-        );
-        let field = Rect::from_min_max(
-            Pos2::new(srow.left() + theme::MENU_ICON_X_PLAIN + theme::MENU_ICON_BOX + theme::MENU_ICON_LABEL_GAP, srow.top()),
-            Pos2::new(srow.right() - theme::MENU_SHORTCUT_PAD, srow.bottom()),
-        );
+        widgets::elevation_400(&p, rect, 12);
+        p.rect_filled(rect, egui::CornerRadius::same(12), bg_surface);
+        p.rect_stroke(rect, egui::CornerRadius::same(12), egui::Stroke::new(1.0, border_col), egui::StrokeKind::Inside);
+
+        // 1. Top Search Row
+        let srow = Rect::from_min_size(rect.min, Vec2::new(rect.width(), PALETTE_SEARCH_H));
+        icons::paint(&p, Icon::Search, Pos2::new(srow.left() + 20.0, srow.center().y), theme::MENU_ICON_SIZE, theme::ICON_SECONDARY);
+        icons::paint(&p, Icon::Dev, Pos2::new(srow.right() - 20.0, srow.center().y), 14.0, theme::ICON_SECONDARY);
+        let field = Rect::from_min_max(Pos2::new(srow.left() + 36.0, srow.top()), Pos2::new(srow.right() - 36.0, srow.bottom()));
         let tid = Id::new("palette-input");
         let mut text = app.ui.palette_query.clone();
         let te = egui::TextEdit::singleline(&mut text)
@@ -728,7 +909,7 @@ fn palette(app: &mut App, ctx: &Context) {
             .frame(egui::Frame::NONE)
             .margin(egui::Margin::ZERO)
             .vertical_align(egui::Align::Center)
-            .hint_text(egui::RichText::new("Search actions").font(font.clone()).color(theme::TEXT_TERTIARY))
+            .hint_text(egui::RichText::new("Search...").font(font.clone()).color(theme::TEXT_TERTIARY))
             .desired_width(field.width());
         ui.put(field, te);
         ui.memory_mut(|m| m.request_focus(tid));
@@ -736,8 +917,37 @@ fn palette(app: &mut App, ctx: &Context) {
             app.ui.palette_query = text;
             app.ui.palette_sel = 0;
         }
-        widgets::hline(&p, rect.left(), rect.right(), srow.bottom() + theme::MENU_SEP_MARGIN, theme::BORDER_MENU);
-        let top = srow.bottom() + widgets::menu::SEP_H;
+        widgets::hline(&p, rect.left(), rect.right(), srow.bottom(), border_col);
+
+        // 2. 4-Tab Bar (`All`, `Assets`, `Plugins & widgets`, `AI & Gate`)
+        let tab_row = Rect::from_min_size(Pos2::new(rect.left(), srow.bottom() + 1.0), Vec2::new(rect.width(), PALETTE_TAB_H));
+        let mut tx = tab_row.left() + 12.0;
+        for (ti, tlabel) in ["All", "Assets", "Plugins & widgets", "AI & Gate"].iter().enumerate() {
+            let tw = widgets::text_width(&p, tlabel, &font) + 20.0;
+            let pill_r = Rect::from_min_size(Pos2::new(tx, tab_row.center().y - 12.0), Vec2::new(tw, 24.0));
+            let tresp = ui.interact(pill_r, Id::new(("palette-tab", ti)), Sense::click());
+            let is_act = active_tab == ti;
+            if is_act {
+                p.rect_filled(pill_r, egui::CornerRadius::same(6), tab_active_bg);
+            } else if tresp.hovered() {
+                p.rect_filled(pill_r, egui::CornerRadius::same(6), theme::BG_HOVER);
+            }
+            p.text(pill_r.center(), Align2::CENTER_CENTER, *tlabel, font.clone(), if is_act { egui::Color32::WHITE } else { theme::TEXT_SECONDARY });
+            if tresp.clicked() {
+                active_tab = ti;
+                ctx.data_mut(|d| d.insert_temp(tab_id, active_tab));
+                app.ui.palette_sel = 0;
+            }
+            tx = pill_r.right() + 6.0;
+        }
+        widgets::hline(&p, rect.left(), rect.right(), tab_row.bottom(), border_col);
+
+        // 3. Section Header ("Recents" when query is empty)
+        let sec_top = tab_row.bottom() + 1.0;
+        let sec_label = if q.is_empty() { "Recents" } else { "Matching actions" };
+        p.text(Pos2::new(rect.left() + 16.0, sec_top + PALETTE_SEC_H / 2.0), Align2::LEFT_CENTER, sec_label, theme::font_small(), theme::TEXT_SECONDARY);
+
+        let top = sec_top + PALETTE_SEC_H;
         if n == 0 {
             p.text(
                 Pos2::new(rect.left() + theme::MENU_LABEL_X_PLAIN, top + theme::MENU_ITEM_HEIGHT / 2.0),
@@ -760,10 +970,10 @@ fn palette(app: &mut App, ctx: &Context) {
                 pick = Some(list[li]);
             }
             if lit {
-                p.rect_filled(row.shrink2(Vec2::new(theme::MENU_PILL_INSET, 0.0)), theme::cr(theme::MENU_PILL_RADIUS), theme::BG_MENU_SELECTED);
+                p.rect_filled(row.shrink2(Vec2::new(theme::MENU_PILL_INSET, 0.0)), theme::cr(theme::MENU_PILL_RADIUS), tab_active_bg);
             }
             let col = if c.disabled { theme::TEXT_DISABLED } else { theme::TEXT };
-            p.text(Pos2::new(row.left() + theme::MENU_LABEL_X_PLAIN, row.center().y), Align2::LEFT_CENTER, &c.label, font.clone(), col);
+            p.text(Pos2::new(row.left() + 16.0, row.center().y), Align2::LEFT_CENTER, &c.label, font.clone(), col);
             if !c.shortcut.is_empty() {
                 let sc = if c.disabled {
                     theme::TEXT_DISABLED

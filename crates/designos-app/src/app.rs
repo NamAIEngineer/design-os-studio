@@ -171,6 +171,8 @@ pub struct App {
     pub terminal: crate::terminal::TerminalState,
     /// In-Canvas Cmd+K Agent & Design Gate Bar state.
     pub cmdk: crate::cmdk::CmdKState,
+    /// 1:1 Figma UI3 Multi-Tab Project Workspace state (`US-10`).
+    pub tabs: crate::tabs::TabsState,
 }
 
 impl App {
@@ -221,6 +223,7 @@ impl App {
             specs: Default::default(),
             terminal: Default::default(),
             cmdk: Default::default(),
+            tabs: Default::default(),
         }
     }
 

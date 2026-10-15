@@ -1,86 +1,110 @@
-version: 2
-project:
-  name: design-os-studio
-  doc_language: vi
-  spec_root: plans/specs/designos-studio-v2
-  us_prefix: ""
-roles:
-  po: {enabled: true, gate: true}
-  qc: {enabled: true, gate: true}
-  dev: {enabled: true, gate: true}
+format_version: "2.0"
+feature: "designos-studio-v2"
+brand: "design:os studio"
+pipeline: "product-os-spec-driven"
+updated_at: "2026-10-15T09:05:00Z"
+
 stages:
-  intake:
-    enabled: true
-    owner: po
-    context: [intake/po-spec.md]
-  clarify:
-    enabled: true
-    owner: po
-    context: [intake/po-spec.md, decisions/decision-log.md, decisions/glossary.md]
-  contract:
-    enabled: true
-    owner: po
-    context: [intake/po-spec.md, contract/FC-001.md, decisions/decision-log.md]
-  prd:
-    enabled: true
-    owner: po
-    context: [contract/FC-001.md, prd/PRD.md, decisions/decision-log.md]
-  us:
-    enabled: true
-    owner: po
-    context: [prd/PRD.md, us/INDEX.md, us/US-01.md, us/US-02.md, us/US-03.md]
-  wireframe:
-    enabled: true
-    owner: po
-    skill: {capability: design, skills: [es-designer]}
-    context: [us/US-01.md, us/US-02.md, us/US-03.md, ux/screen-inventory.md]
-  prototype:
-    enabled: true
-    owner: po
-    skill: {capability: design, skills: [es-designer]}
-    context: [ux/screen-inventory.md, us/US-01.md, us/US-02.md, us/US-03.md]
-  design:
-    enabled: true
-    owner: dev
-    skill: {capability: design, skills: [es-designer]}
-    context: [prd/PRD.md, us/US-01.md, us/US-02.md, us/US-03.md, ux/screen-inventory.md, ux/ui-contract.md]
-  tdd:
-    enabled: true
-    owner: qc
-    context: [us/US-01.md, us/US-02.md, us/US-03.md, ux/ui-contract.md]
-  uiux:
-    enabled: true
-    owner: po
-    skill: {capability: uiux, skills: [es-designer]}
-    design_system: "pcp-dark-operate-v2"
-    context: [ux/screen-inventory.md, ux/ui-contract.md, us/US-01.md, us/US-02.md, us/US-03.md]
-  handoff:
-    enabled: true
-    owner: po
-    context: [contract/FC-001.md, prd/PRD.md, us/INDEX.md, ux/ui-contract.md, review/gates/g1-intake.md, review/gates/g2-contract.md, review/gates/g3-us.md, review/gates/g4-uiux.md, review/gates/g5-handoff.md]
-agents:
-  writer: {command: claude}
-  reviewer: {command: codex}
-review:
-  enabled: true
-  max_rounds: 3
-  rubric: rules/review-rubric.md
-  log_dir: review/log
-limits: {max_fix_rounds: 3}
-versions: {workflow: "2", templates: "2", ruleset: "2", skill: "es-designer@4.0"}
-gates:
-  dir: review/gates
-  values: [PENDING, APPROVED, CHANGES_REQUESTED, NOT_REQUIRED]
-  stage_definitions:
-    intake: {id: g1-intake, version: "1"}
-    clarify: {id: clarify, version: "1"}
-    contract: {id: g2-contract, version: "1"}
-    prd: {id: prd, version: "1"}
-    us: {id: g3-us, version: "1"}
-    wireframe: {id: wireframe, version: "1"}
-    prototype: {id: prototype, version: "1"}
-    design: {id: design, version: "1"}
-    tdd: {id: g3-tdd, version: "1"}
-    uiux: {id: g4-uiux, version: "1"}
-    handoff: {id: g5-handoff, version: "1"}
-exit_codes: {done: 0, waiting_for_human: 2, bad_config_or_artifact: 3, environment_error: 4}
+  - id: 1
+    key: "intake"
+    name: "PO Intake & Reverse-Engineering Synthesis"
+    artifact: "intake/po-spec.md"
+    status: "DONE"
+    summary: "13/13 Directives (DIR-01..DIR-13)"
+    gate: "g1-intake"
+
+  - id: 2
+    key: "clarify"
+    name: "Clarifications, Decision Log & Domain Glossary"
+    artifact: "clarify/clarifications.md"
+    secondary_artifacts:
+      - "decisions/decision-log.md"
+      - "decisions/glossary.md"
+    status: "DONE"
+    summary: "Current to D11 (CL-01..10)"
+    gate: "g1-intake"
+
+  - id: 3
+    key: "contract"
+    name: "Feature Contract & Invariant Freeze"
+    artifact: "contract/FC-001.md"
+    status: "DONE"
+    summary: "FROZEN (BR-01..BR-15, A-01..A-05)"
+    gate: "g2-contract"
+
+  - id: 4
+    key: "prd"
+    name: "Product Requirements Document"
+    artifact: "prd/PRD.md"
+    status: "DONE"
+    summary: "12/12 REQ (REQ-01..REQ-12)"
+    gate: "g2-contract"
+
+  - id: 5
+    key: "us"
+    name: "User Stories & Gherkin Acceptance Criteria"
+    artifact: "us/INDEX.md"
+    story_files:
+      - "us/US-01.md"
+      - "us/US-02.md"
+      - "us/US-03.md"
+      - "us/US-04.md"
+      - "us/US-05.md"
+      - "us/US-06.md"
+      - "us/US-07.md"
+      - "us/US-08.md"
+      - "us/US-09.md"
+      - "us/US-10.md"
+    status: "DONE"
+    summary: "10/10 Ready (US-01..US-10)"
+    gate: "g3-us"
+
+  - id: 6
+    key: "wireframe"
+    name: "ASCII Wireframes & Spatial Geometry"
+    artifact: "wireframe/W-01.md"
+    status: "DONE"
+    summary: "10/10 Screens (S01..S10)"
+    gate: "g4-uiux"
+
+  - id: 7
+    key: "prototype"
+    name: "Interactive Prototype Flows & State Machines"
+    artifact: "prototype/P-01.md"
+    status: "DONE"
+    summary: "Complete (Mermaid Flows + Multi-Tab Shortcuts)"
+    gate: "g4-uiux"
+
+  - id: 8
+    key: "design"
+    name: "Figma UI3 Design Tokens, Brand Wordmark & Geometry Spec"
+    artifact: "design/tokens.md"
+    status: "DONE"
+    summary: "Complete (design:os studio Wordmark + S01..S10 Geometry)"
+    gate: "g4-uiux"
+
+  - id: 9
+    key: "tdd"
+    name: "TDD Verification Matrix & Benchmarks"
+    artifact: "tdd/test-plan.md"
+    status: "DONE"
+    summary: "30/30 SCN (SCN-01-01..SCN-10-03)"
+    gate: "g5-handoff"
+
+  - id: 10
+    key: "ux"
+    name: "Screen Inventory & 6-State UI Contract"
+    artifact: "ux/ui-contract.md"
+    secondary_artifacts:
+      - "ux/screen-inventory.md"
+    status: "DONE"
+    summary: "60 Rows (S01..S10 x 6 States)"
+    gate: "g4-uiux"
+
+  - id: 11
+    key: "handoff"
+    name: "Developer Handoff & Readiness Packet"
+    artifact: "handoff/READY.md"
+    status: "DONE"
+    summary: "READY (All 12 REQ + 10 US Traced)"
+    gate: "g5-handoff"

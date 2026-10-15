@@ -194,20 +194,33 @@ pub fn show(app: &mut App, ui: &mut Ui, screen: Rect) {
         );
         let resp = ui.interact(r, ui.id().with(("mode", i)), Sense::click());
         let proto_mode = app.ui.right_tab == Some(crate::app::RightTab::Prototype);
-        let sel = if app.ui.dev_mode {
+        let sel = if i == 0 {
+            app.cmdk.open
+        } else if app.ui.dev_mode {
             i == 3
         } else if proto_mode {
             i == 2
         } else {
             i == 1
         };
+        let dev_green = Color32::from_rgb(0x1B, 0xC4, 0x7D);
         if sel {
-            // Active segment: darker inset tile.
-            p.rect_filled(r, theme::cr(theme::MODE_TILE_RADIUS), theme::BG_TOOLBAR);
+            // Active segment: Dev Mode uses Figma UI3 #1BC47D green; other modes use darker inset tile.
+            let active_bg = if i == 3 { dev_green } else { theme::BG_TOOLBAR };
+            p.rect_filled(r, theme::cr(theme::MODE_TILE_RADIUS), active_bg);
         } else if resp.hovered() {
             p.rect_filled(r, theme::cr(theme::MODE_TILE_RADIUS), theme::BG_TOOLBAR_HOVER);
         }
-        icons::paint(&p, icon, r.center(), 16.0, if sel { theme::ICON_SELECTED } else { theme::ICON_SECONDARY });
+        let icon_col = if sel && i == 3 {
+            Color32::WHITE
+        } else if sel {
+            theme::ICON_SELECTED
+        } else if i == 3 && resp.hovered() {
+            dev_green
+        } else {
+            theme::ICON_SECONDARY
+        };
+        icons::paint(&p, icon, r.center(), 16.0, icon_col);
         if resp.on_hover_text(label).clicked() {
             match i {
                 1 => {

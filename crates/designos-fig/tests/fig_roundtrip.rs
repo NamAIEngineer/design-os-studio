@@ -860,3 +860,349 @@ fn roundtrip_figma_parity_grid_slots_axes_props_and_overrides() {
     );
 }
 
+#[test]
+fn rea_v106_all_seven_gaps_fidelity_and_roundtrip() {
+    let g = |s: u64, l: u64| -> Value { json!({"sessionID": s, "localID": l}) };
+    let node = |id: (u64, u64),
+                parent: (u64, u64),
+                pos: &str,
+                ty: &str,
+                name: &str,
+                extra: Value|
+     -> Value {
+        let mut v = json!({
+            "guid": g(id.0, id.1),
+            "parentIndex": {"guid": g(parent.0, parent.1), "position": pos},
+            "type": ty,
+            "name": name,
+            "phase": "CREATED",
+            "visible": true,
+            "opacity": 1.0,
+            "size": {"x": 100.0, "y": 50.0},
+            "transform": {"m00": 1.0, "m01": 0.0, "m02": 0.0, "m10": 0.0, "m11": 1.0, "m12": 0.0}
+        });
+        for (k, x) in extra.as_object().unwrap() {
+            v[k] = x.clone();
+        }
+        v
+    };
+    let var_alias = |field: &str, s: u64, l: u64| -> Value {
+        json!({
+            "variableField": field,
+            "variableData": {
+                "dataType": "ALIAS",
+                "value": {"alias": {"guid": g(s, l)}}
+            }
+        })
+    };
+
+    let changes = json!([
+        node((0, 0), (0, 0), "!", "DOCUMENT", "REA_v106", json!({})),
+        // Active variable set + variables for GAP-03
+        node((2, 1), (0, 0), "a", "VARIABLE_SET", "Semantic", json!({
+            "variableSetModes": [
+                {"id": g(2, 10), "name": "Light", "sortPosition": "a"}
+            ]
+        })),
+        node((2, 11), (2, 1), "a", "VARIABLE", "vis/showBadge", json!({
+            "variableSetID": g(2, 1),
+            "variableResolvedType": "BOOLEAN",
+            "variableDataValues": {
+                "entries": [{
+                    "modeID": g(2, 10),
+                    "variableData": {"dataType": "BOOLEAN", "value": {"boolValue": false}}
+                }]
+            }
+        })),
+        node((2, 12), (2, 1), "b", "VARIABLE", "copy/title", json!({
+            "variableSetID": g(2, 1),
+            "variableResolvedType": "STRING",
+            "variableDataValues": {
+                "entries": [{
+                    "modeID": g(2, 10),
+                    "variableData": {"dataType": "STRING", "value": {"textValue": "Bound Headline"}}
+                }]
+            }
+        })),
+        node((2, 13), (2, 1), "c", "VARIABLE", "border/top", json!({
+            "variableSetID": g(2, 1),
+            "variableResolvedType": "FLOAT",
+            "variableDataValues": {
+                "entries": [{
+                    "modeID": g(2, 10),
+                    "variableData": {"dataType": "FLOAT", "value": {"floatValue": 3.0}}
+                }]
+            }
+        })),
+        // GAP-07: Soft-deleted variable set and variable must be ignored
+        node((2, 99), (0, 0), "z", "VARIABLE_SET", "DeletedSet", json!({
+            "isSoftDeleted": true,
+            "variableSetModes": [{"id": g(2, 990), "name": "Default", "sortPosition": "a"}]
+        })),
+        node((2, 98), (2, 1), "z", "VARIABLE", "deleted/token", json!({
+            "isSoftDeleted": true,
+            "variableSetID": g(2, 1),
+            "variableResolvedType": "FLOAT",
+            "variableDataValues": {"entries": []}
+        })),
+        node((1, 1), (0, 0), "b", "CANVAS", "Page 1", json!({})),
+        // GAP-07: Soft-deleted canvas node must be ignored
+        node((1, 999), (1, 1), "z", "FRAME", "GhostDeletedFrame", json!({
+            "isSoftDeleted": true
+        })),
+        // GAP-01 & GAP-02 & GAP-03: Frame with per-side border weights WITHOUT borderStrokeWeightsIndependent
+        // and per-corner radii WITHOUT rectangleCornerRadiiIndependent, plus variableConsumptionMap
+        node((1, 10), (1, 1), "a", "FRAME", "HeaderBar", json!({
+            "strokeWeight": 1.0,
+            "borderTopWeight": 0.0,
+            "borderRightWeight": 0.0,
+            "borderBottomWeight": 2.0,
+            "borderLeftWeight": 0.0,
+            "rectangleTopLeftCornerRadius": 10.0,
+            "rectangleTopRightCornerRadius": 10.0,
+            "rectangleBottomRightCornerRadius": 0.0,
+            "rectangleBottomLeftCornerRadius": 0.0,
+            "variableConsumptionMap": {
+                "entries": [
+                    var_alias("VISIBLE", 2, 11),
+                    var_alias("BORDER_TOP_WEIGHT", 2, 13),
+                    var_alias("BORDER_RIGHT_WEIGHT", 2, 13),
+                    var_alias("BORDER_BOTTOM_WEIGHT", 2, 13),
+                    var_alias("BORDER_LEFT_WEIGHT", 2, 13)
+                ]
+            }
+        })),
+        node((1, 11), (1, 10), "a", "TEXT", "HeaderText", json!({
+            "textData": {"characters": "Placeholder"},
+            "variableConsumptionMap": {
+                "entries": [
+                    var_alias("TEXT_DATA", 2, 12)
+                ]
+            }
+        })),
+        // GAP-04: v106 CSS Grid Frame using gridColumnGap, gridRowGap, gridColumnsSizing, gridRowsSizing,
+        // and child using gridColumnAnchor / gridRowAnchor
+        node((1, 20), (1, 1), "b", "FRAME", "V106Grid", json!({
+            "stackMode": "GRID",
+            "gridColumnGap": 16.0,
+            "gridRowGap": 24.0,
+            "gridColumnsSizing": "1fr 2fr 120px auto",
+            "gridRowsSizing": "repeat(2, 80px)",
+            "variableConsumptionMap": {
+                "entries": [
+                    var_alias("GRID_COLUMN_GAP", 2, 13),
+                    var_alias("GRID_ROW_GAP", 2, 13)
+                ]
+            }
+        })),
+        node((1, 21), (1, 20), "a", "ROUNDED_RECTANGLE", "V106GridCell", json!({
+            "gridColumnAnchor": 2,
+            "gridRowAnchor": 1,
+            "gridColumnSpan": 2,
+            "gridRowSpan": 1
+        })),
+        // GAP-05 & GAP-06: Master component with auto-layout Hug & Fill child, plus Instance with
+        // symbolOverrides (sizing overrides) and derivedSymbolData (size & transform via master guid)
+        node((1, 30), (1, 1), "c", "SYMBOL", "ButtonComp", json!({
+            "size": {"x": 120.0, "y": 40.0},
+            "stackMode": "HORIZONTAL",
+            "stackPrimarySizing": "RESIZE_TO_FIT",
+            "stackCounterSizing": "RESIZE_TO_FIT_WITH_IMPLICIT_SIZE"
+        })),
+        node((1, 31), (1, 30), "a", "ROUNDED_RECTANGLE", "BtnBg", json!({
+            "overrideKey": g(9, 31),
+            "size": {"x": 100.0, "y": 32.0},
+            "stackChildPrimaryGrow": 1.0,
+            "stackChildAlignSelf": "STRETCH"
+        })),
+        node((1, 32), (1, 1), "d", "INSTANCE", "ButtonInst", json!({
+            "size": {"x": 240.0, "y": 48.0},
+            "stackMode": "HORIZONTAL",
+            "stackPrimarySizing": "FIXED",
+            "stackCounterSizing": "FIXED",
+            "symbolData": {
+                "symbolID": g(1, 30),
+                "symbolOverrides": [
+                    {
+                        "guidPath": {"guids": [g(9, 31)]},
+                        "stackChildPrimaryGrow": 0.0,
+                        "stackChildAlignSelf": "AUTO",
+                        "variableConsumptionMap": {
+                            "entries": [
+                                var_alias("VISIBLE", 2, 11)
+                            ]
+                        }
+                    }
+                ]
+            },
+            "derivedSymbolData": [
+                {
+                    // Uses master node GUID (1, 31) rather than overrideKey (9, 31)!
+                    "guidPath": {"guids": [g(1, 31)]},
+                    "size": {"x": 220.0, "y": 44.0},
+                    "transform": {"m00": 1.0, "m01": 0.0, "m02": 10.0, "m10": 0.0, "m11": 1.0, "m12": 2.0}
+                }
+            ]
+        })),
+        // GAP-07: Section with sectionStatusInfo, Sticky, ShapeWithText, and Connector linking two nodes
+        node((1, 40), (1, 1), "e", "SECTION", "DevSection", json!({
+            "sectionStatusInfo": {"status": "READY_FOR_DEV"}
+        })),
+        node((1, 41), (1, 1), "f", "STICKY", "NoteA", json!({
+            "authorVisible": true,
+            "textData": {"characters": "Sticky content"}
+        })),
+        node((1, 42), (1, 1), "g", "SHAPE_WITH_TEXT", "DecisionNode", json!({
+            "shapeWithTextType": "DIAMOND",
+            "textData": {"characters": "Approve?"}
+        })),
+        node((1, 43), (1, 1), "h", "CONNECTOR", "FlowConnector", json!({
+            "connectorLineStyle": "CURVED",
+            "connectorStartStrokeCap": "NONE",
+            "connectorEndStrokeCap": "ARROW_EQUILATERAL",
+            "connectorStart": {
+                "endpointNodeId": g(1, 41),
+                "position": {"x": 100.0, "y": 25.0},
+                "magnet": "RIGHT"
+            },
+            "connectorEnd": {
+                "endpointNodeId": g(1, 42),
+                "position": {"x": 200.0, "y": 25.0},
+                "magnet": "LEFT"
+            },
+            "textData": {"characters": "Yes"}
+        }))
+    ]);
+
+    let doc = import_fig_node_changes(&changes, "REA_v106")
+        .expect("import_fig_node_changes");
+
+    // Verify GAP-07: soft-deleted nodes and variables are filtered out
+    assert!(doc.nodes.values().all(|n| n.name != "GhostDeletedFrame"));
+    assert!(doc.variable_collections.values().all(|c| c.name != "DeletedSet"));
+    assert!(doc.variables.values().all(|v| v.name != "deleted/token"));
+
+    // Verify GAP-01 & GAP-02 & GAP-03 on HeaderBar and HeaderText
+    let header = find(&doc, "HeaderBar");
+    assert_eq!(header.stroke.side_weights, Some([0.0, 0.0, 2.0, 0.0]));
+    assert_eq!(header.corner_radii, [10.0, 10.0, 0.0, 0.0]);
+    assert_eq!(header.variables.bindings.get("visible").map(String::as_str), Some("VariableID:2:11"));
+    assert_eq!(header.variables.bindings.get("strokeTopWeight").map(String::as_str), Some("VariableID:2:13"));
+    assert_eq!(header.variables.bindings.get("strokeBottomWeight").map(String::as_str), Some("VariableID:2:13"));
+
+    let header_txt = find(&doc, "HeaderText");
+    assert_eq!(header_txt.variables.bindings.get("characters").map(String::as_str), Some("VariableID:2:12"));
+
+    // Verify GAP-04 on V106Grid and V106GridCell
+    let grid = find(&doc, "V106Grid");
+    let grid_al = grid.kind.frame_props().unwrap().auto_layout.unwrap();
+    assert_eq!(grid_al.direction, LayoutDirection::Grid);
+    assert_eq!(grid_al.item_spacing, 16.0);
+    assert_eq!(grid_al.counter_spacing, 24.0);
+    assert_eq!(grid_al.grid_columns, 4);
+    assert_eq!(grid_al.grid_rows, 2);
+    assert_eq!(
+        &grid_al.grid_col_tracks[..4],
+        &[
+            GridTrack::Flex(1.0),
+            GridTrack::Flex(2.0),
+            GridTrack::Fixed(120.0),
+            GridTrack::Hug
+        ]
+    );
+    assert_eq!(
+        &grid_al.grid_row_tracks[..2],
+        &[GridTrack::Fixed(80.0), GridTrack::Fixed(80.0)]
+    );
+    assert_eq!(grid.variables.bindings.get("itemSpacing").map(String::as_str), Some("VariableID:2:13"));
+    assert_eq!(grid.variables.bindings.get("counterAxisSpacing").map(String::as_str), Some("VariableID:2:13"));
+
+    let cell = find(&doc, "V106GridCell");
+    assert_eq!(cell.layout_child.grid_column, Some(2));
+    assert_eq!(cell.layout_child.grid_row, Some(1));
+    assert_eq!(cell.layout_child.col_span, 2);
+    assert_eq!(cell.layout_child.row_span, 1);
+
+    // Verify GAP-05 & GAP-06 on ButtonInst and its cloned child BtnBg
+    let btn_inst = find(&doc, "ButtonInst");
+    let btn_inst_al = btn_inst.kind.frame_props().unwrap().auto_layout.unwrap();
+    assert_eq!(btn_inst_al.primary_sizing, Sizing::Fixed);
+    assert_eq!(btn_inst_al.counter_sizing, Sizing::Fixed);
+    let inst_bg = btn_inst
+        .children
+        .iter()
+        .filter_map(|id| doc.get(*id))
+        .find(|n| n.name == "BtnBg")
+        .expect("BtnBg in ButtonInst");
+    assert_eq!(inst_bg.layout_child.grow, 0.0);
+    assert_eq!(inst_bg.layout_child.horizontal, Sizing::Fixed);
+    assert_eq!(inst_bg.layout_child.vertical, Sizing::Fixed);
+    assert_eq!(inst_bg.size, Vec2::new(220.0, 44.0));
+    assert_eq!(inst_bg.transform.tx, 10.0);
+    assert_eq!(inst_bg.transform.ty, 2.0);
+    assert_eq!(inst_bg.variables.bindings.get("visible").map(String::as_str), Some("VariableID:2:11"));
+
+    // Verify GAP-07: Section devStatus, Sticky, ShapeWithText, Connector
+    let sec = find(&doc, "DevSection");
+    assert_eq!(sec.dev.status, Some(DevStatus::ReadyForDev));
+
+    let sticky = find(&doc, "NoteA");
+    match &sticky.kind {
+        NodeKind::Sticky(sp) => {
+            assert!(sp.show_author);
+            assert_eq!(sp.text.content, "Sticky content");
+        }
+        other => panic!("expected Sticky, got {other:?}"),
+    }
+
+    let shape = find(&doc, "DecisionNode");
+    match &shape.kind {
+        NodeKind::ShapeWithText(sp) => {
+            assert_eq!(sp.shape, ShapeKind::Diamond);
+            assert_eq!(sp.text.content, "Approve?");
+        }
+        other => panic!("expected ShapeWithText, got {other:?}"),
+    }
+
+    let conn = find(&doc, "FlowConnector");
+    match &conn.kind {
+        NodeKind::Connector(cp) => {
+            assert_eq!(cp.line, ConnectorLine::Curved);
+            assert_eq!(cp.start.node, Some(sticky.id));
+            assert_eq!(cp.end.node, Some(shape.id));
+            assert_eq!(cp.end_cap, ConnectorCap::Triangle);
+            assert_eq!(cp.label.as_ref().map(|l| l.content.as_str()), Some("Yes"));
+        }
+        other => panic!("expected Connector, got {other:?}"),
+    }
+
+    // Verify full binary export_fig -> import_fig round-trip preserves all new fields
+    let bytes = export_fig(&doc).expect("export_fig");
+    let rt = import_fig(&bytes).expect("import_fig");
+    let rt_grid = find(&rt, "V106Grid");
+    let rt_al = rt_grid.kind.frame_props().unwrap().auto_layout.unwrap();
+    assert_eq!(
+        &rt_al.grid_col_tracks[..4],
+        &[
+            GridTrack::Flex(1.0),
+            GridTrack::Flex(2.0),
+            GridTrack::Fixed(120.0),
+            GridTrack::Hug
+        ]
+    );
+    let rt_header = find(&rt, "HeaderBar");
+    assert!(rt_header.variables.bindings.contains_key("visible"));
+    assert!(rt_header.variables.bindings.contains_key("strokeTopWeight"));
+    let rt_conn = find(&rt, "FlowConnector");
+    let rt_sticky = find(&rt, "NoteA");
+    let rt_shape = find(&rt, "DecisionNode");
+    match &rt_conn.kind {
+        NodeKind::Connector(cp) => {
+            assert_eq!(cp.line, ConnectorLine::Curved);
+            assert_eq!(cp.start.node, Some(rt_sticky.id));
+            assert_eq!(cp.end.node, Some(rt_shape.id));
+        }
+        other => panic!("expected Connector after roundtrip, got {other:?}"),
+    }
+}
+

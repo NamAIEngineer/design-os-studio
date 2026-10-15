@@ -1,19 +1,26 @@
 ---
 id: us-index
 type: us-index
-title: "US Spec Index — DESIGN:OS Studio v2"
+title: "US Spec Index — design:os studio v2 (US-01..US-10)"
 status: Verified
 updated: 2026-10-15
 label: Story index
 order: 0
 ---
 
-Mỗi file định nghĩa một User Story độc lập. Các mã `REQ` đối chiếu trực tiếp tới [PRD](../prd/PRD.md#4-yeu-cau-va-quy-tac).
+Mỗi file định nghĩa một User Story độc lập. Các mã `REQ` đối chiếu trực tiếp tới [PRD](../prd/PRD.md#4-yeu-cau-va-quy-tac) và tổng hợp tại [Master Backlog](../../../BACKLOG.md).
 
-### E1 Figma 1:1, Spec Reader v2 & Agentic Studio
+### E1 Figma 1:1, Multi-Tab Projects, Spec Reader v2, REA, Auto-Update & Agentic Studio (`US-01..US-10`)
 
-| File | Story | REQ |
-|---|---|---|
-| US-01.md | 1:1 Figma `.fig` v106 Binary R/W & 2D CSS Grid | REQ-01, REQ-02 |
-| US-02.md | PRODUCT:OS Spec Driven v2 Reader & Role Views | REQ-03, REQ-04 |
-| US-03.md | Embedded PTY Agent Terminal `claude`/`codex` & Live Canvas Bridge | REQ-05 |
+| File | Story | Epic | REQ | Screens | Scenarios |
+|---|---|---|---|---|---|
+| [US-01.md](US-01.md) | 1:1 Figma `.fig` v106 Binary R/W & 2D CSS Grid | `EP-02` | `REQ-01, REQ-02` | `S01, S02, S03` | `SCN-01-01..03` |
+| [US-02.md](US-02.md) | PRODUCT:OS Spec Driven v2 Reader & Role Views | `EP-07` | `REQ-03, REQ-04` | `S01, S02, S03` | `SCN-02-01..03` |
+| [US-03.md](US-03.md) | Embedded PTY Agent Terminal `claude`/`codex` & Live Canvas Bridge | `EP-06` | `REQ-05` | `S01, S02, S03` | `SCN-03-01..03` |
+| [US-04.md](US-04.md) | 1:1 Figma UI3 Home & File Management (`Drafts`, `All folders`, `Resources`, `Trash`, `Starred`) | `EP-05` | `REQ-06` | `S04` | `SCN-04-01..03` |
+| [US-05.md](US-05.md) | 1:1 Figma UI3 Settings, Menus & Popovers (`Type settings`, `Cmd+K`, `Zoom/View`, `Color/Variables`, `Dev Mode`) | `EP-04` | `REQ-07` | `S05, S06, S07, S08` | `SCN-05-01..03` |
+| [US-06.md](US-06.md) | 1:1 Figma Per-Element Canvas Interactions & 2D Grid Overlay (17 Node Kinds) | `EP-03` | `REQ-08, REQ-01` | `S01` | `SCN-06-01..03` |
+| [US-07.md](US-07.md) | Figma Desktop (`app.asar`) & `.fig` Kiwi Binary Reverse Engineering (REA) Pipeline | `EP-01` | `REQ-09` | `S01, S07` | `SCN-07-01..03` |
+| [US-08.md](US-08.md) | Headless Background Screenshot Verification (`with_active(false)`) & 99% Parity Gate | `EP-08` | `REQ-10` | `S01..S10` | `SCN-08-01..03` |
+| [US-09.md](US-09.md) | Dual-Layer Auto-Update (Atomic Self-Updater `updater.rs` + Upstream Figma `app.asar`/Kiwi Watchdog) | `EP-09` | `REQ-11` | `S09, S04, S01` | `SCN-09-01..03` |
+| [US-10.md](US-10.md) | Multiple Tab Project Workspace & Figma UI3 Desktop Tab Strip (`36px` Tab Bar, Per-Tab Isolation & Brand Wordmark) | `EP-10` | `REQ-12` | `S10, S04, S01` | `SCN-10-01..03` |

@@ -170,21 +170,21 @@ impl App {
 
     pub fn show_about(&mut self) {
         let mut lines = vec![
-            ("DESIGN:OS Studio — native Rust design canvas for DESIGN:OS & EaseUI.".to_string(), String::new()),
+            ("design:os studio — native Rust design canvas for design:os & EaseUI.".to_string(), String::new()),
             (format!("Version {}", env!("CARGO_PKG_VERSION")), String::new()),
             ("Local-first, offline-ready. Your `.designos`, `.designos` and `.fig` files stay on this computer.".to_string(), String::new()),
         ];
         if let Some(lib) = &self.lib {
             lines.push((format!("Library: {}", lib.root().display()), String::new()));
         }
-        self.dialog = Some(Dialog::info(Intent::About, "About DESIGN:OS Studio", lines));
+        self.dialog = Some(Dialog::info(Intent::About, "About design:os studio", lines));
     }
 
     pub fn confirm_open_github(&mut self) {
         self.dialog = Some(Dialog::confirm(
             Intent::OpenGithub,
             "Open the GitHub repository?",
-            &["This opens the DESIGN:OS Studio source code page in your web browser.", super::GITHUB_URL],
+            &["This opens the design:os studio source code page in your web browser.", super::GITHUB_URL],
             "Open",
         ));
     }

@@ -6,7 +6,8 @@ use crate::icons::{self, Icon};
 use crate::theme;
 use crate::widgets::menu::{popup_menu, MenuItem, MenuResult};
 use crate::widgets::{self, field};
-use egui::{Align2, Pos2, Rect, Sense, Ui, Vec2};
+use designos_doc::NodeId;
+use egui::{Align2, Color32, Pos2, Rect, Sense, Ui, Vec2};
 
 pub fn show(app: &mut App, ui: &mut Ui, rect: Rect) {
     let p = ui.painter().clone();
@@ -97,6 +98,33 @@ pub fn show(app: &mut App, ui: &mut Ui, rect: Rect) {
     }
     widgets::record(ui, "layers-search", fb);
     y += theme::LAYER_HEADER_HEIGHT;
+    if app.ui.dev_mode {
+        let ready_on_page: usize = crate::dev::list::rows(&app.doc)
+            .into_iter()
+            .find_map(|r| match r {
+                crate::dev::list::Row::Page { id, count, .. } if id == app.page => Some(count),
+                _ => None,
+            })
+            .unwrap_or(0);
+        if ready_on_page > 0 {
+            let banner_r = Rect::from_min_size(Pos2::new(x0 + 8.0, y + 2.0), Vec2::new(inner.width() - 16.0, 24.0));
+            let resp = ui.interact(banner_r, ui.id().with("dev-ready-banner"), Sense::click());
+            let dev_green = Color32::from_rgb(0x1B, 0xC4, 0x7D);
+            ui.painter().rect_filled(banner_r, theme::cr(theme::RADIUS_MEDIUM), dev_green.gamma_multiply(if resp.hovered() { 0.18 } else { 0.12 }));
+            icons::paint(ui.painter(), Icon::Dev, Pos2::new(banner_r.left() + 12.0, banner_r.center().y), 12.0, dev_green);
+            ui.painter().text(
+                Pos2::new(banner_r.left() + 24.0, banner_r.center().y),
+                Align2::LEFT_CENTER,
+                format!("Ready for development ({ready_on_page})"),
+                theme::font_small_strong(),
+                dev_green,
+            );
+            if resp.clicked() {
+                app.dev.left_tab = crate::dev::LeftTab::ReadyForDev;
+            }
+            y += 28.0;
+        }
+    }
     if app.layers.filter_open {
         let row = Rect::from_min_size(Pos2::new(x0, y), Vec2::new(inner.width(), 32.0));
         crate::find::filter::show_field(app, ui, row);
@@ -118,6 +146,13 @@ fn pages_list(app: &mut App, ui: &mut Ui, list: Rect) {
     wheel_scroll(ui, list, &mut scroll, content_h);
     app.layers.page_scroll = scroll;
     let pages = app.doc.pages.clone();
+    let ready_pages: std::collections::HashMap<NodeId, usize> = crate::dev::list::rows(&app.doc)
+        .into_iter()
+        .filter_map(|r| match r {
+            crate::dev::list::Row::Page { id, count, .. } => Some((id, count)),
+            _ => None,
+        })
+        .collect();
     clipped(ui, list, |ui| {
         let p = ui.painter().clone();
         for (i, pid) in pages.iter().enumerate() {
@@ -155,6 +190,11 @@ fn pages_list(app: &mut App, ui: &mut Ui, list: Rect) {
                 }
                 continue;
             }
+            let trimmed = name.trim_matches(|c: char| c == '-' || c == '—' || c == '─' || c.is_whitespace());
+            let has_dashes = name.chars().any(|c| c == '-' || c == '—' || c == '─') && name.trim().len() >= 3;
+            let is_line_div = has_dashes && trimmed.is_empty();
+            let is_hdr_div = !is_line_div && (name.starts_with("---") || name.ends_with("---")) && !trimmed.is_empty();
+
             let r = ui.interact(row, ui.id().with(("page", pid.0)), Sense::click_and_drag());
             if r.secondary_clicked() {
                 let at = ui.input(|i| i.pointer.interact_pos()).unwrap_or(row.left_bottom());
@@ -163,18 +203,38 @@ fn pages_list(app: &mut App, ui: &mut Ui, list: Rect) {
             if r.drag_started() {
                 app.layers.page_drag = Some(*pid);
             }
+            if is_line_div && !selected {
+                widgets::hline(&p, row.left() + theme::PAGE_ROW_TEXT_PAD, row.right() - theme::PAGE_ROW_TEXT_PAD, row.center().y, theme::BORDER);
+                if r.double_clicked() {
+                    app.layers.renaming_page = Some(*pid);
+                    app.layers.rename_started = false;
+                }
+                continue;
+            }
             if selected {
                 p.rect_filled(row, theme::cr(theme::RADIUS_MEDIUM), theme::BG_SECONDARY);
-            } else if r.hovered() && app.layers.page_drag.is_none() {
+            } else if r.hovered() && app.layers.page_drag.is_none() && !is_hdr_div {
                 p.rect_filled(row, theme::cr(theme::RADIUS_MEDIUM), theme::BG_HOVER);
             }
-            let font = if selected { theme::font_body_strong() } else { theme::font_body() };
-            let shown = widgets::elide(&p, &name, &font, row.width() - theme::PAGE_ROW_TEXT_PAD * 2.0);
-            p.text(Pos2::new(row.left() + theme::PAGE_ROW_TEXT_PAD, row.center().y), Align2::LEFT_CENTER, shown, font, theme::TEXT);
+            let ready_count = ready_pages.get(pid).copied().unwrap_or(0);
+            let right_reserve = if ready_count > 0 { 26.0 } else { 0.0 };
+            if is_hdr_div && !selected {
+                let font = theme::font_small_strong();
+                let shown = widgets::elide(&p, trimmed, &font, row.width() - theme::PAGE_ROW_TEXT_PAD * 2.0 - right_reserve);
+                p.text(Pos2::new(row.left() + theme::PAGE_ROW_TEXT_PAD, row.center().y), Align2::LEFT_CENTER, shown, font, theme::TEXT_TERTIARY);
+            } else {
+                let font = if selected { theme::font_body_strong() } else { theme::font_body() };
+                let shown = widgets::elide(&p, &name, &font, row.width() - theme::PAGE_ROW_TEXT_PAD * 2.0 - right_reserve);
+                p.text(Pos2::new(row.left() + theme::PAGE_ROW_TEXT_PAD, row.center().y), Align2::LEFT_CENTER, shown, font, theme::TEXT);
+            }
+            if ready_count > 0 {
+                let dev_green = Color32::from_rgb(0x1B, 0xC4, 0x7D);
+                icons::paint(&p, Icon::Dev, Pos2::new(row.right() - 12.0, row.center().y), 12.0, dev_green);
+            }
             if r.double_clicked() {
                 app.layers.renaming_page = Some(*pid);
                 app.layers.rename_started = false;
-            } else if r.clicked() && !selected {
+            } else if r.clicked() && !selected && !is_hdr_div {
                 app.switch_page(*pid);
             }
         }

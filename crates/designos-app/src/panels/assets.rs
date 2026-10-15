@@ -366,6 +366,15 @@ fn grid_cell(
     }
     if cell.intersects(ui.clip_rect()) {
         paint_thumb(p, thumbs, ui.ctx(), doc, e, preview, now);
+        if e.variants > 0 {
+            let badge_txt = format!("{}", e.variants);
+            let bfont = theme::font_small_strong();
+            let bw = (widgets::text_width(p, &badge_txt, &bfont) + 20.0).max(26.0);
+            let badge_r = Rect::from_min_size(Pos2::new(preview.right() - bw - 4.0, preview.top() + 4.0), Vec2::new(bw, 16.0));
+            p.rect_filled(badge_r, theme::cr(8), theme::CANVAS_COMPONENT);
+            icons::paint(p, Icon::Component, Pos2::new(badge_r.left() + 8.0, badge_r.center().y), 10.0, Color32::WHITE);
+            p.text(Pos2::new(badge_r.left() + 15.0, badge_r.center().y), Align2::LEFT_CENTER, badge_txt, bfont, Color32::WHITE);
+        }
     }
     let label = if e.variants > 0 { format!("{} ({})", e.name, e.variants) } else { e.name.clone() };
     let s = widgets::elide(p, &label, &theme::font_small(), cell.width() - 4.0);
@@ -439,18 +448,59 @@ pub fn show(app: &mut App, ui: &mut Ui, region: Rect) {
         app.assets.scroll = 0.0;
     }
 
+    // ---- UI3 Category Filter Pills: All | Local | Used in file
+    let cat_id = Id::new("assets-cat-filter");
+    let mut cat = ui.ctx().data(|d| d.get_temp::<u8>(cat_id)).unwrap_or(0);
+    let pill_y = region.top() + 36.0;
+    let mut pill_x = region.left() + 8.0;
+    for (idx, label) in [(0u8, "All"), (1u8, "Local"), (2u8, "Used in file")] {
+        let pfont = if cat == idx { theme::font_small_strong() } else { theme::font_small() };
+        let pw = widgets::text_width(&p, label, &pfont) + 14.0;
+        let pr = Rect::from_min_size(Pos2::new(pill_x, pill_y), Vec2::new(pw, 20.0));
+        widgets::record(ui, &format!("assets-filter:{label}"), pr);
+        let presp = ui.interact(pr, ui.id().with(("assets-cat", idx)), Sense::click());
+        if cat == idx {
+            p.rect_filled(pr, theme::cr(10), theme::BG_SECONDARY);
+        } else if presp.hovered() {
+            p.rect_filled(pr, theme::cr(10), theme::BG_HOVER);
+        }
+        p.text(pr.center(), Align2::CENTER_CENTER, label, pfont, if cat == idx { theme::TEXT } else { theme::TEXT_SECONDARY });
+        if presp.clicked() && cat != idx {
+            cat = idx;
+            ui.ctx().data_mut(|d| d.insert_temp(cat_id, cat));
+            app.assets.scroll = 0.0;
+        }
+        pill_x += pw + 4.0;
+    }
+
     // ---- list
-    let list = Rect::from_min_max(Pos2::new(region.left(), region.top() + SEARCH_H), region.max);
+    let list = Rect::from_min_max(Pos2::new(region.left(), region.top() + SEARCH_H + 22.0), region.max);
     // Local components, then imported ones whose library is unavailable, then one
     // section per enabled library (entries with a `Some` source index).
     let mut entries = app.local_components();
     entries.extend(app.unavailable_library_components());
     let lib_entries = app.library_entries();
     let mut srcs: Vec<Option<usize>> = vec![None; entries.len()];
-    for (k, le) in lib_entries.iter().enumerate() {
-        entries.push(AssetEntry { page: le.library_name.clone(), container: String::new(), name: le.name.clone(), id: le.node, variants: le.variants });
-        srcs.push(Some(k));
+    if cat != 1 {
+        for (k, le) in lib_entries.iter().enumerate() {
+            entries.push(AssetEntry { page: le.library_name.clone(), container: String::new(), name: le.name.clone(), id: le.node, variants: le.variants });
+            srcs.push(Some(k));
+        }
     }
+    let used_components: std::collections::HashSet<NodeId> = if cat == 2 {
+        let mut set = std::collections::HashSet::new();
+        for n in app.doc.nodes.values() {
+            if let NodeKind::Instance { component: Some(cid), .. } = n.kind {
+                set.insert(cid);
+                if let Some(parent_id) = app.doc.get(cid).and_then(|cn| cn.parent) {
+                    set.insert(parent_id);
+                }
+            }
+        }
+        set
+    } else {
+        std::collections::HashSet::new()
+    };
     let mut lib_docs: HashMap<String, std::sync::Arc<Document>> = HashMap::new();
     for le in lib_entries.iter() {
         if !lib_docs.contains_key(&le.library_id) {
@@ -459,7 +509,8 @@ pub fn show(app: &mut App, ui: &mut Ui, region: Rect) {
             }
         }
     }
-    let shown = filtered(&entries, &app.assets.query);
+    let shown: Vec<usize> =
+        filtered(&entries, &app.assets.query).into_iter().filter(|&i| cat != 2 || (srcs[i].is_none() && used_components.contains(&entries[i].id))).collect();
     let cols = app.assets.grid.then(|| grid_cols(list.width() - 16.0));
     let ls = lines(&entries, &shown, cols);
     let content_h: f32 = ls.iter().map(line_h).sum::<f32>() + 8.0;

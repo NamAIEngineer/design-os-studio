@@ -27,6 +27,7 @@ pub const TERM_BG_ELEVATED: Color32 = Color32::from_rgb(0x1F, 0x20, 0x24);
 pub const TERM_BG_HOVER: Color32 = Color32::from_rgb(0x26, 0x27, 0x2C);
 pub const TERM_BORDER: Color32 = Color32::from_rgb(0x2A, 0x2B, 0x31);
 pub const TERM_ORANGE: Color32 = Color32::from_rgb(0xFF, 0x6A, 0x3D);
+#[allow(dead_code)]
 pub const TERM_ORANGE_BG: Color32 = Color32::from_rgb(0x36, 0x1A, 0x12);
 pub const TERM_FG_DEFAULT: Color32 = Color32::from_rgb(0xE4, 0xE4, 0xE7);
 
@@ -70,7 +71,7 @@ impl AgentCliPreset {
             AgentCliPreset::Claude => "Claude Code",
             AgentCliPreset::Codex => "Codex CLI",
             AgentCliPreset::Grok => "Grok Build",
-            AgentCliPreset::DesignOsHelp => "DESIGN:OS Agent CLI",
+            AgentCliPreset::DesignOsHelp => "design:os studio Agent CLI",
         }
     }
 
@@ -161,7 +162,7 @@ impl TerminalTab {
             let bin_disp = std::env::current_exe().ok().map(|p| p.display().to_string()).unwrap_or_else(|| "designos".into());
             let file_disp = file_path.map(|p| p.display().to_string()).unwrap_or_else(|| "examples/specs/easeui-agent-console.spec.json".into());
             let banner = format!(
-                "\x1b[1;38;2;255;106;61m[DESIGN:OS Studio — Native Agent Terminal]\x1b[0m\r\n\
+                "\x1b[1;38;2;255;106;61m[design:os studio — Native Agent Terminal]\x1b[0m\r\n\
                  \x1b[38;2;161;161;170m  DESIGNOS_BIN  = {bin_disp}\r\n\
                  \x1b[38;2;161;161;170m  DESIGNOS_FILE = {file_disp}\x1b[0m\r\n\
                  \x1b[38;2;143;176;255m  Ready: claude | codex | grok | \"$DESIGNOS_BIN\" \"$DESIGNOS_FILE\" --inspect-json\x1b[0m\r\n\r\n"
@@ -553,7 +554,7 @@ pub fn export_selection_and_comments_to_pty(
         format!("{} open pin-comments ({})", unresolved_comments.len(), unresolved_comments.join(" | "))
     };
 
-    let cmd_snippet = format!("# [DESIGN:OS Canvas Context] Node '{}' (#{}) exported to {} — {}", node_name, target_id.0, tmp_path.display(), comment_summary);
+    let cmd_snippet = format!("# [design:os studio Canvas Context] Node '{}' (#{}) exported to {} — {}", node_name, target_id.0, tmp_path.display(), comment_summary);
 
     if let Some(tab) = state.active_tab_mut() {
         tab.send_line(&cmd_snippet);

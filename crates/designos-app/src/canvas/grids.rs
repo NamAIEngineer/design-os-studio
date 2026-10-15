@@ -4,8 +4,264 @@
 use super::*;
 use crate::theme;
 use crate::util::*;
-use designos_doc::{Color, LayoutGrid, NodeKind};
+use designos_doc::{AutoLayout, Color, Document, GridTrack, LayoutDirection, LayoutGrid, NodeKind, Sizing};
 use egui::{Color32, Painter, Pos2, Shape, Stroke};
+
+/// One resolved `(row, col)` cell in a `LayoutDirection::Grid` container (frame-local coordinates).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct CssGridCell {
+    pub row: usize,
+    pub col: usize,
+    pub rect: Rect,
+}
+
+/// Complete on-canvas overlay geometry for a 2D CSS Grid container (`LayoutDirection::Grid`).
+#[derive(Clone, Debug, PartialEq)]
+pub struct CssGridOverlay {
+    pub cols: usize,
+    pub rows: usize,
+    pub col_x: Vec<f32>,
+    pub col_widths: Vec<f32>,
+    pub row_y: Vec<f32>,
+    pub row_heights: Vec<f32>,
+    pub col_gap: f32,
+    pub row_gap: f32,
+    pub padding: [f32; 4],
+    pub cells: Vec<CssGridCell>,
+    pub col_tracks: Vec<GridTrack>,
+    pub row_tracks: Vec<GridTrack>,
+}
+
+/// Formats a [`GridTrack`] for an on-canvas column/row track header pill (`1fr`, `120px`, `Hug`).
+pub fn format_grid_track(track: GridTrack) -> String {
+    match track {
+        GridTrack::Flex(fr) => {
+            let f = fr.max(0.1);
+            if (f - f.round()).abs() < 0.05 {
+                format!("{}fr", f.round() as i32)
+            } else {
+                format!("{:.1}fr", f)
+            }
+        }
+        GridTrack::Fixed(px) => format!("{}px", px.round() as i32),
+        GridTrack::Hug => "Hug".to_string(),
+    }
+}
+
+/// Computes the 2D CSS Grid cell rects, column/row tracks, padding, and gaps for `LayoutDirection::Grid`.
+pub fn compute_css_grid_overlay(al: &AutoLayout, frame_size: DV, child_sizes: &[DV], spans: &[(u16, u16)]) -> CssGridOverlay {
+    let [pt, pr, pb, pl] = al.padding;
+    let cols = (if al.grid_columns > 0 { al.grid_columns as usize } else { 3 }).clamp(1, 16);
+    let col_gap = al.item_spacing.max(0.0);
+    let row_gap = if al.counter_spacing > 0.0 { al.counter_spacing } else { col_gap };
+
+    // Place children into a 2D occupancy grid respecting col_span and row_span.
+    let mut occupied: Vec<Vec<bool>> = Vec::new();
+    let mut placements: Vec<(usize, usize, usize, usize)> = Vec::with_capacity(child_sizes.len());
+    let mut max_row = 0usize;
+
+    for idx in 0..child_sizes.len() {
+        let (cs, rs) = spans.get(idx).copied().unwrap_or((1, 1));
+        let c_span = (cs.max(1) as usize).min(cols);
+        let r_span = (rs.max(1) as usize).min(16);
+        let mut r = 0usize;
+        let placed = loop {
+            while occupied.len() < r + r_span {
+                occupied.push(vec![false; cols]);
+            }
+            let mut found_c = None;
+            for c in 0..=(cols - c_span) {
+                let mut fits = true;
+                for dr in 0..r_span {
+                    for dc in 0..c_span {
+                        if occupied[r + dr][c + dc] {
+                            fits = false;
+                            break;
+                        }
+                    }
+                    if !fits {
+                        break;
+                    }
+                }
+                if fits {
+                    found_c = Some(c);
+                    break;
+                }
+            }
+            if let Some(c) = found_c {
+                for dr in 0..r_span {
+                    for dc in 0..c_span {
+                        occupied[r + dr][c + dc] = true;
+                    }
+                }
+                break (r, c, r_span, c_span);
+            }
+            r += 1;
+        };
+        max_row = max_row.max(placed.0 + placed.2);
+        placements.push(placed);
+    }
+
+    let default_rows = if child_sizes.is_empty() { 2 } else { 1 };
+    let rows = max_row.max(al.grid_rows as usize).max(default_rows).clamp(1, 16);
+
+    // Resolve column widths from `grid_col_tracks` + `frame_size.x`.
+    let inner_w = (frame_size.x - pl - pr - col_gap * (cols.saturating_sub(1) as f32)).max(0.0);
+    let mut col_widths = vec![0.0f32; cols];
+    let mut flex_total = 0.0f32;
+    let mut fixed_used = 0.0f32;
+
+    for c in 0..cols {
+        let track = al.grid_col_tracks.get(c).copied().unwrap_or(GridTrack::Flex(1.0));
+        match track {
+            GridTrack::Fixed(w) => {
+                col_widths[c] = w.max(1.0);
+                fixed_used += col_widths[c];
+            }
+            GridTrack::Hug => {
+                let mut max_w = 0.0f32;
+                for (i, &(_, col, _, cs)) in placements.iter().enumerate() {
+                    if col == c && cs == 1 {
+                        max_w = max_w.max(child_sizes[i].x);
+                    }
+                }
+                col_widths[c] = max_w.max(1.0);
+                fixed_used += col_widths[c];
+            }
+            GridTrack::Flex(fr) => {
+                flex_total += fr.max(0.1);
+            }
+        }
+    }
+    let rem_w = (inner_w - fixed_used).max(0.0);
+    for c in 0..cols {
+        if let GridTrack::Flex(fr) = al.grid_col_tracks.get(c).copied().unwrap_or(GridTrack::Flex(1.0)) {
+            col_widths[c] = if al.primary_sizing == Sizing::Hug && !child_sizes.is_empty() {
+                let mut max_w = 0.0f32;
+                for (i, &(_, col, _, cs)) in placements.iter().enumerate() {
+                    if col == c && cs == 1 {
+                        max_w = max_w.max(child_sizes[i].x);
+                    }
+                }
+                max_w.max(40.0)
+            } else if flex_total > 0.0 {
+                (rem_w * (fr.max(0.1) / flex_total)).max(1.0)
+            } else {
+                (rem_w / cols as f32).max(1.0)
+            };
+        }
+    }
+
+    // Resolve row heights from child heights and `grid_row_tracks`.
+    let inner_h = (frame_size.y - pt - pb - row_gap * (rows.saturating_sub(1) as f32)).max(0.0);
+    let mut row_heights = vec![0.0f32; rows];
+    for (i, &(r, _, rs, _)) in placements.iter().enumerate() {
+        let per_row = (child_sizes[i].y - row_gap * (rs.saturating_sub(1) as f32)).max(0.0) / (rs as f32);
+        for dr in 0..rs {
+            if r + dr < rows {
+                row_heights[r + dr] = row_heights[r + dr].max(per_row);
+            }
+        }
+    }
+    let mut row_flex_total = 0.0f32;
+    let mut row_fixed_used = 0.0f32;
+    for r in 0..rows {
+        let track = al.grid_row_tracks.get(r).copied().unwrap_or(GridTrack::Flex(1.0));
+        match track {
+            GridTrack::Fixed(h) => {
+                row_heights[r] = row_heights[r].max(h.max(1.0));
+                row_fixed_used += row_heights[r];
+            }
+            GridTrack::Hug => {
+                row_heights[r] = row_heights[r].max(1.0);
+                row_fixed_used += row_heights[r];
+            }
+            GridTrack::Flex(fr) => {
+                if row_heights[r] > 0.0 && al.counter_sizing == Sizing::Hug {
+                    row_fixed_used += row_heights[r];
+                } else {
+                    row_flex_total += fr.max(0.1);
+                }
+            }
+        }
+    }
+    let rem_h = (inner_h - row_fixed_used).max(0.0);
+    for r in 0..rows {
+        if let GridTrack::Flex(fr) = al.grid_row_tracks.get(r).copied().unwrap_or(GridTrack::Flex(1.0)) {
+            if al.counter_sizing != Sizing::Hug || row_heights[r] <= 0.0 {
+                let share = if row_flex_total > 0.0 {
+                    rem_h * (fr.max(0.1) / row_flex_total)
+                } else {
+                    rem_h / rows as f32
+                };
+                row_heights[r] = row_heights[r].max(share).max(1.0);
+            }
+        }
+    }
+
+    let mut col_x = vec![0.0f32; cols];
+    let mut cx = pl;
+    for c in 0..cols {
+        col_x[c] = cx;
+        cx += col_widths[c] + col_gap;
+    }
+
+    let mut row_y = vec![0.0f32; rows];
+    let mut cy = pt;
+    for r in 0..rows {
+        row_y[r] = cy;
+        cy += row_heights[r] + row_gap;
+    }
+
+    let mut cells = Vec::with_capacity(rows * cols);
+    for r in 0..rows {
+        for c in 0..cols {
+            cells.push(CssGridCell {
+                row: r,
+                col: c,
+                rect: Rect::new(col_x[c], row_y[r], col_widths[c], row_heights[r]),
+            });
+        }
+    }
+
+    let col_tracks = (0..cols).map(|c| al.grid_col_tracks.get(c).copied().unwrap_or_default()).collect();
+    let row_tracks = (0..rows).map(|r| al.grid_row_tracks.get(r).copied().unwrap_or_default()).collect();
+
+    CssGridOverlay {
+        cols,
+        rows,
+        col_x,
+        col_widths,
+        row_y,
+        row_heights,
+        col_gap,
+        row_gap,
+        padding: al.padding,
+        cells,
+        col_tracks,
+        row_tracks,
+    }
+}
+
+/// Returns the 2D CSS Grid overlay geometry if `id` is a container with `LayoutDirection::Grid`.
+pub fn node_css_grid_overlay(doc: &Document, id: NodeId) -> Option<CssGridOverlay> {
+    let n = doc.get(id)?;
+    let al = n.kind.frame_props()?.auto_layout.as_ref()?;
+    if al.direction != LayoutDirection::Grid {
+        return None;
+    }
+    let mut child_sizes = Vec::new();
+    let mut spans = Vec::new();
+    for &cid in &n.children {
+        let Some(c) = doc.get(cid) else { continue };
+        if !c.visible || c.layout_child.absolute {
+            continue;
+        }
+        child_sizes.push(c.size);
+        spans.push((c.layout_child.col_span.max(1), c.layout_child.row_span.max(1)));
+    }
+    Some(compute_css_grid_overlay(al, n.size, &child_sizes, &spans))
+}
 
 /// Start and length of each stripe of a columns / rows grid along an extent.
 /// `count` stripes separated by `gutter`, inset by `offset` on both ends.
@@ -146,5 +402,40 @@ mod tests {
         assert_eq!(grid_lines(10.0, 35.0), vec![10.0, 20.0, 30.0]);
         assert!(grid_lines(0.0, 100.0).is_empty());
         assert!(grid_lines(10.0, 5.0).is_empty());
+    }
+
+    #[test]
+    fn css_grid_overlay_calculates_2d_cells_and_tracks() {
+        let mut tracks = [GridTrack::Flex(1.0); 8];
+        tracks[0] = GridTrack::Fixed(120.0);
+        tracks[1] = GridTrack::Flex(1.0);
+        tracks[2] = GridTrack::Flex(2.0);
+        let al = AutoLayout {
+            direction: LayoutDirection::Grid,
+            grid_columns: 3,
+            grid_rows: 2,
+            item_spacing: 16.0,
+            counter_spacing: 12.0,
+            padding: [20.0, 24.0, 20.0, 24.0],
+            grid_col_tracks: tracks,
+            ..AutoLayout::default()
+        };
+        // Frame width = 24 + 120 + 16 + 100 + 16 + 200 + 24 = 500
+        let child_sizes = [v2(120.0, 80.0), v2(100.0, 80.0), v2(200.0, 80.0), v2(200.0, 100.0)];
+        let spans = [(1, 1), (1, 1), (1, 1), (2, 1)];
+        let ov = compute_css_grid_overlay(&al, v2(500.0, 232.0), &child_sizes, &spans);
+        assert_eq!(ov.cols, 3);
+        assert_eq!(ov.rows, 2);
+        assert_eq!(ov.cells.len(), 6);
+        assert!((ov.col_widths[0] - 120.0).abs() < 1e-3);
+        assert!((ov.col_widths[1] - 100.0).abs() < 1e-3);
+        assert!((ov.col_widths[2] - 200.0).abs() < 1e-3);
+        assert!((ov.col_x[0] - 24.0).abs() < 1e-3);
+        assert!((ov.col_x[1] - 160.0).abs() < 1e-3);
+        assert!((ov.col_x[2] - 276.0).abs() < 1e-3);
+        assert_eq!(format_grid_track(ov.col_tracks[0]), "120px");
+        assert_eq!(format_grid_track(ov.col_tracks[1]), "1fr");
+        assert_eq!(format_grid_track(ov.col_tracks[2]), "2fr");
+        assert_eq!(format_grid_track(GridTrack::Hug), "Hug");
     }
 }

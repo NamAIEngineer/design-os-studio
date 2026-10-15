@@ -20,7 +20,7 @@ pub fn show(h: &mut Home, ui: &mut Ui, rect: Rect, acts: &mut Vec<Act>) {
 
     // ---- brand
     icons::paint(&p, Icon::Logo, Pos2::new(x0 + 28.0, y + 28.0), 24.0, theme::ICON);
-    p.text(Pos2::new(x0 + 48.0, y + 28.0), Align2::LEFT_CENTER, "DESIGN:OS Studio", theme::font_large_strong(), theme::TEXT);
+    crate::updater::paint_brand_wordmark(&p, Pos2::new(x0 + 48.0, y + 28.0), 15.0, theme::TEXT, theme::TEXT_SECONDARY);
     y += 56.0;
 
     // ---- search

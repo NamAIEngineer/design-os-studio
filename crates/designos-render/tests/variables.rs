@@ -92,3 +92,75 @@ fn tile_cache_notices_variable_value_and_mode_edits() {
     assert!(near(w, [26, 26, 26, 255], 2), "{w:?}");
     assert_eq!(c, WHITE);
 }
+
+#[test]
+fn per_side_stroke_renders_with_fill_geometry_and_visible_variable_binding() {
+    let mut t = T::new();
+    let frame = t.add(None, |id| {
+        let mut n = Node::frame(id, Rect::new(10.0, 10.0, 60.0, 40.0));
+        n.fills = vec![];
+        // Precomputed fill_geometry on a Frame (as in .fig v106 files) must still keep shape.is_rect = true
+        // so per-side border weights draw only the active side instead of stroking all 4 sides.
+        n.fill_geometry = Some(vec![Path {
+            cmds: vec![
+                PathCmd::MoveTo(Vec2::new(0.0, 0.0)),
+                PathCmd::LineTo(Vec2::new(60.0, 0.0)),
+                PathCmd::LineTo(Vec2::new(60.0, 40.0)),
+                PathCmd::LineTo(Vec2::new(0.0, 40.0)),
+                PathCmd::Close,
+            ],
+            fill_rule: FillRule::NonZero,
+        }]);
+        n.stroke.paints = vec![Paint::solid(RED)];
+        n.stroke.weight = 4.0;
+        n.stroke.align = StrokeAlign::Inside;
+        n.stroke.side_weights = Some([0.0, 0.0, 4.0, 0.0]);
+        n.variables.bindings.insert("visible".into(), "vis".into());
+        n
+    });
+    t.doc.variable_collections.insert(
+        "c".into(),
+        VariableCollection {
+            id: "c".into(),
+            name: "C".into(),
+            modes: vec![
+                VariableMode { id: "on".into(), name: "On".into() },
+                VariableMode { id: "off".into(), name: "Off".into() },
+            ],
+            default_mode: "on".into(),
+            variables: vec!["vis".into()],
+            key: None,
+        },
+    );
+    t.doc.variables.insert(
+        "vis".into(),
+        Variable {
+            id: "vis".into(),
+            name: "vis".into(),
+            collection: "c".into(),
+            kind: VariableKind::Boolean,
+            values: [
+                ("on".to_string(), VariableValue::Boolean(true)),
+                ("off".to_string(), VariableValue::Boolean(false)),
+            ]
+            .into_iter()
+            .collect(),
+            description: String::new(),
+            scopes: vec![],
+            hidden_from_publishing: false,
+            key: None,
+        },
+    );
+
+    let pm_on = t.render(100, 80);
+    // Bottom border at y=48 (inside 10..50) is RED; top border at y=11 and left border at x=11 are untouched (WHITE).
+    assert_eq!(px(&pm_on, 40, 48), [255, 0, 0, 255]);
+    assert_eq!(px(&pm_on, 40, 11), WHITE);
+    assert_eq!(px(&pm_on, 11, 30), WHITE);
+
+    // Switching mode to "off" resolves `visible = false` via the bound boolean variable.
+    t.node(frame).variables.modes.insert("c".into(), "off".into());
+    let pm_off = t.render(100, 80);
+    assert_eq!(px(&pm_off, 40, 48), WHITE);
+}
+

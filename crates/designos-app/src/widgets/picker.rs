@@ -766,9 +766,37 @@ pub fn show(ui: &mut Ui, pos: Pos2, st: &mut State, paint: &mut Paint, env: &Env
         return (rect, out);
     }
 
-    // ---- gradient stop bar
+    // ---- gradient stop bar + flip / rotate controls
     if mode.is_gradient() {
-        gradient_bar(ui, Rect::from_min_size(Pos2::new(rect.left() + PAD, y + 12.0), Vec2::new(AREA, 16.0)), st, paint, &mut out);
+        let bar_w = AREA - 56.0;
+        gradient_bar(ui, Rect::from_min_size(Pos2::new(rect.left() + PAD, y + 12.0), Vec2::new(bar_w, 16.0)), st, paint, &mut out);
+        let flip_r = Rect::from_min_size(Pos2::new(rect.left() + PAD + bar_w + 4.0, y + 8.0), Vec2::splat(24.0));
+        let rot_r = Rect::from_min_size(Pos2::new(flip_r.right() + 4.0, y + 8.0), Vec2::splat(24.0));
+        if icon_button(ui, flip_r, "picker-grad-flip", Icon::FlipH, false, "Flip gradient").clicked() {
+            if let Some(sv) = stops_mut(&mut paint.kind) {
+                for s in sv.iter_mut() {
+                    s.pos = (1.0 - s.pos).clamp(0.0, 1.0);
+                }
+                sv.sort_by(|a, b| a.pos.total_cmp(&b.pos));
+                st.sel = sv.len().saturating_sub(1).saturating_sub(st.sel);
+                out.changed = true;
+            }
+        }
+        if icon_button(ui, rot_r, "picker-grad-rot", Icon::Rotate90, false, "Rotate gradient").clicked() {
+            match &mut paint.kind {
+                PaintKind::LinearGradient { handles, .. }
+                | PaintKind::RadialGradient { handles, .. }
+                | PaintKind::AngularGradient { handles, .. }
+                | PaintKind::DiamondGradient { handles, .. } => {
+                    for h in handles.iter_mut() {
+                        let (dx, dy) = (h.x - 0.5, h.y - 0.5);
+                        *h = DV::new(0.5 - dy, 0.5 + dx);
+                    }
+                    out.changed = true;
+                }
+                _ => {}
+            }
+        }
         y += STOPS_H;
     }
     let rgba = active_rgba(paint, st.sel);

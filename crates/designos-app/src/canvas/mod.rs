@@ -78,6 +78,21 @@ pub struct DrawState {
     pub dragged: bool,
 }
 
+pub struct CornerRadiusDragState {
+    pub tx: Tx,
+    pub id: NodeId,
+    pub corner: usize,
+    pub start_radii: [f32; 4],
+}
+
+pub struct AutoLayoutDragState {
+    pub tx: Tx,
+    pub id: NodeId,
+    pub kind: handles::AutoLayoutHandleKind,
+    pub start_page: DV,
+    pub start_value: f32,
+}
+
 #[derive(Default)]
 pub enum Interaction {
     #[default]
@@ -92,6 +107,8 @@ pub enum Interaction {
     Move(MoveState),
     Resize(ResizeState),
     Rotate(RotateState),
+    CornerRadius(CornerRadiusDragState),
+    AutoLayoutDrag(AutoLayoutDragState),
     Draw(DrawState),
     Pencil(Vec<DV>),
     PenDrag,
@@ -157,6 +174,8 @@ impl App {
             Interaction::Move(m) => m.tx.cancel(&mut self.doc),
             Interaction::Resize(r) => r.tx.cancel(&mut self.doc),
             Interaction::Rotate(r) => r.tx.cancel(&mut self.doc),
+            Interaction::CornerRadius(c) => c.tx.cancel(&mut self.doc),
+            Interaction::AutoLayoutDrag(a) => a.tx.cancel(&mut self.doc),
             Interaction::Draw(d) => d.tx.cancel(&mut self.doc),
             Interaction::Connect(c) => {
                 c.tx.cancel(&mut self.doc);

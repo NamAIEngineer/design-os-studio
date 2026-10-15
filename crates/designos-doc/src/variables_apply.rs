@@ -126,15 +126,43 @@ pub fn set_bound_property(n: &mut Node, key: &str, value: &VariableValue) {
         return;
     }
     let Some(x) = number_of(value) else { return };
+    let is_rect_like = matches!(
+        n.kind,
+        NodeKind::Frame(_) | NodeKind::Component(_) | NodeKind::ComponentSet(_) | NodeKind::Instance { .. } | NodeKind::Section | NodeKind::Rectangle
+    );
     match key {
-        "width" => n.size.x = x.max(0.0),
-        "height" => n.size.y = x.max(0.0),
+        "width" => {
+            n.size.x = x.max(0.0);
+            if is_rect_like {
+                n.fill_geometry = None;
+                n.stroke_geometry = None;
+            }
+        }
+        "height" => {
+            n.size.y = x.max(0.0);
+            if is_rect_like {
+                n.fill_geometry = None;
+                n.stroke_geometry = None;
+            }
+        }
         "opacity" => n.opacity = (x / 100.0).clamp(0.0, 1.0),
-        "topLeftRadius" => n.corner_radii[0] = x.max(0.0),
-        "topRightRadius" => n.corner_radii[1] = x.max(0.0),
-        "bottomRightRadius" => n.corner_radii[2] = x.max(0.0),
-        "bottomLeftRadius" => n.corner_radii[3] = x.max(0.0),
-        "strokeWeight" => n.stroke.weight = x.max(0.0),
+        "topLeftRadius" | "topRightRadius" | "bottomRightRadius" | "bottomLeftRadius" => {
+            let i = match key {
+                "topLeftRadius" => 0,
+                "topRightRadius" => 1,
+                "bottomRightRadius" => 2,
+                _ => 3,
+            };
+            n.corner_radii[i] = x.max(0.0);
+            if is_rect_like {
+                n.fill_geometry = None;
+                n.stroke_geometry = None;
+            }
+        }
+        "strokeWeight" => {
+            n.stroke.weight = x.max(0.0);
+            n.stroke_geometry = None;
+        }
         "strokeTopWeight" | "strokeRightWeight" | "strokeBottomWeight" | "strokeLeftWeight" => {
             let w = n.stroke.weight;
             let sw = n.stroke.side_weights.get_or_insert([w; 4]);
@@ -145,6 +173,7 @@ pub fn set_bound_property(n: &mut Node, key: &str, value: &VariableValue) {
                 _ => 3,
             };
             sw[i] = x.max(0.0);
+            n.stroke_geometry = None;
         }
         "itemSpacing" | "counterAxisSpacing" | "paddingTop" | "paddingRight" | "paddingBottom" | "paddingLeft" => {
             if let Some(al) = n.kind.frame_props_mut().and_then(|f| f.auto_layout.as_mut()) {

@@ -421,6 +421,12 @@ pub fn node_shape(doc: &Document, n: &Node, tol: f32) -> Option<Shape> {
         Some(s) => Some(s),
         None => derived_shape(doc, n, tol),
     }?;
+    if matches!(
+        n.kind,
+        NodeKind::Frame(_) | NodeKind::Component(_) | NodeKind::ComponentSet(_) | NodeKind::Instance { .. } | NodeKind::Section | NodeKind::Rectangle
+    ) {
+        shape.is_rect = true;
+    }
     if let Some(sg) = n.stroke_geometry.as_deref().map(vector_paths).filter(|s| !s.paths.is_empty()) {
         shape.stroke_paths = Some(sg.paths);
     }

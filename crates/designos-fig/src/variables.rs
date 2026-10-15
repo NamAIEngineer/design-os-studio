@@ -351,8 +351,9 @@ fn fig_value(ty: &str, v: &Value, refs: &Refs) -> Option<Value> {
 /// where `variableData.value` is `colorValue`, `floatValue`, `textValue`,
 /// `boolValue` or `alias`.
 pub(crate) fn from_fig_entries(entries: &[&Value]) -> Option<Value> {
+    let active = |e: &Value| fstr(e, "phase") != Some("REMOVED") && fbool(e, "isSoftDeleted") != Some(true);
     let mut refs = Refs { sets: BTreeMap::new(), vars: BTreeMap::new() };
-    for e in entries {
+    for e in entries.iter().copied().filter(|e| active(e)) {
         let (Some(key), Some(gid)) = (fstr(e, "key").filter(|k| !k.is_empty()), e.get("guid").and_then(guid)) else { continue };
         match fstr(e, "type") {
             Some("VARIABLE_SET") => refs.sets.insert(key, format!("VariableCollectionId:{gid}")),
@@ -361,7 +362,7 @@ pub(crate) fn from_fig_entries(entries: &[&Value]) -> Option<Value> {
     }
     let mut colls = Map::new();
     let mut vars = Map::new();
-    for e in entries {
+    for e in entries.iter().copied().filter(|e| active(e)) {
         if fstr(e, "type") != Some("VARIABLE_SET") {
             continue;
         }
@@ -380,8 +381,11 @@ pub(crate) fn from_fig_entries(entries: &[&Value]) -> Option<Value> {
         }
         colls.insert(id, c);
     }
-    let mut order: Vec<(&str, &Value)> =
-        entries.iter().filter(|e| fstr(e, "type") == Some("VARIABLE")).map(|e| (fstr(e, "sortPosition").unwrap_or(""), *e)).collect();
+    let mut order: Vec<(&str, &Value)> = entries
+        .iter()
+        .filter(|e| active(e) && fstr(e, "type") == Some("VARIABLE"))
+        .map(|e| (fstr(e, "sortPosition").unwrap_or(""), *e))
+        .collect();
     order.sort_by(|a, b| a.0.cmp(b.0));
     for (_, e) in order {
         let Some(gid) = e.get("guid").and_then(guid) else { continue };

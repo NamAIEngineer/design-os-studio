@@ -566,6 +566,14 @@ fn export_node_rec(
         fields.push(("overrideKey", guid(nguid.0, nguid.1)));
     }
 
+    if let Some(ds) = node.dev.status {
+        let st_name = match ds {
+            DevStatus::ReadyForDev | DevStatus::Changed => "READY_FOR_DEV",
+            DevStatus::Completed => "COMPLETED",
+        };
+        fields.push(("sectionStatusInfo", msg(vec![("status", en(st_name))])));
+    }
+
     // Fills & strokes (with bound colorVar when present).
     let fill_color_var = |i: usize| -> Option<V> {
         let vid = node.variables.bindings.get(&format!("fills/{i}"))?;
@@ -577,8 +585,13 @@ fn export_node_rec(
         let vg = cx.resolve_var_guid(vid)?;
         Some(alias_var_data(vg))
     };
-    let fills_slice = match &node.kind {
+    let sticky_fill_buf;
+    let fills_slice: &[Paint] = match &node.kind {
         NodeKind::Text(t) => &t.style.fills,
+        NodeKind::Sticky(s) if node.fills.is_empty() => {
+            sticky_fill_buf = [Paint::solid(s.color)];
+            &sticky_fill_buf
+        }
         _ => &node.fills,
     };
     let fill_paints: Vec<V> = fills_slice.iter().enumerate().map(|(i, p)| encode_paint(p, fill_color_var(i))).collect();
@@ -681,9 +694,15 @@ fn export_node_rec(
             fields.push(("stackMode", en(sm)));
             if al.grid_columns > 0 {
                 fields.push(("gridColumns", V::Uint(al.grid_columns)));
+                fields.push(("gridColumnsSizing", V::String(format_grid_tracks(al.grid_columns, &al.grid_col_tracks))));
             }
             if al.grid_rows > 0 {
                 fields.push(("gridRows", V::Uint(al.grid_rows)));
+                fields.push(("gridRowsSizing", V::String(format_grid_tracks(al.grid_rows, &al.grid_row_tracks))));
+            }
+            if al.direction == LayoutDirection::Grid {
+                fields.push(("gridColumnGap", fl(al.item_spacing)));
+                fields.push(("gridRowGap", fl(al.counter_spacing)));
             }
             fields.push(("stackSpacing", fl(al.item_spacing)));
             fields.push(("stackCounterSpacing", fl(al.counter_spacing)));
@@ -728,9 +747,11 @@ fn export_node_rec(
     }
     if let Some(c) = lc.grid_column {
         fields.push(("gridColumnAnchorIndex", V::Uint(u32::from(c))));
+        fields.push(("gridColumnAnchor", V::Uint(u32::from(c))));
     }
     if let Some(r) = lc.grid_row {
         fields.push(("gridRowAnchorIndex", V::Uint(u32::from(r))));
+        fields.push(("gridRowAnchor", V::Uint(u32::from(r))));
     }
     if lc.col_span > 1 {
         fields.push(("gridColumnSpan", V::Uint(u32::from(lc.col_span))));
@@ -1018,6 +1039,66 @@ fn export_node_rec(
         NodeKind::Text(tp) => {
             encode_text_node(&mut fields, tp);
         }
+        NodeKind::Sticky(sp) => {
+            fields.push(("authorVisible", V::Bool(sp.show_author)));
+            encode_text_node(&mut fields, &sp.text);
+        }
+        NodeKind::ShapeWithText(sp) => {
+            let st_name = match sp.shape {
+                ShapeKind::Square => "SQUARE",
+                ShapeKind::RoundedRect => "ROUNDED_RECTANGLE",
+                ShapeKind::Ellipse => "ELLIPSE",
+                ShapeKind::Diamond => "DIAMOND",
+                ShapeKind::Triangle => "TRIANGLE_UP",
+                ShapeKind::TriangleDown => "TRIANGLE_DOWN",
+                ShapeKind::Parallelogram => "PARALLELOGRAM_RIGHT",
+                ShapeKind::Star => "STAR",
+                ShapeKind::Hexagon => "HEXAGON",
+                ShapeKind::Pentagon => "PENTAGON",
+            };
+            fields.push(("shapeWithTextType", V::String(st_name.into())));
+            encode_text_node(&mut fields, &sp.text);
+        }
+        NodeKind::Connector(cp) => {
+            let line_style = match cp.line {
+                ConnectorLine::Elbowed => "ELBOWED",
+                ConnectorLine::Straight => "STRAIGHT",
+                ConnectorLine::Curved => "CURVED",
+            };
+            fields.push(("connectorLineStyle", V::String(line_style.into())));
+            let cap_name = |c: ConnectorCap| match c {
+                ConnectorCap::None => "NONE",
+                ConnectorCap::Arrow => "ARROW_LINES",
+                ConnectorCap::Triangle => "ARROW_EQUILATERAL",
+                ConnectorCap::Circle => "ROUND",
+                ConnectorCap::Diamond => "SQUARE",
+            };
+            fields.push(("connectorStartStrokeCap", en(cap_name(cp.start_cap))));
+            fields.push(("connectorEndStrokeCap", en(cap_name(cp.end_cap))));
+            let mag_name = |m: Magnet| match m {
+                Magnet::Auto => "AUTO",
+                Magnet::Top => "TOP",
+                Magnet::Right => "RIGHT",
+                Magnet::Bottom => "BOTTOM",
+                Magnet::Left => "LEFT",
+                Magnet::Center => "CENTER",
+            };
+            let end_msg = |ep: &ConnectorEnd| {
+                let mut ef = vec![
+                    ("position", vec2(ep.point.x, ep.point.y)),
+                    ("magnet", V::String(mag_name(ep.magnet).into())),
+                ];
+                if let Some(tg) = ep.node.and_then(|nid| cx.node_guids.get(&nid).copied()) {
+                    ef.push(("endpointNodeId", guid(tg.0, tg.1)));
+                }
+                msg(ef)
+            };
+            fields.push(("connectorStart", end_msg(&cp.start)));
+            fields.push(("connectorEnd", end_msg(&cp.end)));
+            if let Some(lbl) = &cp.label {
+                encode_text_node(&mut fields, lbl);
+            }
+        }
         _ => {}
     }
 
@@ -1029,6 +1110,29 @@ fn export_node_rec(
     }
 }
 
+fn format_grid_tracks(count: u32, tracks: &[GridTrack; 8]) -> String {
+    (0..count.min(8) as usize)
+        .map(|i| match tracks[i] {
+            GridTrack::Flex(w) => {
+                if (w - w.round()).abs() < 1e-4 {
+                    format!("{}fr", w.round() as i32)
+                } else {
+                    format!("{w}fr")
+                }
+            }
+            GridTrack::Fixed(px) => {
+                if (px - px.round()).abs() < 1e-4 {
+                    format!("{}px", px.round() as i32)
+                } else {
+                    format!("{px}px")
+                }
+            }
+            GridTrack::Hug => "auto".to_string(),
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 fn encode_node_var_entries(cx: &ExportCtx, vars: &NodeVariables) -> Vec<V> {
     let mut var_entries = Vec::new();
     for (k, vid) in &vars.bindings {
@@ -1037,6 +1141,9 @@ fn encode_node_var_entries(cx: &ExportCtx, vars: &NodeVariables) -> Vec<V> {
         }
         let Some(vg) = cx.resolve_var_guid(vid) else { continue };
         let vfield = match k.as_str() {
+            "visible" => "VISIBLE",
+            "characters" => "TEXT_DATA",
+            "component" => "OVERRIDDEN_SYMBOL_ID",
             "paddingLeft" => "STACK_PADDING_LEFT",
             "paddingRight" => "STACK_PADDING_RIGHT",
             "paddingTop" => "STACK_PADDING_TOP",
@@ -1055,6 +1162,10 @@ fn encode_node_var_entries(cx: &ExportCtx, vars: &NodeVariables) -> Vec<V> {
             "maxHeight" => "MAX_HEIGHT",
             "opacity" => "OPACITY",
             "strokeWeight" => "STROKE_WEIGHT",
+            "strokeTopWeight" => "BORDER_TOP_WEIGHT",
+            "strokeRightWeight" => "BORDER_RIGHT_WEIGHT",
+            "strokeBottomWeight" => "BORDER_BOTTOM_WEIGHT",
+            "strokeLeftWeight" => "BORDER_LEFT_WEIGHT",
             "fontSize" => "FONT_SIZE",
             "fontFamily" => "FONT_FAMILY",
             "fontWeight" => "FONT_WEIGHT",
@@ -1227,9 +1338,15 @@ fn collect_instance_overrides(cx: &ExportCtx, inst_id: NodeId) -> Vec<V> {
                         ov.push(("stackMode", en(sm)));
                         if al.grid_columns > 0 {
                             ov.push(("gridColumns", V::Uint(al.grid_columns)));
+                            ov.push(("gridColumnsSizing", V::String(format_grid_tracks(al.grid_columns, &al.grid_col_tracks))));
                         }
                         if al.grid_rows > 0 {
                             ov.push(("gridRows", V::Uint(al.grid_rows)));
+                            ov.push(("gridRowsSizing", V::String(format_grid_tracks(al.grid_rows, &al.grid_row_tracks))));
+                        }
+                        if al.direction == LayoutDirection::Grid {
+                            ov.push(("gridColumnGap", fl(al.item_spacing)));
+                            ov.push(("gridRowGap", fl(al.counter_spacing)));
                         }
                         ov.push(("stackSpacing", fl(al.item_spacing)));
                         ov.push(("stackCounterSpacing", fl(al.counter_spacing)));
@@ -1237,20 +1354,39 @@ fn collect_instance_overrides(cx: &ExportCtx, inst_id: NodeId) -> Vec<V> {
                         ov.push(("stackPaddingRight", fl(al.padding[1])));
                         ov.push(("stackPaddingBottom", fl(al.padding[2])));
                         ov.push(("stackPaddingLeft", fl(al.padding[3])));
+                        ov.push(("stackPrimarySizing", en(if al.primary_sizing == Sizing::Hug { "RESIZE_TO_FIT" } else { "FIXED" })));
+                        ov.push(("stackCounterSizing", en(if al.counter_sizing == Sizing::Hug { "RESIZE_TO_FIT_WITH_IMPLICIT_SIZE" } else { "FIXED" })));
                     }
                 }
+                let parent_dir = n
+                    .parent
+                    .and_then(|p| cx.doc.get(p))
+                    .and_then(|p| p.kind.frame_props())
+                    .and_then(|f| f.auto_layout)
+                    .map(|a| a.direction);
                 let lc = &n.layout_child;
-                if lc.grow > 0.0 {
-                    ov.push(("stackChildPrimaryGrow", fl(lc.grow)));
+                let (prim_fill, counter_fill) = match parent_dir {
+                    Some(LayoutDirection::Horizontal | LayoutDirection::Grid) => (lc.horizontal == Sizing::Fill || lc.grow > 0.0, lc.vertical == Sizing::Fill),
+                    Some(LayoutDirection::Vertical) => (lc.vertical == Sizing::Fill || lc.grow > 0.0, lc.horizontal == Sizing::Fill),
+                    None => (lc.grow > 0.0, lc.horizontal == Sizing::Fill && lc.vertical == Sizing::Fill),
+                };
+                if prim_fill {
+                    ov.push(("stackChildPrimaryGrow", fl(if lc.grow > 0.0 { lc.grow } else { 1.0 })));
+                } else if parent_dir.is_some() {
+                    ov.push(("stackChildPrimaryGrow", fl(0.0)));
                 }
-                if lc.horizontal == Sizing::Fill && lc.vertical == Sizing::Fill {
+                if counter_fill {
                     ov.push(("stackChildAlignSelf", en("STRETCH")));
+                } else if parent_dir.is_some() {
+                    ov.push(("stackChildAlignSelf", en("AUTO")));
                 }
                 if let Some(c) = lc.grid_column {
                     ov.push(("gridColumnAnchorIndex", V::Uint(u32::from(c))));
+                    ov.push(("gridColumnAnchor", V::Uint(u32::from(c))));
                 }
                 if let Some(r) = lc.grid_row {
                     ov.push(("gridRowAnchorIndex", V::Uint(u32::from(r))));
+                    ov.push(("gridRowAnchor", V::Uint(u32::from(r))));
                 }
                 if lc.col_span > 1 {
                     ov.push(("gridColumnSpan", V::Uint(u32::from(lc.col_span))));

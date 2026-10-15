@@ -356,7 +356,9 @@ pub const TOOL_MENU_OVERLAP: f32 = 4.0;
 pub const MAIN_MENU_X: f32 = 12.0;
 pub const MAIN_MENU_Y: f32 = 44.0;
 pub const MAIN_MENU_WIDTH: f32 = 210.0;
+#[allow(dead_code)]
 pub const PALETTE_WIDTH: f32 = 320.0;
+#[allow(dead_code)]
 pub const PALETTE_TOP: f32 = 64.0;
 pub const TOAST_RADIUS: u8 = 13;
 pub const TOAST_HEIGHT: f32 = 40.0;
@@ -500,7 +502,7 @@ pub const PRESENT_MAX_SCALE: f32 = 4.0;
 // ---------------------------------------------------------------- app defaults
 pub const DEFAULT_WINDOW: (f32, f32) = (1600.0, 1088.0);
 pub const MIN_WINDOW: (f32, f32) = (900.0, 600.0);
-pub const APP_TITLE: &str = "DESIGN:OS Studio";
+pub const APP_TITLE: &str = "design:os studio";
 pub const DEFAULT_SHAPE_SIZE: f32 = 100.0;
 pub const DEFAULT_TEXT_SIZE: f32 = 16.0;
 pub const DEFAULT_PAGE_BG: u32 = 0xF5F5F5;

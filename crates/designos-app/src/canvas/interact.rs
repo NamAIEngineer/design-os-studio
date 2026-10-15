@@ -273,7 +273,16 @@ fn on_press(app: &mut App, rect: ERect, inp: &Inp) {
         }
     }
     let deep = inp.mods.command;
-    let target = if let Some(h) = handle_hit(app, rect, pos) {
+    let over_handle = handle_hit(app, rect, pos);
+    if over_handle.is_none() && !mid && !inp.space && matches!(app.tool, Tool::Move) {
+        if let [sel_id] = app.selection.as_slice() {
+            let sel_id = *sel_id;
+            if hit_under(app, page, deep) == Some(sel_id) && try_start_special_handle(app, rect, pos, page, sel_id) {
+                return;
+            }
+        }
+    }
+    let target = if let Some(h) = over_handle {
         PressTarget::Handle(h)
     } else if let Some(id) = label_hit(app, rect, pos).or_else(|| hit_under(app, page, deep)) {
         if app.is_selected(id) {
@@ -329,6 +338,55 @@ fn on_press(app: &mut App, rect: ERect, inp: &Inp) {
             }
         }
     }
+}
+
+fn try_start_special_handle(app: &mut App, rect: ERect, pos: Pos2, page: DV, id: NodeId) -> bool {
+    let Some(n) = app.doc.get(id) else { return false };
+    let z = app.view.zoom;
+    let corners = world_corners(&app.doc, id).map(|c| dv(app.view.to_screen(rect.min, c)));
+    if handles::supports_corner_radius_handles(&n.kind) {
+        if let Some(corner) = handles::hit_corner_radius_handle(&corners, n.corner_radii, z, dv(pos), 4.5) {
+            app.canvas.inter = Interaction::CornerRadius(CornerRadiusDragState {
+                tx: Tx::new(),
+                id,
+                corner,
+                start_radii: n.corner_radii,
+            });
+            return true;
+        }
+    }
+    if let Some(al) = n.kind.frame_props().and_then(|fp| fp.auto_layout.as_ref()) {
+        let mut child_rects = Vec::new();
+        for &cid in &n.children {
+            if let Some(c) = app.doc.get(cid) {
+                if c.visible && !c.layout_child.absolute {
+                    child_rects.push(Rect::new(c.transform.tx, c.transform.ty, c.size.x, c.size.y));
+                }
+            }
+        }
+        let hnds = handles::auto_layout_handles(al, n.size, &child_rects, z);
+        let w_xform = app.doc.world_transform(id);
+        if let Some(kind) = handles::hit_auto_layout_handle(
+            &hnds,
+            |lc| dv(app.view.to_screen(rect.min, w_xform.apply(lc))),
+            dv(pos),
+            3.0,
+        ) {
+            let start_value = match kind {
+                handles::AutoLayoutHandleKind::Padding(s) => al.padding[s.min(3)],
+                handles::AutoLayoutHandleKind::Gap(_) => al.item_spacing,
+            };
+            app.canvas.inter = Interaction::AutoLayoutDrag(AutoLayoutDragState {
+                tx: Tx::new(),
+                id,
+                kind,
+                start_page: page,
+                start_value,
+            });
+            return true;
+        }
+    }
+    false
 }
 
 fn label_hit(app: &App, rect: ERect, pos: Pos2) -> Option<NodeId> {
@@ -466,6 +524,74 @@ fn on_drag(app: &mut App, ui: &Ui, rect: ERect, inp: &Inp) {
                 }
                 crate::ops::rotate_nodes_about(&mut app.doc, &mut r.tx.ed, &r.group, r.center, delta);
             }
+            app.changed();
+        }
+        Interaction::CornerRadius(cr) => {
+            cr.tx.ed.revert(&mut app.doc);
+            let inv = app.doc.world_transform(cr.id).invert().unwrap_or(Affine::IDENTITY);
+            let ml = inv.apply(cur);
+            if let Some(n) = cr.tx.ed.node(&mut app.doc, cr.id) {
+                let dx = if matches!(cr.corner, 0 | 3) { ml.x } else { n.size.x - ml.x };
+                let dy = if matches!(cr.corner, 0 | 1) { ml.y } else { n.size.y - ml.y };
+                let max_r = (n.size.x.min(n.size.y) * 0.5).max(0.0);
+                let new_r = dx.min(dy).clamp(0.0, max_r).round();
+                if inp.mods.alt {
+                    let mut r = cr.start_radii;
+                    r[cr.corner] = new_r;
+                    n.corner_radii = r;
+                } else {
+                    n.corner_radii = [new_r; 4];
+                }
+            }
+            app.changed();
+        }
+        Interaction::AutoLayoutDrag(ad) => {
+            ad.tx.ed.revert(&mut app.doc);
+            let horiz = app
+                .doc
+                .get(ad.id)
+                .and_then(|n| n.kind.frame_props())
+                .and_then(|fp| fp.auto_layout.as_ref())
+                .is_some_and(|al| al.direction == designos_doc::LayoutDirection::Horizontal);
+            let delta = match ad.kind {
+                handles::AutoLayoutHandleKind::Padding(0) => cur.y - ad.start_page.y,
+                handles::AutoLayoutHandleKind::Padding(1) => ad.start_page.x - cur.x,
+                handles::AutoLayoutHandleKind::Padding(2) => ad.start_page.y - cur.y,
+                handles::AutoLayoutHandleKind::Padding(_) => cur.x - ad.start_page.x,
+                handles::AutoLayoutHandleKind::Gap(_) => {
+                    if horiz {
+                        cur.x - ad.start_page.x
+                    } else {
+                        cur.y - ad.start_page.y
+                    }
+                }
+            };
+            let new_val = (ad.start_value + delta).max(0.0).round();
+            if let Some(n) = ad.tx.ed.node(&mut app.doc, ad.id) {
+                if let Some(al) = n.kind.frame_props_mut().and_then(|fp| fp.auto_layout.as_mut()) {
+                    match ad.kind {
+                        handles::AutoLayoutHandleKind::Padding(side) => {
+                            if inp.mods.shift {
+                                al.padding = [new_val; 4];
+                            } else if inp.mods.alt {
+                                if side % 2 == 0 {
+                                    al.padding[0] = new_val;
+                                    al.padding[2] = new_val;
+                                } else {
+                                    al.padding[1] = new_val;
+                                    al.padding[3] = new_val;
+                                }
+                            } else {
+                                al.padding[side.min(3)] = new_val;
+                            }
+                        }
+                        handles::AutoLayoutHandleKind::Gap(_) => {
+                            al.item_spacing = new_val;
+                        }
+                    }
+                }
+            }
+            layout::relayout_around(&mut app.doc, &mut ad.tx.ed, ad.id);
             app.changed();
         }
         Interaction::Draw(d) => {
@@ -707,6 +833,12 @@ fn on_release(app: &mut App, rect: ERect, inp: &Inp) {
         Interaction::Rotate(r) => {
             app.run_tx(r.tx);
         }
+        Interaction::CornerRadius(c) => {
+            app.run_tx(c.tx);
+        }
+        Interaction::AutoLayoutDrag(a) => {
+            app.run_tx(a.tx);
+        }
         Interaction::Draw(mut d) => {
             if !d.dragged && (crate::board::create::types_into(d.tool) || d.tool == Tool::Stamp) {
                 // a click places a board item at its default size, centred on the pointer
@@ -797,6 +929,43 @@ fn reparent_after_move(app: &mut App, m: &mut MoveState, cur: DV) {
     }
 }
 
+/// 1:1 Figma `Enter` (select direct children) and `Shift+Enter` (select parent container)
+/// hierarchy navigation when not editing text or in a modal.
+pub fn navigate_hierarchy_enter(app: &mut App, shift: bool) -> bool {
+    if app.canvas.text.is_some()
+        || app.canvas.vedit.is_some()
+        || app.canvas.pen.is_some()
+        || app.cmdk.open
+        || app.find.open
+        || app.selection.is_empty()
+    {
+        return false;
+    }
+    let before = app.selection.clone();
+    if shift {
+        app.select_parent();
+        return app.selection != before;
+    }
+    if let [one] = app.selection.as_slice() {
+        let id = *one;
+        if let Some(n) = app.doc.get(id) {
+            if n.kind.is_container() {
+                app.select_children();
+                return app.selection != before;
+            }
+            if matches!(n.kind, NodeKind::Text(_) | NodeKind::Sticky(_) | NodeKind::ShapeWithText(_)) {
+                begin_text_edit(app, id);
+                return app.canvas.text.is_some();
+            }
+            if vector::is_vector(app, id) {
+                return vector::enter(app, id);
+            }
+        }
+    }
+    app.select_children();
+    app.selection != before
+}
+
 // ------------------------------------------------------------------ double click
 fn on_double_click(app: &mut App, rect: ERect, inp: &Inp) {
     let Some(pos) = inp.pos else { return };
@@ -815,7 +984,13 @@ fn on_double_click(app: &mut App, rect: ERect, inp: &Inp) {
     if app.tool != Tool::Move {
         return;
     }
-    if let Some(id) = hit_under(app, page, true) {
+    let tol = 2.0 / app.view.zoom;
+    let deep = inp.mods.command || inp.mods.shift;
+    let mut entered_drill = entered(app);
+    entered_drill.extend(app.selection.iter().copied());
+    let drilled = hit::hit_test_with_index(&app.doc, app.page, page, tol, deep, &entered_drill, active_index(app))
+        .or_else(|| hit_under(app, page, true));
+    if let Some(id) = drilled {
         let is_text = matches!(app.doc.get(id).map(|n| &n.kind), Some(NodeKind::Text(_)));
         let board_kind = app.doc.get(id).map(|n| &n.kind);
         if is_text {
@@ -1281,5 +1456,82 @@ mod tests {
         h264[at..at + 4].copy_from_slice(b"avc1");
         let id = place_video_bytes(&mut app, v2(0.0, 0.0), "h264", h264).unwrap();
         assert_eq!(app.doc.get(id).unwrap().prototype.videos.len(), 1);
+    }
+
+    #[test]
+    fn enter_selects_children_and_shift_enter_climbs_to_parent() {
+        let (mut app, _, _) = app_with_two();
+        let fid = app.doc.alloc_id();
+        let frame = app.doc.insert(app.page, designos_doc::Node::frame(fid, Rect::new(0.0, 0.0, 400.0, 300.0))).unwrap();
+        let gid = app.doc.alloc_id();
+        let mut grp = designos_doc::Node::new(gid, NodeKind::Group);
+        grp.size = v2(200.0, 150.0);
+        let grp = app.doc.insert(frame, grp).unwrap();
+        let c1_id = app.doc.alloc_id();
+        let c1 = app.doc.insert(grp, designos_doc::Node::rectangle(c1_id, Rect::new(10.0, 10.0, 60.0, 60.0))).unwrap();
+        let c2_id = app.doc.alloc_id();
+        let c2 = app.doc.insert(grp, designos_doc::Node::rectangle(c2_id, Rect::new(80.0, 10.0, 60.0, 60.0))).unwrap();
+
+        // Start with Frame selected -> Enter selects direct child (Group)
+        app.selection = vec![frame];
+        assert!(navigate_hierarchy_enter(&mut app, false));
+        assert_eq!(app.selection, vec![grp]);
+
+        // Enter on Group selects all its direct children (c1, c2)
+        assert!(navigate_hierarchy_enter(&mut app, false));
+        assert_eq!(app.selection, vec![c1, c2]);
+
+        // Shift+Enter climbs back up to Group
+        assert!(navigate_hierarchy_enter(&mut app, true));
+        assert_eq!(app.selection, vec![grp]);
+
+        // Shift+Enter climbs back up to Frame
+        assert!(navigate_hierarchy_enter(&mut app, true));
+        assert_eq!(app.selection, vec![frame]);
+    }
+
+    #[test]
+    fn double_click_drills_down_nested_containers_then_enters_vector_edit() {
+        let (mut app, _, _) = app_with_two();
+        app.canvas_rect = ERect::from_min_size(Pos2::ZERO, egui::Vec2::new(800.0, 600.0));
+        app.view.zoom = 1.0;
+        app.view.offset = DV::ZERO;
+
+        let g1_id = app.doc.alloc_id();
+        let mut g1 = designos_doc::Node::new(g1_id, NodeKind::Group);
+        g1.size = v2(200.0, 200.0);
+        let g1 = app.doc.insert(app.page, g1).unwrap();
+
+        let g2_id = app.doc.alloc_id();
+        let mut g2 = designos_doc::Node::new(g2_id, NodeKind::Group);
+        g2.size = v2(200.0, 200.0);
+        let g2 = app.doc.insert(g1, g2).unwrap();
+
+        let r_id = app.doc.alloc_id();
+        let r = app.doc.insert(g2, designos_doc::Node::rectangle(r_id, Rect::new(20.0, 20.0, 100.0, 100.0))).unwrap();
+
+        let inp = Inp {
+            pos: Some(Pos2::new(50.0, 50.0)),
+            pressed: false,
+            down: false,
+            released: false,
+            mid_pressed: false,
+            mid_down: false,
+            mods: Modifiers::NONE,
+            space: false,
+        };
+
+        // Start with outer group g1 selected
+        app.selection = vec![g1];
+        let rect = app.canvas_rect;
+        on_double_click(&mut app, rect, &inp);
+        assert_eq!(app.selection, vec![g2], "first double-click drills down to direct child g2");
+
+        on_double_click(&mut app, rect, &inp);
+        assert_eq!(app.selection, vec![r], "second double-click drills down to leaf rectangle r");
+        assert!(app.canvas.vedit.is_none());
+
+        on_double_click(&mut app, rect, &inp);
+        assert_eq!(app.canvas.vedit.as_ref().map(|v| v.id), Some(r), "third double-click enters vector edit mode on leaf");
     }
 }

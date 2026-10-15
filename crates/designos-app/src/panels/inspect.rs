@@ -61,11 +61,14 @@ pub fn collect_colors(doc: &Document, root: NodeId) -> Vec<ColorEntry> {
     let mut all = Vec::new();
     doc.walk(root, |n, _| {
         let n = resolve_node(doc, n);
-        let fill_style = n.style_refs.get("fill").map(|k| doc.style_name(k).to_string());
-        let stroke_style = n.style_refs.get("stroke").map(|k| doc.style_name(k).to_string());
+        let var_token = |prop: &str| -> Option<String> {
+            n.variables.bindings.get(prop).and_then(|vid| doc.variables.get(vid)).map(|v| format!("--{}", v.name.replace(['/', ' '], "-").to_lowercase()))
+        };
+        let fill_style = n.style_refs.get("fill").map(|k| doc.style_name(k).to_string()).or_else(|| var_token("fills/0"));
+        let stroke_style = n.style_refs.get("stroke").map(|k| doc.style_name(k).to_string()).or_else(|| var_token("strokes/0"));
         match &n.kind {
             NodeKind::Text(t) => {
-                let text_style = n.style_refs.get("text").map(|k| doc.style_name(k).to_string());
+                let text_style = n.style_refs.get("text").map(|k| doc.style_name(k).to_string()).or_else(|| var_token("fills/0"));
                 push_paints(&mut all, &t.style.fills, "Text", text_style.as_ref());
                 for r in &t.runs {
                     push_paints(&mut all, &r.style.fills, "Text", None);
@@ -319,32 +322,18 @@ fn body(app: &mut App, ui: &mut Ui, c: &mut Cur, id: NodeId, count: usize) {
     kv(ui, app, c, "Session activity", "Ready · designos-mcp");
     kv(ui, app, c, "Estimated tokens", &format!("{est_tokens:.1}k"));
     c.y += 4.0;
-    let prompt_text = format!(
-        "Implement this design from DESIGN:OS Studio.\n@designos://node/{}/{}",
-        id.0,
-        n.name.replace(' ', "-")
-    );
+    let prompt_text = format!("Implement this design from design:os studio.\n@designos://node/{}/{}", id.0, n.name.replace(' ', "-"));
     let box_r = c.rect(PAD, 0.0, c.w - 2.0 * PAD, 44.0);
     ui.painter().rect_filled(box_r, theme::cr(theme::RADIUS_MEDIUM), theme::BG_SECONDARY);
-    ui.painter().rect_stroke(
-        box_r,
-        theme::cr(theme::RADIUS_MEDIUM),
-        Stroke::new(1.0, theme::BORDER),
-        egui::StrokeKind::Inside,
-    );
+    ui.painter().rect_stroke(box_r, theme::cr(theme::RADIUS_MEDIUM), Stroke::new(1.0, theme::BORDER), egui::StrokeKind::Inside);
     ui.painter().text(
         Pos2::new(box_r.left() + 8.0, box_r.top() + 14.0),
         Align2::LEFT_CENTER,
-        "Implement this design from DESIGN:OS.",
+        "Implement this design from design:os studio.",
         theme::font_small(),
         theme::TEXT_SECONDARY,
     );
-    let uri_line = elide(
-        ui.painter(),
-        &format!("@designos://node/{}/{}", id.0, n.name),
-        &theme::font_small(),
-        box_r.width() - 16.0,
-    );
+    let uri_line = elide(ui.painter(), &format!("@designos://node/{}/{}", id.0, n.name), &theme::font_small(), box_r.width() - 16.0);
     ui.painter().text(
         Pos2::new(box_r.left() + 8.0, box_r.top() + 30.0),
         Align2::LEFT_CENTER,
@@ -409,8 +398,10 @@ fn body(app: &mut App, ui: &mut Ui, c: &mut Cur, id: NodeId, count: usize) {
             let sw = Rect::from_min_size(Pos2::new(r.left(), r.center().y - 8.0), Vec2::splat(16.0));
             widgets::swatch(ui.painter(), sw, c32(&e.color.with_alpha(1.0), e.opacity));
             let value = if app.dev.color_format == ColorFormat::Hex { e.hex() } else { app.dev.color_format.value(e.color, e.opacity) };
-            let label = elide(ui.painter(), &value, &theme::font_body(), r.width() - 24.0);
+            let pct_str = format!("{}%", (e.opacity * 100.0).round() as i32);
+            let label = elide(ui.painter(), &value, &theme::font_body(), r.width() - 60.0);
             ui.painter().text(Pos2::new(sw.right() + 8.0, r.top() + 12.0), Align2::LEFT_CENTER, label, theme::font_body(), theme::TEXT);
+            ui.painter().text(Pos2::new(r.right(), r.top() + 12.0), Align2::RIGHT_CENTER, pct_str, theme::font_small(), theme::TEXT_SECONDARY);
             let detail = match &e.style {
                 Some(s) => format!("{} · {}", e.role, s),
                 None => e.role.to_string(),

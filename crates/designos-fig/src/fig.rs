@@ -229,7 +229,7 @@ pub fn import_fig_node_changes(changes: &Value, name: &str) -> Result<Document, 
 fn nodes_to_rest(changes: Vec<Value>, blobs: &[&[u8]], name: &str) -> Value {
     let mut entries: Vec<Entry> = Vec::new();
     for j in changes {
-        if fstr(&j, "phase") == Some("REMOVED") {
+        if fstr(&j, "phase") == Some("REMOVED") || rest_import::fbool(&j, "isSoftDeleted") == Some(true) {
             continue;
         }
         let Some(id) = j.get("guid").and_then(guid_str) else { continue };
@@ -420,8 +420,12 @@ fn convert_node(nc: &Value, id: &str, lk: &Lk) -> Option<Map<String, Value>> {
     }
     if let Some(ds) = nc.get("devStatus") {
         m.insert("devStatus".into(), ds.clone());
-    } else if let Some(&st) = lk.handoff_status.get(id) {
-        m.insert("devStatus".into(), json!({"type": st}));
+    } else if let Some(st) = nc.get("sectionStatusInfo").and_then(|s| fstr(s, "status")).or_else(|| lk.handoff_status.get(id).copied()) {
+        let mapped = match st {
+            "BUILD" => "READY_FOR_DEV",
+            other => other,
+        };
+        m.insert("devStatus".into(), json!({"type": mapped}));
     }
     if ty == "CANVAS" {
         copy(&mut m, nc, "backgroundColor", "backgroundColor");
@@ -447,8 +451,13 @@ fn convert_node(nc: &Value, id: &str, lk: &Lk) -> Option<Map<String, Value>> {
     copy(&mut m, nc, "dashPattern", "strokeDashes");
     copy(&mut m, nc, "strokeMiterAngle", "strokeMiterAngle");
     copy(&mut m, nc, "miterLimit", "strokeMiterLimit");
-    if nc.get("borderStrokeWeightsIndependent").and_then(Value::as_bool) == Some(true) {
-        let w = fnum(nc, "strokeWeight").unwrap_or(1.0);
+    let indep_borders = nc.get("borderStrokeWeightsIndependent").and_then(Value::as_bool) == Some(true);
+    if indep_borders || ["borderTopWeight", "borderRightWeight", "borderBottomWeight", "borderLeftWeight"].iter().any(|k| nc.get(*k).is_some()) {
+        let w = if indep_borders {
+            fnum(nc, "strokeWeight").unwrap_or(1.0)
+        } else {
+            fnum(nc, "strokeWeight").unwrap_or(0.0)
+        };
         let g = |k: &str| fnum(nc, k).unwrap_or(w);
         m.insert(
             "individualStrokeWeights".into(),
@@ -461,7 +470,11 @@ fn convert_node(nc: &Value, id: &str, lk: &Lk) -> Option<Map<String, Value>> {
     // Corners.
     copy(&mut m, nc, "cornerRadius", "cornerRadius");
     copy(&mut m, nc, "cornerSmoothing", "cornerSmoothing");
-    if nc.get("rectangleCornerRadiiIndependent").and_then(Value::as_bool) == Some(true) {
+    if nc.get("rectangleCornerRadiiIndependent").and_then(Value::as_bool) == Some(true)
+        || ["rectangleTopLeftCornerRadius", "rectangleTopRightCornerRadius", "rectangleBottomRightCornerRadius", "rectangleBottomLeftCornerRadius"]
+            .iter()
+            .any(|k| nc.get(*k).is_some())
+    {
         let base = fnum(nc, "cornerRadius").unwrap_or(0.0);
         let g = |k: &str| fnum(nc, k).unwrap_or(base);
         m.insert(
@@ -511,8 +524,14 @@ fn convert_node(nc: &Value, id: &str, lk: &Lk) -> Option<Map<String, Value>> {
     if fstr(nc, "stackPositioning") == Some("ABSOLUTE") {
         m.insert("layoutPositioning".into(), "ABSOLUTE".into());
     }
-    for k in ["gridColumnSpan", "gridRowSpan", "gridColumnAnchorIndex", "gridRowAnchorIndex"] {
+    for k in ["gridColumnSpan", "gridRowSpan"] {
         copy(&mut m, nc, k, k);
+    }
+    if let Some(c) = nc.get("gridColumnAnchor").or_else(|| nc.get("gridColumnAnchorIndex")) {
+        m.insert("gridColumnAnchorIndex".into(), c.clone());
+    }
+    if let Some(r) = nc.get("gridRowAnchor").or_else(|| nc.get("gridRowAnchorIndex")) {
+        m.insert("gridRowAnchorIndex".into(), r.clone());
     }
     for (src, dst_x, dst_y) in [("minSize", "minWidth", "minHeight"), ("maxSize", "maxWidth", "maxHeight")] {
         if let Some(s) = nc.get(src) {
@@ -579,6 +598,48 @@ fn convert_node(nc: &Value, id: &str, lk: &Lk) -> Option<Map<String, Value>> {
             }
         }
         "TEXT" => convert_text(&mut m, nc, lk),
+        "STICKY" => {
+            copy(&mut m, nc, "authorName", "authorName");
+            copy(&mut m, nc, "authorVisible", "authorVisible");
+            convert_text(&mut m, nc, lk);
+        }
+        "SHAPE_WITH_TEXT" => {
+            if let Some(st) = nc.get("shapeWithTextType").or_else(|| nc.get("shapeType")) {
+                m.insert("shapeType".into(), st.clone());
+            }
+            convert_text(&mut m, nc, lk);
+        }
+        "STAMP" => {
+            copy(&mut m, nc, "stampType", "stampType");
+        }
+        "CONNECTOR" => {
+            let conv_ep = |ep: &Value| -> Value {
+                let mut o = ep.as_object().cloned().unwrap_or_default();
+                if let Some(id_val) = ep.get("endpointNodeId") {
+                    if let Some(gs) = guid_str(id_val) {
+                        o.insert("endpointNodeId".into(), Value::String(gs));
+                    }
+                }
+                Value::Object(o)
+            };
+            if let Some(s) = nc.get("connectorStart") {
+                m.insert("connectorStart".into(), conv_ep(s));
+            }
+            if let Some(e) = nc.get("connectorEnd") {
+                m.insert("connectorEnd".into(), conv_ep(e));
+            }
+            if let Some(lt) = fstr(nc, "connectorLineType")
+                .or_else(|| fstr(nc, "connectorLineStyle"))
+                .or_else(|| fstr(nc, "connectorType"))
+            {
+                m.insert("connectorLineType".into(), lt.into());
+            }
+            copy(&mut m, nc, "connectorStartStrokeCap", "connectorStartStrokeCap");
+            copy(&mut m, nc, "connectorEndStrokeCap", "connectorEndStrokeCap");
+            if nc.get("textData").is_some() {
+                convert_text(&mut m, nc, lk);
+            }
+        }
         _ => {}
     }
     // Vector networks: vertices, segments and regions of editable vectors.
@@ -587,8 +648,8 @@ fn convert_node(nc: &Value, id: &str, lk: &Lk) -> Option<Map<String, Value>> {
             m.insert("vectorNetwork".into(), net);
         }
     }
-    // Precomputed outlines (text keeps none: the renderer lays glyphs out itself).
-    if ty != "TEXT" {
+    // Precomputed outlines (text and lowered board items keep none: the renderer lays them out itself).
+    if !matches!(ty, "TEXT" | "STICKY" | "SHAPE_WITH_TEXT" | "CONNECTOR" | "STAMP") {
         for k in ["fillGeometry", "strokeGeometry"] {
             if let Some(g) = convert_geometry(nc, k, blobs) {
                 m.insert(k.into(), g);
@@ -629,8 +690,8 @@ fn bound_variables(nc: &Value, lk: &Lk) -> Option<Value> {
             "STACK_HORIZONTAL_PADDING" => &["paddingLeft", "paddingRight"],
             "STACK_VERTICAL_PADDING" => &["paddingTop", "paddingBottom"],
             "STACK_PADDING" => &["paddingLeft", "paddingRight", "paddingTop", "paddingBottom"],
-            "STACK_SPACING" => &["itemSpacing"],
-            "STACK_COUNTER_SPACING" => &["counterAxisSpacing"],
+            "STACK_SPACING" | "GRID_COLUMN_GAP" => &["itemSpacing"],
+            "STACK_COUNTER_SPACING" | "GRID_ROW_GAP" => &["counterAxisSpacing"],
             "RECTANGLE_TOP_LEFT_CORNER_RADIUS" => &["topLeftRadius"],
             "RECTANGLE_TOP_RIGHT_CORNER_RADIUS" => &["topRightRadius"],
             "RECTANGLE_BOTTOM_LEFT_CORNER_RADIUS" => &["bottomLeftRadius"],
@@ -643,7 +704,14 @@ fn bound_variables(nc: &Value, lk: &Lk) -> Option<Value> {
             "MIN_HEIGHT" => &["minHeight"],
             "MAX_HEIGHT" => &["maxHeight"],
             "OPACITY" => &["opacity"],
+            "VISIBLE" => &["visible"],
+            "TEXT_DATA" => &["characters"],
+            "OVERRIDDEN_SYMBOL_ID" => &["component"],
             "STROKE_WEIGHT" => &["strokeWeight"],
+            "BORDER_TOP_WEIGHT" => &["strokeTopWeight"],
+            "BORDER_RIGHT_WEIGHT" => &["strokeRightWeight"],
+            "BORDER_BOTTOM_WEIGHT" => &["strokeBottomWeight"],
+            "BORDER_LEFT_WEIGHT" => &["strokeLeftWeight"],
             "FONT_SIZE" => &["fontSize"],
             "FONT_FAMILY" => &["fontFamily"],
             "FONT_WEIGHT" | "FONT_STYLE" => &["fontWeight"],
@@ -835,7 +903,11 @@ fn stack_align(s: Option<&str>) -> &'static str {
 }
 
 fn stack_sizing(s: Option<&str>) -> &'static str {
-    if s.map(|s| s.starts_with("RESIZE_TO_FIT")).unwrap_or(false) { "AUTO" } else { "FIXED" }
+    if s.map(|s| s.starts_with("RESIZE_TO_FIT") || s == "AUTO" || s == "HUG").unwrap_or(false) {
+        "AUTO"
+    } else {
+        "FIXED"
+    }
 }
 
 /// Partial REST node fields from an override / derived-data entry: only keys
@@ -861,10 +933,13 @@ fn convert_override(o: &Value, lk: &Lk) -> Map<String, Value> {
             m.insert(dst.into(), Value::Array(rest_import::farr(sn, "fillPaints").iter().filter_map(convert_paint).collect()));
         }
     }
-    if o.get("borderStrokeWeightsIndependent").and_then(Value::as_bool) == Some(true)
-        || ["borderTopWeight", "borderRightWeight", "borderBottomWeight", "borderLeftWeight"].iter().any(|k| o.get(*k).is_some())
-    {
-        let w = fnum(o, "strokeWeight").unwrap_or(1.0);
+    let indep_borders = o.get("borderStrokeWeightsIndependent").and_then(Value::as_bool) == Some(true);
+    if indep_borders || ["borderTopWeight", "borderRightWeight", "borderBottomWeight", "borderLeftWeight"].iter().any(|k| o.get(*k).is_some()) {
+        let w = if indep_borders {
+            fnum(o, "strokeWeight").unwrap_or(1.0)
+        } else {
+            fnum(o, "strokeWeight").unwrap_or(0.0)
+        };
         let g = |k: &str| fnum(o, k).unwrap_or(w);
         m.insert(
             "individualStrokeWeights".into(),
@@ -915,8 +990,12 @@ fn convert_override(o: &Value, lk: &Lk) -> Map<String, Value> {
     if o.get("stackMode").is_some() {
         convert_stack(&mut m, o);
     }
-    copy(&mut m, o, "stackSpacing", "itemSpacing");
-    copy(&mut m, o, "stackCounterSpacing", "counterAxisSpacing");
+    if let Some(x) = fnum(o, "gridColumnGap").or_else(|| fnum(o, "gridColumnsGap")).or_else(|| fnum(o, "stackSpacing")) {
+        m.insert("itemSpacing".into(), x.into());
+    }
+    if let Some(x) = fnum(o, "gridRowGap").or_else(|| fnum(o, "gridRowsGap")).or_else(|| fnum(o, "stackCounterSpacing")) {
+        m.insert("counterAxisSpacing".into(), x.into());
+    }
     let p = fnum(o, "stackPadding");
     let h = fnum(o, "stackHorizontalPadding").or(p);
     let v = fnum(o, "stackVerticalPadding").or(p);
@@ -964,8 +1043,14 @@ fn convert_override(o: &Value, lk: &Lk) -> Map<String, Value> {
     }
     copy(&mut m, o, "layoutSizingHorizontal", "layoutSizingHorizontal");
     copy(&mut m, o, "layoutSizingVertical", "layoutSizingVertical");
-    for k in ["gridColumns", "gridRows", "gridColumnSpan", "gridRowSpan", "gridColumnAnchorIndex", "gridRowAnchorIndex"] {
+    for k in ["gridColumns", "gridRows", "gridColumnsSizing", "gridRowsSizing", "gridColumnSpan", "gridRowSpan"] {
         copy(&mut m, o, k, k);
+    }
+    if let Some(c) = o.get("gridColumnAnchor").or_else(|| o.get("gridColumnAnchorIndex")) {
+        m.insert("gridColumnAnchorIndex".into(), c.clone());
+    }
+    if let Some(r) = o.get("gridRowAnchor").or_else(|| o.get("gridRowAnchorIndex")) {
+        m.insert("gridRowAnchorIndex".into(), r.clone());
     }
     // Text.
     let mut st = convert_type_style(o, None);
@@ -1020,10 +1105,15 @@ fn convert_stack(m: &mut Map<String, Value>, nc: &Value) {
         _ => return,
     };
     m.insert("layoutMode".into(), mode.into());
-    copy(m, nc, "gridColumns", "gridColumns");
-    copy(m, nc, "gridRows", "gridRows");
-    copy(m, nc, "stackSpacing", "itemSpacing");
-    copy(m, nc, "stackCounterSpacing", "counterAxisSpacing");
+    for k in ["gridColumns", "gridRows", "gridColumnsSizing", "gridRowsSizing"] {
+        copy(m, nc, k, k);
+    }
+    if let Some(x) = fnum(nc, "gridColumnGap").or_else(|| fnum(nc, "gridColumnsGap")).or_else(|| fnum(nc, "stackSpacing")) {
+        m.insert("itemSpacing".into(), x.into());
+    }
+    if let Some(x) = fnum(nc, "gridRowGap").or_else(|| fnum(nc, "gridRowsGap")).or_else(|| fnum(nc, "stackCounterSpacing")) {
+        m.insert("counterAxisSpacing".into(), x.into());
+    }
     let p = fnum(nc, "stackPadding");
     let h = fnum(nc, "stackHorizontalPadding").or(p);
     let v = fnum(nc, "stackVerticalPadding").or(p);

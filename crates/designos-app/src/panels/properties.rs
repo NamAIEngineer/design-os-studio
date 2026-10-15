@@ -489,11 +489,29 @@ fn selection_colors_section(app: &mut App, ui: &mut Ui, pane: &mut Pane, sel: &[
     if cols.is_empty() || !(cols.len() >= 2 || sel.len() > 1 || nested) {
         return;
     }
+    let mut usage_counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    for &root in sel {
+        app.doc.walk(root, |n, _| {
+            for p in n.fills.iter().chain(n.stroke.paints.iter()).filter(|p| p.visible) {
+                if let PaintKind::Solid(col) = &p.kind {
+                    *usage_counts.entry(col.to_hex()).or_insert(0) += 1;
+                }
+            }
+            if let NodeKind::Text(t) = &n.kind {
+                for p in t.style.fills.iter().filter(|p| p.visible) {
+                    if let PaintKind::Solid(col) = &p.kind {
+                        *usage_counts.entry(col.to_hex()).or_insert(0) += 1;
+                    }
+                }
+            }
+        });
+    }
     section_sep(ui, pane, false);
     title(ui, pane, "Selection colors", None, false);
     for (i, c) in cols.iter().enumerate() {
         let sw = pane.rect(theme::SWATCH_ROW_X, 4.0, theme::SWATCH_SIZE, theme::SWATCH_SIZE);
         let hex_r = pane.rect(theme::SWATCH_ROW_X + theme::SWATCH_SIZE + 8.0, 0.0, 96.0, theme::FIELD_HEIGHT);
+        let op_r = pane.rect(theme::SWATCH_ROW_X + theme::SWATCH_SIZE + 8.0 + 100.0, 0.0, 52.0, theme::FIELD_HEIGHT);
         widgets::record(ui, &format!("selsw:{i}"), sw);
         widgets::record(ui, &format!("selhex:{i}"), hex_r);
         let swr = ui.interact(sw, ui.id().with(("selsw", i)), Sense::click());
@@ -507,6 +525,10 @@ fn selection_colors_section(app: &mut App, ui: &mut Ui, pane: &mut Pane, sel: &[
                 app.replace_selection_color(sel, *c, nc);
             }
         }
+        ui.painter().rect_filled(op_r, theme::cr(theme::RADIUS_MEDIUM), theme::BG_SECONDARY);
+        let cnt = usage_counts.get(&c.to_hex()).copied().unwrap_or(1);
+        let badge_txt = if cnt > 1 { format!("100% · {cnt}") } else { "100 %".to_string() };
+        ui.painter().text(op_r.center(), Align2::CENTER_CENTER, badge_txt, theme::font_small(), theme::TEXT_SECONDARY);
         pane.y += theme::FIELD_HEIGHT + 8.0;
     }
     pane.y += 4.0;
@@ -1130,7 +1152,7 @@ fn node_paint(app: &App, target: PickTarget, ids: &[NodeId]) -> Option<Paint> {
     }
 }
 
-/// Colours for the picker's swatch grid: this page, the whole document and colour styles.
+/// Colours for the picker's swatch grid: this page, the whole document, colour styles, and colour variables.
 fn swatch_sources(app: &App) -> Vec<(String, Vec<Color32>)> {
     let conv = |cs: Vec<Color>| cs.into_iter().map(|c| to_c32(c, 1.0)).collect::<Vec<_>>();
     let page = conv(crate::styles::selection_colors(&app.doc, &[app.page]));
@@ -1142,9 +1164,23 @@ fn swatch_sources(app: &App) -> Vec<(String, Vec<Color32>)> {
             _ => None,
         })
         .collect();
+    let store = VariableStore::from_doc(&app.doc);
+    let mut vars: Vec<Color32> = Vec::new();
+    for coll in app.doc.variable_collections.values() {
+        for vid in &coll.variables {
+            if let Some(v) = app.doc.variables.get(vid).filter(|v| v.kind == VariableKind::Color) {
+                if let Some(VariableValue::Color(c)) = store.resolve(&v.id, &coll.default_mode) {
+                    vars.push(to_c32(c, c.a));
+                }
+            }
+        }
+    }
     let mut out = vec![("On this page".to_string(), page), ("Document colors".to_string(), doc)];
     if !styles.is_empty() {
         out.push(("Color styles".to_string(), styles));
+    }
+    if !vars.is_empty() {
+        out.push(("Color variables".to_string(), vars));
     }
     out
 }
@@ -1275,8 +1311,23 @@ pub(super) fn picker_popup(app: &mut App, ui: &mut Ui, region: Rect) {
     } else {
         Vec::new()
     };
-    // Colour styles of enabled libraries, grouped per library after the document's own.
+    // Colour styles of enabled libraries and local Color Variables, grouped after the document's own styles.
     if paint_types && pk.state.tab == picker::Tab::Libraries {
+        let store = VariableStore::from_doc(&app.doc);
+        for coll in app.doc.variable_collections.values() {
+            for vid in &coll.variables {
+                if let Some(v) = app.doc.variables.get(vid).filter(|v| v.kind == VariableKind::Color) {
+                    if let Some(VariableValue::Color(c)) = store.resolve(&v.id, &coll.default_mode) {
+                        styles.push(picker::StyleItem {
+                            name: v.name.clone(),
+                            key: v.id.clone(),
+                            paint: Paint { opacity: c.a, ..Paint::solid(Color { a: 1.0, ..c }) },
+                            library: Some(("__vars__".to_string(), format!("Variables · {}", coll.name))),
+                        });
+                    }
+                }
+            }
+        }
         for ls in app.library_styles().into_iter().filter(|s| !s.text && s.local_key.is_none()) {
             if let Style::Fill(ps) = &ls.style {
                 if let Some(p) = ps.first() {
@@ -1365,9 +1416,19 @@ pub(super) fn picker_popup(app: &mut App, ui: &mut Ui, region: Rect) {
         !pk.eyedrop && !pk.state.menu_open && pressed && ptr.map(|p| !panel.contains(p) && !pk.anchor.contains(p) && !handle_hit(&pk, app, p)).unwrap_or(false);
     let esc = esc && !pk.eyedrop && !pk.state.menu_open;
     if let Some((lib, key)) = out.apply_library_style.take() {
-        // Import the library style and apply it together with the picker's own edits: one undo step.
         let ids = pk.ids.clone();
-        app.apply_library_style(pk.tx, &ids, &lib, &key);
+        if lib == "__vars__" {
+            let prop_key = match pk.target {
+                PickTarget::Stroke(i) => format!("strokes/{i}"),
+                PickTarget::Fill(i) => format!("fills/{i}"),
+                _ => "fills/0".to_string(),
+            };
+            app.run_tx(pk.tx);
+            app.bind_variable(&ids, &[prop_key.as_str()], &key);
+        } else {
+            // Import the library style and apply it together with the picker's own edits: one undo step.
+            app.apply_library_style(pk.tx, &ids, &lib, &key);
+        }
         return;
     }
     if outside || esc || out.close || out.apply_style.is_some() || remove {
@@ -1499,8 +1560,26 @@ fn gradient_handles(app: &mut App, ctx: &egui::Context, pk: &mut Picker, changed
     }
 }
 
+fn find_node_in_page(doc: &Document, root: NodeId, pred: &dyn Fn(&Node) -> bool) -> Option<NodeId> {
+    let n = doc.get(root)?;
+    if !matches!(n.kind, NodeKind::Page { .. }) && pred(n) {
+        return Some(root);
+    }
+    for &c in &n.children {
+        if let Some(found) = find_node_in_page(doc, c, pred) {
+            return Some(found);
+        }
+    }
+    None
+}
+
 /// Opens an inspector popup on the current selection (`--panel`, for screenshots).
 pub fn preset_popup(app: &mut App, spec: &str, screen: Vec2) {
+    if spec == "variables" {
+        app.vars.open = true;
+        app.vars.full = true;
+        return;
+    }
     if spec == "picker-page" {
         // The page background picker, anchored on the Page row swatch.
         let bg = match app.doc.get(app.page).map(|n| &n.kind) {
@@ -1511,6 +1590,18 @@ pub fn preset_popup(app: &mut App, spec: &str, screen: Vec2) {
             Rect::from_min_size(Pos2::new(screen.x - theme::RIGHT_PANEL_WIDTH + 17.0 + theme::PAGE_SWATCH_CX - 6.0, 131.0), Vec2::splat(theme::PAGE_SWATCH));
         open_picker(app, PickTarget::PageBg, to_c32(bg, 1.0), sw, vec![app.page]);
         return;
+    }
+    if spec == "type-details" {
+        let has_text = app.selection.first().and_then(|id| app.doc.get(*id)).is_some_and(|n| matches!(n.kind, NodeKind::Text(_)));
+        if !has_text {
+            if let Some(tid) = find_node_in_page(&app.doc, app.page, &|n| matches!(n.kind, NodeKind::Text(_))) {
+                app.selection = vec![tid];
+            }
+        }
+    } else if app.selection.is_empty() {
+        if let Some(fid) = find_node_in_page(&app.doc, app.page, &|n| !n.fills.is_empty()).or_else(|| find_node_in_page(&app.doc, app.page, &|_| true)) {
+            app.selection = vec![fid];
+        }
     }
     let Some(id) = app.selection.first().copied() else { return };
     let sw = Rect::from_min_size(Pos2::new(screen.x - theme::RIGHT_PANEL_WIDTH + 29.0, 660.0), Vec2::splat(theme::SWATCH_SIZE));

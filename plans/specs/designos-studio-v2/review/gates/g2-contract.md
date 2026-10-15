@@ -9,14 +9,17 @@ freshness: CURRENT
   "stage": "contract",
   "gate_id": "g2-contract",
   "freshness": "CURRENT",
-  "config_sha256": "8f4b2e91c0d74a16b35e891a24c7f09d5e6a1b2c3d4e5f60718293a4b5c6d7e8",
-  "context": ["decisions/decision-log.md", "intake/po-spec.md"],
+  "config_sha256": "ad6d82e23b06b4ac3d5ec7608bd0c37d2e211b809e3b860f96511c57765b50a3",
+  "context": ["clarify/clarifications.md", "decisions/decision-log.md", "decisions/glossary.md", "intake/po-spec.md"],
   "inputs": {
-    "decisions/decision-log.md": "4b8e1f2a3c5d7e9f0a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f",
-    "intake/po-spec.md": "3a7f9c12e4b8016d52c9e7a14f8b3d2091c4e6f8a2b3c4d5e6f708192a3b4c5d"
+    "clarify/clarifications.md": "58d8ace83705a8d8bd8ff0a8e8e8dfb31f86396e2546e4c2b507ee9d9b115e89",
+    "decisions/decision-log.md": "ea51a6e41846e229bf4c7bb324761fde03321598629481a9b370a0830a5f886b",
+    "decisions/glossary.md": "10fbe863e589582935de5f82d133e3f34e74dde39e9ac9f319a1ffd3789433ba",
+    "intake/po-spec.md": "1e193a012aac84997523a1301f49bdb4f762c267213ec7f8f4cf0189dad07a73"
   },
   "outputs": {
-    "contract/FC-001.md": "7d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e"
+    "contract/FC-001.md": "7a05a0bf788dea83c9b9b955867719a9639364a700cf182a72d36d56d143e5c1",
+    "prd/PRD.md": "034fcde18bee37cc8a618722e3477b07277cb6b357d73bba0e6e7f5da3bc123c"
   },
   "role": {"owner": "po", "enabled": true, "gate": true},
   "evals": [
@@ -39,6 +42,6 @@ freshness: CURRENT
   "versions": {"workflow": "2", "templates": "2", "ruleset": "2"},
   "change_requests": [],
   "invalidation": null,
-  "approval": {"by": "po@designos.local", "at": "2026-10-15T06:05:00.000Z"}
+  "approval": {"by": "po@designos.local", "at": "2026-10-15T09:10:00.000Z"}
 }
 ```

@@ -9,21 +9,21 @@ freshness: CURRENT
   "stage": "uiux",
   "gate_id": "g4-uiux",
   "freshness": "CURRENT",
-  "config_sha256": "8f4b2e91c0d74a16b35e891a24c7f09d5e6a1b2c3d4e5f60718293a4b5c6d7e8",
-  "context": ["us/US-01.md", "us/US-02.md", "us/US-03.md", "ux/screen-inventory.md", "ux/ui-contract.md"],
+  "config_sha256": "ad6d82e23b06b4ac3d5ec7608bd0c37d2e211b809e3b860f96511c57765b50a3",
+  "context": ["us/INDEX.md", "wireframe/W-01.md", "prototype/P-01.md", "design/tokens.md"],
   "inputs": {
-    "us/US-01.md": "2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a2b3c",
-    "us/US-02.md": "3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a2b3c4d",
-    "us/US-03.md": "4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e",
-    "ux/screen-inventory.md": "6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f",
-    "ux/ui-contract.md": "7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a"
+    "wireframe/W-01.md": "7d497c1e08ff69e5e3c3e5a4823c8708156aa31a9e02217d88b3ddb550665436",
+    "prototype/P-01.md": "801e2000fd8e3333684a226b141a72a377206ce955107144cffd454662740d23",
+    "design/tokens.md": "cc58487b26257222d8522b4ccc269a84db139b5af6a6ce2e16ff105ceddff1ad"
   },
   "outputs": {
-    "crates/designos-app/src/specs.rs": "9a0b1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a01"
+    "ux/screen-inventory.md": "b3971f82bd8e6606ddb57e7ca42fa7c937084aaf4b512ba585c19b34e1a0a8ac",
+    "ux/ui-contract.md": "706db83168e1e8b73761400fc2d31dd30df4369c6d4a5595be277092483dddfd",
+    "crates/designos-app/src/specs.rs": "941461e3498cc7a567075d2cde6ad3f0c8322d26da1a9af54aa047a3267d23a5"
   },
   "role": {"owner": "po", "enabled": true, "gate": true},
   "evals": [
-    {"command": "cargo test -p designos-app renders_specs_reader_and_left_panel_without_lint_issues", "exit_code": 0, "report": null}
+    {"command": "node tools/lint/lint.mjs spec --stage uiux", "exit_code": 0, "report": null}
   ],
   "review": {
     "enabled": true,
@@ -41,6 +41,7 @@ freshness: CURRENT
   },
   "versions": {"workflow": "2", "templates": "2", "ruleset": "2"},
   "change_requests": [],
-  "invalidation": null
+  "invalidation": null,
+  "approval": null
 }
 ```

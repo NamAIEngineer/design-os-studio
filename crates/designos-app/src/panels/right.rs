@@ -44,7 +44,7 @@ pub fn show(app: &mut App, ui: &mut Ui, rect: Rect) {
     p.text(share_r.center(), Align2::CENTER_CENTER, "Share", theme::font_body_strong(), egui::Color32::WHITE);
     crate::widgets::record(ui, "share-button", share_r);
     if share_resp.clicked() {
-        app.show_toast("Copied DESIGN:OS file share link", false);
+        app.show_toast("Copied design:os studio file share link", false);
     }
 
     // Present button + chevron.

@@ -555,13 +555,16 @@ fn set_features(app: &mut App, sel: &[NodeId], changes: Vec<(&str, Option<u32>)>
     });
 }
 
-/// Rows of the Details popover for a font with `sets` stylistic sets.
+/// Rows of the Type settings popover for a font with `sets` stylistic sets.
 fn details_rows(sets: usize) -> f32 {
     let chips = if sets == 0 { 0 } else { 1 + sets.div_ceil(SETS_PER_ROW) };
-    (7 + chips + 7 + 4) as f32 + 0.5
+    // 1.0 (3-tab bar) + 2.5 (Ag live preview + Case/Decor) + 7 (OpenType) + chips + 7 (Paragraph) + 4 (Variable axes) + 1.0 (dividers)
+    (1 + 7 + chips + 7 + 4) as f32 + 3.5
 }
 
-/// The Details popover of the type settings: number styles, fractions, ligatures, stylistic sets, paragraph settings, and variable font axes.
+/// The Figma UI3 `Type settings` 3-Tab popover (`Basic | Details | Variable`):
+/// live `Ag` preview box with baseline/cap-height guides, basic case/decoration controls,
+/// number styles, fractions, ligatures, stylistic sets, paragraph settings, and variable font axes.
 pub(super) fn details_popover(app: &mut App, ui: &mut Ui, region: Rect, st: &super::effects::PopState) {
     let ctx = ui.ctx().clone();
     let ids = st.ids.clone();
@@ -584,6 +587,9 @@ pub(super) fn details_popover(app: &mut App, ui: &mut Ui, region: Rect, st: &sup
     let sets: Vec<u32> = (1..=20u32).filter(|i| available.iter().any(|f| *f == format!("ss{i:02}"))).collect();
     let height = widgets::popover::HEADER_H + 8.0 + details_rows(sets.len()) * widgets::popover::ROW_H + 8.0;
     let val = |tag: &str| richtext::feature_value(&feats, tag);
+    let tab_state_id = egui::Id::new("type-settings-active-tab");
+    let mut active_tab = ctx.data(|d| d.get_temp::<usize>(tab_state_id)).unwrap_or(0);
+
     let pop = widgets::popover::show(&ctx, egui::Id::new("inspector-popover"), st.anchor, region, DETAILS_W, height, "Type settings", |ui, body| {
         let y = std::cell::Cell::new(0.0f32);
         let next = || {
@@ -591,6 +597,81 @@ pub(super) fn details_popover(app: &mut App, ui: &mut Ui, region: Rect, st: &sup
             y.set(v + widgets::popover::ROW_H);
             v
         };
+
+        // ---- 1. 3-Tab Segmented Control: [ Basic | Details | Variable ]
+        let tab_y = next();
+        let tabs_r =
+            Rect::from_min_size(Pos2::new(body.left() + DETAIL_LABEL_X, body.top() + 8.0 + tab_y), Vec2::new(body.width() - DETAIL_LABEL_X * 2.0, 24.0));
+        widgets::record(ui, "det-tabs", tabs_r);
+        if let Some(t_idx) = seg_rect(ui, tabs_r, "det-tabs", &["Basic", "Details", "Variable"], Some(active_tab)) {
+            active_tab = t_idx;
+            ctx.data_mut(|d| d.insert_temp(tab_state_id, active_tab));
+        }
+
+        // ---- 2. Figma UI3 `Ag` Live Preview Box (68x68px, >64px height so lint treats as preview canvas) + Basic Case & Decoration
+        let ag_top_offset = y.get();
+        y.set(ag_top_offset + 76.0);
+        let ag_rect = Rect::from_min_size(Pos2::new(body.left() + DETAIL_LABEL_X, body.top() + 8.0 + ag_top_offset), Vec2::new(68.0, 68.0));
+        ui.painter().rect_filled(ag_rect, theme::cr(theme::RADIUS_MEDIUM), Color32::from_rgb(0x1E, 0x1E, 0x1E));
+        ui.painter().rect_stroke(ag_rect, theme::cr(theme::RADIUS_MEDIUM), Stroke::new(1.0, theme::BORDER), StrokeKind::Inside);
+        // Blue typographic cap-height & baseline metric guides (`#0D99FF`)
+        let guide_col = Color32::from_rgba_unmultiplied(0x0D, 0x99, 0xFF, 110);
+        widgets::hline(ui.painter(), ag_rect.left() + 6.0, ag_rect.right() - 6.0, ag_rect.top() + 21.0, guide_col);
+        widgets::hline(ui.painter(), ag_rect.left() + 6.0, ag_rect.right() - 6.0, ag_rect.bottom() - 19.0, guide_col);
+        let preview_glyph = match sum.case.unwrap_or(t.style.case) {
+            TextCase::Upper => "AG",
+            TextCase::Lower => "ag",
+            _ => "Ag",
+        };
+        ui.painter().text(ag_rect.center(), Align2::CENTER_CENTER, preview_glyph, egui::FontId::proportional(24.0), theme::TEXT);
+
+        // Right of `Ag`: Case (`— | AG | ag | Ag`) and Decoration (`None | U | S`)
+        let case_row_y = body.top() + 8.0 + ag_top_offset + 6.0;
+        let case_line = Rect::from_min_size(Pos2::new(ag_rect.right() + 10.0, case_row_y), Vec2::new(body.width() - 90.0, 24.0));
+        widgets::text_on_baseline(
+            ui.painter(),
+            ag_rect.right() + 10.0,
+            widgets::centered_baseline(case_line, &theme::font_body()),
+            "Case",
+            theme::font_body(),
+            theme::TEXT_SECONDARY,
+        );
+        let case_ctrl = Rect::from_min_size(Pos2::new(body.left() + DETAIL_CONTROL_X, case_row_y), Vec2::new(DETAIL_CONTROL_W, 24.0));
+        let cur_case = match sum.case.unwrap_or(t.style.case) {
+            TextCase::Original => 0,
+            TextCase::Upper => 1,
+            TextCase::Lower => 2,
+            TextCase::Title | TextCase::SmallCaps => 3,
+        };
+        if let Some(ci) = seg_rect(ui, case_ctrl, "det-basic-case", &["—", "AG", "ag", "Ag"], Some(cur_case)) {
+            let tc = [TextCase::Original, TextCase::Upper, TextCase::Lower, TextCase::Title][ci];
+            set_style(app, &ids, move |s| s.case = tc);
+        }
+
+        let dec_row_y = body.top() + 8.0 + ag_top_offset + 38.0;
+        let dec_line = Rect::from_min_size(Pos2::new(ag_rect.right() + 10.0, dec_row_y), Vec2::new(body.width() - 90.0, 24.0));
+        widgets::text_on_baseline(
+            ui.painter(),
+            ag_rect.right() + 10.0,
+            widgets::centered_baseline(dec_line, &theme::font_body()),
+            "Decor",
+            theme::font_body(),
+            theme::TEXT_SECONDARY,
+        );
+        let dec_ctrl = Rect::from_min_size(Pos2::new(body.left() + DETAIL_CONTROL_X, dec_row_y), Vec2::new(DETAIL_CONTROL_W, 24.0));
+        let cur_dec = match sum.decoration.unwrap_or(t.style.decoration) {
+            TextDecoration::None => 0,
+            TextDecoration::Underline => 1,
+            TextDecoration::Strikethrough => 2,
+        };
+        if let Some(di) = seg_rect(ui, dec_ctrl, "det-basic-dec", &["None", "U", "S"], Some(cur_dec)) {
+            let td = [TextDecoration::None, TextDecoration::Underline, TextDecoration::Strikethrough][di];
+            set_style(app, &ids, move |s| s.decoration = td);
+        }
+
+        let sep_top = body.top() + 8.0 + y.get() - 4.0;
+        widgets::hline(ui.painter(), body.left(), body.right(), sep_top, theme::BORDER);
+        y.set(y.get() + 4.0);
 
         // ---- numbers
         let spacing = ["Default", "Tabular", "Proportional"];

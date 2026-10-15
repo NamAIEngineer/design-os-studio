@@ -31,6 +31,7 @@ mod shell;
 mod showcase;
 mod specs;
 mod styles;
+mod tabs;
 mod terminal;
 mod textedit;
 mod textmeasure;
@@ -86,7 +87,7 @@ fn main() {
     let (w, h) = opts.size.unwrap_or((theme::DEFAULT_WINDOW.0 as u32, theme::DEFAULT_WINDOW.1 as u32));
     let screenshot_mode = opts.screenshot.is_some();
     let mut viewport = egui::ViewportBuilder::default()
-        .with_title(theme::APP_TITLE)
+        .with_title("design:os studio")
         .with_inner_size([w as f32, h as f32])
         .with_min_inner_size([theme::MIN_WINDOW.0, theme::MIN_WINDOW.1]);
     if let Some(icon) = window_icon() {
@@ -96,7 +97,7 @@ fn main() {
         viewport = viewport.with_min_inner_size([200.0, 200.0]).with_resizable(true).with_active(false);
     }
     let native = eframe::NativeOptions { viewport, ..Default::default() };
-    let result = eframe::run_native(theme::APP_TITLE, native, Box::new(move |cc| Ok(Box::new(shell::Shell::new(cc, opts)))));
+    let result = eframe::run_native("design:os studio", native, Box::new(move |cc| Ok(Box::new(shell::Shell::new(cc, opts)))));
     if let Err(e) = result {
         eprintln!("designos: {e}");
         std::process::exit(1);

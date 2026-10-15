@@ -67,7 +67,7 @@ pub fn save_path(doc: &Document, path: &Path) -> Result<PathBuf, String> {
 pub fn pick_open() -> Option<PathBuf> {
     rfd::FileDialog::new()
         .add_filter("Design files", &[NATIVE_EXT, LEGACY_EXT, "fig", "json", "svg"])
-        .add_filter("DESIGN:OS Studio", &[NATIVE_EXT, LEGACY_EXT])
+        .add_filter("design:os studio", &[NATIVE_EXT, LEGACY_EXT])
         .add_filter("Figma file", &["fig"])
         .add_filter("SVG", &["svg"])
         .add_filter("JSON", &["json"])
@@ -76,7 +76,7 @@ pub fn pick_open() -> Option<PathBuf> {
 
 pub fn pick_save(default_name: &str) -> Option<PathBuf> {
     rfd::FileDialog::new()
-        .add_filter("DESIGN:OS Studio", &[NATIVE_EXT, LEGACY_EXT])
+        .add_filter("design:os studio", &[NATIVE_EXT, LEGACY_EXT])
         .add_filter("Figma file", &["fig"])
         .set_file_name(format!("{default_name}.{NATIVE_EXT}"))
         .save_file()

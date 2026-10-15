@@ -173,15 +173,36 @@ fn folded_key(coll: &str, path: &str) -> String {
     format!("{coll}\0{path}")
 }
 
+const SCOPE_FILTERS: [(&str, &[&str]); 6] = [
+    ("All", &[]),
+    ("Fills", &["ALL_FILLS", "FRAME_FILL", "SHAPE_FILL"]),
+    ("Strokes", &["STROKE_COLOR", "STROKE_FLOAT"]),
+    ("Text", &["TEXT_FILL", "FONT_FAMILY", "FONT_SIZE", "LINE_HEIGHT", "LETTER_SPACING"]),
+    ("Radius", &["CORNER_RADIUS"]),
+    ("Gap & Size", &["GAP", "WIDTH_HEIGHT"]),
+];
+
+fn matches_scope_filter(v: &Variable, scope_idx: usize) -> bool {
+    let Some((_, codes)) = SCOPE_FILTERS.get(scope_idx) else {
+        return true;
+    };
+    if codes.is_empty() {
+        return true;
+    }
+    codes.iter().any(|code| v.matches_scope(code))
+}
+
 /// Rows of the table for the selected group: variables grouped under their folder's header.
-fn build_rows(app: &App, view: &VariableStore, coll: &VariableCollection) -> Vec<Row> {
+fn build_rows(app: &App, ctx: &Context, view: &VariableStore, coll: &VariableCollection) -> Vec<Row> {
     let q = app.vars.search.to_lowercase();
     let group = app.vars.group.as_deref();
+    let scope_idx = ctx.data(|d| d.get_temp::<usize>(Id::new("vars-scope-filter"))).unwrap_or(0);
     let mut folders: Vec<(String, Vec<String>)> = Vec::new();
     for id in &coll.variables {
         let Some(v) = view.variables.get(id) else { continue };
         let folder = folder_of(&v.name);
-        if !in_group(folder, group) || kind_hidden(app, v.kind) || (!q.is_empty() && !v.name.to_lowercase().contains(&q)) {
+        if !in_group(folder, group) || kind_hidden(app, v.kind) || !matches_scope_filter(v, scope_idx) || (!q.is_empty() && !v.name.to_lowercase().contains(&q))
+        {
             continue;
         }
         match folders.iter_mut().find(|(f, _)| f == folder) {
@@ -696,6 +717,34 @@ fn bottom_bar(app: &mut App, ui: &mut Ui, g: &Geom, coll: &VariableCollection, f
         let h = theme::MENU_PADDING * 2.0 + 4.0 * theme::MENU_ITEM_HEIGHT;
         app.vars.menu = Some(VarMenu { kind: VarMenuKind::Create, pos: Pos2::new(b.left(), b.top() - h - 4.0), anchor: b });
     }
+
+    // ---- Scoped Variables Filter Bar (`All`, `Fills`, `Strokes`, `Text`, `Radius`, `Gap & Size`)
+    let scope_id = Id::new("vars-scope-filter");
+    let active_scope = ui.ctx().data(|d| d.get_temp::<usize>(scope_id)).unwrap_or(0);
+    let mut sx = b.right() + 16.0;
+    let cy = b.center().y;
+    for (idx, (label, _)) in SCOPE_FILTERS.iter().enumerate() {
+        let cw = widgets::text_width(&p, label, &theme::font_small_medium()) + 16.0;
+        if sx + cw > g.panel.right() - 8.0 {
+            break;
+        }
+        let chip_r = Rect::from_min_size(Pos2::new(sx, cy - 11.0), Vec2::new(cw, 22.0));
+        widgets::record(ui, &format!("vars-scope:{label}"), chip_r);
+        let cresp = ui.interact(chip_r, Id::new(("vars-scope-chip", idx)), Sense::click());
+        let is_act = active_scope == idx;
+        if is_act {
+            p.rect_filled(chip_r, theme::cr(theme::RADIUS_MEDIUM), theme::BG_TERTIARY);
+        } else if cresp.hovered() {
+            p.rect_filled(chip_r, theme::cr(theme::RADIUS_MEDIUM), theme::BG_HOVER);
+        }
+        p.text(chip_r.center(), Align2::CENTER_CENTER, *label, theme::font_small_medium(), if is_act { theme::TEXT } else { theme::TEXT_SECONDARY });
+        if cresp.clicked() {
+            ui.ctx().data_mut(|d| d.insert_temp(scope_id, idx));
+            app.vars.scroll = 0.0;
+        }
+        sx = chip_r.right() + 4.0;
+    }
+
     let _ = (coll, fr);
 }
 
@@ -726,7 +775,7 @@ fn table(app: &mut App, ui: &mut Ui, g: &Geom, fr: &mut Frame, coll: &VariableCo
     let col_left = |i: usize| modes_left - sx + i as f32 * (mw + 1.0);
 
     // ---- rows
-    let rows = build_rows(app, fr.view, coll);
+    let rows = build_rows(app, ui.ctx(), fr.view, coll);
     fr.order = rows.iter().filter_map(|r| if let Row::Var(id) = r { Some(id.clone()) } else { None }).collect();
     let content_h = rows.len() as f32 * theme::VAR_ROW_PITCH;
     let mut scroll = app.vars.scroll;
@@ -960,8 +1009,19 @@ fn variable_row(app: &mut App, ui: &mut Ui, g: &Geom, r: Rect, coll: &VariableCo
                 fr.work.rename_variable(&v.id, &full);
             }
         } else {
-            let shown = widgets::elide(&p, &leaf, &theme::font_body(), text_rect.width() - 6.0);
+            let badge_txt = if v.hidden_from_publishing {
+                Some("Hidden".to_string())
+            } else if !v.scopes.is_empty() {
+                Some(format!("{}sc", v.scopes.len()))
+            } else {
+                None
+            };
+            let reserve_w = if badge_txt.is_some() { 38.0 } else { 6.0 };
+            let shown = widgets::elide(&p, &leaf, &theme::font_body(), (text_rect.width() - reserve_w).max(24.0));
             p.text(Pos2::new(name_cell.left() + theme::VAR_NAME_X, r.center().y), Align2::LEFT_CENTER, shown, theme::font_body(), theme::TEXT);
+            if let Some(bt) = badge_txt {
+                p.text(Pos2::new(name_cell.right() - 8.0, r.center().y), Align2::RIGHT_CENTER, bt, theme::font_small(), theme::TEXT_TERTIARY);
+            }
         }
         // selection
         if resp.clicked() {
@@ -1512,5 +1572,37 @@ fn run_cell_picker(app: &mut App, ctx: &Context) {
         app.finish_cell_picker(pk);
     } else {
         app.vars.cell_picker = Some(pk);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::BTreeMap;
+
+    #[test]
+    fn scope_filter_matches_variable_scopes() {
+        let mut var = Variable {
+            id: "v1".into(),
+            key: None,
+            name: "Radius/Card".into(),
+            collection: "c1".into(),
+            kind: VariableKind::Number,
+            values: BTreeMap::new(),
+            description: String::new(),
+            scopes: vec!["CORNER_RADIUS".into()],
+            hidden_from_publishing: false,
+        };
+        assert!(matches_scope_filter(&var, 0)); // All
+        assert!(!matches_scope_filter(&var, 1)); // Fills
+        assert!(!matches_scope_filter(&var, 2)); // Strokes
+        assert!(!matches_scope_filter(&var, 3)); // Text
+        assert!(matches_scope_filter(&var, 4)); // Radius
+        assert!(!matches_scope_filter(&var, 5)); // Gap & Size
+
+        var.scopes.clear(); // Empty scopes = ALL_SCOPES
+        for idx in 0..SCOPE_FILTERS.len() {
+            assert!(matches_scope_filter(&var, idx));
+        }
     }
 }

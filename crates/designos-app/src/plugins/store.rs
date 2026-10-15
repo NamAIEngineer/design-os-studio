@@ -332,7 +332,7 @@ pub fn install(root: &Path, input: &str) -> Result<InstalledPlugin, String> {
             request = request.set("Authorization", &format!("Bearer {}", token.trim()));
         }
         let response = request.call().map_err(|err| -> String { match err {
-            ureq::Error::Status(401 | 403 | 404, _) => format!("The plugin repository or file is unavailable. For a private registry, set DESIGNOS_PLUGINS_TOKEN (or DESIGNOS_PLUGINS_TOKEN) to a GitHub token with read access to {REPOSITORY}, then restart DESIGN:OS Studio."),
+            ureq::Error::Status(401 | 403 | 404, _) => format!("The plugin repository or file is unavailable. For a private registry, set DESIGNOS_PLUGINS_TOKEN (or DESIGNOS_PLUGINS_TOKEN) to a GitHub token with read access to {REPOSITORY}, then restart design:os studio."),
             _ => "Plugin download failed. Check your connection and the manifest URL.".into(),
         } })?;
         if response.status() != 200 {

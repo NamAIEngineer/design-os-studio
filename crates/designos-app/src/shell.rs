@@ -51,6 +51,12 @@ impl Shell {
         // GPU canvas on by default; screenshots stay on the deterministic CPU path unless --gpu
         let saved = library.as_deref().and_then(|l| crate::comments::settings::load_flag(l, "use_gpu"));
         shell.app.canvas.gpu.pref = if screenshot { gpu_flag } else { gpu_flag || saved.unwrap_or(true) };
+        shell.app.tabs.always_visible = true;
+        if shell.app.home.is_none() {
+            let mut tabs = std::mem::take(&mut shell.app.tabs);
+            tabs.sync_from_app(&shell.app);
+            shell.app.tabs = tabs;
+        }
         shell
     }
 
@@ -385,6 +391,25 @@ impl Shell {
                     app.start_present();
                     None
                 }
+                (Key::Tab, false, _) => {
+                    app.next_tab();
+                    None
+                }
+                (Key::Tab, true, _) => {
+                    app.prev_tab();
+                    None
+                }
+                (Key::T, false, false) => {
+                    app.open_new_design_tab();
+                    None
+                }
+                (Key::W, false, false) => {
+                    if app.tabs.entries.len() > 1 {
+                        let idx = app.tabs.active_idx;
+                        app.close_tab(idx);
+                    }
+                    None
+                }
                 _ => None,
             };
             if let Some(a) = act {
@@ -435,7 +460,9 @@ impl Shell {
                     interact::finish_pen(app);
                     app.tool = Tool::Move;
                 } else if m.shift {
-                    menus::run(app, ctx, Action::SelectParent);
+                    if !crate::canvas::interact::navigate_hierarchy_enter(app, true) {
+                        menus::run(app, ctx, Action::SelectParent);
+                    }
                 } else if let Some(n) = app.selection.first().filter(|_| app.selection.len() == 1).and_then(|s| app.doc.get(*s)) {
                     // A single text or vector layer is entered for editing; anything else selects its children.
                     let id = n.id;
@@ -448,10 +475,10 @@ impl Shell {
                     } else if canvas::vector::is_vector(app, id) {
                         // vectors and basic shapes (which become vectors on the first edit)
                         canvas::vector::enter(app, id);
-                    } else {
+                    } else if !crate::canvas::interact::navigate_hierarchy_enter(app, false) {
                         menus::run(app, ctx, Action::SelectChildren);
                     }
-                } else {
+                } else if !crate::canvas::interact::navigate_hierarchy_enter(app, false) {
                     menus::run(app, ctx, Action::SelectChildren);
                 }
             }
@@ -633,8 +660,28 @@ impl Shell {
             self.app.flush_autosave();
         }
         self.app.scrub_sync(&ctx);
+        let window_full = ui.max_rect();
+        let show_tab_bar = self.app.tabs.is_bar_visible(self.app.home.is_some()) && self.app.proto.present.is_none();
+        let full = if show_tab_bar {
+            let bar_rect = Rect::from_min_max(
+                window_full.min,
+                Pos2::new(window_full.right(), window_full.top() + crate::tabs::TOP_TAB_BAR_HEIGHT),
+            );
+            crate::tabs::show_top_tab_bar_ui(ui, bar_rect, &mut self.app);
+            Rect::from_min_max(Pos2::new(window_full.left(), bar_rect.bottom()), window_full.max)
+        } else {
+            let mut tabs = std::mem::take(&mut self.app.tabs);
+            tabs.reconcile_frame(&mut self.app);
+            self.app.tabs = tabs;
+            window_full
+        };
         if self.app.home.is_some() {
-            self.home_frame(ui, &ctx);
+            if show_tab_bar {
+                let mut home_ui = ui.new_child(egui::UiBuilder::new().max_rect(full));
+                self.home_frame(&mut home_ui, &ctx);
+            } else {
+                self.home_frame(ui, &ctx);
+            }
             crate::plugins::ui::show(&mut self.app, &ctx);
             return;
         }
@@ -650,7 +697,6 @@ impl Shell {
             self.handle_drops(&ctx);
         }
 
-        let full = ui.max_rect();
         ui.painter().rect_filled(full, 0.0, theme::BG);
         let rail_w = theme::RAIL_WIDTH + theme::BORDER_WIDTH;
         let panel_w = theme::LEFT_PANEL_WIDTH + theme::BORDER_WIDTH;

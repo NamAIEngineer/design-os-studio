@@ -1,108 +1,156 @@
 {
-  "format": "2",
-  "title": "DESIGN:OS Studio — Figma 1:1 & Agentic Product OS",
-  "language": "vi (EN product terms kept)",
-  "date": "2026-10-15",
-  "tests_root": "tests",
-  "glossary": {
-    "document": "decisions/glossary.md"
+  "format_version": "2.0",
+  "feature": "designos-studio-v2",
+  "title": "design:os studio — Figma 1:1 & Agentic Product OS",
+  "brand_wordmark": {
+    "canonical": "design:os studio",
+    "short": "design:os",
+    "case": "all-lowercase",
+    "bold_prefix": "design",
+    "regular_suffix": ":os studio",
+    "rule": "BR-14"
   },
-  "ui_contract": "required",
-  "artifacts": [
+  "status": "READY_FOR_DEV",
+  "contract_status": "FROZEN",
+  "current_stage": "handoff",
+  "updated_at": "2026-10-15T09:05:00Z",
+  "directives": [
+    "DIR-01",
+    "DIR-02",
+    "DIR-03",
+    "DIR-04",
+    "DIR-05",
+    "DIR-06",
+    "DIR-07",
+    "DIR-08",
+    "DIR-09",
+    "DIR-10",
+    "DIR-11",
+    "DIR-12",
+    "DIR-13"
+  ],
+  "requirements": [
+    "REQ-01",
+    "REQ-02",
+    "REQ-03",
+    "REQ-04",
+    "REQ-05",
+    "REQ-06",
+    "REQ-07",
+    "REQ-08",
+    "REQ-09",
+    "REQ-10",
+    "REQ-11",
+    "REQ-12"
+  ],
+  "stories": [
     {
-      "id": "intake",
-      "folder": "intake",
-      "name": "PO Spec Intake",
-      "status": "Approved (G1)",
-      "owner_role": "Product Owner"
-    },
-    {
-      "id": "contract",
-      "folder": "contract",
-      "name": "Product & Feature Contract",
-      "status": "Locked (G2)",
-      "owner_role": "Product Owner"
-    },
-    {
-      "id": "prd",
-      "folder": "prd",
-      "name": "Product Requirements (PRD)",
-      "status": "Approved",
-      "owner_role": "Product Owner"
-    },
-    {
-      "id": "us",
-      "folder": "us",
-      "name": "User Stories & Scenarios",
-      "status": "Verified (G3)",
-      "owner_role": "Product Owner"
-    },
-    {
-      "id": "wireframe",
-      "folder": "wireframe",
-      "name": "ASCII Wireframes",
+      "id": "US-01",
+      "title": "1:1 Figma .fig v106 Binary R/W & 2D CSS Grid",
+      "priority": "MVP",
       "status": "Verified",
-      "owner_role": "Designer"
+      "file": "us/US-01.md"
     },
     {
-      "id": "ux",
-      "folder": "ux",
-      "name": "Screen Inventory & UI Contract",
-      "status": "Pending G4 Review",
-      "owner_role": "Designer"
+      "id": "US-02",
+      "title": "PRODUCT:OS Spec Driven v2 Reader & Role Views",
+      "priority": "MVP",
+      "status": "Verified",
+      "file": "us/US-02.md"
     },
     {
-      "id": "reviews",
-      "folder": "review",
-      "name": "Gates & Evidence",
-      "status": "4/5 Approved · CURRENT",
-      "owner_role": "Reviewer"
+      "id": "US-03",
+      "title": "Embedded PTY Agent Terminal claude/codex & Live Canvas Bridge",
+      "priority": "MVP",
+      "status": "Verified",
+      "file": "us/US-03.md"
     },
     {
-      "id": "decisions",
-      "folder": "decisions",
-      "name": "Decision Ledger & Glossary",
-      "status": "Current to D5",
-      "owner_role": "Product Owner"
+      "id": "US-04",
+      "title": "1:1 Figma UI3 Home & File Management (Drafts, All folders, Resources, Trash, Starred)",
+      "priority": "MVP",
+      "status": "Verified",
+      "file": "us/US-04.md"
     },
     {
-      "id": "handoff",
-      "folder": "handoff",
-      "name": "Handoff Manifest",
-      "status": "Ready (G5)",
-      "owner_role": "Product Owner"
+      "id": "US-05",
+      "title": "1:1 Figma UI3 Settings, Menus & Popovers (Type settings, Cmd+K, Zoom/View, Color/Variables, Dev Mode)",
+      "priority": "MVP",
+      "status": "Verified",
+      "file": "us/US-05.md"
+    },
+    {
+      "id": "US-06",
+      "title": "1:1 Figma Per-Element Canvas Interactions & 2D Grid Overlay (17 Node Kinds)",
+      "priority": "MVP",
+      "status": "Verified",
+      "file": "us/US-06.md"
+    },
+    {
+      "id": "US-07",
+      "title": "Figma Desktop (app.asar) & .fig Kiwi Binary Reverse Engineering (REA) Pipeline",
+      "priority": "MVP",
+      "status": "Verified",
+      "file": "us/US-07.md"
+    },
+    {
+      "id": "US-08",
+      "title": "Headless Background Screenshot Verification (with_active(false)) & 99% Parity Gate",
+      "priority": "MVP",
+      "status": "Verified",
+      "file": "us/US-08.md"
+    },
+    {
+      "id": "US-09",
+      "title": "Dual-Layer Auto-Update (Atomic Self-Updater updater.rs + Upstream Figma app.asar/Kiwi Watchdog)",
+      "priority": "MVP",
+      "status": "Verified",
+      "file": "us/US-09.md"
+    },
+    {
+      "id": "US-10",
+      "title": "Multiple Tab Project Workspace & Figma UI3 Desktop Tab Strip (36px Tab Bar, Per-Tab Isolation & Brand Wordmark)",
+      "priority": "MVP",
+      "status": "Verified",
+      "file": "us/US-10.md"
     }
   ],
-  "readable": {
-    "epics": {
-      "min": 1,
-      "max": 8
+  "gates": {
+    "g1-intake": {
+      "status": "APPROVED",
+      "file": "review/gates/g1-intake.md"
     },
-    "capabilities": {
-      "min": 1,
-      "max": 7
+    "g2-contract": {
+      "status": "APPROVED",
+      "file": "review/gates/g2-contract.md"
+    },
+    "g3-us": {
+      "status": "APPROVED",
+      "file": "review/gates/g3-us.md"
+    },
+    "g4-uiux": {
+      "status": "PENDING",
+      "file": "review/gates/g4-uiux.md"
+    },
+    "g5-handoff": {
+      "status": "APPROVED",
+      "file": "review/gates/g5-handoff.md"
     }
   },
-  "reading_order": [
-    {
-      "pages": ["po-spec", "fc-001"],
-      "note": "Intake problem & locked scope contract"
-    },
-    {
-      "pages": ["prd-designos-v2", "us-index", "US-01", "US-02", "US-03"],
-      "note": "Requirements, user stories & acceptance scenarios"
-    },
-    {
-      "pages": ["screen-inventory", "ui-contract"],
-      "note": "Screen states & 12-column behavioral selectors"
-    },
-    {
-      "pages": ["decision-log", "glossary"],
-      "note": "Settled decisions D1..D5 & domain glossary"
-    }
-  ],
-  "changes": {
-    "recent_days": 7,
-    "locale": "vi"
+  "artifacts": {
+    "intake": "intake/po-spec.md",
+    "clarify": "clarify/clarifications.md",
+    "decisions": "decisions/decision-log.md",
+    "glossary": "decisions/glossary.md",
+    "contract": "contract/FC-001.md",
+    "prd": "prd/PRD.md",
+    "us_index": "us/INDEX.md",
+    "wireframe": "wireframe/W-01.md",
+    "prototype": "prototype/P-01.md",
+    "tokens": "design/tokens.md",
+    "tdd": "tdd/test-plan.md",
+    "screen_inventory": "ux/screen-inventory.md",
+    "ui_contract": "ux/ui-contract.md",
+    "handoff": "handoff/READY.md"
   }
 }
