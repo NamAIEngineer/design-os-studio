@@ -113,6 +113,9 @@ pub enum Action {
     Shortcuts,
     AboutDesignOS,
     OpenGithub,
+    OpenLibraries,
+    OpenAgents,
+    HelpAndAccount,
     /// Dev mode: marks the selected frames and sections Ready for dev.
     MarkReadyForDev,
     MarkCompleted,
@@ -233,6 +236,17 @@ pub fn run(app: &mut App, ctx: &Context, a: Action) {
         Action::Shortcuts => app.show_shortcuts(),
         Action::AboutDesignOS => app.show_about(),
         Action::OpenGithub => app.confirm_open_github(),
+        Action::OpenLibraries => app.open_libraries(),
+        Action::OpenAgents => {
+            app.ui.rail = Some(crate::app::RailItem::Agents);
+            app.ui.left_collapsed = false;
+            app.show_toast("AI Agents & NodeSpec Engine active (unlimited local quota)", false);
+        }
+        Action::HelpAndAccount => {
+            app.cmdk.open = true;
+            app.cmdk.query = "help".into();
+            app.cmdk.focus_requested = true;
+        }
         Action::MarkReadyForDev => {
             let sel = app.top_selection();
             app.dev_mark_ready(&sel);
@@ -467,6 +481,7 @@ fn main_nodes(app: &App) -> Vec<Node> {
     ];
     let help = vec![
         leaf("Command palette", "Ctrl+K", Action::OpenPalette),
+        leaf("Help & command search…", "Ctrl+K", Action::HelpAndAccount),
         leaf("Keyboard shortcuts", "", Action::Shortcuts).sep(),
         leaf("About design:os studio", "", Action::AboutDesignOS),
         leaf("design:os studio on GitHub", "", Action::OpenGithub),
@@ -490,8 +505,8 @@ fn main_nodes(app: &App) -> Vec<Node> {
                 leaf("Use GPU rendering", "", Action::ToggleGpu).on(app.canvas.gpu.active()).off(!app.canvas.gpu.available),
             ],
         ),
-        leaf("Libraries", "", Action::About).off(true).sep(),
-        leaf("AI balance", "", Action::About).off(true).sep(),
+        leaf("Libraries", "", Action::OpenLibraries).sep(),
+        leaf("AI balance", "", Action::OpenAgents).sep(),
         submenu("Help and account", help),
     ]
 }

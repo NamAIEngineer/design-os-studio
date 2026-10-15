@@ -56,7 +56,13 @@ pub fn show(app: &mut App, ui: &mut Ui, rect: Rect) {
         app.add_page();
     }
     let search = plus.translate(Vec2::new(-theme::PAGES_SEARCH_DX, 0.0));
-    widgets::icon_button(ui, search, "page-search", Icon::Search, false, "Search pages");
+    if widgets::icon_button(ui, search, "page-search", Icon::Search, app.find.open, "Search pages").clicked() {
+        if app.find.open {
+            app.close_find();
+        } else {
+            app.open_find();
+        }
+    }
     y += theme::PANEL_TITLE_ROW_HEIGHT;
 
     let n = app.doc.pages.len();
@@ -273,6 +279,9 @@ fn pages_list(app: &mut App, ui: &mut Ui, list: Rect) {
         }
     });
     scrollbar(ui, list, scroll, content_h);
+    if let Some(s) = super::take_scrollbar_drag(ui, list) {
+        app.layers.page_scroll = s;
+    }
     page_drag(app, ui, list, scroll);
     page_menu(app, ui);
 }
@@ -389,16 +398,29 @@ fn file_header(app: &mut App, ui: &mut Ui, inner: Rect, y: f32) {
             app.renaming_file = true;
             app.ui.menu = None;
         } else if hr.clicked() {
-            app.ui.menu = if app.ui.menu == Some(MenuKind::FileName) { None } else { Some(MenuKind::FileName) };
+            app.ui.menu = if app.ui.menu == Some(MenuKind::Main) { None } else { Some(MenuKind::Main) };
             app.ui.menu_anchor = Some(hit);
         }
     }
 
-    // Second line: save state for library files, "Save to library" when a library is attached, or "Team project" subtitle.
+    // Second line: save state for library files, "Save to library" when a library is attached, or "Drafts / Team project" subtitle.
     let sub_y = y + theme::LEFT_SUBLABEL_Y + 8.0;
     if app.lib_file.is_some() {
         let text = if app.autosave.pending() { "Saving\u{2026}" } else { "Team project" };
-        p.text(Pos2::new(x0, sub_y), Align2::LEFT_CENTER, text, theme::font_body(), theme::TEXT_SECONDARY);
+        let w = widgets::text_width(&p, text, &theme::font_body());
+        let sub_r = Rect::from_min_size(Pos2::new(x0 - 2.0, sub_y - 9.0), Vec2::new(w + 6.0, 18.0));
+        widgets::record(ui, "left-header-subtitle", sub_r);
+        let resp = ui.interact(sub_r, ui.id().with("left-header-subtitle"), Sense::click());
+        p.text(
+            Pos2::new(x0, sub_y),
+            Align2::LEFT_CENTER,
+            text,
+            theme::font_body(),
+            if resp.hovered() { theme::TEXT } else { theme::TEXT_SECONDARY },
+        );
+        if resp.on_hover_text("Return to Home / Drafts").clicked() {
+            app.go_home();
+        }
     } else if app.lib.is_some() {
         let label = "Save to library";
         let w = widgets::text_width(&p, label, &theme::font_body());
@@ -411,6 +433,20 @@ fn file_header(app: &mut App, ui: &mut Ui, inner: Rect, y: f32) {
             app.begin_save_to_library();
         }
     } else {
-        p.text(Pos2::new(x0, sub_y), Align2::LEFT_CENTER, "Team project", theme::font_body(), theme::TEXT_SECONDARY);
+        let text = "Drafts · Team project";
+        let w = widgets::text_width(&p, text, &theme::font_body());
+        let sub_r = Rect::from_min_size(Pos2::new(x0 - 2.0, sub_y - 9.0), Vec2::new(w + 6.0, 18.0));
+        widgets::record(ui, "left-header-subtitle", sub_r);
+        let resp = ui.interact(sub_r, ui.id().with("left-header-subtitle"), Sense::click());
+        p.text(
+            Pos2::new(x0, sub_y),
+            Align2::LEFT_CENTER,
+            text,
+            theme::font_body(),
+            if resp.hovered() { theme::TEXT } else { theme::TEXT_SECONDARY },
+        );
+        if resp.on_hover_text("Return to Home / Drafts").clicked() {
+            app.go_home();
+        }
     }
 }

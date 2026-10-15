@@ -155,9 +155,6 @@ pub fn show(app: &mut App, ui: &mut Ui, rect: Rect) {
                     app.ui.rail = Some(*item);
                     app.ui.left_collapsed = false;
                 }
-                if *item != RailItem::Assets {
-                    app.show_toast(format!("{label} panel is not available in this build"), false);
-                }
             }
         }
     }

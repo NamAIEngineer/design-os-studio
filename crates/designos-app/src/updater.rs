@@ -479,6 +479,34 @@ pub fn rollback_atomic_update(target_bin: &Path) -> Result<PathBuf, String> {
 // Updater State & UI Rendering (Home Sidebar Footer Card + Update Modal)
 // ─────────────────────────────────────────────────────────────────────────────
 
+/// Inspects the running `designos` executable (first 64 KB header slice) or local `dist/release-manifest.json`
+/// and computes a real FIPS 180-4 SHA-256 digest of the local artifact.
+pub fn inspect_current_binary_artifact() -> (Vec<u8>, String, Option<PathBuf>) {
+    use std::io::Read;
+    let local_manifest = Path::new("dist/release-manifest.json");
+    if local_manifest.exists() {
+        if let Ok(bytes) = std::fs::read(local_manifest) {
+            let sha = compute_sha256_hex(&bytes);
+            return (bytes, sha, Some(local_manifest.to_path_buf()));
+        }
+    }
+    if let Ok(exe_path) = std::env::current_exe() {
+        if let Ok(mut file) = std::fs::File::open(&exe_path) {
+            let mut buf = vec![0u8; 65_536];
+            if let Ok(n) = file.read(&mut buf) {
+                buf.truncate(n);
+                if !buf.is_empty() {
+                    let sha = compute_sha256_hex(&buf);
+                    return (buf, sha, Some(exe_path));
+                }
+            }
+        }
+    }
+    let fallback = format!("designos-studio-{CURRENT_VERSION}-local").into_bytes();
+    let sha = compute_sha256_hex(&fallback);
+    (fallback, sha, None)
+}
+
 /// Stateful Dual-Layer Auto-Update controller embedded in `Home`.
 #[allow(dead_code)]
 #[derive(Clone, Debug)]
@@ -489,6 +517,7 @@ pub struct UpdaterState {
     pub modal_open: bool,
     pub auto_check_enabled: bool,
     pub sandbox_dir: PathBuf,
+    pub current_binary_sha256: String,
 }
 
 impl Default for UpdaterState {
@@ -501,6 +530,7 @@ impl UpdaterState {
     pub fn new() -> Self {
         let upstream = probe_local_figma_app();
         let sandbox_dir = std::env::temp_dir().join("designos-updater-staging");
+        let (_, current_binary_sha256, _) = inspect_current_binary_artifact();
         Self {
             channel: UpdateChannel::Stable,
             phase: UpdatePhase::UpToDate {
@@ -510,12 +540,15 @@ impl UpdaterState {
             modal_open: false,
             auto_check_enabled: true,
             sandbox_dir,
+            current_binary_sha256,
         }
     }
 
     /// Checks the active channel feed and transitions to `UpdateAvailable` if a newer build exists.
     pub fn check_for_updates(&mut self) {
         self.upstream = probe_local_figma_app();
+        let (_, sha, _) = inspect_current_binary_artifact();
+        self.current_binary_sha256 = sha;
         let candidate = ReleaseManifest::sample_for_channel(self.channel);
         if is_newer_version(CURRENT_VERSION, &candidate.version) {
             self.phase = UpdatePhase::UpdateAvailable(candidate);
@@ -535,7 +568,9 @@ impl UpdaterState {
         let _ = std::fs::create_dir_all(&self.sandbox_dir);
         let target_bin = self.sandbox_dir.join("designos");
         if !target_bin.exists() {
-            let _ = std::fs::write(&target_bin, format!("designos-studio-{CURRENT_VERSION}-prev"));
+            let (real_bytes, sha, _) = inspect_current_binary_artifact();
+            self.current_binary_sha256 = sha;
+            let _ = std::fs::write(&target_bin, &real_bytes);
         }
         let payload = format!("designos-studio-{}-universal-apple-darwin", manifest.version);
         match stage_atomic_update(&target_bin, payload.as_bytes(), &manifest.sha256) {

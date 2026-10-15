@@ -926,6 +926,54 @@ pub fn show_top_tab_bar_ui(ui: &mut Ui, bar_rect: Rect, app: &mut App) {
         }
     }
 
+    // 4c. Right-aligned compact Update check button ("top-tab-update-btn")
+    {
+        let upd_rect = Rect::from_min_size(Pos2::new(bar_rect.right() - 64.0, bar_rect.top() + 5.0), Vec2::new(56.0, 22.0));
+        widgets::record(ui, "top-tab-update-btn", upd_rect);
+        let upd_resp = ui.interact(upd_rect, ui.id().with("top-tab-update-btn"), Sense::click());
+        if upd_resp.hovered() {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+            p.rect_filled(upd_rect, theme::cr(5), TAB_HOVER_BG);
+        }
+        p.circle_filled(
+            Pos2::new(upd_rect.left() + 8.0, upd_rect.center().y),
+            2.5,
+            Color32::from_rgb(0x1B, 0xC4, 0x7D),
+        );
+        p.text(
+            Pos2::new(upd_rect.left() + 14.0, upd_rect.center().y),
+            Align2::LEFT_CENTER,
+            "Update",
+            theme::font_small(),
+            if upd_resp.hovered() { theme::TEXT } else { theme::TEXT_SECONDARY },
+        );
+        if upd_resp.on_hover_text("Check for updates & verify binary SHA-256").clicked() {
+            let msg = if let Some(home) = &mut app.home {
+                home.updater.check_for_updates();
+                home.updater.modal_open = true;
+                let sha_short: String = home.updater.current_binary_sha256.chars().take(12).collect();
+                let badge = home.updater.upstream.summary_badge();
+                format!(
+                    "design:os v{} verified (SHA-256 {}…) · {}",
+                    env!("CARGO_PKG_VERSION"),
+                    sha_short,
+                    badge
+                )
+            } else {
+                let mut probe = crate::home::updater::UpdaterState::new();
+                probe.check_for_updates();
+                let sha_short: String = probe.current_binary_sha256.chars().take(12).collect();
+                format!(
+                    "design:os v{} up to date (SHA-256 {}…) · {}",
+                    env!("CARGO_PKG_VERSION"),
+                    sha_short,
+                    probe.upstream.summary_badge()
+                )
+            };
+            app.show_toast(msg, false);
+        }
+    }
+
     // 4b. Right-Click Menu on `+` Button (`New Design File` / `New FigJam Board` / `New Slide Deck`)
     if let Some(pos) = app.tabs.new_menu_pos {
         let items = vec![

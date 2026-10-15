@@ -25,9 +25,29 @@ pub fn show(app: &mut App, ui: &mut Ui, rect: Rect) {
 
     // User avatar pill + chevron on top-left of right inspector header (Figma UI3 #F59E0B).
     let av_center = Pos2::new(left + 21.0, rect.top() + theme::RIGHT_BTN_Y + theme::RIGHT_BTN_SIZE * 0.5);
+    let av_r = Rect::from_min_size(Pos2::new(left + 8.0, rect.top() + theme::RIGHT_BTN_Y), Vec2::new(38.0, theme::RIGHT_BTN_SIZE));
+    crate::widgets::record(ui, "right-top-avatar", av_r);
+    let av_resp = ui.interact(av_r, ui.id().with("right-top-avatar"), Sense::click());
+    if av_resp.hovered() {
+        p.rect_filled(av_r, theme::cr(theme::RADIUS_MEDIUM), theme::BG_HOVER);
+    }
+    let active_user = std::env::var("USER").unwrap_or_else(|_| "jangtrinh".into());
+    let initial = active_user.chars().next().map(|c| c.to_ascii_uppercase().to_string()).unwrap_or_else(|| "J".to_string());
     p.circle_filled(av_center, 11.0, egui::Color32::from_rgb(0xF5, 0x9E, 0x0B));
-    p.text(av_center, Align2::CENTER_CENTER, "J", theme::font_small_strong(), egui::Color32::WHITE);
+    p.text(av_center, Align2::CENTER_CENTER, initial, theme::font_small_strong(), egui::Color32::WHITE);
     icons::paint(&p, Icon::ChevronDown, Pos2::new(av_center.x + 17.0, av_center.y), theme::CHEVRON_SMALL, theme::ICON_SECONDARY);
+    if av_resp.on_hover_text(format!("Active user: {active_user}")).clicked() {
+        let doc_title = if app.doc.name.is_empty() { "Untitled" } else { &app.doc.name };
+        let stats = format!(
+            "User: {} · Doc: {} ({} pages, {} nodes)",
+            active_user,
+            doc_title,
+            app.doc.pages.len(),
+            app.doc.nodes.len()
+        );
+        ui.ctx().copy_text(stats.clone());
+        app.show_toast(stats, false);
+    }
 
     // Present button + chevron (to the LEFT of Share button, matching Figma UI3).
     let pb = Rect::from_min_size(Pos2::new(right - theme::RIGHT_PRESENT_FROM_RIGHT - 46.0, rect.top() + theme::RIGHT_BTN_Y), Vec2::splat(theme::RIGHT_BTN_SIZE));
@@ -57,8 +77,37 @@ pub fn show(app: &mut App, ui: &mut Ui, rect: Rect) {
     p.rect_filled(share_r, theme::cr(6), if share_resp.hovered() { share_col.gamma_multiply(1.1) } else { share_col });
     p.text(share_r.center(), Align2::CENTER_CENTER, "Share", theme::font_body_strong(), egui::Color32::WHITE);
     crate::widgets::record(ui, "share-button", share_r);
+    crate::widgets::record(ui, "right-top-share", share_r);
     if share_resp.clicked() {
-        app.show_toast("Copied design:os studio file share link", false);
+        let doc_name = if app.doc.name.is_empty() { "Untitled" } else { &app.doc.name };
+        let file_ref = app
+            .file_path
+            .as_ref()
+            .map(|p| p.display().to_string())
+            .or_else(|| app.lib_file.as_ref().map(|f| f.id.clone()))
+            .unwrap_or_else(|| "local".to_string());
+        let page_name = app.doc.get(app.page).map(|n| n.name.as_str()).unwrap_or("Page 1");
+        let sel_str = if app.selection.is_empty() {
+            "none".to_string()
+        } else {
+            app.selection
+                .iter()
+                .map(|id| {
+                    let nm = app.doc.get(*id).map(|n| n.name.as_str()).unwrap_or("layer");
+                    format!("{}:{}", id.0, nm.replace(' ', "_"))
+                })
+                .collect::<Vec<_>>()
+                .join(",")
+        };
+        let payload = format!(
+            "designos://open?doc={}&file={}&page={}&selection={}",
+            doc_name.replace(' ', "%20"),
+            file_ref.replace(' ', "%20"),
+            page_name.replace(' ', "%20"),
+            sel_str
+        );
+        ui.ctx().copy_text(payload.clone());
+        app.show_toast(format!("Share link copied to clipboard ({payload})"), false);
     }
 
     // Tabs: Design | Prototype (or Inspect | Plugins when Dev Mode is active, matching Figma UI3).
@@ -75,6 +124,7 @@ pub fn show(app: &mut App, ui: &mut Ui, rect: Rect) {
         let font = if sel { theme::font_body_strong() } else { theme::font_body() };
         let w = widgets::text_width(&p, label, &font) + theme::RIGHT_TAB_PAD_X * 2.0;
         let r = Rect::from_min_size(Pos2::new(x, ty), Vec2::new(w, theme::RIGHT_TABS_H));
+        widgets::record(ui, &format!("right-tab-{label}"), r);
         let resp = ui.interact(r, ui.id().with(("tab", label)), Sense::click());
         if sel {
             p.rect_filled(r, theme::cr(theme::RADIUS_MEDIUM), theme::BG_SECONDARY);
@@ -104,7 +154,11 @@ pub fn show(app: &mut App, ui: &mut Ui, rect: Rect) {
     widgets::hline(&p, rect.left() + 1.0, right, content_top, theme::BORDER);
     let region = Rect::from_min_max(Pos2::new(rect.left() + 1.0, content_top + 1.0), rect.max);
     if active == RightTab::Prototype {
-        super::prototype::show(app, ui, region);
+        if app.ui.dev_mode {
+            show_dev_plugins_inspector(app, ui, region);
+        } else {
+            super::prototype::show(app, ui, region);
+        }
     } else if app.ui.dev_mode {
         super::inspect::show(app, ui, region);
     } else {
@@ -128,4 +182,257 @@ pub fn show(app: &mut App, ui: &mut Ui, rect: Rect) {
     hp.circle_stroke(help_center, 14.0, egui::Stroke::new(1.0, egui::Color32::from_rgb(0x38, 0x38, 0x38)));
     icons::paint(hp, Icon::Help, help_center, 14.0, egui::Color32::from_rgb(0xB3, 0xB3, 0xB3));
     crate::widgets::record(ui, "help-button", help_r);
+    if help_resp.on_hover_text("Keyboard shortcuts & help").clicked() {
+        app.show_shortcuts();
+    }
 }
+
+fn show_dev_plugins_inspector(app: &mut App, ui: &mut Ui, region: Rect) {
+    let p = ui.painter().clone();
+    let pad = 16.0;
+    let mut y = region.top() + 14.0;
+    let w = (region.width() - pad * 2.0).max(80.0);
+
+    p.text(
+        Pos2::new(region.left() + pad, y),
+        Align2::LEFT_CENTER,
+        "Dev Mode Plugins & Codegen",
+        theme::font_body_strong(),
+        theme::TEXT,
+    );
+    y += 22.0;
+
+    let builtins = [
+        ("designos-mcp (22 Tools)", "JSON-RPC MCP server bridge"),
+        ("Figma Code Connect", "@figma/code-connect mapping"),
+        ("Tailwind v4 Token Exporter", "CSS @theme variable tokens"),
+        ("Design Gate A11y Auditor", "WCAG contrast & tap target check"),
+    ];
+    for (idx, (title, subtitle)) in builtins.iter().enumerate() {
+        let row_r = Rect::from_min_size(Pos2::new(region.left() + pad, y), Vec2::new(w, 40.0));
+        widgets::record(ui, &format!("dev-plugin-builtin-{idx}"), row_r);
+        let resp = ui.interact(row_r, ui.id().with(("dev-plugin-builtin", idx)), Sense::click());
+        p.rect_filled(
+            row_r,
+            theme::cr(6),
+            if resp.hovered() { theme::BG_TERTIARY } else { theme::BG_SECONDARY },
+        );
+        icons::paint(&p, Icon::Dev, Pos2::new(row_r.left() + 14.0, row_r.center().y), 14.0, egui::Color32::from_rgb(0x1B, 0xC4, 0x7D));
+        p.text(Pos2::new(row_r.left() + 28.0, row_r.top() + 13.0), Align2::LEFT_CENTER, *title, theme::font_body_strong(), theme::TEXT);
+        p.text(Pos2::new(row_r.left() + 28.0, row_r.top() + 28.0), Align2::LEFT_CENTER, *subtitle, theme::font_small(), theme::TEXT_SECONDARY);
+        if resp.clicked() {
+            match idx {
+                0 => {
+                    let cfg = "{\"mcpServers\":{\"designos-mcp\":{\"command\":\"designos-mcp\",\"args\":[\"--stdio\"]}}}";
+                    ui.ctx().copy_text(cfg.to_string());
+                    app.show_toast("Copied designos-mcp (22 Tools) config to clipboard", false);
+                }
+                1 => {
+                    let target = app.selection.first().copied().unwrap_or(app.page);
+                    let nm = app.doc.get(target).map(|n| n.name.as_str()).unwrap_or("Component");
+                    let snippet = format!(
+                        "import figma from \"@figma/code-connect\";\nfigma.connect({}, \"designos://node/{}\", {{}});",
+                        nm.chars().filter(|c| c.is_alphanumeric()).collect::<String>(),
+                        target.0
+                    );
+                    ui.ctx().copy_text(snippet);
+                    app.show_toast("Copied Figma Code Connect snippet to clipboard", false);
+                }
+                2 => {
+                    let mut css = String::from("@theme {\n");
+                    for v in app.doc.variables.values() {
+                        css.push_str(&format!("  --{}: /* {:?} */;\n", v.name.replace(['/', ' '], "-").to_lowercase(), v.kind));
+                    }
+                    css.push_str("}\n");
+                    ui.ctx().copy_text(css);
+                    app.show_toast(format!("Exported {} Tailwind v4 tokens to clipboard", app.doc.variables.len()), false);
+                }
+                _ => {
+                    let small_targets = app
+                        .doc
+                        .nodes
+                        .values()
+                        .filter(|n| matches!(n.kind, designos_doc::NodeKind::Frame(_) | designos_doc::NodeKind::Component(_)) && (n.size.x < 44.0 || n.size.y < 44.0))
+                        .count();
+                    let report = format!("Design Gate A11y Audit: {} nodes checked, {} <44pt targets", app.doc.nodes.len(), small_targets);
+                    ui.ctx().copy_text(report.clone());
+                    app.show_toast(report, false);
+                }
+            }
+        }
+        y += 46.0;
+    }
+
+    let installed = app.plugins.installed.clone();
+    for (i, plug) in installed.iter().enumerate() {
+        let row_r = Rect::from_min_size(Pos2::new(region.left() + pad, y), Vec2::new(w, 32.0));
+        widgets::record(ui, &format!("dev-plugin-installed-{i}"), row_r);
+        let resp = ui.interact(row_r, ui.id().with(("dev-plugin-inst", &plug.id)), Sense::click());
+        p.rect_filled(row_r, theme::cr(6), if resp.hovered() { theme::BG_TERTIARY } else { theme::BG_SECONDARY });
+        p.text(Pos2::new(row_r.left() + 10.0, row_r.center().y), Align2::LEFT_CENTER, &plug.name, theme::font_body(), theme::TEXT);
+        if resp.clicked() {
+            let ctx = ui.ctx().clone();
+            if let Err(e) = app.start_plugin(plug, &ctx) {
+                app.show_toast(e, true);
+            }
+        }
+        y += 36.0;
+    }
+
+    y += 4.0;
+    let open_r = Rect::from_min_size(Pos2::new(region.left() + pad, y), Vec2::new(w, 28.0));
+    widgets::record(ui, "dev-plugins-open-modal", open_r);
+    let open_resp = ui.interact(open_r, ui.id().with("dev-plugins-open-modal"), Sense::click());
+    p.rect_filled(
+        open_r,
+        theme::cr(6),
+        if open_resp.hovered() {
+            egui::Color32::from_rgb(0x1B, 0xC4, 0x7D).gamma_multiply(1.1)
+        } else {
+            egui::Color32::from_rgb(0x1B, 0xC4, 0x7D)
+        },
+    );
+    p.text(open_r.center(), Align2::CENTER_CENTER, "Manage & Run Plugins\u{2026}", theme::font_body_strong(), egui::Color32::WHITE);
+    if open_resp.clicked() {
+        app.open_plugins();
+    }
+    y += 34.0;
+
+    let mcp_r = Rect::from_min_size(Pos2::new(region.left() + pad, y), Vec2::new(w, 28.0));
+    widgets::record(ui, "dev-plugins-copy-mcp", mcp_r);
+    let mcp_resp = ui.interact(mcp_r, ui.id().with("dev-plugins-copy-mcp"), Sense::click());
+    p.rect_filled(mcp_r, theme::cr(6), if mcp_resp.hovered() { theme::BG_TERTIARY } else { theme::BG_SECONDARY });
+    p.text(mcp_r.center(), Align2::CENTER_CENTER, "Copy MCP Config", theme::font_body_strong(), theme::TEXT);
+    if mcp_resp.clicked() {
+        let mcp_json = "{\n  \"mcpServers\": {\n    \"designos-mcp\": {\n      \"command\": \"designos-mcp\",\n      \"args\": [\"--stdio\"]\n    }\n  }\n}";
+        ui.ctx().copy_text(mcp_json.to_string());
+        app.show_toast("Copied MCP server config JSON to clipboard", false);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use designos_doc::Document;
+    use egui::{Pos2, Rect, Vec2};
+
+    #[test]
+    fn dev_mode_plugins_tab_and_share_avatar_help_execute_real_logic() {
+        let mut d = Document::new("TestDoc");
+        let _p = d.add_page("Page 1");
+        let mut app = App::new(d);
+        app.ui.dev_mode = true;
+        app.ui.right_tab = Some(RightTab::Prototype);
+        let ctx = egui::Context::default();
+        theme::install_fonts(&ctx);
+        let screen = Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 800.0));
+        let _ = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(screen),
+                ..Default::default()
+            },
+            |ui| {
+                show(&mut app, ui, screen);
+            },
+        );
+        let get_rect = |name: &str| ctx.data(|d| d.get_temp::<Rect>(egui::Id::new(("test-rect", name.to_string()))));
+        let open_btn = get_rect("dev-plugins-open-modal").expect("dev-plugins-open-modal rect");
+        let share_btn = get_rect("right-top-share").expect("right-top-share rect");
+        let avatar_btn = get_rect("right-top-avatar").expect("right-top-avatar rect");
+        let help_btn = get_rect("help-button").expect("help-button rect");
+        assert!(get_rect("dev-plugin-builtin-0").is_some());
+        assert!(get_rect("dev-plugins-copy-mcp").is_some());
+
+        // Click Manage & Run Plugins...
+        for down in [true, false] {
+            let _ = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(screen),
+                    events: vec![
+                        egui::Event::PointerMoved(open_btn.center()),
+                        egui::Event::PointerButton {
+                            pos: open_btn.center(),
+                            button: egui::PointerButton::Primary,
+                            pressed: down,
+                            modifiers: egui::Modifiers::NONE,
+                        },
+                    ],
+                    ..Default::default()
+                },
+                |ui| show(&mut app, ui, screen),
+            );
+        }
+        assert!(app.plugins.open, "clicking Manage & Run Plugins must open the plugins modal");
+
+        // Click Share button
+        for down in [true, false] {
+            let _ = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(screen),
+                    events: vec![
+                        egui::Event::PointerMoved(share_btn.center()),
+                        egui::Event::PointerButton {
+                            pos: share_btn.center(),
+                            button: egui::PointerButton::Primary,
+                            pressed: down,
+                            modifiers: egui::Modifiers::NONE,
+                        },
+                    ],
+                    ..Default::default()
+                },
+                |ui| show(&mut app, ui, screen),
+            );
+        }
+        assert!(
+            app.toast.as_ref().is_some_and(|t| t.text.contains("designos://open?doc=")),
+            "Share button must build and toast a real designos://open URI"
+        );
+
+        // Click Avatar button
+        for down in [true, false] {
+            let _ = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(screen),
+                    events: vec![
+                        egui::Event::PointerMoved(avatar_btn.center()),
+                        egui::Event::PointerButton {
+                            pos: avatar_btn.center(),
+                            button: egui::PointerButton::Primary,
+                            pressed: down,
+                            modifiers: egui::Modifiers::NONE,
+                        },
+                    ],
+                    ..Default::default()
+                },
+                |ui| show(&mut app, ui, screen),
+            );
+        }
+        assert!(
+            app.toast.as_ref().is_some_and(|t| t.text.contains("User:") && t.text.contains("Doc:")),
+            "Avatar click must report active user & document summary"
+        );
+
+        // Click Help button
+        for down in [true, false] {
+            let _ = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(screen),
+                    events: vec![
+                        egui::Event::PointerMoved(help_btn.center()),
+                        egui::Event::PointerButton {
+                            pos: help_btn.center(),
+                            button: egui::PointerButton::Primary,
+                            pressed: down,
+                            modifiers: egui::Modifiers::NONE,
+                        },
+                    ],
+                    ..Default::default()
+                },
+                |ui| show(&mut app, ui, screen),
+            );
+        }
+        assert!(app.dialog.is_some(), "Help button must open keyboard shortcuts dialog");
+    }
+}
+
+

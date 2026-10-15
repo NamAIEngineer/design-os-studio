@@ -110,6 +110,20 @@ def main() -> int:
     if not skills:
         issues.append("missing skills/<slug>/SKILL.md")
 
+    gate_script = ROOT / "scripts" / "zero_fake_ui_gate.py"
+    if not gate_script.is_file():
+        issues.append("missing scripts/zero_fake_ui_gate.py")
+    else:
+        import subprocess
+        proc = subprocess.run(
+            [sys.executable, str(gate_script), "--json"],
+            cwd=str(ROOT),
+            capture_output=True,
+            text=True,
+        )
+        if proc.returncode != 0:
+            issues.append(f"zero_fake_ui_gate.py failed (exit {proc.returncode}): {proc.stdout or proc.stderr}")
+
     if issues:
         for item in issues:
             print(f"FAIL: {item}", file=sys.stderr)

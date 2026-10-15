@@ -242,6 +242,9 @@ pub fn show(app: &mut App, ui: &mut Ui, region: Rect) {
     });
     app.props.content_h = end;
     scrollbar(ui, region, scroll, end);
+    if let Some(s) = super::take_scrollbar_drag(ui, region) {
+        app.props.scroll = s;
+    }
     picker_popup(app, ui, region);
     super::effects::popover_ui(app, ui, region);
 }
@@ -596,6 +599,7 @@ fn selection_ui(app: &mut App, ui: &mut Ui, pane: &mut Pane, sel: &[NodeId]) {
             26.0,
         );
         widgets::record(ui, "copy-to-figma-slides-btn", slides_r);
+        widgets::record(ui, "copy-to-slides", slides_r);
         let slides_resp = ui.interact(slides_r, ui.id().with("copy-to-figma-slides"), Sense::click());
         let slides_bg = if slides_resp.hovered() {
             Color32::from_rgb(0x38, 0x38, 0x38)
@@ -617,6 +621,9 @@ fn selection_ui(app: &mut App, ui: &mut Ui, pane: &mut Pane, sel: &[NodeId]) {
             theme::TEXT,
         );
         if slides_resp.on_hover_text("Copy selected frame to Figma Slides").clicked() {
+            if let Some(s) = app.copy_selection() {
+                ui.ctx().copy_text(s);
+            }
             app.show_toast("Copied frame to Figma Slides clipboard", false);
         }
         pane.y += 32.0;
@@ -725,6 +732,15 @@ fn selection_ui(app: &mut App, ui: &mut Ui, pane: &mut Pane, sel: &[NodeId]) {
     if let NodeKind::Text(t) = &n0.kind {
         section_sep(ui, pane, false);
         title(ui, pane, "Typography", None, false);
+        let var_pill = pane.rect(theme::SECTION_TRAILING_X, -26.0, 24.0, 20.0);
+        widgets::record(ui, "typo-var-pill", var_pill);
+        if ui
+            .interact(var_pill, ui.id().with("typo-var-pill"), Sense::click())
+            .on_hover_text("Apply typography variable or style")
+            .clicked()
+        {
+            app.open_variables();
+        }
         super::typography::section(app, ui, pane, sel, t);
         pane.y += 4.0;
     }
@@ -1397,6 +1413,10 @@ pub(super) fn picker_popup(app: &mut App, ui: &mut Ui, region: Rect) {
         out = o;
     });
     let mut changed = out.changed;
+    if let Some((key, bytes)) = out.generated_image {
+        app.doc.images.insert(key, bytes);
+        changed = true;
+    }
     if out.eyedrop {
         pk.eyedrop = true;
     }

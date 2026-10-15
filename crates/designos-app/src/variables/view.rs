@@ -884,22 +884,37 @@ fn table(app: &mut App, ui: &mut Ui, g: &Geom, fr: &mut Frame, coll: &VariableCo
 
     // ---- scrollbar strip (vertical thumb lives at the right edge of the rows)
     crate::panels::scrollbar(ui, rows_rect, scroll, content_h);
-    hscrollbar(ui, strip, sx, drawn_w, n, right - x0, g.floating);
+    if let Some(s) = crate::panels::take_scrollbar_drag(ui, rows_rect) {
+        app.vars.scroll = s;
+    }
+    hscrollbar(ui, strip, &mut app.vars.scroll_x, drawn_w, n, right - x0, g.floating);
     let _ = p;
 }
 
-fn hscrollbar(ui: &mut Ui, strip: Rect, sx: f32, drawn_w: f32, modes: usize, view_w: f32, floating: bool) {
-    let p = ui.painter();
-    p.rect_filled(strip, 0.0, theme::BG);
-    // nominal content width: Figma's 280px mode columns plus a trailing gutter
+fn hscrollbar(ui: &mut Ui, strip: Rect, sx: &mut f32, drawn_w: f32, modes: usize, view_w: f32, floating: bool) {
     let nominal = (theme::VAR_NAME_COL + 1.0) + modes as f32 * (theme::VAR_MODE_MAX + 1.0) + theme::VAR_ADD_COL + if floating { 0.0 } else { 40.0 };
     let content = nominal.max(drawn_w);
     let track = Rect::from_min_max(strip.min + Vec2::new(10.0, 3.0), Pos2::new(strip.right() - 10.0, strip.bottom() - 1.0));
+    widgets::record(ui, "vars-hscrollbar", track);
     let ratio = (view_w / content).clamp(0.1, 1.0);
     let thumb_w = track.width() * ratio;
     let max_sx = (drawn_w - view_w).max(0.0);
-    let t = if max_sx > 0.0 { sx / max_sx } else { 0.0 };
+    let resp = ui.interact(
+        track,
+        ui.id().with(("scrollbar", track.min.x as i32, track.min.y as i32)),
+        Sense::click_and_drag(),
+    );
+    if (resp.clicked() || resp.dragged()) && max_sx > 0.0 {
+        if let Some(pos) = resp.interact_pointer_pos() {
+            let denom = (track.width() - thumb_w).max(1.0);
+            let new_t = ((pos.x - track.min.x - thumb_w * 0.5) / denom).clamp(0.0, 1.0);
+            *sx = new_t * max_sx;
+        }
+    }
+    let t = if max_sx > 0.0 { (*sx / max_sx).clamp(0.0, 1.0) } else { 0.0 };
     let tl = track.left() + (track.width() - thumb_w) * t;
+    let p = ui.painter();
+    p.rect_filled(strip, 0.0, theme::BG);
     p.rect_filled(Rect::from_min_size(Pos2::new(tl, track.top()), Vec2::new(thumb_w, track.height())), theme::cr(3), theme::VAR_SCROLL_THUMB);
     for (x, dir) in [(strip.left() + 3.5, -1.0f32), (strip.right() - 3.5, 1.0)] {
         let c = Pos2::new(x, strip.center().y + 1.0);

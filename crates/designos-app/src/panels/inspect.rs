@@ -291,8 +291,9 @@ pub fn show(app: &mut App, ui: &mut Ui, region: Rect) {
         body(app, ui, &mut c, id, sel.len());
         c.y + 24.0
     });
-    ui.ctx().data_mut(|d| d.insert_temp(state_id, (scroll, end)));
     scrollbar(ui, region, scroll, end);
+    let final_scroll = super::take_scrollbar_drag(ui, region).unwrap_or(scroll);
+    ui.ctx().data_mut(|d| d.insert_temp(state_id, (final_scroll, end)));
 }
 
 fn body(app: &mut App, ui: &mut Ui, c: &mut Cur, id: NodeId, count: usize) {
@@ -303,9 +304,44 @@ fn body(app: &mut App, ui: &mut Ui, c: &mut Cur, id: NodeId, count: usize) {
     let hdr = c.rect(PAD, 0.0, c.w - 2.0 * PAD, 24.0);
     let name = elide(ui.painter(), &n.name, &theme::font_large_strong(), (hdr.width() - 68.0).max(40.0));
     ui.painter().text(Pos2::new(hdr.left(), hdr.center().y), Align2::LEFT_CENTER, name, theme::font_large_strong(), theme::TEXT);
-    icons::paint(ui.painter(), Icon::Connector, Pos2::new(hdr.right() - 48.0, hdr.center().y), 13.0, theme::ICON_SECONDARY);
-    icons::paint(ui.painter(), Icon::Dev, Pos2::new(hdr.right() - 26.0, hdr.center().y), 13.0, theme::ICON_SECONDARY);
-    ui.painter().text(Pos2::new(hdr.right() - 6.0, hdr.center().y), Align2::CENTER_CENTER, "•••", theme::font_small_strong(), theme::ICON_SECONDARY);
+
+    let link_r = Rect::from_center_size(Pos2::new(hdr.right() - 48.0, hdr.center().y), Vec2::splat(20.0));
+    widgets::record(ui, "dev-inspect-link", link_r);
+    let link_resp = ui.interact(link_r, ui.id().with("dev-inspect-link"), Sense::click());
+    icons::paint(ui.painter(), Icon::Connector, link_r.center(), 13.0, if link_resp.hovered() { Color32::WHITE } else { theme::ICON_SECONDARY });
+    if link_resp.on_hover_text("Copy node link").clicked() {
+        copy(app, ui, format!("designos://open?node={}", id.0), "node link");
+    }
+
+    let code_r = Rect::from_center_size(Pos2::new(hdr.right() - 26.0, hdr.center().y), Vec2::splat(20.0));
+    widgets::record(ui, "dev-inspect-code", code_r);
+    let code_resp = ui.interact(code_r, ui.id().with("dev-inspect-code"), Sense::click());
+    icons::paint(ui.painter(), Icon::Dev, code_r.center(), 13.0, if code_resp.hovered() { Color32::WHITE } else { theme::ICON_SECONDARY });
+    if code_resp.on_hover_text("Copy active language snippet").clicked() {
+        let snippet = app.dev.lang.generate(&app.doc, id, app.dev.react_tailwind);
+        copy(app, ui, snippet, app.dev.lang.label());
+    }
+
+    let more_r = Rect::from_center_size(Pos2::new(hdr.right() - 6.0, hdr.center().y), Vec2::splat(20.0));
+    widgets::record(ui, "dev-inspect-more", more_r);
+    let more_resp = ui.interact(more_r, ui.id().with("dev-inspect-more"), Sense::click());
+    ui.painter().text(
+        more_r.center(),
+        Align2::CENTER_CENTER,
+        "•••",
+        theme::font_small_strong(),
+        if more_resp.hovered() { Color32::WHITE } else { theme::ICON_SECONDARY },
+    );
+    if more_resp.on_hover_text("Copy full multi-language code bundle (CSS + React + SwiftUI + Compose)").clicked() {
+        let bundle = format!(
+            "/* === CSS === */\n{}\n\n// === React ===\n{}\n\n// === SwiftUI ===\n{}\n\n// === Compose ===\n{}",
+            crate::dev::Language::Css.generate(&app.doc, id, false),
+            crate::dev::Language::React.generate(&app.doc, id, app.dev.react_tailwind),
+            crate::dev::Language::SwiftUi.generate(&app.doc, id, false),
+            crate::dev::Language::Compose.generate(&app.doc, id, false),
+        );
+        copy(app, ui, bundle, "multi-language code bundle");
+    }
     c.y += 24.0;
     let sub = if count > 1 { format!("{} · {} layers selected, showing the first", kind_label(&n.kind), count) } else { kind_label(&n.kind).to_string() };
     let sub_r = c.rect(PAD, 0.0, c.w - 2.0 * PAD, 18.0);
@@ -331,11 +367,22 @@ fn body(app: &mut App, ui: &mut Ui, c: &mut Cur, id: NodeId, count: usize) {
     widgets::hline(ui.painter(), c.x0, c.x0 + c.w, c.oy + c.y, theme::BORDER);
     c.y += 1.0;
     let mcp_hdr = c.rect(PAD, 0.0, c.w - 2.0 * PAD, theme::SECTION_TITLE_HEIGHT);
+    widgets::record(ui, "dev-mcp-btn", mcp_hdr);
+    let mcp_resp = ui.interact(mcp_hdr, ui.id().with("dev-mcp-btn"), Sense::click());
     icons::paint(ui.painter(), Icon::ChevronDown, Pos2::new(mcp_hdr.left() + 5.0, mcp_hdr.center().y), theme::CHEVRON_SMALL, theme::ICON_SECONDARY);
     ui.painter().text(Pos2::new(mcp_hdr.left() + 16.0, mcp_hdr.center().y), Align2::LEFT_CENTER, "MCP", theme::font_body_strong(), Color32::WHITE);
     icons::paint(ui.painter(), Icon::Help, Pos2::new(mcp_hdr.right() - 44.0, mcp_hdr.center().y), 13.0, theme::ICON_SECONDARY);
     icons::paint(ui.painter(), Icon::StrokeSettings, Pos2::new(mcp_hdr.right() - 24.0, mcp_hdr.center().y), 13.0, theme::ICON_SECONDARY);
     icons::paint(ui.painter(), Icon::Plus, Pos2::new(mcp_hdr.right() - 4.0, mcp_hdr.center().y), 13.0, theme::ICON_SECONDARY);
+    if mcp_resp.on_hover_text("Copy MCP JSON-RPC payload & send to Agent Terminal").clicked() {
+        let payload = format!(
+            "{{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{{\"name\":\"designos_get_node\",\"arguments\":{{\"node_id\":{},\"name\":{:?}}}}}}}",
+            id.0, n.name
+        );
+        ui.ctx().copy_text(payload);
+        let _ = crate::terminal::export_selection_and_comments_to_pty(&mut app.terminal, &app.doc, app.page, &app.selection, app.file_path.as_deref());
+        app.show_toast("Copied MCP JSON-RPC payload to clipboard", false);
+    }
     c.y += theme::SECTION_TITLE_HEIGHT - 6.0;
 
     let sel_det_r = c.rect(PAD, 0.0, c.w - 2.0 * PAD, 20.0);
@@ -382,15 +429,55 @@ fn body(app: &mut App, ui: &mut Ui, c: &mut Cur, id: NodeId, count: usize) {
     }
     c.y += 34.0;
 
-    // Section B: `Code Connect` (Figma UI3 1:1 section with `Not started` pill + description).
+    // Section B: `Code Connect` (Figma UI3 1:1 section with status pill + snippet action).
     widgets::hline(ui.painter(), c.x0, c.x0 + c.w, c.oy + c.y, theme::BORDER);
     c.y += 1.0;
     let cc_hdr = c.rect(PAD, 0.0, c.w - 2.0 * PAD, theme::SECTION_TITLE_HEIGHT);
+    widgets::record(ui, "dev-code-connect", cc_hdr);
+    let cc_resp = ui.interact(cc_hdr, ui.id().with("dev-code-connect"), Sense::click());
     ui.painter().text(Pos2::new(cc_hdr.left(), cc_hdr.center().y), Align2::LEFT_CENTER, "Code Connect", theme::font_body_strong(), Color32::WHITE);
-    let pill_w = 64.0;
+    let is_connected = n.dev.annotations.iter().any(|a| a.text.contains("Code Connect:"));
+    let pill_w = if is_connected { 68.0 } else { 64.0 };
     let pill_r = Rect::from_min_size(Pos2::new(cc_hdr.right() - pill_w, cc_hdr.center().y - 9.0), Vec2::new(pill_w, 18.0));
-    ui.painter().rect_filled(pill_r, theme::cr(4), Color32::from_rgb(0x38, 0x38, 0x38));
-    ui.painter().text(pill_r.center(), Align2::CENTER_CENTER, "Not started", theme::font_small(), Color32::from_rgb(0xB3, 0xB3, 0xB3));
+    let pill_bg = if is_connected {
+        Color32::from_rgb(0x16, 0x4E, 0x33)
+    } else if cc_resp.hovered() {
+        Color32::from_rgb(0x45, 0x45, 0x45)
+    } else {
+        Color32::from_rgb(0x38, 0x38, 0x38)
+    };
+    ui.painter().rect_filled(pill_r, theme::cr(4), pill_bg);
+    ui.painter().text(
+        pill_r.center(),
+        Align2::CENTER_CENTER,
+        if is_connected { "Connected" } else { "Not started" },
+        theme::font_small(),
+        if is_connected { Color32::from_rgb(0x4A, 0xDE, 0x80) } else { Color32::from_rgb(0xB3, 0xB3, 0xB3) },
+    );
+    if cc_resp.on_hover_text("Click to generate & copy @figma/code-connect snippet").clicked() {
+        let comp_ident: String = n
+            .name
+            .chars()
+            .filter(|ch| ch.is_alphanumeric())
+            .collect::<String>();
+        let comp_ident = if comp_ident.is_empty() { format!("Node{}", id.0) } else { comp_ident };
+        let snippet = format!(
+            "import figma from \"@figma/code-connect\";\nimport {{ {comp_ident} }} from \"./{comp_ident}\";\n\nfigma.connect({comp_ident}, \"designos://node/{}\", {{\n  example: () => <{comp_ident} />,\n}});\n",
+            id.0
+        );
+        ui.ctx().copy_text(snippet);
+        let note = format!("Code Connect: <{comp_ident} />");
+        app.dev_edit(id, |d| {
+            if !d.annotations.iter().any(|a| a.text == note) {
+                d.annotations.push(Annotation {
+                    text: note,
+                    properties: vec!["Width".into(), "Height".into()],
+                    category: None,
+                });
+            }
+        });
+        app.show_toast("Copied @figma/code-connect snippet & attached mapping", false);
+    }
     c.y += theme::SECTION_TITLE_HEIGHT - 6.0;
 
     let cc_desc = "Publish components to a library, then you can connect them to your codebase with Code Connect. Learn more";
@@ -421,6 +508,28 @@ fn body(app: &mut App, ui: &mut Ui, c: &mut Cur, id: NodeId, count: usize) {
     let lp_hdr = c.rect(PAD, 0.0, c.w - 2.0 * PAD, theme::SECTION_TITLE_HEIGHT);
     icons::paint(ui.painter(), Icon::ChevronDown, Pos2::new(lp_hdr.left() + 5.0, lp_hdr.center().y), theme::CHEVRON_SMALL, theme::ICON_SECONDARY);
     ui.painter().text(Pos2::new(lp_hdr.left() + 16.0, lp_hdr.center().y), Align2::LEFT_CENTER, "Layer properties", theme::font_body_strong(), Color32::WHITE);
+    let redline_r = Rect::from_min_size(Pos2::new(lp_hdr.right() - 88.0, lp_hdr.center().y - 10.0), Vec2::new(88.0, 20.0));
+    widgets::record(ui, "dev-add-redlines", redline_r);
+    if small_button(ui, redline_r, "dev-add-redlines", "+ Add redlines") {
+        app.dev.show_redlines = true;
+        let spec_note = format!(
+            "Redlines: {}×{}px · ({}, {})",
+            fmt_num(n.size.x),
+            fmt_num(n.size.y),
+            fmt_num(n.transform.tx),
+            fmt_num(n.transform.ty)
+        );
+        app.dev_edit(id, |d| {
+            if !d.annotations.iter().any(|a| a.text == spec_note) {
+                d.annotations.push(Annotation {
+                    text: spec_note,
+                    properties: vec!["Width".into(), "Height".into()],
+                    category: None,
+                });
+            }
+        });
+        app.show_toast("Added measurement redline annotation to node", false);
+    }
     c.y += theme::SECTION_TITLE_HEIGHT - 8.0;
     kv(ui, app, c, "Width", &format!("{}px", fmt_num(n.size.x)));
     kv(ui, app, c, "Height", &format!("{}px", fmt_num(n.size.y)));
@@ -500,13 +609,69 @@ fn body(app: &mut App, ui: &mut Ui, c: &mut Cur, id: NodeId, count: usize) {
     // Typography.
     if let NodeKind::Text(t) = &n.kind {
         section_title(ui, c, "Typography");
+        let tier = if t.style.font_size >= 32.0 {
+            "Display"
+        } else if t.style.font_size >= 20.0 {
+            "Heading"
+        } else if t.style.font_size >= 13.0 {
+            "Body"
+        } else {
+            "Caption"
+        };
+        let wt = if t.style.font_weight >= 700 {
+            "Bold"
+        } else if t.style.font_weight >= 600 {
+            "SemiBold"
+        } else if t.style.font_weight >= 500 {
+            "Medium"
+        } else {
+            "Regular"
+        };
+        let style_name = format!("{tier}/{wt}");
+        let style_r = c.rect(PAD, 0.0, c.w - 2.0 * PAD, ROW_H);
+        widgets::record(ui, "dev-typography-style", style_r);
+        let style_resp = ui.interact(style_r, ui.id().with("dev-typography-style"), Sense::click());
+        if style_resp.hovered() {
+            ui.painter().rect_filled(style_r.expand2(Vec2::new(8.0, 0.0)), theme::cr(theme::RADIUS_MEDIUM), theme::BG_SECONDARY);
+        }
+        ui.painter().text(Pos2::new(style_r.left(), style_r.center().y), Align2::LEFT_CENTER, "Style", theme::font_body(), theme::TEXT_SECONDARY);
+        ui.painter().text(Pos2::new(style_r.left() + 100.0, style_r.center().y), Align2::LEFT_CENTER, &style_name, theme::font_body_strong(), theme::TEXT);
+        if style_resp.on_hover_text("Click to copy CSS font shorthand").clicked() {
+            let css_font = format!(
+                "font: {} {}px \"{}\";",
+                t.style.font_weight,
+                fmt_num(t.style.font_size),
+                t.style.font_family
+            );
+            copy(app, ui, css_font, "CSS font");
+        }
+        c.y += ROW_H;
         for (label, value) in typography_rows(t) {
             kv(ui, app, c, label, &value);
         }
         c.y += 8.0;
     }
 
+    inspect_keyframes_section(app, ui, c, &n, id);
+
     crate::dev::sections::assets_section(app, ui, c, id);
+}
+
+fn inspect_keyframes_section(app: &mut App, ui: &mut Ui, c: &mut Cur, n: &Node, id: NodeId) {
+    if n.prototype.reactions.is_empty() {
+        return;
+    }
+    section_title(ui, c, "Animation & Keyframes");
+    let kf_r = c.rect(PAD, 0.0, c.w - 2.0 * PAD, 28.0);
+    widgets::record(ui, "dev-keyframes-copy", kf_r);
+    let kf_css = format!(
+        "@keyframes node_{}_enter {{\n  from {{ opacity: 0; transform: translateY(4px); }}\n  to {{ opacity: 1; transform: translateY(0); }}\n}}",
+        id.0
+    );
+    if small_button(ui, kf_r, "dev-keyframes-copy", "Copy @keyframes CSS") {
+        copy(app, ui, kf_css, "@keyframes CSS");
+    }
+    c.y += 34.0;
 }
 
 // ------------------------------------------------------------------ measurements
@@ -784,4 +949,57 @@ mod tests {
         d.insert(page, n).unwrap();
         assert_eq!(collect_assets(&d, i), vec![Asset::Image("abc".into()), Asset::Svg, Asset::Png2x]);
     }
+
+    #[test]
+    fn inspect_code_connect_redlines_mcp_and_typography_style_mutate_state() {
+        let mut d = Document::new("t");
+        let page = d.add_page("p");
+        let f = d.alloc_id();
+        let f = d.insert(page, Node::frame(f, designos_doc::Rect::new(12.0, 24.0, 320.0, 180.0))).unwrap();
+        let mut app = App::new(d);
+        app.ui.dev_mode = true;
+        app.selection = vec![f];
+        let ctx = egui::Context::default();
+        theme::install_fonts(&ctx);
+        let region = Rect::from_min_size(Pos2::new(660.0, 40.0), Vec2::new(260.0, 1200.0));
+        let screen = Rect::from_min_size(Pos2::ZERO, Vec2::new(1000.0, 1300.0));
+        let _ = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(screen),
+                ..Default::default()
+            },
+            |ui| show(&mut app, ui, region),
+        );
+        let get_rect = |name: &str| ctx.data(|d| d.get_temp::<Rect>(egui::Id::new(("test-rect", name.to_string()))));
+        let cc_rect = get_rect("dev-code-connect").expect("dev-code-connect");
+        let red_rect = get_rect("dev-add-redlines").expect("dev-add-redlines");
+        assert!(get_rect("dev-mcp-btn").is_some());
+        assert!(get_rect("dev-inspect-more").is_some());
+
+        for target in [cc_rect, red_rect] {
+            for down in [true, false] {
+                let _ = ctx.run_ui(
+                    egui::RawInput {
+                        screen_rect: Some(screen),
+                        events: vec![
+                            egui::Event::PointerMoved(target.center()),
+                            egui::Event::PointerButton {
+                                pos: target.center(),
+                                button: egui::PointerButton::Primary,
+                                pressed: down,
+                                modifiers: egui::Modifiers::NONE,
+                            },
+                        ],
+                        ..Default::default()
+                    },
+                    |ui| show(&mut app, ui, region),
+                );
+            }
+        }
+        assert!(app.dev.show_redlines, "+ Add redlines must enable dev.show_redlines");
+        let annots = &app.doc.get(f).unwrap().dev.annotations;
+        assert!(annots.iter().any(|a| a.text.contains("Code Connect:")));
+        assert!(annots.iter().any(|a| a.text.contains("Redlines: 320×180px")));
+    }
 }
+

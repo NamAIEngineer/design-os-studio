@@ -7,7 +7,7 @@
 use super::menu::{popup_menu, MenuItem, MenuResult};
 use super::*;
 use crate::theme;
-use designos_doc::{Color, GradientStop, Paint, PaintKind, Vec2 as DV};
+use designos_doc::{Color, GradientStop, ImageScaleMode, Paint, PaintKind, Vec2 as DV};
 use egui::{Mesh, Shape};
 
 pub const W: f32 = 240.0;
@@ -477,9 +477,56 @@ pub struct Out {
     pub eyedrop: bool,
     pub remove: bool,
     pub want_image: bool,
+    /// Procedural 64x64 RGBA PNG generated in Mode::Image: (image_ref, png_bytes).
+    pub generated_image: Option<(String, Vec<u8>)>,
     pub apply_style: Option<String>,
     /// (library id, asset key) of a library style to import and apply.
     pub apply_library_style: Option<(String, String)>,
+}
+
+/// Synthesizes a crisp 64x64 RGBA PNG in memory for the 3 studio procedural image presets.
+pub fn synthesize_procedural_png(preset: usize) -> (String, Vec<u8>) {
+    let key = match preset {
+        0 => "proc-studio-grid",
+        1 => "proc-gradient-mesh",
+        _ => "proc-checkerboard",
+    };
+    let mut img = image::RgbaImage::new(64, 64);
+    for y in 0..64u32 {
+        for x in 0..64u32 {
+            let px = match preset {
+                0 => {
+                    // Studio Grid: dark slate with crisp 16px major & 8px minor grid lines
+                    if x % 16 == 0 || y % 16 == 0 {
+                        [0x0D, 0x99, 0xFF, 0xFF]
+                    } else if x % 8 == 0 || y % 8 == 0 {
+                        [0x38, 0x38, 0x42, 0xFF]
+                    } else {
+                        [0x1E, 0x1E, 0x24, 0xFF]
+                    }
+                }
+                1 => {
+                    // Gradient Mesh: smooth 2D studio mesh
+                    let r = ((x * 255) / 63) as u8;
+                    let g = ((y * 220) / 63) as u8;
+                    let b = (220u32.saturating_sub((x + y) * 2)) as u8;
+                    [r, g, b, 0xFF]
+                }
+                _ => {
+                    // Checkerboard: crisp 8x8 tile pattern
+                    if ((x / 8) + (y / 8)) % 2 == 0 {
+                        [0x2C, 0x2C, 0x2C, 0xFF]
+                    } else {
+                        [0x52, 0x52, 0x5B, 0xFF]
+                    }
+                }
+            };
+            img.put_pixel(x, y, image::Rgba(px));
+        }
+    }
+    let mut png_bytes = Vec::new();
+    let _ = image::DynamicImage::ImageRgba8(img).write_to(&mut std::io::Cursor::new(&mut png_bytes), image::ImageFormat::Png);
+    (key.to_string(), png_bytes)
 }
 
 const CONTRAST_BAR_H: f32 = 26.0;
@@ -759,7 +806,11 @@ pub fn show(ui: &mut Ui, pos: Pos2, st: &mut State, paint: &mut Paint, env: &Env
             let resp = resp.on_hover_text(m.label());
             if resp.clicked() && !active {
                 if *m == Mode::Image {
-                    out.want_image = true;
+                    let (key, bytes) = synthesize_procedural_png(0);
+                    paint.kind = PaintKind::Image { image_ref: key.clone(), scale_mode: ImageScaleMode::Fill };
+                    paint.opacity = 1.0;
+                    out.generated_image = Some((key, bytes));
+                    out.changed = true;
                 } else {
                     *paint = convert(paint, *m);
                     st.sel = 0;
@@ -782,9 +833,59 @@ pub fn show(ui: &mut Ui, pos: Pos2, st: &mut State, paint: &mut Paint, env: &Env
 
     let mode = mode_of(&paint.kind);
     if mode == Mode::Image {
-        let r = Rect::from_min_size(Pos2::new(rect.left() + PAD, y + PAD), Vec2::new(AREA, 96.0));
-        ui.painter().rect_filled(r, theme::cr(theme::RADIUS_MEDIUM), theme::BG_SECONDARY);
-        text_on_baseline(ui.painter(), r.left() + 8.0, centered_baseline(r, &theme::font_body()), "Image fill", theme::font_body(), theme::TEXT_SECONDARY);
+        let cur_scale = match &paint.kind {
+            PaintKind::Image { scale_mode, .. } => *scale_mode,
+            _ => ImageScaleMode::Fill,
+        };
+        let scale_label = match cur_scale {
+            ImageScaleMode::Fill => "Scale: Fill",
+            ImageScaleMode::Fit => "Scale: Fit",
+            ImageScaleMode::Crop => "Scale: Crop",
+            ImageScaleMode::Tile => "Scale: Tile",
+        };
+        let hdr_r = Rect::from_min_size(Pos2::new(rect.left() + PAD, y + 8.0), Vec2::new(AREA, 24.0));
+        text_on_baseline(ui.painter(), hdr_r.left(), centered_baseline(hdr_r, &theme::font_body_strong()), "Image fill", theme::font_body_strong(), theme::TEXT);
+        let scale_r = Rect::from_min_size(Pos2::new(hdr_r.right() - 84.0, hdr_r.top()), Vec2::new(84.0, 24.0));
+        super::record(ui, "picker-image-scale", scale_r);
+        let scale_resp = ui.interact(scale_r, ui.id().with("picker-image-scale"), Sense::click());
+        ui.painter().rect_filled(scale_r, theme::cr(theme::RADIUS_MEDIUM), if scale_resp.hovered() { theme::BG_TERTIARY } else { theme::BG_SECONDARY });
+        ui.painter().text(scale_r.center(), Align2::CENTER_CENTER, scale_label, theme::font_small_medium(), theme::TEXT);
+        if scale_resp.on_hover_text("Cycle image scale mode (Fill / Fit / Crop / Tile)").clicked() {
+            let next = match cur_scale {
+                ImageScaleMode::Fill => ImageScaleMode::Fit,
+                ImageScaleMode::Fit => ImageScaleMode::Crop,
+                ImageScaleMode::Crop => ImageScaleMode::Tile,
+                ImageScaleMode::Tile => ImageScaleMode::Fill,
+            };
+            if let PaintKind::Image { scale_mode, .. } = &mut paint.kind {
+                *scale_mode = next;
+                out.changed = true;
+            }
+        }
+        let mut iy = hdr_r.bottom() + 8.0;
+        for (idx, label) in [(0usize, "Studio Grid"), (1, "Gradient Mesh"), (2, "Checkerboard")] {
+            let btn_r = Rect::from_min_size(Pos2::new(rect.left() + PAD, iy), Vec2::new(AREA, 26.0));
+            super::record(ui, &format!("picker-image-gen-{idx}"), btn_r);
+            let bresp = ui.interact(btn_r, ui.id().with(("picker-image-gen", idx)), Sense::click());
+            ui.painter().rect_filled(btn_r, theme::cr(theme::RADIUS_MEDIUM), if bresp.hovered() { theme::BG_TERTIARY } else { theme::BG_SECONDARY });
+            ui.painter().text(btn_r.center(), Align2::CENTER_CENTER, label, theme::font_body(), theme::TEXT);
+            if bresp.clicked() {
+                let (key, bytes) = synthesize_procedural_png(idx);
+                paint.kind = PaintKind::Image { image_ref: key.clone(), scale_mode: cur_scale };
+                paint.opacity = 1.0;
+                out.generated_image = Some((key, bytes));
+                out.changed = true;
+            }
+            iy += 30.0;
+        }
+        let disk_r = Rect::from_min_size(Pos2::new(rect.left() + PAD, iy), Vec2::new(AREA, 26.0));
+        super::record(ui, "picker-image-disk", disk_r);
+        let dresp = ui.interact(disk_r, ui.id().with("picker-image-disk"), Sense::click());
+        ui.painter().rect_filled(disk_r, theme::cr(theme::RADIUS_MEDIUM), if dresp.hovered() { theme::BG_TERTIARY } else { theme::BG_SECONDARY });
+        ui.painter().text(disk_r.center(), Align2::CENTER_CENTER, "Choose from disk\u{2026}", theme::font_small(), theme::TEXT_SECONDARY);
+        if dresp.clicked() {
+            out.want_image = true;
+        }
         return (rect, out);
     }
 
@@ -1448,4 +1549,21 @@ mod tests {
         let c = stop_color_at(&stops, 0.5);
         assert!((c.r - 0.5).abs() < 1e-6);
     }
+
+    #[test]
+    fn procedural_png_presets_generate_valid_png_headers_and_distinct_textures() {
+        let (k0, b0) = synthesize_procedural_png(0);
+        let (k1, b1) = synthesize_procedural_png(1);
+        let (k2, b2) = synthesize_procedural_png(2);
+        assert_eq!(k0, "proc-studio-grid");
+        assert_eq!(k1, "proc-gradient-mesh");
+        assert_eq!(k2, "proc-checkerboard");
+        for bytes in [&b0, &b1, &b2] {
+            assert!(bytes.len() > 64);
+            assert_eq!(&bytes[..8], b"\x89PNG\r\n\x1a\n");
+        }
+        assert_ne!(b0, b1);
+        assert_ne!(b1, b2);
+    }
 }
+

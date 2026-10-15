@@ -153,27 +153,14 @@ pub fn show(app: &mut App, ui: &mut Ui, screen: Rect) {
         ];
         for (icon, key, tip) in ctx_items {
             let br = Rect::from_min_size(Pos2::new(cx, cy), Vec2::splat(28.0));
+            widgets::record(ui, key, br);
             let resp = ui.interact(br, ui.id().with(key), Sense::click());
             if resp.hovered() {
                 p.rect_filled(br, theme::cr(theme::RADIUS_MEDIUM), theme::BG_TOOLBAR_HOVER);
             }
             icons::paint(&p, icon, br.center(), 15.0, theme::ICON);
             if resp.on_hover_text(tip).clicked() {
-                match key {
-                    "ctx-edit-prompt" => {
-                        app.cmdk.open = true;
-                        app.cmdk.focus_requested = true;
-                    }
-                    "ctx-remove-bg" => {
-                        app.show_toast("AI Remove Background queued", false);
-                    }
-                    "ctx-crop" => {
-                        app.show_toast("Crop mode active", false);
-                    }
-                    _ => {
-                        app.show_toast("Select area active", false);
-                    }
-                }
+                apply_contextual_action(app, key);
             }
             cx += 30.0;
         }
@@ -531,6 +518,112 @@ fn show_dev_mode_toolbar(app: &mut App, ui: &mut Ui, screen: Rect) {
     }
 }
 
+/// Executes a real document/tool mutation when a button in the Figma UI3
+/// Selection Contextual Bar (`ctx-crop`, `ctx-select-area`, `ctx-remove-bg`, `ctx-edit-prompt`) is clicked.
+pub fn apply_contextual_action(app: &mut App, key: &str) {
+    let sel = app.selection.clone();
+    match key {
+        "ctx-crop" => {
+            if sel.is_empty() {
+                return;
+            }
+            let mut clipped_frames = 0usize;
+            let mut cropped_nodes = 0usize;
+            app.edit_nodes(&sel, |n| {
+                for fill in &mut n.fills {
+                    if let designos_doc::PaintKind::Image { scale_mode, .. } = &mut fill.kind {
+                        *scale_mode = designos_doc::ImageScaleMode::Crop;
+                    }
+                }
+                if let Some(fp) = n.kind.frame_props_mut() {
+                    fp.clips_content = !fp.clips_content;
+                    clipped_frames += 1;
+                } else {
+                    let dx = (n.size.x * 0.05).round().max(1.0);
+                    let dy = (n.size.y * 0.05).round().max(1.0);
+                    n.transform.tx = (n.transform.tx + dx).round();
+                    n.transform.ty = (n.transform.ty + dy).round();
+                    n.size.x = (n.size.x - dx * 2.0).round().max(8.0);
+                    n.size.y = (n.size.y - dy * 2.0).round().max(8.0);
+                    cropped_nodes += 1;
+                }
+            });
+            app.show_toast(
+                format!("Crop applied ({clipped_frames} frame clip toggled, {cropped_nodes} layer bounds cropped)"),
+                false,
+            );
+        }
+        "ctx-select-area" => {
+            if sel.len() == 1 {
+                if let Some(children) = app.doc.get(sel[0]).map(|n| n.children.clone()) {
+                    if !children.is_empty() {
+                        let count = children.len();
+                        app.selection = children;
+                        app.changed();
+                        app.show_toast(format!("Selected {count} child layer(s) inside area"), false);
+                        return;
+                    }
+                }
+            }
+            app.set_tool(Tool::Slice);
+            app.show_toast("Slice area tool active — drag on canvas to select region", false);
+        }
+        "ctx-remove-bg" => {
+            if sel.is_empty() {
+                return;
+            }
+            let mut removed = 0usize;
+            let mut fallback_children = Vec::new();
+            for &id in &sel {
+                if let Some(n) = app.doc.get(id) {
+                    if n.fills.is_empty() {
+                        if let Some(&first_child) = n.children.first() {
+                            fallback_children.push(first_child);
+                        }
+                    }
+                }
+            }
+            app.edit_nodes(&sel, |n| {
+                if let Some(pos) = n.fills.iter().position(|p| matches!(p.kind, designos_doc::PaintKind::Solid(_))) {
+                    n.fills.remove(pos);
+                    removed += 1;
+                } else if !n.fills.is_empty() {
+                    n.fills.remove(0);
+                    removed += 1;
+                }
+            });
+            if removed == 0 && !fallback_children.is_empty() {
+                app.edit_nodes(&fallback_children, |n| {
+                    if let Some(pos) = n.fills.iter().position(|p| matches!(p.kind, designos_doc::PaintKind::Solid(_))) {
+                        n.fills.remove(pos);
+                        removed += 1;
+                    } else if !n.fills.is_empty() {
+                        n.fills.remove(0);
+                        removed += 1;
+                    }
+                });
+            }
+            app.show_toast(format!("Removed background fill from {removed} layer(s)"), false);
+        }
+        "ctx-edit-prompt" => {
+            if app.cmdk.query.trim().is_empty() {
+                if let Some(first_name) = sel
+                    .first()
+                    .and_then(|id| app.doc.get(*id))
+                    .map(|n| n.name.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                {
+                    app.cmdk.query = first_name;
+                }
+            }
+            app.cmdk.active_tab = 0;
+            app.cmdk.open = true;
+            app.cmdk.focus_requested = true;
+        }
+        _ => {}
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -679,5 +772,58 @@ mod tests {
         let spec_json = serde_json::to_string(&spec).unwrap();
         crate::shell::execute_terminal_actions(&mut app, vec![crate::terminal::TerminalAction::ApplySpecJson(spec_json)]);
         assert!(app.hist.can_undo(), "Applying Agent-synthesized NodeSpec records undo history");
+    }
+
+    #[test]
+    fn contextual_floating_bar_buttons_mutate_selection_and_tool_state() {
+        use designos_doc::{Color, Document, Node, Paint};
+
+        let mut d = Document::new("CtxBarTest");
+        let page = d.add_page("Page 1");
+        let frame_id = d.alloc_id();
+        let mut frame = Node::frame(frame_id, designos_doc::Rect::new(0.0, 0.0, 200.0, 120.0));
+        frame.name = "Hero Card".into();
+        frame.fills = vec![Paint::solid(Color::from_hex("#18181B").unwrap())];
+        if let Some(fp) = frame.kind.frame_props_mut() {
+            fp.clips_content = false;
+        }
+        let frame_id = d.insert(page, frame).unwrap();
+
+        let child_id = d.alloc_id();
+        let mut child = Node::frame(child_id, designos_doc::Rect::new(10.0, 10.0, 100.0, 80.0));
+        child.fills = vec![Paint::solid(Color::from_hex("#E36323").unwrap())];
+        let child_id = d.insert(frame_id, child).unwrap();
+
+        let mut app = App::new(d);
+        app.selection = vec![frame_id];
+
+        // 1. Crop toggles clips_content on frame
+        apply_contextual_action(&mut app, "ctx-crop");
+        assert!(
+            app.doc
+                .get(frame_id)
+                .unwrap()
+                .kind
+                .frame_props()
+                .unwrap()
+                .clips_content
+        );
+        assert!(app.hist.can_undo());
+
+        // 2. Remove background removes solid fill from selected frame
+        apply_contextual_action(&mut app, "ctx-remove-bg");
+        assert!(app.doc.get(frame_id).unwrap().fills.is_empty());
+
+        // 3. Select area on container selects its children; on leaf node activates Tool::Slice
+        apply_contextual_action(&mut app, "ctx-select-area");
+        assert_eq!(app.selection, vec![child_id]);
+        apply_contextual_action(&mut app, "ctx-select-area");
+        assert_eq!(app.tool, Tool::Slice);
+
+        // 4. Edit with prompt opens CmdK seeded with selected node name
+        app.selection = vec![frame_id];
+        apply_contextual_action(&mut app, "ctx-edit-prompt");
+        assert!(app.cmdk.open);
+        assert_eq!(app.cmdk.query, "Hero Card");
     }
 }

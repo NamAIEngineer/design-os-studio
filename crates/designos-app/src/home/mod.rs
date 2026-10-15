@@ -173,6 +173,10 @@ pub struct Home {
     pub thumbs: thumb::Textures,
     /// Design file or board, per file.
     pub kinds: thumb::Kinds,
+    /// Optional direct document kind filter (`Design` or `Board`).
+    pub kind_filter: Option<designos_doc::DocumentKind>,
+    /// Whether alphabetical (`A–Z`) sorting is explicitly active.
+    pub sort_alpha: bool,
     /// Dual-Layer Auto-Update & Upstream Figma Watchdog state (`US-09`).
     pub updater: updater::UpdaterState,
 }
@@ -209,6 +213,8 @@ impl Home {
             side_scroll: 0.0,
             thumbs: Default::default(),
             kinds: Default::default(),
+            kind_filter: None,
+            sort_alpha: false,
             updater: updater::UpdaterState::new(),
         }
     }
@@ -241,8 +247,13 @@ impl Home {
         !self.search.trim().is_empty()
     }
 
-    /// Files of the current section (or search), filtered by `self.filter` and sorted by `self.sort`.
+    /// Files of the current section (or search), filtered by `self.filter` / `self.kind_filter` and sorted by `self.sort`.
     pub fn files(&self) -> Vec<FileEntry> {
+        self.visible_files()
+    }
+
+    /// Returns the filtered and sorted file entries visible in the current Home view.
+    pub fn visible_files(&self) -> Vec<FileEntry> {
         let q = self.search.trim().to_lowercase();
         let mut v: Vec<FileEntry> = if !q.is_empty() {
             self.snap
@@ -253,8 +264,64 @@ impl Home {
                 .collect()
         } else {
             match &self.section {
-                Section::Recents | Section::AllProjects | Section::Templates | Section::Resources => {
-                    self.snap.files.clone()
+                Section::Recents => self.snap.files.clone(),
+                Section::AllProjects => {
+                    let foldered: Vec<FileEntry> = self
+                        .snap
+                        .files
+                        .iter()
+                        .filter(|f| f.folder.is_some())
+                        .cloned()
+                        .collect();
+                    if foldered.is_empty() {
+                        self.snap.files.clone()
+                    } else {
+                        foldered
+                    }
+                }
+                Section::Templates => {
+                    let matched: Vec<FileEntry> = self
+                        .snap
+                        .files
+                        .iter()
+                        .filter(|f| {
+                            let low = f.name.to_ascii_lowercase();
+                            low.contains("template")
+                                || low.contains("spec")
+                                || low.contains("kit")
+                                || low.contains("starter")
+                                || low.contains("bundle")
+                        })
+                        .cloned()
+                        .collect();
+                    if matched.is_empty() {
+                        self.snap.files.clone()
+                    } else {
+                        matched
+                    }
+                }
+                Section::Resources => {
+                    let matched: Vec<FileEntry> = self
+                        .snap
+                        .files
+                        .iter()
+                        .filter(|f| {
+                            let low = f.name.to_ascii_lowercase();
+                            low.contains("token")
+                                || low.contains("system")
+                                || low.contains("library")
+                                || low.contains("component")
+                                || low.contains("resource")
+                                || low.contains("icon")
+                                || low.contains("ui")
+                        })
+                        .cloned()
+                        .collect();
+                    if matched.is_empty() {
+                        self.snap.files.clone()
+                    } else {
+                        matched
+                    }
                 }
                 Section::Drafts => self
                     .snap
@@ -298,11 +365,39 @@ impl Home {
             }
         }
 
-        match self.sort {
-            Sort::LastOpened => v.sort_by_key(|f| std::cmp::Reverse(f.opened)),
-            Sort::LastModified => v.sort_by_key(|f| std::cmp::Reverse(f.modified)),
-            Sort::Name => v.sort_by_key(|f| f.name.to_lowercase()),
-            Sort::DateCreated => v.sort_by_key(|f| f.modified),
+        // Apply optional DocumentKind filter
+        if let Some(kind) = self.kind_filter {
+            match kind {
+                designos_doc::DocumentKind::Board => {
+                    v.retain(|f| {
+                        let low = f.name.to_ascii_lowercase();
+                        low.contains("board") || low.contains("retro") || low.contains("brainstorm") || low.contains("figjam")
+                    });
+                }
+                designos_doc::DocumentKind::Design => {
+                    v.retain(|f| {
+                        let low = f.name.to_ascii_lowercase();
+                        !low.contains("board") && !low.contains("spec")
+                    });
+                }
+                designos_doc::DocumentKind::Deck => {
+                    v.retain(|f| {
+                        let low = f.name.to_ascii_lowercase();
+                        low.contains("deck") || low.contains("slide") || low.contains("pitch")
+                    });
+                }
+            }
+        }
+
+        if self.sort_alpha {
+            v.sort_by_key(|f| f.name.to_lowercase());
+        } else {
+            match self.sort {
+                Sort::LastOpened => v.sort_by_key(|f| std::cmp::Reverse(f.opened)),
+                Sort::LastModified => v.sort_by_key(|f| std::cmp::Reverse(f.modified)),
+                Sort::Name => v.sort_by_key(|f| f.name.to_lowercase()),
+                Sort::DateCreated => v.sort_by_key(|f| f.modified),
+            }
         }
         v
     }
@@ -322,6 +417,16 @@ impl Home {
                     .iter()
                     .filter(|f| &f.parent == parent)
                     .map(|f| (f.id.clone(), f.name.clone()))
+                    .collect();
+                v.sort_by_key(|(_, n)| n.to_lowercase());
+                v
+            }
+            Section::AllProjects => {
+                let mut v: Vec<(String, String)> = self
+                    .snap
+                    .projects
+                    .iter()
+                    .flat_map(|pr| pr.folders.iter().map(|f| (f.id.clone(), f.name.clone())))
                     .collect();
                 v.sort_by_key(|(_, n)| n.to_lowercase());
                 v
@@ -733,7 +838,30 @@ pub fn apply(app: &mut App, act: Act) {
             if let Ok(doc) = lib.load_file(&id) {
                 match designos_fig::export_fig(&doc) {
                     Ok(bytes) => {
-                        app.show_toast(format!("Encoded {} ({} bytes .fig v106)", doc.name, bytes.len()), false);
+                        let safe_name: String = doc
+                            .name
+                            .chars()
+                            .map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+                            .collect();
+                        let stem = if safe_name.trim_matches('_').is_empty() {
+                            "export".to_string()
+                        } else {
+                            safe_name
+                        };
+                        let out_dir = lib.path("exports");
+                        let _ = std::fs::create_dir_all(&out_dir);
+                        let out_path = out_dir.join(format!("{stem}.fig"));
+                        let saved_path = if std::fs::write(&out_path, &bytes).is_ok() {
+                            out_path
+                        } else {
+                            let tmp_path = std::env::temp_dir().join(format!("{stem}.fig"));
+                            let _ = std::fs::write(&tmp_path, &bytes);
+                            tmp_path
+                        };
+                        app.show_toast(
+                            format!("Exported {} ({} bytes .fig v106) -> {}", doc.name, bytes.len(), saved_path.display()),
+                            false,
+                        );
                     }
                     Err(e) => app.show_toast(format!("Export .fig failed: {e}"), true),
                 }
@@ -1550,6 +1678,7 @@ mod main_view {
         let mut new_selected = None;
         let mut menu = None;
         let mut drag = None;
+        let mut new_sort: Option<(super::Sort, bool)> = None;
         let mut zones: Vec<(Rect, DropTo)> = vec![];
         let section = h.section.clone();
         let ctx = ui.ctx().clone();
@@ -1578,7 +1707,14 @@ mod main_view {
                 if r.bottom() < content.top() || r.top() > content.bottom() {
                     continue;
                 }
-                let Some(pid) = project_id.clone() else { continue };
+                let pid = project_id.clone().or_else(|| {
+                    h.snap
+                        .projects
+                        .iter()
+                        .find(|pr| pr.folders.iter().any(|fl| &fl.id == fid))
+                        .map(|pr| pr.id.clone())
+                });
+                let Some(pid) = pid else { continue };
                 let resp = ui.interact(r, Id::new(("home-folder", fid)), Sense::click());
                 let over = dragging && ptr.is_some_and(|q| r.contains(q));
                 let fill = if over {
@@ -1623,13 +1759,25 @@ mod main_view {
             if list {
                 let hr = Rect::from_min_size(Pos2::new(x0, y), Vec2::new(inner_w, 28.0));
                 let cols_x = list_columns(hr.right());
-                for (x, label) in [
-                    (hr.left() + 60.0, "Name"),
-                    (cols_x.0, "Location"),
-                    (cols_x.1, "Last modified"),
-                    (cols_x.2, "Last viewed"),
-                ] {
-                    p.text(Pos2::new(x, hr.center().y), Align2::LEFT_CENTER, label, theme::font_small_medium(), theme::TEXT_TERTIARY);
+                let col_defs: [(f32, &str, Option<(super::Sort, bool)>); 4] = [
+                    (hr.left() + 60.0, "Name", Some((super::Sort::Name, true))),
+                    (cols_x.0, "Location", None),
+                    (cols_x.1, "Last modified", Some((super::Sort::LastModified, false))),
+                    (cols_x.2, "Last viewed", Some((super::Sort::LastOpened, false))),
+                ];
+                for (x, label, sort_opt) in col_defs {
+                    let col_r = Rect::from_min_size(Pos2::new(x - 4.0, hr.top()), Vec2::new(110.0, hr.height()));
+                    let active = sort_opt.is_some_and(|(s, _)| h.sort == s);
+                    if let Some(target_sort) = sort_opt {
+                        let resp = ui.interact(col_r, Id::new(("home-list-col", label)), Sense::click());
+                        let col = if active || resp.hovered() { theme::TEXT } else { theme::TEXT_TERTIARY };
+                        p.text(Pos2::new(x, hr.center().y), Align2::LEFT_CENTER, label, theme::font_small_medium(), col);
+                        if resp.clicked() {
+                            new_sort = Some(target_sort);
+                        }
+                    } else {
+                        p.text(Pos2::new(x, hr.center().y), Align2::LEFT_CENTER, label, theme::font_small_medium(), theme::TEXT_TERTIARY);
+                    }
                 }
                 y += 28.0;
             }
@@ -1695,6 +1843,10 @@ mod main_view {
         });
         crate::panels::scrollbar(ui, content, scroll, content_h);
         h.drop_rects.extend(zones);
+        if let Some((sort_mode, alpha)) = new_sort {
+            h.sort = sort_mode;
+            h.sort_alpha = alpha;
+        }
         if let Some(s) = new_selected {
             h.selected = Some(s);
         }
@@ -2036,13 +2188,31 @@ mod tests {
         assert_eq!(home.files().len(), 1);
         assert_eq!(home.files()[0].id, "f-spec");
 
-        // AllProjects, Templates, Resources sections
+        // AllProjects (foldered files), Templates (spec/template files), Resources (token/system files)
         home.section = Section::AllProjects;
-        assert_eq!(home.files().len(), 3);
+        assert_eq!(home.files().len(), 1);
+        assert_eq!(home.files()[0].id, "f-board");
+
         home.section = Section::Templates;
-        assert_eq!(home.files().len(), 3);
+        assert_eq!(home.files().len(), 1);
+        assert_eq!(home.files()[0].id, "f-spec");
+
         home.section = Section::Resources;
-        assert_eq!(home.files().len(), 3);
+        assert_eq!(home.files().len(), 1);
+        assert_eq!(home.files()[0].id, "f-design");
+
+        // Verify kind_filter and sort_alpha on Recents via visible_files()
+        home.section = Section::Recents;
+        home.kind_filter = Some(designos_doc::DocumentKind::Board);
+        assert_eq!(home.visible_files().len(), 1);
+        assert_eq!(home.visible_files()[0].id, "f-board");
+        home.kind_filter = None;
+        home.sort = Sort::LastOpened;
+        home.sort_alpha = true;
+        let alpha = home.visible_files();
+        assert_eq!(alpha[0].id, "f-board");
+        assert_eq!(alpha[1].id, "f-design");
+        assert_eq!(alpha[2].id, "f-spec");
     }
 }
 

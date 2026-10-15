@@ -450,9 +450,16 @@ pub fn show(app: &mut App, ui: &mut Ui, region: Rect) {
     widgets::record(ui, "assets-search", sr);
     app.assets.query = q;
 
+    let cat_id = Id::new("assets-cat-filter");
+    let mut cat = ui.ctx().data(|d| d.get_temp::<u8>(cat_id)).unwrap_or(0);
+
     let filter_btn = Rect::from_min_size(Pos2::new(sr.right() + 4.0, search_y + 2.0), Vec2::splat(VIEW_BTN));
     widgets::record(ui, "assets-filter-btn", filter_btn);
-    let _ = widgets::icon_button(ui, filter_btn, "assets-filter-btn", Icon::StrokeSettings, false, "Filter assets");
+    if widgets::icon_button(ui, filter_btn, "assets-filter-btn", Icon::StrokeSettings, cat != 0, "Cycle asset category filter").clicked() {
+        cat = (cat + 1) % 3;
+        ui.ctx().data_mut(|d| d.insert_temp(cat_id, cat));
+        app.assets.scroll = 0.0;
+    }
 
     let mut grid = app.assets.grid;
     view_toggle(ui, Pos2::new(filter_btn.right() + 4.0, search_y + 2.0), &mut grid);
@@ -462,8 +469,6 @@ pub fn show(app: &mut App, ui: &mut Ui, region: Rect) {
     }
 
     // ---- 3. UI3 Category Filter Pills: All | Local | Used in file
-    let cat_id = Id::new("assets-cat-filter");
-    let mut cat = ui.ctx().data(|d| d.get_temp::<u8>(cat_id)).unwrap_or(0);
     let pill_y = search_y + 34.0;
     let mut pill_x = region.left() + 8.0;
     for (idx, label) in [(0u8, "All"), (1u8, "Local"), (2u8, "Used in file")] {
@@ -497,14 +502,26 @@ pub fn show(app: &mut App, ui: &mut Ui, region: Rect) {
     );
 
     let local_comps = app.local_components();
-    let local_count = local_comps.len();
+    let real_count = local_comps.len().max(
+        app.doc
+            .nodes
+            .values()
+            .filter(|n| matches!(n.kind, NodeKind::Component(_) | NodeKind::ComponentSet(_)))
+            .count(),
+    );
     let card_r = Rect::from_min_size(
         Pos2::new(region.left() + 12.0, sec_top + 22.0),
         Vec2::new((region.width() - 24.0).max(80.0), 86.0),
     );
     widgets::record(ui, "assets-created-in-file", card_r);
+    widgets::record(ui, "assets-created-in-file-card", card_r);
+    let card_resp = ui.interact(card_r, ui.id().with("assets-created-in-file-card"), Sense::click());
     let preview_r = Rect::from_min_size(card_r.min, Vec2::new(card_r.width(), 52.0));
-    p.rect_filled(preview_r, theme::cr(8), Color32::from_rgb(0x2C, 0x2C, 0x2C));
+    p.rect_filled(
+        preview_r,
+        theme::cr(8),
+        if card_resp.hovered() { Color32::from_rgb(0x38, 0x38, 0x38) } else { Color32::from_rgb(0x2C, 0x2C, 0x2C) },
+    );
     p.rect_stroke(preview_r, theme::cr(8), Stroke::new(1.0, Color32::from_rgb(0x38, 0x38, 0x38)), StrokeKind::Inside);
     icons::paint(&p, Icon::Component, preview_r.center(), 18.0, Color32::from_rgb(0x8C, 0x8C, 0x8C));
     p.text(
@@ -517,10 +534,19 @@ pub fn show(app: &mut App, ui: &mut Ui, region: Rect) {
     p.text(
         Pos2::new(card_r.left() + 2.0, preview_r.bottom() + 26.0),
         Align2::LEFT_CENTER,
-        format!("{local_count} component{}", if local_count == 1 { "" } else { "s" }),
+        format!("{real_count} component{}", if real_count == 1 { "" } else { "s" }),
         theme::font_small(),
         Color32::from_rgb(0x8C, 0x8C, 0x8C),
     );
+    if card_resp.on_hover_text("Filter to local components & focus first component").clicked() {
+        cat = 1;
+        ui.ctx().data_mut(|d| d.insert_temp(cat_id, cat));
+        app.assets.scroll = 0.0;
+        if let Some(first) = local_comps.first() {
+            app.select_only(first.id);
+            app.fit_selection();
+        }
+    }
 
     let add_libs_r = Rect::from_min_size(
         Pos2::new(region.left() + 12.0, card_r.bottom() + 6.0),
@@ -680,6 +706,9 @@ pub fn show(app: &mut App, ui: &mut Ui, region: Rect) {
     app.assets.thumbs = thumbs;
     app.assets.lib_thumbs = lib_thumbs;
     scrollbar(ui, list, scroll, content_h);
+    if let Some(s) = super::take_scrollbar_drag(ui, list) {
+        app.assets.scroll = s;
+    }
     if out.started.is_some() {
         app.assets.drag = out.started;
     }

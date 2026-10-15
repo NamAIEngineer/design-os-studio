@@ -62,6 +62,8 @@ pub enum TextAiMode {
 pub enum FigmaAiOp {
     MakePrototype,
     RenameLayers,
+    RemoveBackground,
+    BoostResolution,
     RewriteText(TextAiMode),
     PopulateContent,
 }
@@ -94,6 +96,8 @@ pub enum CmdKAction {
 impl CmdKAction {
     pub const MakePrototype: CmdKAction = CmdKAction::AutoFixDesignGate;
     pub const RenameLayers: CmdKAction = CmdKAction::AutoFixDesignGate;
+    pub const RemoveBackground: CmdKAction = CmdKAction::AutoFixDesignGate;
+    pub const BoostResolution: CmdKAction = CmdKAction::AutoFixDesignGate;
     pub const PopulateContent: CmdKAction = CmdKAction::AutoFixDesignGate;
 
     pub fn RewriteText(mode: TextAiMode) -> CmdKAction {
@@ -116,7 +120,7 @@ struct QuickCommandItem {
     keywords: &'static str,
 }
 
-const QUICK_COMMANDS: [QuickCommandItem; 10] = [
+const QUICK_COMMANDS: [QuickCommandItem; 12] = [
     QuickCommandItem {
         id: "cmdk-open-terminal",
         section: "Recents",
@@ -155,33 +159,55 @@ const QUICK_COMMANDS: [QuickCommandItem; 10] = [
         section: "Image editing",
         icon: Icon::Sparkle,
         title: "Remove background",
-        subtitle: "Automatically wires OnClick -> NavigateTo SmartAnimate flows or removes backdrop fills",
+        subtitle: "Strips backdrop/first solid fill on selected layers (or wires SmartAnimate flows across frames)",
         badge: "AI",
         shortcut: "⌥⌘P",
         tab_mask: 0b1001,
-        keywords: "remove background make prototype auto wire flow navigate smart animate interaction click",
+        keywords: "remove background strip backdrop fill transparent cut out make prototype",
     },
     QuickCommandItem {
         id: "cmdk-rename-layers",
         section: "Image editing",
         icon: Icon::Sparkle,
         title: "Boost resolution",
-        subtitle: "Enhances selected layers and replaces generic Frame / Rectangle / Text names semantically",
+        subtitle: "Upgrades image fills to high-DPI Fill, snaps fractional bounds to integers, and sharpens strokes",
         badge: "AI",
         shortcut: "⌥⌘R",
         tab_mask: 0b1001,
-        keywords: "boost resolution upscale rename layers semantic clean frame rectangle text label button header",
+        keywords: "boost resolution upscale crisp pixel snap integer bounds sharpen stroke image",
     },
     QuickCommandItem {
         id: "cmdk-translate-vi",
         section: "Image editing",
         icon: Icon::Sparkle,
         title: "Edit image with prompt",
-        subtitle: "Rewrites or translates selected copy (VI <-> EN) and applies prompt-driven edits",
+        subtitle: "Rewrites or translates selected copy (VI <-> EN) and applies prompt-driven visual edits",
         badge: "AI",
         shortcut: "⌥⌘T",
         tab_mask: 0b1001,
         keywords: "edit image with prompt translate rewrite shorten polish vietnamese english text copy microcopy",
+    },
+    QuickCommandItem {
+        id: "cmdk-wire-prototype",
+        section: "AI & Prototype",
+        icon: Icon::Sparkle,
+        title: "Make prototype flows",
+        subtitle: "Automatically wires OnClick -> NavigateTo SmartAnimate flows between top-level frames",
+        badge: "AI",
+        shortcut: "⇧⌥P",
+        tab_mask: 0b1100,
+        keywords: "make prototype auto wire flow navigate smart animate interaction click",
+    },
+    QuickCommandItem {
+        id: "cmdk-semantic-rename",
+        section: "AI & Prototype",
+        icon: Icon::Sparkle,
+        title: "Rename layers semantically",
+        subtitle: "Replaces generic Frame / Rectangle / Text names with semantic component labels",
+        badge: "AI",
+        shortcut: "⇧⌥R",
+        tab_mask: 0b1100,
+        keywords: "rename layers semantic clean frame rectangle text label button header",
     },
     QuickCommandItem {
         id: "cmdk-design-gate",
@@ -347,7 +373,7 @@ pub fn show(ctx: &Context, state: &mut CmdKState, doc: &Document, page: NodeId, 
                 .frame(egui::Frame::NONE)
                 .font(theme::font_body())
                 .text_color(theme::TEXT)
-                .hint_text("Search")
+                .hint_text("Search actions or type layout prompt (↵ Local Spec · ⌃` Live Agent CLI)")
                 .desired_width(edit_rect.width());
             let resp = ui.add(te);
             if state.open && (state.focus_requested || !resp.has_focus()) {
@@ -360,10 +386,16 @@ pub fn show(ctx: &Context, state: &mut CmdKState, doc: &Document, page: NodeId, 
         let tab_row = Rect::from_min_size(Pos2::new(rect.left(), input_row.bottom()), Vec2::new(bar_w, 34.0));
         widgets::hline(&p, tab_row.left(), tab_row.right(), tab_row.bottom() - 1.0, CMDK_BORDER);
         let mut tx = tab_row.left() + 14.0;
+        let tab_tips = [
+            "All actions: local layout synthesis (↵) + live Agent PTY CLI (⌃`)",
+            "Assets & Specs: local NodeSpec synthesis, Spec Reader, and .fig binary export",
+            "Plugins, Widgets & Agent CLI: interactive PTY session + canvas bridge",
+            "Design Gate: live VSF / EaseUI audit & 1-click auto-fix",
+        ];
         for (t_idx, t_label) in ["All", "Assets", "Plugins & widgets", "Design Gate"].iter().enumerate() {
             let tw = widgets::text_width(&p, t_label, &theme::font_body_semibold());
             let tr = Rect::from_min_size(Pos2::new(tx, tab_row.top()), Vec2::new(tw + 8.0, tab_row.height()));
-            let tresp = ui.interact(tr, Id::new(("cmdk-tab", t_idx)), Sense::click());
+            let tresp = ui.interact(tr, Id::new(("cmdk-tab", t_idx)), Sense::click()).on_hover_text(tab_tips[t_idx]);
             let is_active = state.active_tab == t_idx;
             p.text(
                 tr.center(),
@@ -405,7 +437,7 @@ pub fn show(ctx: &Context, state: &mut CmdKState, doc: &Document, page: NodeId, 
 
             let row_rect = Rect::from_min_size(Pos2::new(rect.left() + 8.0, row_y), Vec2::new(bar_w - 16.0, 30.0));
             widgets::record(ui, item.id, row_rect);
-            let resp = ui.interact(row_rect, Id::new(item.id), Sense::click());
+            let resp = ui.interact(row_rect, Id::new(item.id), Sense::click()).on_hover_text(item.subtitle);
             if resp.hovered() {
                 state.selected_idx = list_idx;
             }
@@ -438,17 +470,29 @@ pub fn show(ctx: &Context, state: &mut CmdKState, doc: &Document, page: NodeId, 
                     "cmdk-synth-spec" => {
                         let prompt = if state.query.trim().is_empty() { "pricing card" } else { state.query.trim() };
                         let spec = synthesize_spec_from_prompt(prompt);
-                        state.status = Some(format!("Synthesized '{}'", spec.name));
+                        state.status = Some(format!("Synthesized '{}' (Instant Local NodeSpec)", spec.name));
                         state.open = false;
                         out_action = Some(CmdKAction::ApplySpec(spec));
                     }
                     "cmdk-make-prototype" => {
+                        queue_pending_ai_op(FigmaAiOp::RemoveBackground);
+                        state.status = Some("Removed background fill on selection".into());
+                        state.open = false;
+                        out_action = Some(CmdKAction::RemoveBackground);
+                    }
+                    "cmdk-wire-prototype" => {
                         queue_pending_ai_op(FigmaAiOp::MakePrototype);
                         state.status = Some("Wired SmartAnimate prototype flows across frames".into());
                         state.open = false;
                         out_action = Some(CmdKAction::MakePrototype);
                     }
                     "cmdk-rename-layers" => {
+                        queue_pending_ai_op(FigmaAiOp::BoostResolution);
+                        state.status = Some("Boosted resolution, snapped integer bounds & renamed layers".into());
+                        state.open = false;
+                        out_action = Some(CmdKAction::BoostResolution);
+                    }
+                    "cmdk-semantic-rename" => {
                         queue_pending_ai_op(FigmaAiOp::RenameLayers);
                         state.status = Some("Renamed generic layers semantically".into());
                         state.open = false;
@@ -464,7 +508,7 @@ pub fn show(ctx: &Context, state: &mut CmdKState, doc: &Document, page: NodeId, 
                         } else {
                             TextAiMode::TranslateVi
                         };
-                        state.status = Some(format!("Applied {:?} across text layers", mode));
+                        state.status = Some(format!("Applied {:?} across selected layers", mode));
                         state.open = false;
                         out_action = Some(CmdKAction::RewriteText(mode));
                     }
@@ -481,6 +525,7 @@ pub fn show(ctx: &Context, state: &mut CmdKState, doc: &Document, page: NodeId, 
                         state.last_audit = Some(report);
                     }
                     "cmdk-open-terminal" => {
+                        state.status = Some("Opened live interactive Agent PTY CLI".into());
                         state.open = false;
                         out_action = Some(CmdKAction::OpenTerminal(AgentCliPreset::Claude));
                     }
@@ -968,6 +1013,8 @@ pub fn auto_fix_design_gate(doc: &mut Document, page: NodeId, selection: &[NodeI
             FigmaAiOp::RenameLayers => auto_rename_layers_semantically(doc, page, selection),
             FigmaAiOp::RewriteText(mode) => rewrite_selected_text(doc, page, selection, mode),
             FigmaAiOp::PopulateContent => populate_realistic_content(doc, page, selection),
+            FigmaAiOp::RemoveBackground => remove_background_on_selection(doc, page, selection),
+            FigmaAiOp::BoostResolution => boost_resolution_on_selection(doc, page, selection),
         };
     }
 
@@ -1361,6 +1408,114 @@ pub fn populate_realistic_content(doc: &mut Document, page: NodeId, selection: &
     populated
 }
 
+/// Removes the background fill (first solid fill, or first fill if no solid fill is present)
+/// from the selected nodes (or top-level page children if selection is empty).
+/// If a selected frame has no direct fills, strips the background fill from its first backdrop child.
+pub fn remove_background_on_selection(doc: &mut Document, page: NodeId, selection: &[NodeId]) -> usize {
+    let targets: Vec<NodeId> = if !selection.is_empty() {
+        selection.to_vec()
+    } else {
+        doc.get(page).map(|pg| pg.children.clone()).unwrap_or_default()
+    };
+
+    let mut modified = 0usize;
+    for nid in targets {
+        let mut removed_direct = false;
+        let first_child = if let Some(node) = doc.nodes.get_mut(&nid) {
+            if let Some(pos) = node.fills.iter().position(|p| matches!(p.kind, PaintKind::Solid(_))) {
+                node.fills.remove(pos);
+                removed_direct = true;
+            } else if !node.fills.is_empty() {
+                node.fills.remove(0);
+                removed_direct = true;
+            }
+            node.children.first().copied()
+        } else {
+            None
+        };
+
+        if removed_direct {
+            modified += 1;
+        } else if let Some(cid) = first_child {
+            if let Some(cnode) = doc.nodes.get_mut(&cid) {
+                if let Some(pos) = cnode.fills.iter().position(|p| matches!(p.kind, PaintKind::Solid(_))) {
+                    cnode.fills.remove(pos);
+                    modified += 1;
+                } else if !cnode.fills.is_empty() {
+                    cnode.fills.remove(0);
+                    modified += 1;
+                }
+            }
+        }
+    }
+    modified
+}
+
+/// Upgrades image fills on the selected subtree to crisp `ImageScaleMode::Fill` at full opacity,
+/// snaps fractional node coordinates/sizes (`transform.tx`, `transform.ty`, `size.x`, `size.y`) to
+/// integer device pixels, and sharpens sub-pixel stroke weights to crisp integer widths.
+pub fn boost_resolution_on_selection(doc: &mut Document, page: NodeId, selection: &[NodeId]) -> usize {
+    let roots: Vec<NodeId> = if !selection.is_empty() {
+        selection.to_vec()
+    } else {
+        doc.get(page).map(|pg| pg.children.clone()).unwrap_or_default()
+    };
+
+    let mut visited = Vec::new();
+    for r in &roots {
+        collect_subtree(doc, *r, &mut visited);
+    }
+
+    let mut boosted = 0usize;
+    for nid in visited {
+        let Some(node) = doc.nodes.get_mut(&nid) else { continue };
+        let mut changed = false;
+
+        for fill in &mut node.fills {
+            if let PaintKind::Image { scale_mode, .. } = &mut fill.kind {
+                if *scale_mode != designos_doc::ImageScaleMode::Fill {
+                    *scale_mode = designos_doc::ImageScaleMode::Fill;
+                    changed = true;
+                }
+                if (fill.opacity - 1.0).abs() > f32::EPSILON || !fill.visible {
+                    fill.opacity = 1.0;
+                    fill.visible = true;
+                    changed = true;
+                }
+            }
+        }
+
+        let rx = node.transform.tx.round();
+        let ry = node.transform.ty.round();
+        let rw = node.size.x.round().max(1.0);
+        let rh = node.size.y.round().max(1.0);
+        if (node.transform.tx - rx).abs() > 0.001
+            || (node.transform.ty - ry).abs() > 0.001
+            || (node.size.x - rw).abs() > 0.001
+            || (node.size.y - rh).abs() > 0.001
+        {
+            node.transform.tx = rx;
+            node.transform.ty = ry;
+            node.size.x = rw;
+            node.size.y = rh;
+            changed = true;
+        }
+
+        if node.stroke.weight > 0.0 {
+            let sw = node.stroke.weight.round().max(1.0);
+            if (node.stroke.weight - sw).abs() > 0.001 {
+                node.stroke.weight = sw;
+                changed = true;
+            }
+        }
+
+        if changed {
+            boosted += 1;
+        }
+    }
+    boosted
+}
+
 fn collect_subtree(doc: &Document, root: NodeId, out: &mut Vec<NodeId>) {
     let Some(node) = doc.get(root) else { return };
     if !matches!(node.kind, NodeKind::Page { .. }) {
@@ -1554,5 +1709,47 @@ mod tests {
         assert_eq!(all_tab_items[3].title, "Remove background");
         assert_eq!(all_tab_items[4].title, "Boost resolution");
         assert_eq!(all_tab_items[5].title, "Edit image with prompt");
+    }
+
+    #[test]
+    fn remove_background_and_boost_resolution_mutate_document_cleanly() {
+        let mut doc = Document::new("Image Editing AI Test");
+        let page = doc.add_page("Page 1");
+
+        let nid = doc.alloc_id();
+        let mut node = Node::frame(nid, Rect::new(10.35, 20.72, 199.6, 120.4));
+        node.fills = vec![
+            Paint::solid(Color::from_hex("#18181B").unwrap()),
+            Paint {
+                kind: PaintKind::Image {
+                    image_ref: "hero-asset".into(),
+                    scale_mode: designos_doc::ImageScaleMode::Fit,
+                },
+                opacity: 0.85,
+                visible: true,
+                blend: designos_doc::BlendMode::Normal,
+            },
+        ];
+        node.stroke.weight = 1.4;
+        doc.insert(page, node).unwrap();
+
+        let removed = remove_background_on_selection(&mut doc, page, &[nid]);
+        assert_eq!(removed, 1);
+        assert_eq!(doc.get(nid).unwrap().fills.len(), 1);
+        assert!(matches!(doc.get(nid).unwrap().fills[0].kind, PaintKind::Image { .. }));
+
+        let boosted = boost_resolution_on_selection(&mut doc, page, &[nid]);
+        assert_eq!(boosted, 1);
+        let updated = doc.get(nid).unwrap();
+        assert_eq!(updated.transform.tx, 10.0);
+        assert_eq!(updated.transform.ty, 21.0);
+        assert_eq!(updated.size.x, 200.0);
+        assert_eq!(updated.size.y, 120.0);
+        assert_eq!(updated.stroke.weight, 1.0);
+        assert!(matches!(
+            updated.fills[0].kind,
+            PaintKind::Image { scale_mode: designos_doc::ImageScaleMode::Fill, .. }
+        ));
+        assert_eq!(updated.fills[0].opacity, 1.0);
     }
 }

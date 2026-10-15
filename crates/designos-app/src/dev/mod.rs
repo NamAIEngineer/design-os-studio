@@ -84,12 +84,48 @@ pub struct DevState {
     pub annot: Option<AnnotEdit>,
     pub link: Option<LinkEdit>,
     pub compare: Option<compare::CompareView>,
+    pub show_redlines: bool,
     /// Time of the last status refresh (seconds), to throttle fingerprinting while dragging.
     pub last_refresh: f64,
     /// The document changed since the last refresh.
     pub stale: bool,
     pub checked_rev: Option<u64>,
     pub has_tracked_cached: bool,
+}
+
+/// Escapes a string literal for Jetpack Compose Kotlin code generation (`\`, `"`, `\n`, `$`).
+#[allow(dead_code)]
+pub fn compose_text(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 4);
+    for ch in s.chars() {
+        match ch {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            '$' => out.push_str("\\$"),
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+/// Escapes a string literal for SwiftUI Swift code generation (`\`, `"`, `\n`).
+#[allow(dead_code)]
+pub fn swift_text(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 4);
+    for ch in s.chars() {
+        match ch {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c => out.push(c),
+        }
+    }
+    out
 }
 
 /// Ready for dev items can be marked on these layers.
@@ -337,4 +373,12 @@ mod tests {
         assert!(Language::React.generate(&app.doc, f, true).contains("className"));
         assert!(Language::React.generate(&app.doc, f, false).contains("style={{"));
     }
+
+    #[test]
+    fn compose_and_swift_text_escape_quotes_backslashes_and_newlines() {
+        let raw = "Hello \"World\" \\ line1\nline2 $100";
+        assert_eq!(compose_text(raw), "Hello \\\"World\\\" \\\\ line1\\nline2 \\$100");
+        assert_eq!(swift_text(raw), "Hello \\\"World\\\" \\\\ line1\\nline2 $100");
+    }
 }
+

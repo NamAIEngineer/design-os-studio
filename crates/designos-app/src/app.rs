@@ -74,6 +74,7 @@ pub enum MenuKind {
     FileMenu,
     Zoom,
     ToolGroup(usize),
+    #[allow(dead_code)]
     FileName,
     /// The "Actions…" command palette (Ctrl+K).
     Palette,

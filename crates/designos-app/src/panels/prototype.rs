@@ -44,6 +44,9 @@ pub fn show(app: &mut App, ui: &mut Ui, region: Rect) {
     });
     app.proto.content_h = end;
     scrollbar(ui, region, scroll, end);
+    if let Some(s) = super::take_scrollbar_drag(ui, region) {
+        app.proto.scroll = s;
+    }
     picker_popup(app, ui, region);
     popover(app, ui, region);
 }
@@ -78,12 +81,19 @@ fn prototype_guide_cards(ui: &mut Ui, pane: &mut Pane) {
             "Use the play button in the toolbar to play your prototype. If there are no connections, the play button can be used to play a presentation of your frames.",
         ),
     ] {
+        let dismiss_id = egui::Id::new(("proto-guide-dismissed", key));
+        if ui.ctx().data(|d| d.get_temp::<bool>(dismiss_id).unwrap_or(false)) {
+            continue;
+        }
         pane.y += 8.0;
         let hdr_r = pane.rect(theme::SECTION_CONTENT_X, 0.0, theme::SECTION_CONTENT_W, 22.0);
         record(ui, key, hdr_r);
         ui.painter().text(Pos2::new(hdr_r.left(), hdr_r.center().y), Align2::LEFT_CENTER, heading, theme::font_body_strong(), Color32::WHITE);
         let close_r = Rect::from_min_size(Pos2::new(hdr_r.right() - 20.0, hdr_r.center().y - 10.0), Vec2::splat(20.0));
-        let _ = widgets::icon_button(ui, close_r, (key, "dismiss"), Icon::Close, false, "Dismiss tip");
+        record(ui, &format!("{key}-dismiss"), close_r);
+        if widgets::icon_button(ui, close_r, (key, "dismiss"), Icon::Close, false, "Dismiss tip").clicked() {
+            ui.ctx().data_mut(|d| d.insert_temp(dismiss_id, true));
+        }
         pane.y += 24.0;
         let text_r = pane.rect(theme::SECTION_CONTENT_X, 0.0, theme::SECTION_CONTENT_W, 48.0);
         let galley = ui.painter().layout(
@@ -123,7 +133,7 @@ fn flows_section(app: &mut App, ui: &mut Ui, pane: &mut Pane) {
         hint(ui, pane, "Select a frame and add it as a flow starting point to present from it.");
     }
     for (i, f) in here {
-        let row = pane.rect(theme::SECTION_CONTENT_X, 0.0, theme::SECTION_CONTENT_W, theme::FIELD_HEIGHT);
+        let row = pane.rect(theme::SECTION_CONTENT_X, 0.0, theme::SECTION_CONTENT_W - 28.0, theme::FIELD_HEIGHT);
         record(ui, &format!("proto-flow-{i}"), row);
         icons::paint(ui.painter(), Icon::Flag, Pos2::new(row.left() + 8.0, row.center().y), 14.0, theme::PROTO_BLUE);
         let name_r = Rect::from_min_max(Pos2::new(row.left() + 20.0, row.top()), Pos2::new(row.right() - 4.0, row.bottom()));
@@ -134,6 +144,13 @@ fn flows_section(app: &mut App, ui: &mut Ui, pane: &mut Pane) {
                 flows[i].name = name;
                 app.proto_set_flows(flows);
             }
+        }
+        let play_r = pane.rect(theme::SECTION_TRAILING_X - 26.0, 0.0, theme::PANEL_ACTION_BUTTON, theme::FIELD_HEIGHT);
+        record(ui, &format!("proto-flow-play-{i}"), play_r);
+        if widgets::icon_button(ui, play_r, ("flow-play", i), Icon::Play, false, "Present this flow").clicked() {
+            app.select_only(f.start);
+            app.start_present();
+            return;
         }
         let del = pane.rect(theme::SECTION_TRAILING_X, 0.0, theme::PANEL_ACTION_BUTTON, theme::FIELD_HEIGHT);
         record(ui, &format!("proto-flow-del-{i}"), del);
@@ -146,7 +163,14 @@ fn flows_section(app: &mut App, ui: &mut Ui, pane: &mut Pane) {
         pane.y += theme::FIELD_HEIGHT + 2.0;
         let start = app.doc.get(f.start).map(|n| n.name.clone()).unwrap_or_else(|| "(missing)".into());
         let r = pane.rect(theme::SECTION_CONTENT_X + 20.0, 0.0, theme::SECTION_CONTENT_W - 20.0, 16.0);
-        ui.painter().text(Pos2::new(r.left(), r.center().y), Align2::LEFT_CENTER, format!("Starts at {start}"), theme::font_small(), theme::TEXT_TERTIARY);
+        record(ui, &format!("proto-flow-start-{i}"), r);
+        let start_resp = ui.interact(r, ui.id().with(("flow-start-jump", i)), Sense::click());
+        let start_col = if start_resp.hovered() { theme::PROTO_BLUE } else { theme::TEXT_TERTIARY };
+        ui.painter().text(Pos2::new(r.left(), r.center().y), Align2::LEFT_CENTER, format!("Starts at {start}"), theme::font_small(), start_col);
+        if start_resp.on_hover_text("Click to select & focus starting frame").clicked() {
+            app.select_only(f.start);
+            app.fit_selection();
+        }
         pane.y += 20.0;
     }
     pane.y += 4.0;
