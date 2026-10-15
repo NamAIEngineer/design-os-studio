@@ -14,6 +14,17 @@ pub fn show(app: &mut App, ui: &mut Ui, rect: Rect) {
     p.rect_filled(rect, 0.0, theme::BG);
     widgets::vline(&p, rect.right() - theme::BORDER_WIDTH, rect.top(), rect.bottom(), theme::BORDER);
     let inner = Rect::from_min_max(rect.min, Pos2::new(rect.right() - theme::BORDER_WIDTH, rect.bottom()));
+    if matches!(app.ui.rail, Some(crate::app::RailItem::Agents | crate::app::RailItem::Tools)) {
+        let fp = app.file_path.clone();
+        let actions = crate::terminal::show_left(&mut app.terminal, ui, inner, fp.as_deref());
+        crate::shell::execute_terminal_actions(app, actions);
+        return;
+    }
+    if app.ui.rail == Some(crate::app::RailItem::Assets) {
+        super::assets::show(app, ui, inner);
+        return;
+    }
+
     let x0 = inner.left();
     let mut y = inner.top();
 
@@ -29,18 +40,8 @@ pub fn show(app: &mut App, ui: &mut Ui, rect: Rect) {
     y += theme::LEFT_HEADER_HEIGHT;
     widgets::hline(&p, x0, inner.right(), y - 1.0, theme::BORDER);
 
-    if app.ui.rail == Some(crate::app::RailItem::Assets) {
-        super::assets::show(app, ui, Rect::from_min_max(Pos2::new(x0, y), inner.max));
-        return;
-    }
     if app.ui.rail == Some(crate::app::RailItem::Specs) {
         crate::specs::show_left(app, ui, Rect::from_min_max(Pos2::new(x0, y), inner.max));
-        return;
-    }
-    if app.ui.rail == Some(crate::app::RailItem::Tools) {
-        let fp = app.file_path.clone();
-        let actions = crate::terminal::show_left(&mut app.terminal, ui, Rect::from_min_max(Pos2::new(x0, y), inner.max), fp.as_deref());
-        crate::shell::execute_terminal_actions(app, actions);
         return;
     }
 
@@ -66,6 +67,55 @@ pub fn show(app: &mut App, ui: &mut Ui, rect: Rect) {
     y += list_h + 8.0;
     widgets::hline(&p, x0, inner.right(), y - 1.0, theme::BORDER);
 
+    // ---- Dev Mode: compact 52px `Ready for development` section between Pages and Layers (`Gap C`)
+    let ready_rows =
+        if app.ui.dev_mode && (app.dev.has_tracked_cached || app.doc.nodes.len() <= 20_000) { crate::dev::list::rows(&app.doc) } else { Vec::new() };
+    if app.ui.dev_mode {
+        let sec_r = Rect::from_min_size(Pos2::new(x0, y), Vec2::new(inner.width(), 52.0));
+        widgets::record(ui, "left-dev-ready-section", sec_r);
+        let dev_green = Color32::from_rgb(0x1B, 0xC4, 0x7D);
+        let ready_on_page: usize = ready_rows
+            .iter()
+            .find_map(|r| match r {
+                crate::dev::list::Row::Page { id, count, .. } if *id == app.page => Some(*count),
+                _ => None,
+            })
+            .unwrap_or(0);
+        icons::paint(&p, Icon::Dev, Pos2::new(x0 + 18.0, y + 14.0), 13.0, dev_green);
+        p.text(Pos2::new(x0 + 30.0, y + 14.0), Align2::LEFT_CENTER, "Ready for development", theme::font_small_strong(), theme::TEXT);
+        p.text(
+            Pos2::new(inner.right() - theme::PANEL_PADDING_X, y + 14.0),
+            Align2::RIGHT_CENTER,
+            ready_on_page.to_string(),
+            theme::font_small_strong(),
+            if ready_on_page > 0 { dev_green } else { theme::TEXT_TERTIARY },
+        );
+
+        let markable_ids: Vec<NodeId> = app.selection.iter().copied().filter(|id| crate::dev::markable(app, *id)).collect();
+        let btn_r = Rect::from_min_size(Pos2::new(x0 + 10.0, y + 25.0), Vec2::new(inner.width() - 20.0, 22.0));
+        widgets::record(ui, "left-dev-mark-ready", btn_r);
+        let btn_resp = ui.interact(btn_r, ui.id().with("left-dev-mark-ready"), Sense::click());
+        let can_mark = !markable_ids.is_empty();
+        p.rect_filled(btn_r, theme::cr(5), if can_mark { dev_green.gamma_multiply(if btn_resp.hovered() { 0.24 } else { 0.16 }) } else { theme::BG_SECONDARY });
+        let btn_label = if can_mark {
+            "</> Mark selection ready for dev"
+        } else if ready_on_page > 0 {
+            "View ready sections & frames"
+        } else {
+            "Select a frame or section to mark ready"
+        };
+        p.text(btn_r.center(), Align2::CENTER_CENTER, btn_label, theme::font_small_medium(), if can_mark { dev_green } else { theme::TEXT_SECONDARY });
+        if btn_resp.clicked() {
+            if can_mark {
+                app.dev_mark_ready(&markable_ids);
+            } else if ready_on_page > 0 {
+                app.dev.left_tab = crate::dev::LeftTab::ReadyForDev;
+            }
+        }
+        y += 52.0;
+        widgets::hline(&p, x0, inner.right(), y - 1.0, theme::BORDER);
+    }
+
     // ---- find and replace takes the place of the layers
     if app.find.open {
         crate::find::panel::show(app, ui, Rect::from_min_max(Pos2::new(x0, y), inner.max));
@@ -74,8 +124,8 @@ pub fn show(app: &mut App, ui: &mut Ui, rect: Rect) {
 
     // ---- layers
     let lt = Rect::from_min_size(Pos2::new(x0, y), Vec2::new(inner.width(), theme::LAYER_HEADER_HEIGHT));
-    let dev_list = app.ui.dev_mode && app.dev.left_tab == crate::dev::LeftTab::ReadyForDev;
-    if app.ui.dev_mode {
+    let dev_list = app.ui.dev_mode && !ready_rows.is_empty() && app.dev.left_tab == crate::dev::LeftTab::ReadyForDev;
+    if app.ui.dev_mode && !ready_rows.is_empty() {
         crate::dev::list::tabs(app, ui, lt);
     } else {
         section_title(ui, lt, "Layers");
@@ -97,34 +147,13 @@ pub fn show(app: &mut App, ui: &mut Ui, rect: Rect) {
         }
     }
     widgets::record(ui, "layers-search", fb);
-    y += theme::LAYER_HEADER_HEIGHT;
-    if app.ui.dev_mode {
-        let ready_on_page: usize = crate::dev::list::rows(&app.doc)
-            .into_iter()
-            .find_map(|r| match r {
-                crate::dev::list::Row::Page { id, count, .. } if id == app.page => Some(count),
-                _ => None,
-            })
-            .unwrap_or(0);
-        if ready_on_page > 0 {
-            let banner_r = Rect::from_min_size(Pos2::new(x0 + 8.0, y + 2.0), Vec2::new(inner.width() - 16.0, 24.0));
-            let resp = ui.interact(banner_r, ui.id().with("dev-ready-banner"), Sense::click());
-            let dev_green = Color32::from_rgb(0x1B, 0xC4, 0x7D);
-            ui.painter().rect_filled(banner_r, theme::cr(theme::RADIUS_MEDIUM), dev_green.gamma_multiply(if resp.hovered() { 0.18 } else { 0.12 }));
-            icons::paint(ui.painter(), Icon::Dev, Pos2::new(banner_r.left() + 12.0, banner_r.center().y), 12.0, dev_green);
-            ui.painter().text(
-                Pos2::new(banner_r.left() + 24.0, banner_r.center().y),
-                Align2::LEFT_CENTER,
-                format!("Ready for development ({ready_on_page})"),
-                theme::font_small_strong(),
-                dev_green,
-            );
-            if resp.clicked() {
-                app.dev.left_tab = crate::dev::LeftTab::ReadyForDev;
-            }
-            y += 28.0;
-        }
+    let collapse_btn = fb.translate(Vec2::new(-theme::PAGES_SEARCH_DX, 0.0));
+    if widgets::icon_button(ui, collapse_btn, "layers-collapse-all", Icon::ChevronDown, false, "Collapse layers").clicked() {
+        app.layers.expanded.clear();
+        app.layers.expanded_gen = app.layers.expanded_gen.wrapping_add(1);
     }
+    widgets::record(ui, "layers-collapse-all", collapse_btn);
+    y += theme::LAYER_HEADER_HEIGHT;
     if app.layers.filter_open {
         let row = Rect::from_min_size(Pos2::new(x0, y), Vec2::new(inner.width(), 32.0));
         crate::find::filter::show_field(app, ui, row);
@@ -146,13 +175,17 @@ fn pages_list(app: &mut App, ui: &mut Ui, list: Rect) {
     wheel_scroll(ui, list, &mut scroll, content_h);
     app.layers.page_scroll = scroll;
     let pages = app.doc.pages.clone();
-    let ready_pages: std::collections::HashMap<NodeId, usize> = crate::dev::list::rows(&app.doc)
-        .into_iter()
-        .filter_map(|r| match r {
-            crate::dev::list::Row::Page { id, count, .. } => Some((id, count)),
-            _ => None,
-        })
-        .collect();
+    let ready_pages: std::collections::HashMap<NodeId, usize> = if app.ui.dev_mode && (app.dev.has_tracked_cached || app.doc.nodes.len() <= 20_000) {
+        crate::dev::list::rows(&app.doc)
+            .into_iter()
+            .filter_map(|r| match r {
+                crate::dev::list::Row::Page { id, count, .. } => Some((id, count)),
+                _ => None,
+            })
+            .collect()
+    } else {
+        std::collections::HashMap::new()
+    };
     clipped(ui, list, |ui| {
         let p = ui.painter().clone();
         for (i, pid) in pages.iter().enumerate() {
@@ -361,10 +394,10 @@ fn file_header(app: &mut App, ui: &mut Ui, inner: Rect, y: f32) {
         }
     }
 
-    // Second line: save state for library files, otherwise a way into the library.
+    // Second line: save state for library files, "Save to library" when a library is attached, or "Team project" subtitle.
     let sub_y = y + theme::LEFT_SUBLABEL_Y + 8.0;
     if app.lib_file.is_some() {
-        let text = if app.autosave.pending() { "Saving\u{2026}" } else { "All changes saved" };
+        let text = if app.autosave.pending() { "Saving\u{2026}" } else { "Team project" };
         p.text(Pos2::new(x0, sub_y), Align2::LEFT_CENTER, text, theme::font_body(), theme::TEXT_SECONDARY);
     } else if app.lib.is_some() {
         let label = "Save to library";
@@ -377,5 +410,7 @@ fn file_header(app: &mut App, ui: &mut Ui, inner: Rect, y: f32) {
         if resp.clicked() {
             app.begin_save_to_library();
         }
+    } else {
+        p.text(Pos2::new(x0, sub_y), Align2::LEFT_CENTER, "Team project", theme::font_body(), theme::TEXT_SECONDARY);
     }
 }

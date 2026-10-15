@@ -234,6 +234,11 @@ impl<'a> ExportCtx<'a> {
     }
 
     fn resolve_prop_guid(&self, scope_node: NodeId, prop_name: &str) -> (u32, u32) {
+        if let Some(rest) = prop_name.strip_prefix("propDefId:") {
+            if let Some(g) = parse_guid_pair(rest) {
+                return g;
+            }
+        }
         let key = prop_name.split('#').next().unwrap_or(prop_name).to_string();
         let mut cur = Some(scope_node);
         while let Some(c) = cur {
@@ -522,7 +527,7 @@ fn export_node_rec(
         NodeKind::Line => ("LINE", false),
         NodeKind::Polygon { .. } => ("REGULAR_POLYGON", false),
         NodeKind::Star { .. } => ("STAR", false),
-        NodeKind::Vector { .. } => ("VECTOR", false),
+        NodeKind::Vector { .. } => (if node.fig_metadata.contains_key("brushType") { "BRUSH" } else { "VECTOR" }, false),
         NodeKind::Text(_) => ("TEXT", false),
         NodeKind::BooleanOp(_) => ("BOOLEAN_OPERATION", false),
         NodeKind::Component(_) => ("SYMBOL", false),
@@ -560,6 +565,59 @@ fn export_node_rec(
     if node.is_mask {
         fields.push(("mask", V::Bool(true)));
     }
+    if node.lock_aspect {
+        fields.push(("proportionsConstrained", V::Bool(true)));
+    }
+    if let Some(hl) = node.hyperlink.as_deref().filter(|s| !s.is_empty()) {
+        let hl_msg = if let Some((s_str, l_str)) = hl.strip_prefix("guid:").and_then(|r| r.split_once(':')) {
+            if let (Ok(s), Ok(l)) = (s_str.parse::<u32>(), l_str.parse::<u32>()) {
+                msg(vec![("guid", guid(s, l))])
+            } else {
+                msg(vec![("url", V::String(hl.to_string()))])
+            }
+        } else {
+            msg(vec![("url", V::String(hl.to_string()))])
+        };
+        fields.push(("hyperlink", hl_msg));
+    }
+    if !node.plugin_data.is_empty() {
+        let pd_entries: Vec<V> = node
+            .plugin_data
+            .iter()
+            .map(|(full_key, val)| {
+                let mut m = Vec::with_capacity(3);
+                if let Some((pid, key)) = full_key.split_once(':') {
+                    if !pid.is_empty() {
+                        m.push(("pluginID", V::String(pid.to_string())));
+                    }
+                    m.push(("key", V::String(key.to_string())));
+                } else {
+                    m.push(("key", V::String(full_key.clone())));
+                }
+                m.push(("value", V::String(val.clone())));
+                msg(m)
+            })
+            .collect();
+        fields.push(("pluginData", V::Array(pd_entries)));
+    }
+    if !node.component.description.is_empty() {
+        fields.push(("symbolDescription", V::String(node.component.description.clone())));
+    }
+    if node.component.expose_nested_instances {
+        fields.push(("propsAreBubbled", V::Bool(true)));
+    }
+    if let Some(lvl) = node.component.override_level {
+        fields.push(("overrideLevel", V::Uint(lvl.max(0) as u32)));
+    }
+    if let Some(ds) = node
+        .detached_symbol_id
+        .as_deref()
+        .or(node.component.detached_symbol_id.as_deref())
+        .filter(|s| !s.is_empty())
+    {
+        fields.push(("detachedSymbolId", encode_detached_symbol_id(ds)));
+    }
+    append_fig_metadata(&mut fields, &node.fig_metadata);
     if let Some(src) = node.component.source.and_then(|s| cx.node_guids.get(&s).copied()) {
         fields.push(("overrideKey", guid(src.0, src.1)));
     } else if in_component {
@@ -966,6 +1024,22 @@ fn export_node_rec(
             fields.push(("componentPropRefs", V::Array(prop_refs)));
         }
     }
+    if !node.component.variant_props.is_empty() {
+        let mut vspecs = Vec::new();
+        for (prop_name, val) in &node.component.variant_props {
+            let def_g = cx.resolve_prop_guid(id, prop_name);
+            let bare_name = prop_name
+                .strip_prefix("propDefId:")
+                .map(|_| String::new())
+                .unwrap_or_else(|| prop_name.split('#').next().unwrap_or(prop_name).to_string());
+            let mut vspec = vec![("propDefId", guid(def_g.0, def_g.1)), ("value", V::String(val.clone()))];
+            if !bare_name.is_empty() {
+                vspec.push(("propertyName", V::String(bare_name)));
+            }
+            vspecs.push(msg(vspec));
+        }
+        fields.push(("variantPropSpecs", V::Array(vspecs)));
+    }
 
     // Geometry blobs.
     if !matches!(node.kind, NodeKind::Text(_)) {
@@ -1044,18 +1118,23 @@ fn export_node_rec(
             encode_text_node(&mut fields, &sp.text);
         }
         NodeKind::ShapeWithText(sp) => {
-            let st_name = match sp.shape {
-                ShapeKind::Square => "SQUARE",
-                ShapeKind::RoundedRect => "ROUNDED_RECTANGLE",
-                ShapeKind::Ellipse => "ELLIPSE",
-                ShapeKind::Diamond => "DIAMOND",
-                ShapeKind::Triangle => "TRIANGLE_UP",
-                ShapeKind::TriangleDown => "TRIANGLE_DOWN",
-                ShapeKind::Parallelogram => "PARALLELOGRAM_RIGHT",
-                ShapeKind::Star => "STAR",
-                ShapeKind::Hexagon => "HEXAGON",
-                ShapeKind::Pentagon => "PENTAGON",
-            };
+            let st_name = node
+                .fig_metadata
+                .get("shapeWithTextType")
+                .map(String::as_str)
+                .filter(|s| !s.is_empty())
+                .unwrap_or(match sp.shape {
+                    ShapeKind::Square => "SQUARE",
+                    ShapeKind::RoundedRect => "ROUNDED_RECTANGLE",
+                    ShapeKind::Ellipse => "ELLIPSE",
+                    ShapeKind::Diamond => "DIAMOND",
+                    ShapeKind::Triangle => "TRIANGLE_UP",
+                    ShapeKind::TriangleDown => "TRIANGLE_DOWN",
+                    ShapeKind::Parallelogram => "PARALLELOGRAM_RIGHT",
+                    ShapeKind::Star => "STAR",
+                    ShapeKind::Hexagon => "HEXAGON",
+                    ShapeKind::Pentagon => "PENTAGON",
+                });
             fields.push(("shapeWithTextType", V::String(st_name.into())));
             encode_text_node(&mut fields, &sp.text);
         }
@@ -1213,10 +1292,27 @@ fn collect_instance_overrides(cx: &ExportCtx, inst_id: NodeId) -> Vec<V> {
             .unwrap_or((1, cid.0 as u32));
         path.push(step_g);
 
-        if !n.component.overrides.is_empty() || !n.variables.bindings.is_empty() || !n.variables.modes.is_empty() {
+        if !n.component.overrides.is_empty()
+            || !n.variables.bindings.is_empty()
+            || !n.variables.modes.is_empty()
+            || n.component.override_level.is_some()
+            || n.component.detached_symbol_id.is_some()
+        {
             let mut ov = Vec::new();
             let guids: Vec<V> = path.iter().map(|&(s, l)| guid(s, l)).collect();
             ov.push(("guidPath", msg(vec![("guids", V::Array(guids))])));
+            if let Some(lvl) = n.component.override_level {
+                ov.push(("overrideLevel", V::Uint(lvl.max(0) as u32)));
+            }
+            if let Some(ds) = n
+                .component
+                .detached_symbol_id
+                .as_deref()
+                .or(n.detached_symbol_id.as_deref())
+                .filter(|s| !s.is_empty())
+            {
+                ov.push(("detachedSymbolId", encode_detached_symbol_id(ds)));
+            }
 
             let ovs = &n.component.overrides;
             if ovs.contains(&OverrideField::Name) {
@@ -1657,13 +1753,113 @@ fn style_name_from_weight(weight: u16, italic: bool) -> String {
 
 const KNOWN_OT_FEATURES: &[&str] = &[
     "LIGA", "DLIG", "CLIG", "CALT", "KERN", "SS01", "SS02", "SS03", "SS04", "SS05", "SS06", "SS07", "SS08", "SS09", "SS10", "TNUM",
-    "ONUM", "LNUM", "PNUM", "FRAC", "AFRC", "ZERO", "SMCP", "C2SC", "ORDN", "SWSH", "SALT", "SUPS", "SUBS", "CASE",
+    "ONUM", "LNUM", "PNUM", "FRAC", "AFRC", "ZERO", "SMCP", "C2SC", "PCAP", "C2PC", "UNIC", "TITL", "ORDN", "SWSH", "SALT", "SUPS",
+    "SUBS", "CASE",
 ];
+
+fn encode_detached_symbol_id(ds: &str) -> V {
+    if let Some(rest) = ds.strip_prefix("assetRef:") {
+        let (key, ver) = rest.split_once(':').unwrap_or((rest, ""));
+        let mut ar = vec![("key", V::String(key.to_string()))];
+        if !ver.is_empty() {
+            ar.push(("version", V::String(ver.to_string())));
+        }
+        return msg(vec![("assetRef", msg(ar))]);
+    }
+    let guid_part = ds.strip_prefix("guid:").unwrap_or(ds);
+    if let Some(g) = parse_guid_pair(guid_part) {
+        return msg(vec![("guid", guid(g.0, g.1))]);
+    }
+    msg(vec![("assetRef", msg(vec![("key", V::String(ds.to_string()))]))])
+}
+
+fn append_fig_metadata(fields: &mut Vec<(&'static str, V)>, meta: &BTreeMap<String, String>) {
+    if meta.is_empty() {
+        return;
+    }
+    for k in ["userFacingVersion", "sharedSymbolVersion", "publishedVersion", "version"] {
+        if let Some(v) = meta.get(k).filter(|s| !s.is_empty()) {
+            fields.push((k, V::String(v.clone())));
+        }
+    }
+    for k in ["isSymbolPublishable", "isPublishable"] {
+        if let Some(v) = meta.get(k) {
+            fields.push((k, V::Bool(v == "true")));
+        }
+    }
+    if let Some(g) = meta.get("publishID").and_then(|s| parse_guid_pair(s)) {
+        fields.push(("publishID", guid(g.0, g.1)));
+    }
+    if let Some(bt) = meta.get("brushType").filter(|s| !s.is_empty()) {
+        fields.push(("brushType", en(bt)));
+    }
+    if let Some(wca) = meta.get("widgetCachedAncestor").and_then(|s| parse_guid_pair(s)) {
+        fields.push(("widgetCachedAncestor", msg(vec![("nodeId", guid(wca.0, wca.1))])));
+    }
+    if let Some(ei_str) = meta.get("editInfo") {
+        if let Ok(serde_json::Value::Object(ei)) = serde_json::from_str::<serde_json::Value>(ei_str) {
+            let mut m = Vec::new();
+            if let Some(ts) = ei.get("timestampIso8601").and_then(|v| v.as_str()) {
+                m.push(("timestampIso8601", V::String(ts.to_string())));
+            }
+            if let Some(uid) = ei.get("userId").and_then(|v| v.as_str()) {
+                m.push(("userId", V::String(uid.to_string())));
+            }
+            if let Some(le) = ei.get("lastEditedAt").and_then(|v| v.as_u64()) {
+                m.push(("lastEditedAt", V::Uint(le as u32)));
+            }
+            if let Some(ca) = ei.get("createdAt").and_then(|v| v.as_u64()) {
+                m.push(("createdAt", V::Uint(ca as u32)));
+            }
+            if !m.is_empty() {
+                fields.push(("editInfo", msg(m)));
+            }
+        }
+    }
+    if let Some(prd_str) = meta.get("pluginRelaunchData") {
+        if let Ok(serde_json::Value::Array(arr)) = serde_json::from_str::<serde_json::Value>(prd_str) {
+            let mut items = Vec::new();
+            for item in arr {
+                let mut m = Vec::new();
+                if let Some(pid) = item.get("pluginID").and_then(|v| v.as_str()) {
+                    m.push(("pluginID", V::String(pid.to_string())));
+                }
+                if let Some(ms) = item.get("message").and_then(|v| v.as_str()) {
+                    m.push(("message", V::String(ms.to_string())));
+                }
+                if let Some(cmd) = item.get("command").and_then(|v| v.as_str()) {
+                    m.push(("command", V::String(cmd.to_string())));
+                }
+                if let Some(del) = item.get("isDeleted").and_then(|v| v.as_bool()) {
+                    m.push(("isDeleted", V::Bool(del)));
+                }
+                if !m.is_empty() {
+                    items.push(msg(m));
+                }
+            }
+            if !items.is_empty() {
+                fields.push(("pluginRelaunchData", V::Array(items)));
+            }
+        }
+    }
+    if let Some(ngd_str) = meta.get("nodeGenerationData") {
+        if let Ok(serde_json::Value::Object(ngd)) = serde_json::from_str::<serde_json::Value>(ngd_str) {
+            let mut m = Vec::new();
+            if let Some(fgs) = ngd.get("useFineGrainedSyncing").and_then(|v| v.as_bool()) {
+                m.push(("useFineGrainedSyncing", V::Bool(fgs)));
+            }
+            if !m.is_empty() {
+                fields.push(("nodeGenerationData", msg(m)));
+            }
+        }
+    }
+}
 
 fn append_ot_and_variation_fields(fields: &mut Vec<(&'static str, V)>, ts: &TextStyle) {
     if !ts.features.is_empty() {
         let mut on_f = Vec::new();
         let mut off_f = Vec::new();
+        let is_on = |name: &str| ts.features.iter().any(|(t, v)| t.eq_ignore_ascii_case(name) && *v != 0);
         for (tag, enabled) in &ts.features {
             let up = tag.to_ascii_uppercase();
             if KNOWN_OT_FEATURES.contains(&up.as_str()) {
@@ -1679,6 +1875,39 @@ fn append_ot_and_variation_fields(fields: &mut Vec<(&'static str, V)>, ts: &Text
         }
         if !off_f.is_empty() {
             fields.push(("toggledOffOTFeatures", V::Array(off_f)));
+        }
+        if is_on("onum") {
+            fields.push(("fontVariantNumericFigure", en("OLDSTYLE")));
+        } else if is_on("lnum") {
+            fields.push(("fontVariantNumericFigure", en("LINING")));
+        }
+        if is_on("tnum") {
+            fields.push(("fontVariantNumericSpacing", en("TABULAR")));
+        } else if is_on("pnum") {
+            fields.push(("fontVariantNumericSpacing", en("PROPORTIONAL")));
+        }
+        if is_on("frac") {
+            fields.push(("fontVariantNumericFraction", en("DIAGONAL")));
+        } else if is_on("afrc") {
+            fields.push(("fontVariantNumericFraction", en("STACKED")));
+        }
+        if is_on("c2sc") {
+            fields.push(("fontVariantCaps", en("ALL_SMALL")));
+        } else if is_on("smcp") {
+            fields.push(("fontVariantCaps", en("SMALL")));
+        } else if is_on("c2pc") {
+            fields.push(("fontVariantCaps", en("ALL_PETITE")));
+        } else if is_on("pcap") {
+            fields.push(("fontVariantCaps", en("PETITE")));
+        } else if is_on("unic") {
+            fields.push(("fontVariantCaps", en("UNICASE")));
+        } else if is_on("titl") {
+            fields.push(("fontVariantCaps", en("TITLING")));
+        }
+        if is_on("subs") {
+            fields.push(("fontVariantPosition", en("SUB")));
+        } else if is_on("sups") {
+            fields.push(("fontVariantPosition", en("SUPER")));
         }
     }
     if !ts.variation_axes.is_empty() {
@@ -1758,6 +1987,8 @@ fn append_text_style_fields(fields: &mut Vec<(&'static str, V)>, ts: &TextStyle)
 
 fn encode_text_node(fields: &mut Vec<(&'static str, V)>, tp: &TextProps) {
     append_text_style_fields(fields, &tp.style);
+    fields.push(("autoRename", V::Bool(tp.auto_rename)));
+    fields.push(("textDecorationSkipInk", V::Bool(tp.decoration_skip_ink)));
     fields.push((
         "textAutoResize",
         en(match tp.auto_resize {

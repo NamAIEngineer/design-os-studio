@@ -353,6 +353,49 @@ pub fn snap_angle(rad: f32, step_deg: f32) -> f32 {
     (rad / step).round() * step
 }
 
+/// Computes interactive on-canvas Table / CSS Grid column and row track resize divider handles
+/// (`(start_world, end_world, is_column_divider)`) for a Grid/Table frame (`LayoutDirection::Grid` / `NodeKind::Table`).
+#[allow(dead_code)]
+pub fn table_col_resize_handle(
+    doc: &designos_doc::Document,
+    id: designos_doc::NodeId,
+) -> Vec<(egui::Pos2, egui::Pos2, bool)> {
+    let Some(node) = doc.get(id) else {
+        return Vec::new();
+    };
+    let (cols, rows, pad, col_gap, row_gap) = match node.kind.frame_props().and_then(|fp| fp.auto_layout.as_ref()) {
+        Some(al) if al.direction == LayoutDirection::Grid => (
+            al.grid_columns.max(1),
+            al.grid_rows.max(1),
+            al.padding,
+            al.item_spacing.max(0.0),
+            al.counter_spacing.max(0.0),
+        ),
+        _ if node.name.to_ascii_lowercase().contains("table") => (2, 2, [0.0; 4], 0.0, 0.0),
+        _ => return Vec::new(),
+    };
+    let [pt, pr, pb, pl] = pad;
+    let inner_w = (node.size.x - pl - pr - col_gap * (cols.saturating_sub(1) as f32)).max(1.0);
+    let inner_h = (node.size.y - pt - pb - row_gap * (rows.saturating_sub(1) as f32)).max(1.0);
+    let col_w = inner_w / (cols as f32);
+    let row_h = inner_h / (rows as f32);
+    let world = doc.world_transform(id);
+    let to_pos2 = |p: Vec2| {
+        let wp = world.apply(p);
+        egui::Pos2::new(wp.x, wp.y)
+    };
+    let mut out = Vec::new();
+    for c in 1..cols {
+        let x = pl + (c as f32) * col_w + ((c - 1) as f32 + 0.5) * col_gap;
+        out.push((to_pos2(v2(x, pt)), to_pos2(v2(x, node.size.y - pb)), true));
+    }
+    for r in 1..rows {
+        let y = pt + (r as f32) * row_h + ((r - 1) as f32 + 0.5) * row_gap;
+        out.push((to_pos2(v2(pl, y)), to_pos2(v2(node.size.x - pr, y)), false));
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -461,5 +504,27 @@ mod tests {
             hit_auto_layout_handle(&hnds, |v| v, v2(10.0, 32.0), 3.0),
             Some(AutoLayoutHandleKind::Padding(3))
         );
+    }
+
+    #[test]
+    fn table_col_resize_handle_computes_grid_column_and_row_dividers() {
+        let mut doc = designos_doc::Document::new("Table Test");
+        let page = doc.add_page("Page 1");
+        let tid = doc.alloc_id();
+        let mut f = designos_doc::Node::frame(tid, Rect::new(0.0, 0.0, 300.0, 200.0));
+        if let Some(fp) = f.kind.frame_props_mut() {
+            fp.auto_layout = Some(AutoLayout {
+                direction: LayoutDirection::Grid,
+                grid_columns: 3,
+                grid_rows: 2,
+                ..AutoLayout::default()
+            });
+        }
+        doc.insert(page, f).unwrap();
+        let dividers = table_col_resize_handle(&doc, tid);
+        // 2 internal column dividers + 1 internal row divider = 3 dividers
+        assert_eq!(dividers.len(), 3);
+        assert_eq!(dividers.iter().filter(|d| d.2).count(), 2);
+        assert_eq!(dividers.iter().filter(|d| !d.2).count(), 1);
     }
 }

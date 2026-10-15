@@ -107,8 +107,104 @@ pub fn tool_menu_pos(screen: Rect, gi: usize, h: f32) -> Pos2 {
 }
 
 pub fn show(app: &mut App, ui: &mut Ui, screen: Rect) {
+    if app.ui.dev_mode {
+        show_dev_mode_toolbar(app, ui, screen);
+        return;
+    }
+    let figma_blue = Color32::from_rgb(0x0D, 0x99, 0xFF);
     let bar = toolbar_rect(screen);
     let p = ui.painter().clone();
+
+    // 1:1 Figma UI3 Contextual Floating Action Bar (`figma_live_editor.png`):
+    // Rendered 8px above the main bottom toolbar when a layer/frame is selected in Design Mode
+    // and no popup menu, toast, popover, or Actions modal is covering that region.
+    if !app.selection.is_empty()
+        && app.canvas.vedit.is_none()
+        && app.ui.menu.is_none()
+        && !app.cmdk.open
+        && app.toast.is_none()
+        && app.props.pop.is_none()
+        && app.props.picker.is_none()
+    {
+        let ctx_w = 188.0;
+        let ctx_h = 34.0;
+        let ctx_bar = Rect::from_min_size(
+            Pos2::new((screen.center().x - ctx_w * 0.5).round(), bar.top() - 8.0 - ctx_h),
+            Vec2::new(ctx_w, ctx_h),
+        );
+        widgets::record(ui, "contextual-floating-bar", ctx_bar);
+        widgets::shadow(&p, ctx_bar, 8, Vec2::new(0.0, 2.0), 6.0, theme::SHADOW_COLOR);
+        p.rect_filled(ctx_bar, theme::cr(8), theme::BG_TOOLBAR);
+        p.rect_stroke(
+            ctx_bar.shrink(0.5),
+            theme::cr(8),
+            Stroke::new(1.0, Color32::from_rgb(0x38, 0x38, 0x38)),
+            egui::StrokeKind::Inside,
+        );
+        ui.interact(ctx_bar, ui.id().with("ctx-toolbar-block"), Sense::click_and_drag());
+
+        let mut cx = ctx_bar.left() + 4.0;
+        let cy = ctx_bar.top() + 3.0;
+        let ctx_items: [(Icon, &str, &str); 4] = [
+            (Icon::Frame, "ctx-crop", "Crop"),
+            (Icon::Rectangle, "ctx-select-area", "Select area"),
+            (Icon::Sparkle, "ctx-remove-bg", "Remove background"),
+            (Icon::Pen, "ctx-edit-prompt", "Edit with prompt"),
+        ];
+        for (icon, key, tip) in ctx_items {
+            let br = Rect::from_min_size(Pos2::new(cx, cy), Vec2::splat(28.0));
+            let resp = ui.interact(br, ui.id().with(key), Sense::click());
+            if resp.hovered() {
+                p.rect_filled(br, theme::cr(theme::RADIUS_MEDIUM), theme::BG_TOOLBAR_HOVER);
+            }
+            icons::paint(&p, icon, br.center(), 15.0, theme::ICON);
+            if resp.on_hover_text(tip).clicked() {
+                match key {
+                    "ctx-edit-prompt" => {
+                        app.cmdk.open = true;
+                        app.cmdk.focus_requested = true;
+                    }
+                    "ctx-remove-bg" => {
+                        app.show_toast("AI Remove Background queued", false);
+                    }
+                    "ctx-crop" => {
+                        app.show_toast("Crop mode active", false);
+                    }
+                    _ => {
+                        app.show_toast("Select area active", false);
+                    }
+                }
+            }
+            cx += 30.0;
+        }
+        cx += 3.0;
+        widgets::vline(&p, cx, ctx_bar.top() + 6.0, ctx_bar.bottom() - 6.0, theme::BORDER);
+        cx += 5.0;
+        let more_r = Rect::from_min_size(Pos2::new(cx, cy), Vec2::new(48.0, 28.0));
+        let more_resp = ui.interact(more_r, ui.id().with("ctx-more"), Sense::click());
+        if more_resp.hovered() {
+            p.rect_filled(more_r, theme::cr(theme::RADIUS_MEDIUM), theme::BG_TOOLBAR_HOVER);
+        }
+        p.text(
+            Pos2::new(more_r.left() + 6.0, more_r.center().y),
+            egui::Align2::LEFT_CENTER,
+            "More",
+            theme::font_small(),
+            theme::TEXT,
+        );
+        icons::paint(
+            &p,
+            Icon::ChevronDown,
+            Pos2::new(more_r.right() - 9.0, more_r.center().y),
+            theme::TOOL_CHEVRON_ICON,
+            theme::ICON_SECONDARY,
+        );
+        if more_resp.on_hover_text("More actions   Ctrl+K").clicked() {
+            app.cmdk.open = true;
+            app.cmdk.focus_requested = true;
+        }
+    }
+
     widgets::shadow(&p, bar, theme::RADIUS_LARGE, Vec2::new(0.0, 3.0), 8.0, theme::SHADOW_COLOR);
     widgets::shadow(&p, bar, theme::RADIUS_LARGE, Vec2::new(0.0, 1.0), 3.0, theme::SHADOW_COLOR_STRONG);
     p.rect_filled(bar, theme::cr(theme::RADIUS_LARGE), theme::BG_TOOLBAR);
@@ -129,9 +225,9 @@ pub fn show(app: &mut App, ui: &mut Ui, screen: Rect) {
         let br = Rect::from_min_size(Pos2::new(x, y), Vec2::splat(theme::TOOL_BUTTON));
         let resp = ui.interact(br, ui.id().with(("tool", gi)), Sense::click());
         let has_chev = has_chevron(group);
-        // Only the 32x32 icon button takes the selected fill.
+        // Only the 32x32 icon button takes the selected fill (Figma UI3 #0D99FF Blue).
         let fill = if selected {
-            theme::BG_TOOLBAR_SELECTED
+            figma_blue
         } else if resp.hovered() {
             theme::BG_TOOLBAR_HOVER
         } else {
@@ -166,14 +262,24 @@ pub fn show(app: &mut App, ui: &mut Ui, screen: Rect) {
         }
     }
 
-    // Actions button.
+    // Actions button (`figma_ui3_actions_cmdk.png`: fills #0D99FF Figma Blue when Actions is open).
     x += theme::TOOL_GROUP_GAP;
     let ar = Rect::from_min_size(Pos2::new(x, y), Vec2::splat(theme::TOOL_BUTTON));
+    widgets::record(ui, "toolbar-actions-btn", ar);
     let aresp = ui.interact(ar, ui.id().with("actions"), Sense::click());
-    if aresp.hovered() {
+    let actions_open = app.cmdk.open || app.ui.menu == Some(MenuKind::Palette);
+    if actions_open {
+        p.rect_filled(ar, theme::cr(theme::RADIUS_MEDIUM), figma_blue);
+    } else if aresp.hovered() {
         p.rect_filled(ar, theme::cr(theme::RADIUS_MEDIUM), theme::BG_TOOLBAR_HOVER);
     }
-    icons::paint(&p, Icon::Sparkle, ar.center(), theme::TOOL_ICON_SIZE, theme::ICON);
+    icons::paint(
+        &p,
+        Icon::Sparkle,
+        ar.center(),
+        theme::TOOL_ICON_SIZE,
+        if actions_open { Color32::WHITE } else { theme::ICON },
+    );
     if aresp.on_hover_text("Actions   Ctrl+K").clicked() {
         super::menus::run(app, ui.ctx(), super::menus::Action::OpenPalette);
     }
@@ -183,39 +289,43 @@ pub fn show(app: &mut App, ui: &mut Ui, screen: Rect) {
     widgets::vline(&p, x, bar.top() + 1.0, bar.bottom() - 1.0, theme::BORDER);
     x += theme::BORDER_WIDTH + theme::TOOLBAR_DIVIDER_GAP_AFTER;
 
-    // Mode switcher: draw, design, prototype, dev (design / dev are the working modes).
+    // Mode switcher: 3 Figma UI3 segments (Draw | Design | Dev mode) in the right pill.
     let sw = Rect::from_min_size(Pos2::new(x, y), Vec2::new(mode_switch_width(), theme::TOOL_BUTTON));
     p.rect_filled(sw, theme::cr(theme::RADIUS_MEDIUM), theme::BG_TOOLBAR_MODE_SWITCHER);
-    let modes = [(Icon::Pencil, "Draw"), (Icon::Design, "Design"), (Icon::Component, "Prototype"), (Icon::Dev, "Dev mode")];
+    let modes = [(Icon::Pencil, "Draw"), (Icon::Design, "Design"), (Icon::Dev, "Dev mode")];
+    let seg_w = (mode_switch_width() - theme::MODE_SWITCH_PAD * 2.0) / modes.len() as f32;
     for (i, (icon, label)) in modes.into_iter().enumerate() {
         let r = Rect::from_min_size(
-            Pos2::new(x + theme::MODE_SWITCH_PAD + i as f32 * theme::MODE_SWITCH_W, y + theme::MODE_SWITCH_PAD),
-            Vec2::new(theme::MODE_SWITCH_W, theme::TOOL_BUTTON - theme::MODE_SWITCH_PAD * 2.0),
+            Pos2::new(x + theme::MODE_SWITCH_PAD + i as f32 * seg_w, y + theme::MODE_SWITCH_PAD),
+            Vec2::new(seg_w, theme::TOOL_BUTTON - theme::MODE_SWITCH_PAD * 2.0),
         );
+        let mode_key = match i {
+            0 => "toolbar-mode-draw",
+            1 => "toolbar-mode-design",
+            _ => "toolbar-mode-dev",
+        };
+        widgets::record(ui, mode_key, r);
         let resp = ui.interact(r, ui.id().with(("mode", i)), Sense::click());
-        let proto_mode = app.ui.right_tab == Some(crate::app::RightTab::Prototype);
-        let sel = if i == 0 {
-            app.cmdk.open
-        } else if app.ui.dev_mode {
-            i == 3
-        } else if proto_mode {
+        let sel = if app.ui.dev_mode {
             i == 2
+        } else if matches!(app.tool, Tool::Pencil | Tool::Pen) {
+            i == 0
         } else {
             i == 1
         };
         let dev_green = Color32::from_rgb(0x1B, 0xC4, 0x7D);
         if sel {
-            // Active segment: Dev Mode uses Figma UI3 #1BC47D green; other modes use darker inset tile.
-            let active_bg = if i == 3 { dev_green } else { theme::BG_TOOLBAR };
+            // Active segment: Dev Mode uses Figma UI3 #1BC47D green; Design/Draw use darker inset tile with #0D99FF icon.
+            let active_bg = if i == 2 { dev_green } else { theme::BG_TOOLBAR };
             p.rect_filled(r, theme::cr(theme::MODE_TILE_RADIUS), active_bg);
         } else if resp.hovered() {
             p.rect_filled(r, theme::cr(theme::MODE_TILE_RADIUS), theme::BG_TOOLBAR_HOVER);
         }
-        let icon_col = if sel && i == 3 {
+        let icon_col = if sel && i == 2 {
             Color32::WHITE
         } else if sel {
-            theme::ICON_SELECTED
-        } else if i == 3 && resp.hovered() {
+            figma_blue
+        } else if i == 2 && resp.hovered() {
             dev_green
         } else {
             theme::ICON_SECONDARY
@@ -223,17 +333,168 @@ pub fn show(app: &mut App, ui: &mut Ui, screen: Rect) {
         icons::paint(&p, icon, r.center(), 16.0, icon_col);
         if resp.on_hover_text(label).clicked() {
             match i {
+                0 => {
+                    app.ui.dev_mode = false;
+                    app.ui.right_tab = Some(crate::app::RightTab::Design);
+                    app.set_tool(Tool::Pencil);
+                }
                 1 => {
                     app.ui.dev_mode = false;
                     app.ui.right_tab = Some(crate::app::RightTab::Design);
+                    if matches!(app.tool, Tool::Pencil | Tool::Pen) {
+                        app.set_tool(Tool::Move);
+                    }
                 }
-                2 => {
-                    app.ui.dev_mode = false;
-                    app.ui.right_tab = Some(crate::app::RightTab::Prototype);
-                }
-                3 => {
+                _ => {
                     app.ui.dev_mode = true;
                     app.ui.right_tab = Some(crate::app::RightTab::Design);
+                }
+            }
+        }
+    }
+}
+
+/// 1:1 Figma UI3 Dev Mode 5-tool bottom floating dock + floating `↩ Re-center  ⇧2` pill (`Gap C`).
+fn show_dev_mode_toolbar(app: &mut App, ui: &mut Ui, screen: Rect) {
+    let dev_green = Color32::from_rgb(0x1B, 0xC4, 0x7D);
+    let dev_toggle_w = 36.0;
+    let tools_count = 5usize;
+    let w = theme::TOOLBELT_PADDING * 2.0
+        + tools_count as f32 * theme::TOOL_BUTTON
+        + (tools_count - 1) as f32 * theme::TOOL_GROUP_GAP
+        + theme::TOOLBAR_DIVIDER_GAP_BEFORE
+        + theme::BORDER_WIDTH
+        + theme::TOOLBAR_DIVIDER_GAP_AFTER
+        + dev_toggle_w;
+
+    let bar = Rect::from_min_size(
+        Pos2::new(
+            screen.center().x - w / 2.0,
+            screen.bottom() - theme::TOOLBELT_BOTTOM_MARGIN - theme::TOOLBELT_HEIGHT,
+        ),
+        Vec2::new(w, theme::TOOLBELT_HEIGHT),
+    );
+    let p = ui.painter().clone();
+
+    // Floating `↩ Re-center  ⇧2` pill 8px above the Dev Mode bottom toolbar
+    let recenter_rect = Rect::from_min_size(
+        Pos2::new(bar.center().x - 59.0, bar.top() - 8.0 - 28.0),
+        Vec2::new(118.0, 28.0),
+    );
+    widgets::record(ui, "dev-recenter", recenter_rect);
+    let recenter_resp = ui.interact(recenter_rect, ui.id().with("dev-recenter"), Sense::click());
+    widgets::shadow(
+        &p,
+        recenter_rect,
+        6,
+        Vec2::new(0.0, 2.0),
+        6.0,
+        theme::SHADOW_COLOR,
+    );
+    p.rect_filled(
+        recenter_rect,
+        theme::cr(6),
+        if recenter_resp.hovered() {
+            Color32::from_rgb(0x36, 0x36, 0x36)
+        } else {
+            Color32::from_rgb(0x2C, 0x2C, 0x2C)
+        },
+    );
+    p.rect_stroke(
+        recenter_rect,
+        theme::cr(6),
+        Stroke::new(1.0, Color32::from_rgb(0x38, 0x38, 0x38)),
+        egui::StrokeKind::Inside,
+    );
+    p.text(
+        Pos2::new(recenter_rect.left() + 10.0, recenter_rect.center().y),
+        egui::Align2::LEFT_CENTER,
+        "\u{21A9} Re-center",
+        theme::font_small_strong(),
+        theme::TEXT,
+    );
+    p.text(
+        Pos2::new(recenter_rect.right() - 10.0, recenter_rect.center().y),
+        egui::Align2::RIGHT_CENTER,
+        "\u{21E7}2",
+        theme::font_small(),
+        theme::TEXT_SECONDARY,
+    );
+    if recenter_resp.on_hover_text("Re-center canvas   Shift+2").clicked() {
+        if app.selection.is_empty() {
+            app.fit_all();
+        } else {
+            app.fit_selection();
+        }
+    }
+
+    // Bottom floating dock container
+    widgets::shadow(&p, bar, theme::RADIUS_LARGE, Vec2::new(0.0, 3.0), 8.0, theme::SHADOW_COLOR);
+    widgets::shadow(&p, bar, theme::RADIUS_LARGE, Vec2::new(0.0, 1.0), 3.0, theme::SHADOW_COLOR_STRONG);
+    p.rect_filled(bar, theme::cr(theme::RADIUS_LARGE), theme::BG_TOOLBAR);
+    p.rect_stroke(
+        bar.shrink(0.5),
+        theme::cr(theme::RADIUS_LARGE),
+        Stroke::new(1.0, theme::INNER_HIGHLIGHT),
+        egui::StrokeKind::Inside,
+    );
+    ui.interact(bar, ui.id().with("toolbar-block-dev"), Sense::click_and_drag());
+
+    let mut x = bar.left() + theme::TOOLBELT_PADDING;
+    let y = bar.top() + (bar.height() - theme::TOOL_BUTTON) / 2.0;
+
+    let dev_tools: [(Icon, &str, bool); 5] = [
+        (Icon::Move, "Select   V", app.tool == Tool::Move && app.dev.annot.is_none()),
+        (Icon::Pen, "Annotate   Y", app.dev.annot.is_some()),
+        (Icon::Spacing, "Measure   M", app.ui.rulers),
+        (Icon::Comment, "Comment   C", app.tool == Tool::Comment),
+        (Icon::Sparkle, "Actions   Ctrl+K", app.cmdk.open),
+    ];
+
+    for (idx, (icon, tip, active)) in dev_tools.into_iter().enumerate() {
+        if idx > 0 {
+            x += theme::TOOL_GROUP_GAP;
+        }
+        let br = Rect::from_min_size(Pos2::new(x, y), Vec2::splat(theme::TOOL_BUTTON));
+        let resp = ui.interact(br, ui.id().with(("dev-tool", idx)), Sense::click());
+        let fill = if active {
+            dev_green
+        } else if resp.hovered() {
+            theme::BG_TOOLBAR_HOVER
+        } else {
+            Color32::TRANSPARENT
+        };
+        if fill != Color32::TRANSPARENT {
+            p.rect_filled(br, theme::cr(theme::RADIUS_MEDIUM), fill);
+        }
+        let icon_col = if active { Color32::WHITE } else { theme::ICON };
+        icons::paint(&p, icon, br.center(), theme::TOOL_ICON_SIZE, icon_col);
+        if resp.on_hover_text(tip).clicked() {
+            match idx {
+                0 => {
+                    app.dev.annot = None;
+                    app.set_tool(Tool::Move);
+                }
+                1 => {
+                    if app.dev.annot.is_some() {
+                        app.dev.annot = None;
+                    } else if let Some(&id) = app.selection.first() {
+                        app.dev.annot = Some(crate::dev::AnnotEdit {
+                            node: id,
+                            index: None,
+                            text: String::new(),
+                            props: Vec::new(),
+                        });
+                    } else {
+                        app.set_tool(Tool::Comment);
+                    }
+                }
+                2 => {
+                    app.ui.rulers = !app.ui.rulers;
+                }
+                3 => {
+                    app.dev.annot = None;
+                    app.set_tool(Tool::Comment);
                 }
                 _ => {
                     app.cmdk.open = !app.cmdk.open;
@@ -243,6 +504,30 @@ pub fn show(app: &mut App, ui: &mut Ui, screen: Rect) {
                 }
             }
         }
+        x += theme::TOOL_BUTTON;
+    }
+
+    x += theme::TOOLBAR_DIVIDER_GAP_BEFORE;
+    widgets::vline(&p, x, bar.top() + 1.0, bar.bottom() - 1.0, theme::BORDER);
+    x += theme::BORDER_WIDTH + theme::TOOLBAR_DIVIDER_GAP_AFTER;
+
+    // Solid green `</>` Dev Mode toggle button
+    let toggle_r = Rect::from_min_size(Pos2::new(x, y), Vec2::new(dev_toggle_w, theme::TOOL_BUTTON));
+    widgets::record(ui, "dev-mode-toggle", toggle_r);
+    let toggle_resp = ui.interact(toggle_r, ui.id().with("dev-mode-toggle"), Sense::click());
+    p.rect_filled(
+        toggle_r,
+        theme::cr(theme::RADIUS_MEDIUM),
+        if toggle_resp.hovered() {
+            Color32::from_rgb(0x22, 0xD4, 0x89)
+        } else {
+            dev_green
+        },
+    );
+    icons::paint(&p, Icon::Dev, toggle_r.center(), 16.0, Color32::WHITE);
+    if toggle_resp.on_hover_text("Exit Dev Mode   Shift+D").clicked() {
+        app.ui.dev_mode = false;
+        app.ui.right_tab = Some(crate::app::RightTab::Design);
     }
 }
 
@@ -275,5 +560,124 @@ mod tests {
                 let _ = tool_icon(*t);
             }
         }
+    }
+
+    #[test]
+    fn end_to_end_figma_ui3_userflows_uf01_to_uf05() {
+        use crate::app::{RailItem, RightTab};
+        use designos_doc::{Document, Node};
+
+        let mut d = Document::new("FlowTest");
+        let page = d.add_page("Page 1");
+        let f = d.alloc_id();
+        let f = d.insert(page, Node::frame(f, designos_doc::Rect::new(0.0, 0.0, 320.0, 200.0))).unwrap();
+        let mut app = App::new(d);
+        app.selection = vec![f];
+
+        let ctx = egui::Context::default();
+        theme::install_fonts(&ctx);
+        let screen = Rect::from_min_size(Pos2::ZERO, Vec2::new(1440.0, 900.0));
+
+        let run_frame = |app: &mut App, click: Option<Pos2>| {
+            let mut events = Vec::new();
+            if let Some(pos) = click {
+                events.push(egui::Event::PointerMoved(pos));
+                events.push(egui::Event::PointerButton {
+                    pos,
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: egui::Modifiers::NONE,
+                });
+                events.push(egui::Event::PointerButton {
+                    pos,
+                    button: egui::PointerButton::Primary,
+                    pressed: false,
+                    modifiers: egui::Modifiers::NONE,
+                });
+            }
+            let raw = egui::RawInput {
+                screen_rect: Some(screen),
+                events,
+                ..Default::default()
+            };
+            let _ = ctx.run_ui(raw, |ui| {
+                crate::panels::rail::show(app, ui, Rect::from_min_size(Pos2::new(0.0, 32.0), Vec2::new(40.0, 868.0)));
+                crate::panels::left::show(app, ui, Rect::from_min_size(Pos2::new(40.0, 32.0), Vec2::new(240.0, 868.0)));
+                crate::panels::toolbar::show(app, ui, screen);
+            });
+        };
+        let get_rect = |name: &str| ctx.data(|d| d.get_temp::<Rect>(egui::Id::new(("test-rect", name.to_string()))));
+
+        // Initial frame: File (Pages & Layers) is active.
+        run_frame(&mut app, None);
+        assert_eq!(app.ui.rail, None);
+
+        // UF-01 & UF-02: Click Agents in Left Rail -> opens full-height Agents Left Side Panel (top < 60.0).
+        let agents_btn = get_rect("rail-Agents").expect("rail-Agents rect");
+        run_frame(&mut app, Some(agents_btn.center()));
+        assert_eq!(app.ui.rail, Some(RailItem::Agents));
+        run_frame(&mut app, None);
+        let agents_hdr = get_rect("agents-header-back").expect("agents-header-back rect");
+        assert!(agents_hdr.top() < 60.0, "Agents header sits at top of Left Side Panel without duplicate file_header");
+
+        // UF-01 & UF-02: Click Assets in Left Rail -> opens full-height Assets Left Side Panel without duplicate file_header.
+        let assets_btn = get_rect("rail-Assets").expect("rail-Assets rect");
+        run_frame(&mut app, Some(assets_btn.center()));
+        assert_eq!(app.ui.rail, Some(RailItem::Assets));
+        run_frame(&mut app, None);
+        let assets_lib_btn = get_rect("assets-libraries").expect("assets-libraries rect");
+        assert!(assets_lib_btn.top() < 60.0, "Assets header sits at top of Left Side Panel without duplicate file_header");
+
+        // UF-01: Click Variables -> opens Variables view; then click File -> closes Variables and returns to File (Pages & Layers) in 1 click!
+        let vars_btn = get_rect("rail-Variables").expect("rail-Variables rect");
+        run_frame(&mut app, Some(vars_btn.center()));
+        assert!(app.vars.open);
+        let file_btn = get_rect("rail-File").expect("rail-File rect");
+        run_frame(&mut app, Some(file_btn.center()));
+        assert!(!app.vars.open, "Variables view closed in 1 click when clicking File");
+        assert_eq!(app.ui.rail, None, "Returned to File (Pages & Layers) in 1 click");
+        assert!(!app.ui.left_collapsed);
+
+        // UF-03: Bottom Toolbar 3-button Mode Switcher (Draw | Design | Dev mode) <-> Right Panel bidirectional sync.
+        run_frame(&mut app, None);
+        let draw_mode_btn = get_rect("toolbar-mode-draw").expect("toolbar-mode-draw");
+        run_frame(&mut app, Some(draw_mode_btn.center()));
+        assert_eq!(app.tool, Tool::Pencil);
+        assert!(!app.ui.dev_mode);
+
+        let design_mode_btn = get_rect("toolbar-mode-design").expect("toolbar-mode-design");
+        run_frame(&mut app, Some(design_mode_btn.center()));
+        assert_eq!(app.tool, Tool::Move);
+        assert_eq!(app.ui.right_tab, Some(RightTab::Design));
+
+        let dev_mode_btn = get_rect("toolbar-mode-dev").expect("toolbar-mode-dev");
+        run_frame(&mut app, Some(dev_mode_btn.center()));
+        assert!(app.ui.dev_mode);
+        run_frame(&mut app, None);
+        let dev_exit_btn = get_rect("dev-mode-toggle").expect("dev-mode-toggle");
+        run_frame(&mut app, Some(dev_exit_btn.center()));
+        assert!(!app.ui.dev_mode);
+        assert_eq!(app.ui.right_tab, Some(RightTab::Design));
+
+        // UF-04: Home <-> Multi-Tab Document Workspace roundtrip preserves open tabs & selection.
+        let tmp_lib = std::env::temp_dir().join(format!("designos-uf04-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp_lib);
+        app.attach_library(tmp_lib.clone());
+        let mut tabs = std::mem::take(&mut app.tabs);
+        tabs.sync_from_app(&app);
+        app.tabs = tabs;
+        app.go_home();
+        assert!(app.home.is_some());
+        assert!(!app.tabs.entries.is_empty());
+        app.switch_tab(0);
+        assert!(app.home.is_none());
+        assert_eq!(app.selection, vec![f]);
+        let _ = std::fs::remove_dir_all(&tmp_lib);
+
+        // UF-05: In-panel Agents prompt -> NodeSpec synthesis & Canvas mutation with undo history.
+        let spec = crate::cmdk::synthesize_spec_from_prompt("pricing card");
+        let spec_json = serde_json::to_string(&spec).unwrap();
+        crate::shell::execute_terminal_actions(&mut app, vec![crate::terminal::TerminalAction::ApplySpecJson(spec_json)]);
+        assert!(app.hist.can_undo(), "Applying Agent-synthesized NodeSpec records undo history");
     }
 }

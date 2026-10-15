@@ -225,8 +225,11 @@ pub const RIGHT_PANEL_WIDTH: f32 = 240.0;
 /// The present button sits at the right edge, level with the zoom dropdown (8px from the edge).
 pub const RIGHT_PRESENT_FROM_RIGHT: f32 = 56.0;
 /// Outlined play triangle of the present button.
+#[allow(dead_code)]
 pub const PRESENT_ICON_W: f32 = 15.0;
+#[allow(dead_code)]
 pub const PRESENT_ICON_H: f32 = 16.0;
+#[allow(dead_code)]
 pub const PRESENT_ICON_STROKE: f32 = 1.2;
 pub const RIGHT_BTN_Y: f32 = 8.0;
 pub const RIGHT_BTN_SIZE: f32 = 32.0;

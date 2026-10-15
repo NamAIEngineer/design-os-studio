@@ -52,16 +52,20 @@ fn board_text_props(v: &Value, base: TextProps) -> TextProps {
 
 fn shape_from_name(s: &str) -> ShapeKind {
     match s {
-        "ROUNDED_RECTANGLE" => ShapeKind::RoundedRect,
-        "ELLIPSE" => ShapeKind::Ellipse,
-        "DIAMOND" => ShapeKind::Diamond,
+        "ROUNDED_RECTANGLE" | "SPEECH_BUBBLE" | "ENG_FOLDER" | "ENG_FILE" | "DOCUMENT_SINGLE" | "DOCUMENT_MULTIPLE" => {
+            ShapeKind::RoundedRect
+        }
+        "ELLIPSE" | "ENG_DATABASE" | "ENG_QUEUE" | "SUMMING_JUNCTION" | "OR" => ShapeKind::Ellipse,
+        "DIAMOND" | "SHIELD" => ShapeKind::Diamond,
         "TRIANGLE_UP" => ShapeKind::Triangle,
         "TRIANGLE_DOWN" => ShapeKind::TriangleDown,
-        "PARALLELOGRAM_RIGHT" | "PARALLELOGRAM_LEFT" => ShapeKind::Parallelogram,
-        "STAR" => ShapeKind::Star,
-        "HEXAGON" => ShapeKind::Hexagon,
+        "PARALLELOGRAM_RIGHT" | "PARALLELOGRAM_LEFT" | "PARALLELOGRAM" | "TRAPEZOID" | "MANUAL_INPUT" => {
+            ShapeKind::Parallelogram
+        }
+        "STAR" | "PLUS" => ShapeKind::Star,
+        "HEXAGON" | "OCTAGON" | "CHEVRON" | "ARROW_LEFT" | "ARROW_RIGHT" => ShapeKind::Hexagon,
         "PENTAGON" => ShapeKind::Pentagon,
-        _ => ShapeKind::Square,
+        "SQUARE" | "RECTANGLE" | "PREDEFINED_PROCESS" | "INTERNAL_STORAGE" | _ => ShapeKind::Square,
     }
 }
 
@@ -155,7 +159,8 @@ pub(crate) fn kind_from_json(ty: &str, v: &Value, origin: Vec2) -> Option<NodeKi
             NodeKind::Sticky(p)
         }
         "SHAPE_WITH_TEXT" => {
-            let mut p = ShapeWithTextProps { shape: fstr(v, "shapeType").map(shape_from_name).unwrap_or_default(), ..Default::default() };
+            let shape_str = fstr(v, "shapeType").or_else(|| fstr(v, "shapeWithTextType"));
+            let mut p = ShapeWithTextProps { shape: shape_str.map(shape_from_name).unwrap_or_default(), ..Default::default() };
             p.text = board_text_props(v, p.text);
             NodeKind::ShapeWithText(p)
         }

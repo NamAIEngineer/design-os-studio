@@ -1,12 +1,13 @@
 [Desktop Entry]
 Type=Application
-Name=designos
-GenericName=Design editor
-Comment=Free, open-source Figma-style design editor
-Exec=designos %F
+Name=design:os studio
+GenericName=Design Studio
+Comment=Figma-grade vector, UI, and spec design studio
+Exec=designos-studio %F
+TryExec=designos-studio
 Icon=designos
 Terminal=false
-Categories=Graphics;VectorGraphics;Design;
+Categories=Graphics;VectorGraphics;Design;Development;
 MimeType=application/x-designos;application/x-figma-design;
-Keywords=design;vector;figma;prototype;
-StartupWMClass=designos
+Keywords=design;vector;figma;prototype;ui;mcp;
+StartupWMClass=designos-studio

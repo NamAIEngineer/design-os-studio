@@ -3,8 +3,8 @@ name: Release
 on:
   push:
     tags: ["v*"]
-  # Dry run: builds and packages everything, uploads workflow artifacts, and
-  # creates no GitHub Release.
+  # Dry run: builds and packages everything across macOS, Windows, and Linux,
+  # uploads workflow artifacts, and creates no GitHub Release.
   workflow_dispatch:
 
 env:
@@ -36,7 +36,7 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             pkg-config libxkbcommon-dev libwayland-dev libx11-dev \
             libxcursor-dev libxrandr-dev libxi-dev libgl1-mesa-dev \
-            libfontconfig1-dev
+            libfontconfig1-dev dpkg-dev
 
       - uses: dtolnay/rust-toolchain@master
         with:
@@ -50,8 +50,8 @@ jobs:
       # On Windows, crates/designos-app/build.rs embeds the icon and version info
       # (rc.exe ships with the runner's Windows SDK); it fails the build under CI
       # if that step breaks, so an icon-less exe is never released.
-      - name: Build designos and designos-diff
-        run: cargo build --release --locked --target ${{ matrix.target }} -p designos-app -p designos-diff
+      - name: Build designos-studio, designos, designos-mcp, and designos-diff
+        run: cargo build --release --locked --target ${{ matrix.target }} -p designos-app -p designos-mcp -p designos-diff
 
       - name: Resolve version
         id: version
@@ -63,7 +63,7 @@ jobs:
             echo "version=0.0.0-dev.${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Package
+      - name: Package installers and archives
         shell: bash
         run: scripts/package.sh "${{ matrix.target }}" "${{ steps.version.outputs.version }}"
 
@@ -72,13 +72,14 @@ jobs:
           name: designos-${{ matrix.target }}
           path: |
             dist/*.zip
+            dist/*.exe
+            dist/*.deb
             dist/*.tar.gz
             dist/*.sha256
           if-no-files-found: error
 
   # One job builds both Apple architectures and packages a universal designos.app
-  # (.dmg for people, .tar.gz for scripts). macos-13 runners are retired, so the
-  # Intel half is cross-compiled on the arm64 runner.
+  # (.dmg for users + install-cli.command, .tar.gz for scripts & self-updater).
   macos:
     name: Build macOS universal app
     runs-on: macos-14
@@ -94,10 +95,10 @@ jobs:
         with:
           key: release-macos-universal
 
-      - name: Build both architectures
+      - name: Build both architectures (designos-studio, designos, designos-mcp, designos-diff)
         run: |
           for t in aarch64-apple-darwin x86_64-apple-darwin; do
-            cargo build --release --locked --target "$t" -p designos-app -p designos-diff
+            cargo build --release --locked --target "$t" -p designos-app -p designos-mcp -p designos-diff
           done
 
       - name: Resolve version
@@ -130,35 +131,46 @@ jobs:
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@v4
+
       - uses: actions/download-artifact@v4
         with:
           path: dist
           merge-multiple: true
 
-      - name: Combine checksums
-        working-directory: dist
+      - name: Generate SHA256SUMS and release-manifest.json
         run: |
-          cat *.sha256 | sort -k2 > SHA256SUMS
-          rm -f *.sha256
-          cat SHA256SUMS
+          version="${GITHUB_REF_NAME#v}"
+          scripts/build-release.sh "$version" --generate-manifest
+          rm -f dist/*.sha256
+          cat dist/SHA256SUMS
+          cat dist/release-manifest.json
 
       - uses: softprops/action-gh-release@v2
         with:
           generate_release_notes: true
-          # Shown above the generated notes.
           body: |
-            ### Installing
+            ### Installing **design:os studio**
 
-            Download the file for your platform below. These builds are **not code-signed yet**, so the first launch shows a warning:
+            Download the installer for your platform below. Every package includes all 4 tools (`designos-studio`, `designos`, `designos-mcp`, and `designos-diff`):
 
-            - **macOS (Apple Silicon and Intel):** download `designos-<version>-macos.dmg`, open it and drag **designos** to **Applications**. The first time, open it from Applications, then go to **System Settings → Privacy & Security** and click **Open Anyway**. Or run `xattr -dr com.apple.quarantine /Applications/designos.app`.
-            - **Windows:** unzip `designos-<version>-x86_64-pc-windows-msvc.zip` and run `designos.exe`. In the SmartScreen dialog, click **More info → Run anyway**.
-            - **Linux:** unpack `designos-<version>-x86_64-unknown-linux-gnu.tar.gz`, then run `./install.sh` (no sudo) or just `./designos`.
+            - **macOS (Apple Silicon & Intel Universal):**
+              - Download `designos-<version>-macos.dmg`, open it, and drag **designos.app** to **Applications**.
+              - *(Optional)* Double-click `install-cli.command` inside the DMG to clear the macOS quarantine attribute and symlink `designos-studio`, `designos`, `designos-mcp`, and `designos-diff` onto your `PATH`.
+            - **Windows (x64):**
+              - **GUI Installer:** Download and run `designos-<version>-x86_64-pc-windows-msvc-setup.exe` (per-user install, no Administrator prompt required; creates Desktop & Start Menu shortcuts and registers `.designos` / `.fig` files).
+              - **Portable ZIP / PowerShell:** Unzip `designos-<version>-x86_64-pc-windows-msvc.zip` and run `powershell -ExecutionPolicy Bypass -File .\install.ps1`.
+            - **Linux (x64):**
+              - **Ubuntu / Debian (`.deb`):** `sudo apt install ./designos_<version>_amd64.deb`
+              - **Any Linux distro (`.tar.gz`):** Unpack `designos-<version>-x86_64-unknown-linux-gnu.tar.gz` and run `./install.sh` (installs under `~/.local`, no `sudo` needed).
 
-            Full instructions: [docs/install.md](https://github.com/jangtrinh/design-os-studio/blob/main/docs/install.md). Check downloads against `SHA256SUMS`.
+            Full instructions: [docs/install.md](https://github.com/jangtrinh/design-os-studio/blob/main/docs/install.md). Verify downloads against `SHA256SUMS` or `release-manifest.json`.
           prerelease: ${{ contains(github.ref_name, '-') }}
           files: |
+            dist/*.dmg
+            dist/*-setup.exe
+            dist/*.deb
             dist/*.zip
             dist/*.tar.gz
-            dist/*.dmg
+            dist/release-manifest.json
             dist/SHA256SUMS

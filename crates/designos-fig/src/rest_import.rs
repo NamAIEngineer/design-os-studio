@@ -647,10 +647,14 @@ impl Ctx {
                 count: v.get("pointCount").and_then(Value::as_u64).unwrap_or(5).clamp(3, 1000) as u32,
                 inner_ratio: fnum(v, "starInnerRadius").unwrap_or(0.382),
             },
-            "VECTOR" => {
+            "VECTOR" | "BRUSH" => {
                 // an editable network when the file carries one; Figma's own outline stays the rendered geometry
                 let network = v.get("vectorNetwork").and_then(crate::vecnet::network_from_json).filter(|n| !n.vertices.is_empty());
-                let paths = fill_geo.clone().or_else(|| network.as_ref().map(|n| n.to_paths())).unwrap_or_default();
+                let paths = fill_geo
+                    .clone()
+                    .or_else(|| stroke_geo.clone())
+                    .or_else(|| network.as_ref().map(|n| n.to_paths()))
+                    .unwrap_or_default();
                 NodeKind::Vector { paths, network }
             }
             "TEXT" => NodeKind::Text(text_props(v)),
@@ -675,10 +679,57 @@ impl Ctx {
         }
         n.visible = fbool(v, "visible").unwrap_or(true);
         n.locked = fbool(v, "locked").unwrap_or(false);
+        n.lock_aspect = fbool(v, "preserveRatio")
+            .or_else(|| fbool(v, "lockAspect"))
+            .unwrap_or(false);
         n.opacity = fnum(v, "opacity").unwrap_or(1.0);
         n.variables = crate::variables::parse_node_variables(v);
         n.blend = fstr(v, "blendMode").map(blend).unwrap_or(default_blend);
         n.is_mask = fbool(v, "isMask").unwrap_or(false);
+        if let Some(hl) = fstr(v, "hyperlink").filter(|s| !s.is_empty()) {
+            n.hyperlink = Some(hl.to_string());
+        }
+        if let Some(pd) = v.get("pluginData").and_then(Value::as_object) {
+            for (k, val) in pd {
+                if let Some(s) = val.as_str() {
+                    n.plugin_data.insert(k.clone(), s.to_string());
+                }
+            }
+        }
+        if let Some(desc) = fstr(v, "symbolDescription")
+            .or_else(|| fstr(v, "description"))
+            .filter(|s| !s.is_empty())
+        {
+            n.component.description = desc.to_string();
+        }
+        if let Some(bub) = fbool(v, "propsAreBubbled") {
+            n.component.expose_nested_instances = bub;
+        }
+        if let Some(lvl) = v.get("overrideLevel").and_then(Value::as_i64) {
+            n.component.override_level = Some(lvl as i32);
+        }
+        if let Some(ds) = fstr(v, "detachedSymbolId").filter(|s| !s.is_empty()) {
+            n.detached_symbol_id = Some(ds.to_string());
+            n.component.detached_symbol_id = Some(ds.to_string());
+        }
+        if let Some(fm) = v.get("figMetadata").and_then(Value::as_object) {
+            for (k, val) in fm {
+                if let Some(s) = val.as_str() {
+                    n.fig_metadata.insert(k.clone(), s.to_string());
+                }
+            }
+        }
+        if ty == "BRUSH" {
+            let bt = fstr(v, "brushType").unwrap_or("STRETCH").to_string();
+            n.fig_metadata.entry("brushType".into()).or_insert(bt);
+        } else if let Some(bt) = fstr(v, "brushType").filter(|s| !s.is_empty()) {
+            n.fig_metadata.insert("brushType".into(), bt.to_string());
+        }
+        if ty == "SHAPE_WITH_TEXT" {
+            if let Some(swt) = fstr(v, "shapeWithTextType").or_else(|| fstr(v, "shapeType")).filter(|s| !s.is_empty()) {
+                n.fig_metadata.entry("shapeWithTextType".into()).or_insert_with(|| swt.to_string());
+            }
+        }
         n.export_settings = parse_export_settings(v);
         n.dev = crate::dev::parse_dev(v);
         n.fill_geometry = fill_geo;
@@ -872,6 +923,21 @@ impl Ctx {
                 };
                 if let Some(p) = p.as_str() {
                     n.component.bindings.insert(field, prop_name(p));
+                }
+            }
+        }
+        if let Some(vspecs) = v.get("variantPropSpecs") {
+            if let Some(obj) = vspecs.as_object() {
+                for (k, val) in obj {
+                    if let Some(s) = val.as_str() {
+                        n.component.variant_props.insert(k.clone(), s.to_string());
+                    }
+                }
+            } else if let Some(arr) = vspecs.as_array() {
+                for s in arr {
+                    let Some(val) = fstr(s, "value") else { continue };
+                    let Some(k) = fstr(s, "propertyName").or_else(|| fstr(s, "name")) else { continue };
+                    n.component.variant_props.insert(k.to_string(), val.to_string());
                 }
             }
         }
@@ -1421,6 +1487,13 @@ impl Ctx {
         if let Some(s) = fstr(set, "name") {
             n.name = s.to_string();
         }
+        if let Some(lvl) = set.get("overrideLevel").and_then(Value::as_i64) {
+            n.component.override_level = Some(lvl as i32);
+        }
+        if let Some(ds) = fstr(set, "detachedSymbolId").filter(|s| !s.is_empty()) {
+            n.detached_symbol_id = Some(ds.to_string());
+            n.component.detached_symbol_id = Some(ds.to_string());
+        }
         if let Some(b) = fbool(set, "visible") {
             n.visible = b;
         }
@@ -1661,6 +1734,12 @@ impl Ctx {
             };
         }
         if let NodeKind::Text(t) = &mut n.kind {
+            if let Some(ar) = fbool(set, "autoRename") {
+                t.auto_rename = ar;
+            }
+            if let Some(si) = fbool(set, "textDecorationSkipInk") {
+                t.decoration_skip_ink = si;
+            }
             if let Some(st) = set.get("style") {
                 apply_type_style(&mut t.style, st);
                 crate::textfmt::apply_paragraph(t, st);
@@ -1672,6 +1751,12 @@ impl Ctx {
                 }
                 if let Some(m) = st.get("maxLines").and_then(Value::as_u64) {
                     t.max_lines = Some(m.min(u32::MAX as u64) as u32).filter(|m| *m > 0);
+                }
+                if let Some(ar) = fbool(st, "autoRename") {
+                    t.auto_rename = ar;
+                }
+                if let Some(si) = fbool(st, "textDecorationSkipInk") {
+                    t.decoration_skip_ink = si;
                 }
             }
             if let Some(c) = fstr(set, "characters") {
@@ -1689,7 +1774,7 @@ impl Ctx {
                 t.runs = build_runs(&t.content, &t.style, &ids, set.get("styleOverrideTable"));
             }
         }
-        if set.get("componentProperties").is_some() || set.get("componentPropertyReferences").is_some() {
+        if set.get("componentProperties").is_some() || set.get("componentPropertyReferences").is_some() || set.get("variantPropSpecs").is_some() {
             if let Some(mut node_copy) = self.doc.get(id).cloned() {
                 self.parse_component_props(&mut node_copy, set);
                 if let Some(n) = self.doc.get_mut(id) {
@@ -1995,10 +2080,12 @@ fn text_props(v: &Value) -> TextProps {
     }
     let max_lines =
         v.get("maxLines").or_else(|| st.and_then(|s| s.get("maxLines"))).and_then(Value::as_u64).filter(|n| *n > 0).map(|n| n.min(u32::MAX as u64) as u32);
+    let auto_rename = fbool(v, "autoRename").or_else(|| st.and_then(|s| fbool(s, "autoRename"))).unwrap_or(true);
+    let decoration_skip_ink = fbool(v, "textDecorationSkipInk").or_else(|| st.and_then(|s| fbool(s, "textDecorationSkipInk"))).unwrap_or(true);
 
     let overrides: Vec<u64> = farr(v, "characterStyleOverrides").iter().map(|x| x.as_u64().unwrap_or(0)).collect();
     let runs = build_runs(&content, &style, &overrides, v.get("styleOverrideTable"));
-    let mut tp = TextProps { content, style, runs, auto_resize: auto, max_lines, ..Default::default() };
+    let mut tp = TextProps { content, style, runs, auto_resize: auto, max_lines, auto_rename, decoration_skip_ink, ..Default::default() };
     if let Some(st) = st {
         crate::textfmt::apply_paragraph(&mut tp, st);
     }

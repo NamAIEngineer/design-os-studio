@@ -1,24 +1,24 @@
 ---
 id: decision-log
 type: decisions
-title: "Decision Ledger & Open Items Tracker (D1..D11)"
-status: Current to D11
+title: "Decision Ledger & Open Items Tracker (D1..D19)"
+status: Current to D19
 updated: 2026-10-15
 ledger: true
 trace:
-  amendments: [A-01, A-02, A-03, A-04, A-05]
+  amendments: [A-01, A-02, A-03, A-04, A-05, A-06, A-07, A-08, A-09, A-10, A-11]
 topics:
   - id: architecture
-    name: Architecture, REA, Binary Format, Auto-Update & Multi-Tab State
-    note: Figma binary v106, REA pipeline, Dual-Layer Auto-Update, Multi-Tab Project isolation, and Spec Format v2 decisions
-    ids: [D1, D3, D5, D7, D9, D11]
+    name: Architecture, REA, Binary Format, Auto-Update, Multi-Tab State, AI PTY Core, Parity Meter & Cross-Platform Release Packaging
+    note: Figma binary v106, REA pipeline, Dual-Layer Auto-Update, Multi-Tab Project isolation, Native PTY AI Core, 5-Pillar Parity Meter, Pure PTY Chat Wrapper, Cross-Platform Installers (macOS/Windows/Linux), and Spec Format v2 decisions
+    ids: [D1, D3, D5, D7, D9, D11, D12, D13, D14, D16, D18, D19]
   - id: craft
-    name: UI3 Design Craft, Brand Typography, Agent Citations & Headless QA
-    note: Figma UI3 tokens, design:os studio lowercase+bold brand rule, Operate-mode tokens, Copy cho AI, and background capture
-    ids: [D2, D4, D6, D8, D10]
+    name: UI3 Design Craft, Brand Typography, Unified Phosphor Icons, Agents Side Panel & Headless QA
+    note: Figma UI3 tokens, design:os studio lowercase+bold brand rule, Operate-mode tokens, Unified Phosphor Icons, Agents Left Side Panel, Copy cho AI, and background capture
+    ids: [D2, D4, D6, D8, D10, D15, D17]
 ---
 
-## 1. Settled Decisions (D1..D11)
+## 1. Settled Decisions (D1..D19)
 
 | Id | Decision | Source and detail |
 |---|---|---|
@@ -26,16 +26,25 @@ topics:
 | D2 | Strictly enforce `es:designer` Operate-mode tokens (`#16171B` / `#1F2024` / `#26272C`), zero emoji icons in chrome, and no cards-in-cards inside Spec Reader v2 (`S02`) | Owner round R1, 2026-10-14: amendment A-01, [contract](../contract/FC-001.md) BR-02, [US-02](../us/US-02.md). |
 | D3 | Compute all 4 KPI strip metrics (`REQs · US`, `ACs · SCNs`, `Screens · Contract Rows`, `Gates Approved`) from a single loaded spec model | Owner round R1, 2026-10-14: see [contract](../contract/FC-001.md) BR-03, [US-02](../us/US-02.md). |
 | D4 | Standardize `Copy cho AI` citation block with `File: <path>:<start>-<end>`, `Mục`, `Trang reader`, `Project`, and persist to `last_ai_copy` for PTY Terminal injection | Owner round R1, 2026-10-15: amendment A-02, [contract](../contract/FC-001.md) BR-04, [US-02](../us/US-02.md), [US-03](../us/US-03.md). |
-| D5 | Auto-discover `plans/specs/designos-studio-v2`, `product-os-spec-driven/fixtures/v2/full`, and `reference/baseline-v0.2` alongside legacy v1 specs and map all 10 screens (`S01..S10`) in `ui-contract.md` | Owner round R1, 2026-10-15: see [contract](../contract/FC-001.md) BR-05, [US-02](../us/US-02.md), [US-03](../us/US-03.md). |
+| D5 | Auto-discover `plans/specs/designos-studio-v2`, `product-os-spec-driven/fixtures/v2/full`, and `reference/baseline-v0.2` alongside legacy v1 specs and map all 13 screens (`S01..S13`) in `ui-contract.md` | Owner round R1, 2026-10-15: see [contract](../contract/FC-001.md) BR-05, [US-02](../us/US-02.md), [US-03](../us/US-03.md). |
 | D6 | Enforce 1:1 Figma UI3 Dark Mode palette (`#1E1E1E` canvas, `#2C2C2C` panel, `#383838` input well, `#444444` border, `#0D99FF` selection blue, `#9747FF` component purple, `#24CB71` Dev Mode green), `48px` icon-only rail, Home screen (`S04`), Popovers (`S05..S08`), and 17-node canvas interactions | Owner round R2, 2026-10-15: amendment A-03, [contract](../contract/FC-001.md) BR-06..BR-09, [US-04](../us/US-04.md), [US-05](../us/US-05.md), [US-06](../us/US-06.md). |
 | D7 | Execute `morluto/rea` reverse engineering on `/Applications/Figma.app` (`app.asar`) and `/Users/jangtrinh/Downloads/VSF - PCP.fig`, storing architectural artifacts in `plans/specs/designos-studio-v2/research/` and round-trip tests in `crates/designos-fig/` | Owner round R2, 2026-10-15: amendment A-03, [contract](../contract/FC-001.md) BR-10, [US-07](../us/US-07.md). |
 | D8 | Mandate 100% background headless window creation (`with_visible(false).with_active(false)`) for all `--screenshot` verification commands so automated QA never steals macOS focus | Owner round R2, 2026-10-15: amendment A-03, [contract](../contract/FC-001.md) BR-11..BR-12, [US-08](../us/US-08.md). |
 | D9 | Implement Dual-Layer Auto-Update Architecture (`updater.rs` + `designos update`): Layer 1 atomic App/CLI self-updater (`Stable \| Beta \| Nightly`, SHA-256 verification, `.staged` → `.bak` atomic swap & rollback, UI3 Update Modal `S09`) and Layer 2 passive read-only Upstream Figma Desktop (`app.asar` & `.fig` Kiwi schema `v106`) Auto-Sync Watchdog | Owner round R3, 2026-10-15: amendment A-04, [contract](../contract/FC-001.md) BR-13, [US-09](../us/US-09.md). |
 | D10 | Enforce lowercase brand typography wordmark **`design`:os studio** (or **`design`:os**): always all-lowercase with **`design`** rendered in Bold (`700` / `egui::TextFormat` bold span) and `:os studio` rendered in Regular (`400`); ban uppercase/title-case variants (`DESIGN:OS Studio`, `Design OS Studio`, `DESIGN:OS`) across UI chrome | Owner round R4, 2026-10-15: amendment A-05, [contract](../contract/FC-001.md) BR-14, [US-05](../us/US-05.md), [US-10](../us/US-10.md). |
 | D11 | Implement Multiple Tab Project Workspace (`S10`) with a top `36px` Figma UI3 Desktop Tab Strip (`Home` icon tab + open project tabs with file-type badge, dirty dot `•`, pin state, `×` close, `+` new tab), full per-tab state isolation (`Document`, `History` undo/redo, active `Page`, `Selection`, `View` zoom/pan, `Dev Mode`, `file_path`), keyboard shortcuts (`Cmd+T`, `Cmd+W`, `Ctrl+Tab`/`Cmd+Shift+]`, `Cmd+1..9`), and tab context menu | Owner round R4, 2026-10-15: amendment A-05, [contract](../contract/FC-001.md) BR-15, [US-10](../us/US-10.md). |
+| D12 | Implement Hybrid Dual-Mode Figma AI Suite (`S06`, `S11`, Context Menu AI) with 6 Figma AI Actions (`Make Design / First Draft`, `Make Prototype`, `Rename Layers`, `Rewrite / Translate / Shorten Text`, `Populate Realistic Data`, `Design Gate Audit & Auto-Fix`) backed by 5 Native PTY CLI Runtimes (`Claude Code` `claude`, `Codex` `codex`, `Antigravity` `agy`, `Grok` `grok`, `$SHELL`) with zero extra API token billing | Owner round R5, 2026-10-15: amendment A-06, [contract](../contract/FC-001.md) BR-16, [US-11](../us/US-11.md). |
+| D13 | Implement `<50ms` Live `.spec.json` Hot-Apply Watcher (`$DESIGNOS_LIVE_SPEC` / stdout `DESIGNOS_SPEC_JSON:`) with 1-Step Atomic `Cmd+Z` Undo and Diff Toast, and close all Figma `126.9.13` Functional Gaps A–F (`Type settings` per-tab filter, `Color Picker` WCAG AA/AAA contrast bar, 5-tool `Dev Mode` dock + `Re-center ⇧2`, `Variables` `/` group headers, `Canvas Rulers` highlight, zero-clone `sync_active_tab`, and `.fig` v106 `pluginData`/`hyperlink`/`symbolDescription`/`proportionsConstrained`) | Owner round R5, 2026-10-15: amendment A-06, [contract](../contract/FC-001.md) BR-17..BR-18, [US-11](../us/US-11.md). |
+| D14 | Establish the 5-Pillar Quantitative Figma Parity Benchmark (`Total = 0.25*P1 + 0.20*P2 + 0.20*P3 + 0.20*P4 + 0.15*P5`) via `scripts/figma_parity_meter.py`, `plans/specs/designos-studio-v2/research/parity-scorecard.json`, CLI `designos --parity-report`, and the Live Parity Scorecard card in `S12` / `S02` | Owner round R6, 2026-10-15: amendment A-07, [contract](../contract/FC-001.md) BR-19, [US-12](../us/US-12.md). |
+| D15 | Place `Agents` (`✦`) as the 2nd item on the Left Rail immediately below `File` (`DIR-17`) and render the 1:1 Figma UI3 `Agents` Left Side Panel (`240px–320px`, `S13`) with `< New chat / Shared` + `[AI]` + `[↗]` + `•••`, `#26354A` credit banner, `"What's next?"` hero, 3 expandable suggestion groups, inline `>_ Terminal` VT100 PTY (`claude`/`codex`/`grok`/`$SHELL`), and `#0D99FF` `"Ask for changes"` composer, plus remediate all 9 Visual Deltas (`DIR-18`) | Owner round R7, 2026-10-15: amendment A-08, [contract](../contract/FC-001.md) BR-20, [US-13](../us/US-13.md). |
+| D16 | Enforce 1:1 Figma Desktop (`126.9.13`) state machines across all 5 End-to-End Userflows (`UF-01` Left Rail 1-click return to `File` before collapse; `UF-02` `Agents` & `Assets` full-height Left Side Panel ownership; `UF-03` bidirectional `Design \| Prototype \| </>` mode sync; `UF-04` `Home <-> Multi-Tab` lossless state preservation; `UF-05` `Agents` Side Panel prompt/suggestion -> PTY/Canvas + 1-step Undo) (`DIR-18`) | Owner round R7, 2026-10-15: amendment A-08, [contract](../contract/FC-001.md) BR-21, [US-13](../us/US-13.md). |
+| D17 | Unify 100% of **`design`:os studio** icons (`crate::icons::Icon`, except the `Icon::Logo` brand mark) onto official Phosphor Icons (`https://phosphoricons.com/`, `@phosphor-icons/core` `viewBox="0 0 256 256"`, `fill="currentColor"`) vendored in `crates/designos-app/assets/icons/phosphor/*.svg` and rasterized via `resvg` with DPR-aware `(Icon, physical_px)` texture caching and `round_to_pixel` snapping across all 13 screens `S01..S13` (`DIR-19`) | Owner round R8, 2026-10-15: amendment A-09, [contract](../contract/FC-001.md) BR-22, [US-14](../us/US-14.md). |
+| D18 | Pure Chat UI Wrapper Over Live PTY Shell (`Claude Code` `claude`, `Codex` `codex`, `Antigravity CLI` `agy`) with ANSI-Stripped Live Stdout Streaming: implement `RailItem::Agents` (`S13`) as a native Chat UI wrapper (`AgentChatTurn` / `AgentChatRole`) directly on top of the active `portable-pty` + `vt100` shell with 1-click CLI runtime selector pills (`Claude Code \| Codex \| Antigravity`), `sync_chat_from_pty` + `strip_ansi_codes` live stdout streaming, inline `NodeSpec` detection & 1-click/auto Canvas apply badge inside chat bubbles, `+` Selection + Pin-Comment context attachment, and instant toggle between clean Chat thread view and raw VT100 terminal screen (`DIR-21`) | Owner round R9, 2026-10-15: amendment A-10, [contract](../contract/FC-001.md) BR-23, [US-15](../us/US-15.md). |
+| D19 | Final Cross-Platform Release Build & User-Installable Packaging Workflow (`macOS`, `Windows`, `Linux` · `DIR-22`): bundle all 4 binaries (`designos-studio`, `designos`, `designos-mcp`, `designos-diff`) into native user installers via `scripts/package-macos.sh` (`.app` `os.design.studio` + drag-to-Applications `.dmg` + `install-cli.command` + `.tar.gz`), `scripts/package-windows.ps1` + `packaging/windows/installer.nsi` (NSIS `-setup.exe` + PowerShell `install.ps1`/`uninstall.ps1` + `.zip`), `scripts/package-linux.sh` (`.deb` + `.tar.gz` with `./install.sh`, `.desktop`, MIME XML, `AppRun`), and orchestrate via `scripts/build-release.sh` + `.github/workflows/release.yml` emitting `dist/release-manifest.json` + `SHA256SUMS` for `updater.rs` Layer 1 self-update | Owner round R10, 2026-10-15: amendment A-11, [contract](../contract/FC-001.md) BR-24, [US-09](../us/US-09.md). |
 
 ## 2. Open Items (`OPEN` / `OPEN[blocking]` Tracker)
 
 | ID | Kind | Scope | Summary | Status |
 |---|---|---|---|---|
-| OPEN-01 | OPEN | G4 / UIUX | Confirm final PO sign-off on Gate G4 (`g4-uiux.md`) after visual inspection of all 10 screens `S01..S10` and 5 Role Views (0 blocking items remaining). | non-blocking · awaiting PO |
+| OPEN-01 | OPEN | G4 / UIUX | Confirm final PO sign-off on Gate G4 (`g4-uiux.md`) after visual inspection of all 13 screens `S01..S13` and 5 Role Views (0 blocking items remaining). | non-blocking · awaiting PO |
+

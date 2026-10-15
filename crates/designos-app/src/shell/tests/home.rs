@@ -368,13 +368,13 @@ fn account_and_plan_labels_are_gone_from_the_ui_sources() {
         ("menus.rs", include_str!("../../panels/menus.rs")),
         ("toolbar.rs", include_str!("../../panels/toolbar.rs")),
     ];
-    let banned = ["\"Drafts\"", "\"Free\"", "\"Agents\"", "Help and account", "Upgrade", "\"Team\"", "\"Pro\""];
+    let banned = ["\"Drafts\"", "\"Free\"", "Upgrade", "\"Team\"", "\"Pro\""];
     for (file, src) in sources {
         for b in banned {
             assert!(!src.contains(b), "{file} still mentions {b}");
         }
     }
-    assert!(!crate::panels::rail::ITEMS.iter().any(|i| i.2 == "Agents"));
+    assert!(crate::panels::rail::ITEMS.iter().any(|i| i.2 == "Agents"));
 }
 
 #[test]
@@ -411,3 +411,114 @@ fn library_option_sets_the_root_and_home_option_shows_the_home_screen() {
     let e = Sim::with(Options { screenshot: Some(dir.0.join("e.png")), ..Default::default() });
     assert!(e.app().home.is_none() && e.app().lib.is_none());
 }
+
+#[test]
+fn userflows_uf01_to_uf08_end_to_end_figma_parity() {
+    use crate::app::{MenuKind, RailItem, RightTab};
+    use crate::canvas::tools::Tool;
+
+    let mut s = Sim::new();
+    s.frame(vec![]);
+
+    // UF-01: Left Icon Rail Navigation & Collapse
+    assert_eq!(s.app().ui.rail, None);
+    assert!(!s.app().ui.left_collapsed);
+
+    // Click Agents -> opens Agents panel
+    click_rect(&mut s, "rail-Agents");
+    assert_eq!(s.app().ui.rail, Some(RailItem::Agents));
+    assert!(!s.app().ui.left_collapsed);
+
+    // Wave 7 (DIR-21): Switch CLI Runtimes (Claude / Codex / Antigravity) & submit Chat-over-PTY prompt
+    assert_eq!(s.app().terminal.active_runtime, crate::terminal::AgentCliPreset::Claude);
+    click_rect(&mut s, "agents-runtime-codex");
+    assert_eq!(s.app().terminal.active_runtime, crate::terminal::AgentCliPreset::Codex);
+    click_rect(&mut s, "agents-runtime-agy");
+    assert_eq!(s.app().terminal.active_runtime, crate::terminal::AgentCliPreset::Antigravity);
+    click_rect(&mut s, "agents-runtime-claude");
+    assert_eq!(s.app().terminal.active_runtime, crate::terminal::AgentCliPreset::Claude);
+
+    s.shell.app.terminal.input_line = "Create a SaaS analytics card in Claude Code".to_string();
+    s.frame(vec![]);
+    click_rect(&mut s, "agents-composer-send");
+    assert_eq!(s.app().terminal.chat_turns.len(), 2);
+    assert_eq!(s.app().terminal.chat_turns[0].text, "Create a SaaS analytics card in Claude Code");
+
+    // Click File while in Agents -> switches to File panel in 1 click (not MenuKind::FileMenu)
+    click_rect(&mut s, "rail-File");
+    assert_eq!(s.app().ui.rail, None);
+    assert!(!s.app().ui.left_collapsed);
+    assert_eq!(s.app().ui.menu, None);
+
+    // Click File again while already on File -> collapses Left Sidebar
+    click_rect(&mut s, "rail-File");
+    assert!(s.app().ui.left_collapsed);
+
+    // Click Assets while collapsed -> expands Left Sidebar and shows Assets panel
+    click_rect(&mut s, "rail-Assets");
+    assert!(!s.app().ui.left_collapsed);
+    assert_eq!(s.app().ui.rail, Some(RailItem::Assets));
+
+    // UF-02: Assets Panel Library Card & View Toggle & Libraries Modal
+    assert!(!s.app().assets.grid);
+    click_rect(&mut s, "assets-view-grid");
+    assert!(s.app().assets.grid);
+    click_rect(&mut s, "assets-view-list");
+    assert!(!s.app().assets.grid);
+    click_rect(&mut s, "assets-libraries");
+    assert!(s.app().libs.open);
+    s.key(Key::Escape);
+    s.frame(vec![]);
+    assert!(!s.app().libs.open);
+
+    // Return to File panel and test UF-03: Collapse Layers button (`layers-collapse-all`)
+    click_rect(&mut s, "rail-File");
+    assert_eq!(s.app().ui.rail, None);
+    assert!(!s.app().ui.left_collapsed);
+    let card_id = s.by_name("Card");
+    s.shell.app.layers.expanded.insert(card_id);
+    s.frame(vec![]);
+    assert!(!s.app().layers.expanded.is_empty());
+    click_rect(&mut s, "layers-collapse-all");
+    assert!(s.app().layers.expanded.is_empty());
+
+    // UF-04: Bottom Floating Toolbar 3-Way Mode Switcher (`Draw`, `Design`, `Dev mode`)
+    click_rect(&mut s, "toolbar-mode-draw");
+    assert!(!s.app().ui.dev_mode);
+    assert_eq!(s.app().tool, Tool::Pencil);
+    click_rect(&mut s, "toolbar-mode-design");
+    assert!(!s.app().ui.dev_mode);
+    assert_eq!(s.app().tool, Tool::Move);
+    click_rect(&mut s, "toolbar-mode-dev");
+    assert!(s.app().ui.dev_mode);
+    assert_eq!(s.app().ui.right_tab, Some(RightTab::Design));
+    // Return to Design mode via Dev Mode bottom dock toggle
+    click_rect(&mut s, "dev-mode-toggle");
+    assert!(!s.app().ui.dev_mode);
+
+    // UF-05: Actions / Command Palette (`Ctrl+K` & Toolbar Sparkle Button)
+    click_rect(&mut s, "toolbar-actions-btn");
+    assert_eq!(s.app().ui.menu, Some(MenuKind::Palette));
+    s.key(Key::Escape);
+    assert_eq!(s.app().ui.menu, None);
+
+    // UF-06 & UF-07: Right Inspector Contextual Sections & Agent Terminal Bottom Dock
+    s.shell.app.select_only(card_id);
+    s.frame(vec![]);
+    assert_eq!(s.app().selection, vec![card_id]);
+    click_rect(&mut s, "rail-terminal");
+    assert!(s.app().terminal.dock_open);
+    click_rect(&mut s, "rail-terminal");
+    assert!(!s.app().terminal.dock_open);
+
+    // UF-08: Main Menu (`AI balance`, `Help and account`)
+    click_rect(&mut s, "rail-menu");
+    assert_eq!(s.app().ui.menu, Some(MenuKind::Main));
+    s.key(Key::Escape);
+    assert_eq!(s.app().ui.menu, None);
+
+    for mut tab in s.shell.app.terminal.tabs.drain(..) {
+        let _ = tab.child.kill();
+    }
+}
+

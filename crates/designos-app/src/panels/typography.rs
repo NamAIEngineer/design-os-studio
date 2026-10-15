@@ -555,11 +555,17 @@ fn set_features(app: &mut App, sel: &[NodeId], changes: Vec<(&str, Option<u32>)>
     });
 }
 
-/// Rows of the Type settings popover for a font with `sets` stylistic sets.
-fn details_rows(sets: usize) -> f32 {
+/// Rows of the Type settings popover for a font with `sets` stylistic sets on `active_tab`.
+fn details_rows(sets: usize, active_tab: usize) -> f32 {
     let chips = if sets == 0 { 0 } else { 1 + sets.div_ceil(SETS_PER_ROW) };
-    // 1.0 (3-tab bar) + 2.5 (Ag live preview + Case/Decor) + 7 (OpenType) + chips + 7 (Paragraph) + 4 (Variable axes) + 1.0 (dividers)
-    (1 + 7 + chips + 7 + 4) as f32 + 3.5
+    match active_tab {
+        // Variable tab: 3-tab bar + Ag live preview + 4 variable axes + reset row
+        2 => (1 + 5) as f32 + 2.5,
+        // Details tab: 3-tab bar + Ag live preview + 7 OpenType rows + stylistic set chips
+        1 => (1 + 7 + chips) as f32 + 2.5,
+        // Basic tab (default): 3-tab bar + Ag live preview + OpenType + Paragraph (hides Variable Axes to save 136px)
+        _ => (1 + 7 + chips + 7) as f32 + 3.0,
+    }
 }
 
 /// The Figma UI3 `Type settings` 3-Tab popover (`Basic | Details | Variable`):
@@ -585,10 +591,10 @@ pub(super) fn details_popover(app: &mut App, ui: &mut Ui, region: Rect, st: &sup
     let available = features_cached(&ctx, &family, sum.weight.unwrap_or(t.style.font_weight), sum.italic.unwrap_or(t.style.italic));
     let has = |tag: &str| available.is_empty() || available.iter().any(|f| f == tag);
     let sets: Vec<u32> = (1..=20u32).filter(|i| available.iter().any(|f| *f == format!("ss{i:02}"))).collect();
-    let height = widgets::popover::HEADER_H + 8.0 + details_rows(sets.len()) * widgets::popover::ROW_H + 8.0;
-    let val = |tag: &str| richtext::feature_value(&feats, tag);
     let tab_state_id = egui::Id::new("type-settings-active-tab");
     let mut active_tab = ctx.data(|d| d.get_temp::<usize>(tab_state_id)).unwrap_or(0);
+    let height = widgets::popover::HEADER_H + 8.0 + details_rows(sets.len(), active_tab) * widgets::popover::ROW_H + 8.0;
+    let val = |tag: &str| richtext::feature_value(&feats, tag);
 
     let pop = widgets::popover::show(&ctx, egui::Id::new("inspector-popover"), st.anchor, region, DETAILS_W, height, "Type settings", |ui, body| {
         let y = std::cell::Cell::new(0.0f32);
@@ -673,185 +679,198 @@ pub(super) fn details_popover(app: &mut App, ui: &mut Ui, region: Rect, st: &sup
         widgets::hline(ui.painter(), body.left(), body.right(), sep_top, theme::BORDER);
         y.set(y.get() + 4.0);
 
-        // ---- numbers
-        let spacing = ["Default", "Tabular", "Proportional"];
-        let cur = if val("tnum") == Some(1) {
-            1
-        } else if val("pnum") == Some(1) {
-            2
-        } else {
-            0
-        };
-        detail_row(ui, body, next(), "Number spacing", !has("tnum"), |ui, r| {
-            let items = spacing.map(String::from);
-            if let Some(i) = dropdown(ui, r, "det-spacing", spacing[cur], &items) {
-                let (tn, pn) = match i {
-                    1 => (Some(1), None),
-                    2 => (None, Some(1)),
-                    _ => (None, None),
-                };
-                set_features(app, &ids, vec![("tnum", tn), ("pnum", pn)]);
-            }
-        });
-        let figures = ["Default", "Lining", "Oldstyle"];
-        let cur = if val("lnum") == Some(1) {
-            1
-        } else if val("onum") == Some(1) {
-            2
-        } else {
-            0
-        };
-        detail_row(ui, body, next(), "Number style", !has("lnum") && !has("onum"), |ui, r| {
-            let items = figures.map(String::from);
-            if let Some(i) = dropdown(ui, r, "det-figures", figures[cur], &items) {
-                let (l, o) = match i {
-                    1 => (Some(1), None),
-                    2 => (None, Some(1)),
-                    _ => (None, None),
-                };
-                set_features(app, &ids, vec![("lnum", l), ("onum", o)]);
-            }
-        });
-        for (label, tag, key) in [("Fractions", "frac", "det-frac"), ("Slashed zero", "zero", "det-zero"), ("Case sensitive forms", "case", "det-case")] {
-            detail_row(ui, body, next(), label, !has(tag), |ui, r| {
-                widgets::record(ui, key, r);
-                if let Some(on) = widgets::popover::check(ui, r, key, val(tag) == Some(1)) {
-                    set_features(app, &ids, vec![(tag, on.then_some(1))]);
-                }
-            });
-        }
-        // ligatures and contextual alternates are on unless switched off
-        for (label, tag, key) in [("Ligatures", "liga", "det-liga"), ("Contextual alternates", "calt", "det-calt")] {
-            detail_row(ui, body, next(), label, !has(tag), |ui, r| {
-                widgets::record(ui, key, r);
-                if let Some(on) = widgets::popover::check(ui, r, key, val(tag) != Some(0)) {
-                    set_features(app, &ids, vec![(tag, (!on).then_some(0))]);
-                }
-            });
-        }
-
-        // ---- stylistic sets (only those the font has)
-        if !sets.is_empty() {
-            let top = next();
-            detail_row(ui, body, top, "Stylistic sets", false, |_, _| {});
-            for (row, chunk) in sets.chunks(SETS_PER_ROW).enumerate() {
-                let line_y = next();
-                for (i, set) in chunk.iter().enumerate() {
-                    let tag = format!("ss{set:02}");
-                    let on = val(&tag) == Some(1);
-                    let x = body.left() + DETAIL_LABEL_X + i as f32 * (SET_CHIP_W + SET_CHIP_GAP);
-                    let r = Rect::from_min_size(Pos2::new(x, body.top() + 8.0 + line_y), Vec2::new(SET_CHIP_W, 24.0));
-                    widgets::record(ui, &format!("det-ss-{set}"), r);
-                    let resp = ui.interact(r, ui.id().with(("det-ss", row, i)), Sense::click());
-                    let bg = if on {
-                        theme::BG_BRAND
-                    } else if resp.hovered() {
-                        theme::BG_TERTIARY
-                    } else {
-                        theme::BG_SECONDARY
+        if active_tab != 2 {
+            // ---- numbers & OpenType details (shown on Basic and Details tabs)
+            let spacing = ["Default", "Tabular", "Proportional"];
+            let cur = if val("tnum") == Some(1) {
+                1
+            } else if val("pnum") == Some(1) {
+                2
+            } else {
+                0
+            };
+            detail_row(ui, body, next(), "Number spacing", !has("tnum"), |ui, r| {
+                let items = spacing.map(String::from);
+                if let Some(i) = dropdown(ui, r, "det-spacing", spacing[cur], &items) {
+                    let (tn, pn) = match i {
+                        1 => (Some(1), None),
+                        2 => (None, Some(1)),
+                        _ => (None, None),
                     };
-                    ui.painter().rect_filled(r, theme::cr(theme::RADIUS_MEDIUM), bg);
-                    ui.painter().text(
-                        r.center(),
-                        Align2::CENTER_CENTER,
-                        format!("{set}"),
-                        theme::font_body(),
-                        if on { Color32::WHITE } else { theme::TEXT_SECONDARY },
-                    );
-                    resp.clone().on_hover_text(format!("Stylistic set {set}"));
-                    if resp.clicked() {
-                        set_features(app, &ids, vec![(tag.as_str(), (!on).then_some(1))]);
+                    set_features(app, &ids, vec![("tnum", tn), ("pnum", pn)]);
+                }
+            });
+            let figures = ["Default", "Lining", "Oldstyle"];
+            let cur = if val("lnum") == Some(1) {
+                1
+            } else if val("onum") == Some(1) {
+                2
+            } else {
+                0
+            };
+            detail_row(ui, body, next(), "Number style", !has("lnum") && !has("onum"), |ui, r| {
+                let items = figures.map(String::from);
+                if let Some(i) = dropdown(ui, r, "det-figures", figures[cur], &items) {
+                    let (l, o) = match i {
+                        1 => (Some(1), None),
+                        2 => (None, Some(1)),
+                        _ => (None, None),
+                    };
+                    set_features(app, &ids, vec![("lnum", l), ("onum", o)]);
+                }
+            });
+            for (label, tag, key) in [("Fractions", "frac", "det-frac"), ("Slashed zero", "zero", "det-zero"), ("Case sensitive forms", "case", "det-case")] {
+                detail_row(ui, body, next(), label, !has(tag), |ui, r| {
+                    widgets::record(ui, key, r);
+                    if let Some(on) = widgets::popover::check(ui, r, key, val(tag) == Some(1)) {
+                        set_features(app, &ids, vec![(tag, on.then_some(1))]);
+                    }
+                });
+            }
+            // ligatures and contextual alternates are on unless switched off
+            for (label, tag, key) in [("Ligatures", "liga", "det-liga"), ("Contextual alternates", "calt", "det-calt")] {
+                detail_row(ui, body, next(), label, !has(tag), |ui, r| {
+                    widgets::record(ui, key, r);
+                    if let Some(on) = widgets::popover::check(ui, r, key, val(tag) != Some(0)) {
+                        set_features(app, &ids, vec![(tag, (!on).then_some(0))]);
+                    }
+                });
+            }
+
+            // ---- stylistic sets (only those the font has)
+            if !sets.is_empty() {
+                let top = next();
+                detail_row(ui, body, top, "Stylistic sets", false, |_, _| {});
+                for (row, chunk) in sets.chunks(SETS_PER_ROW).enumerate() {
+                    let line_y = next();
+                    for (i, set) in chunk.iter().enumerate() {
+                        let tag = format!("ss{set:02}");
+                        let on = val(&tag) == Some(1);
+                        let x = body.left() + DETAIL_LABEL_X + i as f32 * (SET_CHIP_W + SET_CHIP_GAP);
+                        let r = Rect::from_min_size(Pos2::new(x, body.top() + 8.0 + line_y), Vec2::new(SET_CHIP_W, 24.0));
+                        widgets::record(ui, &format!("det-ss-{set}"), r);
+                        let resp = ui.interact(r, ui.id().with(("det-ss", row, i)), Sense::click());
+                        let bg = if on {
+                            theme::BG_BRAND
+                        } else if resp.hovered() {
+                            theme::BG_TERTIARY
+                        } else {
+                            theme::BG_SECONDARY
+                        };
+                        ui.painter().rect_filled(r, theme::cr(theme::RADIUS_MEDIUM), bg);
+                        ui.painter().text(
+                            r.center(),
+                            Align2::CENTER_CENTER,
+                            format!("{set}"),
+                            theme::font_body(),
+                            if on { Color32::WHITE } else { theme::TEXT_SECONDARY },
+                        );
+                        resp.clone().on_hover_text(format!("Stylistic set {set}"));
+                        if resp.clicked() {
+                            set_features(app, &ids, vec![(tag.as_str(), (!on).then_some(1))]);
+                        }
                     }
                 }
             }
         }
 
-        // ---- paragraph
-        let sep = body.top() + 8.0 + y.get() - 4.0;
-        widgets::hline(ui.painter(), body.left(), body.right(), sep, theme::BORDER);
-        y.set(y.get() + 8.0);
-        let p = t.paragraph.clone();
-        detail_row(ui, body, next(), "Paragraph indent", false, |ui, r| {
-            if let Some(v) = field::num_field(ui, r, "det-indent", Prefix::None, Some(p.indent), "") {
-                set_text_props(app, &ids, |t| t.paragraph.indent = v.max(0.0));
-            }
-        });
-        detail_row(ui, body, next(), "Paragraph spacing", false, |ui, r| {
-            if let Some(v) = field::num_field(ui, r, "det-pspacing", Prefix::None, Some(t.style.paragraph_spacing), "") {
-                set_base(app, &ids, |s| s.paragraph_spacing = v.max(0.0));
-            }
-        });
-        detail_row(ui, body, next(), "List spacing", false, |ui, r| {
-            if let Some(v) = field::num_field(ui, r, "det-lspacing", Prefix::None, Some(p.list_spacing), "") {
-                set_text_props(app, &ids, |t| t.paragraph.list_spacing = v.max(0.0));
-            }
-        });
-        detail_row(ui, body, next(), "Hanging punctuation", false, |ui, r| {
-            widgets::record(ui, "det-hangp", r);
-            if let Some(on) = widgets::popover::check(ui, r, "det-hangp", p.hanging_punctuation) {
-                set_text_props(app, &ids, |t| t.paragraph.hanging_punctuation = on);
-            }
-        });
-        detail_row(ui, body, next(), "Hanging lists", false, |ui, r| {
-            if let Some(on) = widgets::popover::check(ui, r, "det-hangl", p.hanging_list) {
-                set_text_props(app, &ids, |t| t.paragraph.hanging_list = on);
-            }
-        });
-        detail_row(ui, body, next(), "Vertical trim", false, |ui, r| {
-            let items = ["Standard", "Cap height"].map(String::from);
-            let cur = if p.leading_trim == LeadingTrim::CapHeight { 1 } else { 0 };
-            if let Some(i) = dropdown(ui, r, "det-trim", &items[cur], &items) {
-                set_text_props(app, &ids, |t| t.paragraph.leading_trim = if i == 1 { LeadingTrim::CapHeight } else { LeadingTrim::None });
-            }
-        });
-        detail_row(ui, body, next(), "Text direction", false, |ui, r| {
-            let cur = match t.direction {
-                TextDirection::Auto => 0,
-                TextDirection::Ltr => 1,
-                TextDirection::Rtl => 2,
-            };
-            widgets::record(ui, "det-dir", r);
-            if let Some(i) = seg_rect(ui, r, "det-dir", &["Auto", "LTR", "RTL"], Some(cur)) {
-                let d = [TextDirection::Auto, TextDirection::Ltr, TextDirection::Rtl][i];
-                set_text_props(app, &ids, |t| t.direction = d);
-            }
-        });
+        if active_tab == 0 {
+            // ---- paragraph (Basic tab only)
+            let sep = body.top() + 8.0 + y.get() - 4.0;
+            widgets::hline(ui.painter(), body.left(), body.right(), sep, theme::BORDER);
+            y.set(y.get() + 8.0);
+            let p = t.paragraph.clone();
+            detail_row(ui, body, next(), "Paragraph indent", false, |ui, r| {
+                if let Some(v) = field::num_field(ui, r, "det-indent", Prefix::None, Some(p.indent), "") {
+                    set_text_props(app, &ids, |t| t.paragraph.indent = v.max(0.0));
+                }
+            });
+            detail_row(ui, body, next(), "Paragraph spacing", false, |ui, r| {
+                if let Some(v) = field::num_field(ui, r, "det-pspacing", Prefix::None, Some(t.style.paragraph_spacing), "") {
+                    set_base(app, &ids, |s| s.paragraph_spacing = v.max(0.0));
+                }
+            });
+            detail_row(ui, body, next(), "List spacing", false, |ui, r| {
+                if let Some(v) = field::num_field(ui, r, "det-lspacing", Prefix::None, Some(p.list_spacing), "") {
+                    set_text_props(app, &ids, |t| t.paragraph.list_spacing = v.max(0.0));
+                }
+            });
+            detail_row(ui, body, next(), "Hanging punctuation", false, |ui, r| {
+                widgets::record(ui, "det-hangp", r);
+                if let Some(on) = widgets::popover::check(ui, r, "det-hangp", p.hanging_punctuation) {
+                    set_text_props(app, &ids, |t| t.paragraph.hanging_punctuation = on);
+                }
+            });
+            detail_row(ui, body, next(), "Hanging lists", false, |ui, r| {
+                if let Some(on) = widgets::popover::check(ui, r, "det-hangl", p.hanging_list) {
+                    set_text_props(app, &ids, |t| t.paragraph.hanging_list = on);
+                }
+            });
+            detail_row(ui, body, next(), "Vertical trim", false, |ui, r| {
+                let items = ["Standard", "Cap height"].map(String::from);
+                let cur = if p.leading_trim == LeadingTrim::CapHeight { 1 } else { 0 };
+                if let Some(i) = dropdown(ui, r, "det-trim", &items[cur], &items) {
+                    set_text_props(app, &ids, |t| t.paragraph.leading_trim = if i == 1 { LeadingTrim::CapHeight } else { LeadingTrim::None });
+                }
+            });
+            detail_row(ui, body, next(), "Text direction", false, |ui, r| {
+                let cur = match t.direction {
+                    TextDirection::Auto => 0,
+                    TextDirection::Ltr => 1,
+                    TextDirection::Rtl => 2,
+                };
+                widgets::record(ui, "det-dir", r);
+                if let Some(i) = seg_rect(ui, r, "det-dir", &["Auto", "LTR", "RTL"], Some(cur)) {
+                    let d = [TextDirection::Auto, TextDirection::Ltr, TextDirection::Rtl][i];
+                    set_text_props(app, &ids, |t| t.direction = d);
+                }
+            });
+        }
 
-        // ---- variable font axes (wght, wdth, opsz, slnt)
-        let sep_axes = body.top() + 8.0 + y.get() - 4.0;
-        widgets::hline(ui.painter(), body.left(), body.right(), sep_axes, theme::BORDER);
-        y.set(y.get() + 8.0);
-        let wght_val = t.style.get_axis("wght").unwrap_or(t.style.font_weight as f32);
-        detail_row(ui, body, next(), "Axis · Weight (wght)", false, |ui, r| {
-            if let Some(v) = field::num_field(ui, r, "det-axis-wght", Prefix::None, Some(wght_val), "") {
-                let v = v.clamp(100.0, 900.0);
-                set_style(app, &ids, |s| {
-                    s.set_axis("wght", v);
-                    s.font_weight = v.round() as u16;
-                });
-            }
-        });
-        let wdth_val = t.style.get_axis("wdth").unwrap_or(100.0);
-        detail_row(ui, body, next(), "Axis · Width (wdth)", false, |ui, r| {
-            if let Some(v) = field::num_field(ui, r, "det-axis-wdth", Prefix::None, Some(wdth_val), "%") {
-                let v = v.clamp(50.0, 200.0);
-                set_style(app, &ids, |s| s.set_axis("wdth", v));
-            }
-        });
-        let opsz_val = t.style.get_axis("opsz").unwrap_or(t.style.font_size);
-        detail_row(ui, body, next(), "Axis · Optical (opsz)", false, |ui, r| {
-            if let Some(v) = field::num_field(ui, r, "det-axis-opsz", Prefix::None, Some(opsz_val), "") {
-                let v = v.clamp(6.0, 144.0);
-                set_style(app, &ids, |s| s.set_axis("opsz", v));
-            }
-        });
-        let slnt_val = t.style.get_axis("slnt").unwrap_or(0.0);
-        detail_row(ui, body, next(), "Axis · Slant (slnt)", false, |ui, r| {
-            if let Some(v) = field::num_field(ui, r, "det-axis-slnt", Prefix::None, Some(slnt_val), "°") {
-                let v = v.clamp(-20.0, 20.0);
-                set_style(app, &ids, |s| s.set_axis("slnt", v));
-            }
-        });
+        if active_tab == 2 {
+            // ---- variable font axes (Variable tab only: wght, wdth, opsz, slnt + reset)
+            let wght_val = t.style.get_axis("wght").unwrap_or(t.style.font_weight as f32);
+            detail_row(ui, body, next(), "Axis · Weight (wght)", false, |ui, r| {
+                widgets::record(ui, "det-axis-wght", r);
+                if let Some(v) = field::num_field(ui, r, "det-axis-wght", Prefix::None, Some(wght_val), "") {
+                    let v = v.clamp(100.0, 900.0);
+                    set_style(app, &ids, |s| {
+                        s.set_axis("wght", v);
+                        s.font_weight = v.round() as u16;
+                    });
+                }
+            });
+            let wdth_val = t.style.get_axis("wdth").unwrap_or(100.0);
+            detail_row(ui, body, next(), "Axis · Width (wdth)", false, |ui, r| {
+                widgets::record(ui, "det-axis-wdth", r);
+                if let Some(v) = field::num_field(ui, r, "det-axis-wdth", Prefix::None, Some(wdth_val), "%") {
+                    let v = v.clamp(50.0, 200.0);
+                    set_style(app, &ids, |s| s.set_axis("wdth", v));
+                }
+            });
+            let opsz_val = t.style.get_axis("opsz").unwrap_or(t.style.font_size);
+            detail_row(ui, body, next(), "Axis · Optical (opsz)", false, |ui, r| {
+                widgets::record(ui, "det-axis-opsz", r);
+                if let Some(v) = field::num_field(ui, r, "det-axis-opsz", Prefix::None, Some(opsz_val), "") {
+                    let v = v.clamp(6.0, 144.0);
+                    set_style(app, &ids, |s| s.set_axis("opsz", v));
+                }
+            });
+            let slnt_val = t.style.get_axis("slnt").unwrap_or(0.0);
+            detail_row(ui, body, next(), "Axis · Slant (slnt)", false, |ui, r| {
+                widgets::record(ui, "det-axis-slnt", r);
+                if let Some(v) = field::num_field(ui, r, "det-axis-slnt", Prefix::None, Some(slnt_val), "°") {
+                    let v = v.clamp(-20.0, 20.0);
+                    set_style(app, &ids, |s| s.set_axis("slnt", v));
+                }
+            });
+            detail_row(ui, body, next(), "Variable axes", false, |ui, r| {
+                widgets::record(ui, "det-axis-reset", r);
+                if seg_rect(ui, r, "det-axis-reset", &["Reset axes"], None) == Some(0) {
+                    set_style(app, &ids, |s| s.variation_axes.clear());
+                }
+            });
+        }
     });
     if pop {
         app.props.pop = None;

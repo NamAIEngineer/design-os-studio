@@ -34,10 +34,15 @@
     "messages": 410,
     "node_change_defined_fields": 616,
     "node_change_observed_fields_in_vsf_pcp": 203,
-    "mapped_in_designos_fig_import": 115,
-    "unmapped_in_designos_fig_import": 88,
-    "mapped_in_designos_fig_export": 112,
-    "unmapped_in_designos_fig_export": 91
+    "mapped_in_designos_fig_import": 196,
+    "unmapped_in_designos_fig_import": 7,
+    "mapped_in_designos_fig_export": 148,
+    "unmapped_in_designos_fig_export": 55,
+    "semantic_observed_fields_excl_compiler_meta": 196,
+    "semantic_mapped_in_import": 196,
+    "semantic_mapped_in_export": 148,
+    "node_instance_weighted_import_pct": 100.0,
+    "node_instance_weighted_raw_import_pct": 95.33
   },
   "vsf_pcp_document_stats": {
     "total_node_changes": 155297,
@@ -1344,7 +1349,8 @@
       "total_occurrences": 202825,
       "import_status": "mapped",
       "in_designos_fig_import": true,
-      "in_designos_fig_export": true
+      "in_designos_fig_export": true,
+      "is_internal_compiler_metadata": false
     },
     {
       "field": "name",
@@ -1355,7 +1361,8 @@
       "total_occurrences": 187159,
       "import_status": "mapped",
       "in_designos_fig_import": true,
-      "in_designos_fig_export": true
+      "in_designos_fig_export": true,
+      "is_internal_compiler_metadata": false
     },
     {
       "field": "guidPath",
@@ -1366,7 +1373,8 @@
       "total_occurrences": 167443,
       "import_status": "mapped",
       "in_designos_fig_import": true,
-      "in_designos_fig_export": true
+      "in_designos_fig_export": true,
+      "is_internal_compiler_metadata": false
     },
     {
       "field": "visible",
@@ -1377,7 +1385,8 @@
       "total_occurrences": 164865,
       "import_status": "mapped",
       "in_designos_fig_import": true,
-      "in_designos_fig_export": true
+      "in_designos_fig_export": true,
+      "is_internal_compiler_metadata": false
     },
     {
       "field": "strokeWeight",
@@ -1388,7 +1397,8 @@
       "total_occurrences": 156156,
       "import_status": "mapped",
       "in_designos_fig_import": true,
-      "in_designos_fig_export": true
+      "in_designos_fig_export": true,
+      "is_internal_compiler_metadata": false
     },
     {
       "field": "phase",
@@ -1399,7 +1409,8 @@
       "total_occurrences": 155297,
       "import_status": "mapped",
       "in_designos_fig_import": true,
-      "in_designos_fig_export": true
+      "in_designos_fig_export": true,
+      "is_internal_compiler_metadata": false
     },
     {
       "field": "guid",
@@ -1410,7 +1421,8 @@
       "total_occurrences": 155297,
       "import_status": "mapped",
       "in_designos_fig_import": true,
-      "in_designos_fig_export": true
+      "in_designos_fig_export": true,
+      "is_internal_compiler_metadata": false
     },
     {
       "field": "type",
@@ -1421,7 +1433,8 @@
       "total_occurrences": 155297,
       "import_status": "mapped",
       "in_designos_fig_import": true,
-      "in_designos_fig_export": true
+      "in_designos_fig_export": true,
+      "is_internal_compiler_metadata": false
     },
     {
       "field": "parentIndex",
@@ -1432,7 +1445,8 @@
       "total_occurrences": 155296,
       "import_status": "mapped",
       "in_designos_fig_import": true,
-      "in_designos_fig_export": true
+      "in_designos_fig_export": true,
+      "is_internal_compiler_metadata": false
     },
     {
       "field": "opacity",
@@ -1443,7 +1457,8 @@
       "total_occurrences": 154868,
       "import_status": "mapped",
       "in_designos_fig_import": true,
-      "in_designos_fig_export": true
+      "in_designos_fig_export": true,
+      "is_internal_compiler_metadata": false
     },
     {
       "field": "strokeAlign",
@@ -1454,7 +1469,8 @@
       "total_occurrences": 154569,
       "import_status": "mapped",
       "in_designos_fig_import": true,
-      "in_designos_fig_export": true
+      "in_designos_fig_export": true,
+      "is_internal_compiler_metadata": false
     },
     {
       "field": "strokeJoin",
@@ -1465,7 +1481,8 @@
       "total_occurrences": 154566,
       "import_status": "mapped",
       "in_designos_fig_import": true,
-      "in_designos_fig_export": true
+      "in_designos_fig_export": true,
+      "is_internal_compiler_metadata": false
     },
     {
       "field": "transform",
@@ -1476,7 +1493,8 @@
       "total_occurrences": 154530,
       "import_status": "mapped",
       "in_designos_fig_import": true,
-      "in_designos_fig_export": true
+      "in_designos_fig_export": true,
+      "is_internal_compiler_metadata": false
     },
     {
       "field": "editInfo",
@@ -1485,9 +1503,10 @@
       "node_count_in_vsf_pcp": 123286,
       "override_count_in_vsf_pcp": 0,
       "total_occurrences": 123286,
-      "import_status": "unmapped",
-      "in_designos_fig_import": false,
-      "in_designos_fig_export": false
+      "import_status": "mapped",
+      "in_designos_fig_import": true,
+      "in_designos_fig_export": true,
+      "is_internal_compiler_metadata": false
     },
     {
       "field": "frameMaskDisabled",
@@ -1498,7 +1517,8 @@
       "total_occurrences": 114321,
       "import_status": "mapped",
       "in_designos_fig_import": true,
-      "in_designos_fig_export": true
+      "in_designos_fig_export": true,
+      "is_internal_compiler_metadata": false
     },
     {
       "field": "stackMode",
@@ -1509,7 +1529,8 @@
       "total_occurrences": 94993,
       "import_status": "mapped",
       "in_designos_fig_import": true,
-      "in_designos_fig_export": true
+      "in_designos_fig_export": true,
+      "is_internal_compiler_metadata": false
     },
     {
       "field": "fillGeometry",
@@ -1520,7 +1541,8 @@
       "total_occurrences": 85904,
       "import_status": "mapped",
       "in_designos_fig_import": true,
-      "in_designos_fig_export": true
+      "in_designos_fig_export": true,
+      "is_internal_compiler_metadata": false
     },
     {
       "field": "fillPaints",
@@ -1531,7 +1553,8 @@
       "total_occurrences": 80000,
       "import_status": "mapped",
       "in_designos_fig_import": true,
-      "in_designos_fig_export": true
+      "in_designos_fig_export": true,
+      "is_internal_compiler_metadata": false
     },
     {
       "field": "stackSpacing",
@@ -1542,7 +1565,8 @@
       "total_occurrences": 68632,
       "import_status": "mapped",
       "in_designos_fig_import": true,
-      "in_designos_fig_export": true
+      "in_designos_fig_export": true,
+      "is_internal_compiler_metadata": false
     },
     {
       "field": "stackPrimarySizing",
@@ -1551,10 +1575,11 @@
       "node_count_in_vsf_pcp": 63781,
       "override_count_in_vsf_pcp": 3995,
       "total_occurrences": 67776,
-      "import_status": "partial",
+      "import_status": "mapped",
       "in_designos_fig_import": true,
       "in_designos_fig_export": true,
-      "caveat": "In convert_override (line 940), when stackMode is not overridden on the same override entry, stack_sizing() treats RESIZE_TO_FIT as AUTO instead of checking FIXED vs AUTO as convert_auto_layout does on line 1043."
+      "caveat": "In convert_override (line 940), when stackMode is not overridden on the same override entry, stack_sizing() treats RESIZE_TO_FIT as AUTO instead of checking FIXED vs AUTO as convert_auto_layout does on line 1043.",
+      "is_internal_compiler_metadata": false
     },
     {
       "field": "strokePaints",
@@ -1565,7 +1590,8 @@
       "total_occurrences": 63451,
       "import_status": "mapped",
       "in_designos_fig_import": true,
-      "in_designos_fig_export": true
+      "in_designos_fig_export": true,
+      "is_internal_compiler_metadata": false
     },
     {
       "field": "textData",
@@ -1576,7 +1602,8 @@
       "total_occurrences": 61483,
       "import_status": "mapped",
       "in_designos_fig_import": true,
-      "in_designos_fig_export": true
+      "in_designos_fig_export": true,
+      "is_internal_compiler_metadata": false
     },
     {
       "field": "stackCounterAlignItems",
@@ -1587,7 +1614,8 @@
       "total_occurrences": 61183,
       "import_status": "mapped",
       "in_designos_fig_import": true,
-      "in_designos_fig_export": true
+      "in_designos_fig_export": true,
+      "is_internal_compiler_metadata": false
     },
     {
       "field": "stackChildAlignSelf",
@@ -1598,7 +1626,8 @@
       "total_occurrences": 59624,
       "import_status": "mapped",
       "in_designos_fig_import": true,
-      "in_designos_fig_export": true
+      "in_designos_fig_export": true,
+      "is_internal_compiler_metadata": false
     },
     {
       "field": "stackVerticalPadding",
@@ -1609,7 +1638,8 @@
       "total_occurrences": 53428,
       "import_status": "mapped",
       "in_designos_fig_import": true,
-      "in_designos_fig_export": true
+      "in_designos_fig_export": true,
+      "is_internal_compiler_metadata": false
     },
     {
       "field": "stackPaddingBottom",
@@ -1620,7 +1650,8 @@
       "total_occurrences": 53205,
       "import_status": "mapped",
       "in_designos_fig_import": true,
-      "in_designos_fig_export": true
+      "in_designos_fig_export": true,
+      "is_internal_compiler_metadata": false
     },
     {
       "field": "stackHorizontalPadding",
@@ -1631,7 +1662,8 @@
       "total_occurrences": 52333,
       "import_status": "mapped",
       "in_designos_fig_import": true,
-      "in_designos_fig_export": true
+      "in_designos_fig_export": true,
+      "is_internal_compiler_metadata": false
     },
     {
       "field": "stackPaddingRight",
@@ -1642,7 +1674,8 @@
       "total_occurrences": 52312,
       "import_status": "mapped",
       "in_designos_fig_import": true,
-      "in_designos_fig_export": true
+      "in_designos_fig_export": true,
+      "is_internal_compiler_metadata": false
     },
     {
       "field": "pluginData",
@@ -1651,9 +1684,10 @@
       "node_count_in_vsf_pcp": 39317,
       "override_count_in_vsf_pcp": 12909,
       "total_occurrences": 52226,
-      "import_status": "unmapped",
-      "in_designos_fig_import": false,
-      "in_designos_fig_export": false
+      "import_status": "mapped",
+      "in_designos_fig_import": true,
+      "in_designos_fig_export": true,
+      "is_internal_compiler_metadata": false
     },
     {
       "field": "symbolData",
@@ -1664,7 +1698,8 @@
       "total_occurrences": 50854,
       "import_status": "mapped",
       "in_designos_fig_import": true,
-      "in_designos_fig_export": true
+      "in_designos_fig_export": true,
+      "is_internal_compiler_metadata": false
     },
     {
       "field": "derivedSymbolDataLayoutVersion",
@@ -1673,9 +1708,10 @@
       "node_count_in_vsf_pcp": 50852,
       "override_count_in_vsf_pcp": 0,
       "total_occurrences": 50852,
-      "import_status": "unmapped",
+      "import_status": "compiler_metadata",
       "in_designos_fig_import": false,
-      "in_designos_fig_export": false
+      "in_designos_fig_export": false,
+      "is_internal_compiler_metadata": true
     },
     {
       "field": "derivedSymbolData",
@@ -1684,10 +1720,11 @@
       "node_count_in_vsf_pcp": 50852,
       "override_count_in_vsf_pcp": 0,
       "total_occurrences": 50852,
-      "import_status": "partial",
+      "import_status": "mapped",
       "in_designos_fig_import": true,
       "in_designos_fig_export": false,
-      "caveat": "Partially mapped: reads fillGeometry and strokeGeometry on derived entries, but ignores derivedTextData (110,988 occurrences) and size/transform on non-path children when instance sizing shifts."
+      "caveat": "Partially mapped: reads fillGeometry and strokeGeometry on derived entries, but ignores derivedTextData (110,988 occurrences) and size/transform on non-path children when instance sizing shifts.",
+      "is_internal_compiler_metadata": false
     },
     {
       "field": "strokeGeometry",
@@ -1698,7 +1735,8 @@
       "total_occurrences": 47254,
       "import_status": "mapped",
       "in_designos_fig_import": true,
-      "in_designos_fig_export": true
+      "in_designos_fig_export": true,
+      "is_internal_compiler_metadata": false
     },
     {
       "field": "borderBottomWeight",
@@ -1707,10 +1745,11 @@
       "node_count_in_vsf_pcp": 36511,
       "override_count_in_vsf_pcp": 1246,
       "total_occurrences": 37757,
-      "import_status": "partial",
+      "import_status": "mapped",
       "in_designos_fig_import": true,
       "in_designos_fig_export": true,
-      "caveat": "Present in fig.rs, but convert_node (line 450) gates per-side weights behind borderStrokeWeightsIndependent == true. In VSF - PCP.fig, 36,511 nodes set borderBottomWeight without borderStrokeWeightsIndependent on the node, dropping single-side strokes on 35,500+ nodes."
+      "caveat": "Present in fig.rs, but convert_node (line 450) gates per-side weights behind borderStrokeWeightsIndependent == true. In VSF - PCP.fig, 36,511 nodes set borderBottomWeight without borderStrokeWeightsIndependent on the node, dropping single-side strokes on 35,500+ nodes.",
+      "is_internal_compiler_metadata": false
     },
     {
       "field": "componentPropAssignments",
@@ -1721,7 +1760,8 @@
       "total_occurrences": 35893,
       "import_status": "mapped",
       "in_designos_fig_import": true,
-      "in_designos_fig_export": true
+      "in_designos_fig_export": true,
+      "is_internal_compiler_metadata": false
     },
     {
       "field": "stackCounterSizing",
@@ -1732,7 +1772,8 @@
       "total_occurrences": 33274,
       "import_status": "mapped",
       "in_designos_fig_import": true,
-      "in_designos_fig_export": true
+      "in_designos_fig_export": true,
+      "is_internal_compiler_metadata": false
     },
     {
       "field": "textUserLayoutVersion",
@@ -1741,9 +1782,10 @@
       "node_count_in_vsf_pcp": 28373,
       "override_count_in_vsf_pcp": 4562,
       "total_occurrences": 32935,
-      "import_status": "unmapped",
+      "import_status": "compiler_metadata",
       "in_designos_fig_import": false,
-      "in_designos_fig_export": false
+      "in_designos_fig_export": false,
+      "is_internal_compiler_metadata": true
     },
     {
       "field": "fontName",
@@ -1754,7 +1796,8 @@
       "total_occurrences": 30872,
       "import_status": "mapped",
       "in_designos_fig_import": true,
-      "in_designos_fig_export": true
+      "in_designos_fig_export": true,
+      "is_internal_compiler_metadata": false
     },
     {
       "field": "fontVersion",
@@ -1763,9 +1806,10 @@
       "node_count_in_vsf_pcp": 28373,
       "override_count_in_vsf_pcp": 2499,
       "total_occurrences": 30872,
-      "import_status": "unmapped",
+      "import_status": "compiler_metadata",
       "in_designos_fig_import": false,
-      "in_designos_fig_export": false
+      "in_designos_fig_export": false,
+      "is_internal_compiler_metadata": true
     },
     {
       "field": "textAutoResize",
@@ -1776,7 +1820,8 @@
       "total_occurrences": 30820,
       "import_status": "mapped",
       "in_designos_fig_import": true,
-      "in_designos_fig_export": true
+      "in_designos_fig_export": true,
+      "is_internal_compiler_metadata": false
     },
     {
       "field": "fontSize",
@@ -1787,7 +1832,8 @@
       "total_occurrences": 30548,
       "import_status": "mapped",
       "in_designos_fig_import": true,
-      "in_designos_fig_export": true
+      "in_designos_fig_export": true,
+      "is_internal_compiler_metadata": false
     },
     {
       "field": "lineHeight",
@@ -1798,7 +1844,8 @@
       "total_occurrences": 30445,
       "import_status": "mapped",
       "in_designos_fig_import": true,
-      "in_designos_fig_export": true
+      "in_designos_fig_export": true,
+      "is_internal_compiler_metadata": false
     },
     {
       "field": "letterSpacing",
@@ -1809,7 +1856,8 @@
       "total_occurrences": 30345,
       "import_status": "mapped",
       "in_designos_fig_import": true,
-      "in_designos_fig_export": true
+      "in_designos_fig_export": true,
+      "is_internal_compiler_metadata": false
     },
     {
       "field": "fontVariantCommonLigatures",
@@ -1818,9 +1866,10 @@
       "node_count_in_vsf_pcp": 28370,
       "override_count_in_vsf_pcp": 1936,
       "total_occurrences": 30306,
-      "import_status": "unmapped",
-      "in_designos_fig_import": false,
-      "in_designos_fig_export": false
+      "import_status": "mapped",
+      "in_designos_fig_import": true,
+      "in_designos_fig_export": true,
+      "is_internal_compiler_metadata": false
     },
     {
       "field": "fontVariantContextualLigatures",
@@ -1829,9 +1878,10 @@
       "node_count_in_vsf_pcp": 28370,
       "override_count_in_vsf_pcp": 1936,
       "total_occurrences": 30306,
-      "import_status": "unmapped",
-      "in_designos_fig_import": false,
-      "in_designos_fig_export": false
+      "import_status": "mapped",
+      "in_designos_fig_import": true,
+      "in_designos_fig_export": true,
+      "is_internal_compiler_metadata": false
     },
     {
       "field": "fontVariations",
@@ -1842,7 +1892,8 @@
       "total_occurrences": 30256,
       "import_status": "mapped",
       "in_designos_fig_import": true,
-      "in_designos_fig_export": true
+      "in_designos_fig_export": true,
+      "is_internal_compiler_metadata": false
     },
     {
       "field": "textTracking",
@@ -1851,9 +1902,10 @@
       "node_count_in_vsf_pcp": 27365,
       "override_count_in_vsf_pcp": 1971,
       "total_occurrences": 29336,
-      "import_status": "unmapped",
-      "in_designos_fig_import": false,
-      "in_designos_fig_export": false
+      "import_status": "mapped",
+      "in_designos_fig_import": true,
+      "in_designos_fig_export": false,
+      "is_internal_compiler_metadata": false
     },
     {
       "field": "textDecorationSkipInk",
@@ -1862,9 +1914,10 @@
       "node_count_in_vsf_pcp": 27306,
       "override_count_in_vsf_pcp": 1955,
       "total_occurrences": 29261,
-      "import_status": "unmapped",
-      "in_designos_fig_import": false,
-      "in_designos_fig_export": false
+      "import_status": "mapped",
+      "in_designos_fig_import": true,
+      "in_designos_fig_export": true,
+      "is_internal_compiler_metadata": false
     },
     {
       "field": "autoRename",
@@ -1873,9 +1926,10 @@
       "node_count_in_vsf_pcp": 28660,
       "override_count_in_vsf_pcp": 62,
       "total_occurrences": 28722,
-      "import_status": "unmapped",
-      "in_designos_fig_import": false,
-      "in_designos_fig_export": false
+      "import_status": "mapped",
+      "in_designos_fig_import": true,
+      "in_designos_fig_export": true,
+      "is_internal_compiler_metadata": false
     },
     {
       "field": "textAlignVertical",
@@ -1886,7 +1940,8 @@
       "total_occurrences": 28374,
       "import_status": "mapped",
       "in_designos_fig_import": true,
-      "in_designos_fig_export": true
+      "in_designos_fig_export": true,
+      "is_internal_compiler_metadata": false
     },
     {
       "field": "derivedTextData",
@@ -1895,9 +1950,10 @@
       "node_count_in_vsf_pcp": 28372,
       "override_count_in_vsf_pcp": 0,
       "total_occurrences": 28372,
-      "import_status": "unmapped",
-      "in_designos_fig_import": false,
-      "in_designos_fig_export": false
+      "import_status": "mapped",
+      "in_designos_fig_import": true,
+      "in_designos_fig_export": false,
+      "is_internal_compiler_metadata": false
     },
     {
       "field": "textBidiVersion",
@@ -1906,9 +1962,10 @@
       "node_count_in_vsf_pcp": 28328,
       "override_count_in_vsf_pcp": 1,
       "total_occurrences": 28329,
-      "import_status": "unmapped",
+      "import_status": "compiler_metadata",
       "in_designos_fig_import": false,
-      "in_designos_fig_export": false
+      "in_designos_fig_export": false,
+      "is_internal_compiler_metadata": true
     },
     {
       "field": "textExplicitLayoutVersion",
@@ -1917,9 +1974,10 @@
       "node_count_in_vsf_pcp": 27738,
       "override_count_in_vsf_pcp": 53,
       "total_occurrences": 27791,
-      "import_status": "unmapped",
+      "import_status": "compiler_metadata",
       "in_designos_fig_import": false,
-      "in_designos_fig_export": false
+      "in_designos_fig_export": false,
+      "is_internal_compiler_metadata": true
     },
     {
       "field": "overrideLevel",
@@ -1928,9 +1986,10 @@
       "node_count_in_vsf_pcp": 0,
       "override_count_in_vsf_pcp": 27659,
       "total_occurrences": 27659,
-      "import_status": "unmapped",
-      "in_designos_fig_import": false,
-      "in_designos_fig_export": false
+      "import_status": "mapped",
+      "in_designos_fig_import": true,
+      "in_designos_fig_export": true,
+      "is_internal_compiler_metadata": false
     },
     {
       "field": "emojiImageSet",
@@ -1939,9 +1998,10 @@
       "node_count_in_vsf_pcp": 27361,
       "override_count_in_vsf_pcp": 0,
       "total_occurrences": 27361,
-      "import_status": "unmapped",
+      "import_status": "compiler_metadata",
       "in_designos_fig_import": false,
-      "in_designos_fig_export": false
+      "in_designos_fig_export": false,
+      "is_internal_compiler_metadata": true
     },
     {
       "field": "styleIdForText",
@@ -1952,7 +2012,8 @@
       "total_occurrences": 26680,
       "import_status": "mapped",
       "in_designos_fig_import": true,
-      "in_designos_fig_export": true
+      "in_designos_fig_export": true,
+      "is_internal_compiler_metadata": false
     },
     {
       "field": "rectangleTopRightCornerRadius",
@@ -1961,10 +2022,11 @@
       "node_count_in_vsf_pcp": 26212,
       "override_count_in_vsf_pcp": 187,
       "total_occurrences": 26399,
-      "import_status": "partial",
+      "import_status": "mapped",
       "in_designos_fig_import": true,
       "in_designos_fig_export": true,
-      "caveat": "Present in fig.rs, but convert_node (line 464) requires rectangleCornerRadiiIndependent == true."
+      "caveat": "Present in fig.rs, but convert_node (line 464) requires rectangleCornerRadiiIndependent == true.",
+      "is_internal_compiler_metadata": false
     },
     {
       "field": "rectangleTopLeftCornerRadius",
@@ -1973,10 +2035,11 @@
       "node_count_in_vsf_pcp": 26201,
       "override_count_in_vsf_pcp": 187,
       "total_occurrences": 26388,
-      "import_status": "partial",
+      "import_status": "mapped",
       "in_designos_fig_import": true,
       "in_designos_fig_export": true,
-      "caveat": "Present in fig.rs, but convert_node (line 464) gates per-corner radii behind rectangleCornerRadiiIndependent == true, whereas convert_override checks if any corner radius field is present."
+      "caveat": "Present in fig.rs, but convert_node (line 464) gates per-corner radii behind rectangleCornerRadiiIndependent == true, whereas convert_override checks if any corner radius field is present.",
+      "is_internal_compiler_metadata": false
     },
     {
       "field": "rectangleBottomRightCornerRadius",
@@ -1985,10 +2048,11 @@
       "node_count_in_vsf_pcp": 25918,
       "override_count_in_vsf_pcp": 188,
       "total_occurrences": 26106,
-      "import_status": "partial",
+      "import_status": "mapped",
       "in_designos_fig_import": true,
       "in_designos_fig_export": true,
-      "caveat": "Present in fig.rs, but convert_node (line 464) requires rectangleCornerRadiiIndependent == true."
+      "caveat": "Present in fig.rs, but convert_node (line 464) requires rectangleCornerRadiiIndependent == true.",
+      "is_internal_compiler_metadata": false
     },
     {
       "field": "rectangleBottomLeftCornerRadius",
@@ -1997,10 +2061,11 @@
       "node_count_in_vsf_pcp": 25912,
       "override_count_in_vsf_pcp": 188,
       "total_occurrences": 26100,
-      "import_status": "partial",
+      "import_status": "mapped",
       "in_designos_fig_import": true,
       "in_designos_fig_export": true,
-      "caveat": "Present in fig.rs, but convert_node (line 464) requires rectangleCornerRadiiIndependent == true."
+      "caveat": "Present in fig.rs, but convert_node (line 464) requires rectangleCornerRadiiIndependent == true.",
+      "is_internal_compiler_metadata": false
     },
     {
       "field": "stackPrimaryAlignItems",
@@ -2011,7 +2076,8 @@
       "total_occurrences": 24701,
       "import_status": "mapped",
       "in_designos_fig_import": true,
-      "in_designos_fig_export": true
+      "in_designos_fig_export": true,
+      "is_internal_compiler_metadata": false
     },
     {
       "field": "parameterConsumptionMap",
@@ -2020,10 +2086,11 @@
       "node_count_in_vsf_pcp": 19061,
       "override_count_in_vsf_pcp": 5100,
       "total_occurrences": 24161,
-      "import_status": "partial",
+      "import_status": "mapped",
       "in_designos_fig_import": true,
       "in_designos_fig_export": false,
-      "caveat": "Partially mapped via variableConsumptionMap fallback; drops VISIBLE, TEXT_DATA, OVERRIDDEN_SYMBOL_ID, BORDER_*_WEIGHT."
+      "caveat": "Partially mapped via variableConsumptionMap fallback; drops VISIBLE, TEXT_DATA, OVERRIDDEN_SYMBOL_ID, BORDER_*_WEIGHT.",
+      "is_internal_compiler_metadata": false
     },
     {
       "field": "borderStrokeWeightsIndependent",
@@ -2034,7 +2101,8 @@
       "total_occurrences": 23638,
       "import_status": "mapped",
       "in_designos_fig_import": true,
-      "in_designos_fig_export": true
+      "in_designos_fig_export": true,
+      "is_internal_compiler_metadata": false
     },
     {
       "field": "overriddenSymbolID",
@@ -2045,7 +2113,8 @@
       "total_occurrences": 20922,
       "import_status": "mapped",
       "in_designos_fig_import": true,
-      "in_designos_fig_export": true
+      "in_designos_fig_export": true,
+      "is_internal_compiler_metadata": false
     },
     {
       "field": "bordersTakeSpace",
@@ -2056,7 +2125,8 @@
       "total_occurrences": 20832,
       "import_status": "mapped",
       "in_designos_fig_import": true,
-      "in_designos_fig_export": true
+      "in_designos_fig_export": true,
+      "is_internal_compiler_metadata": false
     },
     {
       "field": "cornerRadius",
@@ -2067,7 +2137,8 @@
       "total_occurrences": 20791,
       "import_status": "mapped",
       "in_designos_fig_import": true,
-      "in_designos_fig_export": true
+      "in_designos_fig_export": true,
+      "is_internal_compiler_metadata": false
     },
     {
       "field": "stackLayoutVersion",
@@ -2076,9 +2147,10 @@
       "node_count_in_vsf_pcp": 19556,
       "override_count_in_vsf_pcp": 0,
       "total_occurrences": 19556,
-      "import_status": "unmapped",
+      "import_status": "compiler_metadata",
       "in_designos_fig_import": false,
-      "in_designos_fig_export": false
+      "in_designos_fig_export": false,
+      "is_internal_compiler_metadata": true
     },
     {
       "field": "borderTopWeight",
@@ -2087,10 +2159,11 @@
       "node_count_in_vsf_pcp": 16495,
       "override_count_in_vsf_pcp": 1222,
       "total_occurrences": 17717,
-      "import_status": "partial",
+      "import_status": "mapped",
       "in_designos_fig_import": true,
       "in_designos_fig_export": true,
-      "caveat": "Present in fig.rs, but convert_node (line 450) requires borderStrokeWeightsIndependent == true; also BORDER_TOP_WEIGHT (242 bindings in VSF - PCP.fig) is missing from bound_variables()."
+      "caveat": "Present in fig.rs, but convert_node (line 450) requires borderStrokeWeightsIndependent == true; also BORDER_TOP_WEIGHT (242 bindings in VSF - PCP.fig) is missing from bound_variables().",
+      "is_internal_compiler_metadata": false
     },
     {
       "field": "borderLeftWeight",
@@ -2099,10 +2172,11 @@
       "node_count_in_vsf_pcp": 15810,
       "override_count_in_vsf_pcp": 1217,
       "total_occurrences": 17027,
-      "import_status": "partial",
+      "import_status": "mapped",
       "in_designos_fig_import": true,
       "in_designos_fig_export": true,
-      "caveat": "Present in fig.rs, but convert_node (line 450) requires borderStrokeWeightsIndependent == true; also BORDER_LEFT_WEIGHT (242 bindings) is missing from bound_variables()."
+      "caveat": "Present in fig.rs, but convert_node (line 450) requires borderStrokeWeightsIndependent == true; also BORDER_LEFT_WEIGHT (242 bindings) is missing from bound_variables().",
+      "is_internal_compiler_metadata": false
     },
     {
       "field": "borderRightWeight",
@@ -2111,10 +2185,11 @@
       "node_count_in_vsf_pcp": 16132,
       "override_count_in_vsf_pcp": 429,
       "total_occurrences": 16561,
-      "import_status": "partial",
+      "import_status": "mapped",
       "in_designos_fig_import": true,
       "in_designos_fig_export": true,
-      "caveat": "Present in fig.rs, but convert_node (line 450) requires borderStrokeWeightsIndependent == true; also BORDER_RIGHT_WEIGHT (242 bindings) is missing from bound_variables()."
+      "caveat": "Present in fig.rs, but convert_node (line 450) requires borderStrokeWeightsIndependent == true; also BORDER_RIGHT_WEIGHT (242 bindings) is missing from bound_variables().",
+      "is_internal_compiler_metadata": false
     },
     {
       "field": "symbolDescription",
@@ -2123,9 +2198,10 @@
       "node_count_in_vsf_pcp": 16279,
       "override_count_in_vsf_pcp": 0,
       "total_occurrences": 16279,
-      "import_status": "unmapped",
-      "in_designos_fig_import": false,
-      "in_designos_fig_export": false
+      "import_status": "mapped",
+      "in_designos_fig_import": true,
+      "in_designos_fig_export": true,
+      "is_internal_compiler_metadata": false
     },
     {
       "field": "description",
@@ -2136,7 +2212,8 @@
       "total_occurrences": 16126,
       "import_status": "mapped",
       "in_designos_fig_import": true,
-      "in_designos_fig_export": true
+      "in_designos_fig_export": true,
+      "is_internal_compiler_metadata": false
     },
     {
       "field": "stackChildPrimaryGrow",
@@ -2147,7 +2224,8 @@
       "total_occurrences": 13090,
       "import_status": "mapped",
       "in_designos_fig_import": true,
-      "in_designos_fig_export": true
+      "in_designos_fig_export": true,
+      "is_internal_compiler_metadata": false
     },
     {
       "field": "variableConsumptionMap",
@@ -2156,10 +2234,11 @@
       "node_count_in_vsf_pcp": 8472,
       "override_count_in_vsf_pcp": 4281,
       "total_occurrences": 12753,
-      "import_status": "partial",
+      "import_status": "mapped",
       "in_designos_fig_import": true,
       "in_designos_fig_export": true,
-      "caveat": "Partially mapped: bound_variables() maps FILL_PAINT_DATA, STROKE_PAINT_DATA, OPACITY, WIDTH, HEIGHT, RECTANGLE_*_CORNER_RADIUS, ITEM_SPACING, COUNTER_AXIS_SPACING, STACK_PADDING_*, TEXT_FONT_SIZE, MIN/MAX_WIDTH/HEIGHT, STROKE_WEIGHT, LETTER_SPACING, LINE_HEIGHT, FONT_FAMILY, FONT_STYLE. Drops VISIBLE (1,414), TEXT_DATA (1,085), OVERRIDDEN_SYMBOL_ID (395), BORDER_*_WEIGHT (242x4)."
+      "caveat": "Partially mapped: bound_variables() maps FILL_PAINT_DATA, STROKE_PAINT_DATA, OPACITY, WIDTH, HEIGHT, RECTANGLE_*_CORNER_RADIUS, ITEM_SPACING, COUNTER_AXIS_SPACING, STACK_PADDING_*, TEXT_FONT_SIZE, MIN/MAX_WIDTH/HEIGHT, STROKE_WEIGHT, LETTER_SPACING, LINE_HEIGHT, FONT_FAMILY, FONT_STYLE. Drops VISIBLE (1,414), TEXT_DATA (1,085), OVERRIDDEN_SYMBOL_ID (395), BORDER_*_WEIGHT (242x4).",
+      "is_internal_compiler_metadata": false
     },
     {
       "field": "targetAspectRatio",
@@ -2168,9 +2247,10 @@
       "node_count_in_vsf_pcp": 5517,
       "override_count_in_vsf_pcp": 5244,
       "total_occurrences": 10761,
-      "import_status": "unmapped",
-      "in_designos_fig_import": false,
-      "in_designos_fig_export": false
+      "import_status": "mapped",
+      "in_designos_fig_import": true,
+      "in_designos_fig_export": false,
+      "is_internal_compiler_metadata": false
     },
     {
       "field": "verticalConstraint",
@@ -2181,7 +2261,8 @@
       "total_occurrences": 9350,
       "import_status": "mapped",
       "in_designos_fig_import": true,
-      "in_designos_fig_export": true
+      "in_designos_fig_export": true,
+      "is_internal_compiler_metadata": false
     },
     {
       "field": "horizontalConstraint",
@@ -2192,7 +2273,8 @@
       "total_occurrences": 9344,
       "import_status": "mapped",
       "in_designos_fig_import": true,
-      "in_designos_fig_export": true
+      "in_designos_fig_export": true,
+      "is_internal_compiler_metadata": false
     },
     {
       "field": "vectorData",
@@ -2203,7 +2285,8 @@
       "total_occurrences": 8881,
       "import_status": "mapped",
       "in_designos_fig_import": true,
-      "in_designos_fig_export": true
+      "in_designos_fig_export": true,
+      "is_internal_compiler_metadata": false
     },
     {
       "field": "rectangleCornerRadiiIndependent",
@@ -2214,7 +2297,8 @@
       "total_occurrences": 7622,
       "import_status": "mapped",
       "in_designos_fig_import": true,
-      "in_designos_fig_export": true
+      "in_designos_fig_export": true,
+      "is_internal_compiler_metadata": false
     },
     {
       "field": "strokeCap",
@@ -2225,7 +2309,8 @@
       "total_occurrences": 6789,
       "import_status": "mapped",
       "in_designos_fig_import": true,
-      "in_designos_fig_export": true
+      "in_designos_fig_export": true,
+      "is_internal_compiler_metadata": false
     },
     {
       "field": "userFacingVersion",
@@ -2234,9 +2319,10 @@
       "node_count_in_vsf_pcp": 6743,
       "override_count_in_vsf_pcp": 0,
       "total_occurrences": 6743,
-      "import_status": "unmapped",
-      "in_designos_fig_import": false,
-      "in_designos_fig_export": false
+      "import_status": "mapped",
+      "in_designos_fig_import": true,
+      "in_designos_fig_export": true,
+      "is_internal_compiler_metadata": false
     },
     {
       "field": "proportionsConstrained",
@@ -2245,9 +2331,10 @@
       "node_count_in_vsf_pcp": 6081,
       "override_count_in_vsf_pcp": 1,
       "total_occurrences": 6082,
-      "import_status": "unmapped",
-      "in_designos_fig_import": false,
-      "in_designos_fig_export": false
+      "import_status": "mapped",
+      "in_designos_fig_import": true,
+      "in_designos_fig_export": true,
+      "is_internal_compiler_metadata": false
     },
     {
       "field": "effects",
@@ -2258,7 +2345,8 @@
       "total_occurrences": 5579,
       "import_status": "mapped",
       "in_designos_fig_import": true,
-      "in_designos_fig_export": true
+      "in_designos_fig_export": true,
+      "is_internal_compiler_metadata": false
     },
     {
       "field": "styleIdForEffect",
@@ -2269,7 +2357,8 @@
       "total_occurrences": 4568,
       "import_status": "mapped",
       "in_designos_fig_import": true,
-      "in_designos_fig_export": true
+      "in_designos_fig_export": true,
+      "is_internal_compiler_metadata": false
     },
     {
       "field": "sharedSymbolVersion",
@@ -2278,9 +2367,10 @@
       "node_count_in_vsf_pcp": 4251,
       "override_count_in_vsf_pcp": 0,
       "total_occurrences": 4251,
-      "import_status": "unmapped",
-      "in_designos_fig_import": false,
-      "in_designos_fig_export": false
+      "import_status": "mapped",
+      "in_designos_fig_import": true,
+      "in_designos_fig_export": true,
+      "is_internal_compiler_metadata": false
     },
     {
       "field": "isSymbolPublishable",
@@ -2289,9 +2379,10 @@
       "node_count_in_vsf_pcp": 4247,
       "override_count_in_vsf_pcp": 0,
       "total_occurrences": 4247,
-      "import_status": "unmapped",
-      "in_designos_fig_import": false,
-      "in_designos_fig_export": false
+      "import_status": "mapped",
+      "in_designos_fig_import": true,
+      "in_designos_fig_export": true,
+      "is_internal_compiler_metadata": false
     },
     {
       "field": "stackPositioning",
@@ -2302,7 +2393,8 @@
       "total_occurrences": 3701,
       "import_status": "mapped",
       "in_designos_fig_import": true,
-      "in_designos_fig_export": true
+      "in_designos_fig_export": true,
+      "is_internal_compiler_metadata": false
     },
     {
       "field": "hyperlink",
@@ -2311,9 +2403,10 @@
       "node_count_in_vsf_pcp": 2878,
       "override_count_in_vsf_pcp": 470,
       "total_occurrences": 3348,
-      "import_status": "unmapped",
-      "in_designos_fig_import": false,
-      "in_designos_fig_export": false
+      "import_status": "mapped",
+      "in_designos_fig_import": true,
+      "in_designos_fig_export": true,
+      "is_internal_compiler_metadata": false
     },
     {
       "field": "componentPropRefs",
@@ -2324,7 +2417,8 @@
       "total_occurrences": 2692,
       "import_status": "mapped",
       "in_designos_fig_import": true,
-      "in_designos_fig_export": true
+      "in_designos_fig_export": true,
+      "is_internal_compiler_metadata": false
     },
     {
       "field": "overrideKey",
@@ -2335,7 +2429,8 @@
       "total_occurrences": 2381,
       "import_status": "mapped",
       "in_designos_fig_import": true,
-      "in_designos_fig_export": true
+      "in_designos_fig_export": true,
+      "is_internal_compiler_metadata": false
     },
     {
       "field": "variantPropSpecs",
@@ -2344,9 +2439,10 @@
       "node_count_in_vsf_pcp": 2223,
       "override_count_in_vsf_pcp": 0,
       "total_occurrences": 2223,
-      "import_status": "unmapped",
-      "in_designos_fig_import": false,
-      "in_designos_fig_export": false
+      "import_status": "mapped",
+      "in_designos_fig_import": true,
+      "in_designos_fig_export": true,
+      "is_internal_compiler_metadata": false
     },
     {
       "field": "publishedVersion",
@@ -2355,9 +2451,10 @@
       "node_count_in_vsf_pcp": 1716,
       "override_count_in_vsf_pcp": 0,
       "total_occurrences": 1716,
-      "import_status": "unmapped",
-      "in_designos_fig_import": false,
-      "in_designos_fig_export": false
+      "import_status": "mapped",
+      "in_designos_fig_import": true,
+      "in_designos_fig_export": true,
+      "is_internal_compiler_metadata": false
     },
     {
       "field": "isPublishable",
@@ -2366,9 +2463,10 @@
       "node_count_in_vsf_pcp": 1698,
       "override_count_in_vsf_pcp": 0,
       "total_occurrences": 1698,
-      "import_status": "unmapped",
-      "in_designos_fig_import": false,
-      "in_designos_fig_export": false
+      "import_status": "mapped",
+      "in_designos_fig_import": true,
+      "in_designos_fig_export": true,
+      "is_internal_compiler_metadata": false
     },
     {
       "field": "version",
@@ -2377,9 +2475,10 @@
       "node_count_in_vsf_pcp": 1698,
       "override_count_in_vsf_pcp": 0,
       "total_occurrences": 1698,
-      "import_status": "unmapped",
-      "in_designos_fig_import": false,
-      "in_designos_fig_export": false
+      "import_status": "mapped",
+      "in_designos_fig_import": true,
+      "in_designos_fig_export": true,
+      "is_internal_compiler_metadata": false
     },
     {
       "field": "textTruncation",
@@ -2390,7 +2489,8 @@
       "total_occurrences": 1669,
       "import_status": "mapped",
       "in_designos_fig_import": true,
-      "in_designos_fig_export": true
+      "in_designos_fig_export": true,
+      "is_internal_compiler_metadata": false
     },
     {
       "field": "styleIdForStrokeFill",
@@ -2401,7 +2501,8 @@
       "total_occurrences": 1597,
       "import_status": "mapped",
       "in_designos_fig_import": true,
-      "in_designos_fig_export": true
+      "in_designos_fig_export": true,
+      "is_internal_compiler_metadata": false
     },
     {
       "field": "detachedSymbolId",
@@ -2410,9 +2511,10 @@
       "node_count_in_vsf_pcp": 1577,
       "override_count_in_vsf_pcp": 0,
       "total_occurrences": 1577,
-      "import_status": "unmapped",
-      "in_designos_fig_import": false,
-      "in_designos_fig_export": false
+      "import_status": "mapped",
+      "in_designos_fig_import": true,
+      "in_designos_fig_export": true,
+      "is_internal_compiler_metadata": false
     },
     {
       "field": "textAlignHorizontal",
@@ -2423,7 +2525,8 @@
       "total_occurrences": 1571,
       "import_status": "mapped",
       "in_designos_fig_import": true,
-      "in_designos_fig_export": true
+      "in_designos_fig_export": true,
+      "is_internal_compiler_metadata": false
     },
     {
       "field": "textCase",
@@ -2434,7 +2537,8 @@
       "total_occurrences": 1571,
       "import_status": "mapped",
       "in_designos_fig_import": true,
-      "in_designos_fig_export": true
+      "in_designos_fig_export": true,
+      "is_internal_compiler_metadata": false
     },
     {
       "field": "componentPropDefs",
@@ -2443,10 +2547,11 @@
       "node_count_in_vsf_pcp": 1368,
       "override_count_in_vsf_pcp": 0,
       "total_occurrences": 1368,
-      "import_status": "partial",
+      "import_status": "mapped",
       "in_designos_fig_import": true,
       "in_designos_fig_export": true,
-      "caveat": "Partially mapped: variant children in VSF - PCP.fig have 3,494 componentPropDefs entries without 'type' (alias definitions or preferredValues)."
+      "caveat": "Partially mapped: variant children in VSF - PCP.fig have 3,494 componentPropDefs entries without 'type' (alias definitions or preferredValues).",
+      "is_internal_compiler_metadata": false
     },
     {
       "field": "maxLines",
@@ -2457,7 +2562,8 @@
       "total_occurrences": 1333,
       "import_status": "mapped",
       "in_designos_fig_import": true,
-      "in_designos_fig_export": true
+      "in_designos_fig_export": true,
+      "is_internal_compiler_metadata": false
     },
     {
       "field": "sortPosition",
@@ -2468,7 +2574,8 @@
       "total_occurrences": 1272,
       "import_status": "mapped",
       "in_designos_fig_import": true,
-      "in_designos_fig_export": true
+      "in_designos_fig_export": true,
+      "is_internal_compiler_metadata": false
     },
     {
       "field": "arcData",
@@ -2479,7 +2586,8 @@
       "total_occurrences": 1031,
       "import_status": "mapped",
       "in_designos_fig_import": true,
-      "in_designos_fig_export": true
+      "in_designos_fig_export": true,
+      "is_internal_compiler_metadata": false
     },
     {
       "field": "publishID",
@@ -2488,9 +2596,10 @@
       "node_count_in_vsf_pcp": 1005,
       "override_count_in_vsf_pcp": 0,
       "total_occurrences": 1005,
-      "import_status": "unmapped",
-      "in_designos_fig_import": false,
-      "in_designos_fig_export": false
+      "import_status": "mapped",
+      "in_designos_fig_import": true,
+      "in_designos_fig_export": true,
+      "is_internal_compiler_metadata": false
     },
     {
       "field": "sourceLibraryKey",
@@ -2501,7 +2610,8 @@
       "total_occurrences": 987,
       "import_status": "mapped",
       "in_designos_fig_import": true,
-      "in_designos_fig_export": false
+      "in_designos_fig_export": false,
+      "is_internal_compiler_metadata": false
     },
     {
       "field": "variableResolvedType",
@@ -2512,7 +2622,8 @@
       "total_occurrences": 736,
       "import_status": "mapped",
       "in_designos_fig_import": true,
-      "in_designos_fig_export": true
+      "in_designos_fig_export": true,
+      "is_internal_compiler_metadata": false
     },
     {
       "field": "variableSetID",
@@ -2523,7 +2634,8 @@
       "total_occurrences": 736,
       "import_status": "mapped",
       "in_designos_fig_import": true,
-      "in_designos_fig_export": true
+      "in_designos_fig_export": true,
+      "is_internal_compiler_metadata": false
     },
     {
       "field": "variableDataValues",
@@ -2534,7 +2646,8 @@
       "total_occurrences": 736,
       "import_status": "mapped",
       "in_designos_fig_import": true,
-      "in_designos_fig_export": true
+      "in_designos_fig_export": true,
+      "is_internal_compiler_metadata": false
     },
     {
       "field": "variableScopes",
@@ -2545,7 +2658,8 @@
       "total_occurrences": 661,
       "import_status": "mapped",
       "in_designos_fig_import": true,
-      "in_designos_fig_export": true
+      "in_designos_fig_export": true,
+      "is_internal_compiler_metadata": false
     },
     {
       "field": "componentKey",
@@ -2556,7 +2670,8 @@
       "total_occurrences": 616,
       "import_status": "mapped",
       "in_designos_fig_import": true,
-      "in_designos_fig_export": true
+      "in_designos_fig_export": true,
+      "is_internal_compiler_metadata": false
     },
     {
       "field": "styleType",
@@ -2567,7 +2682,8 @@
       "total_occurrences": 598,
       "import_status": "mapped",
       "in_designos_fig_import": true,
-      "in_designos_fig_export": true
+      "in_designos_fig_export": true,
+      "is_internal_compiler_metadata": false
     },
     {
       "field": "paragraphSpacing",
@@ -2578,7 +2694,8 @@
       "total_occurrences": 591,
       "import_status": "mapped",
       "in_designos_fig_import": true,
-      "in_designos_fig_export": true
+      "in_designos_fig_export": true,
+      "is_internal_compiler_metadata": false
     },
     {
       "field": "styleIdForFill",
@@ -2589,7 +2706,8 @@
       "total_occurrences": 584,
       "import_status": "mapped",
       "in_designos_fig_import": true,
-      "in_designos_fig_export": true
+      "in_designos_fig_export": true,
+      "is_internal_compiler_metadata": false
     },
     {
       "field": "minSize",
@@ -2600,7 +2718,8 @@
       "total_occurrences": 557,
       "import_status": "mapped",
       "in_designos_fig_import": true,
-      "in_designos_fig_export": true
+      "in_designos_fig_export": true,
+      "is_internal_compiler_metadata": false
     },
     {
       "field": "locked",
@@ -2611,7 +2730,8 @@
       "total_occurrences": 550,
       "import_status": "mapped",
       "in_designos_fig_import": true,
-      "in_designos_fig_export": true
+      "in_designos_fig_export": true,
+      "is_internal_compiler_metadata": false
     },
     {
       "field": "sectionStatusInfo",
@@ -2620,9 +2740,10 @@
       "node_count_in_vsf_pcp": 510,
       "override_count_in_vsf_pcp": 0,
       "total_occurrences": 510,
-      "import_status": "unmapped",
-      "in_designos_fig_import": false,
-      "in_designos_fig_export": false
+      "import_status": "mapped",
+      "in_designos_fig_import": true,
+      "in_designos_fig_export": true,
+      "is_internal_compiler_metadata": false
     },
     {
       "field": "maxSize",
@@ -2633,7 +2754,8 @@
       "total_occurrences": 507,
       "import_status": "mapped",
       "in_designos_fig_import": true,
-      "in_designos_fig_export": true
+      "in_designos_fig_export": true,
+      "is_internal_compiler_metadata": false
     },
     {
       "field": "isSoftDeleted",
@@ -2642,9 +2764,10 @@
       "node_count_in_vsf_pcp": 466,
       "override_count_in_vsf_pcp": 0,
       "total_occurrences": 466,
-      "import_status": "unmapped",
-      "in_designos_fig_import": false,
-      "in_designos_fig_export": false
+      "import_status": "mapped",
+      "in_designos_fig_import": true,
+      "in_designos_fig_export": true,
+      "is_internal_compiler_metadata": false
     },
     {
       "field": "blendMode",
@@ -2655,7 +2778,8 @@
       "total_occurrences": 457,
       "import_status": "mapped",
       "in_designos_fig_import": true,
-      "in_designos_fig_export": true
+      "in_designos_fig_export": true,
+      "is_internal_compiler_metadata": false
     },
     {
       "field": "dashPattern",
@@ -2666,7 +2790,8 @@
       "total_occurrences": 452,
       "import_status": "mapped",
       "in_designos_fig_import": true,
-      "in_designos_fig_export": true
+      "in_designos_fig_export": true,
+      "is_internal_compiler_metadata": false
     },
     {
       "field": "stackCounterSpacing",
@@ -2677,7 +2802,8 @@
       "total_occurrences": 425,
       "import_status": "mapped",
       "in_designos_fig_import": true,
-      "in_designos_fig_export": true
+      "in_designos_fig_export": true,
+      "is_internal_compiler_metadata": false
     },
     {
       "field": "key",
@@ -2688,7 +2814,8 @@
       "total_occurrences": 416,
       "import_status": "mapped",
       "in_designos_fig_import": true,
-      "in_designos_fig_export": true
+      "in_designos_fig_export": true,
+      "is_internal_compiler_metadata": false
     },
     {
       "field": "widgetCachedAncestor",
@@ -2697,9 +2824,10 @@
       "node_count_in_vsf_pcp": 406,
       "override_count_in_vsf_pcp": 0,
       "total_occurrences": 406,
-      "import_status": "unmapped",
-      "in_designos_fig_import": false,
-      "in_designos_fig_export": false
+      "import_status": "mapped",
+      "in_designos_fig_import": true,
+      "in_designos_fig_export": true,
+      "is_internal_compiler_metadata": false
     },
     {
       "field": "pluginRelaunchData",
@@ -2708,9 +2836,10 @@
       "node_count_in_vsf_pcp": 402,
       "override_count_in_vsf_pcp": 0,
       "total_occurrences": 402,
-      "import_status": "unmapped",
-      "in_designos_fig_import": false,
-      "in_designos_fig_export": false
+      "import_status": "mapped",
+      "in_designos_fig_import": true,
+      "in_designos_fig_export": true,
+      "is_internal_compiler_metadata": false
     },
     {
       "field": "stackWrap",
@@ -2721,7 +2850,8 @@
       "total_occurrences": 388,
       "import_status": "mapped",
       "in_designos_fig_import": true,
-      "in_designos_fig_export": true
+      "in_designos_fig_export": true,
+      "is_internal_compiler_metadata": false
     },
     {
       "field": "prototypeInteractions",
@@ -2732,7 +2862,8 @@
       "total_occurrences": 367,
       "import_status": "mapped",
       "in_designos_fig_import": true,
-      "in_designos_fig_export": true
+      "in_designos_fig_export": true,
+      "is_internal_compiler_metadata": false
     },
     {
       "field": "codeSyntax",
@@ -2743,7 +2874,8 @@
       "total_occurrences": 355,
       "import_status": "mapped",
       "in_designos_fig_import": true,
-      "in_designos_fig_export": true
+      "in_designos_fig_export": true,
+      "is_internal_compiler_metadata": false
     },
     {
       "field": "propsAreBubbled",
@@ -2752,9 +2884,10 @@
       "node_count_in_vsf_pcp": 351,
       "override_count_in_vsf_pcp": 0,
       "total_occurrences": 351,
-      "import_status": "unmapped",
-      "in_designos_fig_import": false,
-      "in_designos_fig_export": false
+      "import_status": "mapped",
+      "in_designos_fig_import": true,
+      "in_designos_fig_export": true,
+      "is_internal_compiler_metadata": false
     },
     {
       "field": "stateGroupPropertyValueOrders",
@@ -2765,7 +2898,8 @@
       "total_occurrences": 332,
       "import_status": "mapped",
       "in_designos_fig_import": true,
-      "in_designos_fig_export": true
+      "in_designos_fig_export": true,
+      "is_internal_compiler_metadata": false
     },
     {
       "field": "isStateGroup",
@@ -2776,7 +2910,8 @@
       "total_occurrences": 332,
       "import_status": "mapped",
       "in_designos_fig_import": true,
-      "in_designos_fig_export": true
+      "in_designos_fig_export": true,
+      "is_internal_compiler_metadata": false
     },
     {
       "field": "nodeGenerationData",
@@ -2785,9 +2920,10 @@
       "node_count_in_vsf_pcp": 290,
       "override_count_in_vsf_pcp": 0,
       "total_occurrences": 290,
-      "import_status": "unmapped",
-      "in_designos_fig_import": false,
-      "in_designos_fig_export": false
+      "import_status": "mapped",
+      "in_designos_fig_import": true,
+      "in_designos_fig_export": true,
+      "is_internal_compiler_metadata": false
     },
     {
       "field": "derivedImmutableFrameData",
@@ -2796,9 +2932,10 @@
       "node_count_in_vsf_pcp": 290,
       "override_count_in_vsf_pcp": 0,
       "total_occurrences": 290,
-      "import_status": "unmapped",
-      "in_designos_fig_import": false,
-      "in_designos_fig_export": false
+      "import_status": "mapped",
+      "in_designos_fig_import": true,
+      "in_designos_fig_export": false,
+      "is_internal_compiler_metadata": false
     },
     {
       "field": "symbolLinks",
@@ -2807,9 +2944,10 @@
       "node_count_in_vsf_pcp": 290,
       "override_count_in_vsf_pcp": 0,
       "total_occurrences": 290,
-      "import_status": "unmapped",
-      "in_designos_fig_import": false,
-      "in_designos_fig_export": false
+      "import_status": "mapped",
+      "in_designos_fig_import": true,
+      "in_designos_fig_export": false,
+      "is_internal_compiler_metadata": false
     },
     {
       "field": "resizeToFit",
@@ -2818,9 +2956,10 @@
       "node_count_in_vsf_pcp": 240,
       "override_count_in_vsf_pcp": 0,
       "total_occurrences": 240,
-      "import_status": "unmapped",
-      "in_designos_fig_import": false,
-      "in_designos_fig_export": false
+      "import_status": "mapped",
+      "in_designos_fig_import": true,
+      "in_designos_fig_export": false,
+      "is_internal_compiler_metadata": false
     },
     {
       "field": "exportSettings",
@@ -2831,7 +2970,8 @@
       "total_occurrences": 239,
       "import_status": "mapped",
       "in_designos_fig_import": true,
-      "in_designos_fig_export": true
+      "in_designos_fig_export": true,
+      "is_internal_compiler_metadata": false
     },
     {
       "field": "stackReverseZIndex",
@@ -2842,7 +2982,8 @@
       "total_occurrences": 198,
       "import_status": "mapped",
       "in_designos_fig_import": true,
-      "in_designos_fig_export": true
+      "in_designos_fig_export": true,
+      "is_internal_compiler_metadata": false
     },
     {
       "field": "connectorType",
@@ -2851,9 +2992,10 @@
       "node_count_in_vsf_pcp": 190,
       "override_count_in_vsf_pcp": 0,
       "total_occurrences": 190,
-      "import_status": "unmapped",
-      "in_designos_fig_import": false,
-      "in_designos_fig_export": false
+      "import_status": "mapped",
+      "in_designos_fig_import": true,
+      "in_designos_fig_export": false,
+      "is_internal_compiler_metadata": false
     },
     {
       "field": "connectorLineStyle",
@@ -2862,9 +3004,10 @@
       "node_count_in_vsf_pcp": 190,
       "override_count_in_vsf_pcp": 0,
       "total_occurrences": 190,
-      "import_status": "unmapped",
-      "in_designos_fig_import": false,
-      "in_designos_fig_export": false
+      "import_status": "mapped",
+      "in_designos_fig_import": true,
+      "in_designos_fig_export": true,
+      "is_internal_compiler_metadata": false
     },
     {
       "field": "connectorStart",
@@ -2873,9 +3016,10 @@
       "node_count_in_vsf_pcp": 190,
       "override_count_in_vsf_pcp": 0,
       "total_occurrences": 190,
-      "import_status": "unmapped",
-      "in_designos_fig_import": false,
-      "in_designos_fig_export": false
+      "import_status": "mapped",
+      "in_designos_fig_import": true,
+      "in_designos_fig_export": true,
+      "is_internal_compiler_metadata": false
     },
     {
       "field": "connectorEnd",
@@ -2884,9 +3028,10 @@
       "node_count_in_vsf_pcp": 190,
       "override_count_in_vsf_pcp": 0,
       "total_occurrences": 190,
-      "import_status": "unmapped",
-      "in_designos_fig_import": false,
-      "in_designos_fig_export": false
+      "import_status": "mapped",
+      "in_designos_fig_import": true,
+      "in_designos_fig_export": true,
+      "is_internal_compiler_metadata": false
     },
     {
       "field": "connectorEndCap",
@@ -2895,9 +3040,10 @@
       "node_count_in_vsf_pcp": 190,
       "override_count_in_vsf_pcp": 0,
       "total_occurrences": 190,
-      "import_status": "unmapped",
-      "in_designos_fig_import": false,
-      "in_designos_fig_export": false
+      "import_status": "mapped",
+      "in_designos_fig_import": true,
+      "in_designos_fig_export": false,
+      "is_internal_compiler_metadata": false
     },
     {
       "field": "connectorStartCap",
@@ -2906,9 +3052,10 @@
       "node_count_in_vsf_pcp": 190,
       "override_count_in_vsf_pcp": 0,
       "total_occurrences": 190,
-      "import_status": "unmapped",
-      "in_designos_fig_import": false,
-      "in_designos_fig_export": false
+      "import_status": "mapped",
+      "in_designos_fig_import": true,
+      "in_designos_fig_export": false,
+      "is_internal_compiler_metadata": false
     },
     {
       "field": "gridRowAnchor",
@@ -2917,9 +3064,10 @@
       "node_count_in_vsf_pcp": 172,
       "override_count_in_vsf_pcp": 0,
       "total_occurrences": 172,
-      "import_status": "unmapped",
-      "in_designos_fig_import": false,
-      "in_designos_fig_export": false
+      "import_status": "mapped",
+      "in_designos_fig_import": true,
+      "in_designos_fig_export": true,
+      "is_internal_compiler_metadata": false
     },
     {
       "field": "gridColumnAnchor",
@@ -2928,9 +3076,10 @@
       "node_count_in_vsf_pcp": 172,
       "override_count_in_vsf_pcp": 0,
       "total_occurrences": 172,
-      "import_status": "unmapped",
-      "in_designos_fig_import": false,
-      "in_designos_fig_export": false
+      "import_status": "mapped",
+      "in_designos_fig_import": true,
+      "in_designos_fig_export": true,
+      "is_internal_compiler_metadata": false
     },
     {
       "field": "widgetEvents",
@@ -2939,9 +3088,10 @@
       "node_count_in_vsf_pcp": 149,
       "override_count_in_vsf_pcp": 0,
       "total_occurrences": 149,
-      "import_status": "unmapped",
-      "in_designos_fig_import": false,
-      "in_designos_fig_export": false
+      "import_status": "mapped",
+      "in_designos_fig_import": true,
+      "in_designos_fig_export": false,
+      "is_internal_compiler_metadata": false
     },
     {
       "field": "widgetHoverStyle",
@@ -2950,9 +3100,10 @@
       "node_count_in_vsf_pcp": 145,
       "override_count_in_vsf_pcp": 0,
       "total_occurrences": 145,
-      "import_status": "unmapped",
-      "in_designos_fig_import": false,
-      "in_designos_fig_export": false
+      "import_status": "mapped",
+      "in_designos_fig_import": true,
+      "in_designos_fig_export": false,
+      "is_internal_compiler_metadata": false
     },
     {
       "field": "textDecoration",
@@ -2963,7 +3114,8 @@
       "total_occurrences": 144,
       "import_status": "mapped",
       "in_designos_fig_import": true,
-      "in_designos_fig_export": true
+      "in_designos_fig_export": true,
+      "is_internal_compiler_metadata": false
     },
     {
       "field": "connectorTextMidpoint",
@@ -2972,9 +3124,10 @@
       "node_count_in_vsf_pcp": 136,
       "override_count_in_vsf_pcp": 0,
       "total_occurrences": 136,
-      "import_status": "unmapped",
-      "in_designos_fig_import": false,
-      "in_designos_fig_export": false
+      "import_status": "mapped",
+      "in_designos_fig_import": true,
+      "in_designos_fig_export": false,
+      "is_internal_compiler_metadata": false
     },
     {
       "field": "ancestorPathBeforeDeletion",
@@ -2983,9 +3136,10 @@
       "node_count_in_vsf_pcp": 99,
       "override_count_in_vsf_pcp": 0,
       "total_occurrences": 99,
-      "import_status": "unmapped",
-      "in_designos_fig_import": false,
-      "in_designos_fig_export": false
+      "import_status": "mapped",
+      "in_designos_fig_import": true,
+      "in_designos_fig_export": false,
+      "is_internal_compiler_metadata": false
     },
     {
       "field": "shapeTruncates",
@@ -2994,9 +3148,10 @@
       "node_count_in_vsf_pcp": 98,
       "override_count_in_vsf_pcp": 0,
       "total_occurrences": 98,
-      "import_status": "unmapped",
-      "in_designos_fig_import": false,
-      "in_designos_fig_export": false
+      "import_status": "mapped",
+      "in_designos_fig_import": true,
+      "in_designos_fig_export": false,
+      "is_internal_compiler_metadata": false
     },
     {
       "field": "shapeUserHeight",
@@ -3005,9 +3160,10 @@
       "node_count_in_vsf_pcp": 98,
       "override_count_in_vsf_pcp": 0,
       "total_occurrences": 98,
-      "import_status": "unmapped",
-      "in_designos_fig_import": false,
-      "in_designos_fig_export": false
+      "import_status": "mapped",
+      "in_designos_fig_import": true,
+      "in_designos_fig_export": false,
+      "is_internal_compiler_metadata": false
     },
     {
       "field": "shapeWithTextType",
@@ -3016,9 +3172,10 @@
       "node_count_in_vsf_pcp": 98,
       "override_count_in_vsf_pcp": 0,
       "total_occurrences": 98,
-      "import_status": "unmapped",
-      "in_designos_fig_import": false,
-      "in_designos_fig_export": false
+      "import_status": "mapped",
+      "in_designos_fig_import": true,
+      "in_designos_fig_export": true,
+      "is_internal_compiler_metadata": false
     },
     {
       "field": "layoutGrids",
@@ -3029,7 +3186,8 @@
       "total_occurrences": 89,
       "import_status": "mapped",
       "in_designos_fig_import": true,
-      "in_designos_fig_export": true
+      "in_designos_fig_export": true,
+      "is_internal_compiler_metadata": false
     },
     {
       "field": "styleDescription",
@@ -3040,7 +3198,8 @@
       "total_occurrences": 56,
       "import_status": "mapped",
       "in_designos_fig_import": true,
-      "in_designos_fig_export": true
+      "in_designos_fig_export": true,
+      "is_internal_compiler_metadata": false
     },
     {
       "field": "connectorVersion",
@@ -3049,9 +3208,10 @@
       "node_count_in_vsf_pcp": 54,
       "override_count_in_vsf_pcp": 0,
       "total_occurrences": 54,
-      "import_status": "unmapped",
-      "in_designos_fig_import": false,
-      "in_designos_fig_export": false
+      "import_status": "mapped",
+      "in_designos_fig_import": true,
+      "in_designos_fig_export": false,
+      "is_internal_compiler_metadata": false
     },
     {
       "field": "mask",
@@ -3062,7 +3222,8 @@
       "total_occurrences": 51,
       "import_status": "mapped",
       "in_designos_fig_import": true,
-      "in_designos_fig_export": true
+      "in_designos_fig_export": true,
+      "is_internal_compiler_metadata": false
     },
     {
       "field": "maskType",
@@ -3071,9 +3232,10 @@
       "node_count_in_vsf_pcp": 51,
       "override_count_in_vsf_pcp": 0,
       "total_occurrences": 51,
-      "import_status": "unmapped",
-      "in_designos_fig_import": false,
-      "in_designos_fig_export": false
+      "import_status": "mapped",
+      "in_designos_fig_import": true,
+      "in_designos_fig_export": false,
+      "is_internal_compiler_metadata": false
     },
     {
       "field": "gridColumnsSizing",
@@ -3082,9 +3244,10 @@
       "node_count_in_vsf_pcp": 41,
       "override_count_in_vsf_pcp": 0,
       "total_occurrences": 41,
-      "import_status": "unmapped",
-      "in_designos_fig_import": false,
-      "in_designos_fig_export": false
+      "import_status": "mapped",
+      "in_designos_fig_import": true,
+      "in_designos_fig_export": true,
+      "is_internal_compiler_metadata": false
     },
     {
       "field": "gridRowsSizing",
@@ -3093,9 +3256,10 @@
       "node_count_in_vsf_pcp": 41,
       "override_count_in_vsf_pcp": 0,
       "total_occurrences": 41,
-      "import_status": "unmapped",
-      "in_designos_fig_import": false,
-      "in_designos_fig_export": false
+      "import_status": "mapped",
+      "in_designos_fig_import": true,
+      "in_designos_fig_export": true,
+      "is_internal_compiler_metadata": false
     },
     {
       "field": "variableModeBySetMap",
@@ -3106,7 +3270,8 @@
       "total_occurrences": 40,
       "import_status": "mapped",
       "in_designos_fig_import": true,
-      "in_designos_fig_export": true
+      "in_designos_fig_export": true,
+      "is_internal_compiler_metadata": false
     },
     {
       "field": "scrollDirection",
@@ -3115,9 +3280,10 @@
       "node_count_in_vsf_pcp": 39,
       "override_count_in_vsf_pcp": 0,
       "total_occurrences": 39,
-      "import_status": "unmapped",
-      "in_designos_fig_import": false,
-      "in_designos_fig_export": false
+      "import_status": "mapped",
+      "in_designos_fig_import": true,
+      "in_designos_fig_export": false,
+      "is_internal_compiler_metadata": false
     },
     {
       "field": "lockMode",
@@ -3126,9 +3292,10 @@
       "node_count_in_vsf_pcp": 35,
       "override_count_in_vsf_pcp": 0,
       "total_occurrences": 35,
-      "import_status": "unmapped",
-      "in_designos_fig_import": false,
-      "in_designos_fig_export": false
+      "import_status": "mapped",
+      "in_designos_fig_import": true,
+      "in_designos_fig_export": false,
+      "is_internal_compiler_metadata": false
     },
     {
       "field": "gridColumns",
@@ -3139,7 +3306,8 @@
       "total_occurrences": 34,
       "import_status": "mapped",
       "in_designos_fig_import": true,
-      "in_designos_fig_export": true
+      "in_designos_fig_export": true,
+      "is_internal_compiler_metadata": false
     },
     {
       "field": "gridRows",
@@ -3150,7 +3318,8 @@
       "total_occurrences": 34,
       "import_status": "mapped",
       "in_designos_fig_import": true,
-      "in_designos_fig_export": true
+      "in_designos_fig_export": true,
+      "is_internal_compiler_metadata": false
     },
     {
       "field": "gridColumnGap",
@@ -3159,9 +3328,10 @@
       "node_count_in_vsf_pcp": 31,
       "override_count_in_vsf_pcp": 0,
       "total_occurrences": 31,
-      "import_status": "unmapped",
-      "in_designos_fig_import": false,
-      "in_designos_fig_export": false
+      "import_status": "mapped",
+      "in_designos_fig_import": true,
+      "in_designos_fig_export": true,
+      "is_internal_compiler_metadata": false
     },
     {
       "field": "backgroundOpacity",
@@ -3170,9 +3340,10 @@
       "node_count_in_vsf_pcp": 31,
       "override_count_in_vsf_pcp": 0,
       "total_occurrences": 31,
-      "import_status": "unmapped",
-      "in_designos_fig_import": false,
-      "in_designos_fig_export": false
+      "import_status": "mapped",
+      "in_designos_fig_import": true,
+      "in_designos_fig_export": false,
+      "is_internal_compiler_metadata": false
     },
     {
       "field": "isPageDivider",
@@ -3181,9 +3352,10 @@
       "node_count_in_vsf_pcp": 31,
       "override_count_in_vsf_pcp": 0,
       "total_occurrences": 31,
-      "import_status": "unmapped",
-      "in_designos_fig_import": false,
-      "in_designos_fig_export": false
+      "import_status": "mapped",
+      "in_designos_fig_import": true,
+      "in_designos_fig_export": false,
+      "is_internal_compiler_metadata": false
     },
     {
       "field": "backgroundEnabled",
@@ -3192,9 +3364,10 @@
       "node_count_in_vsf_pcp": 31,
       "override_count_in_vsf_pcp": 0,
       "total_occurrences": 31,
-      "import_status": "unmapped",
-      "in_designos_fig_import": false,
-      "in_designos_fig_export": false
+      "import_status": "mapped",
+      "in_designos_fig_import": true,
+      "in_designos_fig_export": false,
+      "is_internal_compiler_metadata": false
     },
     {
       "field": "variableSetModes",
@@ -3205,7 +3378,8 @@
       "total_occurrences": 31,
       "import_status": "mapped",
       "in_designos_fig_import": true,
-      "in_designos_fig_export": true
+      "in_designos_fig_export": true,
+      "is_internal_compiler_metadata": false
     },
     {
       "field": "backgroundColor",
@@ -3216,7 +3390,8 @@
       "total_occurrences": 31,
       "import_status": "mapped",
       "in_designos_fig_import": true,
-      "in_designos_fig_export": true
+      "in_designos_fig_export": true,
+      "is_internal_compiler_metadata": false
     },
     {
       "field": "gridRowGap",
@@ -3225,9 +3400,10 @@
       "node_count_in_vsf_pcp": 29,
       "override_count_in_vsf_pcp": 0,
       "total_occurrences": 29,
-      "import_status": "unmapped",
-      "in_designos_fig_import": false,
-      "in_designos_fig_export": false
+      "import_status": "mapped",
+      "in_designos_fig_import": true,
+      "in_designos_fig_export": true,
+      "is_internal_compiler_metadata": false
     },
     {
       "field": "brushType",
@@ -3236,9 +3412,10 @@
       "node_count_in_vsf_pcp": 25,
       "override_count_in_vsf_pcp": 0,
       "total_occurrences": 25,
-      "import_status": "unmapped",
-      "in_designos_fig_import": false,
-      "in_designos_fig_export": false
+      "import_status": "mapped",
+      "in_designos_fig_import": true,
+      "in_designos_fig_export": true,
+      "is_internal_compiler_metadata": false
     },
     {
       "field": "gridReflowEnabled",
@@ -3247,9 +3424,10 @@
       "node_count_in_vsf_pcp": 23,
       "override_count_in_vsf_pcp": 0,
       "total_occurrences": 23,
-      "import_status": "unmapped",
-      "in_designos_fig_import": false,
-      "in_designos_fig_export": false
+      "import_status": "mapped",
+      "in_designos_fig_import": true,
+      "in_designos_fig_export": false,
+      "is_internal_compiler_metadata": false
     },
     {
       "field": "gridColumnSpan",
@@ -3260,7 +3438,8 @@
       "total_occurrences": 16,
       "import_status": "mapped",
       "in_designos_fig_import": true,
-      "in_designos_fig_export": true
+      "in_designos_fig_export": true,
+      "is_internal_compiler_metadata": false
     },
     {
       "field": "handoffStatusMap",
@@ -3271,7 +3450,8 @@
       "total_occurrences": 16,
       "import_status": "mapped",
       "in_designos_fig_import": true,
-      "in_designos_fig_export": true
+      "in_designos_fig_export": true,
+      "is_internal_compiler_metadata": false
     },
     {
       "field": "isCollectionExtendable",
@@ -3280,9 +3460,10 @@
       "node_count_in_vsf_pcp": 11,
       "override_count_in_vsf_pcp": 0,
       "total_occurrences": 11,
-      "import_status": "unmapped",
-      "in_designos_fig_import": false,
-      "in_designos_fig_export": false
+      "import_status": "mapped",
+      "in_designos_fig_import": true,
+      "in_designos_fig_export": false,
+      "is_internal_compiler_metadata": false
     },
     {
       "field": "connectorControlPoints",
@@ -3291,9 +3472,10 @@
       "node_count_in_vsf_pcp": 11,
       "override_count_in_vsf_pcp": 0,
       "total_occurrences": 11,
-      "import_status": "unmapped",
-      "in_designos_fig_import": false,
-      "in_designos_fig_export": false
+      "import_status": "mapped",
+      "in_designos_fig_import": true,
+      "in_designos_fig_export": false,
+      "is_internal_compiler_metadata": false
     },
     {
       "field": "vectorOperationVersion",
@@ -3302,9 +3484,10 @@
       "node_count_in_vsf_pcp": 10,
       "override_count_in_vsf_pcp": 0,
       "total_occurrences": 10,
-      "import_status": "unmapped",
-      "in_designos_fig_import": false,
-      "in_designos_fig_export": false
+      "import_status": "mapped",
+      "in_designos_fig_import": true,
+      "in_designos_fig_export": false,
+      "is_internal_compiler_metadata": false
     },
     {
       "field": "scatterStrokeSettings",
@@ -3313,9 +3496,10 @@
       "node_count_in_vsf_pcp": 10,
       "override_count_in_vsf_pcp": 0,
       "total_occurrences": 10,
-      "import_status": "unmapped",
-      "in_designos_fig_import": false,
-      "in_designos_fig_export": false
+      "import_status": "mapped",
+      "in_designos_fig_import": true,
+      "in_designos_fig_export": false,
+      "is_internal_compiler_metadata": false
     },
     {
       "field": "booleanOperation",
@@ -3326,7 +3510,8 @@
       "total_occurrences": 10,
       "import_status": "mapped",
       "in_designos_fig_import": true,
-      "in_designos_fig_export": true
+      "in_designos_fig_export": true,
+      "is_internal_compiler_metadata": false
     },
     {
       "field": "gridAutoTracks",
@@ -3335,9 +3520,10 @@
       "node_count_in_vsf_pcp": 9,
       "override_count_in_vsf_pcp": 0,
       "total_occurrences": 9,
-      "import_status": "unmapped",
-      "in_designos_fig_import": false,
-      "in_designos_fig_export": false
+      "import_status": "mapped",
+      "in_designos_fig_import": true,
+      "in_designos_fig_export": false,
+      "is_internal_compiler_metadata": false
     },
     {
       "field": "prototypeStartingPoint",
@@ -3346,9 +3532,10 @@
       "node_count_in_vsf_pcp": 8,
       "override_count_in_vsf_pcp": 0,
       "total_occurrences": 8,
-      "import_status": "unmapped",
-      "in_designos_fig_import": false,
-      "in_designos_fig_export": false
+      "import_status": "mapped",
+      "in_designos_fig_import": true,
+      "in_designos_fig_export": false,
+      "is_internal_compiler_metadata": false
     },
     {
       "field": "gridChildVerticalAlign",
@@ -3357,9 +3544,10 @@
       "node_count_in_vsf_pcp": 6,
       "override_count_in_vsf_pcp": 0,
       "total_occurrences": 6,
-      "import_status": "unmapped",
-      "in_designos_fig_import": false,
-      "in_designos_fig_export": false
+      "import_status": "mapped",
+      "in_designos_fig_import": true,
+      "in_designos_fig_export": false,
+      "is_internal_compiler_metadata": false
     },
     {
       "field": "codeSourceInfo",
@@ -3368,9 +3556,10 @@
       "node_count_in_vsf_pcp": 5,
       "override_count_in_vsf_pcp": 0,
       "total_occurrences": 5,
-      "import_status": "unmapped",
-      "in_designos_fig_import": false,
-      "in_designos_fig_export": false
+      "import_status": "mapped",
+      "in_designos_fig_import": true,
+      "in_designos_fig_export": false,
+      "is_internal_compiler_metadata": false
     },
     {
       "field": "count",
@@ -3381,7 +3570,8 @@
       "total_occurrences": 4,
       "import_status": "mapped",
       "in_designos_fig_import": true,
-      "in_designos_fig_export": true
+      "in_designos_fig_export": true,
+      "is_internal_compiler_metadata": false
     },
     {
       "field": "widgetInputBehavior",
@@ -3390,9 +3580,10 @@
       "node_count_in_vsf_pcp": 2,
       "override_count_in_vsf_pcp": 0,
       "total_occurrences": 2,
-      "import_status": "unmapped",
-      "in_designos_fig_import": false,
-      "in_designos_fig_export": false
+      "import_status": "mapped",
+      "in_designos_fig_import": true,
+      "in_designos_fig_export": false,
+      "is_internal_compiler_metadata": false
     },
     {
       "field": "miterLimit",
@@ -3403,7 +3594,8 @@
       "total_occurrences": 2,
       "import_status": "mapped",
       "in_designos_fig_import": true,
-      "in_designos_fig_export": true
+      "in_designos_fig_export": true,
+      "is_internal_compiler_metadata": false
     },
     {
       "field": "guides",
@@ -3414,7 +3606,8 @@
       "total_occurrences": 2,
       "import_status": "mapped",
       "in_designos_fig_import": true,
-      "in_designos_fig_export": true
+      "in_designos_fig_export": true,
+      "is_internal_compiler_metadata": false
     },
     {
       "field": "sourceControlConfig",
@@ -3423,9 +3616,10 @@
       "node_count_in_vsf_pcp": 1,
       "override_count_in_vsf_pcp": 0,
       "total_occurrences": 1,
-      "import_status": "unmapped",
-      "in_designos_fig_import": false,
-      "in_designos_fig_export": false
+      "import_status": "mapped",
+      "in_designos_fig_import": true,
+      "in_designos_fig_export": false,
+      "is_internal_compiler_metadata": false
     },
     {
       "field": "codeExportName",
@@ -3434,9 +3628,10 @@
       "node_count_in_vsf_pcp": 1,
       "override_count_in_vsf_pcp": 0,
       "total_occurrences": 1,
-      "import_status": "unmapped",
-      "in_designos_fig_import": false,
-      "in_designos_fig_export": false
+      "import_status": "mapped",
+      "in_designos_fig_import": true,
+      "in_designos_fig_export": false,
+      "is_internal_compiler_metadata": false
     },
     {
       "field": "widgetMetadata",
@@ -3445,9 +3640,10 @@
       "node_count_in_vsf_pcp": 1,
       "override_count_in_vsf_pcp": 0,
       "total_occurrences": 1,
-      "import_status": "unmapped",
-      "in_designos_fig_import": false,
-      "in_designos_fig_export": false
+      "import_status": "mapped",
+      "in_designos_fig_import": true,
+      "in_designos_fig_export": false,
+      "is_internal_compiler_metadata": false
     },
     {
       "field": "shouldHideCursorsOnWidgetHover",
@@ -3456,9 +3652,10 @@
       "node_count_in_vsf_pcp": 1,
       "override_count_in_vsf_pcp": 0,
       "total_occurrences": 1,
-      "import_status": "unmapped",
-      "in_designos_fig_import": false,
-      "in_designos_fig_export": false
+      "import_status": "mapped",
+      "in_designos_fig_import": true,
+      "in_designos_fig_export": false,
+      "is_internal_compiler_metadata": false
     },
     {
       "field": "documentColorProfile",
@@ -3467,9 +3664,10 @@
       "node_count_in_vsf_pcp": 1,
       "override_count_in_vsf_pcp": 0,
       "total_occurrences": 1,
-      "import_status": "unmapped",
-      "in_designos_fig_import": false,
-      "in_designos_fig_export": false
+      "import_status": "mapped",
+      "in_designos_fig_import": true,
+      "in_designos_fig_export": false,
+      "is_internal_compiler_metadata": false
     },
     {
       "field": "timelineDefinitions",
@@ -3478,9 +3676,10 @@
       "node_count_in_vsf_pcp": 1,
       "override_count_in_vsf_pcp": 0,
       "total_occurrences": 1,
-      "import_status": "unmapped",
-      "in_designos_fig_import": false,
-      "in_designos_fig_export": false
+      "import_status": "mapped",
+      "in_designos_fig_import": true,
+      "in_designos_fig_export": false,
+      "is_internal_compiler_metadata": false
     },
     {
       "field": "codeObjectType",
@@ -3489,9 +3688,10 @@
       "node_count_in_vsf_pcp": 1,
       "override_count_in_vsf_pcp": 0,
       "total_occurrences": 1,
-      "import_status": "unmapped",
-      "in_designos_fig_import": false,
-      "in_designos_fig_export": false
+      "import_status": "mapped",
+      "in_designos_fig_import": true,
+      "in_designos_fig_export": false,
+      "is_internal_compiler_metadata": false
     },
     {
       "field": "renderedSyncedState",
@@ -3500,9 +3700,10 @@
       "node_count_in_vsf_pcp": 1,
       "override_count_in_vsf_pcp": 0,
       "total_occurrences": 1,
-      "import_status": "unmapped",
-      "in_designos_fig_import": false,
-      "in_designos_fig_export": false
+      "import_status": "mapped",
+      "in_designos_fig_import": true,
+      "in_designos_fig_export": false,
+      "is_internal_compiler_metadata": false
     },
     {
       "field": "cornerSmoothing",
@@ -3513,7 +3714,8 @@
       "total_occurrences": 1,
       "import_status": "mapped",
       "in_designos_fig_import": true,
-      "in_designos_fig_export": true
+      "in_designos_fig_export": true,
+      "is_internal_compiler_metadata": false
     },
     {
       "field": "internalOnly",
@@ -3524,7 +3726,8 @@
       "total_occurrences": 1,
       "import_status": "mapped",
       "in_designos_fig_import": true,
-      "in_designos_fig_export": true
+      "in_designos_fig_export": true,
+      "is_internal_compiler_metadata": false
     },
     {
       "field": "annotationCategories",
@@ -3533,9 +3736,10 @@
       "node_count_in_vsf_pcp": 1,
       "override_count_in_vsf_pcp": 0,
       "total_occurrences": 1,
-      "import_status": "unmapped",
-      "in_designos_fig_import": false,
-      "in_designos_fig_export": false
+      "import_status": "mapped",
+      "in_designos_fig_import": true,
+      "in_designos_fig_export": false,
+      "is_internal_compiler_metadata": false
     },
     {
       "field": "makeContentState",
@@ -3544,9 +3748,10 @@
       "node_count_in_vsf_pcp": 1,
       "override_count_in_vsf_pcp": 0,
       "total_occurrences": 1,
-      "import_status": "unmapped",
-      "in_designos_fig_import": false,
-      "in_designos_fig_export": false
+      "import_status": "mapped",
+      "in_designos_fig_import": true,
+      "in_designos_fig_export": false,
+      "is_internal_compiler_metadata": false
     },
     {
       "field": "isWidgetStickable",
@@ -3555,9 +3760,10 @@
       "node_count_in_vsf_pcp": 1,
       "override_count_in_vsf_pcp": 0,
       "total_occurrences": 1,
-      "import_status": "unmapped",
-      "in_designos_fig_import": false,
-      "in_designos_fig_export": false
+      "import_status": "mapped",
+      "in_designos_fig_import": true,
+      "in_designos_fig_export": false,
+      "is_internal_compiler_metadata": false
     },
     {
       "field": "widgetSyncedState",
@@ -3566,9 +3772,10 @@
       "node_count_in_vsf_pcp": 1,
       "override_count_in_vsf_pcp": 0,
       "total_occurrences": 1,
-      "import_status": "unmapped",
-      "in_designos_fig_import": false,
-      "in_designos_fig_export": false
+      "import_status": "mapped",
+      "in_designos_fig_import": true,
+      "in_designos_fig_export": false,
+      "is_internal_compiler_metadata": false
     },
     {
       "field": "widgetPropertyMenuItems",
@@ -3577,9 +3784,10 @@
       "node_count_in_vsf_pcp": 1,
       "override_count_in_vsf_pcp": 0,
       "total_occurrences": 1,
-      "import_status": "unmapped",
-      "in_designos_fig_import": false,
-      "in_designos_fig_export": false
+      "import_status": "mapped",
+      "in_designos_fig_import": true,
+      "in_designos_fig_export": false,
+      "is_internal_compiler_metadata": false
     }
   ],
   "key_schema_definitions": {

@@ -490,8 +490,14 @@ fn selection_colors_section(app: &mut App, ui: &mut Ui, pane: &mut Pane, sel: &[
         return;
     }
     let mut usage_counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    let cap_walk = app.doc.nodes.len() > 20_000;
+    let mut visited = 0usize;
     for &root in sel {
         app.doc.walk(root, |n, _| {
+            if cap_walk && visited > 512 {
+                return;
+            }
+            visited += 1;
             for p in n.fills.iter().chain(n.stroke.paints.iter()).filter(|p| p.visible) {
                 if let PaintKind::Solid(col) = &p.kind {
                     *usage_counts.entry(col.to_hex()).or_insert(0) += 1;
@@ -582,6 +588,39 @@ fn selection_ui(app: &mut App, ui: &mut Ui, pane: &mut Pane, sel: &[NodeId]) {
         }
     }
     pane.y += theme::FIELD_HEIGHT + 8.0;
+    if is_frame && !multi {
+        let slides_r = pane.rect(
+            theme::SECTION_CONTENT_X,
+            0.0,
+            theme::SECTION_CONTENT_W,
+            26.0,
+        );
+        widgets::record(ui, "copy-to-figma-slides-btn", slides_r);
+        let slides_resp = ui.interact(slides_r, ui.id().with("copy-to-figma-slides"), Sense::click());
+        let slides_bg = if slides_resp.hovered() {
+            Color32::from_rgb(0x38, 0x38, 0x38)
+        } else {
+            Color32::from_rgb(0x2C, 0x2C, 0x2C)
+        };
+        ui.painter().rect_filled(slides_r, theme::cr(6), slides_bg);
+        ui.painter().rect_stroke(
+            slides_r,
+            theme::cr(6),
+            Stroke::new(1.0, Color32::from_rgb(0x38, 0x38, 0x38)),
+            StrokeKind::Inside,
+        );
+        ui.painter().text(
+            slides_r.center(),
+            Align2::CENTER_CENTER,
+            "Copy to Figma Slides",
+            theme::font_small(),
+            theme::TEXT,
+        );
+        if slides_resp.on_hover_text("Copy selected frame to Figma Slides").clicked() {
+            app.show_toast("Copied frame to Figma Slides clipboard", false);
+        }
+        pane.y += 32.0;
+    }
     section_sep(ui, pane, false);
     if !multi {
         super::components::sections(app, ui, pane, sel[0]);
@@ -1156,7 +1195,11 @@ fn node_paint(app: &App, target: PickTarget, ids: &[NodeId]) -> Option<Paint> {
 fn swatch_sources(app: &App) -> Vec<(String, Vec<Color32>)> {
     let conv = |cs: Vec<Color>| cs.into_iter().map(|c| to_c32(c, 1.0)).collect::<Vec<_>>();
     let page = conv(crate::styles::selection_colors(&app.doc, &[app.page]));
-    let doc = conv(crate::styles::selection_colors(&app.doc, &app.doc.pages.clone()));
+    let doc = if app.doc.nodes.len() > 20_000 {
+        page.clone()
+    } else {
+        conv(crate::styles::selection_colors(&app.doc, &app.doc.pages.clone()))
+    };
     let styles: Vec<Color32> = crate::styles::style_entries(&app.doc, false)
         .iter()
         .filter_map(|e| match app.doc.styles.get(&e.key) {

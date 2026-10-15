@@ -37,13 +37,41 @@ fn select_submenu(has: bool) -> Entry {
     Entry { item: MenuItem::new("Select").disabled(!has).sep(), act: None, kids }
 }
 
+/// The "Copy/Paste" submenu: property copy/paste and positional paste variants.
+fn copy_paste_submenu(has: bool, has_clip: bool) -> Entry {
+    let kids = vec![
+        (MenuItem::new("Copy properties").shortcut("Ctrl+Alt+C").disabled(!has), Action::CopyProperties),
+        (MenuItem::new("Paste properties").shortcut("Ctrl+Alt+V").disabled(!has).sep(), Action::PasteProperties),
+        (MenuItem::new("Paste over selection").shortcut("Ctrl+Shift+V").disabled(!has_clip), Action::PasteOverSelection),
+        (MenuItem::new("Paste to replace").shortcut("Ctrl+Alt+Shift+R").disabled(!has || !has_clip), Action::PasteToReplace),
+    ];
+    Entry { item: MenuItem::new("Copy/Paste").sep(), act: None, kids }
+}
+
 /// Entries given the current selection.
 fn entries(app: &App) -> Vec<Entry> {
     let has = !app.selection.is_empty();
+    let has_clip = app.clip.is_some();
     let insts = app.selected_instances();
     let has_inst = !insts.is_empty();
     let any_container =
         app.selection.iter().any(|id| app.doc.get(*id).is_some_and(|n| matches!(n.kind, NodeKind::Group | NodeKind::Frame(_) | NodeKind::Section)));
+    let is_grid_table = app.selection.iter().any(|id| {
+        app.doc.get(*id).is_some_and(|n| {
+            let self_grid = n
+                .kind
+                .frame_props()
+                .and_then(|fp| fp.auto_layout.as_ref())
+                .is_some_and(|al| al.direction == designos_doc::LayoutDirection::Grid);
+            let parent_grid = n
+                .parent
+                .and_then(|p| app.doc.get(p))
+                .and_then(|pn| pn.kind.frame_props())
+                .and_then(|fp| fp.auto_layout.as_ref())
+                .is_some_and(|al| al.direction == designos_doc::LayoutDirection::Grid);
+            self_grid || parent_grid || n.name.to_ascii_lowercase().contains("table")
+        })
+    });
     let can_create = app
         .selection
         .iter()
@@ -64,8 +92,15 @@ fn entries(app: &App) -> Vec<Entry> {
         leaf(MenuItem::new("Bring to front").shortcut("Ctrl+Shift+]").disabled(!has), Action::BringToFront),
         leaf(MenuItem::new("Send to back").shortcut("Ctrl+Shift+[").disabled(!has).sep(), Action::SendToBack),
         select_submenu(has),
+        copy_paste_submenu(has, has_clip),
         leaf(MenuItem::new("Mark as ready for dev").disabled(!can_mark), Action::MarkReadyForDev),
     ];
+    if is_grid_table {
+        list.push(leaf(MenuItem::new("Insert row"), Action::InsertTableRow));
+        list.push(leaf(MenuItem::new("Delete row"), Action::DeleteTableRow));
+        list.push(leaf(MenuItem::new("Insert column"), Action::InsertTableColumn));
+        list.push(leaf(MenuItem::new("Delete column").sep(), Action::DeleteTableColumn));
+    }
     if has_status {
         list.push(leaf(MenuItem::new("Mark as completed"), Action::MarkCompleted));
         list.push(leaf(MenuItem::new("Remove dev status"), Action::ClearDevStatus));

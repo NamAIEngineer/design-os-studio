@@ -54,6 +54,7 @@ impl View {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RailItem {
     File,
+    Agents,
     Assets,
     Specs,
     Tools,

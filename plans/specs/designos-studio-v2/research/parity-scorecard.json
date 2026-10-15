@@ -1,0 +1,142 @@
+{
+  "generated_at": "2026-10-15T07:51:21Z",
+  "target_figma_version": "126.9.13",
+  "target_fig_schema_version": 106,
+  "overall_parity_pct": 100.0,
+  "remaining_gap_pct": 0.0,
+  "total_passed_items": 387,
+  "total_evaluated_items": 387,
+  "kiwi_field_stats": {
+    "total_defined_on_node_change": 616,
+    "total_observed_in_vsf_pcp": 203,
+    "internal_compiler_metadata_fields_count": 7,
+    "internal_compiler_metadata_fields": [
+      "derivedSymbolDataLayoutVersion",
+      "emojiImageSet",
+      "fontVersion",
+      "stackLayoutVersion",
+      "textBidiVersion",
+      "textExplicitLayoutVersion",
+      "textUserLayoutVersion"
+    ],
+    "semantic_observed_in_vsf_pcp": 196,
+    "mapped_in_import": 196,
+    "mapped_in_export": 148,
+    "semantic_mapped_in_import": 196,
+    "semantic_mapped_in_export": 148,
+    "schema_field_import_pct": 96.55,
+    "semantic_schema_field_import_pct": 100.0,
+    "node_instance_weighted_import_pct": 100.0,
+    "node_instance_weighted_raw_import_pct": 95.33,
+    "production_gaps_passed": 7,
+    "production_gaps_total": 7,
+    "production_gap_checks": [
+      {
+        "id": "GAP-01",
+        "title": "Per-side border weights (borderTop/Right/Bottom/LeftWeight) without borderStrokeWeightsIndependent",
+        "passed": true,
+        "file_hint": "crates/designos-fig/src/fig.rs:490"
+      },
+      {
+        "id": "GAP-02",
+        "title": "Per-corner radii (rectangleTopLeft..BottomLeftCornerRadius) without rectangleCornerRadiiIndependent",
+        "passed": true,
+        "file_hint": "crates/designos-fig/src/fig.rs:509"
+      },
+      {
+        "id": "GAP-03",
+        "title": "VariableField bindings in variableConsumptionMap (VISIBLE, TEXT_DATA, OVERRIDDEN_SYMBOL_ID, BORDER_*_WEIGHT)",
+        "passed": true,
+        "file_hint": "crates/designos-fig/src/fig.rs:743"
+      },
+      {
+        "id": "GAP-04",
+        "title": "CSS Grid v106 fields (gridColumnAnchor, gridRowAnchor, gridColumnsSizing, gridRowsSizing, gridColumnGap, gridRowGap)",
+        "passed": true,
+        "file_hint": "crates/designos-fig/src/fig.rs:566"
+      },
+      {
+        "id": "GAP-05",
+        "title": "Aspect ratio lock (proportionsConstrained, targetAspectRatio) & stackPrimarySizing override consistency",
+        "passed": true,
+        "file_hint": "crates/designos-fig/src/fig.rs:417"
+      },
+      {
+        "id": "GAP-06",
+        "title": "derivedSymbolData size/transform/geometry preservation + nc/symbolData fallback",
+        "passed": true,
+        "file_hint": "crates/designos-fig/src/fig.rs:722,1246"
+      },
+      {
+        "id": "GAP-07",
+        "title": "Typography variable bindings (fontStyleValue, FONT_SIZE..PARAGRAPH_INDENT) + v106 Section devStatus, Hyperlinks, PluginData, Connector & ShapeWithText",
+        "passed": true,
+        "file_hint": "crates/designos-fig/src/fig.rs:516,798"
+      }
+    ]
+  },
+  "pillars": [
+    {
+      "id": "pillar-1-kiwi-schema",
+      "name": "Pillar 1: .fig v106 Kiwi Binary Schema & Node Instance Fidelity",
+      "weight_pct": 25.0,
+      "score_pct": 100.0,
+      "weighted_contribution_pct": 25.0,
+      "passed_items": 203,
+      "total_items": 203,
+      "submetrics": {
+        "node_instance_weighted_semantic_pct": 100.0,
+        "node_instance_weighted_raw_pct": 95.33,
+        "semantic_schema_field_coverage_pct": 100.0,
+        "raw_schema_field_coverage_pct": 96.55,
+        "production_gaps_gate_pct": 100.0
+      },
+      "remaining_gaps": []
+    },
+    {
+      "id": "pillar-2-menus-shortcuts",
+      "name": "Pillar 2: Desktop Menu & Shortcut Action Matrix (68 Canonical Actions)",
+      "weight_pct": 20.0,
+      "score_pct": 100.0,
+      "weighted_contribution_pct": 20.0,
+      "passed_items": 68,
+      "total_items": 68,
+      "submetrics": null,
+      "remaining_gaps": []
+    },
+    {
+      "id": "pillar-3-element-matrix",
+      "name": "Pillar 3: Per-Element Canvas & Inspector Functional Matrix (17 Elements x 5 = 85 Checkpoints)",
+      "weight_pct": 20.0,
+      "score_pct": 100.0,
+      "weighted_contribution_pct": 20.0,
+      "passed_items": 85,
+      "total_items": 85,
+      "submetrics": null,
+      "remaining_gaps": []
+    },
+    {
+      "id": "pillar-4-ui3-surfaces",
+      "name": "Pillar 4: UI3 Surfaces, Popovers & Visual Contract (16 Surface Checkpoints)",
+      "weight_pct": 20.0,
+      "score_pct": 100.0,
+      "weighted_contribution_pct": 20.0,
+      "passed_items": 16,
+      "total_items": 16,
+      "submetrics": null,
+      "remaining_gaps": []
+    },
+    {
+      "id": "pillar-5-ai-terminal-mcp",
+      "name": "Pillar 5: Figma AI Agent & Native PTY Terminal Core (15 Checkpoints)",
+      "weight_pct": 15.0,
+      "score_pct": 100.0,
+      "weighted_contribution_pct": 15.0,
+      "passed_items": 15,
+      "total_items": 15,
+      "submetrics": null,
+      "remaining_gaps": []
+    }
+  ],
+  "all_remaining_gaps": []
+}

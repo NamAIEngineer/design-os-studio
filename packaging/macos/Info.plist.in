@@ -3,9 +3,9 @@
 <plist version="1.0">
 <dict>
   <key>CFBundleName</key>
-  <string>DESIGN:OS Studio</string>
+  <string>design:os studio</string>
   <key>CFBundleDisplayName</key>
-  <string>DESIGN:OS Studio</string>
+  <string>design:os studio</string>
   <key>CFBundleIdentifier</key>
   <string>os.design.studio</string>
   <key>CFBundleExecutable</key>
@@ -27,15 +27,14 @@
   <key>LSApplicationCategoryType</key>
   <string>public.app-category.graphics-design</string>
   <key>NSHumanReadableCopyright</key>
-  <string>MIT OR Apache-2.0, DESIGN:OS Studio &amp; designos contributors</string>
+  <string>MIT OR Apache-2.0, design:os studio &amp; designos contributors</string>
   <key>CFBundleDocumentTypes</key>
   <array>
     <dict>
       <key>CFBundleTypeName</key>
-      <string>DESIGN:OS Studio document</string>
+      <string>design:os studio document</string>
       <key>CFBundleTypeExtensions</key>
       <array>
-        <string>designos</string>
         <string>designos</string>
       </array>
       <key>CFBundleTypeRole</key>
@@ -52,6 +51,18 @@
       </array>
       <key>CFBundleTypeRole</key>
       <string>Viewer</string>
+      <key>LSHandlerRank</key>
+      <string>Alternate</string>
+    </dict>
+    <dict>
+      <key>CFBundleTypeName</key>
+      <string>design:os studio spec document</string>
+      <key>CFBundleTypeExtensions</key>
+      <array>
+        <string>spec.json</string>
+      </array>
+      <key>CFBundleTypeRole</key>
+      <string>Editor</string>
       <key>LSHandlerRank</key>
       <string>Alternate</string>
     </dict>

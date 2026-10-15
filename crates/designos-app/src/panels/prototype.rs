@@ -30,6 +30,10 @@ pub fn show(app: &mut App, ui: &mut Ui, region: Rect) {
     let end = clipped(ui, region, |ui| {
         let mut pane = Pane { x0: region.left() - theme::BORDER_WIDTH, oy: region.top() - scroll, y: 0.0 };
         if sel.is_empty() {
+            let _ = title(ui, &mut pane, "Interactions", Some(Icon::Plus), false);
+            show_prototype_settings_btn(app, ui, &mut pane);
+            section_sep(ui, &mut pane, false);
+            prototype_guide_cards(ui, &mut pane);
             flows_section(app, ui, &mut pane);
             device_section(app, ui, &mut pane);
             background_section(app, ui, &mut pane);
@@ -42,6 +46,57 @@ pub fn show(app: &mut App, ui: &mut Ui, region: Rect) {
     scrollbar(ui, region, scroll, end);
     picker_popup(app, ui, region);
     popover(app, ui, region);
+}
+
+fn show_prototype_settings_btn(app: &mut App, ui: &mut Ui, pane: &mut Pane) {
+    let btn_r = pane.rect(theme::SECTION_CONTENT_X, 0.0, theme::SECTION_CONTENT_W, 28.0);
+    record(ui, "proto-show-settings", btn_r);
+    let resp = ui.interact(btn_r, ui.id().with("proto-show-settings"), Sense::click());
+    ui.painter().rect_filled(
+        btn_r,
+        theme::cr(6),
+        if resp.hovered() { Color32::from_rgb(0x38, 0x38, 0x38) } else { Color32::from_rgb(0x2C, 0x2C, 0x2C) },
+    );
+    ui.painter().rect_stroke(btn_r, theme::cr(6), Stroke::new(1.0, Color32::from_rgb(0x38, 0x38, 0x38)), StrokeKind::Inside);
+    ui.painter().text(btn_r.center(), Align2::CENTER_CENTER, "Show prototype settings", theme::font_body_strong(), Color32::WHITE);
+    if resp.clicked() {
+        app.selection.clear();
+    }
+    pane.y += 34.0;
+}
+
+fn prototype_guide_cards(ui: &mut Ui, pane: &mut Pane) {
+    for (key, heading, body_text) in [
+        (
+            "proto-guide-connection",
+            "Creating a connection",
+            "Select a frame or object in a frame and use the circular node to drag a connection to another frame.",
+        ),
+        (
+            "proto-guide-running",
+            "Running your prototype",
+            "Use the play button in the toolbar to play your prototype. If there are no connections, the play button can be used to play a presentation of your frames.",
+        ),
+    ] {
+        pane.y += 8.0;
+        let hdr_r = pane.rect(theme::SECTION_CONTENT_X, 0.0, theme::SECTION_CONTENT_W, 22.0);
+        record(ui, key, hdr_r);
+        ui.painter().text(Pos2::new(hdr_r.left(), hdr_r.center().y), Align2::LEFT_CENTER, heading, theme::font_body_strong(), Color32::WHITE);
+        let close_r = Rect::from_min_size(Pos2::new(hdr_r.right() - 20.0, hdr_r.center().y - 10.0), Vec2::splat(20.0));
+        let _ = widgets::icon_button(ui, close_r, (key, "dismiss"), Icon::Close, false, "Dismiss tip");
+        pane.y += 24.0;
+        let text_r = pane.rect(theme::SECTION_CONTENT_X, 0.0, theme::SECTION_CONTENT_W, 48.0);
+        let galley = ui.painter().layout(
+            body_text.to_string(),
+            theme::font_body(),
+            Color32::from_rgb(0xB3, 0xB3, 0xB3),
+            text_r.width(),
+        );
+        let h = galley.size().y;
+        ui.painter().galley(text_r.min, galley, Color32::from_rgb(0xB3, 0xB3, 0xB3));
+        pane.y += h + 12.0;
+        section_sep(ui, pane, false);
+    }
 }
 
 fn hint(ui: &Ui, pane: &mut Pane, text: &str) {
@@ -189,6 +244,7 @@ fn selection_sections(app: &mut App, ui: &mut Ui, pane: &mut Pane, sel: &[NodeId
     // Interactions.
     let add = title(ui, pane, "Interactions", single.map(|_| Icon::Plus), false);
     record(ui, "proto-add", pane.rect(theme::SECTION_TRAILING_X, -32.0, theme::PANEL_ACTION_BUTTON, theme::PANEL_ACTION_BUTTON));
+    show_prototype_settings_btn(app, ui, pane);
     match single {
         None => hint(ui, pane, "Select a single layer to edit its interactions."),
         Some(id) => {
@@ -197,15 +253,20 @@ fn selection_sections(app: &mut App, ui: &mut Ui, pane: &mut Pane, sel: &[NodeId
             }
             let rs = app.doc.get(id).map(|n| n.prototype.reactions.clone()).unwrap_or_default();
             if rs.is_empty() {
-                hint(ui, pane, "Add an interaction, or drag the blue handle of a layer to a frame.");
+                section_sep(ui, pane, false);
+                prototype_guide_cards(ui, pane);
+            } else {
+                for (i, r) in rs.iter().enumerate() {
+                    reaction_row(app, ui, pane, id, i, r);
+                }
+                pane.y += 4.0;
+                section_sep(ui, pane, false);
             }
-            for (i, r) in rs.iter().enumerate() {
-                reaction_row(app, ui, pane, id, i, r);
-            }
-            pane.y += 4.0;
         }
     }
-    section_sep(ui, pane, false);
+    if single.is_none() {
+        section_sep(ui, pane, false);
+    }
 
     // Video fill: playback options (the poster frame is the layer's image fill).
     if let Some(id) = single {
@@ -878,5 +939,38 @@ mod tests {
         assert_eq!(pts[10], r.right_top());
         let mid = curve_points(&Easing::EaseIn, r, 10)[5];
         assert!(mid.y > r.center().y, "ease in is below the diagonal at the middle");
+    }
+
+    #[test]
+    fn ui3_prototype_assets_and_right_header_layout() {
+        let mut d = Document::new("t");
+        let page = d.add_page("p");
+        let f = d.alloc_id();
+        let f = d.insert(page, Node::frame(f, designos_doc::Rect::new(0.0, 0.0, 200.0, 100.0))).unwrap();
+        let mut app = App::new(d);
+        app.selection = vec![f];
+        app.ui.right_tab = Some(crate::app::RightTab::Prototype);
+        let ctx = egui::Context::default();
+        theme::install_fonts(&ctx);
+        let raw = egui::RawInput {
+            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1200.0, 800.0))),
+            ..Default::default()
+        };
+        let _ = ctx.run_ui(raw, |ui| {
+            crate::panels::assets::show(&mut app, ui, Rect::from_min_size(Pos2::new(40.0, 0.0), Vec2::new(240.0, 700.0)));
+            crate::panels::right::show(&mut app, ui, Rect::from_min_size(Pos2::new(960.0, 0.0), Vec2::new(240.0, 700.0)));
+        });
+        let get_rect = |name: &str| ctx.data(|d| d.get_temp::<Rect>(egui::Id::new(("test-rect", name.to_string()))));
+        assert!(get_rect("assets-libraries").is_some());
+        assert!(get_rect("assets-search").is_some());
+        assert!(get_rect("assets-created-in-file").is_some());
+        assert!(get_rect("assets-add-more-libraries").is_some());
+        assert!(get_rect("proto-show-settings").is_some());
+        assert!(get_rect("proto-guide-connection").is_some());
+        assert!(get_rect("proto-guide-running").is_some());
+        assert!(get_rect("help-button").is_some());
+        let pb = get_rect("present-button").unwrap();
+        let sb = get_rect("share-button").unwrap();
+        assert!(pb.left() < sb.left(), "Present button should be to the left of Share button in Figma UI3");
     }
 }

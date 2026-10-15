@@ -1,0 +1,14 @@
+#!/usr/bin/env sh
+# AppRun entrypoint for portable Linux AppDir / AppImage execution of design:os studio.
+set -eu
+
+HERE="$(dirname "$(readlink -f "$0")")"
+export PATH="$HERE/usr/bin:$HERE:$PATH"
+
+if [ -x "$HERE/usr/bin/designos-studio" ]; then
+  exec "$HERE/usr/bin/designos-studio" "$@"
+elif [ -x "$HERE/designos-studio" ]; then
+  exec "$HERE/designos-studio" "$@"
+else
+  exec "$HERE/designos" "$@"
+fi

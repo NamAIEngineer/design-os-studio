@@ -7,12 +7,13 @@ use crate::widgets;
 use egui::{Align2, Pos2, Rect, Sense, Ui, Vec2};
 
 /// Rail entries in order; the flag marks the item that starts a new group (separator above it).
-pub const ITEMS: [(RailItem, Icon, &str, bool); 6] = [
+pub const ITEMS: [(RailItem, Icon, &str, bool); 7] = [
     (RailItem::File, Icon::File, "File", false),
+    (RailItem::Agents, Icon::Sparkle, "Agents", false),
     (RailItem::Assets, Icon::Assets, "Assets", false),
-    (RailItem::Specs, Icon::Specs, "Specs", false),
     (RailItem::Tools, Icon::Tools, "Tools", false),
     (RailItem::Variables, Icon::Variables, "Variables", true),
+    (RailItem::Specs, Icon::Specs, "Specs", false),
     (RailItem::Plugins, Icon::Component, "Plugins", false),
 ];
 
@@ -44,6 +45,7 @@ pub fn show(app: &mut App, ui: &mut Ui, rect: Rect) {
         Vec2::splat(theme::RAIL_MENU_BUTTON_SIZE),
     );
     let r = ui.interact(mb, ui.id().with("rail-menu"), Sense::click());
+    widgets::record(ui, "rail-menu", mb);
     widgets::button_bg(&p, mb, &r, app.ui.menu == Some(MenuKind::Main), theme::cr(theme::RADIUS_MEDIUM));
     icons::paint(&p, Icon::Logo, mb.center(), 20.0, theme::ICON);
     if r.clicked() {
@@ -58,6 +60,7 @@ pub fn show(app: &mut App, ui: &mut Ui, rect: Rect) {
         }
         let ir = Rect::from_min_size(Pos2::new(rect.left(), y), Vec2::new(inner_w, theme::RAIL_ITEM_SIZE));
         let resp = ui.interact(ir, ui.id().with(("rail", *label)), Sense::click());
+        widgets::record(ui, &format!("rail-{label}"), ir);
         let selected = if app.plugins.open {
             *item == RailItem::Plugins
         } else if app.vars.open {
@@ -67,53 +70,91 @@ pub fn show(app: &mut App, ui: &mut Ui, rect: Rect) {
                 || (*item == RailItem::File && (app.ui.menu == Some(MenuKind::FileMenu) || (app.ui.rail.is_none() && !app.ui.left_collapsed)))
         };
         // Active item: 32x32 rounded tile behind the icon.
+        // Figma Desktop 126.9.13: selected `Agents` uses slate-blue `#313A4B` tile + `#6EA8FE` 4-point sparkle icon.
         let ic = Pos2::new(ir.center().x, ir.top() + theme::RAIL_ICON_CENTER_Y);
         if selected {
-            p.rect_filled(Rect::from_center_size(ic, Vec2::splat(theme::RAIL_TILE)), theme::cr(theme::RADIUS_MEDIUM), theme::BG_SELECTED);
+            let tile_bg = if *item == RailItem::Agents { egui::Color32::from_rgb(0x31, 0x3A, 0x4B) } else { theme::BG_SELECTED };
+            p.rect_filled(Rect::from_center_size(ic, Vec2::splat(theme::RAIL_TILE)), theme::cr(theme::RADIUS_MEDIUM), tile_bg);
         } else if resp.hovered() {
             p.rect_filled(Rect::from_center_size(ic, Vec2::splat(theme::RAIL_TILE)), theme::cr(theme::RADIUS_MEDIUM), theme::BG_HOVER);
         }
-        icons::paint(&p, *icon, ic, theme::RAIL_ICON_SIZE, theme::ICON);
+        let icon_col = if selected && *item == RailItem::Agents { egui::Color32::from_rgb(0x6E, 0xA8, 0xFE) } else { theme::ICON };
+        match *item {
+            RailItem::Agents => paint_agents_rail_star(&p, ic, icon_col),
+            RailItem::Assets => paint_assets_rail_circle_plus(&p, ic, icon_col),
+            RailItem::Tools => paint_tools_rail_box(&p, ic, icon_col),
+            _ => icons::paint(&p, *icon, ic, theme::RAIL_ICON_SIZE, icon_col),
+        }
         let font = if selected { theme::font_small_strong() } else { theme::font_small() };
         p.text(Pos2::new(ir.center().x, ir.top() + theme::RAIL_LABEL_CENTER_Y), Align2::CENTER_CENTER, *label, font, theme::TEXT);
+        if resp.secondary_clicked() && *item == RailItem::File {
+            toggle(app, MenuKind::FileMenu, ir);
+        }
         if resp.clicked() {
             if *item != RailItem::Specs {
                 app.specs.open = false;
+            }
+            if *item != RailItem::Plugins {
+                app.plugins.open = false;
             }
             if *item == RailItem::Plugins {
                 app.open_plugins();
                 continue;
             }
+            let was_vars = app.vars.open;
             if *item != RailItem::Variables && app.vars.open {
                 // leaving the variables view returns to the editor
                 app.close_variables();
             }
             if *item == RailItem::File {
-                toggle(app, MenuKind::FileMenu, ir);
+                if app.ui.rail.is_some() || app.ui.left_collapsed || was_vars {
+                    app.ui.rail = None;
+                    app.ui.left_collapsed = false;
+                    app.ui.menu = None;
+                } else {
+                    app.ui.left_collapsed = true;
+                    app.ui.menu = None;
+                }
+            } else if *item == RailItem::Agents {
+                if app.ui.rail == Some(RailItem::Agents) && !app.ui.left_collapsed {
+                    app.ui.rail = None;
+                } else {
+                    app.ui.rail = Some(RailItem::Agents);
+                    app.ui.left_collapsed = false;
+                    app.terminal.ensure_default_tab(app.file_path.as_deref());
+                }
             } else if *item == RailItem::Specs {
                 if app.ui.rail == Some(RailItem::Specs) && app.specs.open {
                     app.ui.rail = None;
                     app.specs.open = false;
                 } else {
                     app.ui.rail = Some(RailItem::Specs);
+                    app.ui.left_collapsed = false;
                     app.specs.open = true;
                     app.specs.ensure_loaded();
                 }
             } else if *item == RailItem::Tools {
-                if app.ui.rail == Some(RailItem::Tools) {
+                if app.ui.rail == Some(RailItem::Tools) && !app.ui.left_collapsed {
                     app.ui.rail = None;
                     app.terminal.dock_open = false;
                 } else {
                     app.ui.rail = Some(RailItem::Tools);
+                    app.ui.left_collapsed = false;
                     app.terminal.dock_open = true;
                     app.terminal.ensure_default_tab(app.file_path.as_deref());
                 }
             } else {
                 if *item == RailItem::Variables {
+                    app.ui.left_collapsed = false;
                     app.toggle_variables();
                     continue;
                 }
-                app.ui.rail = if app.ui.rail == Some(*item) { None } else { Some(*item) };
+                if app.ui.rail == Some(*item) && !app.ui.left_collapsed {
+                    app.ui.rail = None;
+                } else {
+                    app.ui.rail = Some(*item);
+                    app.ui.left_collapsed = false;
+                }
                 if *item != RailItem::Assets {
                     app.show_toast(format!("{label} panel is not available in this build"), false);
                 }
@@ -121,15 +162,17 @@ pub fn show(app: &mut App, ui: &mut Ui, rect: Rect) {
         }
     }
 
-    // Bottom: Agent Terminal quick toggle (`>_`) + Help button.
+    // Bottom: Agent Terminal quick toggle (`>_`) + Figma Sync/Updates button with blue indicator dot.
     let tr = Rect::from_min_size(
         Pos2::new(rect.left() + theme::RAIL_MENU_BUTTON_X, rect.bottom() - 48.0 - theme::RAIL_MENU_BUTTON_SIZE),
         Vec2::splat(theme::RAIL_MENU_BUTTON_SIZE),
     );
+    widgets::record(ui, "rail-terminal", tr);
     if widgets::icon_button(ui, tr, "rail-terminal", Icon::Terminal, app.terminal.dock_open, "Agent Terminal (Claude / Codex / Shell)").clicked() {
         app.terminal.dock_open = !app.terminal.dock_open;
         if app.terminal.dock_open {
-            app.ui.rail = Some(RailItem::Tools);
+            app.ui.rail = Some(RailItem::Agents);
+            app.ui.left_collapsed = false;
             app.terminal.ensure_default_tab(app.file_path.as_deref());
         }
     }
@@ -138,9 +181,23 @@ pub fn show(app: &mut App, ui: &mut Ui, rect: Rect) {
         Pos2::new(rect.left() + theme::RAIL_MENU_BUTTON_X, rect.bottom() - 8.0 - theme::RAIL_MENU_BUTTON_SIZE),
         Vec2::splat(theme::RAIL_MENU_BUTTON_SIZE),
     );
-    if widgets::icon_button(ui, br, "help", Icon::Help, false, "Help").clicked() {
+    widgets::record(ui, "rail-help", br);
+    if widgets::icon_button(ui, br, "help", Icon::Rotation, false, "Updates & Shortcuts").clicked() {
         crate::panels::menus::run(app, ui.ctx(), crate::panels::menus::Action::Shortcuts);
     }
+    p.circle_filled(Pos2::new(br.center().x + 6.0, br.center().y - 6.0), 2.5, egui::Color32::from_rgb(0x0D, 0x99, 0xFF));
+}
+
+fn paint_agents_rail_star(p: &egui::Painter, c: Pos2, col: egui::Color32) {
+    icons::paint(p, Icon::Sparkle, c, theme::RAIL_ICON_SIZE, col);
+}
+
+fn paint_assets_rail_circle_plus(p: &egui::Painter, c: Pos2, col: egui::Color32) {
+    icons::paint(p, Icon::Assets, c, theme::RAIL_ICON_SIZE, col);
+}
+
+fn paint_tools_rail_box(p: &egui::Painter, c: Pos2, col: egui::Color32) {
+    icons::paint(p, Icon::Tools, c, theme::RAIL_ICON_SIZE, col);
 }
 
 /// 1px #444 line inset from both edges of the rail.
@@ -163,8 +220,13 @@ mod tests {
 
     #[test]
     fn cells_follow_the_measured_rail_layout() {
-        // File, Assets, Specs, Tools every 56px, then a 16px gap before Variables and Plugins.
-        assert_eq!(cell_tops(), vec![56.0, 112.0, 168.0, 224.0, 296.0, 352.0]);
+        // File, Agents, Assets, Tools every 56px, then a 16px gap before Variables, Specs, and Plugins.
+        assert_eq!(cell_tops(), vec![56.0, 112.0, 168.0, 224.0, 296.0, 352.0, 408.0]);
+        assert_eq!(ITEMS[0].0, RailItem::File);
+        assert_eq!(ITEMS[1].0, RailItem::Agents);
+        assert_eq!(ITEMS[2].0, RailItem::Assets);
+        assert_eq!(ITEMS[3].0, RailItem::Tools);
+        assert_eq!(ITEMS[4].0, RailItem::Variables);
         // separators sit at y=48 (under the logo) and 288 (middle of the group gap)
         assert_eq!(theme::RAIL_SEPARATOR_Y, 48.0);
         assert_eq!(cell_tops()[4] - theme::RAIL_GROUP_GAP / 2.0, 288.0);

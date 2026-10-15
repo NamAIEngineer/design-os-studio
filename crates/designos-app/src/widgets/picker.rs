@@ -482,6 +482,26 @@ pub struct Out {
     pub apply_library_style: Option<(String, String)>,
 }
 
+const CONTRAST_BAR_H: f32 = 26.0;
+
+fn srgb_to_linear(c: u8) -> f32 {
+    let v = c as f32 / 255.0;
+    if v <= 0.04045 {
+        v / 12.92
+    } else {
+        ((v + 0.055) / 1.055).powf(2.4)
+    }
+}
+
+pub fn relative_luminance(rgb: [u8; 3]) -> f32 {
+    0.2126 * srgb_to_linear(rgb[0]) + 0.7152 * srgb_to_linear(rgb[1]) + 0.0722 * srgb_to_linear(rgb[2])
+}
+
+pub fn wcag_contrast_ratio(l1: f32, l2: f32) -> f32 {
+    let (hi, lo) = if l1 >= l2 { (l1, l2) } else { (l2, l1) };
+    (hi + 0.05) / (lo + 0.05)
+}
+
 /// Total panel height for a layout.
 pub fn panel_height(env: &Env, mode: Mode, tab: Tab, source: usize) -> f32 {
     let mut y = HEADER_H;
@@ -493,6 +513,8 @@ pub fn panel_height(env: &Env, mode: Mode, tab: Tab, source: usize) -> f32 {
     }
     if mode.is_gradient() {
         y += STOPS_H;
+    } else if mode == Mode::Solid {
+        y += CONTRAST_BAR_H;
     }
     y += PAD + AREA + 67.0 + 24.0 + 20.0 + 1.0 + 8.0 + 24.0;
     let n = env.sources.get(source).map(|s| s.1.len()).unwrap_or(0).min(PER_ROW * MAX_ROWS);
@@ -802,6 +824,34 @@ pub fn show(ui: &mut Ui, pos: Pos2, st: &mut State, paint: &mut Paint, env: &Env
     let rgba = active_rgba(paint, st.sel);
     st.sync(rgba);
 
+    let cur_lum = relative_luminance([rgba[0], rgba[1], rgba[2]]);
+    let ref_lum = if cur_lum < 0.35 { 1.0 } else { relative_luminance([0x1E, 0x1E, 0x1E]) };
+    if mode == Mode::Solid {
+        let ratio = wcag_contrast_ratio(cur_lum, ref_lum);
+        let bar_r = Rect::from_min_size(Pos2::new(rect.left() + PAD, y + 6.0), Vec2::new(AREA, 20.0));
+        super::record(ui, "picker-contrast-bar", bar_r);
+        let p = ui.painter();
+        let icon_c = Pos2::new(bar_r.left() + 7.0, bar_r.center().y);
+        let fg_col = Color32::from_rgb(0xE4, 0xE4, 0xE7);
+        p.circle_stroke(icon_c, 5.5, Stroke::new(1.2, fg_col));
+        p.rect_filled(Rect::from_min_max(Pos2::new(icon_c.x - 5.0, icon_c.y - 4.5), Pos2::new(icon_c.x, icon_c.y + 4.5)), 2.0, fg_col);
+        p.text(Pos2::new(bar_r.left() + 18.0, bar_r.center().y), Align2::LEFT_CENTER, format!("{ratio:.2} : 1"), theme::font_body_strong(), fg_col);
+        let (badge_txt, badge_bg, badge_fg, badge_w) = if ratio >= 7.0 {
+            ("AAA", Color32::from_rgb(0x17, 0x30, 0x2A), Color32::from_rgb(0x4C, 0xC5, 0x8B), 44.0)
+        } else if ratio >= 4.5 {
+            ("AA", Color32::from_rgb(0x17, 0x30, 0x2A), Color32::from_rgb(0x4C, 0xC5, 0x8B), 38.0)
+        } else if ratio >= 3.0 {
+            ("AA Large", Color32::from_rgb(0x33, 0x27, 0x15), Color32::from_rgb(0xF5, 0xA5, 0x24), 64.0)
+        } else {
+            ("Low", Color32::from_rgb(0x36, 0x1D, 0x21), Color32::from_rgb(0xF3, 0x65, 0x7A), 40.0)
+        };
+        let badge_r = Rect::from_min_size(Pos2::new(bar_r.right() - badge_w, bar_r.top()), Vec2::new(badge_w, 20.0));
+        p.rect_filled(badge_r, theme::cr(4), badge_bg);
+        p.text(badge_r.center(), Align2::CENTER_CENTER, badge_txt, theme::font_small_strong(), badge_fg);
+        y += CONTRAST_BAR_H;
+        hline(ui.painter(), rect.left(), rect.right(), y - 1.0, theme::BORDER);
+    }
+
     // ---- colour area
     let area = Rect::from_min_size(Pos2::new(rect.left() + PAD, y + PAD), Vec2::splat(AREA));
     let mut new_hsv = st.hsv;
@@ -816,6 +866,32 @@ pub fn show(ui: &mut Ui, pos: Pos2, st: &mut State, paint: &mut Paint, env: &Env
         let p = ui.painter();
         sv_area(p, area, st.hsv.h);
         round_corners(p, area, theme::RADIUS_MEDIUM as f32, theme::BG);
+        if mode == Mode::Solid {
+            // Dotted 4.5:1 AA contrast threshold curve across 24 saturation steps
+            let target_lum = if ref_lum > 0.5 { (ref_lum + 0.05) / 4.5 - 0.05 } else { 4.5 * (ref_lum + 0.05) - 0.05 };
+            for step in 0..24 {
+                let s = (step as f32 + 0.5) / 24.0;
+                let max_rgb = Hsva::new(st.hsv.h, s, 1.0, 1.0).to_srgba_unmultiplied();
+                let max_lum = relative_luminance([max_rgb[0], max_rgb[1], max_rgb[2]]);
+                if target_lum > 0.005 && target_lum < max_lum {
+                    let mut lo = 0.0f32;
+                    let mut hi = 1.0f32;
+                    for _ in 0..10 {
+                        let mid = 0.5 * (lo + hi);
+                        let c_mid = Hsva::new(st.hsv.h, s, mid, 1.0).to_srgba_unmultiplied();
+                        if relative_luminance([c_mid[0], c_mid[1], c_mid[2]]) < target_lum {
+                            lo = mid;
+                        } else {
+                            hi = mid;
+                        }
+                    }
+                    let v_thresh = 0.5 * (lo + hi);
+                    let dot_pos = Pos2::new(area.left() + s * area.width(), area.top() + (1.0 - v_thresh) * area.height());
+                    p.circle_filled(dot_pos, 2.0, Color32::from_black_alpha(110));
+                    p.circle_filled(dot_pos, 1.4, Color32::from_white_alpha(220));
+                }
+            }
+        }
         let c = Pos2::new(area.left() + st.hsv.s * area.width(), area.top() + (1.0 - st.hsv.v) * area.height());
         thumb_ring(p, c, 7.0, 2.0, None);
     }

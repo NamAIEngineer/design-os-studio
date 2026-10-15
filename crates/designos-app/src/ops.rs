@@ -22,6 +22,22 @@ pub enum Align {
     Bottom,
 }
 
+#[derive(Clone, Debug)]
+struct CopiedNodeProperties {
+    fills: Vec<Paint>,
+    stroke: Stroke,
+    effects: Vec<Effect>,
+    opacity: f32,
+    blend: BlendMode,
+    corner_radii: [f32; 4],
+    corner_smoothing: f32,
+    text_style: Option<TextStyle>,
+}
+
+thread_local! {
+    static COPIED_PROPS: std::cell::RefCell<Option<CopiedNodeProperties>> = const { std::cell::RefCell::new(None) };
+}
+
 /// Sets size + transform of a node, applying constraints/auto-layout to its
 /// content and fixing ancestors. Shared by canvas resizing and the inspector.
 pub fn apply_resize(doc: &mut Document, ed: &mut Edit, id: NodeId, size: Vec2, transform: Affine, relayout: bool) {
@@ -372,6 +388,216 @@ impl App {
         self.paste_count += 1;
         self.run_tx(tx);
         self.selection = new_sel;
+    }
+
+    /// `Cmd+Shift+V` (`PasteOverSelection`): pastes clipboard nodes directly over the current
+    /// selection (or inside the selected container at its top-left `(0, 0)`).
+    pub fn paste_over_selection(&mut self) {
+        let Some(clip) = self.clip.clone() else { return };
+        let parent = self.container_for_insert();
+        let target_local = if let Some(&sel_id) = self.selection.first() {
+            if sel_id == parent {
+                v2(0.0, 0.0)
+            } else if let Some(n) = self.doc.get(sel_id) {
+                v2(n.transform.tx, n.transform.ty)
+            } else {
+                v2(0.0, 0.0)
+            }
+        } else {
+            v2(0.0, 0.0)
+        };
+        let lists = clipboard::instantiate(&mut self.doc, &clip);
+        let first_orig = lists
+            .first()
+            .and_then(|l| l.first())
+            .map(|r| v2(r.transform.tx, r.transform.ty))
+            .unwrap_or(v2(0.0, 0.0));
+        let delta = v2(target_local.x - first_orig.x, target_local.y - first_orig.y);
+        let mut tx = Tx::new();
+        let mut new_sel = Vec::new();
+        for mut nodes in lists {
+            if let Some(root) = nodes.first_mut() {
+                root.transform.tx += delta.x;
+                root.transform.ty += delta.y;
+                new_sel.push(root.id);
+            }
+            let index = self.doc.get(parent).map(|p| p.children.len()).unwrap_or(0);
+            let _ = tx.cmd(&mut self.doc, Command::Insert { parent, index, nodes });
+        }
+        layout::relayout_around(&mut self.doc, &mut tx.ed, parent);
+        self.run_tx(tx);
+        self.selection = new_sel;
+    }
+
+    /// `Cmd+Alt+Shift+R` (`PasteToReplace`): replaces each selected node in-place with the
+    /// clipboard contents, preserving the target's parent, child index, and `(tx, ty)` position.
+    pub fn paste_to_replace(&mut self) {
+        let Some(clip) = self.clip.clone() else { return };
+        let tops = self.top_selection();
+        if tops.is_empty() {
+            return;
+        }
+        let mut tx = Tx::new();
+        let mut new_sel = Vec::new();
+        let mut affected_parents = Vec::new();
+        for target_id in tops {
+            let Some((parent, index, tx0, ty0)) = self.doc.get(target_id).and_then(|n| {
+                let p = n.parent?;
+                let idx = self.doc.get(p)?.children.iter().position(|&c| c == target_id).unwrap_or(0);
+                Some((p, idx, n.transform.tx, n.transform.ty))
+            }) else {
+                continue;
+            };
+            if tx.cmd(&mut self.doc, Command::Remove { id: target_id }).is_err() {
+                continue;
+            }
+            let lists = clipboard::instantiate(&mut self.doc, &clip);
+            let first_orig = lists
+                .first()
+                .and_then(|l| l.first())
+                .map(|r| v2(r.transform.tx, r.transform.ty))
+                .unwrap_or(v2(0.0, 0.0));
+            let delta = v2(tx0 - first_orig.x, ty0 - first_orig.y);
+            for (k, mut nodes) in lists.into_iter().enumerate() {
+                if let Some(root) = nodes.first_mut() {
+                    root.transform.tx += delta.x;
+                    root.transform.ty += delta.y;
+                    new_sel.push(root.id);
+                }
+                let ins_idx = (index + k).min(self.doc.get(parent).map(|p| p.children.len()).unwrap_or(0));
+                let _ = tx.cmd(&mut self.doc, Command::Insert { parent, index: ins_idx, nodes });
+            }
+            if !affected_parents.contains(&parent) {
+                affected_parents.push(parent);
+            }
+        }
+        for p in affected_parents {
+            layout::relayout_around(&mut self.doc, &mut tx.ed, p);
+        }
+        self.run_tx(tx);
+        if !new_sel.is_empty() {
+            self.selection = new_sel;
+        }
+    }
+
+    /// `Cmd+Alt+C` (`CopyProperties`): copies visual properties (fills, strokes, effects,
+    /// opacity, blend mode, corner radii, and text style) from the first selected layer.
+    pub fn copy_properties(&mut self) {
+        let Some(&id) = self.selection.first() else { return };
+        let Some(n) = self.doc.get(id) else { return };
+        let snap = CopiedNodeProperties {
+            fills: n.fills.clone(),
+            stroke: n.stroke.clone(),
+            effects: n.effects.clone(),
+            opacity: n.opacity,
+            blend: n.blend,
+            corner_radii: n.corner_radii,
+            corner_smoothing: n.corner_smoothing,
+            text_style: n.kind.any_text().map(|t| t.style.clone()),
+        };
+        COPIED_PROPS.with(|slot| *slot.borrow_mut() = Some(snap));
+        self.show_toast("Copied layer properties", false);
+    }
+
+    /// `Cmd+Alt+V` (`PasteProperties`): pastes previously copied visual properties onto all
+    /// currently selected layers in a single undoable transaction.
+    pub fn paste_properties(&mut self) {
+        let snap = COPIED_PROPS.with(|slot| slot.borrow().clone());
+        let Some(snap) = snap else { return };
+        if self.selection.is_empty() {
+            return;
+        }
+        let ids = self.selection.clone();
+        let mut tx = Tx::new();
+        for id in ids {
+            if let Some(n) = tx.ed.node(&mut self.doc, id) {
+                n.fills = snap.fills.clone();
+                n.stroke = snap.stroke.clone();
+                n.effects = snap.effects.clone();
+                n.opacity = snap.opacity;
+                n.blend = snap.blend;
+                n.corner_radii = snap.corner_radii;
+                n.corner_smoothing = snap.corner_smoothing;
+                if let (Some(style), Some(tp)) = (&snap.text_style, n.kind.any_text_mut()) {
+                    tp.style = style.clone();
+                }
+            }
+        }
+        self.run_tx(tx);
+    }
+
+    fn resolve_selected_grid_frame(&self) -> Option<NodeId> {
+        for &id in &self.selection {
+            if let Some(n) = self.doc.get(id) {
+                if n.kind.frame_props().and_then(|fp| fp.auto_layout.as_ref()).is_some_and(|al| al.direction == LayoutDirection::Grid) {
+                    return Some(id);
+                }
+                if let Some(p) = n.parent {
+                    if self
+                        .doc
+                        .get(p)
+                        .and_then(|pn| pn.kind.frame_props())
+                        .and_then(|fp| fp.auto_layout.as_ref())
+                        .is_some_and(|al| al.direction == LayoutDirection::Grid)
+                    {
+                        return Some(p);
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    /// Inserts a row into the selected Table / CSS Grid frame (`InsertTableRow`).
+    pub fn insert_table_row(&mut self) {
+        let Some(fid) = self.resolve_selected_grid_frame() else { return };
+        let mut tx = Tx::new();
+        if let Some(n) = tx.ed.node(&mut self.doc, fid) {
+            if let Some(al) = n.kind.frame_props_mut().and_then(|fp| fp.auto_layout.as_mut()) {
+                al.grid_rows = (al.grid_rows.max(1) + 1).min(8);
+            }
+        }
+        layout::relayout_around(&mut self.doc, &mut tx.ed, fid);
+        self.run_tx(tx);
+    }
+
+    /// Deletes a row from the selected Table / CSS Grid frame (`DeleteTableRow`).
+    pub fn delete_table_row(&mut self) {
+        let Some(fid) = self.resolve_selected_grid_frame() else { return };
+        let mut tx = Tx::new();
+        if let Some(n) = tx.ed.node(&mut self.doc, fid) {
+            if let Some(al) = n.kind.frame_props_mut().and_then(|fp| fp.auto_layout.as_mut()) {
+                al.grid_rows = al.grid_rows.saturating_sub(1).max(1);
+            }
+        }
+        layout::relayout_around(&mut self.doc, &mut tx.ed, fid);
+        self.run_tx(tx);
+    }
+
+    /// Inserts a column into the selected Table / CSS Grid frame (`InsertTableColumn`).
+    pub fn insert_table_column(&mut self) {
+        let Some(fid) = self.resolve_selected_grid_frame() else { return };
+        let mut tx = Tx::new();
+        if let Some(n) = tx.ed.node(&mut self.doc, fid) {
+            if let Some(al) = n.kind.frame_props_mut().and_then(|fp| fp.auto_layout.as_mut()) {
+                al.grid_columns = (al.grid_columns.max(1) + 1).min(8);
+            }
+        }
+        layout::relayout_around(&mut self.doc, &mut tx.ed, fid);
+        self.run_tx(tx);
+    }
+
+    /// Deletes a column from the selected Table / CSS Grid frame (`DeleteTableColumn`).
+    pub fn delete_table_column(&mut self) {
+        let Some(fid) = self.resolve_selected_grid_frame() else { return };
+        let mut tx = Tx::new();
+        if let Some(n) = tx.ed.node(&mut self.doc, fid) {
+            if let Some(al) = n.kind.frame_props_mut().and_then(|fp| fp.auto_layout.as_mut()) {
+                al.grid_columns = al.grid_columns.saturating_sub(1).max(1);
+            }
+        }
+        layout::relayout_around(&mut self.doc, &mut tx.ed, fid);
+        self.run_tx(tx);
     }
 
     // ------------------------------------------------------------ grouping
@@ -1130,5 +1356,72 @@ mod tests {
         assert_eq!(world_aabb(&app.doc, ids[1]).x, 60.0);
         app.selection = ids[..2].to_vec();
         assert!(!app.distribute_selection(), "needs three layers");
+    }
+
+    #[test]
+    fn paste_over_selection_paste_to_replace_and_copy_paste_properties() {
+        let (mut app, ids) = app_with_rects();
+        if let Some(n0) = app.doc.get_mut(ids[0]) {
+            n0.fills = vec![Paint::solid(Color::rgb(0x0D, 0x99, 0xFF))];
+            n0.corner_radii = [12.0; 4];
+            n0.opacity = 0.75;
+        }
+        // 1. Copy properties from ids[0] and paste onto ids[1]
+        app.selection = vec![ids[0]];
+        app.copy_properties();
+        app.selection = vec![ids[1]];
+        app.paste_properties();
+        assert_eq!(app.doc.get(ids[1]).unwrap().corner_radii, [12.0; 4]);
+        assert!((app.doc.get(ids[1]).unwrap().opacity - 0.75).abs() < 1e-4);
+        app.undo();
+        assert_eq!(app.doc.get(ids[1]).unwrap().corner_radii, [0.0; 4]);
+
+        // 2. Copy ids[0], select ids[2] (at x=200, y=40), and paste_over_selection
+        app.selection = vec![ids[0]];
+        app.copy_selection();
+        app.selection = vec![ids[2]];
+        app.paste_over_selection();
+        let pasted_id = app.selection[0];
+        assert_ne!(pasted_id, ids[0]);
+        assert_eq!(app.doc.get(pasted_id).unwrap().transform.tx, 200.0);
+        assert_eq!(app.doc.get(pasted_id).unwrap().transform.ty, 40.0);
+        app.undo();
+
+        // 3. Paste to replace ids[1] (at x=100, y=20)
+        app.selection = vec![ids[1]];
+        app.paste_to_replace();
+        let replaced_id = app.selection[0];
+        assert!(app.doc.get(ids[1]).is_none());
+        assert_eq!(app.doc.get(replaced_id).unwrap().transform.tx, 100.0);
+        assert_eq!(app.doc.get(replaced_id).unwrap().transform.ty, 20.0);
+    }
+
+    #[test]
+    fn table_grid_insert_and_delete_row_and_column_are_undoable() {
+        let mut d = Document::new("grid-test");
+        let page = d.add_page("p");
+        let fid = d.alloc_id();
+        let mut f = Node::frame(fid, Rect::new(0.0, 0.0, 400.0, 300.0));
+        if let Some(fp) = f.kind.frame_props_mut() {
+            fp.auto_layout = Some(AutoLayout {
+                direction: LayoutDirection::Grid,
+                grid_columns: 2,
+                grid_rows: 2,
+                ..Default::default()
+            });
+        }
+        d.insert(page, f).unwrap();
+        let mut app = App::new(d);
+        app.selection = vec![fid];
+        app.insert_table_row();
+        app.insert_table_column();
+        let al = app.doc.get(fid).unwrap().kind.frame_props().unwrap().auto_layout.unwrap();
+        assert_eq!(al.grid_rows, 3);
+        assert_eq!(al.grid_columns, 3);
+        app.delete_table_row();
+        app.delete_table_column();
+        let al2 = app.doc.get(fid).unwrap().kind.frame_props().unwrap().auto_layout.unwrap();
+        assert_eq!(al2.grid_rows, 2);
+        assert_eq!(al2.grid_columns, 2);
     }
 }

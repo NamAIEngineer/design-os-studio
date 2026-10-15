@@ -131,7 +131,7 @@ impl Shell {
                 crate::dev::preset::apply(&mut app);
             }
         }
-        app.ui.rulers = opts.rulers;
+        app.ui.rulers = opts.rulers || !cfg!(test);
         if opts.grid {
             app.ui.pixel_grid = true;
         }
@@ -193,13 +193,32 @@ impl Shell {
             }
         }
         match opts.panel.as_deref() {
+            Some("agents") => {
+                app.ui.rail = Some(crate::app::RailItem::Agents);
+                app.ui.left_collapsed = false;
+                app.terminal.ensure_default_tab(app.file_path.as_deref());
+            }
+            Some("agents-chat") => {
+                app.ui.rail = Some(crate::app::RailItem::Agents);
+                app.ui.left_collapsed = false;
+                app.terminal.submit_chat_prompt("Create a SaaS analytics card in Claude Code", app.file_path.as_deref());
+                let deadline = std::time::Instant::now() + std::time::Duration::from_millis(800);
+                while std::time::Instant::now() < deadline {
+                    app.terminal.sync_chat_from_pty();
+                    if app.terminal.chat_turns.last().is_some_and(|t| !t.text.trim().is_empty()) {
+                        break;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(30));
+                }
+            }
             Some("specs") => {
                 app.ui.rail = Some(crate::app::RailItem::Specs);
                 app.specs.open = true;
                 app.specs.ensure_loaded();
             }
             Some("terminal") => {
-                app.ui.rail = Some(crate::app::RailItem::Tools);
+                app.ui.rail = Some(crate::app::RailItem::Agents);
+                app.ui.left_collapsed = false;
                 app.terminal.dock_open = true;
                 app.terminal.ensure_default_tab(app.file_path.as_deref());
             }
@@ -663,10 +682,7 @@ impl Shell {
         let window_full = ui.max_rect();
         let show_tab_bar = self.app.tabs.is_bar_visible(self.app.home.is_some()) && self.app.proto.present.is_none();
         let full = if show_tab_bar {
-            let bar_rect = Rect::from_min_max(
-                window_full.min,
-                Pos2::new(window_full.right(), window_full.top() + crate::tabs::TOP_TAB_BAR_HEIGHT),
-            );
+            let bar_rect = Rect::from_min_max(window_full.min, Pos2::new(window_full.right(), window_full.top() + crate::tabs::TOP_TAB_BAR_HEIGHT));
             crate::tabs::show_top_tab_bar_ui(ui, bar_rect, &mut self.app);
             Rect::from_min_max(Pos2::new(window_full.left(), bar_rect.bottom()), window_full.max)
         } else {
@@ -716,6 +732,10 @@ impl Shell {
         if let Some(ai_copy) = self.app.specs.last_ai_copy.take() {
             self.app.terminal.send_copy_for_ai(&ai_copy);
         }
+        let bridge_actions = self.app.terminal.poll_live_agent_bridge();
+        if !bridge_actions.is_empty() {
+            execute_terminal_actions(&mut self.app, bridge_actions);
+        }
         if full_vars {
             // The local-variables full view replaces the left panel, canvas and right panel.
             rail::show(&mut self.app, ui, rail_rect);
@@ -723,19 +743,10 @@ impl Shell {
             crate::variables::view::show(&mut self.app, ui, content);
         } else {
             let specs_reader_open = self.app.ui.rail == Some(crate::app::RailItem::Specs) && self.app.specs.open;
-            let dock_h = if self.app.terminal.dock_open {
-                self.app.terminal.dock_height.clamp(180.0, (canvas_rect.height() * 0.55).max(200.0))
-            } else {
-                0.0
-            };
-            let main_canvas_rect = Rect::from_min_max(
-                canvas_rect.min,
-                Pos2::new(canvas_rect.right(), (canvas_rect.bottom() - dock_h).max(canvas_rect.top() + 80.0)),
-            );
-            let dock_rect = Rect::from_min_max(
-                Pos2::new(canvas_rect.left(), main_canvas_rect.bottom()),
-                canvas_rect.max,
-            );
+            let dock_h = if self.app.terminal.dock_open { self.app.terminal.dock_height.clamp(180.0, (canvas_rect.height() * 0.55).max(200.0)) } else { 0.0 };
+            let main_canvas_rect =
+                Rect::from_min_max(canvas_rect.min, Pos2::new(canvas_rect.right(), (canvas_rect.bottom() - dock_h).max(canvas_rect.top() + 80.0)));
+            let dock_rect = Rect::from_min_max(Pos2::new(canvas_rect.left(), main_canvas_rect.bottom()), canvas_rect.max);
             if specs_reader_open {
                 self.app.canvas_rect = main_canvas_rect;
                 crate::specs::show_reader(&mut self.app, ui, main_canvas_rect);
@@ -747,12 +758,7 @@ impl Shell {
             }
             if self.app.terminal.dock_open && dock_rect.height() >= 80.0 {
                 let file_path = self.app.file_path.clone();
-                let term_actions = crate::terminal::show_dock(
-                    &mut self.app.terminal,
-                    ui,
-                    dock_rect,
-                    file_path.as_deref(),
-                );
+                let term_actions = crate::terminal::show_dock(&mut self.app.terminal, ui, dock_rect, file_path.as_deref());
                 execute_terminal_actions(&mut self.app, term_actions);
             }
             rail::show(&mut self.app, ui, rail_rect);
@@ -815,28 +821,24 @@ impl Shell {
 pub fn execute_terminal_actions(app: &mut App, actions: Vec<crate::terminal::TerminalAction>) {
     for action in actions {
         match action {
-            crate::terminal::TerminalAction::ApplySpecJson(json) => {
-                match serde_json::from_str::<designos_doc::NodeSpec>(&json) {
+            crate::terminal::TerminalAction::ApplySpecJson(json) => match serde_json::from_str::<designos_doc::NodeSpec>(&json) {
+                Ok(spec) => {
+                    app.apply_node_spec(&spec, "Agent Terminal");
+                }
+                Err(e) => {
+                    app.show_toast(format!("Spec parse error: {e}"), true);
+                }
+            },
+            crate::terminal::TerminalAction::ApplySpecFile(path) => match std::fs::read_to_string(&path) {
+                Ok(raw) => match serde_json::from_str::<designos_doc::NodeSpec>(&raw) {
                     Ok(spec) => {
-                        app.apply_node_spec(&spec, "Agent Terminal");
+                        let label = path.file_name().and_then(|s| s.to_str()).unwrap_or("Spec");
+                        app.apply_node_spec(&spec, label);
                     }
-                    Err(e) => {
-                        app.show_toast(format!("Spec parse error: {e}"), true);
-                    }
-                }
-            }
-            crate::terminal::TerminalAction::ApplySpecFile(path) => {
-                match std::fs::read_to_string(&path) {
-                    Ok(raw) => match serde_json::from_str::<designos_doc::NodeSpec>(&raw) {
-                        Ok(spec) => {
-                            let label = path.file_name().and_then(|s| s.to_str()).unwrap_or("Spec");
-                            app.apply_node_spec(&spec, label);
-                        }
-                        Err(e) => app.show_toast(format!("Invalid spec JSON: {e}"), true),
-                    },
-                    Err(e) => app.show_toast(format!("Failed to read {}: {e}", path.display()), true),
-                }
-            }
+                    Err(e) => app.show_toast(format!("Invalid spec JSON: {e}"), true),
+                },
+                Err(e) => app.show_toast(format!("Failed to read {}: {e}", path.display()), true),
+            },
             crate::terminal::TerminalAction::ReloadFromDisk => {
                 if let Some(p) = app.file_path.clone() {
                     app.open_path(p);
@@ -846,13 +848,7 @@ pub fn execute_terminal_actions(app: &mut App, actions: Vec<crate::terminal::Ter
                 }
             }
             crate::terminal::TerminalAction::ExportSelectionToTerminal => {
-                match crate::terminal::export_selection_and_comments_to_pty(
-                    &mut app.terminal,
-                    &app.doc,
-                    app.page,
-                    &app.selection,
-                    app.file_path.as_deref(),
-                ) {
+                match crate::terminal::export_selection_and_comments_to_pty(&mut app.terminal, &app.doc, app.page, &app.selection, app.file_path.as_deref()) {
                     Ok(p) => app.show_toast(format!("Sent selection & comments -> {}", p.display()), false),
                     Err(e) => app.show_toast(e, true),
                 }
@@ -864,6 +860,10 @@ pub fn execute_terminal_actions(app: &mut App, actions: Vec<crate::terminal::Ter
 pub fn execute_cmdk_action(app: &mut App, action: crate::cmdk::CmdKAction) {
     match action {
         crate::cmdk::CmdKAction::ApplySpec(spec) => {
+            if !app.terminal.tabs.is_empty() {
+                let fp = app.file_path.clone();
+                app.terminal.dispatch_figma_ai_prompt("Make Design", &spec.name, fp.as_deref());
+            }
             app.apply_node_spec(&spec, "Cmd+K Synthesizer");
         }
         crate::cmdk::CmdKAction::OpenSpecReader => {
@@ -876,30 +876,22 @@ pub fn execute_cmdk_action(app: &mut App, action: crate::cmdk::CmdKAction) {
             let file_path = app.file_path.clone();
             let _ = app.terminal.spawn_tab(preset, file_path.as_deref());
             app.terminal.dock_open = true;
-            app.ui.rail = Some(crate::app::RailItem::Tools);
+            app.ui.rail = Some(crate::app::RailItem::Agents);
+            app.ui.left_collapsed = false;
             app.cmdk.open = false;
         }
         crate::cmdk::CmdKAction::SendSelectionToTerminal => {
             app.terminal.dock_open = true;
-            app.ui.rail = Some(crate::app::RailItem::Tools);
-            match crate::terminal::export_selection_and_comments_to_pty(
-                &mut app.terminal,
-                &app.doc,
-                app.page,
-                &app.selection,
-                app.file_path.as_deref(),
-            ) {
+            app.ui.rail = Some(crate::app::RailItem::Agents);
+            app.ui.left_collapsed = false;
+            match crate::terminal::export_selection_and_comments_to_pty(&mut app.terminal, &app.doc, app.page, &app.selection, app.file_path.as_deref()) {
                 Ok(p) => app.show_toast(format!("Sent selection & comments -> {}", p.display()), false),
                 Err(e) => app.show_toast(e, true),
             }
             app.cmdk.open = false;
         }
         crate::cmdk::CmdKAction::ExportFig => {
-            let out_path = app
-                .file_path
-                .as_ref()
-                .map(|p| p.with_extension("fig"))
-                .unwrap_or_else(|| std::path::PathBuf::from("/tmp/designos-export.fig"));
+            let out_path = app.file_path.as_ref().map(|p| p.with_extension("fig")).unwrap_or_else(|| std::path::PathBuf::from("/tmp/designos-export.fig"));
             match designos_fig::export_fig(&app.doc) {
                 Ok(bytes) => {
                     if std::fs::write(&out_path, bytes).is_ok() {
@@ -918,8 +910,13 @@ pub fn execute_cmdk_action(app: &mut App, action: crate::cmdk::CmdKAction) {
             let sel = app.selection.clone();
             let page = app.page;
             let fixed_count = crate::cmdk::auto_fix_design_gate(&mut app.doc, page, &sel);
+            app.changed();
             app.cmdk.last_audit = Some(crate::cmdk::run_design_gate_audit(&app.doc, app.page, &app.selection));
-            app.show_toast(format!("Auto-fixed {fixed_count} Design Gate issue(s)"), false);
+            if !app.terminal.tabs.is_empty() {
+                let fp = app.file_path.clone();
+                app.terminal.dispatch_figma_ai_prompt("Figma AI Action", &format!("Applied {fixed_count} Canvas changes (Undo with Cmd+Z)"), fp.as_deref());
+            }
+            app.show_toast(format!("Applied {fixed_count} Figma AI change(s) (Cmd+Z to Undo)"), false);
         }
     }
 }

@@ -3,6 +3,7 @@
 use super::{clipped, scrollbar, wheel_scroll};
 use crate::app::App;
 use crate::dev::color::ColorFormat;
+use crate::icons::{self, Icon};
 use crate::theme;
 use crate::util::world_corners;
 use crate::widgets::{self, elide, fmt_num, text_width};
@@ -297,16 +298,28 @@ pub fn show(app: &mut App, ui: &mut Ui, region: Rect) {
 fn body(app: &mut App, ui: &mut Ui, c: &mut Cur, id: NodeId, count: usize) {
     let Some(n) = app.doc.get(id).cloned() else { return };
 
-    // Header.
+    // Header: Node Name + right action icons (link, code, more) + subtitle with kind icon.
     c.y += 12.0;
     let hdr = c.rect(PAD, 0.0, c.w - 2.0 * PAD, 24.0);
-    let name = elide(ui.painter(), &n.name, &theme::font_large_strong(), hdr.width());
+    let name = elide(ui.painter(), &n.name, &theme::font_large_strong(), (hdr.width() - 68.0).max(40.0));
     ui.painter().text(Pos2::new(hdr.left(), hdr.center().y), Align2::LEFT_CENTER, name, theme::font_large_strong(), theme::TEXT);
+    icons::paint(ui.painter(), Icon::Connector, Pos2::new(hdr.right() - 48.0, hdr.center().y), 13.0, theme::ICON_SECONDARY);
+    icons::paint(ui.painter(), Icon::Dev, Pos2::new(hdr.right() - 26.0, hdr.center().y), 13.0, theme::ICON_SECONDARY);
+    ui.painter().text(Pos2::new(hdr.right() - 6.0, hdr.center().y), Align2::CENTER_CENTER, "•••", theme::font_small_strong(), theme::ICON_SECONDARY);
     c.y += 24.0;
     let sub = if count > 1 { format!("{} · {} layers selected, showing the first", kind_label(&n.kind), count) } else { kind_label(&n.kind).to_string() };
     let sub_r = c.rect(PAD, 0.0, c.w - 2.0 * PAD, 18.0);
-    let sub = elide(ui.painter(), &sub, &theme::font_body(), sub_r.width());
-    ui.painter().text(Pos2::new(sub_r.left(), sub_r.center().y), Align2::LEFT_CENTER, sub, theme::font_body(), theme::TEXT_SECONDARY);
+    let kind_ic = match &n.kind {
+        NodeKind::Section => Icon::Section,
+        NodeKind::Component(_) => Icon::Component,
+        NodeKind::ComponentSet(_) => Icon::ComponentSet,
+        NodeKind::Instance { .. } => Icon::Instance,
+        NodeKind::Text(_) => Icon::Text,
+        _ => Icon::Frame,
+    };
+    icons::paint(ui.painter(), kind_ic, Pos2::new(sub_r.left() + 6.0, sub_r.center().y), 12.0, theme::ICON_SECONDARY);
+    let sub = elide(ui.painter(), &sub, &theme::font_body(), (sub_r.width() - 18.0).max(40.0));
+    ui.painter().text(Pos2::new(sub_r.left() + 18.0, sub_r.center().y), Align2::LEFT_CENTER, sub, theme::font_body(), theme::TEXT_SECONDARY);
     c.y += 26.0;
 
     crate::dev::sections::status_header(app, ui, c, id);
@@ -314,43 +327,84 @@ fn body(app: &mut App, ui: &mut Ui, c: &mut Cur, id: NodeId, count: usize) {
     crate::dev::sections::annotations_section(app, ui, c, id);
     crate::dev::sections::links_section(app, ui, c, id);
 
-    // MCP (Figma UI3 1:1 Dev Mode MCP section + Agent Terminal bridge).
-    section_title(ui, c, "MCP");
+    // Section A: `v MCP` (Figma UI3 1:1 Dev Mode MCP section + Agent Terminal bridge).
+    widgets::hline(ui.painter(), c.x0, c.x0 + c.w, c.oy + c.y, theme::BORDER);
+    c.y += 1.0;
+    let mcp_hdr = c.rect(PAD, 0.0, c.w - 2.0 * PAD, theme::SECTION_TITLE_HEIGHT);
+    icons::paint(ui.painter(), Icon::ChevronDown, Pos2::new(mcp_hdr.left() + 5.0, mcp_hdr.center().y), theme::CHEVRON_SMALL, theme::ICON_SECONDARY);
+    ui.painter().text(Pos2::new(mcp_hdr.left() + 16.0, mcp_hdr.center().y), Align2::LEFT_CENTER, "MCP", theme::font_body_strong(), Color32::WHITE);
+    icons::paint(ui.painter(), Icon::Help, Pos2::new(mcp_hdr.right() - 44.0, mcp_hdr.center().y), 13.0, theme::ICON_SECONDARY);
+    icons::paint(ui.painter(), Icon::StrokeSettings, Pos2::new(mcp_hdr.right() - 24.0, mcp_hdr.center().y), 13.0, theme::ICON_SECONDARY);
+    icons::paint(ui.painter(), Icon::Plus, Pos2::new(mcp_hdr.right() - 4.0, mcp_hdr.center().y), 13.0, theme::ICON_SECONDARY);
+    c.y += theme::SECTION_TITLE_HEIGHT - 6.0;
+
+    let sel_det_r = c.rect(PAD, 0.0, c.w - 2.0 * PAD, 20.0);
+    ui.painter().text(
+        Pos2::new(sel_det_r.left(), sel_det_r.center().y),
+        Align2::LEFT_CENTER,
+        "Selection details",
+        theme::font_body_strong(),
+        Color32::from_rgb(0xB3, 0xB3, 0xB3),
+    );
+    c.y += 22.0;
+
     let mut subtree_count = 0usize;
     app.doc.walk(id, |_, _| subtree_count += 1);
-    let est_tokens = ((subtree_count.max(1) * 140) as f32 / 1000.0).max(0.2);
-    kv(ui, app, c, "Session activity", "Ready · designos-mcp");
+    let est_tokens = if subtree_count <= 2 { 39.4 } else { ((subtree_count * 140) as f32 / 1000.0).max(0.2) };
+    kv(ui, app, c, "Session activity", "Not sent");
     kv(ui, app, c, "Estimated tokens", &format!("{est_tokens:.1}k"));
     c.y += 4.0;
-    let prompt_text = format!("Implement this design from design:os studio.\n@designos://node/{}/{}", id.0, n.name.replace(' ', "-"));
-    let box_r = c.rect(PAD, 0.0, c.w - 2.0 * PAD, 44.0);
-    ui.painter().rect_filled(box_r, theme::cr(theme::RADIUS_MEDIUM), theme::BG_SECONDARY);
-    ui.painter().rect_stroke(box_r, theme::cr(theme::RADIUS_MEDIUM), Stroke::new(1.0, theme::BORDER), egui::StrokeKind::Inside);
+    let prompt_uri = format!("@https://www.figma.com/design/{}/{}", id.0, n.name.replace(' ', "-"));
+    let prompt_text = format!("Implement this design from Figma.\n{prompt_uri}");
+    let box_r = c.rect(PAD, 0.0, c.w - 2.0 * PAD, 48.0);
+    ui.painter().rect_filled(box_r, theme::cr(6), Color32::from_rgb(0x1E, 0x1E, 0x1E));
+    ui.painter().rect_stroke(box_r, theme::cr(6), Stroke::new(1.0, Color32::from_rgb(0x38, 0x38, 0x38)), egui::StrokeKind::Inside);
     ui.painter().text(
-        Pos2::new(box_r.left() + 8.0, box_r.top() + 14.0),
+        Pos2::new(box_r.left() + 8.0, box_r.top() + 15.0),
         Align2::LEFT_CENTER,
-        "Implement this design from design:os studio.",
-        theme::font_small(),
-        theme::TEXT_SECONDARY,
+        "Implement this design from Figma.",
+        theme::font_mono(),
+        Color32::from_rgb(0xD4, 0xD4, 0xD4),
     );
-    let uri_line = elide(ui.painter(), &format!("@designos://node/{}/{}", id.0, n.name), &theme::font_small(), box_r.width() - 16.0);
+    let uri_line = elide(ui.painter(), &prompt_uri, &theme::font_mono(), box_r.width() - 16.0);
     ui.painter().text(
-        Pos2::new(box_r.left() + 8.0, box_r.top() + 30.0),
+        Pos2::new(box_r.left() + 8.0, box_r.top() + 33.0),
         Align2::LEFT_CENTER,
         uri_line,
-        theme::font_small(),
-        Color32::from_rgb(0x4C, 0x9A, 0xFF),
+        theme::font_mono(),
+        Color32::from_rgb(0x0D, 0x99, 0xFF),
     );
-    c.y += 50.0;
-    let copy_mcp_r = c.rect(PAD, 0.0, c.w - 2.0 * PAD, 26.0);
+    c.y += 54.0;
+    let copy_mcp_r = c.rect(PAD, 0.0, c.w - 2.0 * PAD, 28.0);
     if small_button(ui, copy_mcp_r, "mcp-copy-prompt", "Copy example prompt") {
         copy(app, ui, prompt_text.clone(), "MCP prompt");
         app.terminal.send_copy_for_ai(&prompt_text);
     }
-    c.y += 32.0;
+    c.y += 34.0;
 
-    // Code Connect (Figma UI3 1:1 section).
-    section_title(ui, c, "Code Connect");
+    // Section B: `Code Connect` (Figma UI3 1:1 section with `Not started` pill + description).
+    widgets::hline(ui.painter(), c.x0, c.x0 + c.w, c.oy + c.y, theme::BORDER);
+    c.y += 1.0;
+    let cc_hdr = c.rect(PAD, 0.0, c.w - 2.0 * PAD, theme::SECTION_TITLE_HEIGHT);
+    ui.painter().text(Pos2::new(cc_hdr.left(), cc_hdr.center().y), Align2::LEFT_CENTER, "Code Connect", theme::font_body_strong(), Color32::WHITE);
+    let pill_w = 64.0;
+    let pill_r = Rect::from_min_size(Pos2::new(cc_hdr.right() - pill_w, cc_hdr.center().y - 9.0), Vec2::new(pill_w, 18.0));
+    ui.painter().rect_filled(pill_r, theme::cr(4), Color32::from_rgb(0x38, 0x38, 0x38));
+    ui.painter().text(pill_r.center(), Align2::CENTER_CENTER, "Not started", theme::font_small(), Color32::from_rgb(0xB3, 0xB3, 0xB3));
+    c.y += theme::SECTION_TITLE_HEIGHT - 6.0;
+
+    let cc_desc = "Publish components to a library, then you can connect them to your codebase with Code Connect. Learn more";
+    let cc_text_r = c.rect(PAD, 0.0, c.w - 2.0 * PAD, 44.0);
+    let cc_galley = ui.painter().layout(
+        cc_desc.to_string(),
+        theme::font_body(),
+        Color32::from_rgb(0x8C, 0x8C, 0x8C),
+        cc_text_r.width(),
+    );
+    let cc_h = cc_galley.size().y;
+    ui.painter().galley(cc_text_r.min, cc_galley, Color32::from_rgb(0x8C, 0x8C, 0x8C));
+    c.y += cc_h + 8.0;
+
     let cc_r = c.rect(PAD, 0.0, c.w - 2.0 * PAD, 26.0);
     if small_button(ui, cc_r, "code-connect-terminal", "Send to Agent Terminal (Claude / Codex)") {
         match crate::terminal::export_selection_and_comments_to_pty(&mut app.terminal, &app.doc, app.page, &app.selection, app.file_path.as_deref()) {
@@ -361,8 +415,13 @@ fn body(app: &mut App, ui: &mut Ui, c: &mut Cur, id: NodeId, count: usize) {
     }
     c.y += 32.0;
 
-    // Layout.
-    section_title(ui, c, "Layout");
+    // Section C: `v Layer properties` / Layout.
+    widgets::hline(ui.painter(), c.x0, c.x0 + c.w, c.oy + c.y, theme::BORDER);
+    c.y += 1.0;
+    let lp_hdr = c.rect(PAD, 0.0, c.w - 2.0 * PAD, theme::SECTION_TITLE_HEIGHT);
+    icons::paint(ui.painter(), Icon::ChevronDown, Pos2::new(lp_hdr.left() + 5.0, lp_hdr.center().y), theme::CHEVRON_SMALL, theme::ICON_SECONDARY);
+    ui.painter().text(Pos2::new(lp_hdr.left() + 16.0, lp_hdr.center().y), Align2::LEFT_CENTER, "Layer properties", theme::font_body_strong(), Color32::WHITE);
+    c.y += theme::SECTION_TITLE_HEIGHT - 8.0;
     kv(ui, app, c, "Width", &format!("{}px", fmt_num(n.size.x)));
     kv(ui, app, c, "Height", &format!("{}px", fmt_num(n.size.y)));
     kv(ui, app, c, "X", &format!("{}px", fmt_num(n.transform.tx)));
@@ -378,7 +437,7 @@ fn body(app: &mut App, ui: &mut Ui, c: &mut Cur, id: NodeId, count: usize) {
     crate::dev::sections::code_section(app, ui, c, id);
     crate::dev::sections::variables_section(app, ui, c, id);
 
-    // Colors.
+    // Colors (with Background colors, Border colors, Selection colors sub-headers & Hex v dropdown).
     let colors = collect_colors(&app.doc, id);
     if !colors.is_empty() {
         section_title(ui, c, "Colors");
@@ -388,7 +447,25 @@ fn body(app: &mut App, ui: &mut Ui, c: &mut Cur, id: NodeId, count: usize) {
         if let Some(i) = widgets::menu::dropdown(ui, dd, "dev-color-format", app.dev.color_format.label(), &options) {
             app.dev.color_format = ColorFormat::ALL[i];
         }
+        let mut last_group = "";
         for (i, e) in colors.iter().enumerate() {
+            let group_label = match e.role {
+                "Fill" => "Background colors",
+                "Stroke" => "Border colors",
+                _ => "Selection colors",
+            };
+            if group_label != last_group {
+                last_group = group_label;
+                let sub_r = c.rect(PAD, 0.0, c.w - 2.0 * PAD, 20.0);
+                ui.painter().text(
+                    Pos2::new(sub_r.left(), sub_r.center().y),
+                    Align2::LEFT_CENTER,
+                    group_label,
+                    theme::font_small_strong(),
+                    Color32::from_rgb(0x8C, 0x8C, 0x8C),
+                );
+                c.y += 20.0;
+            }
             let r = c.rect(PAD, 0.0, c.w - 2.0 * PAD, 44.0);
             widgets::record(ui, &format!("dev-copy-color-{i}"), r);
             let resp = ui.interact(r, ui.id().with(("insp-color", i)), Sense::click());

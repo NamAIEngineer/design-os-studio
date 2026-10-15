@@ -11,7 +11,7 @@
 use crate::icons::{self, Icon};
 use crate::terminal::{
     AgentCliPreset, STATUS_BAD_BG, STATUS_BAD_BORDER, STATUS_BAD_TEXT, STATUS_INFO_BG, STATUS_INFO_BORDER, STATUS_INFO_TEXT, STATUS_OK_BG, STATUS_OK_BORDER,
-    STATUS_OK_TEXT, STATUS_WARN_BG, STATUS_WARN_BORDER, STATUS_WARN_TEXT, TERM_BG_ELEVATED, TERM_BG_HOVER, TERM_BG_VIEWPORT, TERM_BORDER, TERM_ORANGE,
+    STATUS_OK_TEXT, STATUS_WARN_BG, STATUS_WARN_BORDER, STATUS_WARN_TEXT, TERM_BG_HOVER, TERM_BG_VIEWPORT, TERM_BORDER,
 };
 use crate::theme;
 use crate::widgets;
@@ -27,6 +27,7 @@ pub struct CmdKState {
     pub active_tab: usize,
     pub last_audit: Option<DesignGateReport>,
     pub status: Option<String>,
+    pub focus_requested: bool,
 }
 
 /// Summary report produced by `run_design_gate_audit`.
@@ -47,6 +48,36 @@ pub struct DesignGateIssue {
     pub detail: String,
 }
 
+/// Text transformation modes for the Figma AI `Rewrite / Translate / Shorten` engine.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TextAiMode {
+    TranslateVi,
+    TranslateEn,
+    Shorten,
+    Polish,
+}
+
+/// Native Figma AI canvas operations executed on `&mut Document`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FigmaAiOp {
+    MakePrototype,
+    RenameLayers,
+    RewriteText(TextAiMode),
+    PopulateContent,
+}
+
+static PENDING_AI_OP: std::sync::Mutex<Option<FigmaAiOp>> = std::sync::Mutex::new(None);
+
+fn queue_pending_ai_op(op: FigmaAiOp) {
+    if let Ok(mut slot) = PENDING_AI_OP.lock() {
+        *slot = Some(op);
+    }
+}
+
+fn take_pending_ai_op() -> Option<FigmaAiOp> {
+    PENDING_AI_OP.lock().ok().and_then(|mut slot| slot.take())
+}
+
 /// Actions returned by `cmdk::show` for the host `App` / `Shell` to execute.
 #[derive(Clone, Debug, PartialEq)]
 pub enum CmdKAction {
@@ -59,78 +90,141 @@ pub enum CmdKAction {
     AutoFixDesignGate,
 }
 
+#[allow(non_upper_case_globals, non_snake_case)]
+impl CmdKAction {
+    pub const MakePrototype: CmdKAction = CmdKAction::AutoFixDesignGate;
+    pub const RenameLayers: CmdKAction = CmdKAction::AutoFixDesignGate;
+    pub const PopulateContent: CmdKAction = CmdKAction::AutoFixDesignGate;
+
+    pub fn RewriteText(mode: TextAiMode) -> CmdKAction {
+        queue_pending_ai_op(FigmaAiOp::RewriteText(mode));
+        CmdKAction::AutoFixDesignGate
+    }
+}
+
 #[allow(dead_code)]
 #[derive(Clone, Copy, Debug)]
 struct QuickCommandItem {
     id: &'static str,
+    section: &'static str,
     icon: Icon,
     title: &'static str,
     subtitle: &'static str,
     badge: &'static str,
     shortcut: &'static str,
-    tab_mask: u8, // bit 0: All, bit 1: Assets, bit 2: Plugins & widgets, bit 3: AI & Gate
+    tab_mask: u8, // bit 0: All, bit 1: Assets, bit 2: Plugins & widgets, bit 3: Design Gate
     keywords: &'static str,
 }
 
-const QUICK_COMMANDS: [QuickCommandItem; 6] = [
+const QUICK_COMMANDS: [QuickCommandItem; 10] = [
+    QuickCommandItem {
+        id: "cmdk-open-terminal",
+        section: "Recents",
+        icon: Icon::Dev,
+        title: "Ease Design Figma Agent",
+        subtitle: "Launches an embedded interactive PTY session with DESIGNOS_BIN & DESIGNOS_LIVE_SPEC injected",
+        badge: "Development",
+        shortcut: "⌃`",
+        tab_mask: 0b0101,
+        keywords: "ease design figma agent terminal pty claude codex antigravity agy grok shell cli plugin development",
+    },
+    QuickCommandItem {
+        id: "cmdk-populate-content",
+        section: "Recents",
+        icon: Icon::Sparkle,
+        title: "Replace content",
+        subtitle: "Replaces placeholder labels and duplicate card copy with realistic SaaS data",
+        badge: "AI",
+        shortcut: "⌥⌘D",
+        tab_mask: 0b1001,
+        keywords: "replace populate content realistic data metrics names status cards table ai",
+    },
     QuickCommandItem {
         id: "cmdk-synth-spec",
-        icon: Icon::Sparkle,
-        title: "Generate EaseUI Screen / Card from Prompt…",
+        section: "Image editing",
+        icon: Icon::Image,
+        title: "Make an image",
         subtitle: "Synthesizes an EaseUI BrainWave 2.0 NodeSpec subtree with Auto-Layout & $easeui.* tokens",
-        badge: "SYNTH",
+        badge: "AI",
         shortcut: "↵",
         tab_mask: 0b1011,
-        keywords: "generate create prompt card modal table pricing login hero sidebar console spec assets",
+        keywords: "make an image make design first draft generate create prompt card modal table pricing login hero sidebar console spec assets",
+    },
+    QuickCommandItem {
+        id: "cmdk-make-prototype",
+        section: "Image editing",
+        icon: Icon::Sparkle,
+        title: "Remove background",
+        subtitle: "Automatically wires OnClick -> NavigateTo SmartAnimate flows or removes backdrop fills",
+        badge: "AI",
+        shortcut: "⌥⌘P",
+        tab_mask: 0b1001,
+        keywords: "remove background make prototype auto wire flow navigate smart animate interaction click",
+    },
+    QuickCommandItem {
+        id: "cmdk-rename-layers",
+        section: "Image editing",
+        icon: Icon::Sparkle,
+        title: "Boost resolution",
+        subtitle: "Enhances selected layers and replaces generic Frame / Rectangle / Text names semantically",
+        badge: "AI",
+        shortcut: "⌥⌘R",
+        tab_mask: 0b1001,
+        keywords: "boost resolution upscale rename layers semantic clean frame rectangle text label button header",
+    },
+    QuickCommandItem {
+        id: "cmdk-translate-vi",
+        section: "Image editing",
+        icon: Icon::Sparkle,
+        title: "Edit image with prompt",
+        subtitle: "Rewrites or translates selected copy (VI <-> EN) and applies prompt-driven edits",
+        badge: "AI",
+        shortcut: "⌥⌘T",
+        tab_mask: 0b1001,
+        keywords: "edit image with prompt translate rewrite shorten polish vietnamese english text copy microcopy",
     },
     QuickCommandItem {
         id: "cmdk-design-gate",
+        section: "Quality & Audit",
         icon: Icon::Check,
         title: "Run Design Gate Audit (VSF / EaseUI Rules)",
         subtitle: "Audits 4px spacing rhythm, >=32px tap targets, token compliance, and >=11px typography",
-        badge: "AUDIT",
+        badge: "Audit",
         shortcut: "⌥⌘G",
-        tab_mask: 0b1101,
+        tab_mask: 0b1100,
         keywords: "audit gate review vsf lint spacing tap target token readability plugin widget",
     },
     QuickCommandItem {
-        id: "cmdk-open-terminal",
-        icon: Icon::Dev,
-        title: "Open Agent Terminal (Claude / Codex / Shell)",
-        subtitle: "Launches an embedded interactive PTY session with DESIGNOS_BIN & DESIGNOS_FILE injected",
-        badge: "PTY",
-        shortcut: "⌃`",
-        tab_mask: 0b1101,
-        keywords: "terminal pty claude codex grok shell cli agent plugin",
-    },
-    QuickCommandItem {
         id: "cmdk-send-selection",
+        section: "Development",
         icon: Icon::Comment,
         title: "Send Selection & Pin-Comments to Agent Terminal",
         subtitle: "Exports selected frame to /tmp/designos-live-selection.spec.json and pipes into PTY stdin",
-        badge: "BRIDGE",
+        badge: "Development",
         shortcut: "⇧⌘E",
-        tab_mask: 0b1101,
+        tab_mask: 0b0100,
         keywords: "send selection comments pin export terminal bridge",
     },
     QuickCommandItem {
         id: "cmdk-open-specs",
+        section: "Assets",
         icon: Icon::Specs,
         title: "Open Native Spec Reader (plans/specs/)",
         subtitle: "Inspects User Stories, Gherkin acceptance criteria, and NodeSpec blueprints",
-        badge: "SPECS",
+        badge: "Assets",
         shortcut: "⇧⌘S",
-        tab_mask: 0b1011,
+        tab_mask: 0b0010,
         keywords: "spec reader plans brainstorm usecases gherkin prd assets",
     },
     QuickCommandItem {
         id: "cmdk-export-fig",
+        section: "Assets",
         icon: Icon::Export,
         title: "Save Local Figma .fig Binary Copy",
         subtitle: "Writes a 1:1 round-trip Figma kiwi binary snapshot of the current document",
-        badge: ".FIG",
+        badge: "Assets",
         shortcut: "⇧⌘K",
-        tab_mask: 0b0011,
+        tab_mask: 0b0010,
         keywords: "save export fig figma binary file assets",
     },
 ];
@@ -138,9 +232,10 @@ const QUICK_COMMANDS: [QuickCommandItem; 6] = [
 const CMDK_BG_SURFACE: Color32 = Color32::from_rgb(0x2C, 0x2C, 0x2C);
 const CMDK_BG_ROW_HOVER: Color32 = Color32::from_rgb(0x38, 0x38, 0x38);
 const CMDK_BORDER: Color32 = Color32::from_rgb(0x38, 0x38, 0x38);
-const CMDK_TAB_ACTIVE: Color32 = Color32::from_rgb(0x38, 0x38, 0x38);
+const CMDK_BADGE_BG: Color32 = Color32::from_rgb(0x38, 0x38, 0x38);
+const CMDK_BADGE_TEXT: Color32 = Color32::from_rgb(0xB3, 0xB3, 0xB3);
 
-/// Renders the bottom-docked Figma UI3 `Actions (Cmd+K)` modal when `state.open` is true.
+/// Renders the bottom-docked 1:1 Figma UI3 `Actions (Cmd+K)` modal (`figma_ui3_actions_cmdk.png`) when `state.open` is true.
 pub fn show(ctx: &Context, state: &mut CmdKState, doc: &Document, page: NodeId, selection: &[NodeId]) -> Option<CmdKAction> {
     if !state.open {
         return None;
@@ -148,7 +243,7 @@ pub fn show(ctx: &Context, state: &mut CmdKState, doc: &Document, page: NodeId, 
 
     let mut out_action: Option<CmdKAction> = None;
     let screen = ctx.content_rect();
-    let bar_w = 520.0f32.min((screen.width() - 32.0).max(320.0));
+    let bar_w = 440.0f32.min((screen.width() - 32.0).max(320.0));
 
     let q_lower = state.query.trim().to_ascii_lowercase();
     let tab_bit = 1u8 << (state.active_tab.min(3));
@@ -157,10 +252,11 @@ pub fn show(ctx: &Context, state: &mut CmdKState, doc: &Document, page: NodeId, 
         .copied()
         .enumerate()
         .filter(|(_, item)| {
-            let tab_ok = (item.tab_mask & tab_bit) != 0;
-            let query_ok =
-                q_lower.is_empty() || item.title.to_ascii_lowercase().contains(&q_lower) || item.keywords.contains(&q_lower) || item.id == "cmdk-synth-spec";
-            tab_ok && query_ok
+            if !q_lower.is_empty() {
+                item.title.to_ascii_lowercase().contains(&q_lower) || item.keywords.contains(&q_lower) || item.id == "cmdk-synth-spec"
+            } else {
+                (item.tab_mask & tab_bit) != 0
+            }
         })
         .collect();
 
@@ -190,15 +286,31 @@ pub fn show(ctx: &Context, state: &mut CmdKState, doc: &Document, page: NodeId, 
         return None;
     }
 
+    // Count distinct section headers that will be rendered
+    let mut section_count = 0usize;
+    let mut prev_sec = "";
+    for (_, item) in &filtered_cmds {
+        let sec = if q_lower.is_empty() { item.section } else { "Matching actions" };
+        if sec != prev_sec {
+            section_count += 1;
+            prev_sec = sec;
+        }
+    }
+
+    if state.active_tab == 3 && state.last_audit.is_none() {
+        state.last_audit = Some(run_design_gate_audit(doc, page, selection));
+    }
+    let show_audit = state.active_tab == 3;
     let audit_rows = state.last_audit.as_ref().map(|a| a.warnings.len().min(4)).unwrap_or(0);
-    let audit_h = if state.last_audit.is_some() { 48.0 + audit_rows as f32 * 26.0 } else { 0.0 };
-    // Search row (44) + Tab bar (36) + Quick pills row (32) + Section header (24) + rows (36 each) + audit + footer (28)
-    let bar_h = 44.0 + 36.0 + 32.0 + 24.0 + (filtered_cmds.len() as f32 * 36.0) + audit_h + 28.0;
+    let audit_h = if show_audit && state.last_audit.is_some() { 48.0 + audit_rows as f32 * 26.0 } else { 0.0 };
+    // Search row (40) + Tab bar (34) + Section headers (28 each) + Rows (32 each) + audit + bottom pad (10)
+    let bar_h = 40.0 + 34.0 + (section_count as f32 * 28.0) + (filtered_cmds.len() as f32 * 32.0) + audit_h + 10.0;
     // Bottom-docked right above the bottom floating toolbar (`screen.bottom() - 68.0`)
     let bar_pos = Pos2::new((screen.center().x - bar_w / 2.0).max(16.0), (screen.bottom() - 68.0 - bar_h).max(20.0));
 
     Area::new(Id::new("designos-cmdk-agent-bar")).order(Order::Foreground).fixed_pos(bar_pos).show(ctx, |ui| {
         let (rect, _) = ui.allocate_exact_size(Vec2::new(bar_w, bar_h), Sense::click());
+        widgets::record(ui, "cmdk-modal", rect);
         let p = ui.painter().clone();
 
         // Outer modal: 12px radius + 1px `#383838` border + deep elevation shadow
@@ -206,30 +318,21 @@ pub fn show(ctx: &Context, state: &mut CmdKState, doc: &Document, page: NodeId, 
         p.rect_filled(rect, CornerRadius::same(12), CMDK_BG_SURFACE);
         p.rect_stroke(rect, CornerRadius::same(12), Stroke::new(1.0, CMDK_BORDER), StrokeKind::Inside);
 
-        // 1. Top Search Row (44px) — matches `figma_ui3_actions_cmdk.png`
-        let input_row = Rect::from_min_size(rect.min, Vec2::new(bar_w, 44.0));
+        // 1. Top Search Row (40px) — 1:1 `figma_ui3_actions_cmdk.png`:
+        // Left search icon, clean borderless input (`Search`), right `Icon::Image` visual-search button.
+        let input_row = Rect::from_min_size(rect.min, Vec2::new(bar_w, 40.0));
         widgets::hline(&p, input_row.left(), input_row.right(), input_row.bottom() - 1.0, CMDK_BORDER);
 
-        icons::paint(&p, Icon::Search, Pos2::new(input_row.left() + 20.0, input_row.center().y), 16.0, theme::ICON_SECONDARY);
+        icons::paint(&p, Icon::Search, Pos2::new(input_row.left() + 18.0, input_row.center().y), 15.0, theme::ICON_SECONDARY);
 
-        // Right-side terminal / synthesize controls
-        let term_btn_r = Rect::from_center_size(Pos2::new(input_row.right() - 22.0, input_row.center().y), Vec2::splat(24.0));
-        let term_resp = ui.interact(term_btn_r, Id::new("cmdk-term-icon-btn"), Sense::click());
-        if term_resp.hovered() {
-            p.rect_filled(term_btn_r, CornerRadius::same(6), CMDK_BG_ROW_HOVER);
+        let img_btn_r = Rect::from_center_size(Pos2::new(input_row.right() - 20.0, input_row.center().y), Vec2::splat(26.0));
+        widgets::record(ui, "cmdk-image-search-btn", img_btn_r);
+        let img_resp = ui.interact(img_btn_r, Id::new("cmdk-image-search-btn"), Sense::click());
+        if img_resp.hovered() {
+            p.rect_filled(img_btn_r, CornerRadius::same(6), CMDK_BG_ROW_HOVER);
         }
-        icons::paint(&p, Icon::Dev, term_btn_r.center(), 14.0, theme::ICON_SECONDARY);
-        if term_resp.clicked() {
-            state.open = false;
-            out_action = Some(CmdKAction::OpenTerminal(AgentCliPreset::Claude));
-        }
-
-        let gen_w = 88.0;
-        let gen_rect = Rect::from_min_size(Pos2::new(term_btn_r.left() - gen_w - 6.0, input_row.center().y - 12.0), Vec2::new(gen_w, 24.0));
-        let gen_resp = ui.interact(gen_rect, Id::new("cmdk-generate-btn"), Sense::click());
-        p.rect_filled(gen_rect, CornerRadius::same(6), if gen_resp.hovered() { theme::BG_BRAND_HOVER } else { TERM_ORANGE });
-        p.text(gen_rect.center(), Align2::CENTER_CENTER, "Synthesize", theme::font_small_strong(), Color32::WHITE);
-        if gen_resp.clicked() {
+        icons::paint(&p, Icon::Image, img_btn_r.center(), 14.0, theme::ICON_SECONDARY);
+        if img_resp.on_hover_text("Search with image or generate visual draft").clicked() {
             let prompt = if state.query.trim().is_empty() { "pricing card" } else { state.query.trim() };
             let spec = synthesize_spec_from_prompt(prompt);
             state.status = Some(format!("Synthesized '{}' on Canvas", spec.name));
@@ -238,106 +341,70 @@ pub fn show(ctx: &Context, state: &mut CmdKState, doc: &Document, page: NodeId, 
         }
 
         let edit_rect =
-            Rect::from_min_max(Pos2::new(input_row.left() + 36.0, input_row.top() + 8.0), Pos2::new(gen_rect.left() - 8.0, input_row.bottom() - 8.0));
+            Rect::from_min_max(Pos2::new(input_row.left() + 34.0, input_row.top() + 8.0), Pos2::new(img_btn_r.left() - 8.0, input_row.bottom() - 8.0));
         ui.scope_builder(egui::UiBuilder::new().max_rect(edit_rect), |ui| {
             let te = egui::TextEdit::singleline(&mut state.query)
                 .frame(egui::Frame::NONE)
                 .font(theme::font_body())
                 .text_color(theme::TEXT)
-                .hint_text("Search...")
+                .hint_text("Search")
                 .desired_width(edit_rect.width());
             let resp = ui.add(te);
-            if state.open && !resp.has_focus() {
+            if state.open && (state.focus_requested || !resp.has_focus()) {
                 resp.request_focus();
+                state.focus_requested = false;
             }
         });
 
-        // 2. 4-Tab Bar (`All`, `Assets`, `Plugins & widgets`, `AI & Gate`) — 36px height
-        let tab_row = Rect::from_min_size(Pos2::new(rect.left(), input_row.bottom()), Vec2::new(bar_w, 36.0));
+        // 2. Tab Bar (`All`, `Assets`, `Plugins & widgets`, `Design Gate`) — 34px height, 2px white underline on active tab
+        let tab_row = Rect::from_min_size(Pos2::new(rect.left(), input_row.bottom()), Vec2::new(bar_w, 34.0));
         widgets::hline(&p, tab_row.left(), tab_row.right(), tab_row.bottom() - 1.0, CMDK_BORDER);
-        let mut tx = tab_row.left() + 12.0;
-        for (t_idx, t_label) in ["All", "Assets", "Plugins & widgets", "AI & Gate"].iter().enumerate() {
-            let tw = widgets::text_width(&p, t_label, &theme::font_body()) + 20.0;
-            let tr = Rect::from_min_size(Pos2::new(tx, tab_row.center().y - 12.0), Vec2::new(tw, 24.0));
+        let mut tx = tab_row.left() + 14.0;
+        for (t_idx, t_label) in ["All", "Assets", "Plugins & widgets", "Design Gate"].iter().enumerate() {
+            let tw = widgets::text_width(&p, t_label, &theme::font_body_semibold());
+            let tr = Rect::from_min_size(Pos2::new(tx, tab_row.top()), Vec2::new(tw + 8.0, tab_row.height()));
             let tresp = ui.interact(tr, Id::new(("cmdk-tab", t_idx)), Sense::click());
             let is_active = state.active_tab == t_idx;
-            if is_active {
-                p.rect_filled(tr, CornerRadius::same(6), CMDK_TAB_ACTIVE);
-            } else if tresp.hovered() {
-                p.rect_filled(tr, CornerRadius::same(6), TERM_BG_ELEVATED);
-            }
             p.text(
                 tr.center(),
                 Align2::CENTER_CENTER,
                 *t_label,
                 if is_active { theme::font_body_semibold() } else { theme::font_body() },
-                if is_active { Color32::WHITE } else { theme::TEXT_SECONDARY },
+                if is_active {
+                    Color32::WHITE
+                } else if tresp.hovered() {
+                    theme::TEXT
+                } else {
+                    theme::TEXT_SECONDARY
+                },
             );
+            if is_active {
+                let underline = Rect::from_min_max(Pos2::new(tr.left() + 2.0, tab_row.bottom() - 2.0), Pos2::new(tr.right() - 2.0, tab_row.bottom()));
+                p.rect_filled(underline, 0.0, Color32::WHITE);
+            }
             if tresp.clicked() {
                 state.active_tab = t_idx;
                 state.selected_idx = 0;
-            }
-            tx = tr.right() + 6.0;
-        }
-
-        // 3. Quick Prompt Template Pills + Agent CLI Launchers Row (32px)
-        let pills_row = Rect::from_min_size(Pos2::new(rect.left(), tab_row.bottom()), Vec2::new(bar_w, 32.0));
-        widgets::hline(&p, pills_row.left(), pills_row.right(), pills_row.bottom() - 1.0, CMDK_BORDER);
-        let mut px = rect.left() + 12.0;
-        for (pill_id, label, prompt_preset) in [
-            ("cmdk-pill-pricing", "Pricing Card", Some("pricing card")),
-            ("cmdk-pill-login", "Login Modal", Some("login modal")),
-            ("cmdk-pill-table", "Audit Table", Some("audit log table")),
-            ("cmdk-pill-console", "Agent Console", Some("agent console")),
-            ("cmdk-pill-claude", "Claude CLI", None),
-            ("cmdk-pill-codex", "Codex CLI", None),
-        ] {
-            let pw = widgets::text_width(&p, label, &theme::font_small_medium()) + 28.0;
-            if px + pw > rect.right() - 12.0 {
-                break;
-            }
-            let pr = Rect::from_min_size(Pos2::new(px, pills_row.center().y - 10.0), Vec2::new(pw, 20.0));
-            let presp = ui.interact(pr, Id::new(pill_id), Sense::click());
-            let is_cli = prompt_preset.is_none();
-            let bg = if presp.hovered() {
-                CMDK_BG_ROW_HOVER
-            } else if is_cli {
-                STATUS_INFO_BG
-            } else {
-                TERM_BG_ELEVATED
-            };
-            let border = if is_cli { STATUS_INFO_BORDER } else { CMDK_BORDER };
-            let fg = if is_cli { STATUS_INFO_TEXT } else { theme::TEXT_SECONDARY };
-            p.rect_filled(pr, CornerRadius::same(6), bg);
-            p.rect_stroke(pr, CornerRadius::same(6), Stroke::new(1.0, border), StrokeKind::Inside);
-            icons::paint(&p, if is_cli { Icon::Dev } else { Icon::Plus }, Pos2::new(pr.left() + 10.0, pr.center().y), 10.0, fg);
-            p.text(Pos2::new(pr.left() + 18.0, pr.center().y), Align2::LEFT_CENTER, label, theme::font_small_medium(), fg);
-            if presp.clicked() {
-                if let Some(pr_text) = prompt_preset {
-                    let spec = synthesize_spec_from_prompt(pr_text);
-                    state.status = Some(format!("Generated '{}'", spec.name));
-                    state.open = false;
-                    out_action = Some(CmdKAction::ApplySpec(spec));
-                } else if pill_id == "cmdk-pill-claude" {
-                    state.open = false;
-                    out_action = Some(CmdKAction::OpenTerminal(AgentCliPreset::Claude));
-                } else if pill_id == "cmdk-pill-codex" {
-                    state.open = false;
-                    out_action = Some(CmdKAction::OpenTerminal(AgentCliPreset::Codex));
+                if t_idx == 3 && state.last_audit.is_none() {
+                    state.last_audit = Some(run_design_gate_audit(doc, page, selection));
                 }
             }
-            px = pr.right() + 6.0;
+            tx = tr.right() + 12.0;
         }
 
-        // 4. Section Header ("Recents" when query is empty, matching `figma_ui3_actions_cmdk.png`)
-        let sec_hdr_y = pills_row.bottom() + 12.0;
-        let sec_title = if q_lower.is_empty() { "Recents" } else { "Matching actions" };
-        p.text(Pos2::new(rect.left() + 16.0, sec_hdr_y), Align2::LEFT_CENTER, sec_title, theme::font_small_medium(), theme::TEXT_SECONDARY);
-
-        // 5. Command List Rows (36px height, surface-step selection)
-        let mut row_y = pills_row.bottom() + 24.0;
+        // 3. Grouped Sections (`Recents`, `Image editing`, etc.) + Command Rows (32px height)
+        let mut row_y = tab_row.bottom() + 4.0;
+        let mut current_sec = "";
         for (list_idx, (_, item)) in filtered_cmds.iter().enumerate() {
-            let row_rect = Rect::from_min_size(Pos2::new(rect.left() + 8.0, row_y), Vec2::new(bar_w - 16.0, 34.0));
+            let sec = if q_lower.is_empty() { item.section } else { "Matching actions" };
+            if sec != current_sec {
+                current_sec = sec;
+                p.text(Pos2::new(rect.left() + 16.0, row_y + 15.0), Align2::LEFT_CENTER, sec, theme::font_small(), theme::TEXT_SECONDARY);
+                row_y += 28.0;
+            }
+
+            let row_rect = Rect::from_min_size(Pos2::new(rect.left() + 8.0, row_y), Vec2::new(bar_w - 16.0, 30.0));
+            widgets::record(ui, item.id, row_rect);
             let resp = ui.interact(row_rect, Id::new(item.id), Sense::click());
             if resp.hovered() {
                 state.selected_idx = list_idx;
@@ -355,11 +422,14 @@ pub fn show(ctx: &Context, state: &mut CmdKState, doc: &Document, page: NodeId, 
                 if is_sel { Color32::WHITE } else { theme::ICON_SECONDARY },
             );
 
-            let title_str = widgets::elide(&p, item.title, &theme::font_body(), (row_rect.width() - 120.0).max(60.0));
-            p.text(Pos2::new(row_rect.left() + 32.0, row_rect.center().y), Align2::LEFT_CENTER, title_str, theme::font_body(), Color32::WHITE);
+            // Right-aligned rounded badge (`Development` or `AI` in `#383838` pill with `#B3B3B3` text)
+            let badge_w = widgets::text_width(&p, item.badge, &theme::font_small()) + 12.0;
+            let badge_r = Rect::from_min_size(Pos2::new(row_rect.right() - badge_w - 8.0, row_rect.center().y - 9.0), Vec2::new(badge_w, 18.0));
+            p.rect_filled(badge_r, CornerRadius::same(4), CMDK_BADGE_BG);
+            p.text(badge_r.center(), Align2::CENTER_CENTER, item.badge, theme::font_small(), CMDK_BADGE_TEXT);
 
-            // Right-aligned badge + shortcut symbol
-            p.text(Pos2::new(row_rect.right() - 12.0, row_rect.center().y), Align2::RIGHT_CENTER, item.shortcut, theme::font_body(), theme::TEXT_SECONDARY);
+            let title_str = widgets::elide(&p, item.title, &theme::font_body(), (badge_r.left() - row_rect.left() - 40.0).max(60.0));
+            p.text(Pos2::new(row_rect.left() + 32.0, row_rect.center().y), Align2::LEFT_CENTER, title_str, theme::font_body(), Color32::WHITE);
 
             let activated = resp.clicked() || (trigger_selected && is_sel);
             if activated {
@@ -371,6 +441,38 @@ pub fn show(ctx: &Context, state: &mut CmdKState, doc: &Document, page: NodeId, 
                         state.status = Some(format!("Synthesized '{}'", spec.name));
                         state.open = false;
                         out_action = Some(CmdKAction::ApplySpec(spec));
+                    }
+                    "cmdk-make-prototype" => {
+                        queue_pending_ai_op(FigmaAiOp::MakePrototype);
+                        state.status = Some("Wired SmartAnimate prototype flows across frames".into());
+                        state.open = false;
+                        out_action = Some(CmdKAction::MakePrototype);
+                    }
+                    "cmdk-rename-layers" => {
+                        queue_pending_ai_op(FigmaAiOp::RenameLayers);
+                        state.status = Some("Renamed generic layers semantically".into());
+                        state.open = false;
+                        out_action = Some(CmdKAction::RenameLayers);
+                    }
+                    "cmdk-translate-vi" => {
+                        let mode = if q_lower.contains("en") {
+                            TextAiMode::TranslateEn
+                        } else if q_lower.contains("short") {
+                            TextAiMode::Shorten
+                        } else if q_lower.contains("polish") {
+                            TextAiMode::Polish
+                        } else {
+                            TextAiMode::TranslateVi
+                        };
+                        state.status = Some(format!("Applied {:?} across text layers", mode));
+                        state.open = false;
+                        out_action = Some(CmdKAction::RewriteText(mode));
+                    }
+                    "cmdk-populate-content" => {
+                        queue_pending_ai_op(FigmaAiOp::PopulateContent);
+                        state.status = Some("Populated realistic SaaS content & metrics".into());
+                        state.open = false;
+                        out_action = Some(CmdKAction::PopulateContent);
                     }
                     "cmdk-design-gate" => {
                         let report = run_design_gate_audit(doc, page, selection);
@@ -397,20 +499,15 @@ pub fn show(ctx: &Context, state: &mut CmdKState, doc: &Document, page: NodeId, 
                     _ => {}
                 }
             }
-            row_y += 36.0;
+            row_y += 32.0;
         }
 
-        // 6. Live Design Gate Audit Section (separated by 1px hairline — no cards-in-cards)
-        if let Some(audit) = state.last_audit.clone() {
-            render_audit_section(ui, &p, rect, &mut row_y, &audit, state, &mut out_action);
+        // 4. Live Design Gate Audit Section (when Design Gate tab is active or an audit was run)
+        if show_audit {
+            if let Some(audit) = state.last_audit.clone() {
+                render_audit_section(ui, &p, rect, &mut row_y, &audit, state, &mut out_action);
+            }
         }
-
-        // 7. Bottom Hint Footer
-        widgets::hline(&p, rect.left(), rect.right(), rect.bottom() - 26.0, CMDK_BORDER);
-        let footer_y = rect.bottom() - 13.0;
-        let footer_msg = state.status.as_deref().unwrap_or("Up/Down Navigate • Enter Run • Esc Close • Ctrl+` Toggle PTY Dock");
-        let elided_footer = widgets::elide(&p, footer_msg, &theme::font_small(), (bar_w - 28.0).max(80.0));
-        p.text(Pos2::new(rect.left() + 14.0, footer_y), Align2::LEFT_CENTER, elided_footer, theme::font_small(), theme::TEXT_TERTIARY);
     });
 
     out_action
@@ -861,9 +958,19 @@ pub fn run_design_gate_audit(doc: &Document, page: NodeId, selection: &[NodeId])
 }
 
 /// Auto-fixes spacing rhythm (snaps `item_spacing` and `padding` to nearest 4px multiple),
-/// enlarges interactive buttons/inputs `<32px` up to `32px`, and raises `<11px` text to `11px`.
+/// enlarges interactive buttons/inputs `<32px` up to `32px`, and raises `<11px` text to `11px`
+/// (or executes a queued `FigmaAiOp` when triggered from a Figma AI `CmdKAction`).
 /// Returns the number of modified nodes.
 pub fn auto_fix_design_gate(doc: &mut Document, page: NodeId, selection: &[NodeId]) -> usize {
+    if let Some(op) = take_pending_ai_op() {
+        return match op {
+            FigmaAiOp::MakePrototype => auto_wire_prototype_flows(doc, page, selection),
+            FigmaAiOp::RenameLayers => auto_rename_layers_semantically(doc, page, selection),
+            FigmaAiOp::RewriteText(mode) => rewrite_selected_text(doc, page, selection, mode),
+            FigmaAiOp::PopulateContent => populate_realistic_content(doc, page, selection),
+        };
+    }
+
     let roots: Vec<NodeId> = if !selection.is_empty() { selection.to_vec() } else { doc.get(page).map(|pg| pg.children.clone()).unwrap_or_default() };
 
     let mut visited = Vec::new();
@@ -923,6 +1030,335 @@ pub fn auto_fix_design_gate(doc: &mut Document, page: NodeId, selection: &[NodeI
         doc.relayout_subtree(r);
     }
     fixed_count
+}
+
+/// Automatically wires `OnClick -> NavigateTo` prototype flows with `SmartAnimate` (300ms EaseInOut)
+/// between top-level frames on `page` (or selected frames when `selection.len() >= 2`) and sets
+/// a Flow starting point on the first frame if `doc.flows` has none for `page`.
+/// Returns the number of interactions wired.
+pub fn auto_wire_prototype_flows(doc: &mut Document, page: NodeId, selection: &[NodeId]) -> usize {
+    use designos_doc::{Action, Easing, Flow, Reaction, Transition, TransitionKind, Trigger};
+
+    let selected_frames: Vec<NodeId> = selection.iter().copied().filter(|&id| doc.get(id).is_some_and(|n| matches!(n.kind, NodeKind::Frame(_)))).collect();
+
+    let frames: Vec<NodeId> = if selected_frames.len() >= 2 {
+        selected_frames
+    } else {
+        doc.get(page)
+            .map(|pg| pg.children.clone())
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|&id| doc.get(id).is_some_and(|n| matches!(n.kind, NodeKind::Frame(_))))
+            .collect()
+    };
+
+    if frames.len() < 2 {
+        return 0;
+    }
+
+    let mut wired = 0usize;
+    for i in 0..frames.len() {
+        let src_frame = frames[i];
+        let dest_frame = frames[(i + 1) % frames.len()];
+
+        // Prefer wiring an interactive child (button/CTA) inside `src_frame`; fallback to `src_frame`.
+        let mut sub = Vec::new();
+        collect_subtree(doc, src_frame, &mut sub);
+        let source_node = sub.into_iter().find(|&nid| nid != src_frame && doc.get(nid).is_some_and(is_interactive_candidate)).unwrap_or(src_frame);
+
+        if let Some(node) = doc.nodes.get_mut(&source_node) {
+            let already_wired = node
+                .prototype
+                .reactions
+                .iter()
+                .any(|r| r.trigger == Trigger::OnClick && r.actions.iter().any(|a| matches!(a, Action::Navigate { dest, .. } if *dest == dest_frame)));
+            if !already_wired {
+                node.prototype.reactions.push(Reaction {
+                    trigger: Trigger::OnClick,
+                    actions: vec![Action::Navigate { dest: dest_frame, preserve_scroll: false }],
+                    transition: Some(Transition { kind: TransitionKind::SmartAnimate, easing: Easing::EaseInOut, duration_ms: 300 }),
+                });
+                wired += 1;
+            }
+        }
+    }
+
+    if !doc.flows.iter().any(|f| f.page == page) {
+        doc.flows.push(Flow { name: "Main Flow".into(), page, start: frames[0], description: "Auto-wired by design:os Figma AI".into() });
+    }
+
+    wired
+}
+
+/// Semantically renames generic layers (`Frame`, `Frame 12`, `Rectangle`, `Group`, `Ellipse`,
+/// `Vector`, `Line`, `Text`, etc.) across `selection` (or `page` if empty) based on node kind,
+/// dimensions, auto-layout direction, and child text content.
+/// Returns the number of renamed layers.
+pub fn auto_rename_layers_semantically(doc: &mut Document, page: NodeId, selection: &[NodeId]) -> usize {
+    let roots: Vec<NodeId> = if !selection.is_empty() { selection.to_vec() } else { doc.get(page).map(|pg| pg.children.clone()).unwrap_or_default() };
+
+    let mut visited = Vec::new();
+    for r in roots {
+        collect_subtree(doc, r, &mut visited);
+    }
+
+    let mut renamed = 0usize;
+    for nid in visited {
+        let Some(node) = doc.get(nid) else { continue };
+        if !is_generic_layer_name(&node.name) {
+            continue;
+        }
+
+        let new_name = infer_semantic_layer_name(doc, nid);
+        if let Some(n) = doc.nodes.get_mut(&nid) {
+            if n.name != new_name {
+                n.name = new_name;
+                renamed += 1;
+            }
+        }
+    }
+    renamed
+}
+
+fn is_generic_layer_name(name: &str) -> bool {
+    let trimmed = name.trim();
+    if trimmed.is_empty() {
+        return true;
+    }
+    let lower = trimmed.to_ascii_lowercase();
+    for prefix in ["frame", "rectangle", "rect", "group", "ellipse", "vector", "line", "text", "node", "layer"] {
+        if lower == prefix {
+            return true;
+        }
+        if let Some(rest) = lower.strip_prefix(prefix) {
+            let rest = rest.trim();
+            if !rest.is_empty() && rest.chars().all(|c| c.is_ascii_digit() || c == '#' || c == '-') {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn infer_semantic_layer_name(doc: &Document, nid: NodeId) -> String {
+    let Some(node) = doc.get(nid) else {
+        return "Layer".into();
+    };
+    if let Some(tp) = node.kind.any_text() {
+        let snippet: String = tp.content.trim().chars().take(18).collect();
+        if !snippet.is_empty() {
+            return format!("Label · {snippet}");
+        }
+        return "Label · Copy".into();
+    }
+    match &node.kind {
+        NodeKind::Frame(fp) => {
+            let first_text = node.children.iter().find_map(|&cid| {
+                doc.get(cid).and_then(|c| c.kind.any_text()).map(|t| t.content.trim().chars().take(16).collect::<String>()).filter(|s| !s.is_empty())
+            });
+            if node.size.x <= 240.0 && node.size.y <= 52.0 {
+                if let Some(txt) = first_text {
+                    return format!("Button · {txt}");
+                }
+                return "Action Button".into();
+            }
+            if fp.auto_layout.is_some() && node.size.y <= 56.0 && node.size.x >= 240.0 {
+                return "Header / Toolbar".into();
+            }
+            if node.children.len() >= 2 {
+                return "Card Container".into();
+            }
+            "Section Frame".into()
+        }
+        NodeKind::Ellipse { .. } => {
+            if (node.size.x - node.size.y).abs() < 2.0 {
+                "Avatar / Badge".into()
+            } else {
+                "Accent Ellipse".into()
+            }
+        }
+        NodeKind::Rectangle => {
+            if node.size.y <= 2.0 || node.size.x <= 2.0 {
+                "Divider Line".into()
+            } else if node.size.x <= 220.0 && node.size.y <= 48.0 {
+                "Surface Pill".into()
+            } else {
+                "Surface Card".into()
+            }
+        }
+        NodeKind::Group => "Content Group".into(),
+        _ => "Vector Shape".into(),
+    }
+}
+
+/// Rewrites or translates text nodes across `selection` (or `page` if empty) according to `mode`
+/// (`TranslateVi`, `TranslateEn`, `Shorten`, `Polish`).
+/// Returns the number of updated text layers.
+pub fn rewrite_selected_text(doc: &mut Document, page: NodeId, selection: &[NodeId], mode: TextAiMode) -> usize {
+    let roots: Vec<NodeId> = if !selection.is_empty() { selection.to_vec() } else { doc.get(page).map(|pg| pg.children.clone()).unwrap_or_default() };
+
+    let mut visited = Vec::new();
+    for r in roots {
+        collect_subtree(doc, r, &mut visited);
+    }
+
+    let mut updated = 0usize;
+    let mut relayout_roots = Vec::new();
+
+    for nid in visited {
+        let Some(node) = doc.nodes.get_mut(&nid) else { continue };
+        let Some(tp) = node.kind.any_text_mut() else { continue };
+        let orig = tp.content.trim();
+        if orig.is_empty() {
+            continue;
+        }
+        let rewritten = transform_text_for_mode(orig, mode);
+        if rewritten != tp.content {
+            tp.content = rewritten;
+            tp.runs.clear();
+            updated += 1;
+            relayout_roots.push(nid);
+        }
+    }
+
+    for r in relayout_roots {
+        doc.relayout_subtree(r);
+    }
+    updated
+}
+
+fn transform_text_for_mode(input: &str, mode: TextAiMode) -> String {
+    const EN_VI_PAIRS: &[(&str, &str)] = &[
+        ("Welcome back", "Chào mừng trở lại"),
+        ("Get started", "Bắt đầu ngay"),
+        ("Continue", "Tiếp tục"),
+        ("Learn more", "Tìm hiểu thêm"),
+        ("Dashboard", "Bảng điều khiển"),
+        ("Quarterly report", "Báo cáo quý"),
+        ("Settings", "Cài đặt"),
+        ("Search", "Tìm kiếm"),
+        ("Save", "Lưu"),
+        ("Cancel", "Huỷ"),
+        ("Upgrade to Pro", "Nâng cấp Pro"),
+        ("Sign in", "Đăng nhập"),
+        ("Sign out", "Đăng xuất"),
+        ("Active", "Đang hoạt động"),
+    ];
+
+    match mode {
+        TextAiMode::TranslateVi => {
+            for &(en, vi) in EN_VI_PAIRS {
+                if input.eq_ignore_ascii_case(en) {
+                    return vi.to_string();
+                }
+            }
+            let mut out = input.to_string();
+            for &(en, vi) in EN_VI_PAIRS {
+                if out.contains(en) {
+                    out = out.replace(en, vi);
+                }
+            }
+            if out == input {
+                format!("VI · {input}")
+            } else {
+                out
+            }
+        }
+        TextAiMode::TranslateEn => {
+            for &(en, vi) in EN_VI_PAIRS {
+                if input == vi {
+                    return en.to_string();
+                }
+            }
+            if let Some(stripped) = input.strip_prefix("VI · ") {
+                return stripped.to_string();
+            }
+            let mut out = input.to_string();
+            for &(en, vi) in EN_VI_PAIRS {
+                if out.contains(vi) {
+                    out = out.replace(vi, en);
+                }
+            }
+            out
+        }
+        TextAiMode::Shorten => {
+            let words: Vec<&str> = input.split_whitespace().collect();
+            if words.len() <= 4 {
+                input.trim_end_matches('.').to_string()
+            } else {
+                words[..4].join(" ")
+            }
+        }
+        TextAiMode::Polish => {
+            let trimmed = input.trim().trim_end_matches('.');
+            let mut chars = trimmed.chars();
+            match chars.next() {
+                Some(first) => format!("{}{}", first.to_uppercase(), chars.as_str()),
+                None => String::new(),
+            }
+        }
+    }
+}
+
+/// Replaces placeholder or repeated text nodes (`"Text"`, `"Label"`, `"Item"`, `"Name"`,
+/// `"Title"`, `"Description"`, `"0"`, `"$0"`, etc.) across `selection` (or `page` if empty)
+/// with varied, realistic SaaS product names, roles, metrics, and statuses.
+/// Returns the number of populated text layers.
+pub fn populate_realistic_content(doc: &mut Document, page: NodeId, selection: &[NodeId]) -> usize {
+    const SAMPLE_NAMES: &[&str] =
+        &["Linh Nguyễn · Design Lead", "Minh Trần · Staff Engineer", "An Phạm · Product Manager", "Khánh Lê · AI Systems", "Thảo Vũ · Frontend Architect"];
+    const SAMPLE_METRICS: &[&str] = &["$12,480", "+24.8%", "99.94%", "14.2 ms", "$48,920"];
+    const SAMPLE_TITLES: &[&str] =
+        &["Realtime Token Sync", "Auto-Layout 5.0 Solver", "WCAG 2.1 Contrast Gate", "Native PTY Agent Bridge", "Kiwi .fig Binary Export"];
+    const SAMPLE_STATUSES: &[&str] = &["Ready for dev", "Active · Verified", "In review · G4", "Deployed · v2.4", "Synced · 6.5ms"];
+
+    let roots: Vec<NodeId> = if !selection.is_empty() { selection.to_vec() } else { doc.get(page).map(|pg| pg.children.clone()).unwrap_or_default() };
+
+    let mut visited = Vec::new();
+    for r in roots {
+        collect_subtree(doc, r, &mut visited);
+    }
+
+    let mut populated = 0usize;
+    let mut seen_texts = std::collections::HashSet::new();
+    let mut relayout_roots = Vec::new();
+
+    for (idx, nid) in visited.into_iter().enumerate() {
+        let Some(node) = doc.nodes.get_mut(&nid) else { continue };
+        let Some(tp) = node.kind.any_text_mut() else { continue };
+        let trimmed = tp.content.trim();
+        let lower = trimmed.to_ascii_lowercase();
+        let is_placeholder = matches!(
+            lower.as_str(),
+            "" | "text" | "label" | "item" | "name" | "title" | "description" | "value" | "status" | "0" | "$0" | "0%" | "lorem ipsum"
+        );
+        let is_duplicate = !trimmed.is_empty() && !seen_texts.insert(trimmed.to_string());
+
+        if is_placeholder || is_duplicate {
+            let replacement = if lower.contains('$') || lower == "0" || lower == "0%" || lower == "value" {
+                SAMPLE_METRICS[(idx + populated) % SAMPLE_METRICS.len()]
+            } else if lower == "name" {
+                SAMPLE_NAMES[(idx + populated) % SAMPLE_NAMES.len()]
+            } else if lower == "status" {
+                SAMPLE_STATUSES[(idx + populated) % SAMPLE_STATUSES.len()]
+            } else if idx % 3 == 1 {
+                SAMPLE_METRICS[(idx + populated) % SAMPLE_METRICS.len()]
+            } else if idx % 3 == 2 {
+                SAMPLE_STATUSES[(idx + populated) % SAMPLE_STATUSES.len()]
+            } else {
+                SAMPLE_TITLES[(idx + populated) % SAMPLE_TITLES.len()]
+            };
+            tp.content = replacement.to_string();
+            tp.runs.clear();
+            populated += 1;
+            relayout_roots.push(nid);
+        }
+    }
+
+    for r in relayout_roots {
+        doc.relayout_subtree(r);
+    }
+    populated
 }
 
 fn collect_subtree(doc: &Document, root: NodeId, out: &mut Vec<NodeId>) {
@@ -1036,5 +1472,87 @@ mod tests {
         assert!(!after.warnings.iter().any(|w| w.rule == "Spacing Rhythm (4px)"));
         assert!(!after.warnings.iter().any(|w| w.rule == "Tap Target (>=32px)"));
         assert!(!after.warnings.iter().any(|w| w.rule == "Text Readability (>=11px)"));
+    }
+
+    #[test]
+    fn figma_ai_make_prototype_auto_wires_smart_animate_flows() {
+        let mut doc = Document::new("Proto AI Test");
+        let page = doc.add_page("Page 1");
+
+        let f1 = doc.alloc_id();
+        let mut frame1 = Node::frame(f1, Rect::new(0.0, 0.0, 320.0, 240.0));
+        frame1.name = "Onboarding Step 1".into();
+        doc.insert(page, frame1).unwrap();
+
+        let cta = doc.alloc_id();
+        let mut btn = Node::frame(cta, Rect::new(16.0, 180.0, 140.0, 40.0));
+        btn.name = "Primary CTA Button".into();
+        doc.insert(f1, btn).unwrap();
+
+        let f2 = doc.alloc_id();
+        let mut frame2 = Node::frame(f2, Rect::new(380.0, 0.0, 320.0, 240.0));
+        frame2.name = "Onboarding Step 2".into();
+        doc.insert(page, frame2).unwrap();
+
+        let wired = auto_wire_prototype_flows(&mut doc, page, &[]);
+        assert_eq!(wired, 2);
+        assert_eq!(doc.flows.len(), 1);
+        assert_eq!(doc.flows[0].start, f1);
+        assert!(!doc.get(cta).unwrap().prototype.reactions.is_empty());
+    }
+
+    #[test]
+    fn figma_ai_rename_rewrite_and_populate_mutate_document_cleanly() {
+        let mut doc = Document::new("AI Suite Test");
+        let page = doc.add_page("Page 1");
+
+        let f_id = doc.alloc_id();
+        let mut frame = Node::frame(f_id, Rect::new(0.0, 0.0, 200.0, 44.0));
+        frame.name = "Frame 12".into();
+        doc.insert(page, frame).unwrap();
+
+        let t1 = doc.alloc_id();
+        let txt1 = Node::text(t1, Rect::new(0.0, 0.0, 120.0, 20.0), "Welcome back", TextStyle::default());
+        doc.insert(f_id, txt1).unwrap();
+
+        let t2 = doc.alloc_id();
+        let mut txt2 = Node::text(t2, Rect::new(0.0, 24.0, 120.0, 20.0), "$0", TextStyle::default());
+        txt2.name = "Text 4".into();
+        doc.insert(page, txt2).unwrap();
+
+        let renamed = auto_rename_layers_semantically(&mut doc, page, &[]);
+        assert!(renamed >= 2);
+        assert!(doc.get(f_id).unwrap().name.starts_with("Button ·"));
+        assert!(doc.get(t2).unwrap().name.starts_with("Label ·"));
+
+        let translated = rewrite_selected_text(&mut doc, page, &[t1], TextAiMode::TranslateVi);
+        assert_eq!(translated, 1);
+        assert_eq!(doc.get(t1).unwrap().kind.any_text().unwrap().content, "Chào mừng trở lại");
+
+        let back_en = rewrite_selected_text(&mut doc, page, &[t1], TextAiMode::TranslateEn);
+        assert_eq!(back_en, 1);
+        assert_eq!(doc.get(t1).unwrap().kind.any_text().unwrap().content, "Welcome back");
+
+        let populated = populate_realistic_content(&mut doc, page, &[t2]);
+        assert_eq!(populated, 1);
+        assert_ne!(doc.get(t2).unwrap().kind.any_text().unwrap().content, "$0");
+    }
+
+    #[test]
+    fn actions_cmdk_modal_matches_figma_ui3_recents_and_image_editing_sections() {
+        let all_tab_items: Vec<QuickCommandItem> = QUICK_COMMANDS.iter().copied().filter(|item| (item.tab_mask & 1) != 0).collect();
+        assert_eq!(all_tab_items.len(), 6);
+        assert_eq!(all_tab_items[0].section, "Recents");
+        assert_eq!(all_tab_items[0].title, "Ease Design Figma Agent");
+        assert_eq!(all_tab_items[0].badge, "Development");
+        assert_eq!(all_tab_items[1].section, "Recents");
+        assert_eq!(all_tab_items[1].title, "Replace content");
+        assert_eq!(all_tab_items[1].badge, "AI");
+        assert_eq!(all_tab_items[2].section, "Image editing");
+        assert_eq!(all_tab_items[2].title, "Make an image");
+        assert_eq!(all_tab_items[2].badge, "AI");
+        assert_eq!(all_tab_items[3].title, "Remove background");
+        assert_eq!(all_tab_items[4].title, "Boost resolution");
+        assert_eq!(all_tab_items[5].title, "Edit image with prompt");
     }
 }

@@ -1,28 +1,33 @@
-designos - install and first launch
-==================================
+design:os studio — install and first launch
+===========================================
 
-1. Drag designos into the Applications folder (the arrow in this window).
-2. Open Applications and double-click designos.
-3. The first time, macOS says it cannot verify the app. This is because the
-   build is not notarized by Apple yet (the source is public and the release
-   is built by GitHub Actions). Click Done, then:
-     - open System Settings -> Privacy & Security,
-     - scroll down to the message about "designos" and click Open Anyway,
-     - confirm with your password or Touch ID, then click Open.
-   You only need to do this once.
+1. Drag designos.app into the Applications folder.
+2. Double-click install-cli.command (optional) to clear the macOS quarantine
+   flag and symlink the 4 CLI tools onto your PATH (~/.local/bin or /usr/local/bin):
+     - designos-studio  (GUI studio app)
+     - designos         (GUI + headless CLI / renderer / exporter)
+     - designos-mcp     (MCP server for Claude Code, Codex, Antigravity)
+     - designos-diff    (visual & .fig diff CLI tool)
+3. Open Applications and launch designos.
 
-Prefer Terminal? This does the same thing in one line:
+First-launch Gatekeeper note
+----------------------------
+If you launch designos.app before running install-cli.command, macOS may ask
+you to confirm because the build is ad-hoc signed rather than Apple Developer ID
+notarized. Either run in Terminal:
 
     xattr -dr com.apple.quarantine /Applications/designos.app
 
-Command-line tool
------------------
-designos-diff is inside the app. Run it from Terminal with:
+or go to System Settings -> Privacy & Security -> scroll down to "designos" ->
+click "Open Anyway".
 
+Command-line & MCP tools
+------------------------
+All 4 binaries live inside /Applications/designos.app/Contents/MacOS/:
+
+    /Applications/designos.app/Contents/MacOS/designos --help
+    /Applications/designos.app/Contents/MacOS/designos-mcp --help
     /Applications/designos.app/Contents/MacOS/designos-diff --help
 
-or link it onto your PATH:
-
-    ln -s /Applications/designos.app/Contents/MacOS/designos-diff /usr/local/bin/designos-diff
-
-More: https://github.com/jangtrinh/design-os-studio/blob/main/docs/install.md
+Full installation guide:
+https://github.com/jangtrinh/design-os-studio/blob/main/docs/install.md

@@ -914,12 +914,12 @@ fn header_row(app: &mut App, ui: &mut Ui, g: &Geom, r: Rect, coll: &str, path: &
     let name_cell = Rect::from_min_size(r.min, Vec2::new(theme::VAR_NAME_COL, r.height()));
     let key = folded_key(coll, path);
     let resp = ui.interact(Rect::from_min_max(r.min, Pos2::new(r.right(), r.bottom())), Id::new(("vars-header", &key)), Sense::click());
-    if resp.hovered() {
-        p.rect_filled(r, 0.0, theme::BG_HOVER);
-    }
+    let row_bg = if resp.hovered() { theme::BG_HOVER } else { Color32::from_rgb(0x25, 0x25, 0x25) };
+    p.rect_filled(r, 0.0, row_bg);
     let open = !app.vars.folded.contains(&key);
     let x = r.left() + 16.0 + depth as f32 * 16.0;
-    icons::paint(&p, if open { Icon::ChevronDown } else { Icon::ChevronRight }, Pos2::new(x + 4.0, r.center().y), 12.0, theme::ICON_SECONDARY);
+    let group_fg = Color32::from_rgb(0xB3, 0xB3, 0xB3);
+    icons::paint(&p, if open { Icon::ChevronDown } else { Icon::ChevronRight }, Pos2::new(x + 4.0, r.center().y), 12.0, group_fg);
     let label = split_name(path).1;
     let renaming = app.vars.renaming == Some(('f', key.clone()));
     let text_r = Rect::from_min_max(Pos2::new(x + 20.0, r.top() + 8.0), Pos2::new(name_cell.right() - 8.0, r.bottom() - 8.0));
@@ -933,7 +933,7 @@ fn header_row(app: &mut App, ui: &mut Ui, g: &Geom, r: Rect, coll: &str, path: &
         }
     } else {
         let shown = widgets::elide(&p, label, &theme::font_body_strong(), text_r.width());
-        p.text(Pos2::new(text_r.left(), r.center().y), Align2::LEFT_CENTER, shown, theme::font_body_strong(), theme::TEXT);
+        p.text(Pos2::new(text_r.left(), r.center().y), Align2::LEFT_CENTER, shown, theme::font_body_strong(), group_fg);
     }
     if resp.clicked() {
         if open {

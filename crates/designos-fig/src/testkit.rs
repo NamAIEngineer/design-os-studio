@@ -53,6 +53,17 @@ pub fn figma_like_schema() -> Schema {
             "VARIABLE",
             "VARIABLE_SET",
             "VARIABLE_OVERRIDE",
+            "BRUSH",
+            "TABLE",
+            "TABLE_CELL",
+            "WASHI_TAPE",
+            "WIDGET",
+            "CODE_BLOCK",
+            "SLIDE",
+            "SLIDE_GRID",
+            "SLIDE_ROW",
+            "INTERACTIVE_SLIDE_ELEMENT",
+            "MODULE",
         ],
     );
     enum_def(&mut b, "PaintType", &["SOLID", "GRADIENT_LINEAR", "GRADIENT_RADIAL", "GRADIENT_ANGULAR", "GRADIENT_DIAMOND", "IMAGE"]);
@@ -345,17 +356,40 @@ pub fn figma_like_schema() -> Schema {
         "OpenTypeFeature",
         &[
             "LIGA", "DLIG", "CLIG", "CALT", "KERN", "SS01", "SS02", "SS03", "SS04", "SS05", "SS06", "SS07", "SS08", "SS09", "SS10", "TNUM",
-            "ONUM", "LNUM", "PNUM", "FRAC", "AFRC", "ZERO", "SMCP", "C2SC", "ORDN", "SWSH", "SALT", "SUPS", "SUBS", "CASE",
+            "ONUM", "LNUM", "PNUM", "FRAC", "AFRC", "ZERO", "SMCP", "C2SC", "PCAP", "C2PC", "UNIC", "TITL", "ORDN", "SWSH", "SALT", "SUPS",
+            "SUBS", "CASE",
         ],
     );
+    enum_def(&mut b, "FontVariantNumericFigure", &["NORMAL", "LINING", "OLDSTYLE"]);
+    enum_def(&mut b, "FontVariantNumericSpacing", &["NORMAL", "PROPORTIONAL", "TABULAR"]);
+    enum_def(&mut b, "FontVariantNumericFraction", &["NORMAL", "DIAGONAL", "STACKED"]);
+    enum_def(&mut b, "FontVariantCaps", &["NORMAL", "SMALL", "ALL_SMALL", "PETITE", "ALL_PETITE", "UNICASE", "TITLING"]);
+    enum_def(&mut b, "FontVariantPosition", &["NORMAL", "SUB", "SUPER"]);
+    enum_def(&mut b, "BrushType", &["PLAIN", "CHARCOAL", "WAX", "MARKER"]);
     let fv = b.define("FontVariation", DefKind::Message);
     b.field(fv, "axisTag", nat(Uint), false, 1);
     b.field(fv, "axisName", nat(String), false, 2);
     b.field(fv, "value", nat(Float), false, 3);
-    let (otf_so, fvt_so) = (def(&b, "OpenTypeFeature"), def(&b, "FontVariation"));
+    let (otf_so, fvt_so, fvnf_so, fvns_so, fvnfr_so, fvc_so, fvp_so) = (
+        def(&b, "OpenTypeFeature"),
+        def(&b, "FontVariation"),
+        def(&b, "FontVariantNumericFigure"),
+        def(&b, "FontVariantNumericSpacing"),
+        def(&b, "FontVariantNumericFraction"),
+        def(&b, "FontVariantCaps"),
+        def(&b, "FontVariantPosition"),
+    );
     b.field(so, "toggledOnOTFeatures", otf_so, true, 13);
     b.field(so, "toggledOffOTFeatures", otf_so, true, 14);
     b.field(so, "fontVariations", fvt_so, true, 15);
+    b.field(so, "fontVariantCommonLigatures", nat(Bool), false, 16);
+    b.field(so, "fontVariantContextualLigatures", nat(Bool), false, 17);
+    b.field(so, "textTracking", nat(Float), false, 18);
+    b.field(so, "fontVariantNumericFigure", fvnf_so, false, 19);
+    b.field(so, "fontVariantNumericSpacing", fvns_so, false, 20);
+    b.field(so, "fontVariantNumericFraction", fvnfr_so, false, 21);
+    b.field(so, "fontVariantCaps", fvc_so, false, 22);
+    b.field(so, "fontVariantPosition", fvp_so, false, 23);
     let tl = b.define("TextLine", DefKind::Message);
     let t = def(&b, "LineType");
     b.field(tl, "lineType", t, false, 1);
@@ -549,7 +583,23 @@ pub fn figma_like_schema() -> Schema {
     b.field(cep, "endpointNodeId", gt_cep, false, 1);
     b.field(cep, "position", vt_cep, false, 2);
     b.field(cep, "magnet", nat(String), false, 3);
-    let (cept, hst_info, sc_cap) = (def(&b, "ConnectorEndpoint"), def(&b, "HandoffStatus"), def(&b, "StrokeCap"));
+    let hl_def = b.define("Hyperlink", DefKind::Message);
+    b.field(hl_def, "url", nat(String), false, 1);
+    b.field(hl_def, "guid", gt_cep, false, 2);
+    let pd_def = b.define("PluginData", DefKind::Message);
+    b.field(pd_def, "pluginID", nat(String), false, 1);
+    b.field(pd_def, "value", nat(String), false, 2);
+    b.field(pd_def, "key", nat(String), false, 3);
+    let tar_def = b.define("TargetAspectRatio", DefKind::Message);
+    b.field(tar_def, "value", vt_cep, false, 1);
+    let (cept, hst_info, sc_cap, hlt, pdt, tart) = (
+        def(&b, "ConnectorEndpoint"),
+        def(&b, "HandoffStatus"),
+        def(&b, "StrokeCap"),
+        def(&b, "Hyperlink"),
+        def(&b, "PluginData"),
+        def(&b, "TargetAspectRatio"),
+    );
     f(&mut b, "gridColumns", nat(Uint), false);
     f(&mut b, "gridRows", nat(Uint), false);
     f(&mut b, "gridColumnSpan", nat(Uint), false);
@@ -572,6 +622,70 @@ pub fn figma_like_schema() -> Schema {
     f(&mut b, "connectorType", nat(String), false);
     f(&mut b, "connectorStartStrokeCap", sc_cap, false);
     f(&mut b, "connectorEndStrokeCap", sc_cap, false);
+    f(&mut b, "proportionsConstrained", nat(Bool), false);
+    f(&mut b, "targetAspectRatio", tart, false);
+    f(&mut b, "hyperlink", hlt, false);
+    f(&mut b, "pluginData", pdt, true);
+    f(&mut b, "symbolDescription", nat(String), false);
+    f(&mut b, "propsAreBubbled", nat(Bool), false);
+    f(&mut b, "fontVariantCommonLigatures", nat(Bool), false);
+    f(&mut b, "fontVariantContextualLigatures", nat(Bool), false);
+    f(&mut b, "textTracking", nat(Float), false);
+
+    let vps_def = b.define("VariantPropSpec", DefKind::Message);
+    b.field(vps_def, "propDefId", gt_cep, false, 1);
+    b.field(vps_def, "value", nat(String), false, 2);
+    b.field(vps_def, "propertyName", nat(String), false, 3);
+    b.field(vps_def, "name", nat(String), false, 4);
+    let ei_def = b.define("EditInfo", DefKind::Message);
+    b.field(ei_def, "timestampIso8601", nat(String), false, 1);
+    b.field(ei_def, "userId", nat(String), false, 2);
+    b.field(ei_def, "lastEditedAt", nat(Uint), false, 3);
+    b.field(ei_def, "createdAt", nat(Uint), false, 4);
+    let wp_def = b.define("WidgetPointer", DefKind::Message);
+    b.field(wp_def, "nodeId", gt_cep, false, 1);
+    let prd_def = b.define("PluginRelaunchData", DefKind::Message);
+    b.field(prd_def, "pluginID", nat(String), false, 1);
+    b.field(prd_def, "message", nat(String), false, 2);
+    b.field(prd_def, "command", nat(String), false, 3);
+    b.field(prd_def, "isDeleted", nat(Bool), false, 4);
+    let ngd_def = b.define("NodeGenerationData", DefKind::Message);
+    b.field(ngd_def, "useFineGrainedSyncing", nat(Bool), false, 1);
+    let (vpst, eit_msg, wpt, prdt, ngdt, btt, fvnf, fvns, fvnfr, fvc, fvp) = (
+        def(&b, "VariantPropSpec"),
+        def(&b, "EditInfo"),
+        def(&b, "WidgetPointer"),
+        def(&b, "PluginRelaunchData"),
+        def(&b, "NodeGenerationData"),
+        def(&b, "BrushType"),
+        def(&b, "FontVariantNumericFigure"),
+        def(&b, "FontVariantNumericSpacing"),
+        def(&b, "FontVariantNumericFraction"),
+        def(&b, "FontVariantCaps"),
+        def(&b, "FontVariantPosition"),
+    );
+    f(&mut b, "autoRename", nat(Bool), false);
+    f(&mut b, "textDecorationSkipInk", nat(Bool), false);
+    f(&mut b, "overrideLevel", nat(Uint), false);
+    f(&mut b, "detachedSymbolId", sidt, false);
+    f(&mut b, "variantPropSpecs", vpst, true);
+    f(&mut b, "fontVariantNumericFigure", fvnf, false);
+    f(&mut b, "fontVariantNumericSpacing", fvns, false);
+    f(&mut b, "fontVariantNumericFraction", fvnfr, false);
+    f(&mut b, "fontVariantCaps", fvc, false);
+    f(&mut b, "fontVariantPosition", fvp, false);
+    f(&mut b, "brushType", btt, false);
+    f(&mut b, "userFacingVersion", nat(String), false);
+    f(&mut b, "sharedSymbolVersion", nat(String), false);
+    f(&mut b, "publishedVersion", nat(String), false);
+    f(&mut b, "version", nat(String), false);
+    f(&mut b, "isSymbolPublishable", nat(Bool), false);
+    f(&mut b, "isPublishable", nat(Bool), false);
+    f(&mut b, "publishID", gt_cep, false);
+    f(&mut b, "widgetCachedAncestor", wpt, false);
+    f(&mut b, "editInfo", eit_msg, false);
+    f(&mut b, "pluginRelaunchData", prdt, true);
+    f(&mut b, "nodeGenerationData", ngdt, false);
 
     let blob = b.define("Blob", DefKind::Message);
     b.field(blob, "bytes", nat(Byte), true, 1);

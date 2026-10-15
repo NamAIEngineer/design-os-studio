@@ -62,6 +62,14 @@ pub enum Action {
     ResetInstance,
     Copy,
     Paste,
+    PasteOverSelection,
+    PasteToReplace,
+    CopyProperties,
+    PasteProperties,
+    InsertTableRow,
+    DeleteTableRow,
+    InsertTableColumn,
+    DeleteTableColumn,
     TogglePixelGrid,
     ToggleRulers,
     ToggleLayoutGrids,
@@ -166,6 +174,14 @@ pub fn run(app: &mut App, ctx: &Context, a: Action) {
             }
         }
         Action::Paste => app.paste(None),
+        Action::PasteOverSelection => app.paste_over_selection(),
+        Action::PasteToReplace => app.paste_to_replace(),
+        Action::CopyProperties => app.copy_properties(),
+        Action::PasteProperties => app.paste_properties(),
+        Action::InsertTableRow => app.insert_table_row(),
+        Action::DeleteTableRow => app.delete_table_row(),
+        Action::InsertTableColumn => app.insert_table_column(),
+        Action::DeleteTableColumn => app.delete_table_column(),
         Action::TogglePixelGrid => app.ui.pixel_grid = !app.ui.pixel_grid,
         Action::ToggleRulers => app.ui.rulers = !app.ui.rulers,
         Action::ToggleLayoutGrids => app.ui.hide_layout_grids = !app.ui.hide_layout_grids,
@@ -311,7 +327,12 @@ fn find_path(nodes: &[Node], labels: &[&str]) -> Vec<usize> {
     let mut out = vec![];
     let mut cur = nodes;
     for l in labels {
-        let Some(i) = cur.iter().position(|n| n.item.label.eq_ignore_ascii_case(l)) else { break };
+        let Some(i) = cur.iter().position(|n| {
+            n.item.label.eq_ignore_ascii_case(l)
+                || (l.eq_ignore_ascii_case("Help") && n.item.label.to_ascii_lowercase().starts_with("help"))
+        }) else {
+            break;
+        };
         out.push(i);
         cur = &cur[i].kids;
     }
@@ -373,7 +394,11 @@ fn main_nodes(app: &App) -> Vec<Node> {
         leaf("Select parent", "Shift+Enter", Action::SelectParent).off(!has_sel),
         leaf("Select matching layers", "Ctrl+Alt+A", Action::SelectMatching).off(!has_sel),
         submenu("Select all with same", same_nodes(has_sel)).off(!has_sel).sep(),
-        leaf("Find and replace…", "Ctrl+F", Action::Find),
+        leaf("Find and replace…", "Ctrl+F", Action::Find).sep(),
+        leaf("Copy properties", "Ctrl+Alt+C", Action::CopyProperties).off(!has_sel),
+        leaf("Paste properties", "Ctrl+Alt+V", Action::PasteProperties).off(!has_sel),
+        leaf("Paste over selection", "Ctrl+Shift+V", Action::PasteOverSelection).off(app.clip.is_none()),
+        leaf("Paste to replace", "Ctrl+Alt+Shift+R", Action::PasteToReplace).off(!has_sel || app.clip.is_none()),
     ];
     let view = vec![
         leaf("Zoom in", "Ctrl+=", Action::ZoomIn),
@@ -466,7 +491,8 @@ fn main_nodes(app: &App) -> Vec<Node> {
             ],
         ),
         leaf("Libraries", "", Action::About).off(true).sep(),
-        submenu("Help", help),
+        leaf("AI balance", "", Action::About).off(true).sep(),
+        submenu("Help and account", help),
     ]
 }
 

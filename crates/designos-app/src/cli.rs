@@ -95,15 +95,15 @@ impl Options {
     /// Whether a launch with these options starts on the home screen: explicitly
     /// with `--home`, or interactively with nothing else to open.
     pub fn wants_home(&self) -> bool {
-        !self.is_agent_cli()
-            && self.open_id.is_none()
-            && (self.home || (self.file.is_none() && self.screenshot.is_none() && self.fixture.is_none()))
+        !self.is_agent_cli() && self.open_id.is_none() && (self.home || (self.file.is_none() && self.screenshot.is_none() && self.fixture.is_none()))
     }
 }
 
-/// Values of `--panel`: `specs`, `assets`, `variables` / `variables-floating` open the local views,
+/// Values of `--panel`: `agents`, `agents-chat`, `specs`, `assets`, `variables` / `variables-floating` open the local views,
 /// `libraries` the Libraries modal; the others are inspector popups opened on the selection for screenshots.
-pub const PANELS: [&str; 24] = [
+pub const PANELS: [&str; 26] = [
+    "agents",
+    "agents-chat",
     "specs",
     "terminal",
     "cmdk",
@@ -181,6 +181,9 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Options, String> 
             "--fullscreen" => {
                 o.present = true;
                 o.fullscreen = true;
+            }
+            "--agents-chat" => {
+                o.panel = Some("agents-chat".into());
             }
             "--panel" => {
                 let t = it.next().ok_or("--panel needs a name (see --help)")?;
@@ -327,6 +330,9 @@ mod tests {
 
     #[test]
     fn parses_panel() {
+        assert_eq!(p(&["--panel", "agents"]).unwrap().panel.as_deref(), Some("agents"));
+        assert_eq!(p(&["--panel", "agents-chat"]).unwrap().panel.as_deref(), Some("agents-chat"));
+        assert_eq!(p(&["--agents-chat"]).unwrap().panel.as_deref(), Some("agents-chat"));
         assert_eq!(p(&["--panel", "specs"]).unwrap().panel.as_deref(), Some("specs"));
         assert_eq!(p(&["--panel", "assets"]).unwrap().panel.as_deref(), Some("assets"));
         assert_eq!(p(&["--panel", "variables"]).unwrap().panel.as_deref(), Some("variables"));

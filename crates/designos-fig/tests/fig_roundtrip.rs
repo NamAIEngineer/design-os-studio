@@ -1206,3 +1206,396 @@ fn rea_v106_all_seven_gaps_fidelity_and_roundtrip() {
     }
 }
 
+#[test]
+fn fig_v106_schema_functional_fields_roundtrip() {
+    let g = |s: u64, l: u64| -> Value { json!({"sessionID": s, "localID": l}) };
+    let node = |id: (u64, u64),
+                parent: (u64, u64),
+                pos: &str,
+                ty: &str,
+                name: &str,
+                extra: Value|
+     -> Value {
+        let mut v = json!({
+            "guid": g(id.0, id.1),
+            "parentIndex": {"guid": g(parent.0, parent.1), "position": pos},
+            "type": ty,
+            "name": name,
+            "phase": "CREATED",
+            "visible": true,
+            "opacity": 1.0,
+            "size": {"x": 100.0, "y": 50.0},
+            "transform": {"m00": 1.0, "m01": 0.0, "m02": 0.0, "m10": 0.0, "m11": 1.0, "m12": 0.0}
+        });
+        for (k, x) in extra.as_object().unwrap() {
+            v[k] = x.clone();
+        }
+        v
+    };
+
+    let changes = json!([
+        node((0, 0), (0, 0), "", "DOCUMENT", "Document", json!({})),
+        node((0, 1), (0, 0), "!", "CANVAS", "Page 1", json!({})),
+        // 1. SYMBOL with symbolDescription, propsAreBubbled, proportionsConstrained, hyperlink (url), and pluginData
+        node(
+            (1, 10),
+            (0, 1),
+            "!",
+            "SYMBOL",
+            "DesignSystemCard",
+            json!({
+                "size": {"x": 320.0, "y": 180.0},
+                "symbolDescription": "Primary card component for dashboard",
+                "propsAreBubbled": true,
+                "proportionsConstrained": true,
+                "hyperlink": {"url": "https://figma.com/design-system"},
+                "pluginData": [
+                    {
+                        "pluginID": "com.tokens.studio",
+                        "key": "theme",
+                        "value": "dark"
+                    },
+                    {
+                        "key": "rawKey",
+                        "value": "rawValue"
+                    }
+                ]
+            })
+        ),
+        // 2. FRAME with targetAspectRatio (v106 aspect lock) and internal node hyperlink (guid)
+        node(
+            (1, 11),
+            (0, 1),
+            "\"",
+            "FRAME",
+            "AspectLockedMedia",
+            json!({
+                "size": {"x": 160.0, "y": 90.0},
+                "targetAspectRatio": {"value": {"x": 16.0, "y": 9.0}},
+                "hyperlink": {"guid": g(1, 10)}
+            })
+        ),
+        // 3. TEXT with fontVariantCommonLigatures=false, fontVariantContextualLigatures=false, and textTracking
+        node(
+            (1, 12),
+            (0, 1),
+            "#",
+            "TEXT",
+            "TrackedHeadline",
+            json!({
+                "size": {"x": 240.0, "y": 32.0},
+                "fontName": {"family": "Inter", "style": "Bold", "postscript": "Inter-Bold"},
+                "fontSize": 20.0,
+                "fontVariantCommonLigatures": false,
+                "fontVariantContextualLigatures": false,
+                "textTracking": 1.25,
+                "textData": {"characters": "Headline"}
+            })
+        )
+    ]);
+
+    let doc = import_fig_node_changes(&changes, "v106")
+        .expect("import_fig_node_changes v106 functional fields");
+
+    // Check DesignSystemCard
+    let card = find(&doc, "DesignSystemCard");
+    assert_eq!(card.component.description, "Primary card component for dashboard");
+    assert!(card.component.expose_nested_instances);
+    assert!(card.lock_aspect);
+    assert_eq!(card.hyperlink.as_deref(), Some("https://figma.com/design-system"));
+    assert_eq!(card.plugin_data.get("com.tokens.studio:theme").map(String::as_str), Some("dark"));
+    assert_eq!(card.plugin_data.get("rawKey").map(String::as_str), Some("rawValue"));
+
+    // Check AspectLockedMedia
+    let media = find(&doc, "AspectLockedMedia");
+    assert!(media.lock_aspect, "targetAspectRatio should set lock_aspect = true");
+    assert_eq!(media.hyperlink.as_deref(), Some("guid:1:10"));
+
+    // Check TrackedHeadline
+    let txt = find(&doc, "TrackedHeadline");
+    let NodeKind::Text(tp) = &txt.kind else {
+        panic!("expected Text node");
+    };
+    assert!(!tp.style.is_feature_enabled("liga"));
+    assert!(!tp.style.is_feature_enabled("calt"));
+    assert_eq!(
+        tp.style
+            .features
+            .iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case("liga"))
+            .map(|(_, v)| *v),
+        Some(0)
+    );
+    assert_eq!(
+        tp.style
+            .features
+            .iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case("calt"))
+            .map(|(_, v)| *v),
+        Some(0)
+    );
+    assert!(
+        (tp.style.letter_spacing - 1.25).abs() < 1e-4,
+        "expected letter_spacing 1.25 from textTracking, got {}",
+        tp.style.letter_spacing
+    );
+
+    // Export back to binary .fig and re-import to verify lossless round-trip
+    let exported = export_fig(&doc).expect("export_fig");
+    let rt = import_fig(&exported).expect("re-import_fig");
+
+    let rt_card = find(&rt, "DesignSystemCard");
+    assert_eq!(rt_card.component.description, "Primary card component for dashboard");
+    assert!(rt_card.component.expose_nested_instances);
+    assert!(rt_card.lock_aspect);
+    assert_eq!(rt_card.hyperlink.as_deref(), Some("https://figma.com/design-system"));
+    assert_eq!(rt_card.plugin_data.get("com.tokens.studio:theme").map(String::as_str), Some("dark"));
+    assert_eq!(rt_card.plugin_data.get("rawKey").map(String::as_str), Some("rawValue"));
+
+    let rt_media = find(&rt, "AspectLockedMedia");
+    assert!(rt_media.lock_aspect);
+    assert_eq!(rt_media.hyperlink.as_deref(), Some("guid:1:10"));
+
+    let rt_txt = find(&rt, "TrackedHeadline");
+    let NodeKind::Text(rt_tp) = &rt_txt.kind else {
+        panic!("expected Text node after roundtrip");
+    };
+    assert!(!rt_tp.style.is_feature_enabled("liga"));
+    assert!(!rt_tp.style.is_feature_enabled("calt"));
+    assert!((rt_tp.style.letter_spacing - 1.25).abs() < 1e-4);
+}
+
+#[test]
+fn fig_v106_wave5_schema_99pct_coverage_roundtrip() {
+    let g = |s: u64, l: u64| -> Value { json!({"sessionID": s, "localID": l}) };
+    let node = |id: (u64, u64),
+                parent: (u64, u64),
+                pos: &str,
+                ty: &str,
+                name: &str,
+                extra: Value|
+     -> Value {
+        let mut v = json!({
+            "guid": g(id.0, id.1),
+            "parentIndex": {"guid": g(parent.0, parent.1), "position": pos},
+            "type": ty,
+            "name": name,
+            "phase": "CREATED",
+            "visible": true,
+            "opacity": 1.0,
+            "size": {"x": 120.0, "y": 60.0},
+            "transform": {"m00": 1.0, "m01": 0.0, "m02": 0.0, "m10": 0.0, "m11": 1.0, "m12": 0.0}
+        });
+        for (k, x) in extra.as_object().unwrap() {
+            v[k] = x.clone();
+        }
+        v
+    };
+
+    // Encode a simple MoveTo(0,0) -> LineTo(40,20) -> Close commandsBlob
+    let mut cmd_blob = Vec::new();
+    cmd_blob.push(1u8); // MoveTo
+    cmd_blob.extend_from_slice(&0.0f32.to_le_bytes());
+    cmd_blob.extend_from_slice(&0.0f32.to_le_bytes());
+    cmd_blob.push(2u8); // LineTo
+    cmd_blob.extend_from_slice(&40.0f32.to_le_bytes());
+    cmd_blob.extend_from_slice(&20.0f32.to_le_bytes());
+    cmd_blob.push(0u8); // Close
+
+    let msg = json!({
+        "blobs": [
+            {"bytes": cmd_blob}
+        ],
+        "nodeChanges": [
+            node((0, 0), (0, 0), "", "DOCUMENT", "Wave5Doc", json!({})),
+            node((0, 1), (0, 0), "!", "CANVAS", "Page 1", json!({})),
+            // Soft-deleted style node should be ignored
+            node((9, 99), (0, 0), "z", "RECTANGLE", "DeletedStyle", json!({
+                "styleType": "FILL",
+                "isSoftDeleted": true,
+                "fillPaints": [{"type": "SOLID", "color": {"r": 1.0, "g": 0.0, "b": 0.0, "a": 1.0}, "opacity": 1.0, "visible": true}]
+            })),
+            // 1. BRUSH node with strokeGeometry (no fillGeometry) and brushType
+            node((1, 10), (0, 1), "!", "BRUSH", "CharcoalStroke", json!({
+                "brushType": "CHARCOAL",
+                "strokeWeight": 4.0,
+                "strokePaints": [{"type": "SOLID", "color": {"r": 0.1, "g": 0.1, "b": 0.1, "a": 1.0}, "opacity": 1.0, "visible": true}],
+                "strokeGeometry": [{"windingRule": "NONZERO", "commandsBlob": 0}]
+            })),
+            // 2. SHAPE_WITH_TEXT with ENG_DATABASE
+            node((1, 11), (0, 1), "\"", "SHAPE_WITH_TEXT", "DbNode", json!({
+                "shapeWithTextType": "ENG_DATABASE",
+                "textData": {"characters": "Users DB"}
+            })),
+            // 3. TEXT with autoRename=false, textDecorationSkipInk=false, and fontVariant* OpenType enums
+            node((1, 12), (0, 1), "#", "TEXT", "RichVariantText", json!({
+                "fontName": {"family": "Inter", "style": "Regular", "postscript": "Inter-Regular"},
+                "fontSize": 16.0,
+                "autoRename": false,
+                "textDecorationSkipInk": false,
+                "fontVariantNumericFigure": "OLDSTYLE",
+                "fontVariantNumericSpacing": "TABULAR",
+                "fontVariantNumericFraction": "DIAGONAL",
+                "fontVariantCaps": "ALL_SMALL",
+                "fontVariantPosition": "SUPER",
+                "textData": {"characters": "123/456"}
+            })),
+            // 4. SYMBOL with variantPropSpecs and fig_metadata bag
+            node((1, 20), (0, 1), "$", "SYMBOL", "VariantBtn", json!({
+                "variantPropSpecs": [
+                    {"name": "Size", "value": "Lg"},
+                    {"name": "Tone", "value": "Brand"}
+                ],
+                "userFacingVersion": "v2.4",
+                "sharedSymbolVersion": "108",
+                "isSymbolPublishable": true,
+                "publishID": g(7, 77),
+                "widgetCachedAncestor": {"nodeId": g(8, 88)},
+                "editInfo": {
+                    "timestampIso8601": "2026-10-15T00:00:00Z",
+                    "userId": "u-42",
+                    "lastEditedAt": 1700000000,
+                    "createdAt": 1690000000
+                },
+                "pluginRelaunchData": [
+                    {"pluginID": "p1", "message": "Sync", "command": "sync", "isDeleted": false}
+                ],
+                "nodeGenerationData": {
+                    "useFineGrainedSyncing": true
+                }
+            })),
+            node((1, 21), (1, 20), "!", "ROUNDED_RECTANGLE", "VariantBtnChild", json!({
+                "overrideKey": g(9, 21)
+            })),
+            // 5. Detached FRAME with detachedSymbolId + overrideLevel
+            node((1, 30), (0, 1), "%", "FRAME", "DetachedCard", json!({
+                "overrideLevel": 2,
+                "detachedSymbolId": {"assetRef": {"key": "sym-key-99", "version": "v3"}}
+            })),
+            // 6. INSTANCE with symbolOverrides carrying overrideLevel + detachedSymbolId
+            node((1, 31), (0, 1), "&", "INSTANCE", "VariantBtnInst", json!({
+                "symbolData": {
+                    "symbolID": g(1, 20),
+                    "symbolOverrides": [
+                        {
+                            "guidPath": {"guids": [g(9, 21)]},
+                            "overrideLevel": 1,
+                            "detachedSymbolId": {"guid": g(1, 20)}
+                        }
+                    ]
+                }
+            }))
+        ]
+    });
+
+    let doc = import_fig_node_changes(&msg, "Wave5Doc").expect("import Wave5Doc");
+
+    // Soft-deleted style is excluded
+    assert!(doc.styles.is_empty());
+
+    // 1. BRUSH node
+    let brush = find(&doc, "CharcoalStroke");
+    assert_eq!(brush.fig_metadata.get("brushType").map(String::as_str), Some("CHARCOAL"));
+    match &brush.kind {
+        NodeKind::Vector { paths, .. } => assert_eq!(paths.len(), 1, "BRUSH should populate paths from strokeGeometry fallback"),
+        other => panic!("expected Vector for BRUSH, got {other:?}"),
+    }
+
+    // 2. SHAPE_WITH_TEXT (ENG_DATABASE)
+    let db = find(&doc, "DbNode");
+    assert_eq!(db.fig_metadata.get("shapeWithTextType").map(String::as_str), Some("ENG_DATABASE"));
+    match &db.kind {
+        NodeKind::ShapeWithText(sp) => {
+            assert_eq!(sp.shape, ShapeKind::Ellipse);
+            assert_eq!(sp.text.content, "Users DB");
+        }
+        other => panic!("expected ShapeWithText, got {other:?}"),
+    }
+
+    // 3. TEXT node
+    let txt = find(&doc, "RichVariantText");
+    let NodeKind::Text(tp) = &txt.kind else { panic!("expected Text") };
+    assert!(!tp.auto_rename);
+    assert!(!tp.decoration_skip_ink);
+    for tag in ["onum", "tnum", "frac", "smcp", "c2sc", "sups"] {
+        assert!(tp.style.is_feature_enabled(tag), "expected OpenType feature {tag} to be enabled");
+    }
+
+    // 4. SYMBOL variantPropSpecs + fig_metadata
+    let sym = find(&doc, "VariantBtn");
+    assert_eq!(sym.component.variant_props.get("Size").map(String::as_str), Some("Lg"));
+    assert_eq!(sym.component.variant_props.get("Tone").map(String::as_str), Some("Brand"));
+    assert_eq!(sym.fig_metadata.get("userFacingVersion").map(String::as_str), Some("v2.4"));
+    assert_eq!(sym.fig_metadata.get("sharedSymbolVersion").map(String::as_str), Some("108"));
+    assert_eq!(sym.fig_metadata.get("isSymbolPublishable").map(String::as_str), Some("true"));
+    assert_eq!(sym.fig_metadata.get("publishID").map(String::as_str), Some("7:77"));
+    assert_eq!(sym.fig_metadata.get("widgetCachedAncestor").map(String::as_str), Some("8:88"));
+    assert!(sym.fig_metadata.contains_key("editInfo"));
+    assert!(sym.fig_metadata.contains_key("pluginRelaunchData"));
+    assert!(sym.fig_metadata.contains_key("nodeGenerationData"));
+
+    // 5. Detached FRAME + INSTANCE child override
+    let det = find(&doc, "DetachedCard");
+    assert_eq!(det.component.override_level, Some(2));
+    assert_eq!(det.detached_symbol_id.as_deref(), Some("assetRef:sym-key-99:v3"));
+
+    let inst = find(&doc, "VariantBtnInst");
+    let inst_child = inst
+        .children
+        .iter()
+        .filter_map(|id| doc.get(*id))
+        .find(|n| n.name == "VariantBtnChild")
+        .expect("VariantBtnChild");
+    assert_eq!(inst_child.component.override_level, Some(1));
+    assert_eq!(inst_child.component.detached_symbol_id.as_deref(), Some("guid:1:20"));
+
+    // Roundtrip through binary .fig export & re-import
+    let bytes = export_fig(&doc).expect("export_fig Wave5Doc");
+    let rt = import_fig(&bytes).expect("re-import Wave5Doc");
+
+    let rt_brush = find(&rt, "CharcoalStroke");
+    assert_eq!(rt_brush.fig_metadata.get("brushType").map(String::as_str), Some("CHARCOAL"));
+
+    let rt_db = find(&rt, "DbNode");
+    assert_eq!(rt_db.fig_metadata.get("shapeWithTextType").map(String::as_str), Some("ENG_DATABASE"));
+    match &rt_db.kind {
+        NodeKind::ShapeWithText(sp) => assert_eq!(sp.shape, ShapeKind::Ellipse),
+        other => panic!("expected ShapeWithText after roundtrip, got {other:?}"),
+    }
+
+    let rt_txt = find(&rt, "RichVariantText");
+    let NodeKind::Text(rt_tp) = &rt_txt.kind else { panic!("expected Text after roundtrip") };
+    assert!(!rt_tp.auto_rename);
+    assert!(!rt_tp.decoration_skip_ink);
+    for tag in ["onum", "tnum", "frac", "smcp", "c2sc", "sups"] {
+        assert!(rt_tp.style.is_feature_enabled(tag), "expected OpenType feature {tag} after roundtrip");
+    }
+
+    let rt_sym = find(&rt, "VariantBtn");
+    assert_eq!(rt_sym.component.variant_props.get("Size").map(String::as_str), Some("Lg"));
+    assert_eq!(rt_sym.component.variant_props.get("Tone").map(String::as_str), Some("Brand"));
+    assert_eq!(rt_sym.fig_metadata.get("userFacingVersion").map(String::as_str), Some("v2.4"));
+    assert_eq!(rt_sym.fig_metadata.get("sharedSymbolVersion").map(String::as_str), Some("108"));
+    assert_eq!(rt_sym.fig_metadata.get("isSymbolPublishable").map(String::as_str), Some("true"));
+    assert_eq!(rt_sym.fig_metadata.get("publishID").map(String::as_str), Some("7:77"));
+    assert_eq!(rt_sym.fig_metadata.get("widgetCachedAncestor").map(String::as_str), Some("8:88"));
+    assert!(rt_sym.fig_metadata.contains_key("editInfo"));
+    assert!(rt_sym.fig_metadata.contains_key("pluginRelaunchData"));
+    assert!(rt_sym.fig_metadata.contains_key("nodeGenerationData"));
+
+    let rt_det = find(&rt, "DetachedCard");
+    assert_eq!(rt_det.component.override_level, Some(2));
+    assert_eq!(rt_det.detached_symbol_id.as_deref(), Some("assetRef:sym-key-99:v3"));
+
+    let rt_inst = find(&rt, "VariantBtnInst");
+    let rt_inst_child = rt_inst
+        .children
+        .iter()
+        .filter_map(|id| rt.get(*id))
+        .find(|n| n.name == "VariantBtnChild")
+        .expect("VariantBtnChild after roundtrip");
+    assert_eq!(rt_inst_child.component.override_level, Some(1));
+    assert_eq!(rt_inst_child.component.detached_symbol_id.as_deref(), Some("guid:1:20"));
+}
+
+

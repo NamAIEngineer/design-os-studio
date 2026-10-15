@@ -399,15 +399,7 @@ fn view_toggle(ui: &mut Ui, at: Pos2, grid: &mut bool) {
         };
         let p = ui.painter();
         let c = rect.center();
-        if is_grid {
-            for (dx, dy) in [(-1.0, -1.0), (1.0, -1.0), (-1.0, 1.0), (1.0, 1.0)] {
-                p.rect_filled(Rect::from_center_size(Pos2::new(c.x + dx * 3.5, c.y + dy * 3.5), Vec2::splat(5.0)), 1.0, col);
-            }
-        } else {
-            for dy in [-4.5, 0.0, 4.5] {
-                p.rect_filled(Rect::from_center_size(Pos2::new(c.x, c.y + dy), Vec2::new(12.0, 2.0)), 1.0, col);
-            }
-        }
+        icons::paint(p, if is_grid { Icon::GridView } else { Icon::ListView }, c, 15.0, col);
         if r.on_hover_text(if is_grid { "Grid view" } else { "List view" }).clicked() {
             *grid = is_grid;
         }
@@ -416,11 +408,32 @@ fn view_toggle(ui: &mut Ui, at: Pos2, grid: &mut bool) {
 
 pub fn show(app: &mut App, ui: &mut Ui, region: Rect) {
     let p = ui.painter().clone();
-    // ---- search + view toggle
+    // ---- 1. Figma UI3 40px Header Row: "Assets" + Libraries book icon button
+    let hdr_h = SEARCH_H;
+    p.text(
+        Pos2::new(region.left() + 12.0, region.top() + hdr_h * 0.5),
+        Align2::LEFT_CENTER,
+        "Assets",
+        theme::font_large_strong(),
+        Color32::WHITE,
+    );
+    let libs_btn = Rect::from_min_size(Pos2::new(region.right() - 8.0 - VIEW_BTN, region.top() + (hdr_h - VIEW_BTN) * 0.5), Vec2::splat(VIEW_BTN));
+    widgets::record(ui, "assets-libraries", libs_btn);
+    if widgets::icon_button(ui, libs_btn, "assets-libraries", Icon::BookOpen, app.libs.open, "Libraries").clicked() {
+        app.open_libraries();
+    }
+    widgets::hline(&p, region.left(), region.right(), region.top() + hdr_h, theme::BORDER);
+
+    // ---- 2. Search Bar Row: "Search all libraries" (#0D99FF 1px border) + Filter/Sliders + View Toggle
+    let search_y = region.top() + hdr_h + 8.0;
     let toggle_w = VIEW_BTN * 2.0 + 2.0;
-    let lib_w = VIEW_BTN + 4.0;
-    let sr = Rect::from_min_size(Pos2::new(region.left() + 8.0, region.top() + 8.0), Vec2::new(region.width() - 16.0 - toggle_w - 4.0 - lib_w, 24.0));
-    p.rect_filled(sr, theme::cr(theme::RADIUS_MEDIUM), theme::BG_SECONDARY);
+    let filter_btn_w = VIEW_BTN + 4.0;
+    let sr = Rect::from_min_size(
+        Pos2::new(region.left() + 8.0, search_y),
+        Vec2::new((region.width() - 16.0 - filter_btn_w - toggle_w - 4.0).max(80.0), 28.0),
+    );
+    p.rect_filled(sr, theme::cr(6), Color32::from_rgb(0x1E, 0x1E, 0x1E));
+    p.rect_stroke(sr, theme::cr(6), Stroke::new(1.0, Color32::from_rgb(0x0D, 0x99, 0xFF)), StrokeKind::Inside);
     icons::paint(&p, Icon::Search, Pos2::new(sr.left() + 14.0, sr.center().y), 14.0, theme::ICON_SECONDARY);
     let mut q = std::mem::take(&mut app.assets.query);
     let te = TextEdit::singleline(&mut q)
@@ -428,30 +441,30 @@ pub fn show(app: &mut App, ui: &mut Ui, region: Rect) {
         .font(theme::font_body())
         .text_color(theme::TEXT)
         .frame(egui::Frame::NONE)
-        .hint_text("Search")
+        .hint_text("Search all libraries")
         .margin(egui::Margin::symmetric(0, 0))
         .vertical_align(egui::Align::Center)
-        .desired_width(sr.width() - 36.0);
-    let inner = Rect::from_min_max(Pos2::new(sr.left() + 28.0, sr.top()), sr.max);
+        .desired_width((sr.width() - 32.0).max(40.0));
+    let inner = Rect::from_min_max(Pos2::new(sr.left() + 26.0, sr.top()), sr.max);
     ui.put(inner, te);
     widgets::record(ui, "assets-search", sr);
     app.assets.query = q;
+
+    let filter_btn = Rect::from_min_size(Pos2::new(sr.right() + 4.0, search_y + 2.0), Vec2::splat(VIEW_BTN));
+    widgets::record(ui, "assets-filter-btn", filter_btn);
+    let _ = widgets::icon_button(ui, filter_btn, "assets-filter-btn", Icon::StrokeSettings, false, "Filter assets");
+
     let mut grid = app.assets.grid;
-    view_toggle(ui, Pos2::new(sr.right() + 4.0, sr.top()), &mut grid);
-    let libs_btn = Rect::from_min_size(Pos2::new(sr.right() + 4.0 + toggle_w + 4.0, sr.top()), Vec2::splat(VIEW_BTN));
-    widgets::record(ui, "assets-libraries", libs_btn);
-    if widgets::icon_button(ui, libs_btn, "assets-libraries", Icon::Book, app.libs.open, "Libraries").clicked() {
-        app.open_libraries();
-    }
+    view_toggle(ui, Pos2::new(filter_btn.right() + 4.0, search_y + 2.0), &mut grid);
     if grid != app.assets.grid {
         app.assets.grid = grid;
         app.assets.scroll = 0.0;
     }
 
-    // ---- UI3 Category Filter Pills: All | Local | Used in file
+    // ---- 3. UI3 Category Filter Pills: All | Local | Used in file
     let cat_id = Id::new("assets-cat-filter");
     let mut cat = ui.ctx().data(|d| d.get_temp::<u8>(cat_id)).unwrap_or(0);
-    let pill_y = region.top() + 36.0;
+    let pill_y = search_y + 34.0;
     let mut pill_x = region.left() + 8.0;
     for (idx, label) in [(0u8, "All"), (1u8, "Local"), (2u8, "Used in file")] {
         let pfont = if cat == idx { theme::font_small_strong() } else { theme::font_small() };
@@ -473,11 +486,64 @@ pub fn show(app: &mut App, ui: &mut Ui, region: Rect) {
         pill_x += pw + 4.0;
     }
 
+    // ---- 4. "All libraries" section + vertical "Created in this file" card + "Add more libraries" button
+    let sec_top = pill_y + 26.0;
+    p.text(
+        Pos2::new(region.left() + 12.0, sec_top + 8.0),
+        Align2::LEFT_CENTER,
+        "All libraries",
+        theme::font_body_strong(),
+        Color32::WHITE,
+    );
+
+    let local_comps = app.local_components();
+    let local_count = local_comps.len();
+    let card_r = Rect::from_min_size(
+        Pos2::new(region.left() + 12.0, sec_top + 22.0),
+        Vec2::new((region.width() - 24.0).max(80.0), 86.0),
+    );
+    widgets::record(ui, "assets-created-in-file", card_r);
+    let preview_r = Rect::from_min_size(card_r.min, Vec2::new(card_r.width(), 52.0));
+    p.rect_filled(preview_r, theme::cr(8), Color32::from_rgb(0x2C, 0x2C, 0x2C));
+    p.rect_stroke(preview_r, theme::cr(8), Stroke::new(1.0, Color32::from_rgb(0x38, 0x38, 0x38)), StrokeKind::Inside);
+    icons::paint(&p, Icon::Component, preview_r.center(), 18.0, Color32::from_rgb(0x8C, 0x8C, 0x8C));
+    p.text(
+        Pos2::new(card_r.left() + 2.0, preview_r.bottom() + 11.0),
+        Align2::LEFT_CENTER,
+        "Created in this file",
+        theme::font_body_strong(),
+        Color32::WHITE,
+    );
+    p.text(
+        Pos2::new(card_r.left() + 2.0, preview_r.bottom() + 26.0),
+        Align2::LEFT_CENTER,
+        format!("{local_count} component{}", if local_count == 1 { "" } else { "s" }),
+        theme::font_small(),
+        Color32::from_rgb(0x8C, 0x8C, 0x8C),
+    );
+
+    let add_libs_r = Rect::from_min_size(
+        Pos2::new(region.left() + 12.0, card_r.bottom() + 6.0),
+        Vec2::new((region.width() - 24.0).max(80.0), 28.0),
+    );
+    widgets::record(ui, "assets-add-more-libraries", add_libs_r);
+    let add_libs_resp = ui.interact(add_libs_r, ui.id().with("assets-add-more-libs"), Sense::click());
+    p.rect_filled(
+        add_libs_r,
+        theme::cr(6),
+        if add_libs_resp.hovered() { Color32::from_rgb(0x38, 0x38, 0x38) } else { Color32::from_rgb(0x2C, 0x2C, 0x2C) },
+    );
+    p.rect_stroke(add_libs_r, theme::cr(6), Stroke::new(1.0, Color32::from_rgb(0x38, 0x38, 0x38)), StrokeKind::Inside);
+    p.text(add_libs_r.center(), Align2::CENTER_CENTER, "Add more libraries", theme::font_body_strong(), Color32::WHITE);
+    if add_libs_resp.clicked() {
+        app.open_libraries();
+    }
+
     // ---- list
-    let list = Rect::from_min_max(Pos2::new(region.left(), region.top() + SEARCH_H + 22.0), region.max);
+    let list = Rect::from_min_max(Pos2::new(region.left(), add_libs_r.bottom() + 8.0), region.max);
     // Local components, then imported ones whose library is unavailable, then one
     // section per enabled library (entries with a `Some` source index).
-    let mut entries = app.local_components();
+    let mut entries = local_comps;
     entries.extend(app.unavailable_library_components());
     let lib_entries = app.library_entries();
     let mut srcs: Vec<Option<usize>> = vec![None; entries.len()];
@@ -518,16 +584,16 @@ pub fn show(app: &mut App, ui: &mut Ui, region: Rect) {
     wheel_scroll(ui, list, &mut scroll, content_h);
     app.assets.scroll = scroll;
     if entries.is_empty() {
-        p.text(Pos2::new(list.center().x, list.top() + 48.0), Align2::CENTER_CENTER, "No components yet", theme::font_body(), theme::TEXT_TERTIARY);
+        p.text(Pos2::new(list.center().x, list.top() + 20.0), Align2::CENTER_CENTER, "No components yet", theme::font_body(), theme::TEXT_TERTIARY);
         p.text(
-            Pos2::new(list.center().x, list.top() + 68.0),
+            Pos2::new(list.center().x, list.top() + 38.0),
             Align2::CENTER_CENTER,
             "Select a frame and press Ctrl+Alt+K",
             theme::font_small(),
             theme::TEXT_TERTIARY,
         );
     } else if shown.is_empty() {
-        p.text(Pos2::new(list.center().x, list.top() + 48.0), Align2::CENTER_CENTER, "No results", theme::font_body(), theme::TEXT_TERTIARY);
+        p.text(Pos2::new(list.center().x, list.top() + 20.0), Align2::CENTER_CENTER, "No results", theme::font_body(), theme::TEXT_TERTIARY);
     }
 
     let mut thumbs = std::mem::take(&mut app.assets.thumbs);

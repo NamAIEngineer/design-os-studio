@@ -1,0 +1,35 @@
+{
+  "version": "1.0",
+  "project": "design-os-studio",
+  "brand": "design:os studio",
+  "updated_at": "2026-10-15T14:52:00Z",
+  "entries": [
+    {
+      "id": "figma-ai-terminal-core",
+      "category": "features",
+      "title": "1:1 Figma AI Agent Surface + Native PTY Terminal Core (Claude Code, Codex, Antigravity, Grok)",
+      "path": "features/figma-ai-terminal-core/brainstorm.md",
+      "spec_bundle": "plans/specs/designos-studio-v2",
+      "stories": ["US-11", "US-03", "US-05", "US-10"],
+      "decisions": ["A1", "A2", "A3", "D10", "D11", "D12", "D13"]
+    },
+    {
+      "id": "phosphor-icons-and-figma-1to1-wave6",
+      "category": "features",
+      "title": "Wave 6: Unified Phosphor Icons System (DIR-19) & 1:1 Figma Visual/Userflow Closure UF-01..UF-08 (DIR-20)",
+      "path": "features/phosphor-icons-and-figma-1to1-wave6/wave6-parity.md",
+      "spec_bundle": "plans/specs/designos-studio-v2",
+      "stories": ["US-12", "US-13", "US-14"],
+      "decisions": ["D14", "D15", "D16", "D17"]
+    },
+    {
+      "id": "wave7-agentic-chat-and-cross-platform-installers",
+      "category": "features",
+      "title": "Wave 7: Pure Agentic Chat Wrapper over PTY Shell (DIR-21) & Cross-Platform Installers macOS/Windows/Linux (DIR-22)",
+      "path": "features/wave7-agentic-chat-and-cross-platform-installers/wave7.md",
+      "spec_bundle": "plans/specs/designos-studio-v2",
+      "stories": ["US-15"],
+      "decisions": ["D18", "D19"]
+    }
+  ]
+}

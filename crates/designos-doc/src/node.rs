@@ -132,6 +132,24 @@ pub struct Node {
     /// Presentation metadata; ordinary design nodes omit this field.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub slide: Option<SlideProps>,
+    /// Whether width/height aspect ratio is locked (`proportionsConstrained` / `targetAspectRatio`).
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub lock_aspect: bool,
+    /// Optional external URL or internal node hyperlink (`"guid:s:l"`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hyperlink: Option<String>,
+    /// Plugin metadata entries (`"{pluginID}:{key}" -> value` or `key -> value`).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub plugin_data: BTreeMap<String, String>,
+    /// Detached symbol provenance (`detachedSymbolId`, `"guid:s:l"` or `"assetRef:key:version"`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detached_symbol_id: Option<String>,
+    /// Lossless `.fig` v106 provenance & metadata bag (`editInfo`, `userFacingVersion`,
+    /// `sharedSymbolVersion`, `isSymbolPublishable`, `publishedVersion`, `isPublishable`,
+    /// `version`, `publishID`, `widgetCachedAncestor`, `pluginRelaunchData`,
+    /// `nodeGenerationData`, `brushType`, `shapeWithTextType`, etc.).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub fig_metadata: BTreeMap<String, String>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -216,11 +234,35 @@ pub struct ComponentLink {
     /// `Visible -> "Show icon"`, `Characters -> "Label"`, `MainComponent -> "Icon"`.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub bindings: BTreeMap<OverrideField, String>,
+    /// Component or component-set description (`symbolDescription`).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub description: String,
+    /// Whether nested instance properties are bubbled/exposed (`propsAreBubbled`).
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub expose_nested_instances: bool,
+    /// Variant property specifications (`variantPropSpecs`, tag=483) on a variant component.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub variant_props: BTreeMap<String, String>,
+    /// Override hierarchy depth (`overrideLevel`, tag=321).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub override_level: Option<i32>,
+    /// Detached symbol provenance (`detachedSymbolId`, tag=342).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detached_symbol_id: Option<String>,
 }
 
 impl ComponentLink {
     pub fn is_empty(&self) -> bool {
-        self.source.is_none() && self.overrides.is_empty() && self.props.is_empty() && self.values.is_empty() && self.bindings.is_empty()
+        self.source.is_none()
+            && self.overrides.is_empty()
+            && self.props.is_empty()
+            && self.values.is_empty()
+            && self.bindings.is_empty()
+            && self.description.is_empty()
+            && !self.expose_nested_instances
+            && self.variant_props.is_empty()
+            && self.override_level.is_none()
+            && self.detached_symbol_id.is_none()
     }
 }
 
@@ -256,6 +298,11 @@ impl Node {
             export_settings: Vec::new(),
             dev: DevInfo::default(),
             slide: None,
+            lock_aspect: false,
+            hyperlink: None,
+            plugin_data: BTreeMap::new(),
+            detached_symbol_id: None,
+            fig_metadata: BTreeMap::new(),
         }
     }
 
@@ -482,7 +529,7 @@ fn is_default_direction(d: &TextDirection) -> bool {
     *d == TextDirection::default()
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct TextProps {
     pub content: String,
     pub style: TextStyle,
@@ -503,6 +550,29 @@ pub struct TextProps {
     /// Paragraph writing direction.
     #[serde(default, skip_serializing_if = "is_default_direction")]
     pub direction: TextDirection,
+    /// Whether the layer name automatically tracks text content (`autoRename`, tag=14).
+    #[serde(default = "default_true", skip_serializing_if = "is_true")]
+    pub auto_rename: bool,
+    /// Whether underlines skip glyph descenders (`textDecorationSkipInk`, tag=412).
+    #[serde(default = "default_true", skip_serializing_if = "is_true")]
+    pub decoration_skip_ink: bool,
+}
+
+impl Default for TextProps {
+    fn default() -> Self {
+        Self {
+            content: String::new(),
+            style: TextStyle::default(),
+            runs: Vec::new(),
+            auto_resize: TextAutoResize::default(),
+            max_lines: None,
+            paragraph: ParagraphProps::default(),
+            lists: Vec::new(),
+            direction: TextDirection::default(),
+            auto_rename: true,
+            decoration_skip_ink: true,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]

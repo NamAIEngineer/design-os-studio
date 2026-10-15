@@ -129,6 +129,7 @@ pub struct TabsState {
     pub active_idx: usize,
     pub next_id: u64,
     pub ctx_menu_tab: Option<(usize, Pos2)>,
+    pub new_menu_pos: Option<Pos2>,
     /// True in the live native window and screenshot runs so the 32px Top Tab Bar is always shown.
     pub always_visible: bool,
     /// True when the user navigated to `Home` while keeping open project tabs parked in `entries`.
@@ -144,6 +145,7 @@ impl Default for TabsState {
             active_idx: 0,
             next_id: 1,
             ctx_menu_tab: None,
+            new_menu_pos: None,
             always_visible: false,
             parked_in_home: false,
             hist_in_app: true,
@@ -163,8 +165,9 @@ impl TabsState {
         self.always_visible || self.entries.len() > 1
     }
 
-    /// Snapshots the active `app` state into `entries[active_idx]` (and initializes the first tab
-    /// from `app` if `entries.is_empty()`).
+    /// Snapshots lightweight active `app` metadata into `entries[active_idx]` (and initializes the
+    /// first tab from `app` if `entries.is_empty()`). Never clones `app.doc` on per-frame ticks
+    /// (`es:rust` Law 10).
     pub fn sync_from_app(&mut self, app: &App) {
         if self.entries.is_empty() {
             let id = self.alloc_id();
@@ -184,7 +187,6 @@ impl TabsState {
         if tab.kind != ProjectTabKind::Spec {
             tab.kind = ProjectTabKind::from_doc(&app.doc);
         }
-        tab.doc = app.doc.clone();
         tab.page = app.page;
         tab.selection = app.selection.clone();
         tab.view = app.view;
@@ -194,7 +196,7 @@ impl TabsState {
         tab.dirty = app.hist.can_undo() || tab.hist.can_undo() || app.autosave.pending();
     }
 
-    /// Parks the active tab's state AND moves `app.hist` into `entries[active_idx].hist`.
+    /// Parks the active tab's state (including `app.doc`) AND moves `app.hist` into `entries[active_idx].hist`.
     fn park_active_from_app(&mut self, app: &mut App) {
         if self.entries.is_empty() {
             let id = self.alloc_id();
@@ -210,6 +212,9 @@ impl TabsState {
             return;
         }
         self.sync_from_app(app);
+        if self.active_idx < self.entries.len() {
+            self.entries[self.active_idx].doc = app.doc.clone();
+        }
         if self.hist_in_app && self.active_idx < self.entries.len() {
             self.entries[self.active_idx].hist = std::mem::take(&mut app.hist);
             self.entries[self.active_idx].dirty =
@@ -400,6 +405,14 @@ impl TabsState {
     pub fn open_new_board_tab(&mut self, app: &mut App) -> usize {
         let doc = crate::board::create::new_document("Untitled");
         self.open_new_tab(app, "Untitled", doc, ProjectTabKind::Board)
+    }
+
+    /// Creates a new `"Untitled"` slide deck tab and activates it.
+    pub fn open_new_deck_tab(&mut self, app: &mut App) -> usize {
+        let mut doc = Document::new("Untitled");
+        doc.kind = DocumentKind::Deck;
+        doc.add_page("Slide 1");
+        self.open_new_tab(app, "Untitled", doc, ProjectTabKind::Deck)
     }
 
     /// Focuses an existing tab with `file_path == Some(path)`, or opens `path` in a new tab.
@@ -601,6 +614,7 @@ enum TabUiAction {
     CloseOtherTabs(usize),
     NewDesignTab,
     NewBoardTab,
+    NewDeckTab,
 }
 
 /// Renders the 1:1 Figma UI3 Top Window Tab Bar (`32px` height) inside `ui`.
@@ -783,18 +797,28 @@ pub fn show_top_tab_bar_ui(ui: &mut Ui, bar_rect: Rect, app: &mut App) {
             );
         }
 
-        // Colored file-type icon badge
+        // Colored file-type icon badge (or Figma Dev Mode #1BC47D `</>` badge when dev_mode is active)
         let badge_rect = Rect::from_center_size(
             Pos2::new(tab_rect.left() + 13.0, tab_rect.center().y),
             Vec2::splat(14.0),
         );
-        let badge_col = tab.kind.badge_color();
-        p.rect_filled(
-            badge_rect,
-            theme::cr(3),
-            Color32::from_rgba_unmultiplied(badge_col.r(), badge_col.g(), badge_col.b(), 38),
-        );
-        icons::paint(&p, tab.kind.icon(), badge_rect.center(), 11.0, badge_col);
+        let in_dev_mode = tab.dev_mode || (is_active && app.ui.dev_mode);
+        let (badge_col, badge_icon) = if in_dev_mode {
+            (Color32::from_rgb(0x1B, 0xC4, 0x7D), Icon::Dev)
+        } else {
+            (tab.kind.badge_color(), tab.kind.icon())
+        };
+        if in_dev_mode {
+            p.rect_filled(badge_rect, theme::cr(3), badge_col);
+            icons::paint(&p, badge_icon, badge_rect.center(), 10.0, Color32::from_rgb(0x0D, 0x1F, 0x16));
+        } else {
+            p.rect_filled(
+                badge_rect,
+                theme::cr(3),
+                Color32::from_rgba_unmultiplied(badge_col.r(), badge_col.g(), badge_col.b(), 38),
+            );
+            icons::paint(&p, badge_icon, badge_rect.center(), 11.0, badge_col);
+        }
 
         let mut text_left = badge_rect.right() + 6.0;
         if tab.pinned {
@@ -874,7 +898,7 @@ pub fn show_top_tab_bar_ui(ui: &mut Ui, bar_rect: Rect, app: &mut App) {
         x = tab_rect.right() + 3.0;
     }
 
-    // 4. Trailing `+` Button ("tab-bar-new") and `+ Board` quick button ("tab-bar-new-board")
+    // 4. Trailing `+` New Tab Button ("tab-bar-new") — clean 1:1 Figma UI3 end-cap
     {
         let plus_rect = Rect::from_min_size(Pos2::new(x + 2.0, bar_rect.top() + 4.0), Vec2::splat(24.0));
         widgets::record(ui, "tab-bar-new", plus_rect);
@@ -893,39 +917,46 @@ pub fn show_top_tab_bar_ui(ui: &mut Ui, bar_rect: Rect, app: &mut App) {
         if plus_resp.clicked() {
             actions.push(TabUiAction::NewDesignTab);
         }
+        if plus_resp.secondary_clicked() {
+            let pos = ui
+                .ctx()
+                .input(|i| i.pointer.interact_pos())
+                .unwrap_or_else(|| plus_rect.left_bottom());
+            app.tabs.new_menu_pos = Some(pos);
+        }
+    }
 
-        let board_btn_rect = Rect::from_min_size(
-            Pos2::new(plus_rect.right() + 4.0, bar_rect.top() + 5.0),
-            Vec2::new(58.0, 22.0),
-        );
-        if board_btn_rect.right() <= bar_rect.right() - 6.0 {
-            widgets::record(ui, "tab-bar-new-board", board_btn_rect);
-            let b_resp = ui.interact(board_btn_rect, ui.id().with("tab-bar-new-board"), Sense::click());
-            if b_resp.hovered() {
-                ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
-                p.rect_filled(board_btn_rect, theme::cr(5), TAB_HOVER_BG);
+    // 4b. Right-Click Menu on `+` Button (`New Design File` / `New FigJam Board` / `New Slide Deck`)
+    if let Some(pos) = app.tabs.new_menu_pos {
+        let items = vec![
+            MenuItem::new("New Design File").shortcut("Ctrl+T"),
+            MenuItem::new("New FigJam Board"),
+            MenuItem::new("New Slide Deck"),
+        ];
+        match popup_menu(
+            ui.ctx(),
+            egui::Id::new("project-tab-new-menu"),
+            pos,
+            188.0,
+            &items,
+            None,
+        ) {
+            MenuResult::Picked(0) => {
+                app.tabs.new_menu_pos = None;
+                actions.push(TabUiAction::NewDesignTab);
             }
-            p.rect_stroke(
-                board_btn_rect,
-                theme::cr(5),
-                Stroke::new(1.0, TAB_BAR_BORDER),
-                StrokeKind::Inside,
-            );
-            p.circle_filled(
-                Pos2::new(board_btn_rect.left() + 9.0, board_btn_rect.center().y),
-                3.0,
-                BADGE_BOARD_PURPLE,
-            );
-            p.text(
-                Pos2::new(board_btn_rect.left() + 16.0, board_btn_rect.center().y),
-                Align2::LEFT_CENTER,
-                "+ Board",
-                theme::font_small_medium(),
-                if b_resp.hovered() { theme::TEXT } else { theme::TEXT_SECONDARY },
-            );
-            if b_resp.clicked() {
+            MenuResult::Picked(1) => {
+                app.tabs.new_menu_pos = None;
                 actions.push(TabUiAction::NewBoardTab);
             }
+            MenuResult::Picked(2) => {
+                app.tabs.new_menu_pos = None;
+                actions.push(TabUiAction::NewDeckTab);
+            }
+            MenuResult::Picked(_) | MenuResult::Closed => {
+                app.tabs.new_menu_pos = None;
+            }
+            MenuResult::Open => {}
         }
     }
 
@@ -1005,6 +1036,9 @@ pub fn show_top_tab_bar_ui(ui: &mut Ui, bar_rect: Rect, app: &mut App) {
                 TabUiAction::NewBoardTab => {
                     tabs.open_new_board_tab(app);
                 }
+                TabUiAction::NewDeckTab => {
+                    tabs.open_new_deck_tab(app);
+                }
             }
         }
         app.tabs = tabs;
@@ -1012,21 +1046,7 @@ pub fn show_top_tab_bar_ui(ui: &mut Ui, bar_rect: Rect, app: &mut App) {
 }
 
 fn paint_home_glyph(p: &egui::Painter, center: Pos2, color: Color32) {
-    let stroke = Stroke::new(1.35, color);
-    // Roof triangle
-    let top = Pos2::new(center.x, center.y - 5.5);
-    let left_eave = Pos2::new(center.x - 6.0, center.y - 0.5);
-    let right_eave = Pos2::new(center.x + 6.0, center.y - 0.5);
-    p.line_segment([left_eave, top], stroke);
-    p.line_segment([top, right_eave], stroke);
-    // House body
-    let body = Rect::from_min_max(
-        Pos2::new(center.x - 4.2, center.y - 1.0),
-        Pos2::new(center.x + 4.2, center.y + 5.2),
-    );
-    p.line_segment([body.left_top(), body.left_bottom()], stroke);
-    p.line_segment([body.right_top(), body.right_bottom()], stroke);
-    p.line_segment([body.left_bottom(), body.right_bottom()], stroke);
+    icons::paint(p, Icon::Home, center, 14.0, color);
 }
 
 fn truncate_tab_title(p: &egui::Painter, text: &str, font: &egui::FontId, max_w: f32) -> String {

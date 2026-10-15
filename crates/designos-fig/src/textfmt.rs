@@ -213,8 +213,46 @@ pub(crate) fn flags_from_kiwi(o: &Value) -> Option<Value> {
         }
         _ => {}
     }
+    match name("fontVariantCaps") {
+        Some("SMALL" | "SMALL_CAPS") => {
+            m.insert("SMCP".into(), json!(1));
+        }
+        Some("ALL_SMALL" | "ALL_SMALL_CAPS") => {
+            m.insert("SMCP".into(), json!(1));
+            m.insert("C2SC".into(), json!(1));
+        }
+        Some("PETITE" | "PETITE_CAPS") => {
+            m.insert("PCAP".into(), json!(1));
+        }
+        Some("ALL_PETITE" | "ALL_PETITE_CAPS") => {
+            m.insert("PCAP".into(), json!(1));
+            m.insert("C2PC".into(), json!(1));
+        }
+        Some("UNICASE") => {
+            m.insert("UNIC".into(), json!(1));
+        }
+        Some("TITLING" | "TITLING_CAPS") => {
+            m.insert("TITL".into(), json!(1));
+        }
+        _ => {}
+    }
+    match name("fontVariantPosition") {
+        Some("SUB" | "SUBSCRIPT") => {
+            m.insert("SUBS".into(), json!(1));
+        }
+        Some("SUPER" | "SUPERSCRIPT") => {
+            m.insert("SUPS".into(), json!(1));
+        }
+        _ => {}
+    }
     if name("fontVariantLigatures") == Some("NO_COMMON_LIGATURES") {
         m.insert("LIGA".into(), json!(0));
+    }
+    if o.get("fontVariantCommonLigatures").and_then(Value::as_bool) == Some(false) && !m.contains_key("LIGA") {
+        m.insert("LIGA".into(), json!(0));
+    }
+    if o.get("fontVariantContextualLigatures").and_then(Value::as_bool) == Some(false) && !m.contains_key("CALT") {
+        m.insert("CALT".into(), json!(0));
     }
     (!m.is_empty()).then_some(Value::Object(m))
 }

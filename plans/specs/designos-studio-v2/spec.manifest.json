@@ -13,7 +13,7 @@
   "status": "READY_FOR_DEV",
   "contract_status": "FROZEN",
   "current_stage": "handoff",
-  "updated_at": "2026-10-15T09:05:00Z",
+  "updated_at": "2026-10-15T14:30:00Z",
   "directives": [
     "DIR-01",
     "DIR-02",
@@ -27,7 +27,16 @@
     "DIR-10",
     "DIR-11",
     "DIR-12",
-    "DIR-13"
+    "DIR-13",
+    "DIR-14",
+    "DIR-15",
+    "DIR-16",
+    "DIR-17",
+    "DIR-18",
+    "DIR-19",
+    "DIR-20",
+    "DIR-21",
+    "DIR-22"
   ],
   "requirements": [
     "REQ-01",
@@ -41,7 +50,14 @@
     "REQ-09",
     "REQ-10",
     "REQ-11",
-    "REQ-12"
+    "REQ-12",
+    "REQ-13",
+    "REQ-14",
+    "REQ-15",
+    "REQ-16",
+    "REQ-17",
+    "REQ-18",
+    "REQ-19"
   ],
   "stories": [
     {
@@ -113,6 +129,41 @@
       "priority": "MVP",
       "status": "Verified",
       "file": "us/US-10.md"
+    },
+    {
+      "id": "US-11",
+      "title": "1:1 Figma AI Agent Suite & Native PTY Terminal Core (Claude, Codex, Antigravity, Grok)",
+      "priority": "MVP",
+      "status": "Verified",
+      "file": "us/US-11.md"
+    },
+    {
+      "id": "US-12",
+      "title": "Quantitative 1:1 Figma Parity Benchmark & Live Telemetry Scorecard (Thước đo % match với Figma)",
+      "priority": "MVP",
+      "status": "Verified",
+      "file": "us/US-12.md"
+    },
+    {
+      "id": "US-13",
+      "title": "1:1 Figma UI3 Agents Left Side Panel (DIR-17), 9 Visual Deltas & 5 End-to-End Userflows Audit (UF-01..UF-05 · DIR-18)",
+      "priority": "MVP",
+      "status": "Verified",
+      "file": "us/US-13.md"
+    },
+    {
+      "id": "US-14",
+      "title": "Unified Phosphor Icons System Across Entire Studio (@phosphor-icons/core SVG Asset Pipeline & DPR-Aware Raster Cache · DIR-19)",
+      "priority": "MVP",
+      "status": "Verified",
+      "file": "us/US-14.md"
+    },
+    {
+      "id": "US-15",
+      "title": "Pure Chat UI Wrapper Over Native PTY Terminal Shell (Claude Code, Codex, Antigravity CLI · DIR-21)",
+      "priority": "MVP",
+      "status": "Verified",
+      "file": "us/US-15.md"
     }
   ],
   "gates": {

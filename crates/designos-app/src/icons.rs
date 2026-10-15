@@ -1,8 +1,8 @@
-//! UI icons: the open-source Lucide set (ISC, vendored in `assets/icons/lucide`),
-//! rasterised once per (icon, pixel size) with resvg into an alpha mask that is
-//! uploaded as an egui texture and tinted at paint time. Rendering happens at the
-//! device pixel ratio, so glyphs are crisp at 1x and 2x. Only the brand logo is
-//! drawn by hand (it is ours).
+//! UI icons: the official Phosphor Icons set (`@phosphor-icons/core`, MIT license,
+//! vendored in `assets/icons/phosphor`), rasterised once per (icon, pixel size) with
+//! `resvg` into an alpha mask that is uploaded as an egui texture and tinted at paint
+//! time. Rendering happens at the device pixel ratio, so glyphs are crisp at 1x and 2x.
+//! Only the brand logo is drawn from our brand asset.
 
 use egui::{Color32, Context, Painter, Pos2, Rect, TextureHandle, TextureOptions, Vec2};
 use std::collections::HashMap;
@@ -127,6 +127,14 @@ pub enum Icon {
     StrokeWeight,
     Terminal,
     Grid2x2,
+    // navigation & agent chrome
+    Home,
+    Wand,
+    StarFour,
+    BookOpen,
+    Microphone,
+    ArrowUp,
+    ArrowSquareOut,
 }
 
 impl Icon {
@@ -242,256 +250,283 @@ impl Icon {
         Icon::StrokeWeight,
         Icon::Terminal,
         Icon::Grid2x2,
+        Icon::Home,
+        Icon::Wand,
+        Icon::StarFour,
+        Icon::BookOpen,
+        Icon::Microphone,
+        Icon::ArrowUp,
+        Icon::ArrowSquareOut,
     ];
 
-    /// Name of the vendored Lucide icon that stands in for this one (None for the logo).
-    pub fn lucide_name(self) -> Option<&'static str> {
+    /// Name of the vendored Phosphor regular icon that stands in for this one (`None` for the logo).
+    pub fn phosphor_name(self) -> Option<&'static str> {
         Some(match self {
             Icon::Logo => return None,
             Icon::File => "file",
-            Icon::Specs => "specs",
+            Icon::Specs => "book-open-text",
             Icon::Folder => "folder",
-            Icon::Trash => "trash-2",
+            Icon::Trash => "trash",
             Icon::Clock => "clock",
-            Icon::GridView => "layout-grid",
+            Icon::GridView => "squares-four",
             Icon::ListView => "list",
             Icon::Book => "book",
-            Icon::Assets => "library",
-            Icon::Tools => "wrench",
+            Icon::Assets => "plus-circle",
+            Icon::Tools => "toolbox",
             Icon::Variables => "hexagon",
-            Icon::Help => "circle-help",
-            Icon::ChevronDown => "chevron-down",
-            Icon::ChevronRight => "chevron-right",
+            Icon::Help => "question",
+            Icon::ChevronDown => "caret-down",
+            Icon::ChevronRight => "caret-right",
             Icon::Plus => "plus",
             Icon::Minus => "minus",
-            Icon::Search => "search",
+            Icon::Search => "magnifying-glass",
             Icon::Eye => "eye",
-            Icon::EyeOff => "eye-off",
+            Icon::EyeOff => "eye-slash",
             Icon::Lock => "lock",
             Icon::Unlock => "lock-open",
-            Icon::Sidebar => "panel-left",
+            Icon::Sidebar => "sidebar-simple",
             Icon::Page => "file-text",
             Icon::Check => "check",
-            Icon::Move => "mouse-pointer-2",
+            Icon::Move => "cursor",
             Icon::Hand => "hand",
-            Icon::Scale => "scaling",
-            Icon::Frame => "frame",
-            Icon::AutoLayoutH => "auto-layout-h",
-            Icon::AutoLayoutV => "auto-layout-v",
-            Icon::Section => "section",
-            Icon::Slice => "slice",
+            Icon::Scale => "arrows-out",
+            Icon::Frame => "frame-corners",
+            Icon::AutoLayoutH => "columns",
+            Icon::AutoLayoutV => "rows",
+            Icon::Section => "selection-all",
+            Icon::Slice => "knife",
             Icon::Rectangle => "square",
-            Icon::Line => "slash",
+            Icon::Line => "line-segment",
             Icon::Arrow => "arrow-up-right",
             Icon::Ellipse => "circle",
             Icon::Polygon => "triangle",
             Icon::Star => "star",
             Icon::Image => "image",
-            Icon::Pen => "pen-tool",
-            Icon::Pencil => "pencil",
-            Icon::Text => "type",
-            Icon::Comment => "message-circle",
-            Icon::Sticky => "sticky-note",
+            Icon::Pen => "pen-nib",
+            Icon::Pencil => "pencil-simple",
+            Icon::Text => "text-t",
+            Icon::Comment => "chat-circle",
+            Icon::Sticky => "note",
             Icon::Shapes => "shapes",
-            Icon::Connector => "corner-down-right",
+            Icon::Connector => "arrow-elbow-down-right",
             Icon::Marker => "pencil-line",
             Icon::Highlighter => "highlighter",
             Icon::Stamp => "stamp",
-            Icon::Group => "group",
-            Icon::Vector => "spline",
-            Icon::Component => "component",
-            Icon::ComponentSet => "component-set",
-            Icon::Instance => "instance",
-            Icon::Boolean => "combine",
-            Icon::AlignLeft => "align-start-vertical",
-            Icon::AlignHCenter => "align-center-vertical",
-            Icon::AlignRight => "align-end-vertical",
-            Icon::AlignTop => "align-start-horizontal",
-            Icon::AlignVCenter => "align-center-horizontal",
-            Icon::AlignBottom => "align-end-horizontal",
-            Icon::Rotation => "rotate-cw",
-            Icon::Radius => "radius",
-            Icon::Opacity => "droplet",
-            Icon::Mask => "mask",
+            Icon::Group => "selection-plus",
+            Icon::Vector => "bezier-curve",
+            Icon::Component => "diamonds-four",
+            Icon::ComponentSet => "intersect-three",
+            Icon::Instance => "diamond",
+            Icon::Boolean => "unite",
+            Icon::AlignLeft => "align-left",
+            Icon::AlignHCenter => "align-center-horizontal",
+            Icon::AlignRight => "align-right",
+            Icon::AlignTop => "align-top",
+            Icon::AlignVCenter => "align-center-vertical",
+            Icon::AlignBottom => "align-bottom",
+            Icon::Rotation => "arrow-clockwise",
+            Icon::Radius => "corners-out",
+            Icon::Opacity => "drop",
+            Icon::Mask => "circle-half",
             Icon::DirHorizontal => "arrow-right",
             Icon::DirVertical => "arrow-down",
-            Icon::Wrap => "wrap-text",
-            Icon::Spacing => "spacing",
-            Icon::PaddingH => "padding-h",
-            Icon::PaddingV => "padding-v",
-            Icon::Dev => "code-xml",
-            Icon::Design => "mouse-pointer-2",
-            Icon::Export => "download",
-            Icon::Sparkle => "sparkles",
-            Icon::TextLeft => "align-left",
-            Icon::TextCenter => "align-center",
-            Icon::TextRight => "align-right",
-            Icon::Distribute => "align-vertical-distribute-center",
-            Icon::Rotate90 => "rotate-cw-square",
+            Icon::Wrap => "arrow-u-down-left",
+            Icon::Spacing => "arrows-horizontal",
+            Icon::PaddingH => "arrows-out-line-horizontal",
+            Icon::PaddingV => "arrows-out-line-vertical",
+            Icon::Dev => "code",
+            Icon::Design => "cursor",
+            Icon::Export => "download-simple",
+            Icon::Sparkle => "sparkle",
+            Icon::TextLeft => "text-align-left",
+            Icon::TextCenter => "text-align-center",
+            Icon::TextRight => "text-align-right",
+            Icon::Distribute => "align-center-vertical-simple",
+            Icon::Rotate90 => "arrows-clockwise",
             Icon::FlipH => "flip-horizontal",
             Icon::FlipV => "flip-vertical",
             Icon::Flag => "flag",
             Icon::Play => "play",
-            Icon::Eyedropper => "pipette",
+            Icon::Eyedropper => "eyedropper",
             Icon::Close => "x",
-            Icon::Styles => "styles-dots",
+            Icon::Styles => "dots-nine",
             Icon::PaintSolid => "square",
-            Icon::PaintLinear => "blend",
-            Icon::PaintRadial => "circle-dot",
-            Icon::PaintAngular => "rotate-cw",
+            Icon::PaintLinear => "gradient",
+            Icon::PaintRadial => "record",
+            Icon::PaintAngular => "arrow-clockwise",
             Icon::PaintDiamond => "diamond",
             Icon::PaintImage => "image",
-            Icon::Blend => "droplet",
-            Icon::NoPaint => "ban",
-            Icon::InnerShadow => "square-dashed-bottom",
-            Icon::DropShadow => "layers-2",
-            Icon::LayerBlur => "grip",
-            Icon::BackgroundBlur => "grid-3x3",
-            Icon::Noise => "dices",
+            Icon::Blend => "drop",
+            Icon::NoPaint => "prohibit",
+            Icon::InnerShadow => "square-half-bottom",
+            Icon::DropShadow => "stack",
+            Icon::LayerBlur => "dots-six",
+            Icon::BackgroundBlur => "checkerboard",
+            Icon::Noise => "dice-five",
             Icon::Texture => "waves",
-            Icon::Glass => "contrast",
-            Icon::Shader => "sparkles",
+            Icon::Glass => "circle-half-tilt",
+            Icon::Shader => "sparkle",
             Icon::StrokeSettings => "sliders-horizontal",
-            Icon::StrokeSides => "stroke-sides",
-            Icon::StrokeWeight => "align-justify",
-            Icon::Terminal => "terminal",
-            Icon::Grid2x2 => "grid-2x2",
+            Icon::StrokeSides => "bounding-box",
+            Icon::StrokeWeight => "text-align-justify",
+            Icon::Terminal => "terminal-window",
+            Icon::Grid2x2 => "grid-four",
+            Icon::Home => "house",
+            Icon::Wand => "magic-wand",
+            Icon::StarFour => "star-four",
+            Icon::BookOpen => "book-open",
+            Icon::Microphone => "microphone",
+            Icon::ArrowUp => "arrow-up",
+            Icon::ArrowSquareOut => "arrow-square-out",
         })
+    }
+
+    /// Backwards-compatible alias for [`Self::phosphor_name`].
+    #[allow(dead_code)]
+    pub fn lucide_name(self) -> Option<&'static str> {
+        self.phosphor_name()
     }
 }
 
-macro_rules! lucide {
+macro_rules! phosphor {
     ($($name:literal),* $(,)?) => {
-        /// The vendored SVG sources, by Lucide name.
-        pub const LUCIDE: &[(&str, &str)] = &[
-            $(($name, include_str!(concat!("../assets/icons/lucide/", $name, ".svg")))),*
+        /// The vendored Phosphor SVG sources (`viewBox="0 0 256 256"`), by Phosphor icon name.
+        pub const PHOSPHOR: &[(&str, &str)] = &[
+            $(($name, include_str!(concat!("../assets/icons/phosphor/", $name, ".svg")))),*
         ];
     };
 }
 
-lucide!(
-    "file",
-    "specs",
-    "library",
-    "wrench",
-    "hexagon",
-    "circle-help",
-    "folder",
-    "trash-2",
-    "clock",
-    "layout-grid",
-    "list",
-    "book",
-    "chevron-down",
-    "chevron-right",
-    "plus",
-    "minus",
-    "search",
-    "eye",
-    "eye-off",
-    "lock",
-    "lock-open",
-    "panel-left",
-    "file-text",
-    "check",
-    "mouse-pointer-2",
-    "hand",
-    "scaling",
-    "frame",
-    "auto-layout-h",
-    "auto-layout-v",
-    "section",
-    "slice",
-    "square",
-    "slash",
-    "arrow-up-right",
-    "circle",
-    "triangle",
-    "star",
-    "image",
-    "pen-tool",
-    "pencil",
-    "type",
-    "message-circle",
-    "sticky-note",
-    "shapes",
-    "corner-down-right",
-    "pencil-line",
-    "highlighter",
-    "stamp",
-    "group",
-    "spline",
-    "component",
-    "component-set",
-    "instance",
-    "diamond",
-    "combine",
-    "align-start-vertical",
-    "align-center-vertical",
-    "align-end-vertical",
-    "align-start-horizontal",
+phosphor!(
+    "align-bottom",
     "align-center-horizontal",
-    "align-end-horizontal",
-    "rotate-cw",
-    "radius",
-    "stroke-sides",
-    "droplet",
-    "mask",
-    "arrow-right",
-    "arrow-down",
-    "wrap-text",
-    "spacing",
-    "padding-h",
-    "padding-v",
-    "code-xml",
-    "download",
-    "sparkles",
+    "align-center-vertical",
+    "align-center-vertical-simple",
     "align-left",
-    "align-center",
     "align-right",
-    "align-vertical-distribute-center",
-    "rotate-cw-square",
+    "align-top",
+    "arrow-clockwise",
+    "arrow-down",
+    "arrow-elbow-down-right",
+    "arrow-right",
+    "arrow-square-out",
+    "arrow-u-down-left",
+    "arrow-up",
+    "arrow-up-right",
+    "arrows-clockwise",
+    "arrows-horizontal",
+    "arrows-out",
+    "arrows-out-line-horizontal",
+    "arrows-out-line-vertical",
+    "bezier-curve",
+    "book",
+    "book-open",
+    "book-open-text",
+    "bounding-box",
+    "caret-down",
+    "caret-right",
+    "chat-circle",
+    "check",
+    "checkerboard",
+    "circle",
+    "circle-half",
+    "circle-half-tilt",
+    "clock",
+    "code",
+    "columns",
+    "corners-out",
+    "cursor",
+    "diamond",
+    "diamonds-four",
+    "dice-five",
+    "dots-nine",
+    "dots-six",
+    "download-simple",
+    "drop",
+    "eye",
+    "eye-slash",
+    "eyedropper",
+    "file",
+    "file-text",
+    "flag",
     "flip-horizontal",
     "flip-vertical",
-    "flag",
+    "folder",
+    "frame-corners",
+    "gradient",
+    "grid-four",
+    "hand",
+    "hexagon",
+    "highlighter",
+    "house",
+    "image",
+    "intersect-three",
+    "knife",
+    "line-segment",
+    "list",
+    "lock",
+    "lock-open",
+    "magic-wand",
+    "magnifying-glass",
+    "microphone",
+    "minus",
+    "note",
+    "pen-nib",
+    "pencil-line",
+    "pencil-simple",
     "play",
-    "pipette",
-    "x",
-    "styles-dots",
-    "blend",
-    "circle-dot",
-    "ban",
-    "align-justify",
-    "contrast",
-    "dices",
-    "grid-3x3",
-    "grip",
-    "layers-2",
+    "plus",
+    "plus-circle",
+    "prohibit",
+    "question",
+    "record",
+    "rows",
+    "selection-all",
+    "selection-plus",
+    "shapes",
+    "sidebar-simple",
     "sliders-horizontal",
-    "square-dashed-bottom",
+    "sparkle",
+    "square",
+    "square-half-bottom",
+    "squares-four",
+    "stack",
+    "stamp",
+    "star",
+    "star-four",
+    "terminal-window",
+    "text-align-center",
+    "text-align-justify",
+    "text-align-left",
+    "text-align-right",
+    "text-t",
+    "toolbox",
+    "trash",
+    "triangle",
+    "unite",
     "waves",
-    "terminal",
-    "grid-2x2",
+    "x",
 );
 
-/// SVG source of the Lucide icon behind `icon`.
-pub fn svg_source(icon: Icon) -> Option<&'static str> {
-    let name = icon.lucide_name()?;
-    LUCIDE.iter().find(|(n, _)| *n == name).map(|(_, s)| *s)
-}
+/// Backwards-compatible alias for [`PHOSPHOR`].
+#[allow(dead_code)]
+pub const LUCIDE: &[(&str, &str)] = PHOSPHOR;
 
-/// Stroke width in Lucide's 24-unit space. 2.25 gives a 1.5px line on a 16px glyph
-/// (Lucide's own 2 gives 1.33px, which reads thin next to the UI3 captures at 1x). Never
-/// thinner than one device pixel.
-fn stroke_units(px: u32) -> f32 {
-    (2.25f32).max(24.0 / px.max(1) as f32)
+/// SVG source of the Phosphor icon behind `icon`.
+pub fn svg_source(icon: Icon) -> Option<&'static str> {
+    let name = icon.phosphor_name()?;
+    PHOSPHOR.iter().find(|(n, _)| *n == name).map(|(_, s)| *s)
 }
 
 /// Rasterises `icon` into a `px` x `px` coverage mask (one alpha byte per pixel).
 pub fn rasterize(icon: Icon, px: u32) -> Option<Vec<u8>> {
     use resvg::{tiny_skia, usvg};
     let src = svg_source(icon)?;
-    let svg = src.replace("currentColor", "#ffffff").replace("stroke-width=\"2\"", &format!("stroke-width=\"{}\"", stroke_units(px)));
+    let svg = if src.contains("currentColor") {
+        src.replace("currentColor", "#ffffff")
+    } else {
+        src.replace("viewBox=\"0 0 256 256\"", "viewBox=\"0 0 256 256\" fill=\"#ffffff\"")
+    };
     let tree = usvg::Tree::from_str(&svg, &usvg::Options::default()).ok()?;
     let mut pm = tiny_skia::Pixmap::new(px, px)?;
     let s = px as f32 / tree.size().width();
@@ -578,14 +613,15 @@ mod tests {
     fn every_icon_has_a_parsable_asset() {
         for &icon in Icon::ALL {
             if icon == Icon::Logo {
+                assert!(icon.phosphor_name().is_none());
                 assert!(icon.lucide_name().is_none());
                 continue;
             }
-            let src = svg_source(icon).unwrap_or_else(|| panic!("{icon:?} has no vendored svg"));
+            let src = svg_source(icon).unwrap_or_else(|| panic!("{icon:?} has no vendored Phosphor svg"));
             let mask = rasterize(icon, 16).unwrap_or_else(|| panic!("{icon:?} does not parse"));
             assert_eq!(mask.len(), 256);
             assert!(mask.iter().any(|&a| a > 0), "{icon:?} rendered empty");
-            assert!(src.contains("viewBox=\"0 0 24 24\""));
+            assert!(src.contains("viewBox=\"0 0 256 256\""), "{icon:?} is not a 256x256 Phosphor SVG");
         }
     }
 
@@ -595,13 +631,16 @@ mod tests {
         for i in Icon::ALL {
             assert!(seen.insert(*i), "{i:?} listed twice");
         }
-        assert_eq!(seen.len(), 109);
+        assert_eq!(seen.len(), 116);
     }
 
     #[test]
     fn no_vendored_svg_is_unused() {
-        for (name, _) in LUCIDE {
-            assert!(Icon::ALL.iter().any(|i| i.lucide_name() == Some(*name)), "{name} is vendored but unused");
+        for (name, _) in PHOSPHOR {
+            assert!(
+                Icon::ALL.iter().any(|i| i.phosphor_name() == Some(*name)),
+                "{name} is vendored in assets/icons/phosphor but unused"
+            );
         }
     }
 

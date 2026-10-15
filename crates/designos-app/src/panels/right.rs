@@ -23,16 +23,30 @@ pub fn show(app: &mut App, ui: &mut Ui, rect: Rect) {
     let right = rect.right();
     let left = rect.left();
 
-    // User avatar pill + chevron on top-left of right inspector header (Figma UI3).
+    // User avatar pill + chevron on top-left of right inspector header (Figma UI3 #F59E0B).
     let av_center = Pos2::new(left + 21.0, rect.top() + theme::RIGHT_BTN_Y + theme::RIGHT_BTN_SIZE * 0.5);
-    p.circle_filled(av_center, 11.0, theme::BG_BRAND);
+    p.circle_filled(av_center, 11.0, egui::Color32::from_rgb(0xF5, 0x9E, 0x0B));
     p.text(av_center, Align2::CENTER_CENTER, "J", theme::font_small_strong(), egui::Color32::WHITE);
     icons::paint(&p, Icon::ChevronDown, Pos2::new(av_center.x + 17.0, av_center.y), theme::CHEVRON_SMALL, theme::ICON_SECONDARY);
 
-    // Share button (Figma UI3 #0D99FF in Design mode, #1BC47D in Dev mode).
+    // Present button + chevron (to the LEFT of Share button, matching Figma UI3).
+    let pb = Rect::from_min_size(Pos2::new(right - theme::RIGHT_PRESENT_FROM_RIGHT - 46.0, rect.top() + theme::RIGHT_BTN_Y), Vec2::splat(theme::RIGHT_BTN_SIZE));
+    let pr = ui.interact(pb, ui.id().with("present"), Sense::click());
+    widgets::button_bg(&p, pb, &pr, false, theme::cr_each(theme::RADIUS_MEDIUM, 0, 0, theme::RADIUS_MEDIUM));
+    icons::paint(&p, Icon::Play, pb.center(), 15.0, theme::ICON);
+    let cb = Rect::from_min_size(pb.right_top(), Vec2::new(theme::RIGHT_PRESENT_CHEVRON_W, theme::RIGHT_BTN_SIZE));
+    let cr = ui.interact(cb, ui.id().with("present-chev"), Sense::click());
+    widgets::button_bg(&p, cb, &cr, false, theme::cr_each(0, theme::RADIUS_MEDIUM, theme::RADIUS_MEDIUM, 0));
+    icons::paint(&p, Icon::ChevronDown, cb.center(), theme::CHEVRON_SMALL, theme::ICON_SECONDARY);
+    crate::widgets::record(ui, "present-button", pb);
+    if pr.clicked() || cr.clicked() {
+        app.start_present();
+    }
+
+    // Share button at far right (Figma UI3 #0D99FF in Design mode, #1BC47D in Dev mode).
     let share_r = Rect::from_min_size(
-        Pos2::new(right - theme::RIGHT_PRESENT_FROM_RIGHT - 52.0, rect.top() + theme::RIGHT_BTN_Y + 3.0),
-        Vec2::new(46.0, theme::RIGHT_BTN_SIZE - 6.0),
+        Pos2::new(right - theme::RIGHT_PRESENT_FROM_RIGHT, rect.top() + theme::RIGHT_BTN_Y + 2.0),
+        Vec2::new(48.0, 24.0),
     );
     let share_resp = ui.interact(share_r, ui.id().with("share-btn"), Sense::click());
     let share_col = if app.ui.dev_mode {
@@ -45,27 +59,6 @@ pub fn show(app: &mut App, ui: &mut Ui, rect: Rect) {
     crate::widgets::record(ui, "share-button", share_r);
     if share_resp.clicked() {
         app.show_toast("Copied design:os studio file share link", false);
-    }
-
-    // Present button + chevron.
-    let pb = Rect::from_min_size(Pos2::new(right - theme::RIGHT_PRESENT_FROM_RIGHT, rect.top() + theme::RIGHT_BTN_Y), Vec2::splat(theme::RIGHT_BTN_SIZE));
-    let pr = ui.interact(pb, ui.id().with("present"), Sense::click());
-    widgets::button_bg(&p, pb, &pr, false, theme::cr_each(theme::RADIUS_MEDIUM, 0, 0, theme::RADIUS_MEDIUM));
-    // Outlined play triangle, ~16px tall.
-    let (cx, cy) = (pb.center().x, pb.center().y);
-    let (w, h) = (theme::PRESENT_ICON_W, theme::PRESENT_ICON_H);
-    let x0 = cx - w / 2.0 + 0.5;
-    p.add(egui::Shape::closed_line(
-        vec![Pos2::new(x0, cy - h / 2.0), Pos2::new(x0 + w, cy), Pos2::new(x0, cy + h / 2.0)],
-        egui::Stroke::new(theme::PRESENT_ICON_STROKE, theme::ICON),
-    ));
-    let cb = Rect::from_min_size(pb.right_top(), Vec2::new(theme::RIGHT_PRESENT_CHEVRON_W, theme::RIGHT_BTN_SIZE));
-    let cr = ui.interact(cb, ui.id().with("present-chev"), Sense::click());
-    widgets::button_bg(&p, cb, &cr, false, theme::cr_each(0, theme::RADIUS_MEDIUM, theme::RADIUS_MEDIUM, 0));
-    icons::paint(&p, Icon::ChevronDown, cb.center(), theme::CHEVRON_SMALL, theme::ICON_SECONDARY);
-    crate::widgets::record(ui, "present-button", pb);
-    if pr.clicked() || cr.clicked() {
-        app.start_present();
     }
 
     // Tabs: Design | Prototype (or Inspect | Plugins when Dev Mode is active, matching Figma UI3).
@@ -117,4 +110,22 @@ pub fn show(app: &mut App, ui: &mut Ui, rect: Rect) {
     } else {
         properties::show(app, ui, region);
     }
+
+    // Bottom-right floating 28x28 circular `?` Help button (Figma UI3).
+    let help_center = Pos2::new(rect.right() - 22.0, rect.bottom() - 22.0);
+    let help_r = Rect::from_center_size(help_center, Vec2::splat(28.0));
+    let help_resp = ui.interact(help_r, ui.id().with("right-help-btn"), Sense::click());
+    let hp = ui.painter();
+    hp.circle_filled(
+        help_center,
+        14.0,
+        if help_resp.hovered() {
+            egui::Color32::from_rgb(0x38, 0x38, 0x38)
+        } else {
+            egui::Color32::from_rgb(0x2C, 0x2C, 0x2C)
+        },
+    );
+    hp.circle_stroke(help_center, 14.0, egui::Stroke::new(1.0, egui::Color32::from_rgb(0x38, 0x38, 0x38)));
+    icons::paint(hp, Icon::Help, help_center, 14.0, egui::Color32::from_rgb(0xB3, 0xB3, 0xB3));
+    crate::widgets::record(ui, "help-button", help_r);
 }
