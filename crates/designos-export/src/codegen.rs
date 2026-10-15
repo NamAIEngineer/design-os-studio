@@ -207,6 +207,7 @@ pub(crate) fn instance_args(doc: &Document, n: &Node) -> Vec<(String, PropLit)> 
             (_, PropValue::Text(t)) => PropLit::Text(t.clone()),
             (_, PropValue::Variant(v)) => PropLit::Text(v.clone()),
             (_, PropValue::Instance(c)) => PropLit::Instance(doc.get(*c).map(|c| pascal(&c.name)).unwrap_or_else(|| "Icon".into())),
+            (_, PropValue::Slot(_)) => continue,
         };
         out.push((name, lit));
     }

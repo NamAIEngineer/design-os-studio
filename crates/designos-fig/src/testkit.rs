@@ -60,7 +60,7 @@ pub fn figma_like_schema() -> Schema {
     enum_def(&mut b, "StrokeJoin", &["MITER", "BEVEL", "ROUND"]);
     enum_def(&mut b, "StrokeCap", &["NONE", "ROUND", "SQUARE", "ARROW_LINES", "ARROW_EQUILATERAL"]);
     enum_def(&mut b, "EffectType", &["INNER_SHADOW", "DROP_SHADOW", "FOREGROUND_BLUR", "BACKGROUND_BLUR", "NOISE", "TEXTURE", "GLASS"]);
-    enum_def(&mut b, "StackMode", &["NONE", "HORIZONTAL", "VERTICAL"]);
+    enum_def(&mut b, "StackMode", &["NONE", "HORIZONTAL", "VERTICAL", "GRID"]);
     enum_def(&mut b, "StackAlign", &["MIN", "CENTER", "MAX", "SPACE_BETWEEN", "BASELINE", "SPACE_EVENLY"]);
     enum_def(&mut b, "StackSize", &["FIXED", "RESIZE_TO_FIT", "RESIZE_TO_FIT_WITH_IMPLICIT_SIZE"]);
     enum_def(&mut b, "StackCounterAlign", &["STRETCH", "AUTO"]);
@@ -109,8 +109,8 @@ pub fn figma_like_schema() -> Schema {
     enum_def(&mut b, "GuideAxis", &["X", "Y"]);
     enum_def(&mut b, "VariableResolvedDataType", &["BOOLEAN", "FLOAT", "STRING", "COLOR", "MAP", "SYMBOL_ID", "FONT_STYLE"]);
     enum_def(&mut b, "VariableDataType", &["BOOLEAN", "FLOAT", "STRING", "COLOR", "ALIAS", "NODE_FIELD_ALIAS", "FONT_STYLE"]);
-    enum_def(&mut b, "ComponentPropType", &["BOOL", "TEXT", "INSTANCE_SWAP", "VARIANT"]);
-    enum_def(&mut b, "ComponentPropNodeField", &["VISIBLE", "TEXT_DATA", "OVERRIDDEN_SYMBOL_ID"]);
+    enum_def(&mut b, "ComponentPropType", &["BOOL", "TEXT", "INSTANCE_SWAP", "VARIANT", "SLOT"]);
+    enum_def(&mut b, "ComponentPropNodeField", &["VISIBLE", "TEXT_DATA", "OVERRIDDEN_SYMBOL_ID", "SLOT_CONTENT_ID"]);
     enum_def(&mut b, "HandoffStatusType", &["NONE", "BUILD", "READY_FOR_DEV", "COMPLETED"]);
 
     let nat = FieldType::Native;
@@ -315,6 +315,7 @@ pub fn figma_like_schema() -> Schema {
     b.field(cpd, "type", cptt, false, 3);
     b.field(cpd, "initialValue", cpvt, false, 4);
     b.field(cpd, "parentPropDefId", gt, false, 5);
+    b.field(cpd, "preferredValues", gt, true, 6);
     let cpa = b.define("ComponentPropAssignment", DefKind::Message);
     b.field(cpa, "defID", gt, false, 1);
     b.field(cpa, "value", cpvt, false, 2);
@@ -339,7 +340,22 @@ pub fn figma_like_schema() -> Schema {
     enum_def(&mut b, "LineType", &["PLAIN", "ORDERED_LIST", "UNORDERED_LIST"]);
     enum_def(&mut b, "Directionality", &["AUTO", "LTR", "RTL"]);
     enum_def(&mut b, "LeadingTrim", &["NONE", "CAP_HEIGHT"]);
-    enum_def(&mut b, "OpenTypeFeature", &["LIGA", "SS01", "TNUM", "ONUM", "LNUM", "PNUM", "FRAC", "AFRC", "ZERO", "SMCP", "C2SC"]);
+    enum_def(
+        &mut b,
+        "OpenTypeFeature",
+        &[
+            "LIGA", "DLIG", "CLIG", "CALT", "KERN", "SS01", "SS02", "SS03", "SS04", "SS05", "SS06", "SS07", "SS08", "SS09", "SS10", "TNUM",
+            "ONUM", "LNUM", "PNUM", "FRAC", "AFRC", "ZERO", "SMCP", "C2SC", "ORDN", "SWSH", "SALT", "SUPS", "SUBS", "CASE",
+        ],
+    );
+    let fv = b.define("FontVariation", DefKind::Message);
+    b.field(fv, "axisTag", nat(Uint), false, 1);
+    b.field(fv, "axisName", nat(String), false, 2);
+    b.field(fv, "value", nat(Float), false, 3);
+    let (otf_so, fvt_so) = (def(&b, "OpenTypeFeature"), def(&b, "FontVariation"));
+    b.field(so, "toggledOnOTFeatures", otf_so, true, 13);
+    b.field(so, "toggledOffOTFeatures", otf_so, true, 14);
+    b.field(so, "fontVariations", fvt_so, true, 15);
     let tl = b.define("TextLine", DefKind::Message);
     let t = def(&b, "LineType");
     b.field(tl, "lineType", t, false, 1);
@@ -466,7 +482,7 @@ pub fn figma_like_schema() -> Schema {
     b.field(sd, "uniformScaleFactor", nat(Float), false, 3);
     f(&mut b, "derivedSymbolData", FieldType::Def(nc), true);
     // Additional NodeChange fields for 1:1 .fig export & import parity:
-    let (gt, swt, oszt, exst, gdt, vdt_node, cpdt, cpat, cprt, sgpvot, vcmt, vmsmt, vsmt, vrdtt, vdtt, vdvt, hsmt) = (
+    let (gt, swt, oszt, exst, gdt, vdt_node, cpdt, cpat, cprt, sgpvot, vcmt, vmsmt, vsmt, vrdtt, vdtt, vdvt, hsmt, fvt) = (
         def(&b, "GUID"),
         def(&b, "StackWrap"),
         def(&b, "OptionalSize"),
@@ -484,6 +500,7 @@ pub fn figma_like_schema() -> Schema {
         def(&b, "VariableDataType"),
         def(&b, "VariableDataValues"),
         def(&b, "HandoffStatusMap"),
+        def(&b, "FontVariation"),
     );
     f(&mut b, "overrideKey", gt, false);
     f(&mut b, "overriddenSymbolID", gt, false);
@@ -526,6 +543,13 @@ pub fn figma_like_schema() -> Schema {
     f(&mut b, "sortPosition", nat(String), false);
     f(&mut b, "description", nat(String), false);
     f(&mut b, "handoffStatusMap", hsmt, false);
+    f(&mut b, "fontVariations", fvt, true);
+    f(&mut b, "gridColumns", nat(Uint), false);
+    f(&mut b, "gridRows", nat(Uint), false);
+    f(&mut b, "gridColumnSpan", nat(Uint), false);
+    f(&mut b, "gridRowSpan", nat(Uint), false);
+    f(&mut b, "gridColumnAnchorIndex", nat(Uint), false);
+    f(&mut b, "gridRowAnchorIndex", nat(Uint), false);
 
     let blob = b.define("Blob", DefKind::Message);
     b.field(blob, "bytes", nat(Byte), true, 1);

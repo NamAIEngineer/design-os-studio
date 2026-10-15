@@ -62,6 +62,22 @@ pub struct Variable {
     pub key: Option<String>,
 }
 
+impl Variable {
+    pub fn matches_scope(&self, target_scope: &str) -> bool {
+        self.scopes.is_empty()
+            || target_scope.is_empty()
+            || self.scopes.iter().any(|s| {
+                s == "ALL_SCOPES"
+                    || s.eq_ignore_ascii_case(target_scope)
+                    || (s == "ALL_FILLS" && matches!(target_scope, "FRAME_FILL" | "SHAPE_FILL" | "TEXT_FILL" | "FILL"))
+            })
+    }
+
+    pub fn is_publishable(&self) -> bool {
+        !self.hidden_from_publishing
+    }
+}
+
 /// Per-node variable bindings and explicit mode choices.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct NodeVariables {

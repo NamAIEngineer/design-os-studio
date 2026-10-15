@@ -167,6 +167,10 @@ pub struct App {
     pub decks: crate::decks::DecksState,
     /// Native EaseUI-styled Spec Reader & Agentic Hub state.
     pub specs: crate::specs::SpecsState,
+    /// Native Embedded PTY Agent Terminal (Claude CLI, Codex CLI, Grok CLI, $SHELL).
+    pub terminal: crate::terminal::TerminalState,
+    /// In-Canvas Cmd+K Agent & Design Gate Bar state.
+    pub cmdk: crate::cmdk::CmdKState,
 }
 
 impl App {
@@ -215,6 +219,8 @@ impl App {
             board: Default::default(),
             decks: Default::default(),
             specs: Default::default(),
+            terminal: Default::default(),
+            cmdk: Default::default(),
         }
     }
 

@@ -17,7 +17,7 @@ use crate::*;
 use std::collections::{BTreeMap, BTreeSet};
 
 impl OverrideField {
-    pub const ALL: [OverrideField; 15] = [
+    pub const ALL: [OverrideField; 16] = [
         OverrideField::Name,
         OverrideField::Visible,
         OverrideField::Locked,
@@ -33,6 +33,7 @@ impl OverrideField {
         OverrideField::TextStyle,
         OverrideField::Layout,
         OverrideField::MainComponent,
+        OverrideField::SlotContent,
     ];
 }
 
@@ -200,6 +201,48 @@ pub fn is_top_instance(n: &Node) -> bool {
 
 fn is_top(n: &Node) -> bool {
     n.component.source.is_none() || n.component.source == instance_component(n)
+}
+
+/// True if `id` is a component slot container (either via `OverrideField::SlotContent`
+/// override/binding on itself or its master component node, or bound to a `PropKind::Slot` property).
+pub fn is_slot_container(doc: &Document, id: NodeId) -> bool {
+    let Some(n) = doc.get(id) else { return false };
+    if n.component.overrides.contains(&OverrideField::SlotContent)
+        || n.component.bindings.contains_key(&OverrideField::SlotContent)
+    {
+        return true;
+    }
+    if let Some(src_id) = n.component.source {
+        if let Some(src) = doc.get(src_id) {
+            if src.component.overrides.contains(&OverrideField::SlotContent)
+                || src.component.bindings.contains_key(&OverrideField::SlotContent)
+            {
+                return true;
+            }
+            if let Some(comp) = enclosing_component(doc, src_id) {
+                let defs = prop_defs(doc, comp);
+                if src
+                    .component
+                    .bindings
+                    .values()
+                    .any(|pname| defs.iter().any(|d| d.name == *pname && matches!(d.kind, PropKind::Slot)))
+                {
+                    return true;
+                }
+            }
+        }
+    }
+    if let Some(comp) = enclosing_component(doc, id) {
+        let defs = prop_defs(doc, comp);
+        if n.component
+            .bindings
+            .values()
+            .any(|pname| defs.iter().any(|d| d.name == *pname && matches!(d.kind, PropKind::Slot)))
+        {
+            return true;
+        }
+    }
+    false
 }
 
 /// Property definitions that apply to `comp`: its own plus those of its set.
@@ -612,7 +655,7 @@ fn copy_field(f: OverrideField, from: &Node, to: &mut Node) {
             }
             to.layout_child = from.layout_child;
         }
-        OverrideField::MainComponent => {}
+        OverrideField::MainComponent | OverrideField::SlotContent => {}
     }
 }
 
@@ -625,7 +668,7 @@ fn apply_reference(r: &Node, n: &mut Node, top: bool, values: &BTreeMap<String, 
     let own_text = (ov.contains(&OverrideField::Characters) || bound_text)
         && matches!(&n.kind, NodeKind::Text(t) if matches!(t.auto_resize, TextAutoResize::WidthAndHeight | TextAutoResize::Height));
     for f in OverrideField::ALL {
-        if ov.contains(&f) || f == OverrideField::MainComponent {
+        if ov.contains(&f) || matches!(f, OverrideField::MainComponent | OverrideField::SlotContent) {
             continue;
         }
         if top && matches!(f, OverrideField::Transform | OverrideField::Visible | OverrideField::Locked) {
@@ -809,6 +852,13 @@ fn sync_pair(c: &mut Ctx, r: NodeId, i: NodeId, top: bool, holder: NodeId) {
     c.update(n);
 
     // --- children ---
+    if inode.component.overrides.contains(&OverrideField::SlotContent)
+        || rn.component.bindings.contains_key(&OverrideField::SlotContent)
+        || is_slot_container(&c.s, i)
+        || is_slot_container(&c.s, ref_id)
+    {
+        return;
+    }
     let rkids = c.s.get(ref_id).map(|x| x.children.clone()).unwrap_or_default();
     let ikids = c.s.get(i).map(|x| x.children.clone()).unwrap_or_default();
     let child_holder = if matches!(inode.kind, NodeKind::Instance { .. }) { i } else { holder };

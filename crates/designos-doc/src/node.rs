@@ -48,6 +48,15 @@ fn is_default_constraints(c: &Constraints) -> bool {
 fn is_default_layout_child(l: &LayoutChild) -> bool {
     *l == LayoutChild::default()
 }
+fn is_zero_u32(v: &u32) -> bool {
+    *v == 0
+}
+fn is_zero_or_one_u16(v: &u16) -> bool {
+    *v <= 1
+}
+fn is_default_grid_tracks(t: &[GridTrack; 8]) -> bool {
+    *t == [GridTrack::default(); 8]
+}
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Node {
@@ -155,6 +164,8 @@ pub enum OverrideField {
     Layout,
     /// Which component an instance points at (instance swap).
     MainComponent,
+    /// Custom children inside a component slot container.
+    SlotContent,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -165,6 +176,8 @@ pub enum PropValue {
     Variant(String),
     /// Component swapped in, by node id.
     Instance(NodeId),
+    /// Custom nodes inserted into a component slot.
+    Slot(Vec<NodeId>),
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -173,6 +186,7 @@ pub enum PropKind {
     Text,
     Variant { options: Vec<String> },
     InstanceSwap { preferred: Vec<NodeId> },
+    Slot,
 }
 
 /// Component property definition, on a Component or ComponentSet.
@@ -506,6 +520,20 @@ pub enum LayoutDirection {
     #[default]
     Horizontal,
     Vertical,
+    Grid,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub enum GridTrack {
+    Flex(f32),
+    Fixed(f32),
+    Hug,
+}
+
+impl Default for GridTrack {
+    fn default() -> Self {
+        GridTrack::Flex(1.0)
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -540,6 +568,14 @@ pub struct AutoLayout {
     pub counter_sizing: Sizing,
     pub stroke_included: bool,
     pub reverse_z: bool,
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub grid_columns: u32,
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub grid_rows: u32,
+    #[serde(default, skip_serializing_if = "is_default_grid_tracks")]
+    pub grid_col_tracks: [GridTrack; 8],
+    #[serde(default, skip_serializing_if = "is_default_grid_tracks")]
+    pub grid_row_tracks: [GridTrack; 8],
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -552,6 +588,14 @@ pub struct LayoutChild {
     pub max_w: Option<f32>,
     pub min_h: Option<f32>,
     pub max_h: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub grid_column: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub grid_row: Option<u16>,
+    #[serde(default, skip_serializing_if = "is_zero_or_one_u16")]
+    pub col_span: u16,
+    #[serde(default, skip_serializing_if = "is_zero_or_one_u16")]
+    pub row_span: u16,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]

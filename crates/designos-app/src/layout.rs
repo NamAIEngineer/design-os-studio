@@ -7,7 +7,7 @@
 use crate::edit::Edit;
 use crate::util::{aabb_of, rect_corners, v2};
 use designos_doc::{
-    resolve_node, AutoLayout, Constraint, Document, LayoutAlign, LayoutDirection, NodeId, NodeKind, Rect, Sizing, TextAutoResize, TextProps, Vec2,
+    resolve_node, AutoLayout, Constraint, Document, GridTrack, LayoutAlign, LayoutDirection, NodeId, NodeKind, Rect, Sizing, TextAutoResize, TextProps, Vec2,
 };
 
 /// One participating child, as seen by the solver.
@@ -56,9 +56,166 @@ impl Axes {
     }
 }
 
+/// Solves a 2D CSS Grid auto-layout frame (`LayoutDirection::Grid`).
+pub fn compute_grid(al: &AutoLayout, frame: Vec2, kids: &[ChildIn], spans: &[(u16, u16)]) -> LayoutOut {
+    let [pt, pr, pb, pl] = al.padding;
+    let cols = if al.grid_columns > 0 { al.grid_columns as usize } else { 3 };
+    let cols = cols.clamp(1, 16);
+    let col_gap = al.item_spacing.max(0.0);
+    let row_gap = if al.counter_spacing > 0.0 { al.counter_spacing } else { col_gap };
+
+    if kids.is_empty() {
+        let fw = if al.primary_sizing == Sizing::Hug { pl + pr } else { frame.x };
+        let fh = if al.counter_sizing == Sizing::Hug { pt + pb } else { frame.y };
+        return LayoutOut { frame: v2(fw, fh), rects: vec![] };
+    }
+
+    // Place children into a 2D occupancy grid respecting col_span and row_span.
+    let mut occupied: Vec<Vec<bool>> = Vec::new();
+    let mut placements: Vec<(usize, usize, usize, usize)> = Vec::with_capacity(kids.len());
+    let mut max_row = 0usize;
+
+    for idx in 0..kids.len() {
+        let (cs, rs) = spans.get(idx).copied().unwrap_or((1, 1));
+        let c_span = (cs.max(1) as usize).min(cols);
+        let r_span = (rs.max(1) as usize).min(16);
+        let mut r = 0usize;
+        let placed = loop {
+            while occupied.len() < r + r_span {
+                occupied.push(vec![false; cols]);
+            }
+            let mut found_c = None;
+            for c in 0..=(cols - c_span) {
+                let mut fits = true;
+                for dr in 0..r_span {
+                    for dc in 0..c_span {
+                        if occupied[r + dr][c + dc] {
+                            fits = false;
+                            break;
+                        }
+                    }
+                    if !fits {
+                        break;
+                    }
+                }
+                if fits {
+                    found_c = Some(c);
+                    break;
+                }
+            }
+            if let Some(c) = found_c {
+                for dr in 0..r_span {
+                    for dc in 0..c_span {
+                        occupied[r + dr][c + dc] = true;
+                    }
+                }
+                break (r, c, r_span, c_span);
+            }
+            r += 1;
+        };
+        max_row = max_row.max(placed.0 + placed.2);
+        placements.push(placed);
+    }
+
+    let rows = max_row.max(al.grid_rows as usize).max(1);
+
+    // Resolve column widths from `grid_col_tracks` + `frame.x`.
+    let inner_w = (frame.x - pl - pr - col_gap * (cols.saturating_sub(1) as f32)).max(0.0);
+    let mut col_widths = vec![0.0f32; cols];
+    let mut flex_total = 0.0f32;
+    let mut fixed_used = 0.0f32;
+
+    for c in 0..cols {
+        let track = al.grid_col_tracks.get(c).copied().unwrap_or(GridTrack::Flex(1.0));
+        match track {
+            GridTrack::Fixed(w) => {
+                col_widths[c] = w.max(1.0);
+                fixed_used += col_widths[c];
+            }
+            GridTrack::Hug => {
+                let mut max_w = 0.0f32;
+                for (i, &(_, col, _, cs)) in placements.iter().enumerate() {
+                    if col == c && cs == 1 {
+                        max_w = max_w.max(kids[i].size.x);
+                    }
+                }
+                col_widths[c] = max_w.max(1.0);
+                fixed_used += col_widths[c];
+            }
+            GridTrack::Flex(fr) => {
+                flex_total += fr.max(0.1);
+            }
+        }
+    }
+    let rem_w = (inner_w - fixed_used).max(0.0);
+    for c in 0..cols {
+        if let GridTrack::Flex(fr) = al.grid_col_tracks.get(c).copied().unwrap_or(GridTrack::Flex(1.0)) {
+            col_widths[c] = if al.primary_sizing == Sizing::Hug {
+                let mut max_w = 0.0f32;
+                for (i, &(_, col, _, cs)) in placements.iter().enumerate() {
+                    if col == c && cs == 1 {
+                        max_w = max_w.max(kids[i].size.x);
+                    }
+                }
+                max_w.max(40.0)
+            } else if flex_total > 0.0 {
+                (rem_w * (fr.max(0.1) / flex_total)).max(1.0)
+            } else {
+                (rem_w / cols as f32).max(1.0)
+            };
+        }
+    }
+
+    // Resolve row heights from natural child heights.
+    let mut row_heights = vec![0.0f32; rows];
+    for (i, &(r, _, rs, _)) in placements.iter().enumerate() {
+        let per_row = (kids[i].size.y - row_gap * (rs.saturating_sub(1) as f32)).max(0.0) / (rs as f32);
+        for dr in 0..rs {
+            if r + dr < rows {
+                row_heights[r + dr] = row_heights[r + dr].max(per_row);
+            }
+        }
+    }
+
+    let mut col_x = vec![0.0f32; cols];
+    let mut cx = pl;
+    for c in 0..cols {
+        col_x[c] = cx;
+        cx += col_widths[c] + col_gap;
+    }
+
+    let mut row_y = vec![0.0f32; rows];
+    let mut cy = pt;
+    for r in 0..rows {
+        row_y[r] = cy;
+        cy += row_heights[r] + row_gap;
+    }
+
+    let mut rects = Vec::with_capacity(kids.len());
+    for (i, &(r, c, rs, cs)) in placements.iter().enumerate() {
+        let x = col_x[c];
+        let y = row_y[r];
+        let cell_w: f32 = (0..cs).map(|dc| col_widths[c + dc]).sum::<f32>() + col_gap * (cs.saturating_sub(1) as f32);
+        let cell_h: f32 = (0..rs).map(|dr| row_heights[r + dr]).sum::<f32>() + row_gap * (rs.saturating_sub(1) as f32);
+        let w = if kids[i].main_fill || cs > 1 { cell_w } else { kids[i].size.x.min(cell_w).max(cell_w) };
+        let h = if kids[i].cross_fill || rs > 1 { cell_h } else { kids[i].size.y };
+        rects.push(Rect::new(x, y, w, h));
+    }
+
+    let total_w = col_widths.iter().sum::<f32>() + col_gap * (cols.saturating_sub(1) as f32) + pl + pr;
+    let total_h = row_heights.iter().sum::<f32>() + row_gap * (rows.saturating_sub(1) as f32) + pt + pb;
+    let out_w = if al.primary_sizing == Sizing::Hug { total_w } else { frame.x };
+    let out_h = if al.counter_sizing == Sizing::Hug { total_h } else { frame.y };
+
+    LayoutOut { frame: v2(out_w, out_h), rects }
+}
+
 /// Solves an auto-layout frame. `frame` is the current frame size (used for
 /// fixed axes). Padding order is top, right, bottom, left.
 pub fn compute(al: &AutoLayout, frame: Vec2, kids: &[ChildIn]) -> LayoutOut {
+    if al.direction == LayoutDirection::Grid {
+        return compute_grid(al, frame, kids, &[]);
+    }
     let ax = Axes { horiz: al.direction == LayoutDirection::Horizontal };
     let [pt, pr, pb, pl] = al.padding;
     let (pm_start, pm_end, pc_start, pc_end) = if ax.horiz { (pl, pr, pt, pb) } else { (pt, pb, pl, pr) };
@@ -218,12 +375,23 @@ pub fn layout_node(doc: &mut Document, ed: &mut Edit, id: NodeId) {
     }
     // gap / padding bound to variables count with the value of the mode in effect
     let Some(al) = doc.get(id).map(|n| resolve_node(doc, n)).and_then(|n| n.kind.frame_props().and_then(|f| f.auto_layout)) else { return };
-    let horiz = al.direction == LayoutDirection::Horizontal;
+    let horiz = al.direction != LayoutDirection::Vertical;
     let ids: Vec<NodeId> =
         children.iter().copied().filter(|c| doc.get(*c).map(|k| resolve_node(doc, k).visible && !k.layout_child.absolute).unwrap_or(false)).collect();
     let kids: Vec<ChildIn> = ids.iter().map(|c| child_in(doc, *c, horiz)).collect();
     let frame_size = doc.get(id).unwrap().size;
-    let out = compute(&al, frame_size, &kids);
+    let out = if al.direction == LayoutDirection::Grid {
+        let spans: Vec<(u16, u16)> = ids
+            .iter()
+            .map(|c| {
+                let lc = doc.get(*c).unwrap().layout_child;
+                (lc.col_span.max(1), lc.row_span.max(1))
+            })
+            .collect();
+        compute_grid(&al, frame_size, &kids, &spans)
+    } else {
+        compute(&al, frame_size, &kids)
+    };
     if out.frame != frame_size {
         if let Some(n) = ed.node(doc, id) {
             n.size = out.frame;

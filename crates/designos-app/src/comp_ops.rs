@@ -415,6 +415,7 @@ impl App {
             PropKind::Text => "Text",
             PropKind::InstanceSwap { .. } => "Instance",
             PropKind::Variant { .. } => "Variant",
+            PropKind::Slot => "Slot",
         };
         let taken: Vec<String> = self.doc.get(owner).map(|n| n.component.props.iter().map(|p| p.name.clone()).collect()).unwrap_or_default();
         let mut name = base.to_string();
@@ -430,6 +431,7 @@ impl App {
                 self.doc.nodes.values().find(|n| matches!(n.kind, NodeKind::Component(_)) && n.id != owner).map(|n| n.id).unwrap_or(NodeId(0)),
             ),
             PropKind::Variant { options } => PropValue::Variant(options.first().cloned().unwrap_or_default()),
+            PropKind::Slot => PropValue::Slot(Vec::new()),
         };
         self.comp_edit(|d| add_prop(d, owner, ComponentPropDef { name, kind, default }));
     }

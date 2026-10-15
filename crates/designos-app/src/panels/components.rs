@@ -241,6 +241,7 @@ fn override_name(f: OverrideField) -> &'static str {
         OverrideField::TextStyle => "text style",
         OverrideField::Layout => "layout",
         OverrideField::MainComponent => "component",
+        OverrideField::SlotContent => "slot content",
     }
 }
 
@@ -251,6 +252,7 @@ fn kind_label(k: &PropKind) -> &'static str {
         PropKind::Text => "Text",
         PropKind::Variant { .. } => "Variant",
         PropKind::InstanceSwap { .. } => "Instance",
+        PropKind::Slot => "Slot",
     }
 }
 
@@ -309,14 +311,15 @@ fn component_props(app: &mut App, ui: &mut Ui, pane: &mut Pane, id: NodeId) {
         pane.y += 4.0;
     }
     if let Some(anchor) = app.ui.prop_menu {
-        let items = [MenuItem::new("Boolean"), MenuItem::new("Text"), MenuItem::new("Instance swap")];
+        let items = [MenuItem::new("Boolean"), MenuItem::new("Text"), MenuItem::new("Instance swap"), MenuItem::new("Slot")];
         match popup_menu(ui.ctx(), egui::Id::new("prop-add-menu"), anchor.left_bottom() + Vec2::new(-150.0, 2.0), 170.0, &items, Some(anchor)) {
             MenuResult::Picked(i) => {
                 app.ui.prop_menu = None;
                 let kind = match i {
                     0 => PropKind::Boolean,
                     1 => PropKind::Text,
-                    _ => PropKind::InstanceSwap { preferred: vec![] },
+                    2 => PropKind::InstanceSwap { preferred: vec![] },
+                    _ => PropKind::Slot,
                 };
                 app.add_prop_def(owner, kind);
             }
@@ -327,7 +330,7 @@ fn component_props(app: &mut App, ui: &mut Ui, pane: &mut Pane, id: NodeId) {
     section_sep(ui, pane, false);
 }
 
-/// Link a layer's visibility / text / instance to a component property.
+/// Link a layer's visibility / text / instance / slot to a component property.
 fn layer_bindings(app: &mut App, ui: &mut Ui, pane: &mut Pane, id: NodeId) {
     let Some(comp) = enclosing_component(&app.doc, id) else { return };
     if comp == id {
@@ -342,6 +345,9 @@ fn layer_bindings(app: &mut App, ui: &mut Ui, pane: &mut Pane, id: NodeId) {
     }
     if matches!(n.kind, NodeKind::Instance { .. }) {
         rows.push(("Instance", OverrideField::MainComponent, |k| matches!(k, PropKind::InstanceSwap { .. })));
+    }
+    if matches!(n.kind, NodeKind::Frame { .. }) {
+        rows.push(("Slot", OverrideField::SlotContent, |k| matches!(k, PropKind::Slot)));
     }
     let rows: Vec<_> = rows.into_iter().filter(|(_, f, accepts)| n.component.bindings.contains_key(f) || defs.iter().any(|d| accepts(&d.kind))).collect();
     if rows.is_empty() {

@@ -185,6 +185,7 @@ fn export_fig_then_import_fig_roundtrips_sample_and_rich_documents() {
         counter_spacing: 14.0,
         stroke_included: true,
         reverse_z: true,
+        ..AutoLayout::default()
     });
     let comp_id = rich.alloc_id();
     let mut comp_node = Node::new(comp_id, NodeKind::Component(comp_props));
@@ -549,3 +550,313 @@ fn fig_import_resolves_symbol_overrides_bindings_nested_swaps_and_handoff_map() 
         .collect();
     assert_eq!(icon_child_names, vec!["CircleShape"]);
 }
+
+#[test]
+fn roundtrip_figma_parity_grid_slots_axes_props_and_overrides() {
+    let mut doc = Document::new("FigmaParity100");
+    let page_id = doc.add_page("Page 1");
+
+    // 1. 2D CSS Grid Frame with explicit grid_columns, grid_rows, and child col_span/row_span/anchor
+    let grid_id = doc.alloc_id();
+    let mut grid_props = FrameProps::default();
+    grid_props.auto_layout = Some(AutoLayout {
+        direction: LayoutDirection::Grid,
+        item_spacing: 12.0,
+        counter_spacing: 8.0,
+        padding: [16.0, 16.0, 16.0, 16.0],
+        grid_columns: 3,
+        grid_rows: 2,
+        ..AutoLayout::default()
+    });
+    let mut grid_frame = Node::new(grid_id, NodeKind::Frame(grid_props));
+    grid_frame.name = "BentoGrid".into();
+    grid_frame.size = Vec2::new(600.0, 400.0);
+    doc.insert(page_id, grid_frame).unwrap();
+
+    let cell_id = doc.alloc_id();
+    let mut cell_node = Node::new(cell_id, NodeKind::Rectangle);
+    cell_node.name = "HeroCell".into();
+    cell_node.size = Vec2::new(380.0, 180.0);
+    cell_node.layout_child.col_span = 2;
+    cell_node.layout_child.row_span = 2;
+    cell_node.layout_child.grid_column = Some(1);
+    cell_node.layout_child.grid_row = Some(0);
+    doc.insert(grid_id, cell_node).unwrap();
+
+    // 2. Text node with OpenType features (on + off) and variable font axes
+    let txt_id = doc.alloc_id();
+    let mut style = TextStyle {
+        font_family: "Inter Variable".into(),
+        font_size: 24.0,
+        font_weight: 650,
+        ..TextStyle::default()
+    };
+    style.set_feature("tnum", true);
+    style.set_feature("ss01", true);
+    style.set_feature("liga", false);
+    style.set_axis("wght", 650.0);
+    style.set_axis("wdth", 112.5);
+    style.set_axis("opsz", 24.0);
+    let mut txt_node = Node::new(
+        txt_id,
+        NodeKind::Text(TextProps {
+            content: "Variable Axes & OT".into(),
+            style,
+            ..TextProps::default()
+        }),
+    );
+    txt_node.name = "VarFontLabel".into();
+    txt_node.size = Vec2::new(220.0, 32.0);
+    doc.insert(page_id, txt_node).unwrap();
+
+    // 3. Component with Boolean, Text, InstanceSwap, Slot props + bindings, and an Instance with overrides + prop values
+    let icon_a_id = doc.alloc_id();
+    let mut icon_a = Node::new(icon_a_id, NodeKind::Component(FrameProps::default()));
+    icon_a.name = "IconStar".into();
+    icon_a.size = Vec2::new(16.0, 16.0);
+    doc.insert(page_id, icon_a).unwrap();
+
+    let icon_b_id = doc.alloc_id();
+    let mut icon_b = Node::new(icon_b_id, NodeKind::Component(FrameProps::default()));
+    icon_b.name = "IconHeart".into();
+    icon_b.size = Vec2::new(16.0, 16.0);
+    doc.insert(page_id, icon_b).unwrap();
+
+    let card_comp_id = doc.alloc_id();
+    let mut card_comp = Node::new(card_comp_id, NodeKind::Component(FrameProps::default()));
+    card_comp.name = "ModalCard".into();
+    card_comp.size = Vec2::new(320.0, 200.0);
+    card_comp.component.props = vec![
+        ComponentPropDef {
+            name: "ShowFooter#1:0".into(),
+            kind: PropKind::Boolean,
+            default: PropValue::Bool(true),
+        },
+        ComponentPropDef {
+            name: "Title#1:1".into(),
+            kind: PropKind::Text,
+            default: PropValue::Text("Default Title".into()),
+        },
+        ComponentPropDef {
+            name: "HeaderIcon#1:2".into(),
+            kind: PropKind::InstanceSwap {
+                preferred: vec![icon_a_id, icon_b_id],
+            },
+            default: PropValue::Instance(icon_a_id),
+        },
+        ComponentPropDef {
+            name: "BodySlot#1:3".into(),
+            kind: PropKind::Slot,
+            default: PropValue::Slot(vec![]),
+        },
+    ];
+    doc.insert(page_id, card_comp).unwrap();
+
+    let title_id = doc.alloc_id();
+    let mut title_node = Node::new(
+        title_id,
+        NodeKind::Text(TextProps {
+            content: "Default Title".into(),
+            style: TextStyle::default(),
+            ..TextProps::default()
+        }),
+    );
+    title_node.name = "CardTitle".into();
+    title_node.size = Vec2::new(200.0, 24.0);
+    title_node
+        .component
+        .bindings
+        .insert(OverrideField::Characters, "Title#1:1".into());
+    doc.insert(card_comp_id, title_node).unwrap();
+
+    let slot_frame_id = doc.alloc_id();
+    let mut slot_frame = Node::new(slot_frame_id, NodeKind::Frame(FrameProps::default()));
+    slot_frame.name = "BodyContainer".into();
+    slot_frame.size = Vec2::new(280.0, 120.0);
+    slot_frame
+        .component
+        .bindings
+        .insert(OverrideField::SlotContent, "BodySlot#1:3".into());
+    doc.insert(card_comp_id, slot_frame).unwrap();
+
+    let footer_id = doc.alloc_id();
+    let mut footer_rect = Node::new(footer_id, NodeKind::Rectangle);
+    footer_rect.name = "FooterBg".into();
+    footer_rect.size = Vec2::new(280.0, 36.0);
+    footer_rect.fills = vec![Paint::solid(Color::rgb(230, 230, 230))];
+    footer_rect
+        .component
+        .bindings
+        .insert(OverrideField::Visible, "ShowFooter#1:0".into());
+    doc.insert(card_comp_id, footer_rect).unwrap();
+
+    // Create instance of ModalCard with overrides and prop assignments
+    create_instance(&mut doc, card_comp_id, page_id, Vec2::new(400.0, 0.0))
+        .apply(&mut doc)
+        .expect("create_instance");
+    let inst_id = instances_of(&doc, card_comp_id)[0];
+
+    let custom_slot_child_id = doc.alloc_id();
+    let mut custom_slot_child = Node::new(custom_slot_child_id, NodeKind::Rectangle);
+    custom_slot_child.name = "InjectedBanner".into();
+    custom_slot_child.size = Vec2::new(260.0, 60.0);
+    doc.insert(page_id, custom_slot_child).unwrap();
+
+    let inst_children = doc.get(inst_id).unwrap().children.clone();
+    if let Some(inst) = doc.get_mut(inst_id) {
+        inst.name = "ModalCardInstance".into();
+        inst.component
+            .values
+            .insert("ShowFooter#1:0".into(), PropValue::Bool(false));
+        inst.component
+            .values
+            .insert("Title#1:1".into(), PropValue::Text("Assigned Title".into()));
+        inst.component
+            .values
+            .insert("HeaderIcon#1:2".into(), PropValue::Instance(icon_b_id));
+        inst.component.values.insert(
+            "BodySlot#1:3".into(),
+            PropValue::Slot(vec![custom_slot_child_id]),
+        );
+    }
+
+    for cid in inst_children {
+        if let Some(ch) = doc.get_mut(cid) {
+            if ch.name == "CardTitle" {
+                if let NodeKind::Text(ref mut tp) = ch.kind {
+                    tp.content = "Overridden Modal Title".into();
+                }
+                ch.component.overrides.insert(OverrideField::Characters);
+            } else if ch.name == "FooterBg" {
+                ch.visible = false;
+                ch.fills = vec![Paint::solid(Color::rgb(255, 64, 128))];
+                ch.component.overrides.insert(OverrideField::Visible);
+                ch.component.overrides.insert(OverrideField::Fills);
+            }
+        }
+    }
+
+    // Export -> Import round-trip
+    let bytes = export_fig(&doc).expect("export_fig");
+    let rt = import_fig(&bytes).expect("import_fig");
+
+    // Verify 1: 2D CSS Grid
+    let rt_grid = find(&rt, "BentoGrid");
+    let NodeKind::Frame(ref g_fp) = rt_grid.kind else {
+        panic!("expected BentoGrid Frame");
+    };
+    let g_al = g_fp.auto_layout.as_ref().expect("BentoGrid auto_layout");
+    assert_eq!(g_al.direction, LayoutDirection::Grid);
+    assert_eq!(g_al.grid_columns, 3);
+    assert_eq!(g_al.grid_rows, 2);
+    assert_eq!(g_al.item_spacing, 12.0);
+    assert_eq!(g_al.counter_spacing, 8.0);
+
+    let rt_cell = find(&rt, "HeroCell");
+    assert_eq!(rt_cell.layout_child.col_span, 2);
+    assert_eq!(rt_cell.layout_child.row_span, 2);
+    assert_eq!(rt_cell.layout_child.grid_column, Some(1));
+    assert_eq!(rt_cell.layout_child.grid_row, Some(0));
+
+    // Verify 2: TextStyle OpenType features & variable font axes
+    let rt_txt = find(&rt, "VarFontLabel");
+    let NodeKind::Text(ref tp) = rt_txt.kind else {
+        panic!("expected VarFontLabel Text");
+    };
+    assert!(tp.style.is_feature_enabled("tnum"));
+    assert!(tp.style.is_feature_enabled("ss01"));
+    assert!(!tp.style.is_feature_enabled("liga"));
+    assert_eq!(
+        tp.style
+            .features
+            .iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case("liga"))
+            .map(|(_, v)| *v),
+        Some(0)
+    );
+    assert_eq!(tp.style.get_axis("wght"), Some(650.0));
+    assert_eq!(tp.style.get_axis("wdth"), Some(112.5));
+    assert_eq!(tp.style.get_axis("opsz"), Some(24.0));
+
+    // Verify 3: Component props & bindings (including Slot)
+    let rt_comp = find(&rt, "ModalCard");
+    assert_eq!(rt_comp.component.props.len(), 4);
+    assert!(rt_comp
+        .component
+        .props
+        .iter()
+        .any(|p| p.name == "BodySlot" && p.kind == PropKind::Slot));
+    let rt_icon_b = find(&rt, "IconHeart");
+    let swap_def = rt_comp
+        .component
+        .props
+        .iter()
+        .find(|p| p.name == "HeaderIcon")
+        .expect("HeaderIcon prop def");
+    match &swap_def.kind {
+        PropKind::InstanceSwap { preferred } => {
+            assert!(preferred.contains(&rt_icon_b.id));
+        }
+        other => panic!("expected InstanceSwap prop kind, got {other:?}"),
+    }
+
+    let rt_slot_container = rt_comp
+        .children
+        .iter()
+        .filter_map(|id| rt.get(*id))
+        .find(|n| n.name == "BodyContainer")
+        .expect("BodyContainer inside ModalCard");
+    assert_eq!(
+        rt_slot_container
+            .component
+            .bindings
+            .get(&OverrideField::SlotContent)
+            .map(String::as_str),
+        Some("BodySlot")
+    );
+    assert!(is_slot_container(&rt, rt_slot_container.id));
+
+    // Verify 4: Instance prop values & materialized symbolOverrides
+    let rt_inst = find(&rt, "ModalCardInstance");
+    assert_eq!(
+        rt_inst.component.values.get("ShowFooter"),
+        Some(&PropValue::Bool(false))
+    );
+    assert_eq!(
+        rt_inst.component.values.get("Title"),
+        Some(&PropValue::Text("Assigned Title".into()))
+    );
+    assert_eq!(
+        rt_inst.component.values.get("HeaderIcon"),
+        Some(&PropValue::Instance(rt_icon_b.id))
+    );
+    let rt_banner = find(&rt, "InjectedBanner");
+    assert_eq!(
+        rt_inst.component.values.get("BodySlot"),
+        Some(&PropValue::Slot(vec![rt_banner.id]))
+    );
+
+    let inst_title = rt_inst
+        .children
+        .iter()
+        .filter_map(|id| rt.get(*id))
+        .find(|n| n.name == "CardTitle")
+        .expect("CardTitle in ModalCardInstance");
+    let NodeKind::Text(ref inst_tp) = inst_title.kind else {
+        panic!("expected CardTitle Text");
+    };
+    assert_eq!(inst_tp.content, "Overridden Modal Title");
+
+    let inst_footer = rt_inst
+        .children
+        .iter()
+        .filter_map(|id| rt.get(*id))
+        .find(|n| n.name == "FooterBg")
+        .expect("FooterBg in ModalCardInstance");
+    assert!(!inst_footer.visible);
+    assert_eq!(
+        inst_footer.fills,
+        vec![Paint::solid(Color::rgb(255, 64, 128))]
+    );
+}
+

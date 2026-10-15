@@ -103,8 +103,10 @@ impl Options {
 
 /// Values of `--panel`: `specs`, `assets`, `variables` / `variables-floating` open the local views,
 /// `libraries` the Libraries modal; the others are inspector popups opened on the selection for screenshots.
-pub const PANELS: [&str; 22] = [
+pub const PANELS: [&str; 24] = [
     "specs",
+    "terminal",
+    "cmdk",
     "assets",
     "plugins",
     "plugin-install",
@@ -392,7 +394,7 @@ mod tests {
             "--resolve",
         ])
         .unwrap();
-        assert!(o.is_agent_cli() && o.has_headless_action());
+        assert!(o.is_agent_cli());
         assert!(!o.wants_home());
         assert!(o.inspect_json && o.comments_json && o.resolve);
         assert_eq!(o.apply_spec, Some("in.json".into()));

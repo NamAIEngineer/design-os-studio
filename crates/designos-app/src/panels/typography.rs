@@ -558,10 +558,10 @@ fn set_features(app: &mut App, sel: &[NodeId], changes: Vec<(&str, Option<u32>)>
 /// Rows of the Details popover for a font with `sets` stylistic sets.
 fn details_rows(sets: usize) -> f32 {
     let chips = if sets == 0 { 0 } else { 1 + sets.div_ceil(SETS_PER_ROW) };
-    (7 + chips + 7) as f32 + 0.25
+    (7 + chips + 7 + 4) as f32 + 0.5
 }
 
-/// The Details popover of the type settings: number styles, fractions, ligatures, stylistic sets and paragraph settings.
+/// The Details popover of the type settings: number styles, fractions, ligatures, stylistic sets, paragraph settings, and variable font axes.
 pub(super) fn details_popover(app: &mut App, ui: &mut Ui, region: Rect, st: &super::effects::PopState) {
     let ctx = ui.ctx().clone();
     let ids = st.ids.clone();
@@ -733,6 +733,42 @@ pub(super) fn details_popover(app: &mut App, ui: &mut Ui, region: Rect, st: &sup
             if let Some(i) = seg_rect(ui, r, "det-dir", &["Auto", "LTR", "RTL"], Some(cur)) {
                 let d = [TextDirection::Auto, TextDirection::Ltr, TextDirection::Rtl][i];
                 set_text_props(app, &ids, |t| t.direction = d);
+            }
+        });
+
+        // ---- variable font axes (wght, wdth, opsz, slnt)
+        let sep_axes = body.top() + 8.0 + y.get() - 4.0;
+        widgets::hline(ui.painter(), body.left(), body.right(), sep_axes, theme::BORDER);
+        y.set(y.get() + 8.0);
+        let wght_val = t.style.get_axis("wght").unwrap_or(t.style.font_weight as f32);
+        detail_row(ui, body, next(), "Axis · Weight (wght)", false, |ui, r| {
+            if let Some(v) = field::num_field(ui, r, "det-axis-wght", Prefix::None, Some(wght_val), "") {
+                let v = v.clamp(100.0, 900.0);
+                set_style(app, &ids, |s| {
+                    s.set_axis("wght", v);
+                    s.font_weight = v.round() as u16;
+                });
+            }
+        });
+        let wdth_val = t.style.get_axis("wdth").unwrap_or(100.0);
+        detail_row(ui, body, next(), "Axis · Width (wdth)", false, |ui, r| {
+            if let Some(v) = field::num_field(ui, r, "det-axis-wdth", Prefix::None, Some(wdth_val), "%") {
+                let v = v.clamp(50.0, 200.0);
+                set_style(app, &ids, |s| s.set_axis("wdth", v));
+            }
+        });
+        let opsz_val = t.style.get_axis("opsz").unwrap_or(t.style.font_size);
+        detail_row(ui, body, next(), "Axis · Optical (opsz)", false, |ui, r| {
+            if let Some(v) = field::num_field(ui, r, "det-axis-opsz", Prefix::None, Some(opsz_val), "") {
+                let v = v.clamp(6.0, 144.0);
+                set_style(app, &ids, |s| s.set_axis("opsz", v));
+            }
+        });
+        let slnt_val = t.style.get_axis("slnt").unwrap_or(0.0);
+        detail_row(ui, body, next(), "Axis · Slant (slnt)", false, |ui, r| {
+            if let Some(v) = field::num_field(ui, r, "det-axis-slnt", Prefix::None, Some(slnt_val), "°") {
+                let v = v.clamp(-20.0, 20.0);
+                set_style(app, &ids, |s| s.set_axis("slnt", v));
             }
         });
     });

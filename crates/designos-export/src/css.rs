@@ -31,9 +31,14 @@ pub fn css_for(doc: &Document, node: NodeId) -> String {
     }
 
     // display + size
-    if own_al.is_some() {
-        push("display", "flex".into());
+    if let Some(al) = own_al {
+        if al.direction == LayoutDirection::Grid {
+            push("display", "grid".into());
+        } else {
+            push("display", "flex".into());
+        }
     }
+    let grid_parent = parent_al.is_some_and(|a| a.direction == LayoutDirection::Grid);
     let row_parent = parent_al.map(|a| a.direction == LayoutDirection::Horizontal).unwrap_or(true);
     let hug_w = own_al.map(|a| if a.direction == LayoutDirection::Horizontal { a.primary_sizing } else { a.counter_sizing } == Sizing::Hug).unwrap_or(false);
     let hug_h = own_al.map(|a| if a.direction == LayoutDirection::Horizontal { a.counter_sizing } else { a.primary_sizing } == Sizing::Hug).unwrap_or(false);
@@ -44,21 +49,30 @@ pub fn css_for(doc: &Document, node: NodeId) -> String {
     let grows = in_flow && n.layout_child.grow > 0.0;
     let mut flex_done = false;
     let mut stretch = false;
-    for (is_w, fill) in [(true, fill_w), (false, fill_h)] {
-        let main = is_w == row_parent;
-        if fill || (grows && main) {
-            if main {
-                if !flex_done {
-                    push("flex", "1 0 0".into());
-                    flex_done = true;
+    if in_flow && grid_parent {
+        if n.layout_child.col_span > 1 {
+            push("grid-column", format!("span {}", n.layout_child.col_span));
+        }
+        if n.layout_child.row_span > 1 {
+            push("grid-row", format!("span {}", n.layout_child.row_span));
+        }
+    } else {
+        for (is_w, fill) in [(true, fill_w), (false, fill_h)] {
+            let main = is_w == row_parent;
+            if fill || (grows && main) {
+                if main {
+                    if !flex_done {
+                        push("flex", "1 0 0".into());
+                        flex_done = true;
+                    }
+                } else {
+                    stretch = true;
                 }
-            } else {
-                stretch = true;
             }
         }
     }
-    let width_skipped = fill_w || (grows && row_parent) || hug_w || text_auto_w;
-    let height_skipped = fill_h || (grows && !row_parent) || hug_h || text_auto_h;
+    let width_skipped = fill_w || (grows && row_parent) || hug_w || text_auto_w || (in_flow && grid_parent && n.layout_child.col_span > 1);
+    let height_skipped = fill_h || (grows && !row_parent) || hug_h || text_auto_h || (in_flow && grid_parent && n.layout_child.row_span > 1);
     if !width_skipped {
         push("width", format!("{}px", num(n.size.x)));
     }
@@ -68,7 +82,7 @@ pub fn css_for(doc: &Document, node: NodeId) -> String {
     if stretch {
         push("align-self", "stretch".into());
     }
-    if in_flow && !flex_done && (!width_skipped || !height_skipped) {
+    if in_flow && !grid_parent && !flex_done && (!width_skipped || !height_skipped) {
         push("flex-shrink", "0".into());
     }
 
@@ -78,39 +92,52 @@ pub fn css_for(doc: &Document, node: NodeId) -> String {
         if t + r + b + l > 0.0 {
             push("padding", box_shorthand(t, r, b, l));
         }
-        if al.direction == LayoutDirection::Vertical {
-            push("flex-direction", "column".into());
-        }
-        let justify = match al.primary_align {
-            LayoutAlign::Start | LayoutAlign::Baseline => None,
-            LayoutAlign::Center => Some("center"),
-            LayoutAlign::End => Some("flex-end"),
-            LayoutAlign::SpaceBetween => Some("space-between"),
-        };
-        if let Some(j) = justify {
-            push("justify-content", j.into());
-        }
-        push(
-            "align-items",
-            match al.counter_align {
-                LayoutAlign::Start | LayoutAlign::SpaceBetween => "flex-start",
-                LayoutAlign::Center => "center",
-                LayoutAlign::End => "flex-end",
-                LayoutAlign::Baseline => "baseline",
+        if al.direction == LayoutDirection::Grid {
+            let cols = (if al.grid_columns == 0 { 3 } else { al.grid_columns }).max(1);
+            push("grid-template-columns", format!("repeat({cols}, minmax(0, 1fr))"));
+            if al.grid_rows > 0 {
+                push("grid-template-rows", format!("repeat({}, minmax(0, 1fr))", al.grid_rows));
             }
-            .into(),
-        );
-        if al.wrap {
-            push("flex-wrap", "wrap".into());
-            if al.primary_align != LayoutAlign::SpaceBetween || al.counter_spacing > 0.0 {
-                let (row, col) =
-                    if al.direction == LayoutDirection::Horizontal { (al.counter_spacing, al.item_spacing) } else { (al.item_spacing, al.counter_spacing) };
-                if row > 0.0 || col > 0.0 {
-                    push("gap", if (row - col).abs() < 1e-4 { format!("{}px", num(row)) } else { format!("{}px {}px", num(row), num(col)) });
+            let col = al.item_spacing;
+            let row = if al.counter_spacing > 0.0 { al.counter_spacing } else { al.item_spacing };
+            if row > 0.0 || col > 0.0 {
+                push("gap", if (row - col).abs() < 1e-4 { format!("{}px", num(row)) } else { format!("{}px {}px", num(row), num(col)) });
+            }
+        } else {
+            if al.direction == LayoutDirection::Vertical {
+                push("flex-direction", "column".into());
+            }
+            let justify = match al.primary_align {
+                LayoutAlign::Start | LayoutAlign::Baseline => None,
+                LayoutAlign::Center => Some("center"),
+                LayoutAlign::End => Some("flex-end"),
+                LayoutAlign::SpaceBetween => Some("space-between"),
+            };
+            if let Some(j) = justify {
+                push("justify-content", j.into());
+            }
+            push(
+                "align-items",
+                match al.counter_align {
+                    LayoutAlign::Start | LayoutAlign::SpaceBetween => "flex-start",
+                    LayoutAlign::Center => "center",
+                    LayoutAlign::End => "flex-end",
+                    LayoutAlign::Baseline => "baseline",
                 }
+                .into(),
+            );
+            if al.wrap {
+                push("flex-wrap", "wrap".into());
+                if al.primary_align != LayoutAlign::SpaceBetween || al.counter_spacing > 0.0 {
+                    let (row, col) =
+                        if al.direction == LayoutDirection::Horizontal { (al.counter_spacing, al.item_spacing) } else { (al.item_spacing, al.counter_spacing) };
+                    if row > 0.0 || col > 0.0 {
+                        push("gap", if (row - col).abs() < 1e-4 { format!("{}px", num(row)) } else { format!("{}px {}px", num(row), num(col)) });
+                    }
+                }
+            } else if al.item_spacing > 0.0 && al.primary_align != LayoutAlign::SpaceBetween {
+                push("gap", format!("{}px", num(al.item_spacing)));
             }
-        } else if al.item_spacing > 0.0 && al.primary_align != LayoutAlign::SpaceBetween {
-            push("gap", format!("{}px", num(al.item_spacing)));
         }
     }
 
@@ -384,6 +411,10 @@ pub fn text_style_css(st: &TextStyle) -> Vec<String> {
     if !st.features.is_empty() {
         let list: Vec<String> = st.features.iter().map(|(t, v)| format!("\"{t}\" {v}")).collect();
         push("font-feature-settings", list.join(", "));
+    }
+    if !st.variation_axes.is_empty() {
+        let list: Vec<String> = st.variation_axes.iter().map(|(t, v)| format!("\"{t}\" {}", num2(*v))).collect();
+        push("font-variation-settings", list.join(", "));
     }
     out
 }

@@ -311,6 +311,67 @@ fn body(app: &mut App, ui: &mut Ui, c: &mut Cur, id: NodeId, count: usize) {
     crate::dev::sections::annotations_section(app, ui, c, id);
     crate::dev::sections::links_section(app, ui, c, id);
 
+    // MCP (Figma UI3 1:1 Dev Mode MCP section + Agent Terminal bridge).
+    section_title(ui, c, "MCP");
+    let mut subtree_count = 0usize;
+    app.doc.walk(id, |_, _| subtree_count += 1);
+    let est_tokens = ((subtree_count.max(1) * 140) as f32 / 1000.0).max(0.2);
+    kv(ui, app, c, "Session activity", "Ready · designos-mcp");
+    kv(ui, app, c, "Estimated tokens", &format!("{est_tokens:.1}k"));
+    c.y += 4.0;
+    let prompt_text = format!(
+        "Implement this design from DESIGN:OS Studio.\n@designos://node/{}/{}",
+        id.0,
+        n.name.replace(' ', "-")
+    );
+    let box_r = c.rect(PAD, 0.0, c.w - 2.0 * PAD, 44.0);
+    ui.painter().rect_filled(box_r, theme::cr(theme::RADIUS_MEDIUM), theme::BG_SECONDARY);
+    ui.painter().rect_stroke(
+        box_r,
+        theme::cr(theme::RADIUS_MEDIUM),
+        Stroke::new(1.0, theme::BORDER),
+        egui::StrokeKind::Inside,
+    );
+    ui.painter().text(
+        Pos2::new(box_r.left() + 8.0, box_r.top() + 14.0),
+        Align2::LEFT_CENTER,
+        "Implement this design from DESIGN:OS.",
+        theme::font_small(),
+        theme::TEXT_SECONDARY,
+    );
+    let uri_line = elide(
+        ui.painter(),
+        &format!("@designos://node/{}/{}", id.0, n.name),
+        &theme::font_small(),
+        box_r.width() - 16.0,
+    );
+    ui.painter().text(
+        Pos2::new(box_r.left() + 8.0, box_r.top() + 30.0),
+        Align2::LEFT_CENTER,
+        uri_line,
+        theme::font_small(),
+        Color32::from_rgb(0x4C, 0x9A, 0xFF),
+    );
+    c.y += 50.0;
+    let copy_mcp_r = c.rect(PAD, 0.0, c.w - 2.0 * PAD, 26.0);
+    if small_button(ui, copy_mcp_r, "mcp-copy-prompt", "Copy example prompt") {
+        copy(app, ui, prompt_text.clone(), "MCP prompt");
+        app.terminal.send_copy_for_ai(&prompt_text);
+    }
+    c.y += 32.0;
+
+    // Code Connect (Figma UI3 1:1 section).
+    section_title(ui, c, "Code Connect");
+    let cc_r = c.rect(PAD, 0.0, c.w - 2.0 * PAD, 26.0);
+    if small_button(ui, cc_r, "code-connect-terminal", "Send to Agent Terminal (Claude / Codex)") {
+        match crate::terminal::export_selection_and_comments_to_pty(&mut app.terminal, &app.doc, app.page, &app.selection, app.file_path.as_deref()) {
+            Ok(p) => app.show_toast(format!("Sent selection to Agent Terminal ({})", p.display()), false),
+            Err(e) => app.show_toast(e, true),
+        }
+        app.terminal.dock_open = true;
+    }
+    c.y += 32.0;
+
     // Layout.
     section_title(ui, c, "Layout");
     kv(ui, app, c, "Width", &format!("{}px", fmt_num(n.size.x)));

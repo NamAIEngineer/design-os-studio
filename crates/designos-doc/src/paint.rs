@@ -338,8 +338,52 @@ pub struct TextStyle {
     /// a word as one run with the features of its first character, so a feature set on part of a
     /// word applies to all of it (or to none of it when the word starts without it); on whole
     /// words it is exact.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub features: Vec<(String, u32)>,
+    /// Variable font axis settings, e.g. `("wght", 550.0)`, `("wdth", 85.0)`, `("slnt", -6.0)`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub variation_axes: Vec<(String, f32)>,
+}
+
+impl TextStyle {
+    pub fn get_axis(&self, tag: &str) -> Option<f32> {
+        self.variation_axes.iter().find(|(k, _)| k.eq_ignore_ascii_case(tag)).map(|(_, v)| *v)
+    }
+
+    pub fn set_axis(&mut self, tag: &str, value: f32) {
+        if let Some((_, v)) = self.variation_axes.iter_mut().find(|(k, _)| k.eq_ignore_ascii_case(tag)) {
+            *v = value;
+        } else {
+            self.variation_axes.push((tag.to_ascii_lowercase(), value));
+        }
+    }
+
+    pub fn remove_axis(&mut self, tag: &str) {
+        self.variation_axes.retain(|(k, _)| !k.eq_ignore_ascii_case(tag));
+    }
+
+    pub fn is_feature_enabled(&self, tag: &str) -> bool {
+        self.features.iter().find(|(k, _)| k.eq_ignore_ascii_case(tag)).is_some_and(|(_, v)| *v != 0)
+    }
+
+    pub fn set_feature(&mut self, tag: &str, enabled: bool) {
+        let norm = tag.to_ascii_lowercase();
+        if enabled {
+            if let Some((_, v)) = self.features.iter_mut().find(|(k, _)| k.eq_ignore_ascii_case(&norm)) {
+                *v = 1;
+            } else {
+                self.features.push((norm, 1));
+            }
+        } else if matches!(norm.as_str(), "liga" | "calt" | "kern" | "clig") {
+            if let Some((_, v)) = self.features.iter_mut().find(|(k, _)| k.eq_ignore_ascii_case(&norm)) {
+                *v = 0;
+            } else {
+                self.features.push((norm, 0));
+            }
+        } else {
+            self.features.retain(|(k, _)| !k.eq_ignore_ascii_case(&norm));
+        }
+    }
 }
 
 impl Default for TextStyle {
@@ -358,6 +402,7 @@ impl Default for TextStyle {
             decoration: TextDecoration::None,
             fills: vec![Paint::solid(Color::BLACK)],
             features: Vec::new(),
+            variation_axes: Vec::new(),
         }
     }
 }

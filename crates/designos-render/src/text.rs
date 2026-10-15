@@ -3,7 +3,7 @@
 //! style they belong to so fills (solid / gradient / image) apply uniformly.
 
 use cosmic_text::{
-    fontdb, Align, Attrs, Buffer, CacheKeyFlags, Command, Family, FeatureTag, FontFeatures, FontSystem, Hinting, Metrics, Shaping, Style, SwashCache,
+    fontdb, Align, Attrs, Buffer, CacheKeyFlags, Command, Family, FeatureTag, FontFeatures, FontSystem, Hinting, Metrics, Shaping, Stretch, Style, SwashCache,
     TextDecoration as CtDecoration, UnderlineStyle, Weight, Wrap,
 };
 use designos_doc as d;
@@ -378,10 +378,34 @@ impl Shaper {
             Some(n) => Family::Name(n),
             None => Family::SansSerif,
         };
+        let weight = st
+            .get_axis("wght")
+            .map(|w| Weight(w.round().clamp(1.0, 1000.0) as u16))
+            .unwrap_or(Weight(st.font_weight));
+        let stretch = match st.get_axis("wdth") {
+            Some(w) if w <= 56.25 => Stretch::UltraCondensed,
+            Some(w) if w <= 68.75 => Stretch::ExtraCondensed,
+            Some(w) if w <= 81.25 => Stretch::Condensed,
+            Some(w) if w <= 93.75 => Stretch::SemiCondensed,
+            Some(w) if w <= 106.25 => Stretch::Normal,
+            Some(w) if w <= 118.75 => Stretch::SemiExpanded,
+            Some(w) if w <= 137.5 => Stretch::Expanded,
+            Some(w) if w <= 175.0 => Stretch::ExtraExpanded,
+            Some(_) => Stretch::UltraExpanded,
+            None => Stretch::Normal,
+        };
+        let font_style = if st.italic || st.get_axis("ital").is_some_and(|v| v >= 0.5) {
+            Style::Italic
+        } else if st.get_axis("slnt").is_some_and(|s| s < -2.0) {
+            Style::Oblique
+        } else {
+            Style::Normal
+        };
         let mut a = Attrs::new()
             .family(family)
-            .weight(Weight(st.font_weight))
-            .style(if st.italic { Style::Italic } else { Style::Normal })
+            .weight(weight)
+            .stretch(stretch)
+            .style(font_style)
             .metrics(Metrics::new(fsize, self.line_height_for(seg.style, fsize)))
             .metadata(seg.style)
             .cache_key_flags(CacheKeyFlags::DISABLE_HINTING);

@@ -308,32 +308,54 @@ fn classes(doc: &Document, n: &Node, parent: Parent) -> Vec<String> {
         c.push(format!("rotate-[{}deg]", num2(rot)));
     }
     if let Some(al) = own_al {
-        c.push("flex".into());
-        if al.direction == LayoutDirection::Vertical {
-            c.push("flex-col".into());
+        if al.direction == LayoutDirection::Grid {
+            let cols = (if al.grid_columns == 0 { 3 } else { al.grid_columns }).max(1);
+            c.push("grid".into());
+            c.push(format!("grid-cols-{cols}"));
+            if al.grid_rows > 0 {
+                c.push(format!("grid-rows-{}", al.grid_rows));
+            }
+            if al.item_spacing > 0.0 {
+                c.push(spaced("gap", al.item_spacing, bound(doc, n, "itemSpacing")));
+            }
+            c.extend(pad_classes(doc, n, &al));
+        } else {
+            c.push("flex".into());
+            if al.direction == LayoutDirection::Vertical {
+                c.push("flex-col".into());
+            }
+            if al.wrap {
+                c.push("flex-wrap".into());
+            }
+            match al.primary_align {
+                LayoutAlign::Center => c.push("justify-center".into()),
+                LayoutAlign::End => c.push("justify-end".into()),
+                LayoutAlign::SpaceBetween => c.push("justify-between".into()),
+                _ => {}
+            }
+            match al.counter_align {
+                LayoutAlign::Center => c.push("items-center".into()),
+                LayoutAlign::End => c.push("items-end".into()),
+                LayoutAlign::Baseline => c.push("items-baseline".into()),
+                _ => c.push("items-start".into()),
+            }
+            if al.item_spacing > 0.0 && al.primary_align != LayoutAlign::SpaceBetween {
+                c.push(spaced("gap", al.item_spacing, bound(doc, n, "itemSpacing")));
+            }
+            c.extend(pad_classes(doc, n, &al));
         }
-        if al.wrap {
-            c.push("flex-wrap".into());
+    }
+    if sz.in_flow && parent.al.is_some_and(|a| a.direction == LayoutDirection::Grid) {
+        if n.layout_child.col_span > 1 {
+            c.push(format!("col-span-{}", n.layout_child.col_span));
         }
-        match al.primary_align {
-            LayoutAlign::Center => c.push("justify-center".into()),
-            LayoutAlign::End => c.push("justify-end".into()),
-            LayoutAlign::SpaceBetween => c.push("justify-between".into()),
-            _ => {}
+        if n.layout_child.row_span > 1 {
+            c.push(format!("row-span-{}", n.layout_child.row_span));
         }
-        match al.counter_align {
-            LayoutAlign::Center => c.push("items-center".into()),
-            LayoutAlign::End => c.push("items-end".into()),
-            LayoutAlign::Baseline => c.push("items-baseline".into()),
-            _ => c.push("items-start".into()),
-        }
-        if al.item_spacing > 0.0 && al.primary_align != LayoutAlign::SpaceBetween {
-            c.push(spaced("gap", al.item_spacing, bound(doc, n, "itemSpacing")));
-        }
-        c.extend(pad_classes(doc, n, &al));
     }
     // size
-    let main_fill = |is_w: bool| sz.in_flow && (is_w == sz.row_parent);
+    let grid_parent = parent.al.is_some_and(|a| a.direction == LayoutDirection::Grid);
+    let main_fill = |is_w: bool| sz.in_flow && !grid_parent && (is_w == sz.row_parent);
     for (is_w, d) in [(true, sz.w), (false, sz.h)] {
         match d {
             Dim::Fill if main_fill(is_w) => {
@@ -341,17 +363,21 @@ fn classes(doc: &Document, n: &Node, parent: Parent) -> Vec<String> {
                     c.push("flex-1".into());
                 }
             }
-            Dim::Fill => c.push("self-stretch".into()),
+            Dim::Fill if !grid_parent => c.push("self-stretch".into()),
             _ => {}
         }
     }
     if let Some(w) = size_class("w", sz.w, bound(doc, n, "width")) {
-        c.push(w);
+        if !(grid_parent && n.layout_child.col_span > 1) {
+            c.push(w);
+        }
     }
     if let Some(h) = size_class("h", sz.h, bound(doc, n, "height")) {
-        c.push(h);
+        if !(grid_parent && n.layout_child.row_span > 1) {
+            c.push(h);
+        }
     }
-    if sz.in_flow && !c.contains(&"flex-1".to_string()) && (matches!(sz.w, Dim::Fixed(_)) || matches!(sz.h, Dim::Fixed(_))) {
+    if sz.in_flow && !grid_parent && !c.contains(&"flex-1".to_string()) && (matches!(sz.w, Dim::Fixed(_)) || matches!(sz.h, Dim::Fixed(_))) {
         c.push("shrink-0".into());
     }
     // fills

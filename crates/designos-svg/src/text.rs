@@ -112,6 +112,7 @@ fn style_of(s: &TextSpan, align: TextAlignH) -> TextStyle {
         },
         fills,
         features: Vec::new(),
+        variation_axes: Vec::new(),
     }
 }
 

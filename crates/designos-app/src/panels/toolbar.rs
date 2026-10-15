@@ -222,7 +222,12 @@ pub fn show(app: &mut App, ui: &mut Ui, screen: Rect) {
                     app.ui.dev_mode = true;
                     app.ui.right_tab = Some(crate::app::RightTab::Design);
                 }
-                _ => app.show_toast(format!("{label} mode is not available yet"), false),
+                _ => {
+                    app.cmdk.open = !app.cmdk.open;
+                    if app.cmdk.open {
+                        app.cmdk.last_audit = Some(crate::cmdk::run_design_gate_audit(&app.doc, app.page, &app.selection));
+                    }
+                }
             }
         }
     }

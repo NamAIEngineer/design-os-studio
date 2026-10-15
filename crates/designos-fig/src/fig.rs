@@ -147,6 +147,7 @@ impl<'a> Lk<'a> {
                             Some("BOOL") => "BOOLEAN",
                             Some("TEXT") => "TEXT",
                             Some("INSTANCE_SWAP") => "INSTANCE_SWAP",
+                            Some("SLOT") => "SLOT",
                             _ => "VARIANT",
                         };
                         let key = if ty == "VARIANT" { name.to_string() } else { format!("{name}#{id}") };
@@ -510,6 +511,9 @@ fn convert_node(nc: &Value, id: &str, lk: &Lk) -> Option<Map<String, Value>> {
     if fstr(nc, "stackPositioning") == Some("ABSOLUTE") {
         m.insert("layoutPositioning".into(), "ABSOLUTE".into());
     }
+    for k in ["gridColumnSpan", "gridRowSpan", "gridColumnAnchorIndex", "gridRowAnchorIndex"] {
+        copy(&mut m, nc, k, k);
+    }
     for (src, dst_x, dst_y) in [("minSize", "minWidth", "minHeight"), ("maxSize", "maxWidth", "maxHeight")] {
         if let Some(s) = nc.get(src) {
             let s = s.get("value").unwrap_or(s);
@@ -706,6 +710,14 @@ fn component_props(m: &mut Map<String, Value>, nc: &Value, lk: &Lk) {
                 .map(|o| rest_import::farr(o, "values").to_vec())
                 .unwrap_or_default();
             def.insert("variantOptions".into(), Value::Array(options));
+        } else if *ty == "INSTANCE_SWAP" {
+            let prefs: Vec<Value> = rest_import::farr(d, "preferredValues")
+                .iter()
+                .filter_map(|p| guid_str(p).map(Value::String))
+                .collect();
+            if !prefs.is_empty() {
+                def.insert("preferredValues".into(), Value::Array(prefs));
+            }
         }
         defs.insert(key.clone(), Value::Object(def));
     }
@@ -728,6 +740,7 @@ fn component_props(m: &mut Map<String, Value>, nc: &Value, lk: &Lk) {
             Some("VISIBLE") => "visible",
             Some("TEXT_DATA") => "characters",
             Some("OVERRIDDEN_SYMBOL_ID") => "mainComponent",
+            Some("SLOT_CONTENT_ID") => "slotContent",
             _ => continue,
         };
         refs.insert(field.into(), key.clone().into());
@@ -951,6 +964,9 @@ fn convert_override(o: &Value, lk: &Lk) -> Map<String, Value> {
     }
     copy(&mut m, o, "layoutSizingHorizontal", "layoutSizingHorizontal");
     copy(&mut m, o, "layoutSizingVertical", "layoutSizingVertical");
+    for k in ["gridColumns", "gridRows", "gridColumnSpan", "gridRowSpan", "gridColumnAnchorIndex", "gridRowAnchorIndex"] {
+        copy(&mut m, o, k, k);
+    }
     // Text.
     let mut st = convert_type_style(o, None);
     st.remove("fills");
@@ -1000,9 +1016,12 @@ fn convert_stack(m: &mut Map<String, Value>, nc: &Value) {
     let mode = match fstr(nc, "stackMode") {
         Some("HORIZONTAL") => "HORIZONTAL",
         Some("VERTICAL") => "VERTICAL",
+        Some("GRID") => "GRID",
         _ => return,
     };
     m.insert("layoutMode".into(), mode.into());
+    copy(m, nc, "gridColumns", "gridColumns");
+    copy(m, nc, "gridRows", "gridRows");
     copy(m, nc, "stackSpacing", "itemSpacing");
     copy(m, nc, "stackCounterSpacing", "counterAxisSpacing");
     let p = fnum(nc, "stackPadding");
@@ -1138,6 +1157,9 @@ fn convert_type_style(o: &Value, base_size: Option<f32>) -> Map<String, Value> {
     }
     if let Some(flags) = crate::textfmt::flags_from_kiwi(o) {
         m.insert("opentypeFlags".into(), flags);
+    }
+    if let Some(fvs) = o.get("fontVariations").and_then(Value::as_array).filter(|a| !a.is_empty()) {
+        m.insert("fontVariations".into(), Value::Array(fvs.clone()));
     }
     if let Some(ls) = o.get("letterSpacing") {
         let v = fnum(ls, "value").unwrap_or(0.0);

@@ -1,0 +1,108 @@
+{
+  "format": "2",
+  "title": "DESIGN:OS Studio — Figma 1:1 & Agentic Product OS",
+  "language": "vi (EN product terms kept)",
+  "date": "2026-10-15",
+  "tests_root": "tests",
+  "glossary": {
+    "document": "decisions/glossary.md"
+  },
+  "ui_contract": "required",
+  "artifacts": [
+    {
+      "id": "intake",
+      "folder": "intake",
+      "name": "PO Spec Intake",
+      "status": "Approved (G1)",
+      "owner_role": "Product Owner"
+    },
+    {
+      "id": "contract",
+      "folder": "contract",
+      "name": "Product & Feature Contract",
+      "status": "Locked (G2)",
+      "owner_role": "Product Owner"
+    },
+    {
+      "id": "prd",
+      "folder": "prd",
+      "name": "Product Requirements (PRD)",
+      "status": "Approved",
+      "owner_role": "Product Owner"
+    },
+    {
+      "id": "us",
+      "folder": "us",
+      "name": "User Stories & Scenarios",
+      "status": "Verified (G3)",
+      "owner_role": "Product Owner"
+    },
+    {
+      "id": "wireframe",
+      "folder": "wireframe",
+      "name": "ASCII Wireframes",
+      "status": "Verified",
+      "owner_role": "Designer"
+    },
+    {
+      "id": "ux",
+      "folder": "ux",
+      "name": "Screen Inventory & UI Contract",
+      "status": "Pending G4 Review",
+      "owner_role": "Designer"
+    },
+    {
+      "id": "reviews",
+      "folder": "review",
+      "name": "Gates & Evidence",
+      "status": "4/5 Approved · CURRENT",
+      "owner_role": "Reviewer"
+    },
+    {
+      "id": "decisions",
+      "folder": "decisions",
+      "name": "Decision Ledger & Glossary",
+      "status": "Current to D5",
+      "owner_role": "Product Owner"
+    },
+    {
+      "id": "handoff",
+      "folder": "handoff",
+      "name": "Handoff Manifest",
+      "status": "Ready (G5)",
+      "owner_role": "Product Owner"
+    }
+  ],
+  "readable": {
+    "epics": {
+      "min": 1,
+      "max": 8
+    },
+    "capabilities": {
+      "min": 1,
+      "max": 7
+    }
+  },
+  "reading_order": [
+    {
+      "pages": ["po-spec", "fc-001"],
+      "note": "Intake problem & locked scope contract"
+    },
+    {
+      "pages": ["prd-designos-v2", "us-index", "US-01", "US-02", "US-03"],
+      "note": "Requirements, user stories & acceptance scenarios"
+    },
+    {
+      "pages": ["screen-inventory", "ui-contract"],
+      "note": "Screen states & 12-column behavioral selectors"
+    },
+    {
+      "pages": ["decision-log", "glossary"],
+      "note": "Settled decisions D1..D5 & domain glossary"
+    }
+  ],
+  "changes": {
+    "recent_days": 7,
+    "locale": "vi"
+  }
+}

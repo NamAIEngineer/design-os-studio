@@ -260,7 +260,7 @@ pub fn publishable_assets(doc: &Document) -> Vec<(String, LibraryAssetKind, Stri
     for (id, c) in doc.variable_collections.iter().filter(|(id, _)| !imported.contains(id.as_str())) {
         out.push((format!("col:{id}"), LibraryAssetKind::VariableCollection, c.name.clone()));
     }
-    for (id, v) in doc.variables.iter().filter(|(id, v)| !imported.contains(id.as_str()) && !v.hidden_from_publishing) {
+    for (id, v) in doc.variables.iter().filter(|(id, v)| !imported.contains(id.as_str()) && v.is_publishable()) {
         out.push((format!("var:{id}"), LibraryAssetKind::Variable, v.name.clone()));
     }
     out

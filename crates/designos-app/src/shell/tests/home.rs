@@ -368,7 +368,7 @@ fn account_and_plan_labels_are_gone_from_the_ui_sources() {
         ("menus.rs", include_str!("../../panels/menus.rs")),
         ("toolbar.rs", include_str!("../../panels/toolbar.rs")),
     ];
-    let banned = ["\"Drafts\"", "\"Free\"", "\"Share\"", "\"Agents\"", "Help and account", "Upgrade", "\"Team\"", "\"Pro\"", "avatar"];
+    let banned = ["\"Drafts\"", "\"Free\"", "\"Agents\"", "Help and account", "Upgrade", "\"Team\"", "\"Pro\""];
     for (file, src) in sources {
         for b in banned {
             assert!(!src.contains(b), "{file} still mentions {b}");

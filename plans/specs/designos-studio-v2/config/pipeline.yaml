@@ -1,0 +1,86 @@
+version: 2
+project:
+  name: design-os-studio
+  doc_language: vi
+  spec_root: plans/specs/designos-studio-v2
+  us_prefix: ""
+roles:
+  po: {enabled: true, gate: true}
+  qc: {enabled: true, gate: true}
+  dev: {enabled: true, gate: true}
+stages:
+  intake:
+    enabled: true
+    owner: po
+    context: [intake/po-spec.md]
+  clarify:
+    enabled: true
+    owner: po
+    context: [intake/po-spec.md, decisions/decision-log.md, decisions/glossary.md]
+  contract:
+    enabled: true
+    owner: po
+    context: [intake/po-spec.md, contract/FC-001.md, decisions/decision-log.md]
+  prd:
+    enabled: true
+    owner: po
+    context: [contract/FC-001.md, prd/PRD.md, decisions/decision-log.md]
+  us:
+    enabled: true
+    owner: po
+    context: [prd/PRD.md, us/INDEX.md, us/US-01.md, us/US-02.md, us/US-03.md]
+  wireframe:
+    enabled: true
+    owner: po
+    skill: {capability: design, skills: [es-designer]}
+    context: [us/US-01.md, us/US-02.md, us/US-03.md, ux/screen-inventory.md]
+  prototype:
+    enabled: true
+    owner: po
+    skill: {capability: design, skills: [es-designer]}
+    context: [ux/screen-inventory.md, us/US-01.md, us/US-02.md, us/US-03.md]
+  design:
+    enabled: true
+    owner: dev
+    skill: {capability: design, skills: [es-designer]}
+    context: [prd/PRD.md, us/US-01.md, us/US-02.md, us/US-03.md, ux/screen-inventory.md, ux/ui-contract.md]
+  tdd:
+    enabled: true
+    owner: qc
+    context: [us/US-01.md, us/US-02.md, us/US-03.md, ux/ui-contract.md]
+  uiux:
+    enabled: true
+    owner: po
+    skill: {capability: uiux, skills: [es-designer]}
+    design_system: "pcp-dark-operate-v2"
+    context: [ux/screen-inventory.md, ux/ui-contract.md, us/US-01.md, us/US-02.md, us/US-03.md]
+  handoff:
+    enabled: true
+    owner: po
+    context: [contract/FC-001.md, prd/PRD.md, us/INDEX.md, ux/ui-contract.md, review/gates/g1-intake.md, review/gates/g2-contract.md, review/gates/g3-us.md, review/gates/g4-uiux.md, review/gates/g5-handoff.md]
+agents:
+  writer: {command: claude}
+  reviewer: {command: codex}
+review:
+  enabled: true
+  max_rounds: 3
+  rubric: rules/review-rubric.md
+  log_dir: review/log
+limits: {max_fix_rounds: 3}
+versions: {workflow: "2", templates: "2", ruleset: "2", skill: "es-designer@4.0"}
+gates:
+  dir: review/gates
+  values: [PENDING, APPROVED, CHANGES_REQUESTED, NOT_REQUIRED]
+  stage_definitions:
+    intake: {id: g1-intake, version: "1"}
+    clarify: {id: clarify, version: "1"}
+    contract: {id: g2-contract, version: "1"}
+    prd: {id: prd, version: "1"}
+    us: {id: g3-us, version: "1"}
+    wireframe: {id: wireframe, version: "1"}
+    prototype: {id: prototype, version: "1"}
+    design: {id: design, version: "1"}
+    tdd: {id: g3-tdd, version: "1"}
+    uiux: {id: g4-uiux, version: "1"}
+    handoff: {id: g5-handoff, version: "1"}
+exit_codes: {done: 0, waiting_for_human: 2, bad_config_or_artifact: 3, environment_error: 4}

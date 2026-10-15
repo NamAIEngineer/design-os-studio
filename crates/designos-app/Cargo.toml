@@ -48,6 +48,8 @@ uuid = { version = "1", features = ["v4"] }
 roxmltree = "0.20"
 egui = "0.35"
 resvg = { version = "0.45", default-features = false }
+portable-pty = "0.8"
+vt100 = "0.15"
 
 [build-dependencies]
 winresource = "0.1"

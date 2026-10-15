@@ -170,8 +170,9 @@ pub(super) fn row_end(pane: &mut Pane) {
 pub(super) fn segmented(ui: &mut Ui, pane: &Pane, x: f32, key: &str, items: &[Icon], selected: Option<usize>) -> Option<usize> {
     let mut out = None;
     let n = items.len();
+    let seg_w = if n == 4 { 22.0 } else { theme::SEGMENT_W };
     for (i, icon) in items.iter().enumerate() {
-        let r = pane.rect(x + i as f32 * theme::SEGMENT_W, 0.0, theme::SEGMENT_W, theme::FIELD_HEIGHT);
+        let r = pane.rect(x + i as f32 * seg_w, 0.0, seg_w, theme::FIELD_HEIGHT);
         let radius = match (i == 0, i + 1 == n) {
             (true, true) => theme::cr(theme::RADIUS_MEDIUM),
             (true, false) => theme::cr_each(theme::RADIUS_MEDIUM, 0, 0, theme::RADIUS_MEDIUM),
@@ -833,18 +834,42 @@ fn resizing_ui(app: &mut App, ui: &mut Ui, pane: &mut Pane, sel: &[NodeId], n0: 
         set_sizing(app, sel, false, order[i]);
     }
     row_end(pane);
+    let parent_grid = n0
+        .parent
+        .and_then(|p| app.doc.get(p))
+        .and_then(|p| p.kind.frame_props())
+        .and_then(|f| f.auto_layout)
+        .is_some_and(|al| al.direction == LayoutDirection::Grid);
+    if parent_grid {
+        sublabel(ui, pane, "Grid Span");
+        let cs = n0.layout_child.col_span.max(1) as f32;
+        let rs = n0.layout_child.row_span.max(1) as f32;
+        if let Some(v) = field::num_field(ui, pane.col(0, 0.0), "grid-col-span", Prefix::Text("CS"), Some(cs), "") {
+            let span = v.round().clamp(1.0, 12.0) as u16;
+            app.edit_nodes(sel, |n| n.layout_child.col_span = span);
+        }
+        if let Some(v) = field::num_field(ui, pane.col(1, 0.0), "grid-row-span", Prefix::Text("RS"), Some(rs), "") {
+            let span = v.round().clamp(1.0, 12.0) as u16;
+            app.edit_nodes(sel, |n| n.layout_child.row_span = span);
+        }
+        row_end(pane);
+    }
 }
 
 fn auto_layout_ui(app: &mut App, ui: &mut Ui, pane: &mut Pane, sel: &[NodeId], a: AutoLayout, n0: &Node, parent_al: bool) {
     sublabel(ui, pane, "Flow");
-    let dir_sel = if a.wrap {
+    let dir_sel = if a.direction == LayoutDirection::Grid {
+        3
+    } else if a.wrap {
         2
     } else if a.direction == LayoutDirection::Horizontal {
         0
     } else {
         1
     };
-    if let Some(i) = segmented(ui, pane, theme::SECTION_CONTENT_X, "al-dir", &[Icon::DirHorizontal, Icon::DirVertical, Icon::Wrap], Some(dir_sel)) {
+    if let Some(i) =
+        segmented(ui, pane, theme::SECTION_CONTENT_X, "al-dir", &[Icon::DirHorizontal, Icon::DirVertical, Icon::Wrap, Icon::Grid2x2], Some(dir_sel))
+    {
         update_al(app, sel, |al| match i {
             0 => {
                 al.direction = LayoutDirection::Horizontal;
@@ -854,9 +879,17 @@ fn auto_layout_ui(app: &mut App, ui: &mut Ui, pane: &mut Pane, sel: &[NodeId], a
                 al.direction = LayoutDirection::Vertical;
                 al.wrap = false;
             }
-            _ => {
+            2 => {
+                al.direction = LayoutDirection::Horizontal;
                 al.wrap = true;
                 al.primary_sizing = Sizing::Fixed;
+            }
+            _ => {
+                al.direction = LayoutDirection::Grid;
+                al.wrap = false;
+                if al.grid_columns == 0 {
+                    al.grid_columns = 3;
+                }
             }
         });
     }
@@ -867,6 +900,20 @@ fn auto_layout_ui(app: &mut App, ui: &mut Ui, pane: &mut Pane, sel: &[NodeId], a
         update_al(app, sel, |al| al.item_spacing = v);
     }
     row_end(pane);
+    if a.direction == LayoutDirection::Grid {
+        sublabel(ui, pane, "Grid (Columns × Rows)");
+        let cols = a.grid_columns.max(1) as f32;
+        let rows = a.grid_rows as f32;
+        if let Some(v) = field::num_field(ui, pane.col(0, 0.0), "grid-cols", Prefix::Text("C"), Some(cols), "") {
+            let c = v.round().clamp(1.0, 12.0) as u32;
+            update_al(app, sel, |al| al.grid_columns = c);
+        }
+        if let Some(v) = field::num_field(ui, pane.col(1, 0.0), "grid-rows", Prefix::Text("R"), Some(rows), "") {
+            let r = v.round().clamp(0.0, 12.0) as u32;
+            update_al(app, sel, |al| al.grid_rows = r);
+        }
+        row_end(pane);
+    }
     dimensions_ui(app, ui, pane, sel, false);
     let _ = parent_al;
     resizing_ui(app, ui, pane, sel, n0);

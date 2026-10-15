@@ -35,6 +35,10 @@ pub struct LayoutSpec {
     /// `"start"`, `"center"`, `"end"`, or `"baseline"`.
     #[serde(default, alias = "align", skip_serializing_if = "String::is_empty")]
     pub counter_align: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub grid_columns: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub grid_rows: Option<u32>,
 }
 
 /// Declarative node specification used by Agents and CLI/MCP tools (`apply_spec` / `export_spec`).
@@ -74,6 +78,10 @@ pub struct NodeSpec {
     pub min_height: Option<f32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_height: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub col_span: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub row_span: Option<u16>,
     /// Hex color (`"#18181B"`) or EaseUI token (`"$easeui.bg.panel"`, `"$easeui.accent.orange"`, etc.).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fill: Option<String>,
@@ -182,6 +190,7 @@ fn parse_align(s: &str) -> LayoutAlign {
 fn parse_direction(s: &str) -> LayoutDirection {
     match s.trim().to_ascii_lowercase().as_str() {
         "column" | "col" | "vertical" | "v" => LayoutDirection::Vertical,
+        "grid" | "g" => LayoutDirection::Grid,
         _ => LayoutDirection::Horizontal,
     }
 }
@@ -440,6 +449,12 @@ impl Document {
                 if !ls.counter_align.is_empty() {
                     al.counter_align = parse_align(&ls.counter_align);
                 }
+                if let Some(cols) = ls.grid_columns {
+                    al.grid_columns = cols;
+                }
+                if let Some(rows) = ls.grid_rows {
+                    al.grid_rows = rows;
+                }
                 f.auto_layout = Some(al);
             }
         }
@@ -526,6 +541,12 @@ impl Document {
         node.layout_child.max_w = spec.max_width;
         node.layout_child.min_h = spec.min_height;
         node.layout_child.max_h = spec.max_height;
+        if let Some(cs) = spec.col_span {
+            node.layout_child.col_span = cs;
+        }
+        if let Some(rs) = spec.row_span {
+            node.layout_child.row_span = rs;
+        }
 
         // Dev annotations & status
         if let Some(ann) = &spec.annotation {
@@ -610,12 +631,188 @@ impl Document {
         let Some(al) = self.get(root).and_then(|n| n.kind.frame_props()).and_then(|f| f.auto_layout) else {
             return;
         };
-        let horiz = al.direction == LayoutDirection::Horizontal;
         let flow_ids: Vec<NodeId> = children
             .iter()
             .copied()
             .filter(|cid| self.get(*cid).is_some_and(|k| k.visible && !k.layout_child.absolute))
             .collect();
+
+        if al.direction == LayoutDirection::Grid {
+            let [pt, pr, pb, pl] = al.padding;
+            let cols = (if al.grid_columns == 0 { 3 } else { al.grid_columns }).max(1) as usize;
+            let col_gap = al.item_spacing;
+            let row_gap = if al.counter_spacing > 0.0 { al.counter_spacing } else { al.item_spacing };
+            let hug_h = al.counter_sizing == Sizing::Hug || al.primary_sizing == Sizing::Hug;
+            let cur_frame = self.get(root).unwrap().size;
+
+            if flow_ids.is_empty() {
+                if hug_h {
+                    if let Some(fnode) = self.get_mut(root) {
+                        fnode.size.y = pt + pb;
+                    }
+                }
+                return;
+            }
+
+            let mut occupied = std::collections::BTreeSet::<(usize, usize)>::new();
+            let mut placements: Vec<(NodeId, usize, usize, usize, usize)> = Vec::with_capacity(flow_ids.len());
+            for cid in &flow_ids {
+                let lc = self.get(*cid).unwrap().layout_child;
+                let cs = (lc.col_span.max(1) as usize).min(cols);
+                let rs = lc.row_span.max(1) as usize;
+                let (placed_r, placed_c) = if let (Some(gr), Some(gc)) = (lc.grid_row, lc.grid_column) {
+                    (gr as usize, (gc as usize).min(cols - cs))
+                } else {
+                    let start_r = lc.grid_row.unwrap_or(0) as usize;
+                    let mut r = start_r;
+                    let mut found = None;
+                    while found.is_none() {
+                        let c_range = if let Some(gc) = lc.grid_column {
+                            let c0 = (gc as usize).min(cols - cs);
+                            c0..=c0
+                        } else {
+                            0..=(cols - cs)
+                        };
+                        for c in c_range {
+                            let fits = (r..r + rs).all(|rr| (c..c + cs).all(|cc| !occupied.contains(&(rr, cc))));
+                            if fits {
+                                found = Some((r, c));
+                                break;
+                            }
+                        }
+                        r += 1;
+                    }
+                    found.unwrap()
+                };
+                for rr in placed_r..placed_r + rs {
+                    for cc in placed_c..placed_c + cs {
+                        occupied.insert((rr, cc));
+                    }
+                }
+                placements.push((*cid, placed_r, placed_c, rs, cs));
+            }
+
+            let num_rows = placements
+                .iter()
+                .map(|&(_, r, _, rs, _)| r + rs)
+                .max()
+                .unwrap_or(0)
+                .max(al.grid_rows as usize)
+                .max(1);
+
+            let avail_w = (cur_frame.x - pl - pr - col_gap * (cols.saturating_sub(1) as f32)).max(0.0);
+            let mut col_widths = vec![0.0_f32; cols];
+            let mut used_w = 0.0_f32;
+            let mut total_fr = 0.0_f32;
+            for c in 0..cols {
+                let track = al.grid_col_tracks.get(c).copied().unwrap_or(GridTrack::Flex(1.0));
+                match track {
+                    GridTrack::Fixed(w) => {
+                        col_widths[c] = w.max(0.0);
+                        used_w += col_widths[c];
+                    }
+                    GridTrack::Hug => {
+                        let max_w = placements
+                            .iter()
+                            .filter(|&&(_, _, pc, _, cs)| pc == c && cs == 1)
+                            .filter_map(|&(cid, _, _, _, _)| self.get(cid).map(|n| n.size.x))
+                            .fold(0.0_f32, f32::max);
+                        col_widths[c] = max_w;
+                        used_w += max_w;
+                    }
+                    GridTrack::Flex(fr) => {
+                        total_fr += fr.max(0.0);
+                    }
+                }
+            }
+            let free_w = (avail_w - used_w).max(0.0);
+            if total_fr > 0.0 {
+                for c in 0..cols {
+                    if let GridTrack::Flex(fr) = al.grid_col_tracks.get(c).copied().unwrap_or(GridTrack::Flex(1.0)) {
+                        col_widths[c] = free_w * (fr.max(0.0) / total_fr);
+                    }
+                }
+            }
+
+            let mut row_heights = vec![0.0_f32; num_rows];
+            for r in 0..num_rows {
+                if let Some(GridTrack::Fixed(h)) = al.grid_row_tracks.get(r).copied() {
+                    row_heights[r] = h.max(0.0);
+                } else {
+                    let max_h = placements
+                        .iter()
+                        .filter(|&&(_, pr_idx, _, rs, _)| pr_idx == r && rs == 1)
+                        .filter_map(|&(cid, _, _, _, _)| self.get(cid).map(|n| n.size.y))
+                        .fold(0.0_f32, f32::max);
+                    row_heights[r] = max_h;
+                }
+            }
+            for &(cid, r, _, rs, _) in &placements {
+                if rs > 1 {
+                    let ch = self.get(cid).map(|n| n.size.y).unwrap_or(0.0);
+                    let cur_span_h: f32 = (r..r + rs).map(|rr| row_heights[rr]).sum::<f32>() + row_gap * ((rs - 1) as f32);
+                    if ch > cur_span_h {
+                        let extra = (ch - cur_span_h) / (rs as f32);
+                        for rr in r..r + rs {
+                            row_heights[rr] += extra;
+                        }
+                    }
+                }
+            }
+
+            let mut col_x = vec![0.0_f32; cols];
+            let mut cx = pl;
+            for c in 0..cols {
+                col_x[c] = cx;
+                cx += col_widths[c] + col_gap;
+            }
+            let mut row_y = vec![0.0_f32; num_rows];
+            let mut ry = pt;
+            for r in 0..num_rows {
+                row_y[r] = ry;
+                ry += row_heights[r] + row_gap;
+            }
+
+            if hug_h {
+                let total_h = pt + pb + row_heights.iter().sum::<f32>() + row_gap * (num_rows.saturating_sub(1) as f32);
+                if let Some(fnode) = self.get_mut(root) {
+                    fnode.size.y = total_h;
+                }
+            }
+
+            for (cid, r, c, rs, cs) in placements {
+                let cell_w: f32 = (c..c + cs).map(|cc| col_widths[cc]).sum::<f32>() + col_gap * ((cs - 1) as f32);
+                let cell_h: f32 = (r..r + rs).map(|rr| row_heights[rr]).sum::<f32>() + row_gap * ((rs - 1) as f32);
+                let lc = self.get(cid).unwrap().layout_child;
+                let cur_sz = self.get(cid).unwrap().size;
+                let mut w = if lc.horizontal == Sizing::Fill || lc.grow > 0.0 || cs > 1 { cell_w } else { cur_sz.x };
+                let mut h = if lc.vertical == Sizing::Fill || rs > 1 { cell_h } else { cur_sz.y };
+                if let Some(mw) = lc.min_w {
+                    w = w.max(mw);
+                }
+                if let Some(xw) = lc.max_w {
+                    w = w.min(xw);
+                }
+                if let Some(mh) = lc.min_h {
+                    h = h.max(mh);
+                }
+                if let Some(xh) = lc.max_h {
+                    h = h.min(xh);
+                }
+                let size_changed = (cur_sz.x - w).abs() > 1e-3 || (cur_sz.y - h).abs() > 1e-3;
+                if let Some(cnode) = self.get_mut(cid) {
+                    cnode.transform.tx = col_x[c];
+                    cnode.transform.ty = row_y[r];
+                    cnode.size = Vec2::new(w, h);
+                }
+                if size_changed {
+                    self.relayout_subtree(cid);
+                }
+            }
+            return;
+        }
+
+        let horiz = al.direction == LayoutDirection::Horizontal;
 
         let [pt, pr, pb, pl] = al.padding;
         let (pm_start, pm_end, pc_start, pc_end) = if horiz { (pl, pr, pt, pb) } else { (pt, pb, pl, pr) };
@@ -840,6 +1037,7 @@ impl Document {
             direction: match al.direction {
                 LayoutDirection::Horizontal => "row".into(),
                 LayoutDirection::Vertical => "column".into(),
+                LayoutDirection::Grid => "grid".into(),
             },
             wrap: al.wrap,
             gap: al.item_spacing,
@@ -847,6 +1045,8 @@ impl Document {
             padding: al.padding,
             primary_align: format!("{:?}", al.primary_align).to_ascii_lowercase(),
             counter_align: format!("{:?}", al.counter_align).to_ascii_lowercase(),
+            grid_columns: (al.grid_columns > 0).then_some(al.grid_columns),
+            grid_rows: (al.grid_rows > 0).then_some(al.grid_rows),
         });
         let dev_status = n.dev.status.map(|s| s.label().to_string());
         let annotations: Vec<String> = n.dev.annotations.iter().map(|a| a.text.clone()).collect();
@@ -876,6 +1076,8 @@ impl Document {
             max_width: n.layout_child.max_w,
             min_height: n.layout_child.min_h,
             max_height: n.layout_child.max_h,
+            col_span: (n.layout_child.col_span > 1).then_some(n.layout_child.col_span),
+            row_span: (n.layout_child.row_span > 1).then_some(n.layout_child.row_span),
             fill,
             stroke,
             stroke_weight,

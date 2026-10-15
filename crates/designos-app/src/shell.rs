@@ -192,6 +192,15 @@ impl Shell {
                 app.specs.open = true;
                 app.specs.ensure_loaded();
             }
+            Some("terminal") => {
+                app.ui.rail = Some(crate::app::RailItem::Tools);
+                app.terminal.dock_open = true;
+                app.terminal.ensure_default_tab(app.file_path.as_deref());
+            }
+            Some("cmdk") => {
+                app.cmdk.open = true;
+                app.cmdk.last_audit = Some(crate::cmdk::run_design_gate_audit(&app.doc, app.page, &app.selection));
+            }
             Some("assets") => {
                 app.ui.rail = Some(crate::app::RailItem::Assets);
             }
@@ -358,6 +367,20 @@ impl Shell {
                 (Key::Minus, _, _) => Some(Action::ZoomOut),
                 (Key::Backslash, _, _) => Some(Action::ToggleSidebar),
                 (Key::K, false, false) => Some(Action::OpenPalette),
+                (Key::Backtick, _, _) => {
+                    app.terminal.dock_open = !app.terminal.dock_open;
+                    if app.terminal.dock_open {
+                        app.terminal.ensure_default_tab(app.file_path.as_deref());
+                    }
+                    None
+                }
+                (Key::P, false, false) => {
+                    app.cmdk.open = !app.cmdk.open;
+                    if app.cmdk.open {
+                        app.cmdk.last_audit = Some(crate::cmdk::run_design_gate_audit(&app.doc, app.page, &app.selection));
+                    }
+                    None
+                }
                 (Key::Enter, false, true) => {
                     app.start_present();
                     None
@@ -644,6 +667,9 @@ impl Shell {
         let notes_rect = Rect::from_min_max(Pos2::new(canvas_left, canvas_rect.bottom()), Pos2::new(right_rect.left(), full.bottom()));
 
         let full_vars = self.app.vars.open && self.app.vars.full;
+        if let Some(ai_copy) = self.app.specs.last_ai_copy.take() {
+            self.app.terminal.send_copy_for_ai(&ai_copy);
+        }
         if full_vars {
             // The local-variables full view replaces the left panel, canvas and right panel.
             rail::show(&mut self.app, ui, rail_rect);
@@ -651,14 +677,37 @@ impl Shell {
             crate::variables::view::show(&mut self.app, ui, content);
         } else {
             let specs_reader_open = self.app.ui.rail == Some(crate::app::RailItem::Specs) && self.app.specs.open;
-            if specs_reader_open {
-                self.app.canvas_rect = canvas_rect;
-                crate::specs::show_reader(&mut self.app, ui, canvas_rect);
+            let dock_h = if self.app.terminal.dock_open {
+                self.app.terminal.dock_height.clamp(180.0, (canvas_rect.height() * 0.55).max(200.0))
             } else {
-                canvas::show(&mut self.app, ui, canvas_rect);
+                0.0
+            };
+            let main_canvas_rect = Rect::from_min_max(
+                canvas_rect.min,
+                Pos2::new(canvas_rect.right(), (canvas_rect.bottom() - dock_h).max(canvas_rect.top() + 80.0)),
+            );
+            let dock_rect = Rect::from_min_max(
+                Pos2::new(canvas_rect.left(), main_canvas_rect.bottom()),
+                canvas_rect.max,
+            );
+            if specs_reader_open {
+                self.app.canvas_rect = main_canvas_rect;
+                crate::specs::show_reader(&mut self.app, ui, main_canvas_rect);
+            } else {
+                canvas::show(&mut self.app, ui, main_canvas_rect);
                 if deck {
                     crate::decks::ui::notes(&mut self.app, ui, notes_rect);
                 }
+            }
+            if self.app.terminal.dock_open && dock_rect.height() >= 80.0 {
+                let file_path = self.app.file_path.clone();
+                let term_actions = crate::terminal::show_dock(
+                    &mut self.app.terminal,
+                    ui,
+                    dock_rect,
+                    file_path.as_deref(),
+                );
+                execute_terminal_actions(&mut self.app, term_actions);
             }
             rail::show(&mut self.app, ui, rail_rect);
             if self.app.ui.left_collapsed {
@@ -680,25 +729,28 @@ impl Shell {
                 left::show(&mut self.app, ui, left_rect);
             }
             if board {
-                if !specs_reader_open {
+                if !specs_reader_open && !self.app.terminal.dock_open {
                     crate::board::toolbar::show(&mut self.app, ui, canvas_rect_for_toolbar(full));
-                    crate::board::bar::show(&mut self.app, ui, canvas_rect);
-                    crate::board::canvas::zoom_pill(&mut self.app, ui, canvas_rect);
+                    crate::board::bar::show(&mut self.app, ui, main_canvas_rect);
+                    crate::board::canvas::zoom_pill(&mut self.app, ui, main_canvas_rect);
                 }
             } else {
                 right::show(&mut self.app, ui, right_rect);
-                if !specs_reader_open {
-                    toolbar::show(&mut self.app, ui, if deck { canvas_rect } else { canvas_rect_for_toolbar(full) });
+                if !specs_reader_open && !self.app.terminal.dock_open {
+                    toolbar::show(&mut self.app, ui, if deck { main_canvas_rect } else { canvas_rect_for_toolbar(full) });
                 }
             }
             if !specs_reader_open {
-                crate::history::banner::show(&mut self.app, ui, canvas_rect);
-                self.context_menu(ui, canvas_rect);
+                crate::history::banner::show(&mut self.app, ui, main_canvas_rect);
+                self.context_menu(ui, main_canvas_rect);
             }
             menus::show(&mut self.app, &ctx);
             panels::context::show(&mut self.app, &ctx);
             // the floating panel (or only the inspector's binding picker when closed)
             crate::variables::view::show(&mut self.app, ui, full);
+        }
+        if let Some(cmdk_act) = crate::cmdk::show(&ctx, &mut self.app.cmdk, &self.app.doc, self.app.page, &self.app.selection) {
+            execute_cmdk_action(&mut self.app, cmdk_act);
         }
         crate::home::dialog::show(&mut self.app, &ctx);
         crate::history::modal::show(&mut self.app, &ctx);
@@ -710,6 +762,118 @@ impl Shell {
         self.sync_title(&ctx);
         if self.app.ui.menu == Some(MenuKind::Main) && self.app.ui.menu_anchor.is_none() {
             self.app.ui.menu = None;
+        }
+    }
+}
+
+pub fn execute_terminal_actions(app: &mut App, actions: Vec<crate::terminal::TerminalAction>) {
+    for action in actions {
+        match action {
+            crate::terminal::TerminalAction::ApplySpecJson(json) => {
+                match serde_json::from_str::<designos_doc::NodeSpec>(&json) {
+                    Ok(spec) => {
+                        app.apply_node_spec(&spec, "Agent Terminal");
+                    }
+                    Err(e) => {
+                        app.show_toast(format!("Spec parse error: {e}"), true);
+                    }
+                }
+            }
+            crate::terminal::TerminalAction::ApplySpecFile(path) => {
+                match std::fs::read_to_string(&path) {
+                    Ok(raw) => match serde_json::from_str::<designos_doc::NodeSpec>(&raw) {
+                        Ok(spec) => {
+                            let label = path.file_name().and_then(|s| s.to_str()).unwrap_or("Spec");
+                            app.apply_node_spec(&spec, label);
+                        }
+                        Err(e) => app.show_toast(format!("Invalid spec JSON: {e}"), true),
+                    },
+                    Err(e) => app.show_toast(format!("Failed to read {}: {e}", path.display()), true),
+                }
+            }
+            crate::terminal::TerminalAction::ReloadFromDisk => {
+                if let Some(p) = app.file_path.clone() {
+                    app.open_path(p);
+                    app.show_toast("Synced Canvas from disk", false);
+                } else {
+                    app.show_toast("No file path open to sync", true);
+                }
+            }
+            crate::terminal::TerminalAction::ExportSelectionToTerminal => {
+                match crate::terminal::export_selection_and_comments_to_pty(
+                    &mut app.terminal,
+                    &app.doc,
+                    app.page,
+                    &app.selection,
+                    app.file_path.as_deref(),
+                ) {
+                    Ok(p) => app.show_toast(format!("Sent selection & comments -> {}", p.display()), false),
+                    Err(e) => app.show_toast(e, true),
+                }
+            }
+        }
+    }
+}
+
+pub fn execute_cmdk_action(app: &mut App, action: crate::cmdk::CmdKAction) {
+    match action {
+        crate::cmdk::CmdKAction::ApplySpec(spec) => {
+            app.apply_node_spec(&spec, "Cmd+K Synthesizer");
+        }
+        crate::cmdk::CmdKAction::OpenSpecReader => {
+            app.ui.rail = Some(crate::app::RailItem::Specs);
+            app.specs.open = true;
+            app.specs.ensure_loaded();
+            app.cmdk.open = false;
+        }
+        crate::cmdk::CmdKAction::OpenTerminal(preset) => {
+            let file_path = app.file_path.clone();
+            let _ = app.terminal.spawn_tab(preset, file_path.as_deref());
+            app.terminal.dock_open = true;
+            app.ui.rail = Some(crate::app::RailItem::Tools);
+            app.cmdk.open = false;
+        }
+        crate::cmdk::CmdKAction::SendSelectionToTerminal => {
+            app.terminal.dock_open = true;
+            app.ui.rail = Some(crate::app::RailItem::Tools);
+            match crate::terminal::export_selection_and_comments_to_pty(
+                &mut app.terminal,
+                &app.doc,
+                app.page,
+                &app.selection,
+                app.file_path.as_deref(),
+            ) {
+                Ok(p) => app.show_toast(format!("Sent selection & comments -> {}", p.display()), false),
+                Err(e) => app.show_toast(e, true),
+            }
+            app.cmdk.open = false;
+        }
+        crate::cmdk::CmdKAction::ExportFig => {
+            let out_path = app
+                .file_path
+                .as_ref()
+                .map(|p| p.with_extension("fig"))
+                .unwrap_or_else(|| std::path::PathBuf::from("/tmp/designos-export.fig"));
+            match designos_fig::export_fig(&app.doc) {
+                Ok(bytes) => {
+                    if std::fs::write(&out_path, bytes).is_ok() {
+                        app.show_toast(format!("Exported Figma .fig to {}", out_path.display()), false);
+                    }
+                }
+                Err(e) => app.show_toast(format!("Export .fig failed: {e}"), true),
+            }
+            app.cmdk.open = false;
+        }
+        crate::cmdk::CmdKAction::SelectNode(id) => {
+            app.select_only(id);
+            app.fit_selection();
+        }
+        crate::cmdk::CmdKAction::AutoFixDesignGate => {
+            let sel = app.selection.clone();
+            let page = app.page;
+            let fixed_count = crate::cmdk::auto_fix_design_gate(&mut app.doc, page, &sel);
+            app.cmdk.last_audit = Some(crate::cmdk::run_design_gate_audit(&app.doc, app.page, &app.selection));
+            app.show_toast(format!("Auto-fixed {fixed_count} Design Gate issue(s)"), false);
         }
     }
 }

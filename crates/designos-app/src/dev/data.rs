@@ -168,6 +168,7 @@ pub fn component_rows(doc: &Document, id: NodeId) -> Vec<(String, String)> {
             PropValue::Text(t) => t,
             PropValue::Variant(v) => v,
             PropValue::Instance(c) => doc.get(c).map(|c| c.name.clone()).unwrap_or_default(),
+            PropValue::Slot(ids) => format!("{} item(s)", ids.len()),
         };
         rows.push((def.name.split('#').next().unwrap_or(&def.name).to_string(), value));
     }

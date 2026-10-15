@@ -221,6 +221,20 @@ fn type_style(ts: &TextStyle, auto: Option<TextAutoResize>, max_lines: Option<u3
     if let Some(flags) = crate::textfmt::flags_value(&ts.features) {
         m.insert("opentypeFlags".into(), flags);
     }
+    if !ts.variation_axes.is_empty() {
+        let fvs: Vec<Value> = ts
+            .variation_axes
+            .iter()
+            .map(|(tag, val)| {
+                let mut bytes = [b' '; 4];
+                for (i, b) in tag.as_bytes().iter().take(4).enumerate() {
+                    bytes[i] = *b;
+                }
+                json!({"axisTag": u32::from_be_bytes(bytes), "axisName": tag, "value": n(*val)})
+            })
+            .collect();
+        m.insert("fontVariations".into(), Value::Array(fvs));
+    }
     Value::Object(m)
 }
 
@@ -262,7 +276,18 @@ fn frame_fields(m: &mut Map<String, Value>, f: &FrameProps) {
         m.insert("layoutMode".into(), "NONE".into());
         return;
     };
-    m.insert("layoutMode".into(), if al.direction == LayoutDirection::Horizontal { "HORIZONTAL" } else { "VERTICAL" }.into());
+    let mode = match al.direction {
+        LayoutDirection::Horizontal => "HORIZONTAL",
+        LayoutDirection::Vertical => "VERTICAL",
+        LayoutDirection::Grid => "GRID",
+    };
+    m.insert("layoutMode".into(), mode.into());
+    if al.grid_columns > 0 {
+        m.insert("gridColumns".into(), al.grid_columns.into());
+    }
+    if al.grid_rows > 0 {
+        m.insert("gridRows".into(), al.grid_rows.into());
+    }
     m.insert("layoutWrap".into(), if al.wrap { "WRAP" } else { "NO_WRAP" }.into());
     m.insert("itemSpacing".into(), n(al.item_spacing));
     m.insert("counterAxisSpacing".into(), n(al.counter_spacing));
@@ -453,6 +478,18 @@ fn export_node(doc: &Document, id: NodeId, parent_abs: Option<&Affine>, depth: u
             }
             if lc.absolute {
                 m.insert("layoutPositioning".into(), "ABSOLUTE".into());
+            }
+            if let Some(c) = lc.grid_column {
+                m.insert("gridColumnAnchorIndex".into(), c.into());
+            }
+            if let Some(r) = lc.grid_row {
+                m.insert("gridRowAnchorIndex".into(), r.into());
+            }
+            if lc.col_span > 1 {
+                m.insert("gridColumnSpan".into(), lc.col_span.into());
+            }
+            if lc.row_span > 1 {
+                m.insert("gridRowSpan".into(), lc.row_span.into());
             }
             for (k, v) in [("minWidth", lc.min_w), ("maxWidth", lc.max_w), ("minHeight", lc.min_h), ("maxHeight", lc.max_h)] {
                 if let Some(v) = v {
