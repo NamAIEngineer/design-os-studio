@@ -32,6 +32,9 @@ pub struct CompileOptions {
     /// Render at this multiple of the output size and box-filter down (1 = off).
     /// 2 gives 16 samples per pixel together with the 4x MSAA.
     pub supersample: u32,
+    /// Lifts the offscreen-program caps of interactive mode, for the one
+    /// full-quality compile of an idle view. Headless compiles never cap.
+    pub uncap_programs: bool,
 }
 
 /// Persistent compiler state: geometry, paint and index caches.
@@ -327,7 +330,13 @@ impl Ctx<'_> {
     // ----- tree -------------------------------------------------------------
 
     fn interactive(&self) -> bool {
-        self.cull && (self.geom.budget.is_some() || self.doc.nodes.len() > 2_000)
+        self.cull && self.geom.budget.is_some()
+    }
+
+    /// Whether interactive mode forbids opening more offscreen programs once
+    /// `limit` exist (lifted by `CompileOptions::uncap_programs`).
+    fn prog_cap_hit(&self, limit: usize) -> bool {
+        self.interactive() && !self.opts.uncap_programs && self.progs.len() >= limit
     }
 
     fn zoom_lod(&self) -> bool {
@@ -384,7 +393,7 @@ impl Ctx<'_> {
             return;
         }
         let rest = &siblings[i + 1..];
-        if self.interactive() && self.progs.len() >= 64 {
+        if self.prog_cap_hit(64) {
             let lclip = self.narrow_clip(clip, rect);
             self.draw_children(rest, parent_ts, lclip);
             return;
@@ -500,8 +509,7 @@ impl Ctx<'_> {
         if opacity <= 0.0 && !special {
             return;
         }
-        let need_layer = (special || layer_blur > 0.0 || textured || (opacity < 1.0 && (has_kids || paints > 1 || has_effects)))
-            && (!self.interactive() || self.progs.len() < 64);
+        let need_layer = (special || layer_blur > 0.0 || textured || (opacity < 1.0 && (has_kids || paints > 1 || has_effects))) && !self.prog_cap_hit(64);
         if !need_layer {
             self.draw_body(n, ts, clip, opacity);
             return;
@@ -556,7 +564,7 @@ impl Ctx<'_> {
 
     fn draw_body(&mut self, n: &Node, ts: sk::Transform, clip: ClipId, alpha: f32) {
         self.draw_body_inner(n, ts, clip, alpha);
-        if self.interactive() && self.progs.len() >= 64 {
+        if self.prog_cap_hit(64) {
             return;
         }
         for e in &n.effects {
@@ -666,7 +674,7 @@ impl Ctx<'_> {
         }
 
         let g = self.geom_of(n, &ts);
-        let allow_fx = !interactive || (self.progs.len() < 64 && (bb.2 - bb.0).max(bb.3 - bb.1) >= 4.0);
+        let allow_fx = !interactive || (!self.prog_cap_hit(64) && (bb.2 - bb.0).max(bb.3 - bb.1) >= 4.0);
 
         // 1. drop shadows + background blur (behind the node)
         if allow_fx {
@@ -732,14 +740,14 @@ impl Ctx<'_> {
                 let Some(sh) = &g.shape else { return };
                 let radii = if matches!(n.kind, NodeKind::Section) { [0.0; 4] } else { n.corner_radii };
                 let max_r_px = radii.iter().copied().fold(0.0f32, f32::max) * scale;
-                let rect_like = sh.is_rect && identity_like(&ts) && (max_r_px <= 0.0 || (zoom_lod && (max_r_px <= 2.5 || self.progs.len() >= 32)));
+                let rect_like = sh.is_rect && identity_like(&ts) && (max_r_px <= 0.0 || (zoom_lod && (max_r_px <= 2.5 || self.prog_cap_hit(32))));
                 let child_clip = if rect_like {
                     // axis-aligned rectangle: a scissor is exact up to the edge pixels
                     let (x0, y0) = (ts.tx, ts.ty);
                     let (x1, y1) = (ts.tx + n.size.x * ts.sx, ts.ty + n.size.y * ts.sy);
                     let r = IRect::new(x0.round() as i32, y0.round() as i32, x1.round() as i32, y1.round() as i32);
                     Some(self.narrow_clip(clip, r))
-                } else if interactive && self.progs.len() >= 64 {
+                } else if self.prog_cap_hit(64) {
                     Some(self.narrow_clip(clip, IRect::outward(inner_bb)))
                 } else if let Some(mesh) = &g.fill {
                     let roi = self.visible(clip);
@@ -762,7 +770,7 @@ impl Ctx<'_> {
 
     fn fill_with(&mut self, mesh: &Arc<Mesh>, ts: sk::Transform, size: Vec2, p: &d::Paint, alpha: f32, clip: ClipId) {
         let Some(pi) = self.paints.convert(self.doc, p, size, alpha) else { return };
-        if special_blend(p.blend) && (!self.interactive() || self.progs.len() < 64) {
+        if special_blend(p.blend) && !self.prog_cap_hit(64) {
             // a paint blended against what is beneath: isolate it and composite
             let bb = xform_bounds(&ts, mesh.bounds.0, mesh.bounds.1, mesh.bounds.2 - mesh.bounds.0, mesh.bounds.3 - mesh.bounds.1);
             let rect = IRect::outward(bb).grow(1).intersect(self.visible(clip));
@@ -808,13 +816,10 @@ impl Ctx<'_> {
             return;
         }
         let Some((mesh, how)) = g.stroke_mesh(n) else { return };
-        let interactive = self.interactive();
         let zoom_lod = self.zoom_lod();
         let sclip = match how {
             StrokeClip::None => clip,
-            StrokeClip::Inside | StrokeClip::Outside if (zoom_lod && n.stroke.weight * ts_scale(&ts) <= 1.25) || (interactive && self.progs.len() >= 48) => {
-                clip
-            }
+            StrokeClip::Inside | StrokeClip::Outside if (zoom_lod && n.stroke.weight * ts_scale(&ts) <= 1.25) || self.prog_cap_hit(48) => clip,
             StrokeClip::Inside | StrokeClip::Outside => {
                 let Some(shape) = &g.fill else { return };
                 let b = mesh.bounds;
