@@ -5,7 +5,16 @@ use designos_render::{render_page, resolve_font, tiny_skia::Pixmap, Viewport};
 
 const SAMPLE: &str = "Hamburgefonstiv";
 
+/// Builds the font database from the bundled fonts only, so results never depend on what the
+/// host has installed (a machine with SF Pro installed resolves "SF Pro Text" to the real face).
+/// The database is process-wide and built on first use, so every test calls this first.
+fn hermetic_fonts() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| std::env::set_var("DESIGNOS_BUNDLED_FONTS_ONLY", "1"));
+}
+
 fn render_text(family: &str, weight: u16, italic: bool) -> Pixmap {
+    hermetic_fonts();
     let mut doc = Document::new("t");
     let page = doc.add_page("p");
     doc.get_mut(page).unwrap().kind = NodeKind::Page { background: Color::WHITE };
@@ -28,6 +37,7 @@ fn ink(pm: &Pixmap) -> u64 {
 
 #[test]
 fn inter_resolves_to_the_bundled_face() {
+    hermetic_fonts();
     for (w, italic) in [(400, false), (700, false), (400, true), (900, true)] {
         let r = resolve_font("Inter", w, italic).expect("Inter resolves");
         assert_eq!(r.family, "Inter");
@@ -37,6 +47,7 @@ fn inter_resolves_to_the_bundled_face() {
 
 #[test]
 fn sf_pro_text_renders_through_inter() {
+    hermetic_fonts();
     let r = resolve_font("SF Pro Text", 400, false).unwrap();
     assert_eq!((r.family.as_str(), r.bundled), ("Inter", true));
     for fam in ["SF Pro Display", "-apple-system", "system-ui"] {
@@ -49,6 +60,7 @@ fn sf_pro_text_renders_through_inter() {
 
 #[test]
 fn unknown_family_falls_back_to_inter() {
+    hermetic_fonts();
     let r = resolve_font("Definitely Not A Font", 400, false).unwrap();
     assert_eq!((r.family.as_str(), r.bundled), ("Inter", true));
     assert_eq!(render_text("Definitely Not A Font", 400, false).data(), render_text("Inter", 400, false).data());
@@ -74,4 +86,13 @@ fn italic_uses_the_italic_face() {
 #[test]
 fn rendering_is_deterministic() {
     assert_eq!(render_text("Inter", 600, false).data(), render_text("Inter", 600, false).data());
+}
+
+#[test]
+fn hermetic_database_holds_only_bundled_faces() {
+    hermetic_fonts();
+    let bundled: Vec<String> = designos_fonts::bundled().iter().map(|a| a.family.to_lowercase()).collect();
+    for fam in designos_render::available_families() {
+        assert!(bundled.contains(&fam.to_lowercase()), "non-bundled family leaked into the hermetic database: {fam}");
+    }
 }
