@@ -2232,11 +2232,11 @@ fn parse_grid_sizing(s: &str) -> (u32, [GridTrack; 8]) {
                 continue;
             }
             if starts_with_ignore_case(rest, "minmax(") {
-                if let Some(end) = rest.find(')') {
-                    out.push(parse_one(&rest[..=end]));
-                    rest = rest[end + 1..].trim_start();
-                    continue;
-                }
+                // An unclosed minmax() has no defined extent; stop rather than rescanning the tail per token.
+                let Some(end) = rest.find(')') else { return };
+                out.push(parse_one(&rest[..=end]));
+                rest = rest[end + 1..].trim_start();
+                continue;
             }
             if let Some(ws) = rest.find(char::is_whitespace) {
                 out.push(parse_one(&rest[..ws]));
@@ -2549,5 +2549,19 @@ mod grid_sizing_tests {
         let started = std::time::Instant::now();
         let _ = parse_grid_sizing(&unclosed);
         assert!(started.elapsed().as_millis() < 900, "took {:?}", started.elapsed());
+    }
+
+    #[test]
+    fn unclosed_minmax_stops_the_scan_in_linear_time() {
+        // Everything after an unclosed minmax( has no defined extent, like an unclosed repeat(.
+        let (n, t) = parse_grid_sizing("1fr 50px minmax( 2fr 3fr");
+        assert_eq!(n, 2);
+        assert_eq!(t[..2], [GridTrack::Flex(1.0), GridTrack::Fixed(50.0)]);
+        // 80k such tokens rescanned the tail each time (846 ms measured quadratic); linear parsing takes a few ms.
+        let s = "minmax( ".repeat(80_000);
+        let started = std::time::Instant::now();
+        let (n, _) = parse_grid_sizing(&s);
+        assert_eq!(n, 0);
+        assert!(started.elapsed().as_millis() < 250, "took {:?}", started.elapsed());
     }
 }
