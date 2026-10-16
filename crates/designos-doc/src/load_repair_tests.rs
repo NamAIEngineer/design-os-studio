@@ -1,0 +1,156 @@
+//! Regression tests: a document deserialised from external bytes always satisfies the tree invariants.
+
+use crate::{Document, Node, NodeId, Rect};
+use std::collections::BTreeSet;
+
+/// Builds page(1) -> frame(2) -> rect(3), returning the doc and ids.
+fn sample() -> (Document, NodeId, NodeId, NodeId) {
+    let mut d = Document::new("Repair");
+    let page = d.add_page("P");
+    let frame = d.alloc_id();
+    d.insert(page, Node::frame(frame, Rect::new(0.0, 0.0, 100.0, 100.0))).unwrap();
+    let rect = d.alloc_id();
+    d.insert(frame, Node::rectangle(rect, Rect::new(1.0, 2.0, 3.0, 4.0))).unwrap();
+    (d, page, frame, rect)
+}
+
+/// Asserts: every id in pages/children exists, parent <-> children agree, every parent chain
+/// ends within `nodes.len()` hops, every child is claimed once, and `alloc_id` is fresh.
+fn assert_consistent(d: &mut Document) {
+    let mut claimed = BTreeSet::new();
+    for (id, n) in &d.nodes {
+        assert_eq!(n.id, *id, "node id matches its key");
+        for c in &n.children {
+            let child = d.nodes.get(c).unwrap_or_else(|| panic!("dangling child {c:?} under {id:?}"));
+            assert_eq!(child.parent, Some(*id), "child {c:?} parent points back to {id:?}");
+            assert!(claimed.insert(*c), "child {c:?} listed twice");
+            assert_ne!(c, id, "self child");
+        }
+        if let Some(p) = n.parent {
+            let parent = d.nodes.get(&p).unwrap_or_else(|| panic!("dangling parent {p:?} of {id:?}"));
+            assert!(parent.children.contains(id), "parent {p:?} lists {id:?}");
+        }
+        let mut hops = 0;
+        let mut cur = n.parent;
+        while let Some(p) = cur {
+            hops += 1;
+            assert!(hops <= d.nodes.len(), "parent chain of {id:?} never ends");
+            cur = d.nodes[&p].parent;
+        }
+    }
+    for p in &d.pages {
+        assert!(d.nodes.contains_key(p), "dangling page {p:?}");
+    }
+    let max = d.nodes.keys().next_back().map_or(0, |i| i.0);
+    let fresh = d.alloc_id();
+    assert!(fresh.0 > max, "alloc_id {fresh:?} must exceed the largest node id {max}");
+}
+
+fn reload(d: &Document) -> Document {
+    Document::from_json(&d.to_json().unwrap()).unwrap()
+}
+
+#[test]
+fn cyclic_parent_and_children_load_consistently() {
+    let (mut d, _page, frame, rect) = sample();
+    d.nodes.get_mut(&rect).unwrap().children.push(frame);
+    d.nodes.get_mut(&frame).unwrap().parent = Some(rect);
+    let mut back = reload(&d);
+    assert_consistent(&mut back);
+    let _ = back.world_transform(rect);
+    let _ = back.page_of(rect);
+    assert_eq!(back.nodes.len(), 3, "no node is deleted");
+}
+
+#[test]
+fn detached_cycle_without_a_root_loads_consistently() {
+    let (mut d, _page, _frame, _rect) = sample();
+    let (a, b) = (NodeId(50), NodeId(51));
+    let mut na = Node::frame(a, Rect::new(0.0, 0.0, 1.0, 1.0));
+    let mut nb = Node::frame(b, Rect::new(0.0, 0.0, 1.0, 1.0));
+    na.parent = Some(b);
+    na.children.push(b);
+    nb.parent = Some(a);
+    nb.children.push(a);
+    d.nodes.insert(a, na);
+    d.nodes.insert(b, nb);
+    let mut back = reload(&d);
+    assert_consistent(&mut back);
+    let _ = back.world_transform(a);
+    assert_eq!(back.nodes.len(), 5, "no node is deleted");
+}
+
+#[test]
+fn self_child_is_removed() {
+    let (mut d, _page, frame, _rect) = sample();
+    d.nodes.get_mut(&frame).unwrap().children.push(frame);
+    let mut back = reload(&d);
+    assert_consistent(&mut back);
+    assert!(!back.nodes[&frame].children.contains(&frame));
+}
+
+#[test]
+fn stale_next_id_is_raised_above_every_node() {
+    let (d, ..) = sample();
+    let mut v: serde_json::Value = serde_json::from_str(&d.to_json().unwrap()).unwrap();
+    v["next_id"] = serde_json::json!(0);
+    let mut back = Document::from_json(&v.to_string()).unwrap();
+    assert_consistent(&mut back);
+}
+
+#[test]
+fn dangling_child_and_page_ids_are_dropped() {
+    let (mut d, page, frame, _rect) = sample();
+    d.nodes.get_mut(&frame).unwrap().children.push(NodeId(9999));
+    d.pages.push(NodeId(8888));
+    d.nodes.get_mut(&page).unwrap().parent = Some(NodeId(7777));
+    let mut back = reload(&d);
+    assert_consistent(&mut back);
+    assert_eq!(back.pages, vec![page]);
+}
+
+#[test]
+fn child_listed_by_two_parents_and_twice_keeps_one_claim() {
+    let (mut d, page, frame, rect) = sample();
+    d.nodes.get_mut(&page).unwrap().children.push(rect);
+    d.nodes.get_mut(&frame).unwrap().children.push(rect);
+    let mut back = reload(&d);
+    assert_consistent(&mut back);
+    let claims = back.nodes.values().filter(|n| n.children.contains(&rect)).count();
+    assert_eq!(claims, 1);
+}
+
+#[test]
+fn stale_parent_not_listing_the_child_is_rebuilt_from_children() {
+    let (mut d, _page, frame, rect) = sample();
+    d.nodes.get_mut(&frame).unwrap().children.clear();
+    let mut back = reload(&d);
+    assert_consistent(&mut back);
+    assert_eq!(back.nodes[&rect].parent, None);
+}
+
+#[test]
+fn absurd_depth_is_capped_without_stack_overflow() {
+    let mut d = Document::new("Deep");
+    let page = d.add_page("P");
+    let mut parent = page;
+    for _ in 0..1500 {
+        let id = d.alloc_id();
+        d.insert(parent, Node::frame(id, Rect::new(0.0, 0.0, 1.0, 1.0))).unwrap();
+        parent = id;
+    }
+    let mut back = reload(&d);
+    assert_consistent(&mut back);
+    assert_eq!(back.nodes.len(), 1501, "deep nodes are detached, not deleted");
+    let mut depth = 0;
+    back.walk(page, |_, dpt| depth = depth.max(dpt));
+    assert!(depth < 1024, "walk depth {depth} must be bounded");
+}
+
+#[test]
+fn valid_document_is_untouched() {
+    let (d, ..) = sample();
+    let before = d.to_json().unwrap();
+    let back = reload(&d);
+    assert_eq!(back.to_json().unwrap(), before);
+}

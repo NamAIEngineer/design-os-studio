@@ -47,6 +47,7 @@ pub fn load_path(path: &Path) -> Result<Document, String> {
             Document::from_json(&text).map_err(|e| format!("Invalid designos file: {e}"))?
         }
     };
+    doc.validate_and_repair();
     if doc.name.is_empty() {
         doc.name = path.file_stem().and_then(|s| s.to_str()).unwrap_or("Untitled").to_string();
     }
@@ -213,5 +214,21 @@ mod tests {
             assert!(leftovers.iter().all(|n| !n.to_string_lossy().ends_with(".tmp")), "{name}: tmp file left behind: {leftovers:?}");
         }
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn cyclic_file_loads_into_a_consistent_tree() {
+        let mut d = Document::new("Cyc");
+        let page = d.add_page("P");
+        let a = d.alloc_id();
+        d.insert(page, Node::rectangle(a, Rect::new(0.0, 0.0, 1.0, 1.0))).unwrap();
+        d.nodes.get_mut(&a).unwrap().children.push(page);
+        d.nodes.get_mut(&page).unwrap().parent = Some(a);
+        let p = tmp("cyc.designos");
+        std::fs::write(&p, d.to_json().unwrap()).unwrap();
+        let back = load_path(&p).unwrap();
+        std::fs::remove_file(&p).ok();
+        assert_eq!(back.page_of(a), Some(page));
+        let _ = back.world_transform(a);
     }
 }
