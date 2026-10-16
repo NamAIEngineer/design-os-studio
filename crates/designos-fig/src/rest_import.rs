@@ -2507,7 +2507,18 @@ mod grid_sizing_tests {
         assert_eq!(t[..4], [GridTrack::Flex(1.0), GridTrack::Flex(2.0), GridTrack::Fixed(120.0), GridTrack::Hug]);
         let (n, t) = parse_grid_sizing("REPEAT(3, 1fr 50px) auto");
         assert_eq!(n, 7);
-        assert_eq!(t[..7], [GridTrack::Flex(1.0), GridTrack::Fixed(50.0), GridTrack::Flex(1.0), GridTrack::Fixed(50.0), GridTrack::Flex(1.0), GridTrack::Fixed(50.0), GridTrack::Hug]);
+        assert_eq!(
+            t[..7],
+            [
+                GridTrack::Flex(1.0),
+                GridTrack::Fixed(50.0),
+                GridTrack::Flex(1.0),
+                GridTrack::Fixed(50.0),
+                GridTrack::Flex(1.0),
+                GridTrack::Fixed(50.0),
+                GridTrack::Hug
+            ]
+        );
         assert_eq!(parse_grid_sizing("minmax(0, 1fr)").0, 1);
     }
 

@@ -851,7 +851,11 @@ fn import_pen_node(
 /// Nodes the whole import may clone while expanding `ref`s; stops chained components from multiplying without bound.
 const MAX_PEN_REF_CLONES: usize = 50_000;
 
-fn resolve_pen_refs(doc: &mut Document, id_map: &BTreeMap<String, NodeId>, pending_refs: Vec<(NodeId, String, Option<Map<String, Value>>)>) -> Result<(), String> {
+fn resolve_pen_refs(
+    doc: &mut Document,
+    id_map: &BTreeMap<String, NodeId>,
+    pending_refs: Vec<(NodeId, String, Option<Map<String, Value>>)>,
+) -> Result<(), String> {
     let mut clone_budget = MAX_PEN_REF_CLONES;
     for (inst_id, ref_key, descendants) in pending_refs {
         let Some(&comp_id) = id_map.get(&ref_key) else {
