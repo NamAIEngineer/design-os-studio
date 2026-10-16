@@ -319,13 +319,13 @@ fn tokenize_expr(s: &str, current: Option<f32>) -> Option<Vec<Tok>> {
                 {
                     i += 2;
                     NumSuffix::Unit
-                } else if tail.len() >= 1
+                } else if !tail.is_empty()
                     && (tail.starts_with('s') || tail.starts_with('S'))
                     && !tail[1..].chars().next().is_some_and(|c| c.is_ascii_alphabetic())
                 {
                     i += 1;
                     NumSuffix::Unit
-                } else if tail.len() >= 1
+                } else if !tail.is_empty()
                     && (tail.starts_with('x') || tail.starts_with('X'))
                     && !tail[1..].chars().next().is_some_and(|c| c.is_ascii_alphabetic())
                 {
@@ -722,8 +722,7 @@ mod tests {
         assert!(ctx.memory(|m| m.has_focus(num_id)));
 
         // Frame 3: press Shift + ArrowUp -> +10 (111.0)
-        let mut input = egui::RawInput::default();
-        input.modifiers = egui::Modifiers::SHIFT;
+        let mut input = egui::RawInput { modifiers: egui::Modifiers::SHIFT, ..Default::default() };
         input.events.push(egui::Event::Key { key: egui::Key::ArrowUp, physical_key: None, pressed: true, repeat: false, modifiers: egui::Modifiers::SHIFT });
         let _ = ctx.run_ui(input, |ui| {
             if let Some(v) = num_field(ui, rect, "test-w", Prefix::Text("W"), Some(val), "") {
@@ -733,8 +732,7 @@ mod tests {
         assert_eq!(val, 111.0);
 
         // Frame 4: press Alt + ArrowDown -> -0.1 (110.9)
-        let mut input = egui::RawInput::default();
-        input.modifiers = egui::Modifiers::ALT;
+        let mut input = egui::RawInput { modifiers: egui::Modifiers::ALT, ..Default::default() };
         input.events.push(egui::Event::Key { key: egui::Key::ArrowDown, physical_key: None, pressed: true, repeat: false, modifiers: egui::Modifiers::ALT });
         let _ = ctx.run_ui(input, |ui| {
             if let Some(v) = num_field(ui, rect, "test-w", Prefix::Text("W"), Some(val), "") {
@@ -754,8 +752,7 @@ mod tests {
         });
 
         // Whole selection (0..6) + Shift+ArrowUp -> +10 (0x0A) to all 3 channels: 1A2A3A
-        let mut input = egui::RawInput::default();
-        input.modifiers = egui::Modifiers::SHIFT;
+        let mut input = egui::RawInput { modifiers: egui::Modifiers::SHIFT, ..Default::default() };
         input.events.push(egui::Event::Key { key: egui::Key::ArrowUp, physical_key: None, pressed: true, repeat: false, modifiers: egui::Modifiers::SHIFT });
         let _ = ctx.run_ui(input, |ui| {
             if let Some(h) = edit_hex_text(ui, rect, hex_id, &hex, theme::font_body(), theme::TEXT, 0.0) {

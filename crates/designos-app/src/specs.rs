@@ -1012,8 +1012,11 @@ pub fn format_parity_report_for_ai(scorecard: &FigmaParityScorecard, reader_view
     )
 }
 
+/// One parsed Markdown table: `(headers, Vec<(line_number_1_based, Vec<cell_string>)>)`.
+pub type MarkdownTableRows = (Vec<String>, Vec<(usize, Vec<String>)>);
+
 /// Parses a Markdown table into `(headers, Vec<(line_number_1_based, Vec<cell_string>)>)`.
-pub fn parse_markdown_table_rows(md: &str) -> Vec<(Vec<String>, Vec<(usize, Vec<String>)>)> {
+pub fn parse_markdown_table_rows(md: &str) -> Vec<MarkdownTableRows> {
     let mut tables = Vec::new();
     let lines: Vec<&str> = md.lines().collect();
     let mut i = 0;
@@ -3853,7 +3856,7 @@ mod tests {
         assert!(us11.req_refs.contains(&"REQ-13".to_string()));
 
         let contract_rows = parse_ui_contract(V2_UI_CONTRACT_MD);
-        assert!(contract_rows.len() >= 66 && contract_rows.len() % 6 == 0, "11+ screens x 6 states = 66+ behavioral selector rows");
+        assert!(contract_rows.len() >= 66 && contract_rows.len().is_multiple_of(6), "11+ screens x 6 states = 66+ behavioral selector rows");
         assert_eq!(contract_rows[0].screen, "S01");
         assert_eq!(contract_rows[0].state, "normal");
         assert_eq!(contract_rows[0].us, "US-01");

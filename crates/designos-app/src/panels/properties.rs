@@ -1341,8 +1341,9 @@ fn node_paint(app: &App, target: PickTarget, ids: &[NodeId]) -> Option<Paint> {
 
 /// Colours for the picker's swatch grid: this page, the whole document, colour styles, and colour variables.
 fn swatch_sources(app: &App) -> Vec<(String, Vec<Color32>)> {
+    type SwatchCacheEntry = ((u64, NodeId, u64, usize, usize), Vec<(String, Vec<Color32>)>);
     thread_local! {
-        static SWATCH_CACHE: std::cell::RefCell<Option<((u64, NodeId, u64, usize, usize), Vec<(String, Vec<Color32>)>)>> = const { std::cell::RefCell::new(None) };
+        static SWATCH_CACHE: std::cell::RefCell<Option<SwatchCacheEntry>> = const { std::cell::RefCell::new(None) };
     }
     let key = (app.doc.runtime_id(), app.page, app.doc.mutation_epoch(), app.doc.styles.len(), app.doc.variables.len());
     if let Some(cached) = SWATCH_CACHE.with(|c| c.borrow().as_ref().filter(|(k, _)| *k == key).map(|(_, v)| v.clone())) {

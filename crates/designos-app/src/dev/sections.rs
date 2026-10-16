@@ -410,9 +410,11 @@ pub fn code_block(ui: &mut Ui, c: &mut Cur, lang: Language, code: &str) {
 }
 
 type DevCodeCacheKey = (u64, NodeId, u64, Language, bool);
+type DevAssetsCacheKey = (u64, NodeId, u64, usize);
+type DevAssetsCacheEntry = (DevAssetsCacheKey, Vec<(String, NodeId, Asset)>);
 thread_local! {
     static DEV_CODE_CACHE: std::cell::RefCell<Option<(DevCodeCacheKey, String)>> = const { std::cell::RefCell::new(None) };
-    static DEV_ASSETS_CACHE: std::cell::RefCell<Option<((u64, NodeId, u64, usize), Vec<(String, NodeId, Asset)>)>> = const { std::cell::RefCell::new(None) };
+    static DEV_ASSETS_CACHE: std::cell::RefCell<Option<DevAssetsCacheEntry>> = const { std::cell::RefCell::new(None) };
 }
 
 /// Code section: language dropdown, copy button and the generated code.
