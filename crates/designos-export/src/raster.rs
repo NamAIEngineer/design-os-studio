@@ -8,7 +8,7 @@
 
 use crate::bounds::render_bounds;
 use designos_doc::{Affine, Color, Document, Node, NodeId, NodeKind, PaintKind, Rect, Vec2};
-use designos_render::{render_node, render_page, Viewport};
+use designos_render::{checked_pixmap_size, render_node, render_page, Viewport};
 use std::collections::BTreeSet;
 use tiny_skia::Pixmap;
 
@@ -88,8 +88,7 @@ pub fn render_export(doc: &Document, node: NodeId, scale: f32) -> Option<Pixmap>
     if !is_page && b == nominal {
         return render_node(doc, node, scale);
     }
-    let w = (b.w * scale).ceil().clamp(1.0, 16_384.0) as u32;
-    let h = (b.h * scale).ceil().clamp(1.0, 16_384.0) as u32;
+    let (w, h) = checked_pixmap_size(b.w * scale, b.h * scale)?;
     let mut pm = Pixmap::new(w, h)?;
     let vp = Viewport { offset: Vec2::new(0.0, 0.0), zoom: scale, dpr: 1.0 };
     if is_page {
