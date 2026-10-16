@@ -32,6 +32,23 @@ impl RepairReport {
     pub fn is_clean(&self) -> bool {
         *self == Self::default()
     }
+
+    /// Names the node-graph defects that were repaired (dangling ids, cycles or duplicate claims,
+    /// over-deep nesting, wrong parent links, mismatched node ids), or `None` when there were none.
+    /// A merely stale id counter is not a graph defect: the repair raises it and nothing is lost.
+    pub fn structural_summary(&self) -> Option<String> {
+        let parts: Vec<String> = [
+            ("dangling ids", self.dangling_ids),
+            ("duplicate or cyclic child claims", self.duplicate_claims),
+            ("subtrees nested too deep", self.depth_detached),
+            ("wrong parent links", self.parents_rebuilt),
+            ("mismatched node ids", self.ids_realigned),        ]
+        .into_iter()
+        .filter(|(_, n)| *n > 0)
+        .map(|(what, n)| format!("{n} {what}"))
+        .collect();
+        (!parts.is_empty()).then(|| parts.join(", "))
+    }
 }
 
 impl Document {
