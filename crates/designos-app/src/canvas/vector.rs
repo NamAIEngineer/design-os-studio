@@ -565,7 +565,11 @@ pub fn release(app: &mut App) {
                         return true;
                     }
                     let other_v = |net: &VectorNetwork, s: usize, e: End| {
-                        if e == End::Start { net.segments[s].b } else { net.segments[s].a }
+                        if e == End::Start {
+                            net.segments[s].b
+                        } else {
+                            net.segments[s].a
+                        }
                     };
                     if ends.len() >= 2 {
                         let p0 = net.pos(other_v(net, ends[0].0, ends[0].1));
@@ -696,16 +700,8 @@ pub fn delete_and_heal_selected(app: &mut App) {
                             let du = dist(net.pos(u), net.pos(vi));
                             let dw = dist(net.pos(vi), net.pos(w));
                             let t = if du + dw > 1e-4 { (du / (du + dw)).clamp(0.15, 0.85) } else { 0.5 };
-                            let healed_tu = if len(tu) > 1e-4 {
-                                scale(tu, 1.0 / t)
-                            } else {
-                                scale(sub(net.pos(vi), net.pos(u)), 0.33)
-                            };
-                            let healed_tw = if len(tw) > 1e-4 {
-                                scale(tw, 1.0 / (1.0 - t))
-                            } else {
-                                scale(sub(net.pos(vi), net.pos(w)), 0.33)
-                            };
+                            let healed_tu = if len(tu) > 1e-4 { scale(tu, 1.0 / t) } else { scale(sub(net.pos(vi), net.pos(u)), 0.33) };
+                            let healed_tw = if len(tw) > 1e-4 { scale(tw, 1.0 / (1.0 - t)) } else { scale(sub(net.pos(vi), net.pos(w)), 0.33) };
                             net.set_tangent(s0, opp0, healed_tu);
                             net.set_tangent(s1, opp1, healed_tw);
                         }
@@ -1576,4 +1572,3 @@ mod tests {
         assert!(!net3.is_straight(0), "healed segment preserves curve tangents");
     }
 }
-

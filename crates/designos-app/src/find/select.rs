@@ -51,7 +51,6 @@ impl App {
         self.set_selection_from(ids, "");
     }
 
-
     /// Selects every layer on the page matching the selected ones on `criteria`.
     pub fn select_matching(&mut self, criteria: MatchCriteria) {
         if self.selection.is_empty() {

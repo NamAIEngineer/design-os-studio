@@ -1,12 +1,14 @@
 #!/usr/bin/env node
 /**
- * Renders Design OS Studio's 3 Dribbble One-Shape UI Motion videos:
+ * Renders Design OS Studio's 3 Apple-Grade SF Pro Rounded + Liquid Glass UI Motion videos:
  *  1. 28-beat Contact Sheets (7x4 grid, 1 frame per beat) + exact Loop Verification (Frame 0 === Frame Last)
  *  2. Full 60fps 1440x1440 render with 4 subframes per frame (180-deg shutter) blended via ffmpeg tmix=frames=4
+ *     using 8 parallel Chromium browser workers for ~4x faster rendering.
  */
 import { createRequire } from 'node:module';
 import { spawn, execFileSync } from 'node:child_process';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import crypto from 'node:crypto';
 
@@ -32,12 +34,35 @@ const BEAT = DURATION / BEATS;
 const TOTAL_FRAMES = Math.round(DURATION * FPS); // 1002 frames
 const SUBFRAMES = 4;
 const SHUTTER = 0.5; // 180-deg shutter
+const WORKERS = Number(process.env.WORKERS || 8);
+
+const CHROME_ARGS = [
+  '--no-sandbox',
+  '--disable-setuid-sandbox',
+  '--hide-scrollbars',
+  '--disable-gpu-vsync',
+  '--font-render-hinting=none',
+  '--disable-background-timer-throttling',
+  '--disable-backgrounding-occluded-windows',
+  '--disable-renderer-backgrounding',
+  '--enable-gpu-rasterization',
+  '--ignore-gpu-blocklist',
+];
 
 const VIDEOS = [
   '01-designos-studio-launch-hero',
   '02-figma-100-micro-interactions',
   '03-agent-first-specs-and-devmode',
 ];
+
+async function launchBrowser() {
+  return puppeteer.launch({
+    executablePath: CHROME_PATH,
+    headless: 'new',
+    protocolTimeout: 180000,
+    args: CHROME_ARGS,
+  });
+}
 
 async function renderBeatsAndVerifyLoop(browser, id) {
   const htmlPath = path.join(SVG_DIR, `${id}.html`);
@@ -91,7 +116,7 @@ async function renderBeatsAndVerifyLoop(browser, id) {
     '-y',
     '-framerate', '1',
     '-i', path.join(beatDir, 'beat_%02d.png'),
-    '-vf', 'scale=360:360,tile=7x4:margin=8:padding=6:color=0x18181B',
+    '-vf', 'scale=360:360,tile=7x4:margin=8:padding=6:color=0x1D1D1F',
     '-frames:v', '1',
     contactSheetPath,
   ], { stdio: 'ignore' });
@@ -100,92 +125,119 @@ async function renderBeatsAndVerifyLoop(browser, id) {
   await page.close();
 }
 
-async function renderFullVideo(browser, id) {
+async function renderVideoChunk(htmlPath, startFrame, endFrame, chunkPath) {
+  const browser = await launchBrowser();
+  try {
+    const page = await browser.newPage();
+    await page.setViewport({ width: WIDTH, height: HEIGHT, deviceScaleFactor: 1 });
+    await page.goto(`file://${htmlPath}?render=1`, { waitUntil: 'load', timeout: 30000 });
+    await page.evaluate(() => window.__readyPromise);
+
+    const vf = `tmix=frames=${SUBFRAMES}:weights='1 1 1 1',select='eq(mod(n\\,${SUBFRAMES})\\,${SUBFRAMES - 1})',setpts=N/${FPS}/TB`;
+    const ffArgs = [
+      '-y',
+      '-v', 'error',
+      '-f', 'image2pipe',
+      '-vcodec', 'mjpeg',
+      '-framerate', String(FPS * SUBFRAMES),
+      '-i', '-',
+      '-vf', vf,
+      '-r', String(FPS),
+      '-c:v', 'libx264',
+      '-profile:v', 'high',
+      '-level', '4.2',
+      '-preset', 'fast',
+      '-crf', '16',
+      '-pix_fmt', 'yuv420p',
+      '-an',
+      chunkPath,
+    ];
+
+    const ff = spawn('ffmpeg', ffArgs, { stdio: ['pipe', 'ignore', 'pipe'] });
+    let errLog = '';
+    ff.stderr.on('data', (c) => { errLog = (errLog + c).slice(-2000); });
+    const ffDone = new Promise((resolve, reject) => {
+      ff.once('close', (code) => (code === 0 ? resolve() : reject(new Error(`ffmpeg chunk exit ${code}: ${errLog}`))));
+    });
+
+    for (let f = startFrame; f < endFrame; f++) {
+      for (let s = 0; s < SUBFRAMES; s++) {
+        let tSec;
+        if (f === 0) {
+          tSec = 0;
+        } else if (f === TOTAL_FRAMES - 1) {
+          tSec = DURATION;
+        } else {
+          const dt = (s / SUBFRAMES) * (SHUTTER / FPS);
+          tSec = Math.min(DURATION - 1e-3, f / FPS + dt);
+        }
+        await page.evaluate((t) => {
+          window.seek(t);
+          void document.body.offsetHeight;
+        }, tSec);
+        const buf = await page.screenshot({ type: 'jpeg', quality: 95, optimizeForSpeed: true });
+        if (!ff.stdin.write(buf)) {
+          await new Promise((r) => ff.stdin.once('drain', r));
+        }
+      }
+    }
+
+    ff.stdin.end();
+    await ffDone;
+  } finally {
+    await browser.close();
+  }
+}
+
+async function renderFullVideo(id) {
   const htmlPath = path.join(SVG_DIR, `${id}.html`);
   const wavPath = path.join(AUDIO_DIR, `${id}-master.wav`);
   const outMp4 = path.join(VIDEOS_DIR, `${id}.mp4`);
 
-  const NUM_WORKERS = 6;
-  const pages = [];
-  for (let w = 0; w < NUM_WORKERS; w++) {
-    const p = await browser.newPage();
-    await p.setViewport({ width: WIDTH, height: HEIGHT, deviceScaleFactor: 1 });
-    await p.goto(`file://${htmlPath}?render=1`, { waitUntil: 'load' });
-    await p.evaluate(() => window.__readyPromise);
-    pages.push(p);
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), `designos-render-${id}-`));
+  const t0 = Date.now();
+  const framesPerWorker = Math.ceil(TOTAL_FRAMES / WORKERS);
+  const chunkPaths = [];
+  const tasks = [];
+
+  for (let w = 0; w < WORKERS; w++) {
+    const startFrame = w * framesPerWorker;
+    const endFrame = Math.min(TOTAL_FRAMES, (w + 1) * framesPerWorker);
+    if (startFrame >= endFrame) break;
+    const chunkPath = path.join(tmpDir, `chunk-${String(w).padStart(2, '0')}.mp4`);
+    chunkPaths.push(chunkPath);
+    tasks.push(renderVideoChunk(htmlPath, startFrame, endFrame, chunkPath));
   }
 
-  const vf = `tmix=frames=${SUBFRAMES}:weights='1 1 1 1',select='eq(mod(n\\,${SUBFRAMES})\\,${SUBFRAMES - 1})',setpts=N/${FPS}/TB`;
-  const ffArgs = [
+  console.log(`[${id}] Rendering ${TOTAL_FRAMES} frames (${TOTAL_FRAMES * SUBFRAMES} subframes) across ${tasks.length} parallel Chromium workers...`);
+  await Promise.all(tasks);
+
+  const concatListPath = path.join(tmpDir, 'concat.txt');
+  fs.writeFileSync(
+    concatListPath,
+    chunkPaths.map((p) => `file '${p}'`).join('\n') + '\n',
+    'utf8'
+  );
+
+  execFileSync('ffmpeg', [
     '-y',
     '-v', 'error',
-    '-f', 'image2pipe',
-    '-vcodec', 'mjpeg',
-    '-framerate', String(FPS * SUBFRAMES),
-    '-i', '-',
+    '-f', 'concat',
+    '-safe', '0',
+    '-i', concatListPath,
     '-i', wavPath,
-    '-vf', vf,
-    '-r', String(FPS),
-    '-c:v', 'libx264',
-    '-preset', 'fast',
-    '-crf', '16',
-    '-pix_fmt', 'yuv420p',
+    '-c:v', 'copy',
     '-c:a', 'aac',
     '-b:a', '192k',
     '-shortest',
     '-movflags', '+faststart',
     outMp4,
-  ];
+  ]);
 
-  const ff = spawn('ffmpeg', ffArgs, { stdio: ['pipe', 'inherit', 'inherit'] });
-  const ffDone = new Promise((resolve, reject) => {
-    ff.on('close', (code) => (code === 0 ? resolve() : reject(new Error(`ffmpeg exited ${code}`))));
-  });
-
-  // Build list of all subframe timestamps (1002 * 4 = 4008 subframes)
-  // Ensure the final frame's subframes lock to DURATION so Frame Last === Frame First
-  const subTimes = [];
-  for (let f = 0; f < TOTAL_FRAMES; f++) {
-    for (let s = 0; s < SUBFRAMES; s++) {
-      if (f === 0) {
-        subTimes.push(0);
-      } else if (f === TOTAL_FRAMES - 1) {
-        subTimes.push(DURATION);
-      } else {
-        const dt = (s / SUBFRAMES) * (SHUTTER / FPS);
-        subTimes.push(Math.min(DURATION - 1e-3, f / FPS + dt));
-      }
-    }
-  }
-
-  const t0 = Date.now();
-  for (let idx = 0; idx < subTimes.length; idx += NUM_WORKERS) {
-    const batch = subTimes.slice(idx, idx + NUM_WORKERS);
-    const buffers = await Promise.all(
-      batch.map(async (tSec, wIdx) => {
-        const page = pages[wIdx];
-        await page.evaluate((t) => window.seek(t), tSec);
-        return page.screenshot({ type: 'jpeg', quality: 94 });
-      })
-    );
-    for (const buf of buffers) {
-      if (!ff.stdin.write(buf)) {
-        await new Promise((r) => ff.stdin.once('drain', r));
-      }
-    }
-    if ((idx / SUBFRAMES) % 120 === 0) {
-      const doneFrames = Math.min(TOTAL_FRAMES, Math.floor((idx + batch.length) / SUBFRAMES));
-      const elapsed = ((Date.now() - t0) / 1000).toFixed(1);
-      console.log(`[${id}] Rendered ${doneFrames}/${TOTAL_FRAMES} frames (${SUBFRAMES}x tmix subframes) in ${elapsed}s`);
-    }
-  }
-
-  ff.stdin.end();
-  await ffDone;
-  for (const p of pages) await p.close();
-
+  fs.rmSync(tmpDir, { recursive: true, force: true });
   const stat = fs.statSync(outMp4);
-  console.log(`[${id}] Saved 60fps 4x-tmix MP4 -> ${outMp4} (${(stat.size / 1024 / 1024).toFixed(2)} MB)`);
+  const elapsed = ((Date.now() - t0) / 1000).toFixed(1);
+  console.log(`[${id}] Saved 60fps 4x-tmix MP4 -> ${outMp4} (${(stat.size / 1024 / 1024).toFixed(2)} MB) in ${elapsed}s`);
 }
 
 async function main() {
@@ -193,36 +245,31 @@ async function main() {
   const beatsOnly = args.includes('--beats-only');
   const fullOnly = args.includes('--full-only');
 
-  const browser = await puppeteer.launch({
-    executablePath: CHROME_PATH,
-    headless: 'new',
-    args: ['--no-sandbox', '--disable-gpu-vsync', '--font-render-hinting=none'],
-  });
-
-  try {
-    if (!fullOnly) {
+  if (!fullOnly) {
+    const browser = await launchBrowser();
+    try {
       for (const id of VIDEOS) {
         await renderBeatsAndVerifyLoop(browser, id);
       }
+    } finally {
+      await browser.close();
     }
-    if (!beatsOnly) {
-      for (const id of VIDEOS) {
-        await renderFullVideo(browser, id);
-      }
-      // Also generate animated GIF preview from Video 01 for README.md & GitHub Pages
-      const heroMp4 = path.join(VIDEOS_DIR, '01-designos-studio-launch-hero.mp4');
-      const outGif = path.join(VIDEOS_DIR, 'designos-studio-launch-preview.gif');
-      execFileSync('ffmpeg', [
-        '-y',
-        '-v', 'error',
-        '-i', heroMp4,
-        '-vf', 'fps=20,scale=720:720:flags=lanczos,split[s0][s1];[s0]palettegen=max_colors=128[p];[s1][p]paletteuse=dither=bayer:bayer_scale=3',
-        outGif,
-      ]);
-      console.log(`Generated animated GIF preview -> ${outGif}`);
+  }
+
+  if (!beatsOnly) {
+    for (const id of VIDEOS) {
+      await renderFullVideo(id);
     }
-  } finally {
-    await browser.close();
+    const heroMp4 = path.join(VIDEOS_DIR, '01-designos-studio-launch-hero.mp4');
+    const outGif = path.join(VIDEOS_DIR, 'designos-studio-launch-preview.gif');
+    execFileSync('ffmpeg', [
+      '-y',
+      '-v', 'error',
+      '-i', heroMp4,
+      '-vf', 'fps=20,scale=720:720:flags=lanczos,split[s0][s1];[s0]palettegen=max_colors=128[p];[s1][p]paletteuse=dither=bayer:bayer_scale=3',
+      outGif,
+    ]);
+    console.log(`Generated animated GIF preview -> ${outGif}`);
   }
 }
 

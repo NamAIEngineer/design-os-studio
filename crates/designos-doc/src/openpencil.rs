@@ -44,10 +44,7 @@ fn matches_node_test(kind: &NodeKind, test: &str) -> bool {
     }
     matches!(
         (canonical, test.to_ascii_uppercase().as_str()),
-        ("BOOLEAN_OPERATION", "BOOLEAN_OP" | "BOOLEAN")
-            | ("COMPONENT_SET", "COMPONENTSET")
-            | ("VECTOR", "PATH")
-            | ("INSTANCE", "REF")
+        ("BOOLEAN_OPERATION", "BOOLEAN_OP" | "BOOLEAN") | ("COMPONENT_SET", "COMPONENTSET") | ("VECTOR", "PATH") | ("INSTANCE", "REF")
     )
 }
 
@@ -153,11 +150,7 @@ fn parse_xpath(expr: &str) -> Result<Vec<XPathStep>, String> {
             i += 1;
         }
         let start_name = i;
-        while i < bytes.len()
-            && !bytes[i].is_ascii_whitespace()
-            && bytes[i] != b'/'
-            && bytes[i] != b'['
-        {
+        while i < bytes.len() && !bytes[i].is_ascii_whitespace() && bytes[i] != b'/' && bytes[i] != b'[' {
             i += 1;
         }
         let node_test = s[start_name..i].trim().to_string();
@@ -233,65 +226,24 @@ fn node_attr(n: &Node, raw_attr: &str) -> AttrValue {
         "y" => AttrValue::Num(n.transform.ty),
         "cornerRadius" | "radius" => AttrValue::Num(n.corner_radii[0]),
         "opacity" => AttrValue::Num(n.opacity),
-        "fontSize" => n
-            .kind
-            .any_text()
-            .map(|t| AttrValue::Num(t.style.font_size))
-            .unwrap_or(AttrValue::None),
-        "fontWeight" => n
-            .kind
-            .any_text()
-            .map(|t| AttrValue::Num(t.style.font_weight as f32))
-            .unwrap_or(AttrValue::None),
-        "fontFamily" => n
-            .kind
-            .any_text()
-            .map(|t| AttrValue::Str(t.style.font_family.clone()))
-            .unwrap_or(AttrValue::None),
-        "characters" | "text" | "text()" => n
-            .kind
-            .any_text()
-            .map(|t| AttrValue::Str(t.content.clone()))
-            .unwrap_or(AttrValue::None),
-        "itemSpacing" | "gap" => n
-            .kind
-            .frame_props()
-            .and_then(|f| f.auto_layout.as_ref())
-            .map(|al| AttrValue::Num(al.item_spacing))
-            .unwrap_or(AttrValue::Num(0.0)),
-        "paddingTop" => n
-            .kind
-            .frame_props()
-            .and_then(|f| f.auto_layout.as_ref())
-            .map(|al| AttrValue::Num(al.padding[0]))
-            .unwrap_or(AttrValue::Num(0.0)),
-        "paddingRight" => n
-            .kind
-            .frame_props()
-            .and_then(|f| f.auto_layout.as_ref())
-            .map(|al| AttrValue::Num(al.padding[1]))
-            .unwrap_or(AttrValue::Num(0.0)),
-        "paddingBottom" => n
-            .kind
-            .frame_props()
-            .and_then(|f| f.auto_layout.as_ref())
-            .map(|al| AttrValue::Num(al.padding[2]))
-            .unwrap_or(AttrValue::Num(0.0)),
-        "paddingLeft" => n
-            .kind
-            .frame_props()
-            .and_then(|f| f.auto_layout.as_ref())
-            .map(|al| AttrValue::Num(al.padding[3]))
-            .unwrap_or(AttrValue::Num(0.0)),
+        "fontSize" => n.kind.any_text().map(|t| AttrValue::Num(t.style.font_size)).unwrap_or(AttrValue::None),
+        "fontWeight" => n.kind.any_text().map(|t| AttrValue::Num(t.style.font_weight as f32)).unwrap_or(AttrValue::None),
+        "fontFamily" => n.kind.any_text().map(|t| AttrValue::Str(t.style.font_family.clone())).unwrap_or(AttrValue::None),
+        "characters" | "text" | "text()" => n.kind.any_text().map(|t| AttrValue::Str(t.content.clone())).unwrap_or(AttrValue::None),
+        "itemSpacing" | "gap" => {
+            n.kind.frame_props().and_then(|f| f.auto_layout.as_ref()).map(|al| AttrValue::Num(al.item_spacing)).unwrap_or(AttrValue::Num(0.0))
+        }
+        "paddingTop" => n.kind.frame_props().and_then(|f| f.auto_layout.as_ref()).map(|al| AttrValue::Num(al.padding[0])).unwrap_or(AttrValue::Num(0.0)),
+        "paddingRight" => n.kind.frame_props().and_then(|f| f.auto_layout.as_ref()).map(|al| AttrValue::Num(al.padding[1])).unwrap_or(AttrValue::Num(0.0)),
+        "paddingBottom" => n.kind.frame_props().and_then(|f| f.auto_layout.as_ref()).map(|al| AttrValue::Num(al.padding[2])).unwrap_or(AttrValue::Num(0.0)),
+        "paddingLeft" => n.kind.frame_props().and_then(|f| f.auto_layout.as_ref()).map(|al| AttrValue::Num(al.padding[3])).unwrap_or(AttrValue::Num(0.0)),
         "childCount" | "count(*)" => AttrValue::Num(n.children.len() as f32),
         "name" => AttrValue::Str(n.name.clone()),
         "type" => AttrValue::Str(xpath_type_name(&n.kind).to_string()),
         "layoutMode" => AttrValue::Str(layout_mode_str(n).to_string()),
         "visible" => AttrValue::Bool(n.visible),
         "locked" => AttrValue::Bool(n.locked),
-        "clipsContent" | "clip" => AttrValue::Bool(
-            n.kind.frame_props().map(|f| f.clips_content).unwrap_or(false),
-        ),
+        "clipsContent" | "clip" => AttrValue::Bool(n.kind.frame_props().map(|f| f.clips_content).unwrap_or(false)),
         "id" => AttrValue::Num(n.id.0 as f32),
         _ => AttrValue::None,
     }
@@ -336,8 +288,7 @@ fn split_logical_top_level<'a>(s: &'a str, kw: &str) -> Vec<&'a str> {
         }
         if paren == 0 && i + kw_bytes.len() <= bytes.len() {
             let prev_ws = i > 0 && bytes[i - 1].is_ascii_whitespace();
-            let next_ws = i + kw_bytes.len() < bytes.len()
-                && bytes[i + kw_bytes.len()].is_ascii_whitespace();
+            let next_ws = i + kw_bytes.len() < bytes.len() && bytes[i + kw_bytes.len()].is_ascii_whitespace();
             if prev_ws && next_ws && s[i..i + kw_bytes.len()].eq_ignore_ascii_case(kw) {
                 parts.push(s[last..i].trim());
                 i += kw_bytes.len();
@@ -436,14 +387,9 @@ fn eval_predicate_expr(doc: &Document, n: &Node, expr: &str) -> Result<bool, Str
         return Ok(!eval_predicate_expr(doc, n, rest)?);
     }
 
-    for (fn_name, mode) in [
-        ("contains(", "contains"),
-        ("starts-with(", "starts"),
-        ("ends-with(", "ends"),
-    ] {
+    for (fn_name, mode) in [("contains(", "contains"), ("starts-with(", "starts"), ("ends-with(", "ends")] {
         if let Some(inner) = s.strip_prefix(fn_name).and_then(|r| r.strip_suffix(')')) {
-            let (attr_expr, needle) =
-                parse_fn_two_args(inner).ok_or_else(|| format!("invalid {fn_name}...) args"))?;
+            let (attr_expr, needle) = parse_fn_two_args(inner).ok_or_else(|| format!("invalid {fn_name}...) args"))?;
             let hay = match node_attr(n, &attr_expr) {
                 AttrValue::Str(v) => v,
                 AttrValue::Num(v) => v.to_string(),
@@ -557,12 +503,7 @@ fn node_summary_json(doc: &Document, n: &Node) -> Value {
 }
 
 /// Evaluates an Open-Pencil XPath selector query on `doc` (scoped to `page` if provided).
-pub fn query_xpath(
-    doc: &Document,
-    page: Option<NodeId>,
-    expr: &str,
-    limit: usize,
-) -> Result<Vec<Value>, String> {
+pub fn query_xpath(doc: &Document, page: Option<NodeId>, expr: &str, limit: usize) -> Result<Vec<Value>, String> {
     let steps = parse_xpath(expr)?;
     let mut current: Vec<NodeId> = match page {
         Some(p) => {
@@ -619,11 +560,7 @@ pub fn query_xpath(
     }
 
     let max = if limit == 0 { usize::MAX } else { limit };
-    Ok(current
-        .into_iter()
-        .take(max)
-        .filter_map(|id| doc.get(id).map(|n| node_summary_json(doc, n)))
-        .collect())
+    Ok(current.into_iter().take(max).filter_map(|id| doc.get(id).map(|n| node_summary_json(doc, n))).collect())
 }
 
 /// Infers a semantic UI role hint (`"button"`, `"input"`, `"card"`, `"navbar"`, `"heading"`, `"badge"`, `"icon"`, `"container"`).
@@ -632,11 +569,7 @@ pub fn infer_role_hint(doc: &Document, n: &Node) -> &'static str {
     if lname.contains("btn") || lname.contains("button") || lname.contains("cta") {
         return "button";
     }
-    if lname.contains("input")
-        || lname.contains("field")
-        || lname.contains("search")
-        || lname.contains("textbox")
-    {
+    if lname.contains("input") || lname.contains("field") || lname.contains("search") || lname.contains("textbox") {
         return "input";
     }
     if lname.contains("nav") || lname.contains("header") || lname.contains("toolbar") || lname.contains("topbar") {
@@ -667,10 +600,7 @@ pub fn infer_role_hint(doc: &Document, n: &Node) -> &'static str {
             }
         }
         NodeKind::Frame(_) | NodeKind::Component(_) | NodeKind::Instance { .. } => {
-            let has_text_child = n
-                .children
-                .iter()
-                .any(|&c| doc.get(c).is_some_and(|cn| matches!(cn.kind, NodeKind::Text(_))));
+            let has_text_child = n.children.iter().any(|&c| doc.get(c).is_some_and(|cn| matches!(cn.kind, NodeKind::Text(_))));
             if has_text_child && n.children.len() <= 3 && n.size.y >= 24.0 && n.size.y <= 64.0 && n.size.x <= 320.0 && !n.fills.is_empty() {
                 "button"
             } else if n.size.y <= 28.0 && n.size.x <= 120.0 && has_text_child {
@@ -716,14 +646,7 @@ pub fn describe_node(doc: &Document, id: NodeId, depth: usize) -> Result<Value, 
         })
     });
 
-    let children: Vec<Value> = if depth > 0 {
-        n.children
-            .iter()
-            .filter_map(|&cid| describe_node(doc, cid, depth - 1).ok())
-            .collect()
-    } else {
-        Vec::new()
-    };
+    let children: Vec<Value> = if depth > 0 { n.children.iter().filter_map(|&cid| describe_node(doc, cid, depth - 1).ok()).collect() } else { Vec::new() };
 
     Ok(json!({
         "id": n.id.0,
@@ -746,7 +669,8 @@ pub fn describe_node(doc: &Document, id: NodeId, depth: usize) -> Result<Value, 
 }
 
 const SPACING_SCALE: [f32; 15] = [0.0, 2.0, 4.0, 6.0, 8.0, 12.0, 16.0, 20.0, 24.0, 32.0, 40.0, 48.0, 64.0, 80.0, 96.0];
-const FONT_SCALE: [f32; 22] = [10.0, 11.0, 12.0, 13.0, 14.0, 15.0, 16.0, 18.0, 20.0, 24.0, 28.0, 30.0, 32.0, 36.0, 40.0, 48.0, 56.0, 60.0, 64.0, 72.0, 80.0, 96.0];
+const FONT_SCALE: [f32; 22] =
+    [10.0, 11.0, 12.0, 13.0, 14.0, 15.0, 16.0, 18.0, 20.0, 24.0, 28.0, 30.0, 32.0, 36.0, 40.0, 48.0, 56.0, 60.0, 64.0, 72.0, 80.0, 96.0];
 const RADIUS_SCALE: [f32; 14] = [0.0, 2.0, 4.0, 6.0, 8.0, 10.0, 12.0, 16.0, 20.0, 24.0, 32.0, 999.0, 1000.0, 9999.0];
 
 fn on_scale(v: f32, scale: &[f32]) -> bool {
@@ -754,11 +678,7 @@ fn on_scale(v: f32, scale: &[f32]) -> bool {
 }
 
 fn nearest_on_scale(v: f32, scale: &[f32]) -> f32 {
-    scale
-        .iter()
-        .copied()
-        .min_by(|a, b| (v - *a).abs().total_cmp(&(v - *b).abs()))
-        .unwrap_or(v)
+    scale.iter().copied().min_by(|a, b| (v - *a).abs().total_cmp(&(v - *b).abs())).unwrap_or(v)
 }
 
 fn is_grid_multiple(v: f32, step: f32) -> bool {
@@ -771,21 +691,8 @@ fn is_default_layer_name(name: &str) -> bool {
     if trimmed.is_empty() {
         return true;
     }
-    const PREFIXES: [&str; 13] = [
-        "Frame",
-        "Group",
-        "Rectangle",
-        "Ellipse",
-        "Line",
-        "Polygon",
-        "Star",
-        "Vector",
-        "Text",
-        "Section",
-        "Component",
-        "Instance",
-        "Layer",
-    ];
+    const PREFIXES: [&str; 13] =
+        ["Frame", "Group", "Rectangle", "Ellipse", "Line", "Polygon", "Star", "Vector", "Text", "Section", "Component", "Instance", "Layer"];
     for p in PREFIXES {
         if trimmed.eq_ignore_ascii_case(p) {
             return true;
@@ -859,13 +766,8 @@ pub fn lint_document(doc: &Document, page: Option<NodeId>, preset: &str) -> Valu
         None => doc.pages.clone(),
     };
     let mut issues = Vec::new();
-    let mut by_category: BTreeMap<String, usize> = BTreeMap::from([
-        ("layout".into(), 0),
-        ("tokens".into(), 0),
-        ("Naming".into(), 0),
-        ("accessibility".into(), 0),
-        ("structure".into(), 0),
-    ]);
+    let mut by_category: BTreeMap<String, usize> =
+        BTreeMap::from([("layout".into(), 0), ("tokens".into(), 0), ("Naming".into(), 0), ("accessibility".into(), 0), ("structure".into(), 0)]);
     let mut by_rule: BTreeMap<String, usize> = BTreeMap::new();
 
     let mut push_issue = |rule: &str, category: &str, severity: &str, n: &Node, msg: String, fixable: bool| {
@@ -894,26 +796,12 @@ pub fn lint_document(doc: &Document, page: Option<NodeId>, preset: &str) -> Valu
 
             // 10. default-layer-name (Naming)
             if is_default_layer_name(&n.name) {
-                push_issue(
-                    "default-layer-name",
-                    "Naming",
-                    "warning",
-                    n,
-                    format!("Layer '{}' uses a generic default name", n.name),
-                    true,
-                );
+                push_issue("default-layer-name", "Naming", "warning", n, format!("Layer '{}' uses a generic default name", n.name), true);
             }
 
             // 14. deeply-nested (structure)
             if depth > 6 {
-                push_issue(
-                    "deeply-nested",
-                    "structure",
-                    "warning",
-                    n,
-                    format!("Node is nested at depth {depth} (> 6)"),
-                    false,
-                );
+                push_issue("deeply-nested", "structure", "warning", n, format!("Node is nested at depth {depth} (> 6)"), false);
             }
 
             // 15. empty-container (structure)
@@ -923,28 +811,14 @@ pub fn lint_document(doc: &Document, page: Option<NodeId>, preset: &str) -> Valu
                 && n.stroke.paints.iter().all(|p| !p.visible)
                 && n.effects.iter().all(|e| !e.visible())
             {
-                push_issue(
-                    "empty-container",
-                    "structure",
-                    "info",
-                    n,
-                    "Empty container has no children, fills, strokes, or effects".into(),
-                    true,
-                );
+                push_issue("empty-container", "structure", "info", n, "Empty container has no children, fills, strokes, or effects".into(), true);
             }
 
             // 6. non-4px-grid (layout)
             if !matches!(n.kind, NodeKind::Text(_) | NodeKind::Vector { .. } | NodeKind::Line)
                 && (!is_grid_multiple(n.size.x, 4.0) || !is_grid_multiple(n.size.y, 4.0))
             {
-                push_issue(
-                    "non-4px-grid",
-                    "layout",
-                    "info",
-                    n,
-                    format!("Size {}x{} is not aligned to the 4px grid", n.size.x, n.size.y),
-                    true,
-                );
+                push_issue("non-4px-grid", "layout", "info", n, format!("Size {}x{} is not aligned to the 4px grid", n.size.x, n.size.y), true);
             }
 
             // Frame / Auto-layout rules
@@ -952,28 +826,16 @@ pub fn lint_document(doc: &Document, page: Option<NodeId>, preset: &str) -> Valu
                 if let Some(al) = &fp.auto_layout {
                     // 1. inconsistent-spacing (layout)
                     if !on_scale(al.item_spacing, &SPACING_SCALE) {
-                        push_issue(
-                            "inconsistent-spacing",
-                            "layout",
-                            "warning",
-                            n,
-                            format!("item_spacing {} is off the spacing scale", al.item_spacing),
-                            true,
-                        );
+                        push_issue("inconsistent-spacing", "layout", "warning", n, format!("item_spacing {} is off the spacing scale", al.item_spacing), true);
                     }
                     // 5. unbalanced-padding (layout)
-                    if (al.padding[0] - al.padding[2]).abs() > 0.1
-                        || (al.padding[1] - al.padding[3]).abs() > 0.1
-                    {
+                    if (al.padding[0] - al.padding[2]).abs() > 0.1 || (al.padding[1] - al.padding[3]).abs() > 0.1 {
                         push_issue(
                             "unbalanced-padding",
                             "layout",
                             "info",
                             n,
-                            format!(
-                                "Unbalanced padding [{}, {}, {}, {}]",
-                                al.padding[0], al.padding[1], al.padding[2], al.padding[3]
-                            ),
+                            format!("Unbalanced padding [{}, {}, {}, {}]", al.padding[0], al.padding[1], al.padding[2], al.padding[3]),
                             true,
                         );
                     }
@@ -989,8 +851,7 @@ pub fn lint_document(doc: &Document, page: Option<NodeId>, preset: &str) -> Valu
                     );
 
                     // Check sibling alignment & overlaps
-                    let child_nodes: Vec<&Node> =
-                        n.children.iter().filter_map(|&cid| doc.get(cid)).filter(|c| c.visible).collect();
+                    let child_nodes: Vec<&Node> = n.children.iter().filter_map(|&cid| doc.get(cid)).filter(|c| c.visible).collect();
                     let mut misaligned = false;
                     let mut overlapping = false;
                     for i in 0..child_nodes.len() {
@@ -1011,25 +872,11 @@ pub fn lint_document(doc: &Document, page: Option<NodeId>, preset: &str) -> Valu
                     }
                     // 2. misaligned-siblings (layout)
                     if misaligned {
-                        push_issue(
-                            "misaligned-siblings",
-                            "layout",
-                            "warning",
-                            n,
-                            "Child layers are off-alignment by 1–3px".into(),
-                            true,
-                        );
+                        push_issue("misaligned-siblings", "layout", "warning", n, "Child layers are off-alignment by 1–3px".into(), true);
                     }
                     // 16. overlapping-siblings (structure)
                     if overlapping {
-                        push_issue(
-                            "overlapping-siblings",
-                            "structure",
-                            "warning",
-                            n,
-                            "Sibling layers overlap without auto-layout".into(),
-                            false,
-                        );
+                        push_issue("overlapping-siblings", "structure", "warning", n, "Sibling layers overlap without auto-layout".into(), false);
                     }
                 }
 
@@ -1042,14 +889,7 @@ pub fn lint_document(doc: &Document, page: Option<NodeId>, preset: &str) -> Valu
                                 || cn.transform.tx + cn.size.x > n.size.x + 0.5
                                 || cn.transform.ty + cn.size.y > n.size.y + 0.5)
                         {
-                            push_issue(
-                                "overflowing-children",
-                                "layout",
-                                "warning",
-                                cn,
-                                format!("Child '{}' overflows parent '{}'", cn.name, n.name),
-                                false,
-                            );
+                            push_issue("overflowing-children", "layout", "warning", cn, format!("Child '{}' overflows parent '{}'", cn.name, n.name), false);
                         }
                     }
                 }
@@ -1057,17 +897,9 @@ pub fn lint_document(doc: &Document, page: Option<NodeId>, preset: &str) -> Valu
 
             // 7. hardcoded-color (tokens)
             let has_solid_fill = n.fills.iter().any(|p| p.visible && matches!(p.kind, PaintKind::Solid(_)));
-            let has_bound_fill = n.variables.bindings.keys().any(|k| k.starts_with("fills") || k == "fill")
-                || n.style_refs.contains_key("fill");
+            let has_bound_fill = n.variables.bindings.keys().any(|k| k.starts_with("fills") || k == "fill") || n.style_refs.contains_key("fill");
             if has_solid_fill && !has_bound_fill {
-                push_issue(
-                    "hardcoded-color",
-                    "tokens",
-                    "info",
-                    n,
-                    "Solid fill color is hardcoded without a variable or style token".into(),
-                    false,
-                );
+                push_issue("hardcoded-color", "tokens", "info", n, "Solid fill color is hardcoded without a variable or style token".into(), false);
             }
 
             // 9. inconsistent-radius (tokens)
@@ -1103,14 +935,7 @@ pub fn lint_document(doc: &Document, page: Option<NodeId>, preset: &str) -> Valu
             if let Some(t) = n.kind.any_text() {
                 // 8. non-scale-font-size (tokens)
                 if !on_scale(t.style.font_size, &FONT_SCALE) {
-                    push_issue(
-                        "non-scale-font-size",
-                        "tokens",
-                        "info",
-                        n,
-                        format!("Font size {}px is not on the typographic scale", t.style.font_size),
-                        true,
-                    );
+                    push_issue("non-scale-font-size", "tokens", "info", n, format!("Font size {}px is not on the typographic scale", t.style.font_size), true);
                 }
 
                 // 13. tiny-text (accessibility)
@@ -1127,14 +952,7 @@ pub fn lint_document(doc: &Document, page: Option<NodeId>, preset: &str) -> Valu
 
                 // 17. detached-text-style (tokens)
                 if !n.style_refs.contains_key("text") {
-                    push_issue(
-                        "detached-text-style",
-                        "tokens",
-                        "info",
-                        n,
-                        "Text layer is not linked to a shared text style".into(),
-                    false,
-                    );
+                    push_issue("detached-text-style", "tokens", "info", n, "Text layer is not linked to a shared text style".into(), false);
                 }
 
                 // 11. low-contrast-text (accessibility)
@@ -1144,8 +962,7 @@ pub fn lint_document(doc: &Document, page: Option<NodeId>, preset: &str) -> Valu
                 }) {
                     let bg = effective_background_color(doc, n.id);
                     let ratio = contrast_ratio(fg, bg);
-                    let large = t.style.font_size >= 24.0
-                        || (t.style.font_size >= 18.0 && t.style.font_weight >= 700);
+                    let large = t.style.font_size >= 24.0 || (t.style.font_size >= 18.0 && t.style.font_weight >= 700);
                     let min_ratio = if large { 3.0 } else { 4.5 };
                     if ratio < min_ratio {
                         push_issue(
@@ -1153,13 +970,7 @@ pub fn lint_document(doc: &Document, page: Option<NodeId>, preset: &str) -> Valu
                             "accessibility",
                             "error",
                             n,
-                            format!(
-                                "Text contrast ratio {:.2}:1 is below WCAG AA {:.1}:1 (#{} on #{})",
-                                ratio,
-                                min_ratio,
-                                fg.to_hex(),
-                                bg.to_hex()
-                            ),
+                            format!("Text contrast ratio {:.2}:1 is below WCAG AA {:.1}:1 (#{} on #{})", ratio, min_ratio, fg.to_hex(), bg.to_hex()),
                             false,
                         );
                     }
@@ -1178,11 +989,7 @@ pub fn lint_document(doc: &Document, page: Option<NodeId>, preset: &str) -> Valu
 }
 
 /// Applies deterministic auto-fixes for enabled lint rules and returns `{ "fixed_count", "changes" }`.
-pub fn lint_fix_document(
-    doc: &mut Document,
-    page: Option<NodeId>,
-    rules: Option<&[String]>,
-) -> Value {
+pub fn lint_fix_document(doc: &mut Document, page: Option<NodeId>, rules: Option<&[String]>) -> Value {
     let allow = |rule: &str| -> bool {
         match rules {
             None => true,
@@ -1228,11 +1035,8 @@ pub fn lint_fix_document(
 
         // Fix misaligned siblings inside non-auto-layout containers
         if allow("misaligned-siblings") {
-            let children = doc
-                .get(id)
-                .filter(|n| n.kind.frame_props().is_some_and(|f| f.auto_layout.is_none()))
-                .map(|n| n.children.clone())
-                .unwrap_or_default();
+            let children =
+                doc.get(id).filter(|n| n.kind.frame_props().is_some_and(|f| f.auto_layout.is_none())).map(|n| n.children.clone()).unwrap_or_default();
             for i in 0..children.len() {
                 for j in (i + 1)..children.len() {
                     let (Some(a), Some(b)) = (doc.get(children[i]).cloned(), doc.get(children[j]).cloned()) else {
@@ -1340,9 +1144,7 @@ pub fn lint_fix_document(
             }
         }
 
-        if allow("non-4px-grid")
-            && !matches!(n.kind, NodeKind::Text(_) | NodeKind::Vector { .. } | NodeKind::Line)
-        {
+        if allow("non-4px-grid") && !matches!(n.kind, NodeKind::Text(_) | NodeKind::Vector { .. } | NodeKind::Line) {
             let sx = (n.size.x / 4.0).round().max(1.0) * 4.0;
             let sy = (n.size.y / 4.0).round().max(1.0) * 4.0;
             if (sx - n.size.x).abs() >= 0.05 || (sy - n.size.y).abs() >= 0.05 {
@@ -1379,10 +1181,7 @@ pub fn lint_fix_document(
                         "action": format!("snapped item_spacing to {snapped}px"),
                     }));
                 }
-                if allow("unbalanced-padding")
-                    && ((al.padding[0] - al.padding[2]).abs() > 0.1
-                        || (al.padding[1] - al.padding[3]).abs() > 0.1)
-                {
+                if allow("unbalanced-padding") && ((al.padding[0] - al.padding[2]).abs() > 0.1 || (al.padding[1] - al.padding[3]).abs() > 0.1) {
                     let v = nearest_on_scale((al.padding[0] + al.padding[2]) * 0.5, &SPACING_SCALE);
                     let h = nearest_on_scale((al.padding[1] + al.padding[3]) * 0.5, &SPACING_SCALE);
                     al.padding = [v, h, v, h];
@@ -1572,10 +1371,7 @@ pub fn analyze_typography(doc: &Document, page: Option<NodeId>) -> Value {
                 LineHeight::Pixels(px) => format!("{px}px"),
                 LineHeight::Percent(pct) => format!("{pct}%"),
             };
-            let key = format!(
-                "{}|{}|{}|{}",
-                t.style.font_family, t.style.font_size, t.style.font_weight, lh
-            );
+            let key = format!("{}|{}|{}|{}", t.style.font_family, t.style.font_size, t.style.font_weight, lh);
             let e = map.entry(key).or_insert_with(|| TypoEntry {
                 font_family: t.style.font_family.clone(),
                 font_size: t.style.font_size,
@@ -1593,11 +1389,7 @@ pub fn analyze_typography(doc: &Document, page: Option<NodeId>) -> Value {
     }
 
     let mut styles: Vec<TypoEntry> = map.into_values().collect();
-    styles.sort_by(|a, b| {
-        b.count
-            .cmp(&a.count)
-            .then_with(|| b.font_size.total_cmp(&a.font_size))
-    });
+    styles.sort_by(|a, b| b.count.cmp(&a.count).then_with(|| b.font_size.total_cmp(&a.font_size)));
 
     let styles_json: Vec<Value> = styles
         .into_iter()
@@ -1708,20 +1500,8 @@ pub fn analyze_clusters(doc: &Document, page: Option<NodeId>) -> Value {
             let lm = layout_mode_str(n).to_string();
             let approx_w = ((n.size.x / 16.0).round() as i32) * 16;
             let approx_h = ((n.size.y / 16.0).round() as i32) * 16;
-            let child_kinds: Vec<&str> = n
-                .children
-                .iter()
-                .filter_map(|&cid| doc.get(cid).map(|cn| xpath_type_name(&cn.kind)))
-                .collect();
-            let sig = format!(
-                "{}|{}|{}|{}x{}|{}",
-                kind,
-                n.children.len(),
-                lm,
-                approx_w,
-                approx_h,
-                child_kinds.join(",")
-            );
+            let child_kinds: Vec<&str> = n.children.iter().filter_map(|&cid| doc.get(cid).map(|cn| xpath_type_name(&cn.kind))).collect();
+            let sig = format!("{}|{}|{}|{}x{}|{}", kind, n.children.len(), lm, approx_w, approx_h, child_kinds.join(","));
             let g = groups.entry(sig.clone()).or_insert_with(|| ClusterGroup {
                 signature: sig,
                 kind,
@@ -1755,12 +1535,7 @@ pub fn analyze_clusters(doc: &Document, page: Option<NodeId>) -> Value {
             })
         })
         .collect();
-    clusters.sort_by(|a, b| {
-        b["instance_count"]
-            .as_u64()
-            .unwrap_or(0)
-            .cmp(&a["instance_count"].as_u64().unwrap_or(0))
-    });
+    clusters.sort_by(|a, b| b["instance_count"].as_u64().unwrap_or(0).cmp(&a["instance_count"].as_u64().unwrap_or(0)));
 
     json!({
         "cluster_count": clusters.len(),
@@ -1796,11 +1571,10 @@ mod tests {
         let f2 = doc.alloc_id();
         let mut frame2 = Node::frame(f2, Rect::new(300.0, 0.0, 480.0, 200.0));
         frame2.name = "Hero".into();
-        let mut inner_id = NodeId(0);
         doc.insert(page, frame2).unwrap();
 
         let f_inner = doc.alloc_id();
-        inner_id = f_inner;
+        let inner_id = f_inner;
         let mut inner = Node::frame(f_inner, Rect::new(16.0, 16.0, 200.0, 80.0));
         inner.name = "Header Wrap".into();
         doc.insert(f1, inner).unwrap();
@@ -1839,12 +1613,8 @@ mod tests {
         let mut frame = Node::frame(fid, Rect::new(0.0, 0.0, 123.0, 77.0));
         frame.name = "Frame 1".into();
         if let NodeKind::Frame(fp) = &mut frame.kind {
-            fp.auto_layout = Some(AutoLayout {
-                direction: LayoutDirection::Horizontal,
-                item_spacing: 11.0,
-                padding: [10.0, 16.0, 14.0, 8.0],
-                ..Default::default()
-            });
+            fp.auto_layout =
+                Some(AutoLayout { direction: LayoutDirection::Horizontal, item_spacing: 11.0, padding: [10.0, 16.0, 14.0, 8.0], ..Default::default() });
         }
         doc.insert(page, frame).unwrap();
 

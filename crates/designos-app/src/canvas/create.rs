@@ -53,21 +53,8 @@ pub fn container_at(doc: &Document, page: NodeId, p: Vec2, exclude: &[NodeId]) -
 
 /// Deepest frame-like container containing `p` (page space), skipping `exclude`,
 /// accelerated with `SceneIndex` bounds pruning when available.
-pub fn container_at_with_index(
-    doc: &Document,
-    index: Option<&designos_render::SceneIndex>,
-    page: NodeId,
-    p: Vec2,
-    exclude: &[NodeId],
-) -> NodeId {
-    fn rec(
-        doc: &Document,
-        index: Option<&designos_render::SceneIndex>,
-        parent: NodeId,
-        parent_world: Affine,
-        p: Vec2,
-        exclude: &[NodeId],
-    ) -> Option<NodeId> {
+pub fn container_at_with_index(doc: &Document, index: Option<&designos_render::SceneIndex>, page: NodeId, p: Vec2, exclude: &[NodeId]) -> NodeId {
+    fn rec(doc: &Document, index: Option<&designos_render::SceneIndex>, parent: NodeId, parent_world: Affine, p: Vec2, exclude: &[NodeId]) -> Option<NodeId> {
         let pn = doc.get(parent)?;
         for &c in pn.children.iter().rev() {
             if exclude.contains(&c) {
@@ -84,10 +71,7 @@ pub fn container_at_with_index(
                     }
                 }
             }
-            let frame_like = matches!(
-                n.kind,
-                NodeKind::Frame(_) | NodeKind::Section | NodeKind::Component(_) | NodeKind::ComponentSet(_)
-            );
+            let frame_like = matches!(n.kind, NodeKind::Frame(_) | NodeKind::Section | NodeKind::Component(_) | NodeKind::ComponentSet(_));
             if !frame_like && n.children.is_empty() {
                 continue;
             }
@@ -437,22 +421,14 @@ mod tests {
         let found = container_at_with_index(&app.doc, Some(&idx), page, v2(25.0 * 300.0 + 50.0, 50.0), &[]);
         let container_elapsed = t0.elapsed();
         assert_eq!(found, target_frame);
-        assert!(
-            container_elapsed.as_micros() < 1_000,
-            "container_at_with_index took {:?} (>= 1ms)",
-            container_elapsed
-        );
+        assert!(container_elapsed.as_micros() < 1_000, "container_at_with_index took {:?} (>= 1ms)", container_elapsed);
 
         app.selection = vec![target_frame];
         let t1 = std::time::Instant::now();
         let name = app.unique_name("Rectangle");
         let name_elapsed = t1.elapsed();
         assert_eq!(name, "Rectangle 51");
-        assert!(
-            name_elapsed.as_micros() < 1_000,
-            "unique_name took {:?} (>= 1ms)",
-            name_elapsed
-        );
+        assert!(name_elapsed.as_micros() < 1_000, "unique_name took {:?} (>= 1ms)", name_elapsed);
     }
 
     #[test]

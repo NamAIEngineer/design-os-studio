@@ -98,15 +98,8 @@ fn hit_in(
     let iter_slice: &[NodeId] = if let Some(idx) = index.filter(|i| {
         pn.children.len() > 64
             && matches!(pn.kind, NodeKind::Page { .. })
-            && pn
-                .children
-                .iter()
-                .find(|&&c| doc.get(c).is_some_and(|n| n.visible))
-                .is_some_and(|&c| i.bounds_of(c).is_some())
-            && !pn
-                .children
-                .iter()
-                .any(|&c| matches!(doc.get(c).map(|n| &n.kind), Some(NodeKind::Connector(_))))
+            && pn.children.iter().find(|&&c| doc.get(c).is_some_and(|n| n.visible)).is_some_and(|&c| i.bounds_of(c).is_some())
+            && !pn.children.iter().any(|&c| matches!(doc.get(c).map(|n| &n.kind), Some(NodeKind::Connector(_))))
     }) {
         let m = tol + 4.0;
         idx.query_top_level((p.x - m, p.y - m, p.x + m, p.y + m), &mut top_cands);
@@ -138,12 +131,8 @@ fn hit_in(
         if n.kind.is_container() {
             let descend = deep || selects_through(&n.kind) || entered.contains(&cid);
             let clips = n.kind.frame_props().map(|f| f.clips_content).unwrap_or(false);
-            let near_unindexed = index.is_some()
-                || inside
-                || n.size.x <= 0.0
-                || n.size.y <= 0.0
-                || matches!(n.kind, NodeKind::Group | NodeKind::BooleanOp(_))
-                || {
+            let near_unindexed =
+                index.is_some() || inside || n.size.x <= 0.0 || n.size.y <= 0.0 || matches!(n.kind, NodeKind::Group | NodeKind::BooleanOp(_)) || {
                     let pad = if doc.nodes.len() > 5_000 { 512.0 } else { n.size.x.max(n.size.y) + 2000.0 };
                     local.x >= -pad && local.y >= -pad && local.x <= n.size.x + pad && local.y <= n.size.y + pad
                 };
@@ -164,26 +153,13 @@ fn hit_in(
 
 /// Collects all visible, unlocked nodes on `page` under `p` (page space),
 /// ordered from top-most leaf down to container/frame (capped at 32 items).
-pub fn hit_all_under(
-    doc: &Document,
-    page: NodeId,
-    p: Vec2,
-    index: Option<&designos_render::SceneIndex>,
-) -> Vec<NodeId> {
+pub fn hit_all_under(doc: &Document, page: NodeId, p: Vec2, index: Option<&designos_render::SceneIndex>) -> Vec<NodeId> {
     let mut out = Vec::new();
     hit_all_in(doc, page, Affine::IDENTITY, p, 2.0, index, &mut out);
     out
 }
 
-fn hit_all_in(
-    doc: &Document,
-    parent: NodeId,
-    parent_world: Affine,
-    p: Vec2,
-    tol: f32,
-    index: Option<&designos_render::SceneIndex>,
-    out: &mut Vec<NodeId>,
-) {
+fn hit_all_in(doc: &Document, parent: NodeId, parent_world: Affine, p: Vec2, tol: f32, index: Option<&designos_render::SceneIndex>, out: &mut Vec<NodeId>) {
     if out.len() >= 32 {
         return;
     }
@@ -255,11 +231,7 @@ pub fn marquee_select_with_index(doc: &Document, root: NodeId, r: &Rect, index: 
             if !n.visible || n.locked {
                 continue;
             }
-            let bb = if let Some((x0, y0, x1, y1)) = idx.bounds_of(cid) {
-                Rect::new(x0, y0, x1 - x0, y1 - y0)
-            } else {
-                super::fast_world_aabb(doc, None, cid)
-            };
+            let bb = if let Some((x0, y0, x1, y1)) = idx.bounds_of(cid) { Rect::new(x0, y0, x1 - x0, y1 - y0) } else { super::fast_world_aabb(doc, None, cid) };
             if !r.intersects(&bb) {
                 continue;
             }
@@ -276,15 +248,7 @@ pub fn marquee_select_with_index(doc: &Document, root: NodeId, r: &Rect, index: 
     out
 }
 
-fn marquee_in(
-    doc: &Document,
-    parent: NodeId,
-    r: &Rect,
-    index: Option<&designos_render::SceneIndex>,
-    depth: usize,
-    large_doc: bool,
-    out: &mut Vec<NodeId>,
-) {
+fn marquee_in(doc: &Document, parent: NodeId, r: &Rect, index: Option<&designos_render::SceneIndex>, depth: usize, large_doc: bool, out: &mut Vec<NodeId>) {
     let Some(pn) = doc.get(parent) else { return };
     for &cid in &pn.children {
         if out.len() >= MAX_MARQUEE_NODES {
@@ -294,11 +258,7 @@ fn marquee_in(
         if !n.visible || n.locked {
             continue;
         }
-        let bb = if let Some(ibb) = indexed_bounds(index, cid) {
-            ibb
-        } else {
-            super::fast_world_aabb(doc, None, cid)
-        };
+        let bb = if let Some(ibb) = indexed_bounds(index, cid) { ibb } else { super::fast_world_aabb(doc, None, cid) };
         if !r.intersects(&bb) {
             continue;
         }

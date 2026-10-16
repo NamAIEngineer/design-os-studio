@@ -428,13 +428,7 @@ pub fn code_section(app: &mut App, ui: &mut Ui, c: &mut Cur, id: NodeId) {
         app.dev.lang = Language::ALL[i];
     }
     let lang = app.dev.lang;
-    let key: DevCodeCacheKey = (
-        app.doc.runtime_id(),
-        id,
-        app.doc.mutation_epoch(),
-        lang,
-        app.dev.react_tailwind,
-    );
+    let key: DevCodeCacheKey = (app.doc.runtime_id(), id, app.doc.mutation_epoch(), lang, app.dev.react_tailwind);
     let code = DEV_CODE_CACHE.with(|cache| {
         if let Some((k, v)) = cache.borrow().as_ref() {
             if *k == key {
@@ -642,9 +636,7 @@ pub fn assets_section(app: &mut App, ui: &mut Ui, c: &mut Cur, id: NodeId) {
             }
         }
         let base = app.doc.get(id).map(|n| designos_export::sanitize_file_name(&n.name)).unwrap_or_default();
-        let icons = if app.doc.nodes.len() > 10_000
-            && app.doc.get(id).is_some_and(|n| n.children.len() > 64 || matches!(n.kind, NodeKind::Section))
-        {
+        let icons = if app.doc.nodes.len() > 10_000 && app.doc.get(id).is_some_and(|n| n.children.len() > 64 || matches!(n.kind, NodeKind::Section)) {
             Vec::new()
         } else {
             designos_export::vector_assets(&app.doc, id)

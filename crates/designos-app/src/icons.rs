@@ -588,14 +588,12 @@ fn paint_logo(p: &Painter, center: Pos2, size: f32) {
         Some(t) => t,
         None => {
             const PNG: &[u8] = include_bytes!("../../../assets/icon/png/icon_256.png");
-            let loaded = image::load_from_memory_with_format(PNG, image::ImageFormat::Png)
-                .ok()
-                .map(|img| {
-                    let rgba = img.into_rgba8();
-                    let (w, h) = rgba.dimensions();
-                    let cimg = egui::ColorImage::from_rgba_unmultiplied([w as usize, h as usize], rgba.as_raw());
-                    ctx.load_texture("designos-logo", cimg, TextureOptions::LINEAR)
-                });
+            let loaded = image::load_from_memory_with_format(PNG, image::ImageFormat::Png).ok().map(|img| {
+                let rgba = img.into_rgba8();
+                let (w, h) = rgba.dimensions();
+                let cimg = egui::ColorImage::from_rgba_unmultiplied([w as usize, h as usize], rgba.as_raw());
+                ctx.load_texture("designos-logo", cimg, TextureOptions::LINEAR)
+            });
             ctx.data_mut(|d| d.insert_temp(id, loaded.clone()));
             loaded
         }
@@ -637,10 +635,7 @@ mod tests {
     #[test]
     fn no_vendored_svg_is_unused() {
         for (name, _) in PHOSPHOR {
-            assert!(
-                Icon::ALL.iter().any(|i| i.phosphor_name() == Some(*name)),
-                "{name} is vendored in assets/icons/phosphor but unused"
-            );
+            assert!(Icon::ALL.iter().any(|i| i.phosphor_name() == Some(*name)), "{name} is vendored in assets/icons/phosphor but unused");
         }
     }
 

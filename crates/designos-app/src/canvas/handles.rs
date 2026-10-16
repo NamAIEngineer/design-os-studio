@@ -121,23 +121,13 @@ pub fn auto_layout_handles(al: &AutoLayout, frame_size: Vec2, child_rects: &[Rec
             let gy = (a.y + a.h + b.y) * 0.5;
             (v2(gx, gy), v2(12.0, 3.0))
         };
-        out.push(AutoLayoutHandle {
-            kind: AutoLayoutHandleKind::Gap(i),
-            local_center,
-            pill_size,
-            value: al.item_spacing,
-        });
+        out.push(AutoLayoutHandle { kind: AutoLayoutHandleKind::Gap(i), local_center, pill_size, value: al.item_spacing });
     }
     out
 }
 
 /// Hit-tests the on-canvas Auto-Layout padding and gap pill bars in screen space.
-pub fn hit_auto_layout_handle(
-    handles: &[AutoLayoutHandle],
-    to_screen: impl Fn(Vec2) -> Vec2,
-    p: Vec2,
-    hit_pad: f32,
-) -> Option<AutoLayoutHandleKind> {
+pub fn hit_auto_layout_handle(handles: &[AutoLayoutHandle], to_screen: impl Fn(Vec2) -> Vec2, p: Vec2, hit_pad: f32) -> Option<AutoLayoutHandleKind> {
     for h in handles {
         let c = to_screen(h.local_center);
         let hx = h.pill_size.x * 0.5 + hit_pad;
@@ -181,19 +171,13 @@ pub fn shape_control_handles(kind: &NodeKind, corners: &[Vec2; 4], zoom: f32) ->
         NodeKind::Polygon { count } => {
             let n = (*count).max(3) as f32;
             let angle = -std::f32::consts::FRAC_PI_2 + std::f32::consts::TAU / n;
-            vec![
-                at_norm(0.5, 0.14),
-                at_norm(0.5 + 0.38 * angle.cos(), 0.5 + 0.38 * angle.sin()),
-            ]
+            vec![at_norm(0.5, 0.14), at_norm(0.5 + 0.38 * angle.cos(), 0.5 + 0.38 * angle.sin())]
         }
         NodeKind::Star { count, inner_ratio } => {
             let n = (*count).max(3) as f32;
             let valley_angle = -std::f32::consts::FRAC_PI_2 + std::f32::consts::PI / n;
             let r = 0.45 * inner_ratio.clamp(0.15, 0.85);
-            vec![
-                at_norm(0.5, 0.12),
-                at_norm(0.5 + r * valley_angle.cos(), 0.5 + r * valley_angle.sin()),
-            ]
+            vec![at_norm(0.5, 0.12), at_norm(0.5 + r * valley_angle.cos(), 0.5 + r * valley_angle.sin())]
         }
         _ => Vec::new(),
     }
@@ -211,13 +195,7 @@ pub enum ShapeControlKind {
 
 /// Hit-tests on-canvas shape control handles (`Ellipse` sweep/inner-radius/start-angle,
 /// `Polygon` count, `Star` count/inner-ratio) in screen space.
-pub fn hit_shape_control_handle(
-    kind: &NodeKind,
-    corners: &[Vec2; 4],
-    zoom: f32,
-    p: Vec2,
-    hit_radius: f32,
-) -> Option<ShapeControlKind> {
+pub fn hit_shape_control_handle(kind: &NodeKind, corners: &[Vec2; 4], zoom: f32, p: Vec2, hit_radius: f32) -> Option<ShapeControlKind> {
     let pts = shape_control_handles(kind, corners, zoom);
     for (idx, &pt) in pts.iter().enumerate() {
         if dist(p, pt) <= hit_radius {
@@ -308,9 +286,7 @@ pub enum SmartSelectionHandleKind {
 /// Computes Figma Smart Selection handles (`Swap` center rings and `Gap` spacing bars)
 /// when 2 or more nodes are selected.
 /// Returns `(kind, center_in_rect_space, screen_size_px)`.
-pub fn smart_selection_handles(
-    items: &[(designos_doc::NodeId, Rect)],
-) -> Vec<(SmartSelectionHandleKind, Vec2, Vec2)> {
+pub fn smart_selection_handles(items: &[(designos_doc::NodeId, Rect)]) -> Vec<(SmartSelectionHandleKind, Vec2, Vec2)> {
     if items.len() < 2 {
         return Vec::new();
     }
@@ -336,11 +312,7 @@ pub fn smart_selection_handles(
 
     let mut out = Vec::with_capacity(sorted.len() * 2 - 1);
     for &(id, ref r) in &sorted {
-        out.push((
-            SmartSelectionHandleKind::Swap(id),
-            v2(r.x + r.w * 0.5, r.y + r.h * 0.5),
-            v2(10.0, 10.0),
-        ));
+        out.push((SmartSelectionHandleKind::Swap(id), v2(r.x + r.w * 0.5, r.y + r.h * 0.5), v2(10.0, 10.0)));
     }
     for i in 0..(sorted.len() - 1) {
         let a = &sorted[i].1;
@@ -518,21 +490,14 @@ pub fn snap_angle(rad: f32, step_deg: f32) -> f32 {
 /// Computes interactive on-canvas Table / CSS Grid column and row track resize divider handles
 /// (`(start_world, end_world, is_column_divider)`) for a Grid/Table frame (`LayoutDirection::Grid` / `NodeKind::Table`).
 #[allow(dead_code)]
-pub fn table_col_resize_handle(
-    doc: &designos_doc::Document,
-    id: designos_doc::NodeId,
-) -> Vec<(egui::Pos2, egui::Pos2, bool)> {
+pub fn table_col_resize_handle(doc: &designos_doc::Document, id: designos_doc::NodeId) -> Vec<(egui::Pos2, egui::Pos2, bool)> {
     let Some(node) = doc.get(id) else {
         return Vec::new();
     };
     let (cols, rows, pad, col_gap, row_gap) = match node.kind.frame_props().and_then(|fp| fp.auto_layout.as_ref()) {
-        Some(al) if al.direction == LayoutDirection::Grid => (
-            al.grid_columns.max(1),
-            al.grid_rows.max(1),
-            al.padding,
-            al.item_spacing.max(0.0),
-            al.counter_spacing.max(0.0),
-        ),
+        Some(al) if al.direction == LayoutDirection::Grid => {
+            (al.grid_columns.max(1), al.grid_rows.max(1), al.padding, al.item_spacing.max(0.0), al.counter_spacing.max(0.0))
+        }
         _ if node.name.to_ascii_lowercase().contains("table") => (2, 2, [0.0; 4], 0.0, 0.0),
         _ => return Vec::new(),
     };
@@ -645,12 +610,7 @@ mod tests {
 
     #[test]
     fn auto_layout_padding_and_gap_handles_calculation_and_hit() {
-        let al = AutoLayout {
-            direction: LayoutDirection::Horizontal,
-            item_spacing: 16.0,
-            padding: [12.0, 20.0, 12.0, 20.0],
-            ..AutoLayout::default()
-        };
+        let al = AutoLayout { direction: LayoutDirection::Horizontal, item_spacing: 16.0, padding: [12.0, 20.0, 12.0, 20.0], ..AutoLayout::default() };
         let kids = [Rect::new(20.0, 12.0, 60.0, 40.0), Rect::new(96.0, 12.0, 60.0, 40.0)];
         let hnds = auto_layout_handles(&al, v2(176.0, 64.0), &kids, 1.0);
         assert_eq!(hnds.len(), 5, "4 padding handles + 1 gap handle");
@@ -658,14 +618,8 @@ mod tests {
         assert_eq!(hnds[0].local_center, v2(88.0, 6.0));
         assert_eq!(hnds[4].kind, AutoLayoutHandleKind::Gap(0));
         assert_eq!(hnds[4].local_center, v2(88.0, 32.0));
-        assert_eq!(
-            hit_auto_layout_handle(&hnds, |v| v, v2(88.0, 32.0), 3.0),
-            Some(AutoLayoutHandleKind::Gap(0))
-        );
-        assert_eq!(
-            hit_auto_layout_handle(&hnds, |v| v, v2(10.0, 32.0), 3.0),
-            Some(AutoLayoutHandleKind::Padding(3))
-        );
+        assert_eq!(hit_auto_layout_handle(&hnds, |v| v, v2(88.0, 32.0), 3.0), Some(AutoLayoutHandleKind::Gap(0)));
+        assert_eq!(hit_auto_layout_handle(&hnds, |v| v, v2(10.0, 32.0), 3.0), Some(AutoLayoutHandleKind::Padding(3)));
     }
 
     #[test]
@@ -675,12 +629,7 @@ mod tests {
         let tid = doc.alloc_id();
         let mut f = designos_doc::Node::frame(tid, Rect::new(0.0, 0.0, 300.0, 200.0));
         if let Some(fp) = f.kind.frame_props_mut() {
-            fp.auto_layout = Some(AutoLayout {
-                direction: LayoutDirection::Grid,
-                grid_columns: 3,
-                grid_rows: 2,
-                ..AutoLayout::default()
-            });
+            fp.auto_layout = Some(AutoLayout { direction: LayoutDirection::Grid, grid_columns: 3, grid_rows: 2, ..AutoLayout::default() });
         }
         doc.insert(page, f).unwrap();
         let dividers = table_col_resize_handle(&doc, tid);

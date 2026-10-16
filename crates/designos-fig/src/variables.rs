@@ -381,11 +381,8 @@ pub(crate) fn from_fig_entries(entries: &[&Value]) -> Option<Value> {
         }
         colls.insert(id, c);
     }
-    let mut order: Vec<(&str, &Value)> = entries
-        .iter()
-        .filter(|e| active(e) && fstr(e, "type") == Some("VARIABLE"))
-        .map(|e| (fstr(e, "sortPosition").unwrap_or(""), *e))
-        .collect();
+    let mut order: Vec<(&str, &Value)> =
+        entries.iter().filter(|e| active(e) && fstr(e, "type") == Some("VARIABLE")).map(|e| (fstr(e, "sortPosition").unwrap_or(""), *e)).collect();
     order.sort_by(|a, b| a.0.cmp(b.0));
     for (_, e) in order {
         let Some(gid) = e.get("guid").and_then(guid) else { continue };

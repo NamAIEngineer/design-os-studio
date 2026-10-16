@@ -219,12 +219,7 @@ impl App {
             plugins: Default::default(),
             proto: Default::default(),
             find: Default::default(),
-            ui: UiState {
-                pixel_grid: true,
-                left_panel_width: theme::LEFT_PANEL_WIDTH,
-                ai_panel_width: 400.0,
-                ..UiState::default()
-            },
+            ui: UiState { pixel_grid: true, left_panel_width: theme::LEFT_PANEL_WIDTH, ai_panel_width: 400.0, ..UiState::default() },
             clip: None,
             copied_style: None,
             paste_count: 0,

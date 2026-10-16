@@ -22,11 +22,7 @@ pub fn import_pen_json(raw: &str) -> Result<Document, String> {
     let root: Value = serde_json::from_str(raw).map_err(|e| format!("invalid .pen JSON: {e}"))?;
     let obj = root.as_object().ok_or_else(|| "expected top-level JSON object in .pen file".to_string())?;
 
-    let doc_name = obj
-        .get("name")
-        .and_then(Value::as_str)
-        .unwrap_or("Pencil Document")
-        .to_string();
+    let doc_name = obj.get("name").and_then(Value::as_str).unwrap_or("Pencil Document").to_string();
     let mut doc = Document::new(doc_name);
 
     // 1. Parse themes & variables
@@ -41,11 +37,7 @@ pub fn import_pen_json(raw: &str) -> Result<Document, String> {
             doc.add_page("Page 1");
         } else {
             for (idx, pval) in pages.iter().enumerate() {
-                let pname = pval
-                    .get("name")
-                    .and_then(Value::as_str)
-                    .map(String::from)
-                    .unwrap_or_else(|| format!("Page {}", idx + 1));
+                let pname = pval.get("name").and_then(Value::as_str).map(String::from).unwrap_or_else(|| format!("Page {}", idx + 1));
                 let page_id = doc.add_page(pname);
                 if let Some(bg_str) = pval.get("background").and_then(Value::as_str) {
                     if let Some(bg) = Color::from_hex(bg_str) {
@@ -56,13 +48,7 @@ pub fn import_pen_json(raw: &str) -> Result<Document, String> {
                 }
                 if let Some(children) = pval.get("children").and_then(Value::as_array) {
                     for child_val in children {
-                        import_pen_node(
-                            &mut doc,
-                            page_id,
-                            child_val,
-                            &mut id_map,
-                            &mut pending_refs,
-                        )?;
+                        import_pen_node(&mut doc, page_id, child_val, &mut id_map, &mut pending_refs)?;
                     }
                 }
             }
@@ -134,11 +120,7 @@ fn import_pen_variables(doc: &mut Document, obj: &Map<String, Value>) {
                 collection: PEN_COLLECTION_ID.into(),
                 kind,
                 values,
-                description: spec
-                    .get("description")
-                    .and_then(Value::as_str)
-                    .unwrap_or_default()
-                    .to_string(),
+                description: spec.get("description").and_then(Value::as_str).unwrap_or_default().to_string(),
                 scopes: Vec::new(),
                 hidden_from_publishing: false,
                 key: None,
@@ -148,22 +130,11 @@ fn import_pen_variables(doc: &mut Document, obj: &Map<String, Value>) {
 
     doc.variable_collections.insert(
         PEN_COLLECTION_ID.into(),
-        VariableCollection {
-            id: PEN_COLLECTION_ID.into(),
-            name: "Tokens".into(),
-            modes,
-            default_mode,
-            variables: var_ids,
-            key: None,
-        },
+        VariableCollection { id: PEN_COLLECTION_ID.into(), name: "Tokens".into(), modes, default_mode, variables: var_ids, key: None },
     );
 }
 
-fn parse_pen_variable_spec(
-    spec: &Value,
-    modes: &mut Vec<VariableMode>,
-    default_mode: &str,
-) -> (VariableKind, BTreeMap<String, VariableValue>) {
+fn parse_pen_variable_spec(spec: &Value, modes: &mut Vec<VariableMode>, default_mode: &str) -> (VariableKind, BTreeMap<String, VariableValue>) {
     let explicit_type = spec.get("type").and_then(Value::as_str).unwrap_or("");
     let raw_val = spec.get("value").unwrap_or(spec);
 
@@ -180,14 +151,7 @@ fn parse_pen_variable_spec(
         for item in arr {
             let mode_name = item
                 .get("theme")
-                .and_then(|t| {
-                    t.as_str().map(String::from).or_else(|| {
-                        t.as_object()
-                            .and_then(|m| m.values().next())
-                            .and_then(Value::as_str)
-                            .map(String::from)
-                    })
-                })
+                .and_then(|t| t.as_str().map(String::from).or_else(|| t.as_object().and_then(|m| m.values().next()).and_then(Value::as_str).map(String::from)))
                 .or_else(|| item.get("mode").and_then(Value::as_str).map(String::from))
                 .unwrap_or_else(|| default_mode.to_string());
             if !modes.iter().any(|m| m.id == mode_name) {
@@ -236,11 +200,7 @@ fn infer_var_kind(v: &Value) -> VariableKind {
                 VariableKind::String
             }
         }
-        Value::Array(arr) => arr
-            .first()
-            .and_then(|item| item.get("value"))
-            .map(infer_var_kind)
-            .unwrap_or(VariableKind::String),
+        Value::Array(arr) => arr.first().and_then(|item| item.get("value")).map(infer_var_kind).unwrap_or(VariableKind::String),
         Value::Object(map) => map.values().next().map(infer_var_kind).unwrap_or(VariableKind::String),
         Value::Null => VariableKind::String,
     }
@@ -253,14 +213,10 @@ fn parse_var_value(kind: VariableKind, v: &Value) -> Option<VariableValue> {
         }
     }
     match kind {
-        VariableKind::Color => v
-            .as_str()
-            .and_then(Color::from_hex)
-            .map(VariableValue::Color),
-        VariableKind::Number => v
-            .as_f64()
-            .map(|n| VariableValue::Number(n as f32))
-            .or_else(|| v.as_str().and_then(|s| s.parse::<f32>().ok()).map(VariableValue::Number)),
+        VariableKind::Color => v.as_str().and_then(Color::from_hex).map(VariableValue::Color),
+        VariableKind::Number => {
+            v.as_f64().map(|n| VariableValue::Number(n as f32)).or_else(|| v.as_str().and_then(|s| s.parse::<f32>().ok()).map(VariableValue::Number))
+        }
         VariableKind::Boolean => v.as_bool().map(VariableValue::Boolean),
         VariableKind::String => v.as_str().map(|s| VariableValue::String(s.to_string())),
     }
@@ -424,22 +380,14 @@ fn parse_layout_align(s: Option<&str>) -> LayoutAlign {
     }
 }
 
-fn parse_paints(
-    doc: &Document,
-    val: Option<&Value>,
-    binding_prefix: &str,
-) -> (Vec<Paint>, Vec<(String, String)>) {
+fn parse_paints(doc: &Document, val: Option<&Value>, binding_prefix: &str) -> (Vec<Paint>, Vec<(String, String)>) {
     let mut paints = Vec::new();
     let mut bindings = Vec::new();
     let Some(v) = val else {
         return (paints, bindings);
     };
 
-    let items: Vec<&Value> = if let Some(arr) = v.as_array() {
-        arr.iter().collect()
-    } else {
-        vec![v]
-    };
+    let items: Vec<&Value> = if let Some(arr) = v.as_array() { arr.iter().collect() } else { vec![v] };
 
     for (idx, item) in items.into_iter().enumerate() {
         if let Some(s) = item.as_str() {
@@ -459,10 +407,7 @@ fn parse_paints(
                 "linear" | "linear_gradient" | "linear-gradient" => {
                     let stops = parse_gradient_stops(doc, obj.get("stops"));
                     paints.push(Paint {
-                        kind: PaintKind::LinearGradient {
-                            handles: [Vec2::new(0.0, 0.5), Vec2::new(1.0, 0.5), Vec2::new(0.0, 1.0)],
-                            stops,
-                        },
+                        kind: PaintKind::LinearGradient { handles: [Vec2::new(0.0, 0.5), Vec2::new(1.0, 0.5), Vec2::new(0.0, 1.0)], stops },
                         opacity,
                         visible,
                         blend: BlendMode::Normal,
@@ -471,52 +416,25 @@ fn parse_paints(
                 "radial" | "radial_gradient" | "radial-gradient" => {
                     let stops = parse_gradient_stops(doc, obj.get("stops"));
                     paints.push(Paint {
-                        kind: PaintKind::RadialGradient {
-                            handles: [Vec2::new(0.5, 0.5), Vec2::new(1.0, 0.5), Vec2::new(0.5, 1.0)],
-                            stops,
-                        },
+                        kind: PaintKind::RadialGradient { handles: [Vec2::new(0.5, 0.5), Vec2::new(1.0, 0.5), Vec2::new(0.5, 1.0)], stops },
                         opacity,
                         visible,
                         blend: BlendMode::Normal,
                     });
                 }
                 "image" => {
-                    let image_ref = obj
-                        .get("url")
-                        .or_else(|| obj.get("imageRef"))
-                        .and_then(Value::as_str)
-                        .unwrap_or("")
-                        .to_string();
-                    paints.push(Paint {
-                        kind: PaintKind::Image { image_ref, scale_mode: ImageScaleMode::Fill },
-                        opacity,
-                        visible,
-                        blend: BlendMode::Normal,
-                    });
+                    let image_ref = obj.get("url").or_else(|| obj.get("imageRef")).and_then(Value::as_str).unwrap_or("").to_string();
+                    paints.push(Paint { kind: PaintKind::Image { image_ref, scale_mode: ImageScaleMode::Fill }, opacity, visible, blend: BlendMode::Normal });
                 }
                 _ => {
-                    if let Some(color_str) = obj
-                        .get("color")
-                        .or_else(|| obj.get("fill"))
-                        .and_then(Value::as_str)
-                    {
+                    if let Some(color_str) = obj.get("color").or_else(|| obj.get("fill")).and_then(Value::as_str) {
                         let color_str = color_str.trim();
                         if let Some(var_name) = color_str.strip_prefix('$') {
                             bindings.push((format!("{binding_prefix}/{idx}"), var_name.to_string()));
                             let c = resolve_doc_var_color(doc, var_name).unwrap_or(Color::BLACK);
-                            paints.push(Paint {
-                                kind: PaintKind::Solid(c),
-                                opacity,
-                                visible,
-                                blend: BlendMode::Normal,
-                            });
+                            paints.push(Paint { kind: PaintKind::Solid(c), opacity, visible, blend: BlendMode::Normal });
                         } else if let Some(c) = Color::from_hex(color_str) {
-                            paints.push(Paint {
-                                kind: PaintKind::Solid(c),
-                                opacity,
-                                visible,
-                                blend: BlendMode::Normal,
-                            });
+                            paints.push(Paint { kind: PaintKind::Solid(c), opacity, visible, blend: BlendMode::Normal });
                         }
                     }
                 }
@@ -529,10 +447,7 @@ fn parse_paints(
 
 fn parse_gradient_stops(doc: &Document, stops_val: Option<&Value>) -> Vec<GradientStop> {
     let Some(arr) = stops_val.and_then(Value::as_array) else {
-        return vec![
-            GradientStop { pos: 0.0, color: Color::BLACK },
-            GradientStop { pos: 1.0, color: Color::WHITE },
-        ];
+        return vec![GradientStop { pos: 0.0, color: Color::BLACK }, GradientStop { pos: 1.0, color: Color::WHITE }];
     };
     let mut out = Vec::new();
     for s in arr {
@@ -591,11 +506,7 @@ fn parse_effects(doc: &Document, val: Option<&Value>) -> Vec<Effect> {
     let Some(v) = val else {
         return Vec::new();
     };
-    let items: Vec<&Value> = if let Some(arr) = v.as_array() {
-        arr.iter().collect()
-    } else {
-        vec![v]
-    };
+    let items: Vec<&Value> = if let Some(arr) = v.as_array() { arr.iter().collect() } else { vec![v] };
     let mut out = Vec::new();
     for item in items {
         let Some(obj) = item.as_object() else { continue };
@@ -603,18 +514,8 @@ fn parse_effects(doc: &Document, val: Option<&Value>) -> Vec<Effect> {
         let ty = obj.get("type").and_then(Value::as_str).unwrap_or("shadow").to_ascii_lowercase();
         let radius = obj.get("blur").or_else(|| obj.get("radius")).and_then(Value::as_f64).unwrap_or(4.0) as f32;
         let spread = obj.get("spread").and_then(Value::as_f64).unwrap_or(0.0) as f32;
-        let ox = obj
-            .get("offset")
-            .and_then(|o| o.get("x"))
-            .or_else(|| obj.get("x"))
-            .and_then(Value::as_f64)
-            .unwrap_or(0.0) as f32;
-        let oy = obj
-            .get("offset")
-            .and_then(|o| o.get("y"))
-            .or_else(|| obj.get("y"))
-            .and_then(Value::as_f64)
-            .unwrap_or(2.0) as f32;
+        let ox = obj.get("offset").and_then(|o| o.get("x")).or_else(|| obj.get("x")).and_then(Value::as_f64).unwrap_or(0.0) as f32;
+        let oy = obj.get("offset").and_then(|o| o.get("y")).or_else(|| obj.get("y")).and_then(Value::as_f64).unwrap_or(2.0) as f32;
         let color_str = obj.get("color").and_then(Value::as_str).unwrap_or("#00000040");
         let color = if let Some(vn) = color_str.strip_prefix('$') {
             resolve_doc_var_color(doc, vn).unwrap_or(Color::rgba(0, 0, 0, 64))
@@ -623,13 +524,7 @@ fn parse_effects(doc: &Document, val: Option<&Value>) -> Vec<Effect> {
         };
         match ty.as_str() {
             "inner_shadow" | "inner-shadow" => {
-                out.push(Effect::InnerShadow {
-                    color,
-                    offset: Vec2::new(ox, oy),
-                    radius,
-                    spread,
-                    visible,
-                });
+                out.push(Effect::InnerShadow { color, offset: Vec2::new(ox, oy), radius, spread, visible });
             }
             "blur" | "layer_blur" | "layer-blur" => {
                 out.push(Effect::LayerBlur { radius, visible });
@@ -638,27 +533,11 @@ fn parse_effects(doc: &Document, val: Option<&Value>) -> Vec<Effect> {
                 out.push(Effect::BackgroundBlur { radius, visible });
             }
             _ => {
-                let inner = obj
-                    .get("shadowType")
-                    .and_then(Value::as_str)
-                    .is_some_and(|s| s.eq_ignore_ascii_case("inner"));
+                let inner = obj.get("shadowType").and_then(Value::as_str).is_some_and(|s| s.eq_ignore_ascii_case("inner"));
                 if inner {
-                    out.push(Effect::InnerShadow {
-                        color,
-                        offset: Vec2::new(ox, oy),
-                        radius,
-                        spread,
-                        visible,
-                    });
+                    out.push(Effect::InnerShadow { color, offset: Vec2::new(ox, oy), radius, spread, visible });
                 } else {
-                    out.push(Effect::DropShadow {
-                        color,
-                        offset: Vec2::new(ox, oy),
-                        radius,
-                        spread,
-                        visible,
-                        show_behind: false,
-                    });
+                    out.push(Effect::DropShadow { color, offset: Vec2::new(ox, oy), radius, spread, visible, show_behind: false });
                 }
             }
         }
@@ -696,10 +575,7 @@ fn parse_frame_props(doc: &Document, obj: &Map<String, Value>, w_dim: ParsedDim,
     let mut bindings = Vec::new();
     let clips_content = obj.get("clip").or_else(|| obj.get("clipsContent")).and_then(Value::as_bool).unwrap_or(false);
     let layout_str = obj.get("layout").and_then(Value::as_str).map(|s| s.to_ascii_lowercase());
-    let has_layout_props = obj.contains_key("gap")
-        || obj.contains_key("padding")
-        || obj.contains_key("justifyContent")
-        || obj.contains_key("alignItems");
+    let has_layout_props = obj.contains_key("gap") || obj.contains_key("padding") || obj.contains_key("justifyContent") || obj.contains_key("alignItems");
 
     let direction = match layout_str.as_deref() {
         Some("none") => None,
@@ -812,19 +688,9 @@ fn import_pen_node(
             NodeKind::Vector { paths, network: None }
         }
         "text" | "icon_font" => {
-            let content = obj
-                .get("content")
-                .or_else(|| obj.get("characters"))
-                .or_else(|| obj.get("iconFontName"))
-                .and_then(Value::as_str)
-                .unwrap_or("")
-                .to_string();
-            let font_family = obj
-                .get("fontFamily")
-                .or_else(|| obj.get("iconFontFamily"))
-                .and_then(Value::as_str)
-                .unwrap_or("Inter")
-                .to_string();
+            let content =
+                obj.get("content").or_else(|| obj.get("characters")).or_else(|| obj.get("iconFontName")).and_then(Value::as_str).unwrap_or("").to_string();
+            let font_family = obj.get("fontFamily").or_else(|| obj.get("iconFontFamily")).and_then(Value::as_str).unwrap_or("Inter").to_string();
             let (font_size, fs_var) = parse_num_or_var(doc, obj.get("fontSize"), 14.0);
             if let Some(v) = fs_var {
                 var_bindings.push(("fontSize".into(), v));
@@ -845,10 +711,7 @@ fn import_pen_node(
                 },
                 _ => 400,
             };
-            let italic = obj
-                .get("fontStyle")
-                .and_then(Value::as_str)
-                .is_some_and(|s| s.eq_ignore_ascii_case("italic"));
+            let italic = obj.get("fontStyle").and_then(Value::as_str).is_some_and(|s| s.eq_ignore_ascii_case("italic"));
             let line_height = match obj.get("lineHeight") {
                 Some(Value::Number(n)) => {
                     let v = n.as_f64().unwrap_or(1.2) as f32;
@@ -872,11 +735,7 @@ fn import_pen_node(
                 "bottom" => TextAlignV::Bottom,
                 _ => TextAlignV::Top,
             };
-            let text_fills = if fills.is_empty() {
-                vec![Paint::solid(Color::BLACK)]
-            } else {
-                fills.clone()
-            };
+            let text_fills = if fills.is_empty() { vec![Paint::solid(Color::BLACK)] } else { fills.clone() };
             let auto_resize = match obj.get("textGrowth").and_then(Value::as_str) {
                 Some("fixed-width") => TextAutoResize::Height,
                 Some("fixed-width-height") => TextAutoResize::None,
@@ -901,19 +760,10 @@ fn import_pen_node(
             })
         }
         "ref" | "instance" => {
-            let ref_target = obj
-                .get("ref")
-                .or_else(|| obj.get("componentId"))
-                .and_then(Value::as_str)
-                .unwrap_or("")
-                .to_string();
+            let ref_target = obj.get("ref").or_else(|| obj.get("componentId")).and_then(Value::as_str).unwrap_or("").to_string();
             let descendants = obj.get("descendants").and_then(Value::as_object).cloned();
             pending_refs.push((id, ref_target.clone(), descendants));
-            NodeKind::Instance {
-                frame: frame_props,
-                component: None,
-                component_key: if ref_target.is_empty() { None } else { Some(ref_target) },
-            }
+            NodeKind::Instance { frame: frame_props, component: None, component_key: if ref_target.is_empty() { None } else { Some(ref_target) } }
         }
         "note" | "sticky" => {
             let content = obj.get("content").or_else(|| obj.get("text")).and_then(Value::as_str).unwrap_or("").to_string();
@@ -938,12 +788,7 @@ fn import_pen_node(
         node.source_id = Some(src_id.to_string());
         id_map.insert(src_id.to_string(), id);
     }
-    node.name = obj
-        .get("name")
-        .and_then(Value::as_str)
-        .or_else(|| obj.get("id").and_then(Value::as_str))
-        .unwrap_or(node.kind.default_name())
-        .to_string();
+    node.name = obj.get("name").and_then(Value::as_str).or_else(|| obj.get("id").and_then(Value::as_str)).unwrap_or(node.kind.default_name()).to_string();
     node.visible = obj.get("enabled").or_else(|| obj.get("visible")).and_then(Value::as_bool).unwrap_or(true);
     let (opacity, op_var) = parse_num_or_var(doc, obj.get("opacity"), 1.0);
     node.opacity = opacity;
@@ -954,11 +799,7 @@ fn import_pen_node(
     let x = obj.get("x").and_then(Value::as_f64).unwrap_or(0.0) as f32;
     let y = obj.get("y").and_then(Value::as_f64).unwrap_or(0.0) as f32;
     let rot_deg = obj.get("rotation").and_then(Value::as_f64).unwrap_or(0.0) as f32;
-    node.transform = if rot_deg.abs() > 1e-4 {
-        Affine::translate(x, y) * Affine::rotate((-rot_deg).to_radians())
-    } else {
-        Affine::translate(x, y)
-    };
+    node.transform = if rot_deg.abs() > 1e-4 { Affine::translate(x, y) * Affine::rotate((-rot_deg).to_radians()) } else { Affine::translate(x, y) };
     node.size = Vec2::new(px_w, px_h);
 
     node.layout_child.horizontal = match w_dim {
@@ -1007,11 +848,7 @@ fn import_pen_node(
     Ok(id)
 }
 
-fn resolve_pen_refs(
-    doc: &mut Document,
-    id_map: &BTreeMap<String, NodeId>,
-    pending_refs: Vec<(NodeId, String, Option<Map<String, Value>>)>,
-) {
+fn resolve_pen_refs(doc: &mut Document, id_map: &BTreeMap<String, NodeId>, pending_refs: Vec<(NodeId, String, Option<Map<String, Value>>)>) {
     for (inst_id, ref_key, descendants) in pending_refs {
         let Some(&comp_id) = id_map.get(&ref_key) else {
             continue;
@@ -1025,10 +862,7 @@ fn resolve_pen_refs(
         // Clone component's children into instance if instance had no explicit children
         let mut source_to_clone: BTreeMap<String, NodeId> = BTreeMap::new();
         if !has_explicit_children {
-            let comp_children = doc
-                .get(comp_id)
-                .map(|c| c.children.clone())
-                .unwrap_or_default();
+            let comp_children = doc.get(comp_id).map(|c| c.children.clone()).unwrap_or_default();
             for cid in comp_children {
                 clone_component_subtree(doc, cid, inst_id, &mut source_to_clone);
             }
@@ -1037,10 +871,7 @@ fn resolve_pen_refs(
         if let Some(desc_map) = descendants {
             for (desc_path, ov_val) in desc_map {
                 let target_key = desc_path.rsplit('/').next().unwrap_or(&desc_path);
-                let target_id = source_to_clone
-                    .get(&desc_path)
-                    .or_else(|| source_to_clone.get(target_key))
-                    .copied();
+                let target_id = source_to_clone.get(&desc_path).or_else(|| source_to_clone.get(target_key)).copied();
                 let Some(tid) = target_id else { continue };
                 let Some(ov_obj) = ov_val.as_object() else { continue };
                 apply_descendant_override(doc, tid, ov_obj);
@@ -1049,12 +880,7 @@ fn resolve_pen_refs(
     }
 }
 
-fn clone_component_subtree(
-    doc: &mut Document,
-    src_id: NodeId,
-    new_parent: NodeId,
-    source_to_clone: &mut BTreeMap<String, NodeId>,
-) {
+fn clone_component_subtree(doc: &mut Document, src_id: NodeId, new_parent: NodeId, source_to_clone: &mut BTreeMap<String, NodeId>) {
     let Some(orig) = doc.get(src_id).cloned() else { return };
     let new_id = doc.alloc_id();
     let mut copy = orig.clone();
@@ -1139,11 +965,7 @@ pub fn export_pen_json(doc: &Document) -> Result<String, String> {
                 VariableKind::Boolean => "boolean",
             };
             let val_json = if var.values.len() <= 1 {
-                var.values
-                    .values()
-                    .next()
-                    .map(export_var_value)
-                    .unwrap_or(Value::Null)
+                var.values.values().next().map(export_var_value).unwrap_or(Value::Null)
             } else {
                 let arr: Vec<Value> = var
                     .values
@@ -1172,15 +994,7 @@ pub fn export_pen_json(doc: &Document) -> Result<String, String> {
         if let Some(NodeKind::Page { background }) = doc.get(first_page).map(|n| &n.kind) {
             root.insert("background".into(), json!(format!("#{}", background.to_hex())));
         }
-        let children: Vec<Value> = doc
-            .get(first_page)
-            .map(|p| {
-                p.children
-                    .iter()
-                    .filter_map(|&cid| export_pen_node(doc, cid))
-                    .collect()
-            })
-            .unwrap_or_default();
+        let children: Vec<Value> = doc.get(first_page).map(|p| p.children.iter().filter_map(|&cid| export_pen_node(doc, cid)).collect()).unwrap_or_default();
         root.insert("children".into(), Value::Array(children));
     } else {
         root.insert("children".into(), Value::Array(Vec::new()));
@@ -1196,11 +1010,7 @@ pub fn export_pen_json(doc: &Document) -> Result<String, String> {
                     NodeKind::Page { background } => format!("#{}", background.to_hex()),
                     _ => "#5A5A5A".to_string(),
                 };
-                let children: Vec<Value> = p
-                    .children
-                    .iter()
-                    .filter_map(|&cid| export_pen_node(doc, cid))
-                    .collect();
+                let children: Vec<Value> = p.children.iter().filter_map(|&cid| export_pen_node(doc, cid)).collect();
                 Some(json!({
                     "id": node_pen_id(p),
                     "name": p.name,
@@ -1277,14 +1087,8 @@ fn export_pen_node(doc: &Document, id: NodeId) -> Option<Value> {
             Sizing::Fixed => json!(px),
         }
     };
-    obj.insert(
-        "width".into(),
-        export_dim(n.layout_child.horizontal, n.size.x, n.variables.bindings.get("width")),
-    );
-    obj.insert(
-        "height".into(),
-        export_dim(n.layout_child.vertical, n.size.y, n.variables.bindings.get("height")),
-    );
+    obj.insert("width".into(), export_dim(n.layout_child.horizontal, n.size.x, n.variables.bindings.get("width")));
+    obj.insert("height".into(), export_dim(n.layout_child.vertical, n.size.y, n.variables.bindings.get("height")));
 
     if let Some(fp) = n.kind.frame_props() {
         if fp.clips_content {
@@ -1303,10 +1107,7 @@ fn export_pen_node(doc: &Document, id: NodeId) -> Option<Value> {
                 obj.insert("gap".into(), json!(al.item_spacing));
             }
             if al.padding != [0.0; 4] {
-                if al.padding[0] == al.padding[1]
-                    && al.padding[1] == al.padding[2]
-                    && al.padding[2] == al.padding[3]
-                {
+                if al.padding[0] == al.padding[1] && al.padding[1] == al.padding[2] && al.padding[2] == al.padding[3] {
                     obj.insert("padding".into(), json!(al.padding[0]));
                 } else {
                     obj.insert("padding".into(), json!(al.padding));
@@ -1331,11 +1132,7 @@ fn export_pen_node(doc: &Document, id: NodeId) -> Option<Value> {
     }
 
     // Fills
-    let active_fills = if let NodeKind::Text(t) = &n.kind {
-        &t.style.fills
-    } else {
-        &n.fills
-    };
+    let active_fills = if let NodeKind::Text(t) = &n.kind { &t.style.fills } else { &n.fills };
     if let Some(fill_var) = n.variables.bindings.get("fills/0") {
         obj.insert("fill".into(), json!(format!("${fill_var}")));
     } else if active_fills.len() == 1 {
@@ -1360,11 +1157,7 @@ fn export_pen_node(doc: &Document, id: NodeId) -> Option<Value> {
     // Stroke
     if !n.stroke.paints.is_empty() {
         if let Some(PaintKind::Solid(c)) = n.stroke.paints.first().map(|p| &p.kind) {
-            let color_val = if let Some(sv) = n.variables.bindings.get("strokes/0") {
-                format!("${sv}")
-            } else {
-                format!("#{}", c.to_hex())
-            };
+            let color_val = if let Some(sv) = n.variables.bindings.get("strokes/0") { format!("${sv}") } else { format!("#{}", c.to_hex()) };
             obj.insert(
                 "stroke".into(),
                 json!({
@@ -1414,11 +1207,7 @@ fn export_pen_node(doc: &Document, id: NodeId) -> Option<Value> {
             obj.insert("content".into(), json!(s.text.content));
         }
         NodeKind::Instance { component, component_key, .. } => {
-            let ref_id = component
-                .and_then(|cid| doc.get(cid))
-                .map(node_pen_id)
-                .or_else(|| component_key.clone())
-                .unwrap_or_default();
+            let ref_id = component.and_then(|cid| doc.get(cid)).map(node_pen_id).or_else(|| component_key.clone()).unwrap_or_default();
             obj.insert("ref".into(), json!(ref_id));
             let mut desc_map = Map::new();
             collect_instance_descendant_overrides(doc, n, &mut desc_map);
@@ -1431,22 +1220,14 @@ fn export_pen_node(doc: &Document, id: NodeId) -> Option<Value> {
 
     // Export children (skip cloned instance children if `ref` handles them via `descendants`)
     if !matches!(n.kind, NodeKind::Instance { component: Some(_), .. }) && !n.children.is_empty() {
-        let children: Vec<Value> = n
-            .children
-            .iter()
-            .filter_map(|&cid| export_pen_node(doc, cid))
-            .collect();
+        let children: Vec<Value> = n.children.iter().filter_map(|&cid| export_pen_node(doc, cid)).collect();
         obj.insert("children".into(), Value::Array(children));
     }
 
     Some(Value::Object(obj))
 }
 
-fn collect_instance_descendant_overrides(
-    doc: &Document,
-    inst_node: &Node,
-    out: &mut Map<String, Value>,
-) {
+fn collect_instance_descendant_overrides(doc: &Document, inst_node: &Node, out: &mut Map<String, Value>) {
     for &cid in &inst_node.children {
         let Some(cn) = doc.get(cid) else { continue };
         if !cn.component.overrides.is_empty() {

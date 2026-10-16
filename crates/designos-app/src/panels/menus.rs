@@ -341,10 +341,10 @@ fn find_path(nodes: &[Node], labels: &[&str]) -> Vec<usize> {
     let mut out = vec![];
     let mut cur = nodes;
     for l in labels {
-        let Some(i) = cur.iter().position(|n| {
-            n.item.label.eq_ignore_ascii_case(l)
-                || (l.eq_ignore_ascii_case("Help") && n.item.label.to_ascii_lowercase().starts_with("help"))
-        }) else {
+        let Some(i) = cur
+            .iter()
+            .position(|n| n.item.label.eq_ignore_ascii_case(l) || (l.eq_ignore_ascii_case("Help") && n.item.label.to_ascii_lowercase().starts_with("help")))
+        else {
             break;
         };
         out.push(i);

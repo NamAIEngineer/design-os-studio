@@ -28,8 +28,12 @@ fn board_thumbnail_png(doc: &Document) -> Option<Vec<u8>> {
     for k in kids {
         let n = doc.get(*k).filter(|n| n.visible)?;
         let w = doc.world_transform(*k);
-        let corners =
-            [w.apply(designos_doc::Vec2::ZERO), w.apply(designos_doc::Vec2::new(n.size.x, 0.0)), w.apply(n.size), w.apply(designos_doc::Vec2::new(0.0, n.size.y))];
+        let corners = [
+            w.apply(designos_doc::Vec2::ZERO),
+            w.apply(designos_doc::Vec2::new(n.size.x, 0.0)),
+            w.apply(n.size),
+            w.apply(designos_doc::Vec2::new(0.0, n.size.y)),
+        ];
         let (x0, x1) = corners.iter().fold((f32::MAX, f32::MIN), |a, c| (a.0.min(c.x), a.1.max(c.x)));
         let (y0, y1) = corners.iter().fold((f32::MAX, f32::MIN), |a, c| (a.0.min(c.y), a.1.max(c.y)));
         let r = designos_doc::Rect::new(x0, y0, x1 - x0, y1 - y0);

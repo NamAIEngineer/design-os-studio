@@ -152,26 +152,15 @@ fn match_forbidden_purple(c: egui::Color32) -> Option<&'static str> {
         return None;
     }
     let [r, g, b, _] = c.to_srgba_unmultiplied();
-    FORBIDDEN_PURPLE_RGB
-        .iter()
-        .find(|&&(pr, pg, pb, _)| r == pr && g == pg && b == pb)
-        .map(|&(_, _, _, hex)| hex)
+    FORBIDDEN_PURPLE_RGB.iter().find(|&&(pr, pg, pb, _)| r == pr && g == pg && b == pb).map(|&(_, _, _, hex)| hex)
 }
 
 /// Scans every painted `Shape::Rect` and `Shape::Text` outside `exclude_canvas`
 /// and verifies that NO shape uses forbidden purple colors (`#9747FF`, `#8755E9`,
 /// `#C4A1FF`, `#A855F7`, `#D1A8FF`).
-pub fn check_no_purple_chrome(
-    shapes: &[egui::epaint::ClippedShape],
-    exclude_canvas: Option<Rect>,
-) -> Vec<Finding> {
+pub fn check_no_purple_chrome(shapes: &[egui::epaint::ClippedShape], exclude_canvas: Option<Rect>) -> Vec<Finding> {
     let mut out = Vec::new();
-    fn walk(
-        s: &egui::Shape,
-        clip: Rect,
-        exclude_canvas: Option<Rect>,
-        out: &mut Vec<Finding>,
-    ) {
+    fn walk(s: &egui::Shape, clip: Rect, exclude_canvas: Option<Rect>, out: &mut Vec<Finding>) {
         match s {
             egui::Shape::Vec(v) => {
                 v.iter().for_each(|s| walk(s, clip, exclude_canvas, out));
@@ -181,16 +170,10 @@ pub fn check_no_purple_chrome(
                     return;
                 }
                 if let Some(hex) = match_forbidden_purple(r.fill) {
-                    out.push(Finding {
-                        what: format!("forbidden purple rect fill {hex}"),
-                        detail: format!("rect {:?}", r.rect),
-                    });
+                    out.push(Finding { what: format!("forbidden purple rect fill {hex}"), detail: format!("rect {:?}", r.rect) });
                 }
                 if let Some(hex) = match_forbidden_purple(r.stroke.color) {
-                    out.push(Finding {
-                        what: format!("forbidden purple rect stroke {hex}"),
-                        detail: format!("rect {:?}", r.rect),
-                    });
+                    out.push(Finding { what: format!("forbidden purple rect stroke {hex}"), detail: format!("rect {:?}", r.rect) });
                 }
             }
             egui::Shape::Text(t) => {
@@ -200,18 +183,12 @@ pub fn check_no_purple_chrome(
                 }
                 if let Some(c) = t.override_text_color {
                     if let Some(hex) = match_forbidden_purple(c) {
-                        out.push(Finding {
-                            what: format!("forbidden purple text override {hex}"),
-                            detail: format!("rect {:?}", rect),
-                        });
+                        out.push(Finding { what: format!("forbidden purple text override {hex}"), detail: format!("rect {:?}", rect) });
                     }
                 }
                 for sec in &t.galley.job.sections {
                     if let Some(hex) = match_forbidden_purple(sec.format.color) {
-                        out.push(Finding {
-                            what: format!("forbidden purple text section {hex}"),
-                            detail: format!("rect {:?}", rect),
-                        });
+                        out.push(Finding { what: format!("forbidden purple text section {hex}"), detail: format!("rect {:?}", rect) });
                     }
                 }
             }
@@ -277,10 +254,7 @@ fn contrast_ratio(a: egui::Color32, b: egui::Color32) -> f32 {
 /// Checks that visible opaque text on studio chrome has valid WCAG contrast:
 /// `>= 4.5:1` (WCAG AA) against dark zinc surfaces (`rel_luminance(bg) < 0.1`),
 /// and `>= 2.2:1` against saturated accent pills/buttons.
-pub fn check_contrast(
-    shapes: &[egui::epaint::ClippedShape],
-    exclude_canvas: Option<Rect>,
-) -> Vec<Finding> {
+pub fn check_contrast(shapes: &[egui::epaint::ClippedShape], exclude_canvas: Option<Rect>) -> Vec<Finding> {
     let mut filled_boxes: Vec<(Rect, egui::Color32)> = Vec::new();
     let mut text_items: Vec<(String, Rect, Rect, egui::Color32)> = Vec::new();
 
@@ -310,17 +284,8 @@ pub fn check_contrast(
                 if exclude_canvas.is_some_and(|cv| cv.contains_rect(rect)) {
                     return;
                 }
-                let text: String = t
-                    .galley
-                    .rows
-                    .iter()
-                    .map(|r| r.row.glyphs.iter().map(|g| g.chr).collect::<String>())
-                    .collect::<Vec<_>>()
-                    .join("\n");
-                let color = t
-                    .override_text_color
-                    .or_else(|| t.galley.job.sections.first().map(|s| s.format.color))
-                    .unwrap_or(egui::Color32::WHITE);
+                let text: String = t.galley.rows.iter().map(|r| r.row.glyphs.iter().map(|g| g.chr).collect::<String>()).collect::<Vec<_>>().join("\n");
+                let color = t.override_text_color.or_else(|| t.galley.job.sections.first().map(|s| s.format.color)).unwrap_or(egui::Color32::WHITE);
                 if !text.trim().is_empty() && color.a() > 0 {
                     text_items.push((text, rect, clip, color));
                 }
@@ -330,13 +295,7 @@ pub fn check_contrast(
     }
 
     for cs in shapes {
-        walk(
-            &cs.shape,
-            cs.clip_rect,
-            exclude_canvas,
-            &mut filled_boxes,
-            &mut text_items,
-        );
+        walk(&cs.shape, cs.clip_rect, exclude_canvas, &mut filled_boxes, &mut text_items);
     }
 
     let mut out = Vec::new();
@@ -368,5 +327,3 @@ pub fn check_contrast(
     }
     out
 }
-
-

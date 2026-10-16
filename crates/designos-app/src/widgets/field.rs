@@ -89,16 +89,9 @@ pub fn edit_num_text(
     if ui.memory(|m| m.has_focus(id)) {
         let mut key_step: Option<(f32, f32)> = None;
         ui.input_mut(|i| {
-            if let Some(idx) = i.events.iter().position(|ev| {
-                matches!(
-                    ev,
-                    egui::Event::Key {
-                        key: egui::Key::ArrowUp | egui::Key::ArrowDown,
-                        pressed: true,
-                        ..
-                    }
-                )
-            }) {
+            if let Some(idx) =
+                i.events.iter().position(|ev| matches!(ev, egui::Event::Key { key: egui::Key::ArrowUp | egui::Key::ArrowDown, pressed: true, .. }))
+            {
                 if let egui::Event::Key { key, modifiers, .. } = i.events.remove(idx) {
                     let dir = if key == egui::Key::ArrowUp { 1.0 } else { -1.0 };
                     let step = if modifiers.alt {
@@ -136,29 +129,14 @@ pub fn edit_num_text(
 
 /// Editable 6-char hex color field (`RRGGBB`) with Figma `822500` per-channel / whole-color
 /// `ArrowUp`/`ArrowDown` (`±1`) and `Shift+ArrowUp`/`ArrowDown` (`±10`) live stepping.
-pub fn edit_hex_text(
-    ui: &mut Ui,
-    rect: Rect,
-    id: Id,
-    display: &str,
-    font: FontId,
-    color: Color32,
-    pad_x: f32,
-) -> Option<String> {
+pub fn edit_hex_text(ui: &mut Ui, rect: Rect, id: Id, display: &str, font: FontId, color: Color32, pad_x: f32) -> Option<String> {
     let mut stepped: Option<(String, usize, usize)> = None;
     if ui.memory(|m| m.has_focus(id)) {
         let mut key_step: Option<(bool, bool)> = None;
         ui.input_mut(|i| {
-            if let Some(idx) = i.events.iter().position(|ev| {
-                matches!(
-                    ev,
-                    egui::Event::Key {
-                        key: egui::Key::ArrowUp | egui::Key::ArrowDown,
-                        pressed: true,
-                        ..
-                    }
-                )
-            }) {
+            if let Some(idx) =
+                i.events.iter().position(|ev| matches!(ev, egui::Event::Key { key: egui::Key::ArrowUp | egui::Key::ArrowDown, pressed: true, .. }))
+            {
                 if let egui::Event::Key { key, modifiers, .. } = i.events.remove(idx) {
                     key_step = Some((key == egui::Key::ArrowUp, modifiers.shift));
                 }
@@ -184,9 +162,7 @@ pub fn edit_hex_text(
                 step_g = true;
                 step_b = true;
             }
-            let base_col = designos_doc::Color::from_hex(&cur_buf)
-                .or_else(|| designos_doc::Color::from_hex(display))
-                .unwrap_or(designos_doc::Color::BLACK);
+            let base_col = designos_doc::Color::from_hex(&cur_buf).or_else(|| designos_doc::Color::from_hex(display)).unwrap_or(designos_doc::Color::BLACK);
             let [r, g, b, _] = base_col.to_u8();
             let delta: i16 = (if up { 1 } else { -1 }) * (if shift { 10 } else { 1 });
             let nr = if step_r { (r as i16 + delta).clamp(0, 255) as u8 } else { r };
@@ -330,10 +306,7 @@ fn tokenize_expr(s: &str, current: Option<f32>) -> Option<Vec<Tok>> {
                 } else if tail.starts_with('°') {
                     i += '°'.len_utf8();
                     NumSuffix::Unit
-                } else if tail.len() >= 3
-                    && tail[..3].eq_ignore_ascii_case("deg")
-                    && !tail[3..].chars().next().is_some_and(|c| c.is_ascii_alphabetic())
-                {
+                } else if tail.len() >= 3 && tail[..3].eq_ignore_ascii_case("deg") && !tail[3..].chars().next().is_some_and(|c| c.is_ascii_alphabetic()) {
                     i += 3;
                     NumSuffix::Unit
                 } else if tail.len() >= 2
@@ -379,13 +352,7 @@ fn parse_expr_tokens(tokens: &[Tok], pos: &mut usize, current: Option<f32>, is_p
     Some(lhs)
 }
 
-fn parse_term_tokens(
-    tokens: &[Tok],
-    pos: &mut usize,
-    current: Option<f32>,
-    is_percent_field: bool,
-    add_lhs: Option<f32>,
-) -> Option<f32> {
+fn parse_term_tokens(tokens: &[Tok], pos: &mut usize, current: Option<f32>, is_percent_field: bool, add_lhs: Option<f32>) -> Option<f32> {
     let mut lhs = parse_unary_tokens(tokens, pos, current, is_percent_field, add_lhs)?;
     while let Some(&op @ (Tok::Star | Tok::Slash)) = tokens.get(*pos) {
         *pos += 1;
@@ -403,13 +370,7 @@ fn parse_term_tokens(
     Some(lhs)
 }
 
-fn parse_unary_tokens(
-    tokens: &[Tok],
-    pos: &mut usize,
-    current: Option<f32>,
-    is_percent_field: bool,
-    add_lhs: Option<f32>,
-) -> Option<f32> {
+fn parse_unary_tokens(tokens: &[Tok], pos: &mut usize, current: Option<f32>, is_percent_field: bool, add_lhs: Option<f32>) -> Option<f32> {
     match tokens.get(*pos) {
         Some(Tok::Plus) => {
             *pos += 1;
@@ -423,13 +384,7 @@ fn parse_unary_tokens(
     }
 }
 
-fn parse_power_tokens(
-    tokens: &[Tok],
-    pos: &mut usize,
-    current: Option<f32>,
-    is_percent_field: bool,
-    add_lhs: Option<f32>,
-) -> Option<f32> {
+fn parse_power_tokens(tokens: &[Tok], pos: &mut usize, current: Option<f32>, is_percent_field: bool, add_lhs: Option<f32>) -> Option<f32> {
     let base = parse_primary_tokens(tokens, pos, current, is_percent_field, add_lhs)?;
     if matches!(tokens.get(*pos), Some(Tok::Caret)) {
         *pos += 1;
@@ -440,13 +395,7 @@ fn parse_power_tokens(
     }
 }
 
-fn parse_primary_tokens(
-    tokens: &[Tok],
-    pos: &mut usize,
-    current: Option<f32>,
-    is_percent_field: bool,
-    add_lhs: Option<f32>,
-) -> Option<f32> {
+fn parse_primary_tokens(tokens: &[Tok], pos: &mut usize, current: Option<f32>, is_percent_field: bool, add_lhs: Option<f32>) -> Option<f32> {
     match tokens.get(*pos).copied()? {
         Tok::Num(val, suffix) => {
             *pos += 1;
@@ -749,13 +698,7 @@ mod tests {
 
         // Frame 2: press ArrowUp -> +1 (101.0)
         let mut input = egui::RawInput::default();
-        input.events.push(egui::Event::Key {
-            key: egui::Key::ArrowUp,
-            physical_key: None,
-            pressed: true,
-            repeat: false,
-            modifiers: egui::Modifiers::NONE,
-        });
+        input.events.push(egui::Event::Key { key: egui::Key::ArrowUp, physical_key: None, pressed: true, repeat: false, modifiers: egui::Modifiers::NONE });
         let _ = ctx.run_ui(input, |ui| {
             if let Some(v) = num_field(ui, rect, "test-w", Prefix::Text("W"), Some(val), "") {
                 val = v;
@@ -767,13 +710,7 @@ mod tests {
         // Frame 3: press Shift + ArrowUp -> +10 (111.0)
         let mut input = egui::RawInput::default();
         input.modifiers = egui::Modifiers::SHIFT;
-        input.events.push(egui::Event::Key {
-            key: egui::Key::ArrowUp,
-            physical_key: None,
-            pressed: true,
-            repeat: false,
-            modifiers: egui::Modifiers::SHIFT,
-        });
+        input.events.push(egui::Event::Key { key: egui::Key::ArrowUp, physical_key: None, pressed: true, repeat: false, modifiers: egui::Modifiers::SHIFT });
         let _ = ctx.run_ui(input, |ui| {
             if let Some(v) = num_field(ui, rect, "test-w", Prefix::Text("W"), Some(val), "") {
                 val = v;
@@ -784,13 +721,7 @@ mod tests {
         // Frame 4: press Alt + ArrowDown -> -0.1 (110.9)
         let mut input = egui::RawInput::default();
         input.modifiers = egui::Modifiers::ALT;
-        input.events.push(egui::Event::Key {
-            key: egui::Key::ArrowDown,
-            physical_key: None,
-            pressed: true,
-            repeat: false,
-            modifiers: egui::Modifiers::ALT,
-        });
+        input.events.push(egui::Event::Key { key: egui::Key::ArrowDown, physical_key: None, pressed: true, repeat: false, modifiers: egui::Modifiers::ALT });
         let _ = ctx.run_ui(input, |ui| {
             if let Some(v) = num_field(ui, rect, "test-w", Prefix::Text("W"), Some(val), "") {
                 val = v;
@@ -811,13 +742,7 @@ mod tests {
         // Whole selection (0..6) + Shift+ArrowUp -> +10 (0x0A) to all 3 channels: 1A2A3A
         let mut input = egui::RawInput::default();
         input.modifiers = egui::Modifiers::SHIFT;
-        input.events.push(egui::Event::Key {
-            key: egui::Key::ArrowUp,
-            physical_key: None,
-            pressed: true,
-            repeat: false,
-            modifiers: egui::Modifiers::SHIFT,
-        });
+        input.events.push(egui::Event::Key { key: egui::Key::ArrowUp, physical_key: None, pressed: true, repeat: false, modifiers: egui::Modifiers::SHIFT });
         let _ = ctx.run_ui(input, |ui| {
             if let Some(h) = edit_hex_text(ui, rect, hex_id, &hex, theme::font_body(), theme::TEXT, 0.0) {
                 hex = h;
@@ -831,13 +756,7 @@ mod tests {
         state.store(&ctx, hex_id);
 
         let mut input = egui::RawInput::default();
-        input.events.push(egui::Event::Key {
-            key: egui::Key::ArrowUp,
-            physical_key: None,
-            pressed: true,
-            repeat: false,
-            modifiers: egui::Modifiers::NONE,
-        });
+        input.events.push(egui::Event::Key { key: egui::Key::ArrowUp, physical_key: None, pressed: true, repeat: false, modifiers: egui::Modifiers::NONE });
         let _ = ctx.run_ui(input, |ui| {
             if let Some(h) = edit_hex_text(ui, rect, hex_id, &hex, theme::font_body(), theme::TEXT, 0.0) {
                 hex = h;
@@ -846,4 +765,3 @@ mod tests {
         assert_eq!(hex, "1A2B3A");
     }
 }
-

@@ -216,7 +216,7 @@ pub fn fast_world_transform(doc: &designos_doc::Document, id: NodeId) -> Affine 
     let Some(first) = doc.get(id) else {
         return Affine::IDENTITY;
     };
-    let Some( mut cur_parent) = first.parent else {
+    let Some(mut cur_parent) = first.parent else {
         return first.transform;
     };
     let mut stack = [Affine::IDENTITY; 32];
@@ -248,22 +248,13 @@ pub fn fast_world_corners(doc: &designos_doc::Document, id: NodeId) -> [DV; 4] {
         return [DV::ZERO; 4];
     };
     let w = fast_world_transform(doc, id);
-    [
-        w.apply(DV::ZERO),
-        w.apply(DV::new(n.size.x, 0.0)),
-        w.apply(DV::new(n.size.x, n.size.y)),
-        w.apply(DV::new(0.0, n.size.y)),
-    ]
+    [w.apply(DV::ZERO), w.apply(DV::new(n.size.x, 0.0)), w.apply(DV::new(n.size.x, n.size.y)), w.apply(DV::new(0.0, n.size.y))]
 }
 
 /// Fast page-space AABB for `id`: uses `index.bounds_of(id)` when exact or stack-based `fast_world_transform`
 /// without any `O(subtree)` recursion or heap allocation.
 #[inline]
-pub fn fast_world_aabb(
-    doc: &designos_doc::Document,
-    index: Option<&designos_render::SceneIndex>,
-    id: NodeId,
-) -> Rect {
+pub fn fast_world_aabb(doc: &designos_doc::Document, index: Option<&designos_render::SceneIndex>, id: NodeId) -> Rect {
     let Some(n) = doc.get(id) else {
         if let Some((x0, y0, x1, y1)) = index.and_then(|idx| idx.bounds_of(id)) {
             return Rect::new(x0, y0, x1 - x0, y1 - y0);

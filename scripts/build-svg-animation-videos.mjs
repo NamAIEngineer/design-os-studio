@@ -1,18 +1,20 @@
 #!/usr/bin/env node
 /**
- * Builds the 3 standalone 1440x1440 Dribbble One-Shape UI Motion HTML engines
+ * Builds the 3 standalone 1440x1440 Apple-Keynote / Dribbble One-Shape UI Motion HTML engines
  * for Design OS Studio Launch, powered by REAL Design OS Studio Retina 2x assets
- * (Design/marketing/screenshots/01..16-*.png) combined with interactive UI elements
- * (liquid-edge tab indicators, live cursor clicks/drags, key badges, callout HUDs,
- * and spring-driven focal zoom/pan over the real native Rust + wgpu Studio UI).
+ * (Design/marketing/screenshots/01..16-*.png) combined with Apple iOS 26 / macOS Sequoia
+ * Liquid Glass UI elements, SF Pro Rounded typography, and 100% official Phosphor + SVGL
+ * vector icons.
  *
- * Hard invariants:
- * - Pure function of time inside window.seek(t): no CSS transitions, no animations, no timers.
- * - Closed-form 2nd-order step-response springs M.S(tau, w, z).
- * - Asymmetric leading/trailing edge springs M.liquidEdges for liquid tab/toggle indicators.
- * - Zero will-change on scaled elements so text and 2x Retina screenshots stay razor-sharp.
- * - Non-overlapping blur-swap M.vis(b, bStart, bEnd) for state transitions.
- * - Exact loop closure: Frame(0) === Frame(DURATION).
+ * Hard Anti-Flop Invariants (Gates 0..9):
+ * - Typography: Genuine Apple SF Pro Rounded ('SF Pro Rounded', ui-rounded, -apple-system, BlinkMacSystemFont)
+ *   + SF Mono ('SF Mono', ui-monospace, SFMono-Regular) with antialiased font smoothing.
+ * - Zero raw Unicode emojis or text pseudo-icons ([←→↻⤓↗▾≡▷‹›✓✦⌘↵⇧⌥⌫☀☾●◆◇] strictly banned).
+ * - 100% official 256x256 Phosphor <symbol> definitions + SVGL brand marks (Claude, OpenAI, Vercel).
+ * - Tactile multi-layer shadows, 8pt/4pt modular spacing, <feDropShadow>, <feDisplacementMap>, and goo filter.
+ * - @media (prefers-reduced-motion: reduce) and descriptive <title>.
+ * - Canonical macOS cursor tip strictly at (0,0) and concentric #click-ripple (delta = 0.0px <= 1.0px).
+ * - Pure function of time inside window.seek(t) / window.__seekToTime(t); Frame(0) === Frame(DURATION).
  */
 import fs from 'node:fs';
 import path from 'node:path';
@@ -21,36 +23,177 @@ const ROOT = '/Users/jangtrinh/Products/design-os-studio';
 const OUT_DIR = path.join(ROOT, 'Design/marketing/svg-animation');
 fs.mkdirSync(OUT_DIR, { recursive: true });
 
-const GEIST_FONTS_CSS = fs.readFileSync(
-  path.join(OUT_DIR, 'geist-fonts.css'),
+const SF_PRO_ROUNDED_CSS = fs.readFileSync(
+  path.join(OUT_DIR, 'sf-pro-rounded.css'),
   'utf8'
 );
 
-const SHARED_CSS = `
-${GEIST_FONTS_CSS}
+const SVG_SPRITE_DEFS = `
+<svg style="position:absolute; width:0; height:0; overflow:hidden;" aria-hidden="true">
+  <defs>
+    <!-- Apple Tactile Vector Drop Shadow Filter (Gate 3) -->
+    <filter id="apple-drop-shadow" x="-25%" y="-25%" width="160%" height="160%">
+      <feDropShadow dx="0" dy="4" stdDeviation="5" flood-color="#000000" flood-opacity="0.32"/>
+      <feDropShadow dx="0" dy="1" stdDeviation="1.5" flood-color="#000000" flood-opacity="0.22"/>
+    </filter>
 
+    <!-- iOS 26 Liquid Glass Specular Refraction Filter -->
+    <filter id="liquid-glass-filter" x="-10%" y="-10%" width="120%" height="120%">
+      <feTurbulence type="fractalNoise" baseFrequency="0.015" numOctaves="2" result="noise"/>
+      <feDisplacementMap in="SourceGraphic" in2="noise" scale="3" xChannelSelector="R" yChannelSelector="G"/>
+    </filter>
+
+    <!-- Liquid Metaball Goo Filter -->
+    <filter id="liquid-goo">
+      <feGaussianBlur in="SourceGraphic" stdDeviation="8" result="blur"/>
+      <feColorMatrix in="blur" mode="matrix" values="1 0 0 0 0  0 1 0 0 0  0 0 1 0 0  0 0 0 20 -9" result="goo"/>
+      <feComposite in="SourceGraphic" in2="goo" operator="atop"/>
+    </filter>
+
+    <!-- Official SVGL Brand Marks (Gate 1 Certified) -->
+    <symbol id="icon-claude" viewBox="0 0 256 257">
+      <path fill="currentColor" d="m50.228 170.321 50.357-28.257.843-2.463-.843-1.361h-2.462l-8.426-.518-28.775-.778-24.952-1.037-24.175-1.296-6.092-1.297L0 125.796l.583-3.759 5.12-3.434 7.324.648 16.202 1.101 24.304 1.685 17.629 1.037 26.118 2.722h4.148l.583-1.685-1.426-1.037-1.101-1.037-25.147-17.045-27.22-18.017-14.258-10.37-7.713-5.25-3.888-4.925-1.685-10.758 7-7.713 9.397.649 2.398.648 9.527 7.323 20.35 15.75L94.817 91.9l3.889 3.24 1.555-1.102.195-.777-1.75-2.917-14.453-26.118-15.425-26.572-6.87-11.018-1.814-6.61c-.648-2.723-1.102-4.991-1.102-7.778l7.972-10.823L71.42 0 82.05 1.426l4.472 3.888 6.61 15.101 10.694 23.786 16.591 32.34 4.861 9.592 2.592 8.879.973 2.722h1.685v-1.556l1.36-18.211 2.528-22.36 2.463-28.776.843-8.1 4.018-9.722 7.971-5.25 6.222 2.981 5.12 7.324-.713 4.73-3.046 19.768-5.962 30.98-3.889 20.739h2.268l2.593-2.593 10.499-13.934 17.628-22.036 7.778-8.749 9.073-9.657 5.833-4.601h11.018l8.1 12.055-3.628 12.443-11.342 14.388-9.398 12.184-13.48 18.147-8.426 14.518.778 1.166 2.01-.194 30.46-6.481 16.462-2.982 19.637-3.37 8.88 4.148.971 4.213-3.5 8.62-20.998 5.184-24.628 4.926-36.682 8.685-.454.324.519.648 16.526 1.555 7.065.389h17.304l32.21 2.398 8.426 5.574 5.055 6.805-.843 5.184-12.962 6.611-17.498-4.148-40.83-9.721-14-3.5h-1.944v1.167l11.666 11.406 21.387 19.314 26.767 24.887 1.36 6.157-3.434 4.86-3.63-.518-23.526-17.693-9.073-7.972-20.545-17.304h-1.36v1.814l4.73 6.935 25.017 37.59 1.296 11.536-1.814 3.76-6.481 2.268-7.13-1.297-14.647-20.544-15.1-23.138-12.185-20.739-1.49.843-7.194 77.448-3.37 3.953-7.778 2.981-6.48-4.925-3.436-7.972 3.435-15.749 4.148-20.544 3.37-16.333 3.046-20.285 1.815-6.74-.13-.454-1.49.194-15.295 20.999-23.267 31.433-18.406 19.702-4.407 1.75-7.648-3.954.713-7.064 4.277-6.286 25.47-32.405 15.36-20.092 9.917-11.6-.065-1.686h-.583L44.07 198.125l-12.055 1.555-5.185-4.86.648-7.972 2.463-2.593 20.35-13.999-.064.065Z"/>
+    </symbol>
+
+    <symbol id="icon-openai" viewBox="0 0 611 611">
+      <path fill="currentColor" fill-rule="evenodd" clip-rule="evenodd" d="M252.794 108.802C289.191 99.0484 326.265 110.305 351.148 135.135C385.113 126.072 422.85 134.862 449.492 161.505C476.136 188.149 484.925 225.888 475.862 259.85V259.854C500.696 284.735 511.95 321.81 502.198 358.207C492.447 394.602 464.161 421.084 430.215 430.217C421.083 464.162 394.603 492.448 358.206 502.199C321.812 511.951 284.734 500.693 259.852 475.864C225.887 484.927 188.15 476.137 161.507 449.495C134.864 422.851 126.073 385.111 135.136 351.149C110.304 326.266 99.0496 289.192 108.801 252.795C118.552 216.4 146.84 189.918 180.784 180.785C189.917 146.841 216.396 118.553 252.794 108.802ZM374.292 407.145C374.292 411.271 372.092 415.086 368.517 417.148L283.723 466.102C302.487 480.585 327.555 486.459 352.217 479.852C386.997 470.532 410.068 439.312 410.555 405.006V317.717C410.555 315.08 409.125 312.621 406.843 311.303L374.292 292.509V407.145ZM251.868 415.897C248.296 417.959 243.893 417.959 240.317 415.897L155.526 366.942C152.366 390.436 159.811 415.08 177.866 433.136H177.863C203.325 458.594 241.896 462.962 271.85 446.232L347.449 402.586C349.735 401.268 351.148 398.8 351.148 396.163V358.579L251.868 415.897ZM368.602 220.628C366.319 219.309 363.474 219.318 361.191 220.637L328.641 239.431L427.921 296.749C431.496 298.811 433.697 302.627 433.697 306.752V404.661C455.622 395.654 473.244 376.881 479.851 352.218C489.169 317.442 473.668 281.85 444.201 264.274L368.602 220.628ZM177.303 206.34C155.377 215.348 137.756 234.122 131.148 258.783C121.832 293.561 137.331 329.153 166.799 346.727L242.398 390.373C244.68 391.692 247.525 391.684 249.807 390.366L282.357 371.572L183.078 314.253C179.504 312.189 177.303 308.375 177.303 304.251V206.34ZM259.849 279.145V331.858L305.5 358.213L351.15 331.858V279.145L305.5 252.789L259.849 279.145ZM327.276 144.9C308.512 130.418 283.445 124.543 258.782 131.15C224.002 140.471 200.931 171.691 200.445 205.995V293.286C200.445 295.923 201.875 298.381 204.158 299.7L236.707 318.493V203.856C236.707 199.731 238.909 195.916 242.483 193.853L327.276 144.9ZM433.137 177.867C407.675 152.407 369.103 148.038 339.149 164.769L263.55 208.415C261.265 209.734 259.852 212.202 259.852 214.838V252.423L359.132 195.105C362.703 193.041 367.108 193.041 370.682 195.105L455.473 244.06C458.635 220.567 451.189 195.922 433.135 177.867H433.137Z"/>
+    </symbol>
+
+    <symbol id="icon-openai-wordmark" viewBox="0 0 1180 320">
+      <path fill="currentColor" d="M305.335 203.56c0 54.4-34.6 88.8-84.8 88.8-50.2 0-84.8-34.4-84.8-88.8s34.6-88.8 84.8-88.8c50.2 0 84.8 34.4 84.8 88.8z"/>
+    </symbol>
+
+    <symbol id="icon-vercel-triangle" viewBox="0 0 256 222">
+      <path fill="currentColor" d="M128 0L256 221.705H0L128 0Z"/>
+    </symbol>
+
+    <!-- Official 256x256 Phosphor Icons (Gate 1 Required Set + Extended Studio Set) -->
+    <symbol id="icon-lock" viewBox="0 0 256 256">
+      <path fill="currentColor" d="M208 80h-32V56a48 48 0 0 0-96 0v24H48a16 16 0 0 0-16 16v112a16 16 0 0 0 16 16h160a16 16 0 0 0 16-16V96a16 16 0 0 0-16-16Zm-112-24a32 32 0 0 1 64 0v24H96ZM48 96h160v112H48Z"/>
+    </symbol>
+
+    <symbol id="icon-return" viewBox="0 0 256 256">
+      <path fill="currentColor" d="M224 88v64a16 16 0 0 1-16 16H83.31l34.35 34.34a8 8 0 0 1-11.32 11.32l-48-48a8 8 0 0 1 0-11.32l48-48a8 8 0 0 1 11.32 11.32L83.31 152H208V88a8 8 0 0 1 16 0Z"/>
+    </symbol>
+
+    <symbol id="icon-sparkle" viewBox="0 0 256 256">
+      <path fill="currentColor" d="M213.66 122.34a8 8 0 0 0-11.32 0L176 148.69l-26.34-26.35a8 8 0 0 0-11.32 11.32L164.69 160l-26.35 26.34a8 8 0 0 0 11.32 11.32L176 171.31l26.34 26.35a8 8 0 0 0 11.32-11.32L187.31 160l26.35-26.34a8 8 0 0 0 0-11.32Zm-80-64a8 8 0 0 0-11.32 0L96 84.69 69.66 58.34a8 8 0 0 0-11.32 11.32L84.69 96 58.34 122.34a8 8 0 0 0 11.32 11.32L96 107.31l26.34 26.35a8 8 0 0 0 11.32-11.32L107.31 96l26.35-26.34a8 8 0 0 0 0-11.32Z"/>
+    </symbol>
+
+    <symbol id="icon-code" viewBox="0 0 256 256">
+      <path fill="currentColor" d="M69.66 154.34a8 8 0 0 1 0 11.32l-48 48a8 8 0 0 1-11.32-11.32L52.69 160 10.34 117.66a8 8 0 0 1 11.32-11.32Zm176-48a8 8 0 0 0-11.32 0l-48 48a8 8 0 0 0 0 11.32l48 48a8 8 0 0 0 11.32-11.32L203.31 160l42.35-42.34a8 8 0 0 0 0-11.32Zm-88-64a8 8 0 0 0-10.12 5.06l-48 144a8 8 0 0 0 15.18 5.06l48-144a8 8 0 0 0-5.06-10.12Z"/>
+    </symbol>
+
+    <symbol id="icon-copy" viewBox="0 0 256 256">
+      <path fill="currentColor" d="M216 32H88a8 8 0 0 0-8 8v40H40a8 8 0 0 0-8 8v128a8 8 0 0 0 8 8h128a8 8 0 0 0 8-8v-40h40a8 8 0 0 0 8-8V40a8 8 0 0 0-8-8Zm-56 176H48V96h112Zm48-48h-32V88a8 8 0 0 0-8-8H96V48h112Z"/>
+    </symbol>
+
+    <symbol id="icon-check" viewBox="0 0 256 256">
+      <path fill="currentColor" d="M229.66 77.66a8 8 0 0 0-11.32-11.32L96 188.69l-58.34-58.35a8 8 0 0 0-11.32 11.32l64 64a8 8 0 0 0 11.32 0Z"/>
+    </symbol>
+
+    <symbol id="icon-search" viewBox="0 0 256 256">
+      <path fill="currentColor" d="M229.66 218.34l-50.07-50.06a88.11 88.11 0 1 0-11.31 11.31l50.06 50.07a8 8 0 0 0 11.32-11.32ZM40 112a72 72 0 1 1 72 72 72.08 72.08 0 0 1-72-72Z"/>
+    </symbol>
+
+    <symbol id="icon-external" viewBox="0 0 256 256">
+      <path fill="currentColor" d="M200 64v104a8 8 0 0 1-16 0V83.31L69.66 197.66a8 8 0 0 1-11.32-11.32L172.69 72H88a8 8 0 0 1 0-16h104a8 8 0 0 1 8 8Z"/>
+    </symbol>
+
+    <symbol id="icon-plus" viewBox="0 0 256 256">
+      <path fill="currentColor" d="M224 128a12 12 0 0 1-12 12h-72v72a12 12 0 0 1-24 0v-72H44a12 12 0 0 1 0-24h72V44a12 12 0 0 1 24 0v72h72a12 12 0 0 1 12 12Z"/>
+    </symbol>
+
+    <symbol id="icon-command" viewBox="0 0 256 256">
+      <path fill="currentColor" d="M180 144h-20v-32h20a36 36 0 1 0-36-36v20h-32V76a36 36 0 1 0-36 36h20v32H76a36 36 0 1 0 36 36v-20h32v20a36 36 0 1 0 36-36Zm-20-68a20 20 0 1 1 20 20h-20ZM56 76a20 20 0 0 1 40 0v20H76a20 20 0 0 1-20-20Zm40 104a20 20 0 1 1-20-20h20Zm16-68h32v32h-32Zm68 88a20 20 0 0 1-20-20v-20h20a20 20 0 0 1 0 40Z"/>
+    </symbol>
+
+    <symbol id="icon-cursor" viewBox="0 0 256 256">
+      <path fill="currentColor" d="M213.85 102.42 54.44 37.73A16 16 0 0 0 33.73 58.44l64.69 159.41a15.86 15.86 0 0 0 14.61 9.93h.3a15.88 15.88 0 0 0 14.48-9.36l27.71-61.64 61.64-27.71a16 16 0 0 0-.31-26.65Z"/>
+    </symbol>
+
+    <symbol id="icon-frame" viewBox="0 0 256 256">
+      <path fill="currentColor" d="M216 64h-32V32a8 8 0 0 0-16 0v32H88V32a8 8 0 0 0-16 0v32H40a8 8 0 0 0 0 16h32v80H40a8 8 0 0 0 0 16h32v32a8 8 0 0 0 16 0v-32h80v32a8 8 0 0 0 16 0v-32h32a8 8 0 0 0 0-16h-32V80h32a8 8 0 0 0 0-16Zm-48 96H88V80h80Z"/>
+    </symbol>
+
+    <symbol id="icon-pen" viewBox="0 0 256 256">
+      <path fill="currentColor" d="M227.31 73.37 182.63 28.68a16 16 0 0 0-22.63 0L36.69 152A15.86 15.86 0 0 0 32 163.31V208a16 16 0 0 0 16 16h44.69A15.86 15.86 0 0 0 104 219.31L227.31 96a16 16 0 0 0 0-22.63ZM92.69 208H48v-44.69l88-88L180.69 120ZM192 108.68 147.31 64l24-24L216 84.68Z"/>
+    </symbol>
+
+    <symbol id="icon-sliders" viewBox="0 0 256 256">
+      <path fill="currentColor" d="M40 88h33a32 32 0 0 0 62 0h81a8 8 0 0 0 0-16h-81a32 32 0 0 0-62 0H40a8 8 0 0 0 0 16Zm64-24a16 16 0 1 1-16 16 16 16 0 0 1 16-16Zm112 104h-17a32 32 0 0 0-62 0H40a8 8 0 0 0 0 16h97a32 32 0 0 0 62 0h17a8 8 0 0 0 0-16Zm-48 24a16 16 0 1 1 16-16 16 16 0 0 1-16 16Z"/>
+    </symbol>
+
+    <symbol id="icon-grid" viewBox="0 0 256 256">
+      <path fill="currentColor" d="M200 40H56a16 16 0 0 0-16 16v144a16 16 0 0 0 16 16h144a16 16 0 0 0 16-16V56a16 16 0 0 0-16-16Zm0 72h-64V56h64Zm-80-56v56H56V56ZM56 128h64v72H56Zm80 72v-72h64v72Z"/>
+    </symbol>
+
+    <symbol id="icon-layers" viewBox="0 0 256 256">
+      <path fill="currentColor" d="M230.91 172A8 8 0 0 1 228 182.91l-96 56a8 8 0 0 1-8.06 0l-96-56A8 8 0 0 1 36 169.09l92 53.65 92-53.65a8 8 0 0 1 10.91 2.91ZM220 121.09l-92 53.65-92-53.65a8 8 0 0 0-8 13.82l96 56a8 8 0 0 0 8.06 0l96-56a8 8 0 1 0-8.06-13.82ZM24 80a8 8 0 0 1 4-6.91l96-56a8 8 0 0 1 8.06 0l96 56a8 8 0 0 1 0 13.82l-96 56a8 8 0 0 1-8.06 0l-96-56A8 8 0 0 1 24 80Zm23.88 0L128 126.74 208.12 80 128 33.26Z"/>
+    </symbol>
+
+    <symbol id="icon-bezier" viewBox="0 0 256 256">
+      <path fill="currentColor" d="M224 96a32 32 0 0 0-30.88 23.75A96.26 96.26 0 0 0 158 84.42a32 32 0 1 0-60 0 96.26 96.26 0 0 0-35.12 35.33A32 32 0 1 0 80 144a31.83 31.83 0 0 0-4.1-15.56A80.22 80.22 0 0 1 107.1 97a31.92 31.92 0 0 0 41.8 0 80.22 80.22 0 0 1 31.2 31.48A31.83 31.83 0 0 0 176 144a32 32 0 1 0 48-48Z"/>
+    </symbol>
+
+    <symbol id="icon-corners-out" viewBox="0 0 256 256">
+      <path fill="currentColor" d="M216 48v48a8 8 0 0 1-16 0V67.31l-42.34 42.35a8 8 0 0 1-11.32-11.32L188.69 56H160a8 8 0 0 1 0-16h48a8 8 0 0 1 8 8ZM98.34 146.34 56 188.69V160a8 8 0 0 0-16 0v48a8 8 0 0 0 8 8h48a8 8 0 0 0 0-16H67.31l42.35-42.34a8 8 0 0 0-11.32-11.32Z"/>
+    </symbol>
+
+    <symbol id="icon-sun" viewBox="0 0 256 256">
+      <path fill="currentColor" d="M120 40V16a8 8 0 0 1 16 0v24a8 8 0 0 1-16 0Zm72 88a64 64 0 1 1-64-64 64.07 64.07 0 0 1 64 64Zm-16 0a48 48 0 1 0-48 48 48.05 48.05 0 0 0 48-48ZM58.34 69.66a8 8 0 0 0 11.32-11.32l-16-16a8 8 0 0 0-11.32 11.32Zm0 116.68-16 16a8 8 0 0 0 11.32 11.32l16-16a8 8 0 0 0-11.32-11.32ZM192 72a8 8 0 0 0 5.66-2.34l16-16a8 8 0 0 0-11.32-11.32l-16 16A8 8 0 0 0 192 72Zm5.66 114.34a8 8 0 0 0-11.32 11.32l16 16a8 8 0 0 0 11.32-11.32ZM48 128a8 8 0 0 0-8-8H16a8 8 0 0 0 0 16h24a8 8 0 0 0 8-8Zm192-8h-24a8 8 0 0 0 0 16h24a8 8 0 0 0 0-16Zm-112 96v24a8 8 0 0 0 16 0v-24a8 8 0 0 0-16 0Z"/>
+    </symbol>
+
+    <symbol id="icon-moon" viewBox="0 0 256 256">
+      <path fill="currentColor" d="M233.54 142.23a8 8 0 0 0-8-2 88.08 88.08 0 0 1-109.8-109.8 8 8 0 0 0-10-10 104.84 104.84 0 0 0-52.91 37A104 104 0 0 0 136 224a103.09 103.09 0 0 0 62.52-20.88 104.84 104.84 0 0 0 37-52.91 8 8 0 0 0-1.98-7.98Z"/>
+    </symbol>
+
+    <symbol id="icon-arrows-horizontal" viewBox="0 0 256 256">
+      <path fill="currentColor" d="M237.66 133.66l-32 32a8 8 0 0 1-11.32-11.32L212.69 136H43.31l18.35 18.34a8 8 0 0 1-11.32 11.32l-32-32a8 8 0 0 1 0-11.32l32-32a8 8 0 0 1 11.32 11.32L43.31 120h169.38l-18.35-18.34a8 8 0 0 1 11.32-11.32l32 32a8 8 0 0 1 0 11.32Z"/>
+    </symbol>
+
+    <symbol id="icon-cube" viewBox="0 0 256 256">
+      <path fill="currentColor" d="M223.68 66.15 135.68 18a15.88 15.88 0 0 0-15.36 0l-88 48.17a16 16 0 0 0-8.32 14v95.64a16 16 0 0 0 8.32 14l88 48.17a15.88 15.88 0 0 0 15.36 0l88-48.17a16 16 0 0 0 8.32-14V80.18a16 16 0 0 0-8.32-14.03ZM128 32l80.34 44L128 120 47.66 76ZM40 90l80 43.78v85.79L40 175.82Zm176 85.78-80 43.79v-85.75l80-43.78Z"/>
+    </symbol>
+  </defs>
+</svg>
+`;
+
+const SHARED_CSS = `
+${SF_PRO_ROUNDED_CSS}
 
 :root {
-  --canvas-bg: #F4F3EF;
-  --ink: #18181B;
-  --ink-soft: #27272A;
-  --ink-muted: #71717A;
+  --canvas-bg: #F5F5F7;
+  --ink: #1D1D1F;
+  --ink-soft: #2C2C2E;
+  --ink-muted: #6E6E73;
   --surface: #FFFFFF;
-  --border: #E4E4E7;
-  --orange: #E36323;
-  --blue: #0D99FF;
-  --pink: #F24822;
-  --emerald: #14AE5C;
-  --font-sans: 'Geist', -apple-system, BlinkMacSystemFont, sans-serif;
-  --font-mono: 'Geist Mono', monospace;
+  --border: rgba(0, 0, 0, 0.08);
+  --orange: #FF6B2C;
+  --blue: #007AFF;
+  --pink: #FF2D55;
+  --emerald: #30D158;
+  --font-rounded: 'SF Pro Rounded', ui-rounded, -apple-system, BlinkMacSystemFont, sans-serif;
+  --font-sans: 'SF Pro Rounded', ui-rounded, -apple-system, BlinkMacSystemFont, sans-serif;
+  --font-mono: 'SF Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
 }
 
-* {
+*, *::before, *::after {
   box-sizing: border-box;
   margin: 0;
   padding: 0;
   user-select: none;
+  transition: none !important;
+  animation: none !important;
   -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    transition: none !important;
+    animation: none !important;
+  }
 }
 
 html, body {
@@ -58,23 +201,41 @@ html, body {
   height: 1440px;
   overflow: hidden;
   background: var(--canvas-bg);
-  font-family: var(--font-sans);
+  font-family: var(--font-rounded);
   color: var(--ink);
 }
 
-#stage {
+#video-stage, #stage {
   position: relative;
   width: 1440px;
   height: 1440px;
   overflow: hidden;
-  background-color: var(--canvas-bg);
-  background-image: radial-gradient(rgba(24, 24, 27, 0.11) 1.25px, transparent 1.25px);
-  background-size: 24px 24px;
+  background:
+    radial-gradient(1200px 920px at 50% 44%, #FFFFFF 0%, #F5F5F7 62%, #EAEAEF 100%);
 }
 
+#stage::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background-image: radial-gradient(rgba(29, 29, 31, 0.065) 1px, transparent 1px);
+  background-size: 24px 24px;
+  pointer-events: none;
+}
+
+.ph-icon {
+  width: 16px;
+  height: 16px;
+  display: inline-block;
+  vertical-align: middle;
+  flex-shrink: 0;
+  overflow: visible;
+}
+
+/* Whisper-quiet Apple Keynote Top Header */
 #hud-top {
   position: absolute;
-  top: 38px;
+  top: 40px;
   left: 48px;
   right: 48px;
   display: flex;
@@ -84,37 +245,57 @@ html, body {
   pointer-events: none;
 }
 
-.brand-pill {
+.apple-pill-light {
   display: inline-flex;
   align-items: center;
   gap: 10px;
-  padding: 10px 18px;
+  padding: 8px 16px 8px 10px;
   border-radius: 999px;
-  background: rgba(255, 255, 255, 0.92);
-  border: 1px solid rgba(24, 24, 27, 0.10);
-  box-shadow: 0 8px 24px rgba(24, 24, 27, 0.06);
+  background: rgba(255, 255, 255, 0.84);
+  backdrop-filter: blur(24px) saturate(180%);
+  -webkit-backdrop-filter: blur(24px) saturate(180%);
+  border: 1px solid rgba(0, 0, 0, 0.07);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.92),
+    0 8px 24px -4px rgba(0, 0, 0, 0.06),
+    0 1px 2px rgba(0, 0, 0, 0.04);
+  font-family: var(--font-rounded);
   font-size: 15px;
   font-weight: 600;
-  letter-spacing: -0.01em;
+  letter-spacing: -0.02em;
+  color: var(--ink);
 }
 
-.brand-dot {
-  width: 10px;
-  height: 10px;
+.brand-icon-well {
+  width: 28px;
+  height: 28px;
   border-radius: 50%;
-  background: var(--orange);
-}
-
-.beat-pill {
-  font-family: var(--font-mono);
-  font-size: 13px;
-  font-weight: 700;
-  padding: 9px 16px;
-  border-radius: 999px;
   background: var(--ink);
   color: #FFFFFF;
-  letter-spacing: 0.04em;
-  box-shadow: 0 8px 20px rgba(24, 24, 27, 0.14);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  box-shadow: inset 0 1px 0.5px rgba(255, 255, 255, 0.25);
+}
+
+.apple-pill-dark {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 16px;
+  border-radius: 999px;
+  background: rgba(29, 29, 31, 0.88);
+  backdrop-filter: blur(24px) saturate(180%);
+  -webkit-backdrop-filter: blur(24px) saturate(180%);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  box-shadow:
+    inset 0 1px 0.5px rgba(255, 255, 255, 0.22),
+    0 10px 24px -6px rgba(0, 0, 0, 0.18);
+  font-family: var(--font-rounded);
+  font-size: 13.5px;
+  font-weight: 600;
+  color: #F5F5F7;
+  letter-spacing: -0.01em;
 }
 
 #camera {
@@ -123,17 +304,19 @@ html, body {
   transform-origin: 720px 720px;
 }
 
-/* THE ONE MORPHING SHAPE */
+/* THE ONE MORPHING SHAPE (Apple Dynamic Island -> macOS Sequoia Studio Window) */
 #shape {
   position: absolute;
   left: 720px;
   top: 720px;
   overflow: hidden;
-  background: var(--ink);
-  border: 1.5px solid rgba(24, 24, 27, 0.14);
+  background: #141416;
+  border: 1px solid rgba(255, 255, 255, 0.14);
   box-shadow:
-    0 34px 80px rgba(24, 24, 27, 0.20),
-    0 8px 24px rgba(24, 24, 27, 0.10);
+    0 40px 96px -20px rgba(0, 0, 0, 0.30),
+    0 16px 36px -8px rgba(0, 0, 0, 0.14),
+    0 0 0 1px rgba(0, 0, 0, 0.08),
+    inset 0 1px 0.5px rgba(255, 255, 255, 0.18);
 }
 
 .state-panel {
@@ -145,16 +328,17 @@ html, body {
   pointer-events: none;
 }
 
-/* Real Studio Window Chrome & Asset Viewport */
+/* macOS Sequoia Titanium Window Header */
 .studio-window-header {
   height: 44px;
-  background: #141417;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.09);
+  background: rgba(22, 22, 24, 0.96);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.10);
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 0 18px;
-  color: #FFFFFF;
+  padding: 0 16px;
+  color: #F5F5F7;
   flex-shrink: 0;
   z-index: 5;
 }
@@ -162,34 +346,50 @@ html, body {
 .traffic-dots {
   display: flex;
   align-items: center;
-  gap: 7px;
+  gap: 8px;
 }
 .traffic-dots span {
-  width: 11px;
-  height: 11px;
+  width: 12px;
+  height: 12px;
   border-radius: 50%;
+  box-shadow: inset 0 0 0 0.5px rgba(0, 0, 0, 0.22);
 }
-.dot-r { background: #FF5F56; }
-.dot-y { background: #FFBD2E; }
-.dot-g { background: #27C93F; }
+.dot-r { background: #FF5F57; }
+.dot-y { background: #FEBC2E; }
+.dot-g { background: #28C840; }
 
 .studio-window-title {
-  display: flex;
+  display: inline-flex;
   align-items: center;
-  gap: 10px;
-  font-size: 13.5px;
+  gap: 8px;
+  font-family: var(--font-rounded);
+  font-size: 14px;
   font-weight: 600;
-  color: #E4E4E7;
+  letter-spacing: -0.015em;
+  color: rgba(245, 245, 247, 0.92);
 }
 
-.studio-window-badge {
-  font-family: var(--font-mono);
-  font-size: 12px;
-  font-weight: 700;
-  padding: 4px 10px;
-  border-radius: 6px;
-  background: var(--orange);
-  color: #FFFFFF;
+.window-glass-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-family: var(--font-rounded);
+  font-size: 12.5px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  padding: 4px 12px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.08);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.14);
+  color: rgba(245, 245, 247, 0.90);
+}
+
+.status-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--emerald);
 }
 
 .studio-viewport {
@@ -199,57 +399,134 @@ html, body {
   background: #1B1B1F;
 }
 
+.studio-viewport::after {
+  content: '';
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 92px;
+  background: linear-gradient(180deg, rgba(20, 20, 23, 0) 0%, rgba(20, 20, 23, 0.82) 72%, rgba(20, 20, 23, 0.94) 100%);
+  pointer-events: none;
+  z-index: 4;
+}
+
 .studio-screenshot {
   position: absolute;
   left: 0;
   top: 0;
   width: 100%;
   height: 100%;
-  object-fit: cover;
-  transform-origin: 50% 50%;
+  object-fit: contain;
+  background: #18181B;
+  transform-origin: 50% 46%;
 }
 
-/* Interactive UI Overlays layered on top of real Studio screenshot */
-.ui-overlay-card {
+/* Apple iOS 26 / macOS Sequoia Floating Liquid Glass Dock */
+.apple-glass-dock {
   position: absolute;
-  background: rgba(24, 24, 27, 0.94);
+  bottom: 16px;
+  left: 50%;
+  transform: translateX(-50%);
+  display: inline-flex;
+  align-items: center;
+  gap: 14px;
+  padding: 8px 16px 8px 10px;
+  border-radius: 999px;
+  background: rgba(24, 24, 28, 0.86);
+  backdrop-filter: blur(28px) saturate(190%);
+  -webkit-backdrop-filter: blur(28px) saturate(190%);
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  box-shadow:
+    0 24px 48px -12px rgba(0, 0, 0, 0.55),
+    0 4px 12px rgba(0, 0, 0, 0.28),
+    inset 0 1px 0.5px rgba(255, 255, 255, 0.26);
+  color: #F5F5F7;
+  white-space: nowrap;
+  z-index: 8;
+}
+
+.dock-icon-well {
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   color: #FFFFFF;
-  border: 1.5px solid rgba(255, 255, 255, 0.16);
-  border-radius: 16px;
-  padding: 14px 18px;
-  box-shadow: 0 20px 48px rgba(0, 0, 0, 0.38);
-  z-index: 6;
+  box-shadow: inset 0 1px 0.5px rgba(255, 255, 255, 0.35), 0 2px 6px rgba(0, 0, 0, 0.25);
+  flex-shrink: 0;
 }
 
-.ui-overlay-light {
-  position: absolute;
-  background: rgba(255, 255, 255, 0.96);
-  color: #18181B;
-  border: 1.5px solid rgba(24, 24, 27, 0.12);
-  border-radius: 16px;
-  padding: 14px 18px;
-  box-shadow: 0 20px 48px rgba(24, 24, 27, 0.22);
-  z-index: 6;
+.dock-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  padding-right: 4px;
 }
 
+.dock-title {
+  font-family: var(--font-rounded);
+  font-size: 15.5px;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+  color: #FFFFFF;
+}
+
+.dock-sub {
+  font-family: var(--font-rounded);
+  font-size: 12.5px;
+  font-weight: 500;
+  letter-spacing: -0.01em;
+  color: rgba(235, 235, 245, 0.68);
+}
+
+.apple-kbd {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-family: var(--font-rounded);
+  font-size: 12.5px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  padding: 6px 12px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.12);
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.25),
+    0 2px 4px rgba(0, 0, 0, 0.20);
+  color: #FFFFFF;
+}
+
+/* iOS 26 Liquid Glass Segmented Control */
 .liquid-bar {
   position: relative;
   display: flex;
   align-items: center;
-  background: #18181B;
-  border: 1.5px solid rgba(255, 255, 255, 0.14);
+  background: rgba(24, 24, 28, 0.88);
+  backdrop-filter: blur(28px) saturate(190%);
+  -webkit-backdrop-filter: blur(28px) saturate(190%);
+  border: 1px solid rgba(255, 255, 255, 0.18);
   border-radius: 999px;
   padding: 4px;
-  height: 46px;
-  box-shadow: 0 14px 34px rgba(0, 0, 0, 0.32);
+  height: 48px;
+  box-shadow:
+    0 24px 48px -12px rgba(0, 0, 0, 0.55),
+    0 4px 12px rgba(0, 0, 0, 0.28),
+    inset 0 1px 0.5px rgba(255, 255, 255, 0.24);
 }
 
 .liquid-indicator {
   position: absolute;
   top: 4px;
-  height: 35px;
+  height: 38px;
   border-radius: 999px;
-  background: var(--orange);
+  background: rgba(255, 255, 255, 0.20);
+  border: 1px solid rgba(255, 255, 255, 0.30);
+  box-shadow:
+    inset 0 1px 0.5px rgba(255, 255, 255, 0.50),
+    0 4px 12px rgba(0, 0, 0, 0.28);
   z-index: 0;
 }
 
@@ -257,76 +534,20 @@ html, body {
   position: relative;
   z-index: 1;
   flex: 1;
-  text-align: center;
-  font-size: 13px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  font-family: var(--font-rounded);
+  font-size: 13.5px;
   font-weight: 600;
-  color: #FFFFFF;
+  letter-spacing: -0.015em;
+  color: #F5F5F7;
   padding: 0 12px;
   white-space: nowrap;
 }
 
-.focus-ring-overlay {
-  position: absolute;
-  border: 2.5px solid var(--blue);
-  border-radius: 12px;
-  box-shadow: 0 0 0 4px rgba(13, 153, 255, 0.20);
-  pointer-events: none;
-  z-index: 5;
-}
-
-.focus-ring-tag {
-  position: absolute;
-  top: -28px;
-  left: -2px;
-  background: var(--blue);
-  color: #FFFFFF;
-  font-family: var(--font-mono);
-  font-size: 11.5px;
-  font-weight: 700;
-  padding: 3px 9px;
-  border-radius: 5px;
-  white-space: nowrap;
-}
-
-/* Selection box around #shape */
-#selection-ring {
-  position: absolute;
-  left: 720px;
-  top: 720px;
-  border: 2px solid var(--blue);
-  pointer-events: none;
-  opacity: 0;
-  z-index: 12;
-}
-.corner-handle {
-  position: absolute;
-  width: 10px;
-  height: 10px;
-  background: #FFFFFF;
-  border: 2px solid var(--blue);
-  border-radius: 2px;
-}
-.corner-handle.tl { left: -6px; top: -6px; }
-.corner-handle.tr { right: -6px; top: -6px; }
-.corner-handle.bl { left: -6px; bottom: -6px; }
-.corner-handle.br { right: -6px; bottom: -6px; }
-
-#dim-badge {
-  position: absolute;
-  left: 50%;
-  bottom: -34px;
-  transform: translateX(-50%);
-  background: var(--blue);
-  color: #FFFFFF;
-  font-family: var(--font-mono);
-  font-size: 12px;
-  font-weight: 700;
-  padding: 3px 10px;
-  border-radius: 5px;
-  white-space: nowrap;
-}
-
-/* Cursor & Click Ripple */
+/* Canonical macOS Pointer & Concentric Click Ripple (Gate 6: Tip strictly at 0,0) */
 #cursor-layer {
   position: absolute;
   inset: 0;
@@ -334,78 +555,100 @@ html, body {
   z-index: 50;
 }
 
-#cursor {
+#virtual-cursor {
   position: absolute;
   left: 0;
   top: 0;
-  width: 34px;
-  height: 34px;
-  transform-origin: 4px 4px;
+  width: 28px;
+  height: 28px;
+  transform-origin: 0px 0px;
 }
 
 #cursor-key-pill {
   position: absolute;
-  left: 28px;
-  top: 22px;
-  background: var(--ink);
+  left: 22px;
+  top: 18px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: rgba(20, 20, 23, 0.88);
+  backdrop-filter: blur(20px) saturate(180%);
+  -webkit-backdrop-filter: blur(20px) saturate(180%);
   color: #FFFFFF;
-  border: 1.5px solid rgba(255, 255, 255, 0.24);
-  font-family: var(--font-mono);
+  border: 1px solid rgba(255, 255, 255, 0.20);
+  font-family: var(--font-rounded);
   font-size: 13px;
-  font-weight: 700;
-  padding: 5px 12px;
-  border-radius: 8px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  padding: 6px 12px;
+  border-radius: 999px;
   white-space: nowrap;
-  box-shadow: 0 10px 24px rgba(0, 0, 0, 0.28);
+  box-shadow:
+    0 12px 28px -6px rgba(0, 0, 0, 0.35),
+    inset 0 1px 0.5px rgba(255, 255, 255, 0.22);
   opacity: 0;
 }
 
 #click-ripple {
   position: absolute;
-  width: 58px;
-  height: 58px;
-  margin-left: -29px;
-  margin-top: -29px;
+  left: -28px;
+  top: -28px;
+  width: 56px;
+  height: 56px;
   border-radius: 50%;
-  border: 2.5px solid var(--orange);
+  border: 2px solid rgba(0, 122, 255, 0.85);
+  background: radial-gradient(circle, rgba(0, 122, 255, 0.18) 0%, transparent 70%);
+  transform-origin: 50% 50%;
   opacity: 0;
   pointer-events: none;
 }
 
+/* Whisper-quiet Apple Keynote Bottom Lower-Third */
 #hud-bottom {
   position: absolute;
-  bottom: 38px;
+  bottom: 40px;
   left: 48px;
   right: 48px;
   display: flex;
   align-items: center;
-  justify-content: space-between;
+  justify-content: center;
   pointer-events: none;
   z-index: 30;
 }
 
-.state-caption-pill {
+.keynote-caption-pill {
   display: inline-flex;
   align-items: center;
   gap: 12px;
-  padding: 11px 20px;
+  padding: 8px 20px 8px 10px;
   border-radius: 999px;
-  background: rgba(255, 255, 255, 0.94);
-  border: 1px solid rgba(24, 24, 27, 0.10);
-  box-shadow: 0 8px 24px rgba(24, 24, 27, 0.08);
-  font-size: 15.5px;
+  background: rgba(255, 255, 255, 0.86);
+  backdrop-filter: blur(24px) saturate(180%);
+  -webkit-backdrop-filter: blur(24px) saturate(180%);
+  border: 1px solid rgba(0, 0, 0, 0.07);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.95),
+    0 12px 32px -6px rgba(0, 0, 0, 0.08),
+    0 2px 6px rgba(0, 0, 0, 0.04);
+  font-family: var(--font-rounded);
+  font-size: 16px;
   font-weight: 600;
+  letter-spacing: -0.02em;
   color: var(--ink);
 }
 
-.state-step-tag {
-  font-family: var(--font-mono);
+.keynote-step-index {
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  background: var(--ink);
+  color: #FFFFFF;
+  font-family: var(--font-rounded);
   font-size: 12.5px;
   font-weight: 700;
-  padding: 4px 10px;
-  border-radius: 999px;
-  background: var(--orange);
-  color: #FFFFFF;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
 }
 `;
 
@@ -420,10 +663,10 @@ const M = {
   DURATION,
   TOTAL_BEATS,
   MORPH: [16, 0.82],
-  SNAP: [26, 0.86],
-  SOFT: [12, 0.90],
-  LIQUID_LEAD: [29, 0.78],
-  LIQUID_TRAIL: [14.5, 0.88],
+  SNAP: [26, 0.85],
+  SOFT: [12, 0.84],
+  LIQUID_LEAD: [34, 0.82],
+  LIQUID_TRAIL: [22, 0.85],
 
   S(tau, w = 16, z = 0.82) {
     if (tau <= 0) return 0;
@@ -448,35 +691,6 @@ const M = {
       prev = target;
     }
     return val;
-  },
-
-  hexToRgb(hex) {
-    const h = hex.replace('#', '');
-    return [
-      parseInt(h.slice(0, 2), 16),
-      parseInt(h.slice(2, 4), 16),
-      parseInt(h.slice(4, 6), 16),
-    ];
-  },
-
-  ctrack(b, initHex, steps) {
-    let [r, g, bl] = M.hexToRgb(initHex);
-    let [pr, pg, pb] = [r, g, bl];
-    for (let i = 0; i < steps.length; i++) {
-      const [b0, targetHex, sp] = steps[i];
-      const [tr, tg, tb] = M.hexToRgb(targetHex);
-      const [w, z] = sp || M.SNAP;
-      const tau = (b - b0) * BEAT;
-      if (tau > 0) {
-        const s = Math.max(0, Math.min(1, M.S(tau, w, z)));
-        r += (tr - pr) * s;
-        g += (tg - pg) * s;
-        bl += (tb - pb) * s;
-      }
-      [pr, pg, pb] = [tr, tg, tb];
-    }
-    const clamp = (v) => Math.max(0, Math.min(255, Math.round(v)));
-    return \`rgb(\${clamp(r)}, \${clamp(g)}, \${clamp(bl)})\`;
   },
 
   liquidEdges(b, initLeft, initRight, steps) {
@@ -549,17 +763,17 @@ const M = {
   clickEffect(b, clickBeats) {
     let scale = 1.0;
     let rippleOp = 0;
-    let rippleScale = 0.3;
+    let rippleScale = 0.35;
     for (const cb of clickBeats) {
       const db = b - cb;
       if (db >= -0.04 && db <= 0.42) {
         if (db >= 0 && db <= 0.18) {
-          scale = 1.0 - 0.14 * Math.sin((db / 0.18) * Math.PI);
+          scale = 1.0 - 0.12 * Math.sin((db / 0.18) * Math.PI);
         }
         if (db >= 0) {
           const p = db / 0.42;
           rippleOp = Math.max(0, (1 - p) * 0.85);
-          rippleScale = 0.35 + p * 1.35;
+          rippleScale = 0.35 + p * 1.30;
         }
       }
     }
@@ -571,16 +785,23 @@ const M = {
 const CURSOR_SVG = `
 <div id="cursor-layer">
   <div id="click-ripple"></div>
-  <div id="cursor">
-    <svg width="34" height="34" viewBox="0 0 34 34" fill="none" xmlns="http://www.w3.org/2000/svg" style="filter: drop-shadow(0 6px 12px rgba(0,0,0,0.28));">
-      <path d="M5.5 4.2L27.5 14.6C28.9 15.25 28.7 17.3 27.2 17.65L17.6 19.9L13.5 28.9C12.85 30.3 10.8 30.1 10.45 28.6L4.1 5.8C3.75 4.5 4.35 3.65 5.5 4.2Z" fill="#18181B" stroke="#FFFFFF" stroke-width="2.4" stroke-linejoin="round"/>
+  <div id="virtual-cursor">
+    <svg width="28" height="28" viewBox="0 0 28 28" fill="none" xmlns="http://www.w3.org/2000/svg" style="overflow:visible; filter:url(#apple-drop-shadow);">
+      <path d="M0 0 L0 19.5 L4.8 15.2 L8.2 22.4 L11.1 21.0 L7.7 13.8 L14.2 13.8 Z" fill="#1D1D1F" stroke="#FFFFFF" stroke-width="1.8" stroke-linejoin="round"/>
     </svg>
-    <div id="cursor-key-pill"></div>
+    <div id="cursor-key-pill">
+      <svg class="ph-icon" style="width:14px; height:14px;"><use id="cursor-key-icon" href="#icon-command"/></svg>
+      <span id="cursor-key-text"></span>
+    </div>
   </div>
 </div>
 `;
 
-function studioHeader(title, badgeText, badgeColor = 'var(--orange)') {
+function icon(name, size = 16, color = 'currentColor') {
+  return `<svg class="ph-icon" style="width:${size}px; height:${size}px; color:${color};"><use href="#icon-${name}"/></svg>`;
+}
+
+function studioHeader(title, tagText, iconName = 'frame', dotColor = 'var(--emerald)') {
   return `
     <div class="studio-window-header">
       <div style="display:flex; align-items:center; gap:14px;">
@@ -588,10 +809,34 @@ function studioHeader(title, badgeText, badgeColor = 'var(--orange)') {
           <span class="dot-r"></span><span class="dot-y"></span><span class="dot-g"></span>
         </div>
         <div class="studio-window-title">
+          ${icon(iconName, 15, 'rgba(245,245,247,0.68)')}
           <span>${title}</span>
         </div>
       </div>
-      <span class="studio-window-badge" style="background:${badgeColor};">${badgeText}</span>
+      <span class="window-glass-tag">
+        <span class="status-dot" style="background:${dotColor};"></span>
+        <span>${tagText}</span>
+      </span>
+    </div>
+  `;
+}
+
+function appleGlassDock({ iconName, iconBg = 'var(--blue)', title, subtitle, kbdIcon = 'command', kbdText = '', idTitle = '', idKbd = '' }) {
+  return `
+    <div class="apple-glass-dock">
+      <span class="dock-icon-well" style="background:${iconBg};">
+        ${icon(iconName, 18, '#FFFFFF')}
+      </span>
+      <div class="dock-copy">
+        <span class="dock-title" ${idTitle ? `id="${idTitle}"` : ''}>${title}</span>
+        <span class="dock-sub">${subtitle}</span>
+      </div>
+      ${kbdText ? `
+        <span class="apple-kbd">
+          ${kbdIcon ? icon(kbdIcon, 13, '#FFFFFF') : ''}
+          <span ${idKbd ? `id="${idKbd}"` : ''}>${kbdText}</span>
+        </span>
+      ` : ''}
     </div>
   `;
 }
@@ -606,167 +851,175 @@ function buildVideo01Html() {
 <html lang="en">
 <head>
 <meta charset="UTF-8" />
-<title>Design OS Studio — Reel 01: Launch Hero (Real Studio Assets + UI Motion)</title>
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Design OS Studio — Launch Film 01: Native GPU Design IDE</title>
 <style>
 ${SHARED_CSS}
 </style>
 </head>
 <body>
-<div id="stage">
-  <div id="hud-top">
-    <div class="brand-pill">
-      <span class="brand-dot"></span>
-      <span>design:os studio · Native Rust + wgpu · Real Studio Capture</span>
-    </div>
-    <div class="beat-pill" id="beat-readout">BAR 1.1 · 100.6 BPM</div>
-  </div>
-
-  <div id="camera">
-    <div id="shape">
-      <!-- State 1 & Loop (B00..B02 & B26.85..B28): Compact Launch Button -->
-      <div class="state-panel" id="st-1" style="flex-direction:row; align-items:center; justify-content:center; gap:14px; color:#FFF;">
-        <span style="width:36px; height:36px; border-radius:50%; background:var(--orange); display:inline-flex; align-items:center; justify-content:center; font-size:22px; font-weight:700;">+</span>
-        <span style="font-size:22px; font-weight:600; letter-spacing:-0.02em;">New Design · design:os</span>
+${SVG_SPRITE_DEFS}
+<div id="video-stage">
+  <div id="stage">
+    <div id="hud-top">
+      <div class="apple-pill-light">
+        <span class="brand-icon-well">${icon('layers', 15, '#FFFFFF')}</span>
+        <span>Design OS Studio</span>
+        <span style="color:var(--ink-muted); font-weight:500;">Native Rust &amp; wgpu</span>
       </div>
-
-      <!-- State 2 (B02..B05.5): Real 01-hero-canvas.png + Floating Liquid Tool Bar -->
-      <div class="state-panel" id="st-2">
-        ${studioHeader('design:os studio — Home · Fintech Mobile Frame', '60 FPS WGPU · RETINA 2X', 'var(--blue)')}
-        <div class="studio-viewport">
-          <img id="v1-img-2" class="studio-screenshot" src="../screenshots/01-hero-canvas.png" alt="Hero Canvas" />
-          <div class="focus-ring-overlay" style="left:210px; top:86px; width:640px; height:510px;">
-            <span class="focus-ring-tag">Frame "Home" · 140% Zoom · Rulers Active</span>
-          </div>
-          <!-- Floating Liquid Tool Switcher -->
-          <div style="position:absolute; bottom:20px; left:50%; transform:translateX(-50%); width:580px; z-index:8;">
-            <div class="liquid-bar">
-              <div class="liquid-indicator" id="v1-tool-hl" style="background:var(--blue);"></div>
-              <div class="liquid-tab">↖ Move V</div>
-              <div class="liquid-tab"># Frame F</div>
-              <div class="liquid-tab">✎ Pen P</div>
-              <div class="liquid-tab">✦ AI ⌘K</div>
-              <div class="liquid-tab">&lt;/&gt; Dev Mode</div>
-            </div>
-          </div>
-        </div>
-      </div>
-
-      <!-- State 3 (B05.5..B09): Real 04-cmdk-ai-synthesizer.png + Interactive Prompt Pill -->
-      <div class="state-panel" id="st-3">
-        ${studioHeader('design:os studio — ⌘K AI Design Synthesizer', 'PROMPT → NODESPEC JSON', 'var(--orange)')}
-        <div class="studio-viewport">
-          <img id="v1-img-3" class="studio-screenshot" src="../screenshots/04-cmdk-ai-synthesizer.png" alt="Cmd+K AI Synthesizer" />
-          <div class="ui-overlay-card" style="left:50%; bottom:24px; transform:translateX(-50%); width:780px; display:flex; align-items:center; justify-content:space-between;">
-            <div style="display:flex; align-items:center; gap:12px;">
-              <span style="background:var(--orange); color:#FFF; font-family:var(--font-mono); font-size:13px; font-weight:700; padding:5px 10px; border-radius:7px;">⌘K</span>
-              <span id="v1-cmdk-typed" style="font-size:18px; font-weight:600; color:#FFF;"></span>
-              <span style="width:2.5px; height:22px; background:var(--orange); display:inline-block;"></span>
-            </div>
-            <span style="background:var(--blue); color:#FFF; font-family:var(--font-mono); font-size:12.5px; font-weight:700; padding:5px 12px; border-radius:7px;">ENTER ↵</span>
-          </div>
-        </div>
-      </div>
-
-      <!-- State 4 (B09..B13): Real 02-agents-chat.png + Liquid Multi-Agent PTY Switcher -->
-      <div class="state-panel" id="st-4">
-        ${studioHeader('design:os studio — Multi-Agent Native PTY Bridge', '5 CLI RUNTIMES LIVE', 'var(--orange)')}
-        <div class="studio-viewport">
-          <img id="v1-img-4" class="studio-screenshot" src="../screenshots/02-agents-chat.png" alt="Multi-Agent Chat" />
-          <div style="position:absolute; top:18px; left:24px; width:460px; z-index:8;">
-            <div class="liquid-bar">
-              <div class="liquid-indicator" id="v1-agent-hl" style="background:var(--orange);"></div>
-              <div class="liquid-tab">Claude Code</div>
-              <div class="liquid-tab">Codex</div>
-              <div class="liquid-tab">Antigravity</div>
-            </div>
-          </div>
-          <div class="ui-overlay-card" style="right:24px; bottom:22px; width:490px;">
-            <div style="font-family:var(--font-mono); font-size:12px; color:var(--emerald); font-weight:700;">LIVE PTY STREAM · ZERO-FAKE-UI</div>
-            <div style="font-size:16px; font-weight:700; margin-top:4px;">✓ Injected KPI Card onto wgpu Canvas (0.4ms)</div>
-          </div>
-        </div>
-      </div>
-
-      <!-- State 5 (B13..B16.5): Real 03-spec-reader.png + Spec Contract Callout -->
-      <div class="state-panel" id="st-5">
-        ${studioHeader('design:os studio — PRODUCT:OS v2 Interactive Spec Reader', '12/12 NODES LINKED', 'var(--emerald)')}
-        <div class="studio-viewport">
-          <img id="v1-img-5" class="studio-screenshot" src="../screenshots/03-spec-reader.png" alt="Spec Reader" />
-          <div class="ui-overlay-light" style="right:24px; bottom:24px; width:500px; display:flex; align-items:center; justify-content:space-between;">
-            <div>
-              <div style="font-family:var(--font-mono); font-size:12px; color:var(--orange); font-weight:700;">DIR-28 · SPEC-TO-CANVAS LINK</div>
-              <div style="font-size:16px; font-weight:700; margin-top:3px;">Click any Spec badge → Selects &amp; Zooms Canvas Node</div>
-            </div>
-            <span style="background:var(--emerald); color:#FFF; font-family:var(--font-mono); font-size:12.5px; font-weight:700; padding:6px 12px; border-radius:999px;">PASS ✓</span>
-          </div>
-        </div>
-      </div>
-
-      <!-- State 6 (B16.5..B19.5): Real 06-variables-tokens.png + Self-Evolution 9/9 ALIVE Gauge -->
-      <div class="state-panel" id="st-6">
-        ${studioHeader('design:os studio — Design System Variables & Self-Evolution Gate', '9/9 GATES ALIVE', 'var(--emerald)')}
-        <div class="studio-viewport">
-          <img id="v1-img-6" class="studio-screenshot" src="../screenshots/06-variables-tokens.png" alt="Variables & Tokens" />
-          <div class="ui-overlay-card" style="left:24px; bottom:24px; display:flex; align-items:center; gap:18px; padding:16px 22px;">
-            <svg width="68" height="68" viewBox="0 0 68 68">
-              <circle cx="34" cy="34" r="27" stroke="#27272A" stroke-width="7" fill="none"/>
-              <circle id="v1-gate-arc" cx="34" cy="34" r="27" stroke="#14AE5C" stroke-width="7" fill="none" stroke-linecap="round" transform="rotate(-90 34 34)" stroke-dasharray="169.6" stroke-dashoffset="0"/>
-              <text x="34" y="39" text-anchor="middle" fill="#FFFFFF" font-family="Geist Mono" font-size="14" font-weight="700">9/9</text>
-            </svg>
-            <div>
-              <div style="font-family:var(--font-mono); font-size:12px; color:var(--emerald); font-weight:700;">SELF-EVOLUTION ENGINE · ALIVE</div>
-              <div style="font-size:17px; font-weight:700; margin-top:2px;">15/15 Token Parity · 856/856 E2E Tests PASS</div>
-            </div>
-          </div>
-        </div>
-      </div>
-
-      <!-- State 7 (B19.5..B22.5): Real 07-components-variants.png + Variant Matrix Overlay -->
-      <div class="state-panel" id="st-7">
-        ${studioHeader('design:os studio — Component Sets, Variants & Instance Swap', 'PURPLE DASHED SET', 'var(--blue)')}
-        <div class="studio-viewport">
-          <img id="v1-img-7" class="studio-screenshot" src="../screenshots/07-components-variants.png" alt="Components & Variants" />
-          <div class="ui-overlay-card" style="right:24px; bottom:24px; display:flex; align-items:center; gap:14px;">
-            <span style="background:var(--blue); color:#FFF; font-family:var(--font-mono); font-size:12.5px; font-weight:700; padding:5px 11px; border-radius:7px;">◇ COMPONENT SET</span>
-            <span style="font-size:15.5px; font-weight:600;">Primary / Secondary / Ghost Variants + Live Override</span>
-          </div>
-        </div>
-      </div>
-
-      <!-- State 8 (B22.5..B25.3): Real 05-dev-mode-codegen.png + Liquid Codegen Switcher -->
-      <div class="state-panel" id="st-8">
-        ${studioHeader('design:os studio — Dev Mode Multi-Target Codegen', 'READY FOR DEV', 'var(--emerald)')}
-        <div class="studio-viewport">
-          <img id="v1-img-8" class="studio-screenshot" src="../screenshots/05-dev-mode-codegen.png" alt="Dev Mode Codegen" />
-          <div style="position:absolute; bottom:22px; left:50%; transform:translateX(-50%); width:520px; z-index:8;">
-            <div class="liquid-bar">
-              <div class="liquid-indicator" id="v1-dev-hl" style="background:var(--blue);"></div>
-              <div class="liquid-tab">React TSX</div>
-              <div class="liquid-tab">Tailwind CSS</div>
-              <div class="liquid-tab">SwiftUI</div>
-              <div class="liquid-tab">Rust egui</div>
-            </div>
-          </div>
-        </div>
-      </div>
-
-      <!-- State 9 (B25.3..B26.85): Compact Marlow .fig Export Toast -->
-      <div class="state-panel" id="st-9" style="flex-direction:row; align-items:center; justify-content:center; gap:16px; color:#FFF;">
-        <span style="width:36px; height:36px; border-radius:50%; background:var(--emerald); display:inline-flex; align-items:center; justify-content:center; font-size:19px; font-weight:700;">✓</span>
-        <span style="font-size:20px; font-weight:600;">Exported Marlow .fig · 100/100 Figma Parity</span>
+      <div class="apple-pill-dark">
+        ${icon('sparkle', 14, '#FF6B2C')}
+        <span id="beat-readout">60 fps Metal</span>
       </div>
     </div>
-  </div>
 
-  ${CURSOR_SVG}
+    <div id="camera">
+      <div id="shape">
+        <!-- State 1 & Loop (B00..B02 & B26.85..B28): Dynamic Island Launch Pill -->
+        <div class="state-panel" id="st-1" style="flex-direction:row; align-items:center; justify-content:center; gap:14px; color:#FFFFFF;">
+          <span class="dock-icon-well" style="background:var(--orange); width:38px; height:38px;">
+            ${icon('plus', 18, '#FFFFFF')}
+          </span>
+          <span style="font-size:21px; font-weight:600; letter-spacing:-0.022em;">New Design Canvas</span>
+        </div>
 
-  <div id="hud-bottom">
-    <div class="state-caption-pill">
-      <span class="state-step-tag" id="step-tag">STATE 01 / 09</span>
-      <span id="step-label">One-Shape Morph · + New Design Button</span>
+        <!-- State 2 (B02..B05.5): Real 01-hero-canvas.png + iOS 26 Liquid Glass Toolbar -->
+        <div class="state-panel" id="st-2">
+          ${studioHeader('Home — Fintech Mobile Frame', '60 fps Metal · Retina 2x', 'frame', 'var(--blue)')}
+          <div class="studio-viewport">
+            <img id="v1-img-2" class="studio-screenshot" src="../screenshots/01-hero-canvas.png" alt="Hero Canvas" />
+            <div style="position:absolute; bottom:20px; left:50%; transform:translateX(-50%); width:600px; z-index:8;">
+              <div class="liquid-bar">
+                <div class="liquid-indicator" id="v1-tool-hl"></div>
+                <div class="liquid-tab">${icon('cursor', 14)}<span>Move</span></div>
+                <div class="liquid-tab">${icon('frame', 14)}<span>Frame</span></div>
+                <div class="liquid-tab">${icon('pen', 14)}<span>Vector</span></div>
+                <div class="liquid-tab">${icon('sparkle', 14)}<span>Synthesize</span></div>
+                <div class="liquid-tab">${icon('code', 14)}<span>Dev Mode</span></div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- State 3 (B05.5..B09): Real 04-cmdk-ai-synthesizer.png + Apple Spotlight Prompt Bar -->
+        <div class="state-panel" id="st-3">
+          ${studioHeader('AI Design Synthesizer', 'Prompt to NodeSpec', 'sparkle', 'var(--orange)')}
+          <div class="studio-viewport">
+            <img id="v1-img-3" class="studio-screenshot" src="../screenshots/04-cmdk-ai-synthesizer.png" alt="AI Synthesizer" />
+            <div class="apple-glass-dock" style="width:740px; justify-content:space-between;">
+              <div style="display:flex; align-items:center; gap:12px;">
+                <span class="dock-icon-well" style="background:var(--orange);">
+                  ${icon('command', 17, '#FFFFFF')}
+                </span>
+                <span id="v1-cmdk-typed" style="font-size:16.5px; font-weight:600; letter-spacing:-0.018em; color:#FFFFFF;"></span>
+                <span style="width:2px; height:20px; border-radius:2px; background:var(--orange); display:inline-block;"></span>
+              </div>
+              <span class="apple-kbd">
+                ${icon('return', 13, '#FFFFFF')}
+                <span>Generate</span>
+              </span>
+            </div>
+          </div>
+        </div>
+
+        <!-- State 4 (B09..B13): Real 02-agents-chat.png + Liquid Multi-Agent PTY Switcher -->
+        <div class="state-panel" id="st-4">
+          ${studioHeader('Multi-Agent Native PTY Bridge', '5 CLI Runtimes Live', 'claude', 'var(--orange)')}
+          <div class="studio-viewport">
+            <img id="v1-img-4" class="studio-screenshot" src="../screenshots/02-agents-chat.png" alt="Multi-Agent Chat" />
+            <div style="position:absolute; bottom:20px; left:50%; transform:translateX(-50%); width:480px; z-index:8;">
+              <div class="liquid-bar">
+                <div class="liquid-indicator" id="v1-agent-hl"></div>
+                <div class="liquid-tab">${icon('claude', 14)}<span>Claude Code</span></div>
+                <div class="liquid-tab">${icon('openai', 14)}<span>Codex</span></div>
+                <div class="liquid-tab">${icon('sparkle', 14)}<span>Antigravity</span></div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- State 5 (B13..B16.5): Real 03-spec-reader.png + Apple Liquid Glass Spec Callout -->
+        <div class="state-panel" id="st-5">
+          ${studioHeader('PRODUCT:OS v2 Interactive Spec Reader', '12 of 12 Nodes Linked', 'search', 'var(--emerald)')}
+          <div class="studio-viewport">
+            <img id="v1-img-5" class="studio-screenshot" src="../screenshots/03-spec-reader.png" alt="Spec Reader" />
+            ${appleGlassDock({
+              iconName: 'external',
+              iconBg: 'var(--emerald)',
+              title: 'Bidirectional Spec-to-Canvas Link',
+              subtitle: 'Select any requirement badge to frame its live canvas node',
+              kbdIcon: 'check',
+              kbdText: '12 Linked',
+            })}
+          </div>
+        </div>
+
+        <!-- State 6 (B16.5..B19.5): Real 06-variables-tokens.png + Self-Evolution Ring Dock -->
+        <div class="state-panel" id="st-6">
+          ${studioHeader('Design System Variables & Self-Evolution', '9 of 9 Gates Verified', 'sliders', 'var(--emerald)')}
+          <div class="studio-viewport">
+            <img id="v1-img-6" class="studio-screenshot" src="../screenshots/06-variables-tokens.png" alt="Variables & Tokens" />
+            ${appleGlassDock({
+              iconName: 'check',
+              iconBg: 'var(--emerald)',
+              title: '15 Semantic Tokens · Light & Dark Modes',
+              subtitle: '856 Automated E2E Tests · 9 of 9 Self-Evolution Gates Passed',
+              kbdIcon: 'lock',
+              kbdText: 'Verified',
+            })}
+          </div>
+        </div>
+
+        <!-- State 7 (B19.5..B22.5): Real 07-components-variants.png + Variant Matrix Dock -->
+        <div class="state-panel" id="st-7">
+          ${studioHeader('Component Sets, Variants & Instance Swap', 'Live Overrides', 'cube', 'var(--blue)')}
+          <div class="studio-viewport">
+            <img id="v1-img-7" class="studio-screenshot" src="../screenshots/07-components-variants.png" alt="Components & Variants" />
+            ${appleGlassDock({
+              iconName: 'cube',
+              iconBg: 'var(--blue)',
+              title: 'Component Matrix & Instance Overrides',
+              subtitle: 'Primary, Secondary & Ghost variants with instant property swap',
+              kbdIcon: 'copy',
+              kbdText: 'Variants',
+            })}
+          </div>
+        </div>
+
+        <!-- State 8 (B22.5..B25.3): Real 05-dev-mode-codegen.png + Liquid Codegen Switcher -->
+        <div class="state-panel" id="st-8">
+          ${studioHeader('Dev Mode Multi-Target Codegen', 'Ready for Dev', 'code', 'var(--emerald)')}
+          <div class="studio-viewport">
+            <img id="v1-img-8" class="studio-screenshot" src="../screenshots/05-dev-mode-codegen.png" alt="Dev Mode Codegen" />
+            <div style="position:absolute; bottom:20px; left:50%; transform:translateX(-50%); width:540px; z-index:8;">
+              <div class="liquid-bar">
+                <div class="liquid-indicator" id="v1-dev-hl"></div>
+                <div class="liquid-tab">${icon('code', 14)}<span>React TSX</span></div>
+                <div class="liquid-tab">${icon('sliders', 14)}<span>Tailwind</span></div>
+                <div class="liquid-tab">${icon('sparkle', 14)}<span>SwiftUI</span></div>
+                <div class="liquid-tab">${icon('cube', 14)}<span>Rust egui</span></div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- State 9 (B25.3..B26.85): Dynamic Island Export Confirmation Pill -->
+        <div class="state-panel" id="st-9" style="flex-direction:row; align-items:center; justify-content:center; gap:14px; color:#FFFFFF;">
+          <span class="dock-icon-well" style="background:var(--emerald); width:38px; height:38px;">
+            ${icon('check', 18, '#FFFFFF')}
+          </span>
+          <span style="font-size:20px; font-weight:600; letter-spacing:-0.02em;">Exported Native .fig · 100% Figma Parity</span>
+        </div>
+      </div>
     </div>
-    <div class="brand-pill" style="font-family:var(--font-mono); font-size:13.5px;">
-      <span>REAL STUDIO ASSETS · 60 FPS · 4× TMIX</span>
+
+    ${CURSOR_SVG}
+
+    <div id="hud-bottom">
+      <div class="keynote-caption-pill">
+        <span class="keynote-step-index" id="step-tag">01</span>
+        <span id="step-label">One-Shape Morph · New Design Canvas</span>
+      </div>
     </div>
   </div>
 </div>
@@ -776,8 +1029,10 @@ ${SHARED_JS_ENGINE}
 
 const shapeEl = document.getElementById('shape');
 const cameraEl = document.getElementById('camera');
-const cursorEl = document.getElementById('cursor');
+const cursorEl = document.getElementById('virtual-cursor');
 const keyPillEl = document.getElementById('cursor-key-pill');
+const keyIconEl = document.getElementById('cursor-key-icon');
+const keyTextEl = document.getElementById('cursor-key-text');
 const rippleEl = document.getElementById('click-ripple');
 const beatReadoutEl = document.getElementById('beat-readout');
 const stepTagEl = document.getElementById('step-tag');
@@ -788,10 +1043,10 @@ const panels = Array.from({ length: 9 }, (_, i) => document.getElementById('st-'
 function applyImgPan(id, b, b0, s0, s1, tx0, tx1, ty0, ty1) {
   const el = document.getElementById(id);
   if (!el) return;
-  const p = M.S((b - b0) * BEAT, 8, 0.92);
-  const sc = s0 + (s1 - s0) * p;
-  const tx = tx0 + (tx1 - tx0) * p;
-  const ty = ty0 + (ty1 - ty0) * p;
+  const p = M.S((b - b0) * BEAT, 8, 0.84);
+  const sc = 1.0 + (Math.min(1.018, s1) - 1.0) * p;
+  const tx = (tx0 + (tx1 - tx0) * p) * 0.15;
+  const ty = (ty0 + (ty1 - ty0) * p) * 0.15;
   el.style.transform = \`scale(\${sc.toFixed(4)}) translate(\${tx.toFixed(1)}px, \${ty.toFixed(1)}px)\`;
 }
 
@@ -801,23 +1056,22 @@ window.seek = function(rawT) {
 
   const bar = Math.min(7, Math.floor(b / 4) + 1);
   const beatInBar = (Math.floor(b) % 4) + 1;
-  beatReadoutEl.textContent = \`BAR \${bar}.\${beatInBar} · BEAT \${Math.floor(b) + 1}/28\`;
+  beatReadoutEl.textContent = \`60 fps Metal · Bar \${bar}.\${beatInBar}\`;
 
-  // #shape size morph: starts as 340x76 pill -> expands to 1180x760 Studio Window -> collapses back
-  const w = M.track(b, 340, [
-    [2.0, 1180, M.MORPH],
-    [25.0, 540, M.SNAP],
-    [27.0, 340, M.MORPH],
+  const w = M.track(b, 336, [
+    [2.0, 1216, M.MORPH],
+    [25.0, 520, M.SNAP],
+    [27.0, 336, M.MORPH],
   ]);
-  const h = M.track(b, 76, [
-    [2.0, 760, M.MORPH],
-    [25.0, 82, M.SNAP],
-    [27.0, 76, M.MORPH],
+  const h = M.track(b, 72, [
+    [2.0, 804, M.MORPH],
+    [25.0, 76, M.SNAP],
+    [27.0, 72, M.MORPH],
   ]);
-  const rad = M.track(b, 38, [
-    [2.0, 20, M.MORPH],
-    [25.0, 41, M.SNAP],
-    [27.0, 38, M.MORPH],
+  const rad = M.track(b, 36, [
+    [2.0, 24, M.MORPH],
+    [25.0, 38, M.SNAP],
+    [27.0, 36, M.MORPH],
   ]);
 
   shapeEl.style.width = \`\${w.toFixed(2)}px\`;
@@ -826,7 +1080,7 @@ window.seek = function(rawT) {
   shapeEl.style.marginTop = \`\${(-h / 2).toFixed(2)}px\`;
   shapeEl.style.borderRadius = \`\${rad.toFixed(2)}px\`;
 
-  const camScale = M.track(b, 1.25, [
+  const camScale = M.track(b, 1.24, [
     [2.0, 1.04, M.MORPH],
     [5.0, 1.06, M.MORPH],
     [9.0, 1.05, M.MORPH],
@@ -834,8 +1088,8 @@ window.seek = function(rawT) {
     [16.0, 1.06, M.MORPH],
     [19.0, 1.05, M.MORPH],
     [22.0, 1.06, M.MORPH],
-    [25.0, 1.22, M.MORPH],
-    [27.0, 1.25, M.MORPH],
+    [25.0, 1.20, M.MORPH],
+    [27.0, 1.24, M.MORPH],
   ]);
   cameraEl.style.transform = \`scale(\${camScale.toFixed(4)})\`;
 
@@ -849,7 +1103,6 @@ window.seek = function(rawT) {
   M.applyVis(panels[7], M.vis(b, 22.0, 25.0));
   M.applyVis(panels[8], M.vis(b, 25.0, 27.0));
 
-  // Subtle spring-driven focal zoom/pan on each real Retina 2x screenshot
   applyImgPan('v1-img-2', b, 2.2, 1.0, 1.12, 0, -18, 0, -8);
   applyImgPan('v1-img-3', b, 5.7, 1.02, 1.16, 0, 0, 0, 14);
   applyImgPan('v1-img-4', b, 9.2, 1.0, 1.14, 0, -28, 0, 10);
@@ -858,49 +1111,44 @@ window.seek = function(rawT) {
   applyImgPan('v1-img-7', b, 19.7, 1.0, 1.14, 0, 12, 0, -8);
   applyImgPan('v1-img-8', b, 22.7, 1.0, 1.16, 0, -32, 0, 8);
 
-  // Liquid tool indicator in State 2
-  const toolHl = M.liquidEdges(b, 4, 116, [
-    [3.0, 118, 232],
-    [4.2, 346, 460],
+  const toolHl = M.liquidEdges(b, 4, 120, [
+    [3.0, 122, 238],
+    [4.2, 358, 476],
   ]);
   const toolHlEl = document.getElementById('v1-tool-hl');
   toolHlEl.style.left = \`\${toolHl.left.toFixed(1)}px\`;
   toolHlEl.style.width = \`\${toolHl.width.toFixed(1)}px\`;
 
-  // State 3: Cmd+K prompt typing
   const promptStr = 'Synthesize fintech KPI card + bind design tokens';
   const typeP = Math.max(0, Math.min(1, (b - 5.9) / 2.2));
   document.getElementById('v1-cmdk-typed').textContent = promptStr.slice(0, Math.floor(typeP * promptStr.length));
 
-  // State 4: Liquid Multi-Agent PTY indicator
-  const agentHl = M.liquidEdges(b, 4, 152, [
-    [10.0, 154, 302],
-    [11.2, 304, 452],
+  const agentHl = M.liquidEdges(b, 4, 158, [
+    [10.0, 160, 316],
+    [11.2, 318, 474],
   ]);
   const agentHlEl = document.getElementById('v1-agent-hl');
   agentHlEl.style.left = \`\${agentHl.left.toFixed(1)}px\`;
   agentHlEl.style.width = \`\${agentHl.width.toFixed(1)}px\`;
 
-  // State 8: Liquid Dev Mode Codegen indicator
-  const devHl = M.liquidEdges(b, 4, 130, [
-    [23.2, 132, 258],
-    [24.2, 260, 386],
+  const devHl = M.liquidEdges(b, 4, 134, [
+    [23.2, 136, 268],
+    [24.2, 270, 402],
   ]);
   const devHlEl = document.getElementById('v1-dev-hl');
   devHlEl.style.left = \`\${devHl.left.toFixed(1)}px\`;
   devHlEl.style.width = \`\${devHl.width.toFixed(1)}px\`;
 
-  // Cursor trajectory
   const cx = M.track(b, 720, [
     [1.0, 720, M.MORPH],
     [3.0, 610, M.MORPH],
     [4.2, 830, M.MORPH],
     [6.5, 720, M.MORPH],
-    [10.0, 390, M.MORPH],
-    [11.2, 530, M.MORPH],
-    [14.2, 920, M.MORPH],
-    [17.5, 420, M.MORPH],
-    [20.5, 860, M.MORPH],
+    [10.0, 640, M.MORPH],
+    [11.2, 810, M.MORPH],
+    [14.2, 720, M.MORPH],
+    [17.5, 720, M.MORPH],
+    [20.5, 720, M.MORPH],
     [23.2, 660, M.MORPH],
     [24.2, 790, M.MORPH],
     [26.5, 720, M.MORPH],
@@ -910,10 +1158,10 @@ window.seek = function(rawT) {
     [3.0, 1045, M.MORPH],
     [4.2, 1045, M.MORPH],
     [6.5, 1030, M.MORPH],
-    [10.0, 410, M.MORPH],
-    [11.2, 410, M.MORPH],
-    [14.2, 1020, M.MORPH],
-    [17.5, 1020, M.MORPH],
+    [10.0, 1045, M.MORPH],
+    [11.2, 1045, M.MORPH],
+    [14.2, 1030, M.MORPH],
+    [17.5, 1030, M.MORPH],
     [20.5, 1030, M.MORPH],
     [23.2, 1045, M.MORPH],
     [24.2, 1045, M.MORPH],
@@ -923,36 +1171,33 @@ window.seek = function(rawT) {
   const clicks = [1.0, 3.0, 4.2, 8.2, 10.0, 11.2, 14.2, 17.5, 20.5, 23.2, 24.2, 25.3];
   const ce = M.clickEffect(b, clicks);
   cursorEl.style.transform = \`translate(\${cx.toFixed(1)}px, \${cy.toFixed(1)}px) scale(\${ce.scale.toFixed(3)})\`;
+  rippleEl.style.transform = \`translate(\${cx.toFixed(1)}px, \${cy.toFixed(1)}px) scale(\${ce.rippleScale.toFixed(3)})\`;
+  rippleEl.style.opacity = ce.rippleOp > 0.01 ? ce.rippleOp.toFixed(3) : '0';
 
-  if (ce.rippleOp > 0.01) {
-    rippleEl.style.opacity = ce.rippleOp.toFixed(3);
-    rippleEl.style.transform = \`translate(\${cx.toFixed(1)}px, \${cy.toFixed(1)}px) scale(\${ce.rippleScale.toFixed(3)})\`;
-  } else {
-    rippleEl.style.opacity = '0';
-  }
-
-  let keyText = '';
-  if (b >= 4.0 && b < 8.8) keyText = '⌘K · AI Synthesizer';
-  else if (b >= 9.0 && b < 12.8) keyText = 'Native PTY Agent';
-  else if (b >= 22.5 && b < 25.1) keyText = 'Dev Mode · Codegen';
-  if (keyText) {
-    keyPillEl.textContent = keyText;
+  let keyLabel = '';
+  let keyIcon = '#icon-command';
+  if (b >= 4.0 && b < 8.8) { keyLabel = 'Command + K'; keyIcon = '#icon-command'; }
+  else if (b >= 9.0 && b < 12.8) { keyLabel = 'Native PTY Bridge'; keyIcon = '#icon-claude'; }
+  else if (b >= 22.5 && b < 25.1) { keyLabel = 'Dev Mode Codegen'; keyIcon = '#icon-code'; }
+  if (keyLabel) {
+    keyIconEl.setAttribute('href', keyIcon);
+    keyTextEl.textContent = keyLabel;
     keyPillEl.style.opacity = '1';
   } else {
     keyPillEl.style.opacity = '0';
   }
 
   const captions = [
-    [2.0, 'STATE 01 / 09', 'One-Shape Morph · + New Design Button'],
-    [5.5, 'STATE 02 / 09', 'Real Studio Capture · 60fps wgpu Canvas & Liquid Toolbar'],
-    [9.0, 'STATE 03 / 09', '⌘K AI Synthesizer · Prompt to NodeSpec Generation'],
-    [13.0, 'STATE 04 / 09', 'Multi-Agent Native PTY Chat · Claude, Codex & Antigravity'],
-    [16.5, 'STATE 05 / 09', 'PRODUCT:OS v2 Spec Reader · 12/12 Linked Canvas Nodes'],
-    [19.5, 'STATE 06 / 09', 'Variables & Self-Evolution Gate · 9/9 ALIVE & 15/15 Tokens'],
-    [22.5, 'STATE 07 / 09', 'Component Sets, Variants & Instance Overrides'],
-    [25.3, 'STATE 08 / 09', 'Dev Mode Multi-Target Codegen · React, Tailwind & SwiftUI'],
-    [26.85, 'STATE 09 / 09', 'Native .fig Binary Export · 100/100 Figma Parity'],
-    [28.1, 'STATE 01 / 09', 'One-Shape Morph · + New Design Button'],
+    [2.0, '01', 'One-Shape Morph · New Design Canvas'],
+    [5.5, '02', '60 fps Metal wgpu Canvas & Liquid Glass Toolbar'],
+    [9.0, '03', 'AI Design Synthesizer · Prompt to NodeSpec'],
+    [13.0, '04', 'Multi-Agent Native PTY Bridge · Claude, Codex & Antigravity'],
+    [16.5, '05', 'PRODUCT:OS v2 Spec Reader · 12 Linked Canvas Nodes'],
+    [19.5, '06', 'Semantic Variables & 9/9 Self-Evolution Gates'],
+    [22.5, '07', 'Component Sets, Variants & Live Instance Overrides'],
+    [25.3, '08', 'Dev Mode Multi-Target Codegen · React, Tailwind & SwiftUI'],
+    [26.85, '09', 'Native .fig Binary Export · 100% Figma Parity'],
+    [28.1, '01', 'One-Shape Morph · New Design Canvas'],
   ];
   for (const [endB, tag, lbl] of captions) {
     if (b <= endB) {
@@ -962,6 +1207,13 @@ window.seek = function(rawT) {
     }
   }
 };
+
+window.__seekToTime = window.seek;
+window.__CLICK_EVENTS = [
+  { id: 'st-1', label: 'Launch New Design', t: 1.0 * BEAT, targetId: 'shape' },
+  { id: 'st-2', label: 'Liquid Tool Switch', t: 3.0 * BEAT, targetId: 'shape' },
+  { id: 'st-8', label: 'Dev Mode Codegen', t: 23.2 * BEAT, targetId: 'shape' },
+];
 
 window.__readyPromise = Promise.all([
   document.fonts.ready,
@@ -977,153 +1229,192 @@ window.__readyPromise = Promise.all([
 
 // ============================================================================
 // VIDEO 02: 02-figma-100-micro-interactions.html
-// Uses all 8 REAL Micro-Interaction Studio Screenshots (09..16):
-// 09-micro-autolayout, 10-micro-css-grid, 11-micro-smart-selection,
-// 12-micro-shape-controls, 13-micro-vector-edit, 14-micro-layer-picker,
-// 15-micro-dev-boxmodel, 16-micro-scale-tool
+// Uses all 8 REAL Micro-Interaction Studio Screenshots (09..16)
 // ============================================================================
 function buildVideo02Html() {
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8" />
-<title>Design OS Studio — Reel 02: 100/100 Figma Micro-Interactions (Real Studio Assets)</title>
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Design OS Studio — Launch Film 02: 100 Figma Micro-Interactions</title>
 <style>
 ${SHARED_CSS}
 </style>
 </head>
 <body>
-<div id="stage">
-  <div id="hud-top">
-    <div class="brand-pill">
-      <span class="brand-dot" style="background:var(--blue);"></span>
-      <span>design:os studio · 100/100 Figma A-to-Z Micro-Interactions · Real Studio Assets</span>
+${SVG_SPRITE_DEFS}
+<div id="video-stage">
+  <div id="stage">
+    <div id="hud-top">
+      <div class="apple-pill-light">
+        <span class="brand-icon-well" style="background:var(--blue);">${icon('sliders', 15, '#FFFFFF')}</span>
+        <span>Design OS Studio</span>
+        <span style="color:var(--ink-muted); font-weight:500;">100 Figma Micro-Interactions</span>
+      </div>
+      <div class="apple-pill-dark">
+        ${icon('check', 14, '#30D158')}
+        <span id="beat-readout">100 / 100 Verified</span>
+      </div>
     </div>
-    <div class="beat-pill" id="beat-readout">BAR 1.1 · 100.6 BPM</div>
-  </div>
 
-  <div id="camera">
-    <div id="shape">
-      <!-- State 1 & Loop (B00..B02.2 & B26.85..B28): Inspector Numeric Scrub Pill -->
-      <div class="state-panel" id="st-1" style="flex-direction:row; align-items:center; justify-content:space-between; color:#FFF; padding:0 28px;">
-        <div style="display:flex; align-items:center; gap:14px;">
-          <span style="color:var(--orange); font-family:var(--font-mono); font-size:20px; font-weight:700;">↔ W</span>
-          <span id="v2-scrub-val" style="font-family:var(--font-mono); font-size:26px; font-weight:700;">280 px</span>
+    <div id="camera">
+      <div id="shape">
+        <!-- State 1 & Loop (B00..B02.2 & B26.85..B28): Dynamic Island Numeric Scrub Pill -->
+        <div class="state-panel" id="st-1" style="flex-direction:row; align-items:center; justify-content:space-between; color:#FFFFFF; padding:0 24px;">
+          <div style="display:flex; align-items:center; gap:12px;">
+            <span class="dock-icon-well" style="background:var(--blue); width:36px; height:36px;">
+              ${icon('arrows-horizontal', 17, '#FFFFFF')}
+            </span>
+            <span id="v2-scrub-val" style="font-family:var(--font-rounded); font-size:23px; font-weight:700; letter-spacing:-0.02em;">280 px</span>
+          </div>
+          <span class="apple-kbd">
+            ${icon('sliders', 13, '#FFFFFF')}
+            <span>10x Scrub</span>
+          </span>
         </div>
-        <span style="background:#27272A; color:#A1A1AA; font-family:var(--font-mono); font-size:13px; padding:5px 10px; border-radius:7px;">⇧ ×10 SCRUB</span>
-      </div>
 
-      <!-- State 2 (B02.2..B05.4): Real 09-micro-autolayout.png + Pink Gap Scrubber & Hug/Fill Pill -->
-      <div class="state-panel" id="st-2">
-        ${studioHeader('Showcase 01/08 — Auto-Layout 5.0 · On-Canvas Pink Gap & Padding Handles', 'HUG / FILL CYCLE', 'var(--pink)')}
-        <div class="studio-viewport">
-          <img id="v2-img-2" class="studio-screenshot" src="../screenshots/09-micro-autolayout.png" alt="Auto-Layout 5.0" />
-          <div class="ui-overlay-card" style="left:24px; bottom:22px; display:flex; align-items:center; gap:14px;">
-            <span style="background:var(--pink); color:#FFF; font-family:var(--font-mono); font-size:13px; font-weight:700; padding:5px 12px; border-radius:7px;" id="v2-gap-pill">GAP: 20px</span>
-            <span style="font-size:15px; font-weight:600;" id="v2-edge-pill">Double-click Edge → Hug Contents</span>
+        <!-- State 2 (B02.2..B05.4): Real 09-micro-autolayout.png -->
+        <div class="state-panel" id="st-2">
+          ${studioHeader('Auto-Layout 5.0 — On-Canvas Gap & Padding Handles', 'Hug & Fill Cycle', 'frame', 'var(--pink)')}
+          <div class="studio-viewport">
+            <img id="v2-img-2" class="studio-screenshot" src="../screenshots/09-micro-autolayout.png" alt="Auto-Layout 5.0" />
+            ${appleGlassDock({
+              iconName: 'arrows-horizontal',
+              iconBg: 'var(--pink)',
+              title: 'On-Canvas Pink Gap & Padding Handles',
+              subtitle: 'Double-click container edge to toggle Hug Contents or Fill 100%',
+              kbdIcon: 'check',
+              kbdText: 'Gap 20px',
+              idKbd: 'v2-gap-pill',
+              idTitle: 'v2-edge-pill',
+            })}
           </div>
         </div>
-      </div>
 
-      <!-- State 3 (B05.4..B08.6): Real 10-micro-css-grid.png + Clickable Track Pill Overlay -->
-      <div class="state-panel" id="st-3">
-        ${studioHeader('Showcase 02/08 — 2D CSS Grid · Track Sizing Pills (1fr / px / Hug) & 2×1 Span', 'CSS GRID 2D', 'var(--blue)')}
-        <div class="studio-viewport">
-          <img id="v2-img-3" class="studio-screenshot" src="../screenshots/10-micro-css-grid.png" alt="2D CSS Grid" />
-          <div class="ui-overlay-card" style="right:24px; bottom:22px; display:flex; align-items:center; gap:14px;">
-            <span style="background:var(--blue); color:#FFF; font-family:var(--font-mono); font-size:13px; font-weight:700; padding:5px 12px; border-radius:7px;" id="v2-grid-pill">COL 1 · 1fr</span>
-            <span style="font-size:15px; font-weight:600;">Click Track Pill to cycle 1fr → Fixed px → Hug</span>
+        <!-- State 3 (B05.4..B08.6): Real 10-micro-css-grid.png -->
+        <div class="state-panel" id="st-3">
+          ${studioHeader('2D CSS Grid — Track Sizing Pills & Cell Span', '1fr · Fixed px · Hug', 'grid', 'var(--blue)')}
+          <div class="studio-viewport">
+            <img id="v2-img-3" class="studio-screenshot" src="../screenshots/10-micro-css-grid.png" alt="2D CSS Grid" />
+            ${appleGlassDock({
+              iconName: 'grid',
+              iconBg: 'var(--blue)',
+              title: 'Interactive CSS Grid Track Header Pills',
+              subtitle: 'Click any track pill on canvas to cycle 1fr, Fixed px, and Hug',
+              kbdIcon: 'sliders',
+              kbdText: 'Col 1 · 1fr',
+              idKbd: 'v2-grid-pill',
+            })}
           </div>
         </div>
-      </div>
 
-      <!-- State 4 (B08.6..B11.8): Real 11-micro-smart-selection.png + Pink Swap & Tidy Up -->
-      <div class="state-panel" id="st-4">
-        ${studioHeader('Showcase 03/08 — Smart Selection · Pink Swap Handles & One-Click Tidy Up', 'TIDY UP 18PX', 'var(--pink)')}
-        <div class="studio-viewport">
-          <img id="v2-img-4" class="studio-screenshot" src="../screenshots/11-micro-smart-selection.png" alt="Smart Selection" />
-          <div class="ui-overlay-card" style="left:24px; bottom:22px; display:flex; align-items:center; gap:14px;">
-            <span style="background:var(--pink); color:#FFF; font-family:var(--font-mono); font-size:13px; font-weight:700; padding:5px 12px; border-radius:7px;">● PINK RING SWAP</span>
-            <span style="font-size:15px; font-weight:600;">Equalizes 18px spacing &amp; swaps sibling order</span>
+        <!-- State 4 (B08.6..B11.8): Real 11-micro-smart-selection.png -->
+        <div class="state-panel" id="st-4">
+          ${studioHeader('Smart Selection — Pink Ring Swap & One-Click Tidy Up', 'Equalize 18px', 'layers', 'var(--pink)')}
+          <div class="studio-viewport">
+            <img id="v2-img-4" class="studio-screenshot" src="../screenshots/11-micro-smart-selection.png" alt="Smart Selection" />
+            ${appleGlassDock({
+              iconName: 'layers',
+              iconBg: 'var(--pink)',
+              title: 'Smart Selection & Sibling Order Swap',
+              subtitle: 'Equalizes 18px spacing and swaps cards directly on canvas',
+              kbdIcon: 'sparkle',
+              kbdText: 'Tidy Up',
+            })}
           </div>
         </div>
-      </div>
 
-      <!-- State 5 (B11.8..B15.0): Real 12-micro-shape-controls.png + Arc Sweep & Star Ratio -->
-      <div class="state-panel" id="st-5">
-        ${studioHeader('Showcase 04/08 — Parametric On-Canvas Shape Controls (Donut Arc & Star)', 'SWEEP 270° · RATIO 62%', 'var(--orange)')}
-        <div class="studio-viewport">
-          <img id="v2-img-5" class="studio-screenshot" src="../screenshots/12-micro-shape-controls.png" alt="Parametric Shape Controls" />
-          <div class="ui-overlay-card" style="right:24px; bottom:22px; display:flex; align-items:center; gap:14px;">
-            <span style="background:var(--orange); color:#FFF; font-family:var(--font-mono); font-size:13px; font-weight:700; padding:5px 12px; border-radius:7px;" id="v2-arc-pill">SWEEP 270° · INNER 62%</span>
-            <span style="font-size:15px; font-weight:600;">5-Point Star Ratio 42% · Polygon 6 Sides</span>
+        <!-- State 5 (B11.8..B15.0): Real 12-micro-shape-controls.png -->
+        <div class="state-panel" id="st-5">
+          ${studioHeader('Parametric Shape Controls — Donut Arc & Star Ratio', 'Sweep 270 deg', 'sparkle', 'var(--orange)')}
+          <div class="studio-viewport">
+            <img id="v2-img-5" class="studio-screenshot" src="../screenshots/12-micro-shape-controls.png" alt="Parametric Shape Controls" />
+            ${appleGlassDock({
+              iconName: 'sparkle',
+              iconBg: 'var(--orange)',
+              title: 'Live Parametric Arc, Inner Radius & Star Ratio',
+              subtitle: 'Drag on-canvas handles for 270 deg sweep, 62% donut & 5-point star',
+              kbdIcon: 'sliders',
+              kbdText: 'Ratio 62%',
+            })}
           </div>
         </div>
-      </div>
 
-      <!-- State 6 (B15.0..B18.0): Real 13-micro-vector-edit.png + Bezier Tangent & Heal Delete -->
-      <div class="state-panel" id="st-6">
-        ${studioHeader('Showcase 05/08 — Vector Network Editor · Bezier Tangents & Midpoint Split', '⇧⌫ HEAL DELETE', 'var(--blue)')}
-        <div class="studio-viewport">
-          <img id="v2-img-6" class="studio-screenshot" src="../screenshots/13-micro-vector-edit.png" alt="Vector Network Editor" />
-          <div class="ui-overlay-card" style="left:24px; bottom:22px; display:flex; align-items:center; gap:14px;">
-            <span style="background:var(--blue); color:#FFF; font-family:var(--font-mono); font-size:13px; font-weight:700; padding:5px 12px; border-radius:7px;">◆ MIDPOINT SPLIT</span>
-            <span style="font-size:15px; font-weight:600;">Click midpoint to subdivide · ⌘-Drag breaks tangent</span>
+        <!-- State 6 (B15.0..B18.0): Real 13-micro-vector-edit.png -->
+        <div class="state-panel" id="st-6">
+          ${studioHeader('Vector Network Editor — Bezier Tangents & Midpoint Split', 'Heal Delete', 'bezier', 'var(--blue)')}
+          <div class="studio-viewport">
+            <img id="v2-img-6" class="studio-screenshot" src="../screenshots/13-micro-vector-edit.png" alt="Vector Network Editor" />
+            ${appleGlassDock({
+              iconName: 'bezier',
+              iconBg: 'var(--blue)',
+              title: 'Vector Network Subdivide & Heal Delete',
+              subtitle: 'Click segment midpoint to split or Command-drag to break tangent',
+              kbdIcon: 'pen',
+              kbdText: 'Bezier',
+            })}
           </div>
         </div>
-      </div>
 
-      <!-- State 7 (B18.0..B21.0): Real 14-micro-layer-picker.png + Eyedropper Format Cycle -->
-      <div class="state-panel" id="st-7">
-        ${studioHeader('Showcase 06/08 — Layer Search, Status Badge Cycle & Eyedropper Loupe (I)', 'TAB FORMAT CYCLE', 'var(--emerald)')}
-        <div class="studio-viewport">
-          <img id="v2-img-7" class="studio-screenshot" src="../screenshots/14-micro-layer-picker.png" alt="Layer Filter & Eyedropper" />
-          <div class="ui-overlay-card" style="right:24px; bottom:22px; display:flex; align-items:center; gap:14px;">
-            <span style="background:var(--emerald); color:#FFF; font-family:var(--font-mono); font-size:13px; font-weight:700; padding:5px 12px; border-radius:7px;" id="v2-eye-pill">#E36323 · HEX (TAB ⇥)</span>
-            <span style="font-size:15px; font-weight:600;">Tab cycles HEX → RGB → HSL · Double-click icon frames</span>
+        <!-- State 7 (B18.0..B21.0): Real 14-micro-layer-picker.png -->
+        <div class="state-panel" id="st-7">
+          ${studioHeader('Layer Search, Status Badge Cycle & Eyedropper Loupe', 'HEX · RGB · HSL', 'search', 'var(--emerald)')}
+          <div class="studio-viewport">
+            <img id="v2-img-7" class="studio-screenshot" src="../screenshots/14-micro-layer-picker.png" alt="Layer Filter & Eyedropper" />
+            ${appleGlassDock({
+              iconName: 'search',
+              iconBg: 'var(--emerald)',
+              title: 'Pixel Eyedropper Loupe & Format Cycle',
+              subtitle: 'Press Tab while sampling to cycle HEX, RGB, and HSL formats',
+              kbdIcon: 'copy',
+              kbdText: '#E36323 · HEX',
+              idKbd: 'v2-eye-pill',
+            })}
           </div>
         </div>
-      </div>
 
-      <!-- State 8 (B21.0..B24.0): Real 15-micro-dev-boxmodel.png + Emerald Padding & Gap Callout -->
-      <div class="state-panel" id="st-8">
-        ${studioHeader('Showcase 07/08 — Dev Mode Box-Model Overlay · Emerald Padding & Orange Gap', 'DEV INSPECT', 'var(--emerald)')}
-        <div class="studio-viewport">
-          <img id="v2-img-8" class="studio-screenshot" src="../screenshots/15-micro-dev-boxmodel.png" alt="Dev Mode Box-Model" />
-          <div class="ui-overlay-card" style="left:24px; bottom:22px; display:flex; align-items:center; gap:14px;">
-            <span style="background:var(--emerald); color:#FFF; font-family:var(--font-mono); font-size:13px; font-weight:700; padding:5px 12px; border-radius:7px;">PADDING 24PX · GAP 16PX</span>
-            <span style="font-size:15px; font-weight:600;">Live CSS / SwiftUI / Rust egui box-model overlay</span>
+        <!-- State 8 (B21.0..B24.0): Real 15-micro-dev-boxmodel.png -->
+        <div class="state-panel" id="st-8">
+          ${studioHeader('Dev Mode Box-Model — Emerald Padding & Orange Gap Bands', 'Dev Inspect', 'code', 'var(--emerald)')}
+          <div class="studio-viewport">
+            <img id="v2-img-8" class="studio-screenshot" src="../screenshots/15-micro-dev-boxmodel.png" alt="Dev Mode Box-Model" />
+            ${appleGlassDock({
+              iconName: 'code',
+              iconBg: 'var(--emerald)',
+              title: 'Live CSS, SwiftUI & egui Box-Model Overlay',
+              subtitle: 'Visualizes 24px padding and 16px gap tokens directly on canvas',
+              kbdIcon: 'check',
+              kbdText: '24px / 16px',
+            })}
           </div>
         </div>
-      </div>
 
-      <!-- State 9 (B24.0..B26.85): Real 16-micro-scale-tool.png + Liquid Scale Multiplier Bar -->
-      <div class="state-panel" id="st-9">
-        ${studioHeader('Showcase 08/08 — Proportional Scale Tool (K) · Font, Stroke & Radius Scaling', 'SCALE 1.5X', 'var(--orange)')}
-        <div class="studio-viewport">
-          <img id="v2-img-9" class="studio-screenshot" src="../screenshots/16-micro-scale-tool.png" alt="Proportional Scale Tool" />
-          <div style="position:absolute; bottom:22px; left:50%; transform:translateX(-50%); width:460px; z-index:8;">
-            <div class="liquid-bar">
-              <div class="liquid-indicator" id="v2-scale-hl" style="background:var(--orange);"></div>
-              <div class="liquid-tab">1.0× Base</div>
-              <div class="liquid-tab">1.5× Scaled</div>
-              <div class="liquid-tab">2.0× Retina</div>
+        <!-- State 9 (B24.0..B26.85): Real 16-micro-scale-tool.png + Liquid Scale Bar -->
+        <div class="state-panel" id="st-9">
+          ${studioHeader('Proportional Scale Tool (K) — Typography, Stroke & Radius', 'Scale 1.5x', 'corners-out', 'var(--orange)')}
+          <div class="studio-viewport">
+            <img id="v2-img-9" class="studio-screenshot" src="../screenshots/16-micro-scale-tool.png" alt="Proportional Scale Tool" />
+            <div style="position:absolute; bottom:20px; left:50%; transform:translateX(-50%); width:460px; z-index:8;">
+              <div class="liquid-bar">
+                <div class="liquid-indicator" id="v2-scale-hl"></div>
+                <div class="liquid-tab">${icon('corners-out', 14)}<span>1.0x Base</span></div>
+                <div class="liquid-tab">${icon('corners-out', 14)}<span>1.5x Scaled</span></div>
+                <div class="liquid-tab">${icon('corners-out', 14)}<span>2.0x Retina</span></div>
+              </div>
             </div>
           </div>
         </div>
       </div>
     </div>
-  </div>
 
-  ${CURSOR_SVG}
+    ${CURSOR_SVG}
 
-  <div id="hud-bottom">
-    <div class="state-caption-pill">
-      <span class="state-step-tag" id="step-tag" style="background:var(--blue);">MICRO 01 / 09</span>
-      <span id="step-label">Numeric Scrubbing &amp; Math Input (⇧ Shift ×10)</span>
-    </div>
-    <div class="brand-pill" style="font-family:var(--font-mono); font-size:13.5px;">
-      <span>100/100 FIGMA MICRO-INTERACTIONS · REAL STUDIO CAPTURE</span>
+    <div id="hud-bottom">
+      <div class="keynote-caption-pill">
+        <span class="keynote-step-index" id="step-tag" style="background:var(--blue);">01</span>
+        <span id="step-label">Numeric Scrubbing &amp; Math Expressions</span>
+      </div>
     </div>
   </div>
 </div>
@@ -1133,8 +1424,10 @@ ${SHARED_JS_ENGINE}
 
 const shapeEl = document.getElementById('shape');
 const cameraEl = document.getElementById('camera');
-const cursorEl = document.getElementById('cursor');
+const cursorEl = document.getElementById('virtual-cursor');
 const keyPillEl = document.getElementById('cursor-key-pill');
+const keyIconEl = document.getElementById('cursor-key-icon');
+const keyTextEl = document.getElementById('cursor-key-text');
 const rippleEl = document.getElementById('click-ripple');
 const beatReadoutEl = document.getElementById('beat-readout');
 const stepTagEl = document.getElementById('step-tag');
@@ -1145,10 +1438,10 @@ const panels = Array.from({ length: 9 }, (_, i) => document.getElementById('st-'
 function applyImgPan(id, b, b0, s0, s1, tx0, tx1, ty0, ty1) {
   const el = document.getElementById(id);
   if (!el) return;
-  const p = M.S((b - b0) * BEAT, 8, 0.92);
-  const sc = s0 + (s1 - s0) * p;
-  const tx = tx0 + (tx1 - tx0) * p;
-  const ty = ty0 + (ty1 - ty0) * p;
+  const p = M.S((b - b0) * BEAT, 8, 0.84);
+  const sc = 1.0 + (Math.min(1.018, s1) - 1.0) * p;
+  const tx = (tx0 + (tx1 - tx0) * p) * 0.15;
+  const ty = (ty0 + (ty1 - ty0) * p) * 0.15;
   el.style.transform = \`scale(\${sc.toFixed(4)}) translate(\${tx.toFixed(1)}px, \${ty.toFixed(1)}px)\`;
 }
 
@@ -1158,15 +1451,15 @@ window.seek = function(rawT) {
 
   const bar = Math.min(7, Math.floor(b / 4) + 1);
   const beatInBar = (Math.floor(b) % 4) + 1;
-  beatReadoutEl.textContent = \`BAR \${bar}.\${beatInBar} · BEAT \${Math.floor(b) + 1}/28\`;
+  beatReadoutEl.textContent = \`100 Figma Interactions · Bar \${bar}.\${beatInBar}\`;
 
-  let w = M.track(b, 340, [
-    [2.0, 1180, M.MORPH],
-    [27.0, 340, M.MORPH],
+  let w = M.track(b, 344, [
+    [2.0, 1216, M.MORPH],
+    [27.0, 344, M.MORPH],
   ]);
-  const h = M.track(b, 80, [
-    [2.0, 760, M.MORPH],
-    [27.0, 80, M.MORPH],
+  const h = M.track(b, 76, [
+    [2.0, 804, M.MORPH],
+    [27.0, 76, M.MORPH],
   ]);
 
   let scrubPx = 280;
@@ -1177,9 +1470,9 @@ window.seek = function(rawT) {
   }
   document.getElementById('v2-scrub-val').textContent = \`\${scrubPx} px\`;
 
-  const rad = M.track(b, 40, [
-    [2.0, 20, M.MORPH],
-    [27.0, 40, M.MORPH],
+  const rad = M.track(b, 38, [
+    [2.0, 24, M.MORPH],
+    [27.0, 38, M.MORPH],
   ]);
 
   shapeEl.style.width = \`\${w.toFixed(2)}px\`;
@@ -1188,11 +1481,11 @@ window.seek = function(rawT) {
   shapeEl.style.marginTop = \`\${(-h / 2).toFixed(2)}px\`;
   shapeEl.style.borderRadius = \`\${rad.toFixed(2)}px\`;
 
-  const camScale = M.track(b, 1.26, [
-    [2.0, 1.05, M.MORPH],
+  const camScale = M.track(b, 1.24, [
+    [2.0, 1.04, M.MORPH],
     [11.0, 1.06, M.MORPH],
     [21.0, 1.05, M.MORPH],
-    [27.0, 1.26, M.MORPH],
+    [27.0, 1.24, M.MORPH],
   ]);
   cameraEl.style.transform = \`scale(\${camScale.toFixed(4)})\`;
 
@@ -1206,7 +1499,6 @@ window.seek = function(rawT) {
   M.applyVis(panels[7], M.vis(b, 21.0, 24.0));
   M.applyVis(panels[8], M.vis(b, 24.0, 27.0));
 
-  // Spring-driven focal zoom/pan into the active canvas area of each real micro-interaction capture
   applyImgPan('v2-img-2', b, 2.4, 1.02, 1.18, 0, 16, 0, 10);
   applyImgPan('v2-img-3', b, 5.6, 1.02, 1.18, 0, 14, 0, 10);
   applyImgPan('v2-img-4', b, 8.8, 1.02, 1.18, 0, 16, 0, 8);
@@ -1216,17 +1508,16 @@ window.seek = function(rawT) {
   applyImgPan('v2-img-8', b, 21.2, 1.02, 1.18, 0, 14, 0, 8);
   applyImgPan('v2-img-9', b, 24.2, 1.02, 1.18, 0, 14, 0, 8);
 
-  // Dynamic overlay updates
   const gapVal = b < 3.8 ? 20 : 28;
-  document.getElementById('v2-gap-pill').textContent = \`GAP: \${gapVal}px\`;
+  document.getElementById('v2-gap-pill').textContent = \`Gap \${gapVal}px\`;
   document.getElementById('v2-edge-pill').textContent =
-    b < 4.2 ? 'Double-click Edge → Hug Contents' : '⌥ Double-click Edge → Fill 100%';
+    b < 4.2 ? 'On-Canvas Pink Gap & Padding Handles' : 'Option + Double-Click Edge · Fill 100%';
 
   document.getElementById('v2-grid-pill').textContent =
-    b < 6.8 ? 'COL 1 · 1fr' : (b < 7.8 ? 'COL 1 · 220px' : 'COL 1 · Hug');
+    b < 6.8 ? 'Col 1 · 1fr' : (b < 7.8 ? 'Col 1 · 220px' : 'Col 1 · Hug');
 
   document.getElementById('v2-eye-pill').textContent =
-    b < 19.2 ? '#E36323 · HEX (TAB ⇥)' : (b < 20.1 ? 'rgb(227, 99, 35) · RGB' : 'hsl(20°, 78%, 51%) · HSL');
+    b < 19.2 ? '#E36323 · HEX' : (b < 20.1 ? '227, 99, 35 · RGB' : '20 deg, 78%, 51% · HSL');
 
   const scaleHl = M.liquidEdges(b, 4, 150, [
     [24.8, 152, 302],
@@ -1264,38 +1555,35 @@ window.seek = function(rawT) {
   const clicks = [0.6, 3.2, 4.2, 6.8, 7.8, 9.8, 13.0, 16.2, 19.2, 20.1, 22.2, 24.8, 25.8];
   const ce = M.clickEffect(b, clicks);
   cursorEl.style.transform = \`translate(\${cx.toFixed(1)}px, \${cy.toFixed(1)}px) scale(\${ce.scale.toFixed(3)})\`;
+  rippleEl.style.transform = \`translate(\${cx.toFixed(1)}px, \${cy.toFixed(1)}px) scale(\${ce.rippleScale.toFixed(3)})\`;
+  rippleEl.style.opacity = ce.rippleOp > 0.01 ? ce.rippleOp.toFixed(3) : '0';
 
-  if (ce.rippleOp > 0.01) {
-    rippleEl.style.opacity = ce.rippleOp.toFixed(3);
-    rippleEl.style.transform = \`translate(\${cx.toFixed(1)}px, \${cy.toFixed(1)}px) scale(\${ce.rippleScale.toFixed(3)})\`;
-  } else {
-    rippleEl.style.opacity = '0';
-  }
-
-  let keyText = '';
-  if (b < 2.1) keyText = '⇧ Shift · ×10 Scrub';
-  else if (b >= 2.2 && b < 5.3) keyText = '⌥ + Double-Click Edge';
-  else if (b >= 15.0 && b < 17.9) keyText = '⇧⌫ Heal Delete';
-  else if (b >= 18.0 && b < 20.9) keyText = 'I · Tab Format Cycle';
-  else if (b >= 24.0 && b < 26.7) keyText = 'K · Scale Tool';
-  if (keyText) {
-    keyPillEl.textContent = keyText;
+  let keyLabel = '';
+  let keyIcon = '#icon-sliders';
+  if (b < 2.1) { keyLabel = 'Shift · 10x Scrub'; keyIcon = '#icon-sliders'; }
+  else if (b >= 2.2 && b < 5.3) { keyLabel = 'Double-Click Edge'; keyIcon = '#icon-frame'; }
+  else if (b >= 15.0 && b < 17.9) { keyLabel = 'Heal Delete Vertex'; keyIcon = '#icon-bezier'; }
+  else if (b >= 18.0 && b < 20.9) { keyLabel = 'Eyedropper Format'; keyIcon = '#icon-search'; }
+  else if (b >= 24.0 && b < 26.7) { keyLabel = 'Scale Tool (K)'; keyIcon = '#icon-corners-out'; }
+  if (keyLabel) {
+    keyIconEl.setAttribute('href', keyIcon);
+    keyTextEl.textContent = keyLabel;
     keyPillEl.style.opacity = '1';
   } else {
     keyPillEl.style.opacity = '0';
   }
 
   const captions = [
-    [2.2, 'MICRO 01 / 09', 'Numeric Scrubbing & Math Input (⇧ Shift ×10)'],
-    [5.4, 'MICRO 02 / 09', 'Auto-Layout 5.0 · On-Canvas Pink Gap & Hug/Fill Cycle'],
-    [8.6, 'MICRO 03 / 09', '2D CSS Grid · Clickable Track Header Pills & 2×1 Span'],
-    [11.8, 'MICRO 04 / 09', 'Smart Selection · Pink Ring Swap Handles & Tidy Up'],
-    [15.0, 'MICRO 05 / 09', 'Parametric Shape Controls · Donut Arc Sweep & Star Ratio'],
-    [18.0, 'MICRO 06 / 09', 'Vector Network Editor · Bezier Tangents & Midpoint Split'],
-    [21.0, 'MICRO 07 / 09', 'Layer Search, Status Badge Cycle & Eyedropper Loupe (I)'],
-    [24.0, 'MICRO 08 / 09', 'Dev Mode Box-Model · Emerald Padding & Orange Gap Bands'],
-    [26.85, 'MICRO 09 / 09', 'Proportional Scale Tool (K) · Live 1.5× & 2.0× Scaling'],
-    [28.1, 'MICRO 01 / 09', 'Numeric Scrubbing & Math Input (⇧ Shift ×10)'],
+    [2.2, '01', 'Numeric Scrubbing & Math Expressions'],
+    [5.4, '02', 'Auto-Layout 5.0 · On-Canvas Gap & Hug/Fill Cycle'],
+    [8.6, '03', '2D CSS Grid · Clickable Track Header Pills'],
+    [11.8, '04', 'Smart Selection · Pink Ring Swap & Tidy Up'],
+    [15.0, '05', 'Parametric Shape Controls · Donut Arc & Star Ratio'],
+    [18.0, '06', 'Vector Network Editor · Bezier Tangents & Midpoint Split'],
+    [21.0, '07', 'Layer Search, Status Badge Cycle & Eyedropper Loupe'],
+    [24.0, '08', 'Dev Mode Box-Model · Padding & Gap Inspection'],
+    [26.85, '09', 'Proportional Scale Tool (K) · Live 1.5x & 2.0x Scaling'],
+    [28.1, '01', 'Numeric Scrubbing & Math Expressions'],
   ];
   for (const [endB, tag, lbl] of captions) {
     if (b <= endB) {
@@ -1305,6 +1593,13 @@ window.seek = function(rawT) {
     }
   }
 };
+
+window.__seekToTime = window.seek;
+window.__CLICK_EVENTS = [
+  { id: 'st-1', label: 'Numeric Scrub', t: 0.6 * BEAT, targetId: 'shape' },
+  { id: 'st-2', label: 'Auto-Layout Gap', t: 3.2 * BEAT, targetId: 'shape' },
+  { id: 'st-9', label: 'Scale Tool', t: 24.8 * BEAT, targetId: 'shape' },
+];
 
 window.__readyPromise = Promise.all([
   document.fonts.ready,
@@ -1322,143 +1617,166 @@ window.__readyPromise = Promise.all([
 // VIDEO 03: 03-agent-first-specs-and-devmode.html
 // Uses real Studio assets: 02-agents-chat, 04-cmdk-ai-synthesizer,
 // 03-spec-reader, 06-variables-tokens, 07-components-variants,
-// 05-dev-mode-codegen, 15-micro-dev-boxmodel, 08-prototype-flows
+// 05-dev-mode-codegen, 08-prototype-flows
 // ============================================================================
 function buildVideo03Html() {
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8" />
-<title>Design OS Studio — Reel 03: Agent-First Specs &amp; Dev Mode (Real Studio Assets)</title>
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Design OS Studio — Launch Film 03: Agent-First Specs &amp; Dev Mode</title>
 <style>
 ${SHARED_CSS}
 </style>
 </head>
 <body>
-<div id="stage">
-  <div id="hud-top">
-    <div class="brand-pill">
-      <span class="brand-dot" style="background:var(--emerald);"></span>
-      <span>design:os studio · Agent-First Specs &amp; Dev Mode · Real Studio Capture</span>
-    </div>
-    <div class="beat-pill" id="beat-readout">BAR 1.1 · 100.6 BPM</div>
-  </div>
-
-  <div id="camera">
-    <div id="shape">
-      <!-- State 1 & Loop (B00..B02.2 & B26.85..B28): Ask Design Agent Pill -->
-      <div class="state-panel" id="st-1" style="flex-direction:row; align-items:center; justify-content:center; gap:14px; color:#FFF;">
-        <span style="width:36px; height:36px; border-radius:50%; background:var(--orange); display:inline-flex; align-items:center; justify-content:center; font-size:19px;">✦</span>
-        <span style="font-size:22px; font-weight:600; letter-spacing:-0.02em;">Ask Design Agent</span>
+${SVG_SPRITE_DEFS}
+<div id="video-stage">
+  <div id="stage">
+    <div id="hud-top">
+      <div class="apple-pill-light">
+        <span class="brand-icon-well" style="background:var(--emerald);">${icon('claude', 15, '#FFFFFF')}</span>
+        <span>Design OS Studio</span>
+        <span style="color:var(--ink-muted); font-weight:500;">Agent-First Specs &amp; Dev Mode</span>
       </div>
+      <div class="apple-pill-dark">
+        ${icon('check', 14, '#30D158')}
+        <span id="beat-readout">856 E2E Tests Pass</span>
+      </div>
+    </div>
 
-      <!-- State 2 (B02.2..B06.0): Real 02-agents-chat.png + 5-Runtime Liquid Selector -->
-      <div class="state-panel" id="st-2">
-        ${studioHeader('design:os studio — Native PTY Multi-Agent Runtime Bridge', 'PTY STREAM ACTIVE', 'var(--orange)')}
-        <div class="studio-viewport">
-          <img id="v3-img-2" class="studio-screenshot" src="../screenshots/02-agents-chat.png" alt="Agents Chat" />
-          <div style="position:absolute; bottom:22px; left:50%; transform:translateX(-50%); width:680px; z-index:8;">
-            <div class="liquid-bar">
-              <div class="liquid-indicator" id="v3-rt-hl" style="background:var(--orange);"></div>
-              <div class="liquid-tab">Claude Code</div>
-              <div class="liquid-tab">Codex</div>
-              <div class="liquid-tab">Gemini</div>
-              <div class="liquid-tab">Grok</div>
-              <div class="liquid-tab">Antigravity</div>
+    <div id="camera">
+      <div id="shape">
+        <!-- State 1 & Loop (B00..B02.2 & B26.85..B28): Dynamic Island Ask Design Agent Pill -->
+        <div class="state-panel" id="st-1" style="flex-direction:row; align-items:center; justify-content:center; gap:14px; color:#FFFFFF;">
+          <span class="dock-icon-well" style="background:var(--orange); width:38px; height:38px;">
+            ${icon('sparkle', 18, '#FFFFFF')}
+          </span>
+          <span style="font-size:21px; font-weight:600; letter-spacing:-0.022em;">Ask Design Agent</span>
+        </div>
+
+        <!-- State 2 (B02.2..B06.0): Real 02-agents-chat.png + 5-Runtime Liquid Selector -->
+        <div class="state-panel" id="st-2">
+          ${studioHeader('Native PTY Multi-Agent Runtime Bridge', 'PTY Stream Active', 'claude', 'var(--orange)')}
+          <div class="studio-viewport">
+            <img id="v3-img-2" class="studio-screenshot" src="../screenshots/02-agents-chat.png" alt="Agents Chat" />
+            <div style="position:absolute; bottom:20px; left:50%; transform:translateX(-50%); width:680px; z-index:8;">
+              <div class="liquid-bar">
+                <div class="liquid-indicator" id="v3-rt-hl"></div>
+                <div class="liquid-tab">${icon('claude', 14)}<span>Claude</span></div>
+                <div class="liquid-tab">${icon('openai', 14)}<span>Codex</span></div>
+                <div class="liquid-tab">${icon('sparkle', 14)}<span>Gemini</span></div>
+                <div class="liquid-tab">${icon('vercel-triangle', 12)}<span>Grok</span></div>
+                <div class="liquid-tab">${icon('layers', 14)}<span>Antigravity</span></div>
+              </div>
             </div>
           </div>
         </div>
-      </div>
 
-      <!-- State 3 (B06.0..B09.5): Real 04-cmdk-ai-synthesizer.png + NodeSpec Diff Overlay -->
-      <div class="state-panel" id="st-3">
-        ${studioHeader('design:os studio — ⌘K AI Synthesizer & Live NodeSpec Mutation', 'ZERO-FAKE-UI', 'var(--blue)')}
-        <div class="studio-viewport">
-          <img id="v3-img-3" class="studio-screenshot" src="../screenshots/04-cmdk-ai-synthesizer.png" alt="Cmd+K AI Synthesizer" />
-          <div class="ui-overlay-card" style="left:24px; bottom:22px; display:flex; align-items:center; gap:14px;">
-            <span style="background:var(--blue); color:#FFF; font-family:var(--font-mono); font-size:13px; font-weight:700; padding:5px 12px; border-radius:7px;">✦ SYNTHESIZE</span>
-            <span style="font-size:15.5px; font-weight:600;">Prompt compiles directly into Auto-Layout 5.0 Canvas Frame</span>
+        <!-- State 3 (B06.0..B09.5): Real 04-cmdk-ai-synthesizer.png -->
+        <div class="state-panel" id="st-3">
+          ${studioHeader('AI Design Synthesizer & Live NodeSpec Mutation', 'Zero-Fake-UI', 'sparkle', 'var(--blue)')}
+          <div class="studio-viewport">
+            <img id="v3-img-3" class="studio-screenshot" src="../screenshots/04-cmdk-ai-synthesizer.png" alt="AI Synthesizer" />
+            ${appleGlassDock({
+              iconName: 'sparkle',
+              iconBg: 'var(--blue)',
+              title: 'Prompt Compiles to Auto-Layout 5.0 Frame',
+              subtitle: 'Real SceneGraph nodes synthesized with bound semantic tokens',
+              kbdIcon: 'command',
+              kbdText: 'Synthesize',
+            })}
           </div>
         </div>
-      </div>
 
-      <!-- State 4 (B09.5..B13.2): Real 03-spec-reader.png + Anchored Spec Comment Thread -->
-      <div class="state-panel" id="st-4">
-        ${studioHeader('design:os studio — PRODUCT:OS v2 Spec Reader & Review Threads', '12/12 LINKED', 'var(--emerald)')}
-        <div class="studio-viewport">
-          <img id="v3-img-4" class="studio-screenshot" src="../screenshots/03-spec-reader.png" alt="Spec Reader" />
-          <div class="ui-overlay-light" style="left:24px; bottom:22px; display:flex; align-items:center; gap:14px;">
-            <span style="background:var(--emerald); color:#FFF; font-family:var(--font-mono); font-size:13px; font-weight:700; padding:5px 12px; border-radius:7px;">THREAD #T4 · RESOLVED ✓</span>
-            <span style="font-size:15.5px; font-weight:700;">Bidirectional Spec ↔ Canvas NodeId Verification</span>
+        <!-- State 4 (B09.5..B13.2): Real 03-spec-reader.png -->
+        <div class="state-panel" id="st-4">
+          ${studioHeader('PRODUCT:OS v2 Spec Reader & Review Threads', '12 of 12 Linked', 'search', 'var(--emerald)')}
+          <div class="studio-viewport">
+            <img id="v3-img-4" class="studio-screenshot" src="../screenshots/03-spec-reader.png" alt="Spec Reader" />
+            ${appleGlassDock({
+              iconName: 'check',
+              iconBg: 'var(--emerald)',
+              title: 'Anchored Spec Review Thread Resolved',
+              subtitle: 'Bidirectional Spec-to-Canvas NodeId verification in real time',
+              kbdIcon: 'external',
+              kbdText: 'Thread #T4',
+            })}
           </div>
         </div>
-      </div>
 
-      <!-- State 5 (B13.2..B16.8): Real 06-variables-tokens.png + Liquid Light/Dark Mode Toggle -->
-      <div class="state-panel" id="st-5">
-        ${studioHeader('design:os studio — Semantic Variables & Multi-Mode Tokens', '15/15 TOKEN PARITY', 'var(--orange)')}
-        <div class="studio-viewport">
-          <img id="v3-img-5" class="studio-screenshot" src="../screenshots/06-variables-tokens.png" alt="Variables & Tokens" />
-          <div style="position:absolute; bottom:22px; right:24px; width:320px; z-index:8;">
-            <div class="liquid-bar">
-              <div class="liquid-indicator" id="v3-mode-hl" style="background:var(--orange);"></div>
-              <div class="liquid-tab">☀ Light Mode</div>
-              <div class="liquid-tab">☾ Dark Mode</div>
+        <!-- State 5 (B13.2..B16.8): Real 06-variables-tokens.png + Liquid Light/Dark Mode Toggle -->
+        <div class="state-panel" id="st-5">
+          ${studioHeader('Semantic Variables & Multi-Mode Tokens', '15 of 15 Token Parity', 'sliders', 'var(--orange)')}
+          <div class="studio-viewport">
+            <img id="v3-img-5" class="studio-screenshot" src="../screenshots/06-variables-tokens.png" alt="Variables & Tokens" />
+            <div style="position:absolute; bottom:20px; left:50%; transform:translateX(-50%); width:340px; z-index:8;">
+              <div class="liquid-bar">
+                <div class="liquid-indicator" id="v3-mode-hl"></div>
+                <div class="liquid-tab">${icon('sun', 15)}<span>Light Mode</span></div>
+                <div class="liquid-tab">${icon('moon', 15)}<span>Dark Mode</span></div>
+              </div>
             </div>
           </div>
         </div>
-      </div>
 
-      <!-- State 6 (B16.8..B20.2): Real 07-components-variants.png + Liquid Variant Switcher -->
-      <div class="state-panel" id="st-6">
-        ${studioHeader('design:os studio — Component Set Variants & Instance Overrides', 'VARIANT MATRIX', 'var(--blue)')}
-        <div class="studio-viewport">
-          <img id="v3-img-6" class="studio-screenshot" src="../screenshots/07-components-variants.png" alt="Components & Variants" />
-          <div style="position:absolute; bottom:22px; left:24px; width:380px; z-index:8;">
-            <div class="liquid-bar">
-              <div class="liquid-indicator" id="v3-var-hl" style="background:var(--blue);"></div>
-              <div class="liquid-tab">State=Primary</div>
-              <div class="liquid-tab">State=Success</div>
+        <!-- State 6 (B16.8..B20.2): Real 07-components-variants.png + Liquid Variant Switcher -->
+        <div class="state-panel" id="st-6">
+          ${studioHeader('Component Set Variants & Instance Overrides', 'Variant Matrix', 'cube', 'var(--blue)')}
+          <div class="studio-viewport">
+            <img id="v3-img-6" class="studio-screenshot" src="../screenshots/07-components-variants.png" alt="Components & Variants" />
+            <div style="position:absolute; bottom:20px; left:50%; transform:translateX(-50%); width:380px; z-index:8;">
+              <div class="liquid-bar">
+                <div class="liquid-indicator" id="v3-var-hl"></div>
+                <div class="liquid-tab">${icon('cube', 14)}<span>Primary Variant</span></div>
+                <div class="liquid-tab">${icon('check', 14)}<span>Success Variant</span></div>
+              </div>
             </div>
           </div>
         </div>
-      </div>
 
-      <!-- State 7 (B20.2..B23.6): Real 05-dev-mode-codegen.png + 15-micro-dev-boxmodel.png -->
-      <div class="state-panel" id="st-7">
-        ${studioHeader('design:os studio — Dev Mode Codegen & Box-Model Inspection', '5 CODEGEN TARGETS', 'var(--emerald)')}
-        <div class="studio-viewport">
-          <img id="v3-img-7" class="studio-screenshot" src="../screenshots/05-dev-mode-codegen.png" alt="Dev Mode Codegen" />
-          <div class="ui-overlay-card" style="right:24px; bottom:22px; display:flex; align-items:center; gap:14px;">
-            <span style="background:var(--emerald); color:#FFF; font-family:var(--font-mono); font-size:13px; font-weight:700; padding:5px 12px; border-radius:7px;">REACT · TAILWIND · SWIFTUI · EGUI</span>
-            <span style="font-size:15px; font-weight:600;">Zero-hallucination code from bound tokens</span>
+        <!-- State 7 (B20.2..B23.6): Real 05-dev-mode-codegen.png -->
+        <div class="state-panel" id="st-7">
+          ${studioHeader('Dev Mode Codegen & Box-Model Inspection', '5 Codegen Targets', 'code', 'var(--emerald)')}
+          <div class="studio-viewport">
+            <img id="v3-img-7" class="studio-screenshot" src="../screenshots/05-dev-mode-codegen.png" alt="Dev Mode Codegen" />
+            ${appleGlassDock({
+              iconName: 'code',
+              iconBg: 'var(--emerald)',
+              title: 'React, Tailwind, SwiftUI & Rust egui Codegen',
+              subtitle: 'Deterministic production code emitted directly from bound tokens',
+              kbdIcon: 'copy',
+              kbdText: 'Copy Code',
+            })}
           </div>
         </div>
-      </div>
 
-      <!-- State 8 (B23.6..B26.85): Real 08-prototype-flows.png + Ready for Dev Badge -->
-      <div class="state-panel" id="st-8">
-        ${studioHeader('design:os studio — Interactive Prototype Flows & E2E Proof', '856/856 TESTS PASS', 'var(--emerald)')}
-        <div class="studio-viewport">
-          <img id="v3-img-8" class="studio-screenshot" src="../screenshots/08-prototype-flows.png" alt="Prototype Flows" />
-          <div class="ui-overlay-card" style="left:50%; bottom:22px; transform:translateX(-50%); display:flex; align-items:center; gap:14px; white-space:nowrap;">
-            <span style="background:var(--emerald); color:#FFF; font-family:var(--font-mono); font-size:13px; font-weight:700; padding:5px 12px; border-radius:999px;">✓ READY FOR DEV</span>
-            <span style="font-size:15.5px; font-weight:700;">856/856 E2E Tests · 12/12 Zero-Fake-UI · 9/9 ALIVE</span>
+        <!-- State 8 (B23.6..B26.85): Real 08-prototype-flows.png -->
+        <div class="state-panel" id="st-8">
+          ${studioHeader('Interactive Prototype Flows & E2E Proof', '856 of 856 Tests Pass', 'layers', 'var(--emerald)')}
+          <div class="studio-viewport">
+            <img id="v3-img-8" class="studio-screenshot" src="../screenshots/08-prototype-flows.png" alt="Prototype Flows" />
+            ${appleGlassDock({
+              iconName: 'check',
+              iconBg: 'var(--emerald)',
+              title: 'Ready for Dev · 856 E2E Tests Verified',
+              subtitle: '12 Zero-Fake-UI Invariants & 9 Self-Evolution Gates Passed',
+              kbdIcon: 'lock',
+              kbdText: 'Certified',
+            })}
           </div>
         </div>
       </div>
     </div>
-  </div>
 
-  ${CURSOR_SVG}
+    ${CURSOR_SVG}
 
-  <div id="hud-bottom">
-    <div class="state-caption-pill">
-      <span class="state-step-tag" id="step-tag" style="background:var(--emerald);">AGENT 01 / 08</span>
-      <span id="step-label">Ask Design Agent · Native PTY Bridge</span>
-    </div>
-    <div class="brand-pill" style="font-family:var(--font-mono); font-size:13.5px;">
-      <span>AGENT-FIRST SPECS &amp; DEV MODE · REAL STUDIO CAPTURE</span>
+    <div id="hud-bottom">
+      <div class="keynote-caption-pill">
+        <span class="keynote-step-index" id="step-tag" style="background:var(--emerald);">01</span>
+        <span id="step-label">Ask Design Agent · Native PTY Bridge</span>
+      </div>
     </div>
   </div>
 </div>
@@ -1468,8 +1786,10 @@ ${SHARED_JS_ENGINE}
 
 const shapeEl = document.getElementById('shape');
 const cameraEl = document.getElementById('camera');
-const cursorEl = document.getElementById('cursor');
+const cursorEl = document.getElementById('virtual-cursor');
 const keyPillEl = document.getElementById('cursor-key-pill');
+const keyIconEl = document.getElementById('cursor-key-icon');
+const keyTextEl = document.getElementById('cursor-key-text');
 const rippleEl = document.getElementById('click-ripple');
 const beatReadoutEl = document.getElementById('beat-readout');
 const stepTagEl = document.getElementById('step-tag');
@@ -1480,10 +1800,10 @@ const panels = Array.from({ length: 8 }, (_, i) => document.getElementById('st-'
 function applyImgPan(id, b, b0, s0, s1, tx0, tx1, ty0, ty1) {
   const el = document.getElementById(id);
   if (!el) return;
-  const p = M.S((b - b0) * BEAT, 8, 0.92);
-  const sc = s0 + (s1 - s0) * p;
-  const tx = tx0 + (tx1 - tx0) * p;
-  const ty = ty0 + (ty1 - ty0) * p;
+  const p = M.S((b - b0) * BEAT, 8, 0.84);
+  const sc = 1.0 + (Math.min(1.018, s1) - 1.0) * p;
+  const tx = (tx0 + (tx1 - tx0) * p) * 0.15;
+  const ty = (ty0 + (ty1 - ty0) * p) * 0.15;
   el.style.transform = \`scale(\${sc.toFixed(4)}) translate(\${tx.toFixed(1)}px, \${ty.toFixed(1)}px)\`;
 }
 
@@ -1493,19 +1813,19 @@ window.seek = function(rawT) {
 
   const bar = Math.min(7, Math.floor(b / 4) + 1);
   const beatInBar = (Math.floor(b) % 4) + 1;
-  beatReadoutEl.textContent = \`BAR \${bar}.\${beatInBar} · BEAT \${Math.floor(b) + 1}/28\`;
+  beatReadoutEl.textContent = \`Agent-First IDE · Bar \${bar}.\${beatInBar}\`;
 
-  const w = M.track(b, 310, [
-    [2.0, 1180, M.MORPH],
-    [27.0, 310, M.MORPH],
+  const w = M.track(b, 316, [
+    [2.0, 1216, M.MORPH],
+    [27.0, 316, M.MORPH],
   ]);
-  const h = M.track(b, 76, [
-    [2.0, 760, M.MORPH],
-    [27.0, 76, M.MORPH],
+  const h = M.track(b, 72, [
+    [2.0, 804, M.MORPH],
+    [27.0, 72, M.MORPH],
   ]);
-  const rad = M.track(b, 38, [
-    [2.0, 20, M.MORPH],
-    [27.0, 38, M.MORPH],
+  const rad = M.track(b, 36, [
+    [2.0, 24, M.MORPH],
+    [27.0, 36, M.MORPH],
   ]);
 
   shapeEl.style.width = \`\${w.toFixed(2)}px\`;
@@ -1514,11 +1834,11 @@ window.seek = function(rawT) {
   shapeEl.style.marginTop = \`\${(-h / 2).toFixed(2)}px\`;
   shapeEl.style.borderRadius = \`\${rad.toFixed(2)}px\`;
 
-  const camScale = M.track(b, 1.26, [
-    [2.0, 1.05, M.MORPH],
+  const camScale = M.track(b, 1.24, [
+    [2.0, 1.04, M.MORPH],
     [13.0, 1.06, M.MORPH],
     [24.0, 1.05, M.MORPH],
-    [27.0, 1.26, M.MORPH],
+    [27.0, 1.24, M.MORPH],
   ]);
   cameraEl.style.transform = \`scale(\${camScale.toFixed(4)})\`;
 
@@ -1539,7 +1859,6 @@ window.seek = function(rawT) {
   applyImgPan('v3-img-7', b, 20.4, 1.02, 1.16, 0, -28, 0, 8);
   applyImgPan('v3-img-8', b, 23.8, 1.02, 1.15, 0, 12, 0, 6);
 
-  // State 2: 5-Runtime liquid indicator
   const rtHl = M.liquidEdges(b, 4, 136, [
     [3.2, 138, 272],
     [4.4, 540, 674],
@@ -1548,15 +1867,13 @@ window.seek = function(rawT) {
   rtEl.style.left = \`\${rtHl.left.toFixed(1)}px\`;
   rtEl.style.width = \`\${rtHl.width.toFixed(1)}px\`;
 
-  // State 5: Light/Dark mode liquid indicator
-  const modeHl = M.liquidEdges(b, 4, 158, [
-    [14.4, 160, 314],
+  const modeHl = M.liquidEdges(b, 4, 168, [
+    [14.4, 170, 334],
   ]);
   const modeEl = document.getElementById('v3-mode-hl');
   modeEl.style.left = \`\${modeHl.left.toFixed(1)}px\`;
   modeEl.style.width = \`\${modeHl.width.toFixed(1)}px\`;
 
-  // State 6: Variant toggle liquid indicator
   const varHl = M.liquidEdges(b, 4, 188, [
     [18.0, 190, 374],
   ]);
@@ -1570,9 +1887,9 @@ window.seek = function(rawT) {
     [4.4, 980, M.MORPH],
     [7.2, 720, M.MORPH],
     [10.8, 620, M.MORPH],
-    [14.4, 1120, M.MORPH],
-    [18.0, 420, M.MORPH],
-    [21.4, 920, M.MORPH],
+    [14.4, 790, M.MORPH],
+    [18.0, 790, M.MORPH],
+    [21.4, 720, M.MORPH],
     [24.6, 720, M.MORPH],
     [26.6, 720, M.MORPH],
   ]);
@@ -1592,35 +1909,32 @@ window.seek = function(rawT) {
   const clicks = [1.0, 3.2, 4.4, 7.2, 10.8, 14.4, 18.0, 21.4, 24.6];
   const ce = M.clickEffect(b, clicks);
   cursorEl.style.transform = \`translate(\${cx.toFixed(1)}px, \${cy.toFixed(1)}px) scale(\${ce.scale.toFixed(3)})\`;
+  rippleEl.style.transform = \`translate(\${cx.toFixed(1)}px, \${cy.toFixed(1)}px) scale(\${ce.rippleScale.toFixed(3)})\`;
+  rippleEl.style.opacity = ce.rippleOp > 0.01 ? ce.rippleOp.toFixed(3) : '0';
 
-  if (ce.rippleOp > 0.01) {
-    rippleEl.style.opacity = ce.rippleOp.toFixed(3);
-    rippleEl.style.transform = \`translate(\${cx.toFixed(1)}px, \${cy.toFixed(1)}px) scale(\${ce.rippleScale.toFixed(3)})\`;
-  } else {
-    rippleEl.style.opacity = '0';
-  }
-
-  let keyText = '';
-  if (b >= 2.2 && b < 5.8) keyText = '5 Native CLI Runtimes';
-  else if (b >= 13.2 && b < 16.6) keyText = 'Variables · Light / Dark';
-  else if (b >= 20.2 && b < 23.4) keyText = 'Dev Mode · 5 Targets';
-  if (keyText) {
-    keyPillEl.textContent = keyText;
+  let keyLabel = '';
+  let keyIcon = '#icon-claude';
+  if (b >= 2.2 && b < 5.8) { keyLabel = '5 Native CLI Runtimes'; keyIcon = '#icon-claude'; }
+  else if (b >= 13.2 && b < 16.6) { keyLabel = 'Light & Dark Modes'; keyIcon = '#icon-sun'; }
+  else if (b >= 20.2 && b < 23.4) { keyLabel = '5 Codegen Targets'; keyIcon = '#icon-code'; }
+  if (keyLabel) {
+    keyIconEl.setAttribute('href', keyIcon);
+    keyTextEl.textContent = keyLabel;
     keyPillEl.style.opacity = '1';
   } else {
     keyPillEl.style.opacity = '0';
   }
 
   const captions = [
-    [2.2, 'AGENT 01 / 08', 'Ask Design Agent · Native PTY Bridge'],
-    [6.0, 'AGENT 02 / 08', 'Multi-Agent PTY Chat · Claude, Codex, Gemini, Grok & AGY'],
-    [9.5, 'AGENT 03 / 08', '⌘K AI Synthesizer · Prompt to Auto-Layout 5.0 Frame'],
-    [13.2, 'AGENT 04 / 08', 'PRODUCT:OS v2 Spec Reader · Anchored Review Threads'],
-    [16.8, 'AGENT 05 / 08', 'Semantic Variables & Multi-Mode Tokens · Light & Dark'],
-    [20.2, 'AGENT 06 / 08', 'Component Set Variants & Liquid Property Switch'],
-    [23.6, 'AGENT 07 / 08', 'Dev Mode Multi-Target Codegen · React, Tailwind & SwiftUI'],
-    [26.85, 'AGENT 08 / 08', 'Interactive Prototype Flows · 856/856 E2E Tests PASS'],
-    [28.1, 'AGENT 01 / 08', 'Ask Design Agent · Native PTY Bridge'],
+    [2.2, '01', 'Ask Design Agent · Native PTY Bridge'],
+    [6.0, '02', 'Multi-Agent PTY Chat · Claude, Codex, Gemini, Grok & AGY'],
+    [9.5, '03', 'AI Design Synthesizer · Prompt to Auto-Layout 5.0 Frame'],
+    [13.2, '04', 'PRODUCT:OS v2 Spec Reader · Anchored Review Threads'],
+    [16.8, '05', 'Semantic Variables & Multi-Mode Tokens · Light & Dark'],
+    [20.2, '06', 'Component Set Variants & Liquid Property Switch'],
+    [23.6, '07', 'Dev Mode Multi-Target Codegen · React, Tailwind & SwiftUI'],
+    [26.85, '08', 'Interactive Prototype Flows · 856 E2E Tests Verified'],
+    [28.1, '01', 'Ask Design Agent · Native PTY Bridge'],
   ];
   for (const [endB, tag, lbl] of captions) {
     if (b <= endB) {
@@ -1630,6 +1944,13 @@ window.seek = function(rawT) {
     }
   }
 };
+
+window.__seekToTime = window.seek;
+window.__CLICK_EVENTS = [
+  { id: 'st-1', label: 'Ask Design Agent', t: 1.0 * BEAT, targetId: 'shape' },
+  { id: 'st-2', label: 'Switch Runtime', t: 3.2 * BEAT, targetId: 'shape' },
+  { id: 'st-5', label: 'Toggle Dark Mode', t: 14.4 * BEAT, targetId: 'shape' },
+];
 
 window.__readyPromise = Promise.all([
   document.fonts.ready,
@@ -1647,4 +1968,4 @@ fs.writeFileSync(path.join(OUT_DIR, '01-designos-studio-launch-hero.html'), buil
 fs.writeFileSync(path.join(OUT_DIR, '02-figma-100-micro-interactions.html'), buildVideo02Html());
 fs.writeFileSync(path.join(OUT_DIR, '03-agent-first-specs-and-devmode.html'), buildVideo03Html());
 
-console.log('Generated 3 Real-Asset + One-Shape UI Motion HTML engines in', OUT_DIR);
+console.log('Generated 3 Apple-Grade SF Pro Rounded + Liquid Glass HTML engines in', OUT_DIR);

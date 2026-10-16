@@ -585,7 +585,11 @@ impl Lexer<'_> {
             } else if c == '#' {
                 let body = &trimmed[1..];
                 let end = body.find(|d: char| !d.is_ascii_hexdigit()).unwrap_or(body.len());
-                let Some(col) = Color::from_hex(&body[..end]) else { return err(start, format!("Bad color '#{}'", &body[..end])) };
+                let hex = &body[..end];
+                if !matches!(hex.len(), 3 | 4 | 6 | 8) {
+                    return err(start, format!("Bad color '#{hex}'"));
+                }
+                let Some(col) = Color::from_hex(hex) else { return err(start, format!("Bad color '#{hex}'")) };
                 out.push((start, Tok::Color(col)));
                 self.pos += 1 + end;
             } else if c.is_alphabetic() {

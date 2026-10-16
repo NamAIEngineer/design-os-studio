@@ -19,11 +19,7 @@ pub fn figma_like_schema() -> Schema {
     let mut b = SchemaBuilder::new();
     // Enum index 0 must exist: enum fields reference definition 0 in the binary form.
     enum_def(&mut b, "Phase", &["CREATED", "REMOVED"]);
-    enum_def(
-        &mut b,
-        "MessageType",
-        &["JOIN_START", "NODE_CHANGES", "USER_CHANGES", "JOIN_END", "SIGNAL", "STYLE", "BROADCAST"],
-    );
+    enum_def(&mut b, "MessageType", &["JOIN_START", "NODE_CHANGES", "USER_CHANGES", "JOIN_END", "SIGNAL", "STYLE", "BROADCAST"]);
     enum_def(
         &mut b,
         "NodeType",
@@ -355,9 +351,8 @@ pub fn figma_like_schema() -> Schema {
         &mut b,
         "OpenTypeFeature",
         &[
-            "LIGA", "DLIG", "CLIG", "CALT", "KERN", "SS01", "SS02", "SS03", "SS04", "SS05", "SS06", "SS07", "SS08", "SS09", "SS10", "TNUM",
-            "ONUM", "LNUM", "PNUM", "FRAC", "AFRC", "ZERO", "SMCP", "C2SC", "PCAP", "C2PC", "UNIC", "TITL", "ORDN", "SWSH", "SALT", "SUPS",
-            "SUBS", "CASE",
+            "LIGA", "DLIG", "CLIG", "CALT", "KERN", "SS01", "SS02", "SS03", "SS04", "SS05", "SS06", "SS07", "SS08", "SS09", "SS10", "TNUM", "ONUM", "LNUM",
+            "PNUM", "FRAC", "AFRC", "ZERO", "SMCP", "C2SC", "PCAP", "C2PC", "UNIC", "TITL", "ORDN", "SWSH", "SALT", "SUPS", "SUBS", "CASE",
         ],
     );
     enum_def(&mut b, "FontVariantNumericFigure", &["NORMAL", "LINING", "OLDSTYLE"]);

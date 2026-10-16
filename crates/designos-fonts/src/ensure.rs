@@ -40,11 +40,7 @@ pub fn ensure_fonts_with(doc: &Document, cache: &FontCache, is_available: impl F
 
 /// Resolves an explicit set of [`FontRequest`]s against bundled fonts,
 /// `is_available`, and `cache` without cloning the [`Document`].
-pub fn ensure_font_requests_with(
-    requests: impl IntoIterator<Item = FontRequest>,
-    cache: &FontCache,
-    is_available: impl Fn(&str) -> bool,
-) -> FontReport {
+pub fn ensure_font_requests_with(requests: impl IntoIterator<Item = FontRequest>, cache: &FontCache, is_available: impl Fn(&str) -> bool) -> FontReport {
     let mut report = FontReport::default();
     for req in requests {
         let family = substitute(&req.family).map(str::to_string).unwrap_or_else(|| req.family.clone());

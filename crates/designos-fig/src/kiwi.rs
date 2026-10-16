@@ -330,12 +330,7 @@ impl Schema {
         match def.kind {
             DefKind::Enum => {
                 let v = r.var_u32()?;
-                let found = def
-                    .field_by_value
-                    .get(v as usize)
-                    .and_then(|&x| x)
-                    .map(|i| &def.fields[i])
-                    .or_else(|| def.fields.iter().find(|f| f.value == v));
+                let found = def.field_by_value.get(v as usize).and_then(|&x| x).map(|i| &def.fields[i]).or_else(|| def.fields.iter().find(|f| f.value == v));
                 Ok(match found {
                     Some(f) => KiwiValue::Enum(f.name.clone()),
                     None => KiwiValue::EnumRaw(v),

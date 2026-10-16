@@ -8,6 +8,8 @@
 //! - Concentric radii (`12px` outer surface, `6px` inner controls)
 //! - Semantic status pills (`OK #4CC58B`, `WARN #E0A53C`, `BAD #FF7A8C`, `INFO #8FB0FF`)
 
+#![allow(dead_code)]
+
 use crate::icons::{self, Icon};
 use crate::panels::clipped;
 use crate::theme;
@@ -290,24 +292,9 @@ pub fn build_real_cli_command(preset: AgentCliPreset, prompt: &str, live_spec: &
 /// Returns true when `prompt` asks to create, design, or synthesize a UI surface or component.
 pub fn is_design_creation_prompt(prompt: &str) -> bool {
     let lower = prompt.to_ascii_lowercase();
-    [
-        "create",
-        "build",
-        "design",
-        "card",
-        "frame",
-        "screen",
-        "modal",
-        "dashboard",
-        "login",
-        "pricing",
-        "checkout",
-        "spec",
-        "implement",
-        "make",
-    ]
-    .iter()
-    .any(|kw| lower.contains(kw))
+    ["create", "build", "design", "card", "frame", "screen", "modal", "dashboard", "login", "pricing", "checkout", "spec", "implement", "make"]
+        .iter()
+        .any(|kw| lower.contains(kw))
 }
 
 /// Actions emitted by the Embedded Agent Terminal for the host `App` / `Shell` to execute.
@@ -892,14 +879,8 @@ impl TerminalState {
             doc_sync = self.live_doc_sync_path.display(),
         );
         let _ = atomic_write_session_file(&self.session_dir.join("SKILL.md"), skill_md.as_bytes());
-        let _ = atomic_write_session_file(
-            &self.session_dir.join(".claude/skills/designos-studio/SKILL.md"),
-            skill_md.as_bytes(),
-        );
-        let _ = atomic_write_session_file(
-            &self.session_dir.join(".agents/skills/designos-studio/SKILL.md"),
-            skill_md.as_bytes(),
-        );
+        let _ = atomic_write_session_file(&self.session_dir.join(".claude/skills/designos-studio/SKILL.md"), skill_md.as_bytes());
+        let _ = atomic_write_session_file(&self.session_dir.join(".agents/skills/designos-studio/SKILL.md"), skill_md.as_bytes());
     }
 
     /// Terminates all child PTY processes owned by this file's terminal state.
@@ -979,19 +960,11 @@ impl TerminalState {
             || trimmed.starts_with("agy ")
             || trimmed.starts_with("grok ")
             || trimmed.starts_with("designos ");
-        let raw_cmd = if is_raw_shell {
-            trimmed.trim_start_matches('$').trim_start_matches('!').trim().to_string()
-        } else {
-            String::new()
-        };
+        let raw_cmd = if is_raw_shell { trimmed.trim_start_matches('$').trim_start_matches('!').trim().to_string() } else { String::new() };
 
         let selection_path = self.selection_spec_path.clone();
         let real_cli_cmd = build_real_cli_command(runtime, trimmed, &self.live_spec_path, &selection_path);
-        let display_cmd = if is_raw_shell {
-            raw_cmd.clone()
-        } else {
-            real_cli_cmd.clone()
-        };
+        let display_cmd = if is_raw_shell { raw_cmd.clone() } else { real_cli_cmd.clone() };
 
         let run_real_cli = !is_raw_shell
             && !cfg!(test)
@@ -1013,11 +986,8 @@ impl TerminalState {
                 || lower.contains("fc-001")
                 || lower.contains("req-")
                 || lower.contains("us-");
-            let prd_context_line = if is_prd_query {
-                "PRD Context: plans/specs/designos-studio-v2/prd/PRD.md (REQ-01..REQ-20 · US-01..US-17 · G1..G5 APPROVED) | "
-            } else {
-                ""
-            };
+            let prd_context_line =
+                if is_prd_query { "PRD Context: plans/specs/designos-studio-v2/prd/PRD.md (REQ-01..REQ-20 · US-01..US-17 · G1..G5 APPROVED) | " } else { "" };
             if run_real_cli {
                 format!(
                     "printf 'DESIGNOS_CHAT_%s_{asst_id}\\n[%s · %s PTY] %s\\n%s' 'BEGIN' '{title}' '{bin}' '{safe}' '{prd_context_line}'; {real_cli_cmd} 2>&1; printf '\\nDESIGNOS_CHAT_%s_{asst_id}\\n' 'END'"
@@ -1119,13 +1089,7 @@ impl TerminalState {
                     let filtered: Vec<&str> = stripped
                         .lines()
                         .map(|l| l.trim())
-                        .filter(|l| {
-                            !l.is_empty()
-                                && !l.contains("DESIGNOS_CHAT_")
-                                && !l.starts_with("printf ")
-                                && *l != turn.shell_cmd
-                                && *l != "%"
-                        })
+                        .filter(|l| !l.is_empty() && !l.contains("DESIGNOS_CHAT_") && !l.starts_with("printf ") && *l != turn.shell_cmd && *l != "%")
                         .collect();
                     if !filtered.is_empty() {
                         turn.text = filtered.join("\n");
@@ -1150,12 +1114,7 @@ impl TerminalState {
                 self.tabs.push(tab);
                 self.active_tab = self.tabs.len() - 1;
                 self.viewport_focused = true;
-                self.status_msg = Some(format!(
-                    "Spawned {} ({} · {})",
-                    preset.tab_title(),
-                    self.doc_name,
-                    self.current_page_name
-                ));
+                self.status_msg = Some(format!("Spawned {} ({} · {})", preset.tab_title(), self.doc_name, self.current_page_name));
                 Ok(self.active_tab)
             }
             Err(e) => {
@@ -1301,20 +1260,10 @@ impl TerminalState {
 
         // Reuse the latest Assistant turn ID if `submit_chat_prompt` was just invoked for `cli_prompt`,
         // otherwise push a dedicated User + Assistant turn pair so `dispatch_figma_ai_prompt` always records a turn.
-        let already_recorded = self
-            .chat_turns
-            .iter()
-            .rev()
-            .find(|t| t.role == AgentChatRole::User)
-            .is_some_and(|u| u.text == cli_prompt.trim());
+        let already_recorded = self.chat_turns.iter().rev().find(|t| t.role == AgentChatRole::User).is_some_and(|u| u.text == cli_prompt.trim());
 
         let asst_id = if already_recorded {
-            self.chat_turns
-                .iter()
-                .rev()
-                .find(|t| t.role == AgentChatRole::Assistant)
-                .map(|t| t.id)
-                .unwrap_or(1)
+            self.chat_turns.iter().rev().find(|t| t.role == AgentChatRole::Assistant).map(|t| t.id).unwrap_or(1)
         } else {
             let user_id = self.next_turn_id.max(1);
             let aid = user_id + 1;
@@ -1350,9 +1299,8 @@ impl TerminalState {
 
         let safe_title = task_title.replace('\'', "").replace('\n', " ");
         let safe_prompt = cli_prompt.replace('\'', "").replace('\n', " ");
-        let line = format!(
-            "printf 'DESIGNOS_CHAT_%s_{asst_id}\\n[Figma AI · %s] %s\\nDESIGNOS_CHAT_%s_{asst_id}\\n' 'BEGIN' '{safe_title}' '{safe_prompt}' 'END'"
-        );
+        let line =
+            format!("printf 'DESIGNOS_CHAT_%s_{asst_id}\\n[Figma AI · %s] %s\\nDESIGNOS_CHAT_%s_{asst_id}\\n' 'BEGIN' '{safe_title}' '{safe_prompt}' 'END'");
         if let Some(tab) = self.active_tab_mut() {
             tab.send_line(&line);
         }
@@ -1457,23 +1405,8 @@ pub fn format_paste_bytes(text: &str, bracketed: bool) -> Vec<u8> {
 /// while preserving relative code indentation (`stripTerminalSelectionGutter` from `stablyai/orca`).
 pub fn strip_selection_gutter(text: &str) -> String {
     let trimmed_lines: Vec<&str> = text.split('\n').map(|l| l.trim_end_matches([' ', '\t', '\r'])).collect();
-    let min_indent = trimmed_lines
-        .iter()
-        .filter(|l| !l.trim().is_empty())
-        .map(|l| l.bytes().take_while(|&b| b == b' ').count())
-        .min()
-        .unwrap_or(0);
-    trimmed_lines
-        .into_iter()
-        .map(|l| {
-            if l.trim().is_empty() {
-                ""
-            } else {
-                &l[min_indent.min(l.len())..]
-            }
-        })
-        .collect::<Vec<&str>>()
-        .join("\n")
+    let min_indent = trimmed_lines.iter().filter(|l| !l.trim().is_empty()).map(|l| l.bytes().take_while(|&b| b == b' ').count()).min().unwrap_or(0);
+    trimmed_lines.into_iter().map(|l| if l.trim().is_empty() { "" } else { &l[min_indent.min(l.len())..] }).collect::<Vec<&str>>().join("\n")
 }
 
 fn parse_agent_status_payload(payload: &str) -> Option<AgentTabStatus> {
@@ -1482,18 +1415,8 @@ fn parse_agent_status_payload(payload: &str) -> Option<AgentTabStatus> {
         return None;
     }
     if let Ok(val) = serde_json::from_str::<serde_json::Value>(trimmed) {
-        let state_str = val
-            .get("state")
-            .or_else(|| val.get("status"))
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_ascii_lowercase();
-        let detail = val
-            .get("tool")
-            .or_else(|| val.get("detail"))
-            .or_else(|| val.get("message"))
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string());
+        let state_str = val.get("state").or_else(|| val.get("status")).and_then(|v| v.as_str()).unwrap_or("").to_ascii_lowercase();
+        let detail = val.get("tool").or_else(|| val.get("detail")).or_else(|| val.get("message")).and_then(|v| v.as_str()).map(|s| s.to_string());
         return match state_str.as_str() {
             "working" | "running" | "busy" => Some(AgentTabStatus::Working(detail)),
             "waiting" | "permission" | "input" | "waiting_for_input" => Some(AgentTabStatus::WaitingForInput(detail)),
@@ -1550,10 +1473,7 @@ pub fn parse_osc_agent_status_and_strip(chunk: &str) -> (String, Option<AgentTab
             || cleaned.contains("Approve ")
         {
             status = Some(AgentTabStatus::WaitingForInput(Some("Approval requested".into())));
-        } else if cleaned
-            .chars()
-            .any(|c| ('\u{2801}'..='\u{28FF}').contains(&c) || matches!(c, '◐' | '◓' | '◑' | '◒'))
-        {
+        } else if cleaned.chars().any(|c| ('\u{2801}'..='\u{28FF}').contains(&c) || matches!(c, '◐' | '◓' | '◑' | '◒')) {
             status = Some(AgentTabStatus::Working(None));
         }
     }
@@ -1682,10 +1602,7 @@ pub fn paint_custom_terminal_glyph(p: &Painter, cell_rect: Rect, ch: char, fg: C
         for i in 1..=steps {
             let u = i as f32 / steps as f32;
             let inv = 1.0 - u;
-            let next = Pos2::new(
-                inv * inv * p0.x + 2.0 * inv * u * p1.x + u * u * p2.x,
-                inv * inv * p0.y + 2.0 * inv * u * p1.y + u * u * p2.y,
-            );
+            let next = Pos2::new(inv * inv * p0.x + 2.0 * inv * u * p1.x + u * u * p2.x, inv * inv * p0.y + 2.0 * inv * u * p1.y + u * u * p2.y);
             p.line_segment([prev, next], stroke);
             prev = next;
         }
@@ -1902,12 +1819,7 @@ fn paint_orca_tab_status_and_provider(ui: &Ui, p: &Painter, tab: &TerminalTab, t
 
     let explicit_status = tab.agent_status.lock().ok().map(|g| g.clone()).unwrap_or_default();
     let recent_pty_activity = tab.preset != AgentCliPreset::Shell
-        && tab
-            .last_output_at
-            .lock()
-            .ok()
-            .and_then(|g| *g)
-            .is_some_and(|ts| ts.elapsed() < std::time::Duration::from_millis(600));
+        && tab.last_output_at.lock().ok().and_then(|g| *g).is_some_and(|ts| ts.elapsed() < std::time::Duration::from_millis(600));
 
     let effective_status = match explicit_status {
         AgentTabStatus::Working(d) => AgentTabStatus::Working(d),
@@ -2048,12 +1960,7 @@ pub fn configure_pty_env(cmd: &mut CommandBuilder, preset: AgentCliPreset, file_
 /// Auto-injects all `configure_pty_env` variables plus per-file session isolation variables (`DESIGNOS_SESSION_DIR`,
 /// `DESIGNOS_MCP_CONFIG`, `DESIGNOS_LIVE_SPEC`, `DESIGNOS_LIVE_DOC_SYNC`, `DESIGNOS_LIVE_CANVAS`, `DESIGNOS_CONTEXT_JSON`,
 /// `DESIGNOS_SELECTION_JSON`, `DESIGNOS_TARGET_PAGE_ID`, `DESIGNOS_TARGET_PAGE_NAME`, `DESIGNOS_DOC_NAME`).
-pub fn configure_pty_env_with_session(
-    cmd: &mut CommandBuilder,
-    preset: AgentCliPreset,
-    file_path: Option<&Path>,
-    session: Option<&SessionEnv>,
-) {
+pub fn configure_pty_env_with_session(cmd: &mut CommandBuilder, preset: AgentCliPreset, file_path: Option<&Path>, session: Option<&SessionEnv>) {
     cmd.env("TERM", "xterm-256color");
     cmd.env("COLORTERM", "truecolor");
     cmd.env("DESIGNOS_AGENT_RUNTIME", preset.binary_name());
@@ -2294,17 +2201,10 @@ pub fn show_left(state: &mut TerminalState, ui: &mut Ui, rect: Rect, file_path: 
             let is_active = idx == state.active_tab;
             let t_rect = Rect::from_min_size(Pos2::new(x, bar_r.center().y - 12.0), Vec2::new(tab_w, 24.0));
             let close_rect = Rect::from_min_size(Pos2::new(t_rect.right() - 16.0, t_rect.center().y - 6.0), Vec2::splat(12.0));
-            let t_hit_rect = if can_close {
-                Rect::from_min_max(t_rect.min, Pos2::new((close_rect.left() - 2.0).max(t_rect.left() + 16.0), t_rect.max.y))
-            } else {
-                t_rect
-            };
+            let t_hit_rect =
+                if can_close { Rect::from_min_max(t_rect.min, Pos2::new((close_rect.left() - 2.0).max(t_rect.left() + 16.0), t_rect.max.y)) } else { t_rect };
             let tab_resp = ui.interact(t_hit_rect, Id::new(("agents-left-tab-select", tab.id)), Sense::click());
-            let close_resp = if can_close {
-                Some(ui.interact(close_rect, Id::new(("agents-left-tab-close", tab.id)), Sense::click()))
-            } else {
-                None
-            };
+            let close_resp = if can_close { Some(ui.interact(close_rect, Id::new(("agents-left-tab-close", tab.id)), Sense::click())) } else { None };
 
             let bg = if is_active {
                 TERM_BG_ELEVATED
@@ -2384,13 +2284,7 @@ pub fn show_left(state: &mut TerminalState, ui: &mut Ui, rect: Rect, file_path: 
         let ctx_badge = format!("{} · {}", state.doc_name, state.current_page_name);
         let ctx_elided = widgets::elide(&p, &ctx_badge, &theme::font_small(), (ctx_r.width() - 24.0).max(40.0));
         p.circle_filled(Pos2::new(ctx_r.left() + 10.0, ctx_r.center().y), 2.5, STATUS_INFO_TEXT);
-        p.text(
-            Pos2::new(ctx_r.left() + 17.0, ctx_r.center().y),
-            Align2::LEFT_CENTER,
-            ctx_elided,
-            theme::font_small(),
-            STATUS_INFO_TEXT,
-        );
+        p.text(Pos2::new(ctx_r.left() + 17.0, ctx_r.center().y), Align2::LEFT_CENTER, ctx_elided, theme::font_small(), STATUS_INFO_TEXT);
 
         // Live VT100 PTY Terminal Viewport (full height)
         let vp_r = Rect::from_min_max(Pos2::new(rect.left(), ctx_r.bottom()), rect.max);
@@ -2769,11 +2663,7 @@ pub fn show_left(state: &mut TerminalState, ui: &mut Ui, rect: Rect, file_path: 
     if plus_resp.clicked() {
         if !state.input_line.contains("@selection") {
             let existing = state.input_line.trim().to_string();
-            state.input_line = if existing.is_empty() {
-                "@selection @prd ".to_string()
-            } else {
-                format!("@selection @prd {existing}")
-            };
+            state.input_line = if existing.is_empty() { "@selection @prd ".to_string() } else { format!("@selection @prd {existing}") };
         }
         actions.push(TerminalAction::ExportSelectionToTerminal);
     }
@@ -2809,13 +2699,7 @@ pub fn show_left(state: &mut TerminalState, ui: &mut Ui, rect: Rect, file_path: 
         Stroke::new(1.0, if has_prd_tag { Color32::from_rgb(0x0D, 0x99, 0xFF) } else { Color32::from_rgb(0x3C, 0x3C, 0x42) }),
         StrokeKind::Inside,
     );
-    p.text(
-        prd_r.center(),
-        Align2::CENTER_CENTER,
-        "PRD",
-        theme::font_small_strong(),
-        if has_prd_tag { Color32::from_rgb(0x6E, 0xA8, 0xFE) } else { icon_gray },
-    );
+    p.text(prd_r.center(), Align2::CENTER_CENTER, "PRD", theme::font_small_strong(), if has_prd_tag { Color32::from_rgb(0x6E, 0xA8, 0xFE) } else { icon_gray });
     widgets::record(ui, "agents-composer-prd", prd_r);
     widgets::record(ui, "agents-composer-context", prd_r);
     if prd_resp.clicked() {
@@ -2886,21 +2770,9 @@ pub fn show_left(state: &mut TerminalState, ui: &mut Ui, rect: Rect, file_path: 
     actions
 }
 
-fn render_runtime_dropdown_menu(
-    state: &mut TerminalState,
-    ui: &mut Ui,
-    panel_rect: Rect,
-    top_y: f32,
-    file_path: Option<&Path>,
-) {
+fn render_runtime_dropdown_menu(state: &mut TerminalState, ui: &mut Ui, panel_rect: Rect, top_y: f32, file_path: Option<&Path>) {
     let menu_w = (panel_rect.width() - 16.0).clamp(180.0, 224.0);
-    let entries = [
-        AgentCliPreset::Claude,
-        AgentCliPreset::Codex,
-        AgentCliPreset::Grok,
-        AgentCliPreset::Antigravity,
-        AgentCliPreset::Shell,
-    ];
+    let entries = [AgentCliPreset::Claude, AgentCliPreset::Codex, AgentCliPreset::Grok, AgentCliPreset::Antigravity, AgentCliPreset::Shell];
     let row_h = 34.0;
     let header_h = 24.0;
     let menu_h = header_h + entries.len() as f32 * row_h + 8.0;
@@ -2909,12 +2781,7 @@ fn render_runtime_dropdown_menu(
 
     let p = ui.painter().clone();
     p.rect_filled(menu_r, CornerRadius::same(8), Color32::from_rgb(0x22, 0x22, 0x26));
-    p.rect_stroke(
-        menu_r,
-        CornerRadius::same(8),
-        Stroke::new(1.0, Color32::from_rgb(0x3E, 0x3E, 0x46)),
-        StrokeKind::Inside,
-    );
+    p.rect_stroke(menu_r, CornerRadius::same(8), Stroke::new(1.0, Color32::from_rgb(0x3E, 0x3E, 0x46)), StrokeKind::Inside);
     widgets::record(ui, "agents-runtime-dropdown-menu", menu_r);
 
     p.text(
@@ -2945,20 +2812,8 @@ fn render_runtime_dropdown_menu(
         let (_widget_id, title, subtitle) = preset.dropdown_entry();
         let title_str = widgets::elide(&p, title, &theme::font_small_medium(), (row_r.width() - 18.0).max(40.0));
         let sub_str = widgets::elide(&p, subtitle, &theme::font_mono(), (row_r.width() - 18.0).max(40.0));
-        p.text(
-            Pos2::new(row_r.left() + 8.0, row_r.top() + 10.0),
-            Align2::LEFT_CENTER,
-            title_str,
-            theme::font_small_medium(),
-            Color32::WHITE,
-        );
-        p.text(
-            Pos2::new(row_r.left() + 8.0, row_r.top() + 23.0),
-            Align2::LEFT_CENTER,
-            sub_str,
-            theme::font_mono(),
-            STATUS_INFO_TEXT,
-        );
+        p.text(Pos2::new(row_r.left() + 8.0, row_r.top() + 10.0), Align2::LEFT_CENTER, title_str, theme::font_small_medium(), Color32::WHITE);
+        p.text(Pos2::new(row_r.left() + 8.0, row_r.top() + 23.0), Align2::LEFT_CENTER, sub_str, theme::font_mono(), STATUS_INFO_TEXT);
         widgets::record(ui, id_str, row_r);
         if resp.clicked() {
             chosen = Some(preset);
@@ -2971,9 +2826,7 @@ fn render_runtime_dropdown_menu(
         let _ = state.spawn_tab(preset, file_path);
     } else if ui.input(|i| i.pointer.any_pressed()) {
         if let Some(pos) = ui.input(|i| i.pointer.interact_pos()) {
-            let add_btn = ui
-                .ctx()
-                .data(|d| d.get_temp::<Rect>(Id::new(("test-rect", "agents-runtime-add-btn".to_string()))));
+            let add_btn = ui.ctx().data(|d| d.get_temp::<Rect>(Id::new(("test-rect", "agents-runtime-add-btn".to_string()))));
             let in_add = add_btn.map(|r| r.contains(pos)).unwrap_or(false);
             if !menu_r.contains(pos) && !in_add {
                 state.runtime_dropdown_open = false;
@@ -3076,20 +2929,8 @@ fn render_agent_chat_thread(state: &mut TerminalState, ui: &mut Ui, center_rect:
 
                     p.circle_filled(Pos2::new(card_r.left() + 12.0, card_r.top() + 13.0), 3.0, STATUS_OK_TEXT);
                     let title_elided = widgets::elide(&p, turn.runtime.tab_title(), &font_strong, (card_w - 64.0).max(40.0));
-                    p.text(
-                        Pos2::new(card_r.left() + 20.0, card_r.top() + 13.0),
-                        Align2::LEFT_CENTER,
-                        title_elided,
-                        font_strong.clone(),
-                        Color32::WHITE,
-                    );
-                    p.text(
-                        Pos2::new(card_r.right() - 10.0, card_r.top() + 13.0),
-                        Align2::RIGHT_CENTER,
-                        "PTY",
-                        font_strong.clone(),
-                        STATUS_OK_TEXT,
-                    );
+                    p.text(Pos2::new(card_r.left() + 20.0, card_r.top() + 13.0), Align2::LEFT_CENTER, title_elided, font_strong.clone(), Color32::WHITE);
+                    p.text(Pos2::new(card_r.right() - 10.0, card_r.top() + 13.0), Align2::RIGHT_CENTER, "PTY", font_strong.clone(), STATUS_OK_TEXT);
                     widgets::hline(&p, card_r.left() + 8.0, card_r.right() - 8.0, card_r.top() + 24.0, Color32::from_rgb(0x2E, 0x2E, 0x2E));
 
                     for (li, line) in lines.iter().enumerate() {
@@ -3106,13 +2947,7 @@ fn render_agent_chat_thread(state: &mut TerminalState, ui: &mut Ui, center_rect:
                     let has_spec = turn.extracted_spec_json.is_some();
                     let cmd_max_w = if has_spec { (card_w - 88.0).max(36.0) } else { (card_w - 20.0).max(40.0) };
                     let cmd_str = widgets::elide(&p, &format!("$ {}", turn.shell_cmd), &font, cmd_max_w);
-                    p.text(
-                        Pos2::new(card_r.left() + 10.0, footer_y),
-                        Align2::LEFT_CENTER,
-                        cmd_str,
-                        font.clone(),
-                        Color32::from_rgb(0x8C, 0x8C, 0x8C),
-                    );
+                    p.text(Pos2::new(card_r.left() + 10.0, footer_y), Align2::LEFT_CENTER, cmd_str, font.clone(), Color32::from_rgb(0x8C, 0x8C, 0x8C));
 
                     if has_spec {
                         let btn_r = Rect::from_min_size(Pos2::new(card_r.right() - 72.0, card_r.bottom() - 22.0), Vec2::new(64.0, 18.0));
@@ -3513,11 +3348,7 @@ fn render_vt100_viewport(state: &mut TerminalState, ui: &mut Ui, viewport_rect: 
                 } else if let Ok(mut pg) = tab.parser.lock() {
                     let step = ((delta_y.abs() / ROW_H).ceil() as usize).max(1);
                     let cur_sb = pg.screen().scrollback();
-                    let next_sb = if delta_y > 0.0 {
-                        cur_sb.saturating_add(step)
-                    } else {
-                        cur_sb.saturating_sub(step)
-                    };
+                    let next_sb = if delta_y > 0.0 { cur_sb.saturating_add(step) } else { cur_sb.saturating_sub(step) };
                     pg.set_scrollback(next_sb);
                 }
             }
@@ -3658,11 +3489,7 @@ fn render_vt100_viewport(state: &mut TerminalState, ui: &mut Ui, viewport_rect: 
             let font_id = FontId::new(11.5, FontFamily::Monospace);
 
             let needle = if search_open && !search_query.is_empty() {
-                Some(if search_case_sensitive {
-                    search_query.clone()
-                } else {
-                    search_query.to_ascii_lowercase()
-                })
+                Some(if search_case_sensitive { search_query.clone() } else { search_query.to_ascii_lowercase() })
             } else {
                 None
             };
@@ -3678,10 +3505,7 @@ fn render_vt100_viewport(state: &mut TerminalState, ui: &mut Ui, viewport_rect: 
                 if let Some(ref q) = needle {
                     let mut row_chars: Vec<char> = Vec::with_capacity(cols as usize);
                     for c in 0..cols {
-                        let ch = screen
-                            .cell(r, c)
-                            .and_then(|cell| cell.contents().chars().next())
-                            .unwrap_or(' ');
+                        let ch = screen.cell(r, c).and_then(|cell| cell.contents().chars().next()).unwrap_or(' ');
                         row_chars.push(if search_case_sensitive { ch } else { ch.to_ascii_lowercase() });
                     }
                     let q_chars: Vec<char> = q.chars().collect();
@@ -3820,12 +3644,7 @@ fn render_vt100_viewport(state: &mut TerminalState, ui: &mut Ui, viewport_rect: 
                         }
                     }
                 } else {
-                    p.rect_stroke(
-                        cursor_rect,
-                        CornerRadius::same(1),
-                        Stroke::new(1.0, Color32::from_rgb(0xA1, 0xA1, 0xAA)),
-                        StrokeKind::Inside,
-                    );
+                    p.rect_stroke(cursor_rect, CornerRadius::same(1), Stroke::new(1.0, Color32::from_rgb(0xA1, 0xA1, 0xAA)), StrokeKind::Inside);
                 }
             }
 
@@ -3846,13 +3665,7 @@ fn render_vt100_viewport(state: &mut TerminalState, ui: &mut Ui, viewport_rect: 
                 );
                 p.rect_filled(pill_r, CornerRadius::same(10), TERM_BG_ELEVATED);
                 p.rect_stroke(pill_r, CornerRadius::same(10), Stroke::new(1.0, TERM_BORDER), StrokeKind::Inside);
-                p.text(
-                    pill_r.center(),
-                    Align2::CENTER_CENTER,
-                    "↑ Scrollback",
-                    theme::font_small_medium(),
-                    STATUS_INFO_TEXT,
-                );
+                p.text(pill_r.center(), Align2::CENTER_CENTER, "↑ Scrollback", theme::font_small_medium(), STATUS_INFO_TEXT);
             }
         });
     }
@@ -3913,13 +3726,7 @@ fn render_vt100_viewport(state: &mut TerminalState, ui: &mut Ui, viewport_rect: 
         }
 
         let count_str = format!("{search_matches}");
-        p.text(
-            Pos2::new(case_r.left() - 6.0, search_rect.center().y),
-            Align2::RIGHT_CENTER,
-            count_str,
-            theme::font_small(),
-            theme::TEXT_SECONDARY,
-        );
+        p.text(Pos2::new(case_r.left() - 6.0, search_rect.center().y), Align2::RIGHT_CENTER, count_str, theme::font_small(), theme::TEXT_SECONDARY);
 
         let input_r = Rect::from_min_max(
             Pos2::new(search_rect.left() + 8.0, search_rect.top() + 4.0),
@@ -4263,13 +4070,7 @@ Done!
                 }
                 std::thread::sleep(std::time::Duration::from_millis(40));
             }
-            assert!(
-                ok,
-                "Runtime {:?} failed to stream expected output '{}' in PTY: got '{}'",
-                preset,
-                expected_tag,
-                st.chat_turns[turn_idx].text
-            );
+            assert!(ok, "Runtime {:?} failed to stream expected output '{}' in PTY: got '{}'", preset, expected_tag, st.chat_turns[turn_idx].text);
         }
         for mut tab in st.tabs.drain(..) {
             let _ = tab.child.kill();
@@ -4293,11 +4094,7 @@ Done!
             }
             std::thread::sleep(std::time::Duration::from_millis(40));
         }
-        assert!(
-            prd_streamed,
-            "Assistant PTY turn should include PRD Context line: got '{}'",
-            st.chat_turns[1].text
-        );
+        assert!(prd_streamed, "Assistant PTY turn should include PRD Context line: got '{}'", st.chat_turns[1].text);
 
         for mut tab in st.tabs.drain(..) {
             let _ = tab.child.kill();
@@ -4321,26 +4118,10 @@ Done!
         assert!(runtime_binary_available("sh"));
         assert!(!runtime_binary_available("nonexistent_designos_binary_xyz_999"));
 
-        assert!(
-            AgentCliPreset::Claude
-                .cli_launch_command()
-                .starts_with("claude --dangerously-skip-permissions --mcp-config \"$DESIGNOS_MCP_CONFIG\"")
-        );
-        assert!(
-            AgentCliPreset::Codex
-                .cli_launch_command()
-                .starts_with("codex --dangerously-bypass-approvals-and-sandbox")
-        );
-        assert!(
-            AgentCliPreset::Grok
-                .cli_launch_command()
-                .starts_with("grok --always-approve")
-        );
-        assert!(
-            AgentCliPreset::Antigravity
-                .cli_launch_command()
-                .starts_with("agy --dangerously-skip-permissions")
-        );
+        assert!(AgentCliPreset::Claude.cli_launch_command().starts_with("claude --dangerously-skip-permissions --mcp-config \"$DESIGNOS_MCP_CONFIG\""));
+        assert!(AgentCliPreset::Codex.cli_launch_command().starts_with("codex --dangerously-bypass-approvals-and-sandbox"));
+        assert!(AgentCliPreset::Grok.cli_launch_command().starts_with("grok --always-approve"));
+        assert!(AgentCliPreset::Antigravity.cli_launch_command().starts_with("agy --dangerously-skip-permissions"));
         assert_eq!(AgentCliPreset::Shell.cli_launch_command(), "");
 
         let live_spec = std::path::Path::new("/tmp/designos-live-agent-out.spec.json");
@@ -4359,11 +4140,7 @@ Done!
         assert!(grok_cmd.contains("grok --always-approve") && grok_cmd.contains("-p"));
 
         let mut st = TerminalState::default();
-        st.dispatch_figma_ai_prompt(
-            "Auto-rename layers to semantic names",
-            "Auto-rename layers to semantic names",
-            None,
-        );
+        st.dispatch_figma_ai_prompt("Auto-rename layers to semantic names", "Auto-rename layers to semantic names", None);
         assert!(st.dock_open);
         assert_eq!(st.chat_turns.len(), 2);
         assert!(st.chat_turns[0].text.contains("Auto-rename layers to semantic names"));
@@ -4395,16 +4172,11 @@ Done!
         let panel_rect = Rect::from_min_size(Pos2::new(48.0, 0.0), Vec2::new(240.0, 800.0));
 
         // First pass to record widget rects
-        let _ = ctx.run_ui(
-            egui::RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1600.0, 900.0))), ..Default::default() },
-            |ui| {
-                let _ = show_left(&mut st, ui, panel_rect, None);
-            },
-        );
-        let get_rect = |name: &str| -> Rect {
-            ctx.data(|d| d.get_temp::<Rect>(Id::new(("test-rect", name.to_string()))))
-                .unwrap_or_else(|| panic!("{name} recorded"))
-        };
+        let _ = ctx.run_ui(egui::RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1600.0, 900.0))), ..Default::default() }, |ui| {
+            let _ = show_left(&mut st, ui, panel_rect, None);
+        });
+        let get_rect =
+            |name: &str| -> Rect { ctx.data(|d| d.get_temp::<Rect>(Id::new(("test-rect", name.to_string())))).unwrap_or_else(|| panic!("{name} recorded")) };
         let ai_rect = get_rect("agents-header-ai");
         let plus_rect = get_rect("agents-composer-attach");
         let prd_rect = get_rect("agents-composer-context");
@@ -4435,12 +4207,9 @@ Done!
 
         // Switch back to chat view to test composer buttons
         st.side_panel_pty_open = false;
-        let _ = ctx.run_ui(
-            egui::RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1600.0, 900.0))), ..Default::default() },
-            |ui| {
-                let _ = show_left(&mut st, ui, panel_rect, None);
-            },
-        );
+        let _ = ctx.run_ui(egui::RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1600.0, 900.0))), ..Default::default() }, |ui| {
+            let _ = show_left(&mut st, ui, panel_rect, None);
+        });
 
         // Click `+` attach button -> prepends @selection @prd and emits ExportSelectionToTerminal
         let acts = click_at(&ctx, &mut st, plus_rect.center());
@@ -4494,15 +4263,8 @@ Done!
 
         // Simulate MCP server writing doc-sync.designos into session 1
         let mut mutated = doc1.clone();
-        let _ = mutated.apply_spec(
-            page2,
-            &NodeSpec {
-                kind: "frame".into(),
-                name: "MCP Synced Frame".into(),
-                preset: Some("easeui-card".into()),
-                ..Default::default()
-            },
-        );
+        let _ = mutated
+            .apply_spec(page2, &NodeSpec { kind: "frame".into(), name: "MCP Synced Frame".into(), preset: Some("easeui-card".into()), ..Default::default() });
         std::fs::write(&st1.live_doc_sync_path, mutated.to_json().expect("json")).expect("save doc-sync.designos");
 
         let actions1 = st1.poll_live_agent_bridge();
@@ -4532,23 +4294,14 @@ Done!
 
         // 3. paint_custom_terminal_glyph procedurally paints box-drawing, block elements, shades, and Braille spinners
         let ctx = egui::Context::default();
-        let _ = ctx.run_ui(
-            egui::RawInput {
-                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(400.0, 200.0))),
-                ..Default::default()
-            },
-            |ui| {
-                let p = ui.painter();
-                let cell_rect = Rect::from_min_size(Pos2::new(10.0, 10.0), Vec2::new(CHAR_W, ROW_H));
-                for ch in ['╭', '─', '╮', '│', '╰', '╯', '═', '║', '┄', '█', '░', '▒', '▓', '▙', '⠋', '⠙', '⠹'] {
-                    assert!(
-                        paint_custom_terminal_glyph(p, cell_rect, ch, TERM_FG_DEFAULT),
-                        "Custom glyph renderer must handle '{ch}'"
-                    );
-                }
-                assert!(!paint_custom_terminal_glyph(p, cell_rect, 'A', TERM_FG_DEFAULT));
-            },
-        );
+        let _ = ctx.run_ui(egui::RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(400.0, 200.0))), ..Default::default() }, |ui| {
+            let p = ui.painter();
+            let cell_rect = Rect::from_min_size(Pos2::new(10.0, 10.0), Vec2::new(CHAR_W, ROW_H));
+            for ch in ['╭', '─', '╮', '│', '╰', '╯', '═', '║', '┄', '█', '░', '▒', '▓', '▙', '⠋', '⠙', '⠹'] {
+                assert!(paint_custom_terminal_glyph(p, cell_rect, ch, TERM_FG_DEFAULT), "Custom glyph renderer must handle '{ch}'");
+            }
+            assert!(!paint_custom_terminal_glyph(p, cell_rect, 'A', TERM_FG_DEFAULT));
+        });
 
         // 4. parse_osc_agent_status_and_strip parses and strips OSC 9999 without polluting VT100 output
         let osc_chunk = "Before\x1b]9999;{\"state\":\"working\",\"tool\":\"designos_apply_spec\"}\x07After";
@@ -4568,5 +4321,3 @@ Done!
         assert_eq!(vt100_color_to_egui(vt100::Color::Idx(15), true), Color32::from_rgb(0xEA, 0xEA, 0xEA));
     }
 }
-
-

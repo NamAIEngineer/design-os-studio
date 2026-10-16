@@ -396,10 +396,7 @@ impl Shaper {
             Some(n) => Family::Name(n),
             None => Family::SansSerif,
         };
-        let weight = st
-            .get_axis("wght")
-            .map(|w| Weight(w.round().clamp(1.0, 1000.0) as u16))
-            .unwrap_or(Weight(st.font_weight));
+        let weight = st.get_axis("wght").map(|w| Weight(w.round().clamp(1.0, 1000.0) as u16)).unwrap_or(Weight(st.font_weight));
         let stretch = match st.get_axis("wdth") {
             Some(w) if w <= 56.25 => Stretch::UltraCondensed,
             Some(w) if w <= 68.75 => Stretch::ExtraCondensed,

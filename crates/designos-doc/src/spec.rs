@@ -362,11 +362,7 @@ impl Document {
         }
         let root_id = self.build_spec_node(parent, spec)?;
         // Run Auto-Layout 5.0 reflow from parent (if parent has auto-layout) or root_id
-        let relayout_root = if self.get(parent).and_then(|n| n.kind.frame_props()).and_then(|f| f.auto_layout).is_some() {
-            parent
-        } else {
-            root_id
-        };
+        let relayout_root = if self.get(parent).and_then(|n| n.kind.frame_props()).and_then(|f| f.auto_layout).is_some() { parent } else { root_id };
         self.relayout_subtree(relayout_root);
         Ok(root_id)
     }
@@ -408,12 +404,7 @@ impl Document {
                 let mut style = TextStyle::default();
                 style.font_size = spec.font_size.unwrap_or(14.0);
                 style.font_weight = spec.font_weight.unwrap_or(400);
-                let col = spec
-                    .text_color
-                    .as_deref()
-                    .or(spec.fill.as_deref())
-                    .and_then(resolve_easeui_color)
-                    .unwrap_or_else(|| Color::rgb(0xF4, 0xF4, 0xF5));
+                let col = spec.text_color.as_deref().or(spec.fill.as_deref()).and_then(resolve_easeui_color).unwrap_or_else(|| Color::rgb(0xF4, 0xF4, 0xF5));
                 style.fills = vec![Paint::solid(col)];
                 Node::text(id, rect, spec.text.clone().unwrap_or_default(), style)
             }
@@ -598,11 +589,7 @@ impl Document {
                 let mut style = TextStyle::default();
                 style.font_size = spec.font_size.unwrap_or(13.0);
                 style.font_weight = spec.font_weight.unwrap_or(500);
-                let col = spec
-                    .text_color
-                    .as_deref()
-                    .and_then(resolve_easeui_color)
-                    .unwrap_or_else(|| Color::rgb(0xF4, 0xF4, 0xF5));
+                let col = spec.text_color.as_deref().and_then(resolve_easeui_color).unwrap_or_else(|| Color::rgb(0xF4, 0xF4, 0xF5));
                 style.fills = vec![Paint::solid(col)];
                 let mut tnode = Node::text(tid, Rect::new(0.0, 0.0, 60.0, 18.0), label.clone(), style);
                 tnode.name = label.clone();
@@ -631,11 +618,7 @@ impl Document {
         let Some(al) = self.get(root).and_then(|n| n.kind.frame_props()).and_then(|f| f.auto_layout) else {
             return;
         };
-        let flow_ids: Vec<NodeId> = children
-            .iter()
-            .copied()
-            .filter(|cid| self.get(*cid).is_some_and(|k| k.visible && !k.layout_child.absolute))
-            .collect();
+        let flow_ids: Vec<NodeId> = children.iter().copied().filter(|cid| self.get(*cid).is_some_and(|k| k.visible && !k.layout_child.absolute)).collect();
 
         if al.direction == LayoutDirection::Grid {
             let [pt, pr, pb, pl] = al.padding;
@@ -692,13 +675,7 @@ impl Document {
                 placements.push((*cid, placed_r, placed_c, rs, cs));
             }
 
-            let num_rows = placements
-                .iter()
-                .map(|&(_, r, _, rs, _)| r + rs)
-                .max()
-                .unwrap_or(0)
-                .max(al.grid_rows as usize)
-                .max(1);
+            let num_rows = placements.iter().map(|&(_, r, _, rs, _)| r + rs).max().unwrap_or(0).max(al.grid_rows as usize).max(1);
 
             let avail_w = (cur_frame.x - pl - pr - col_gap * (cols.saturating_sub(1) as f32)).max(0.0);
             let mut col_widths = vec![0.0_f32; cols];
@@ -900,10 +877,8 @@ impl Document {
         }
         let main_avail = (frame_main - pm).max(0.0);
 
-        let mut line_cross: Vec<f32> = lines
-            .iter()
-            .map(|l| l.iter().filter(|i| !kids[**i].cross_fill || al.wrap).map(|i| kids[*i].cross).fold(0.0, f32::max))
-            .collect();
+        let mut line_cross: Vec<f32> =
+            lines.iter().map(|l| l.iter().filter(|i| !kids[**i].cross_fill || al.wrap).map(|i| kids[*i].cross).fold(0.0, f32::max)).collect();
         if !al.wrap {
             if hug_cross {
                 frame_cross = line_cross[0] + pc;
@@ -968,11 +943,7 @@ impl Document {
                     LayoutAlign::End => line_cross[li] - c,
                     _ => 0.0,
                 };
-                let (mut x, mut y, mut w, mut h) = if horiz {
-                    (cursor, cross_cursor + off, m, c)
-                } else {
-                    (cross_cursor + off, cursor, c, m)
-                };
+                let (mut x, mut y, mut w, mut h) = if horiz { (cursor, cross_cursor + off, m, c) } else { (cross_cursor + off, cursor, c, m) };
                 if let Some(mw) = kid.min_w {
                     w = w.max(mw);
                 }
@@ -1109,9 +1080,7 @@ impl Document {
                 Some(nid) if self.get(nid).is_some() => self.world_transform(nid).apply(t.anchor.offset),
                 _ => t.anchor.offset,
             };
-            let target_node_id = t.anchor.node.filter(|nid| self.get(*nid).is_some()).or_else(|| {
-                self.deepest_node_at_point(page_id, world_pt)
-            });
+            let target_node_id = t.anchor.node.filter(|nid| self.get(*nid).is_some()).or_else(|| self.deepest_node_at_point(page_id, world_pt));
             let (target_node_name, target_node_kind) = match target_node_id.and_then(|nid| self.get(nid)) {
                 Some(n) => (Some(n.name.clone()), Some(n.kind.default_name().to_string())),
                 None => (None, None),

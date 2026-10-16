@@ -128,19 +128,11 @@ pub fn show(app: &mut App, ui: &mut Ui, screen: Rect) {
     {
         let ctx_w = 188.0;
         let ctx_h = 34.0;
-        let ctx_bar = Rect::from_min_size(
-            Pos2::new((screen.center().x - ctx_w * 0.5).round(), bar.top() - 8.0 - ctx_h),
-            Vec2::new(ctx_w, ctx_h),
-        );
+        let ctx_bar = Rect::from_min_size(Pos2::new((screen.center().x - ctx_w * 0.5).round(), bar.top() - 8.0 - ctx_h), Vec2::new(ctx_w, ctx_h));
         widgets::record(ui, "contextual-floating-bar", ctx_bar);
         widgets::shadow(&p, ctx_bar, 8, Vec2::new(0.0, 2.0), 6.0, theme::SHADOW_COLOR);
         p.rect_filled(ctx_bar, theme::cr(8), theme::BG_TOOLBAR);
-        p.rect_stroke(
-            ctx_bar.shrink(0.5),
-            theme::cr(8),
-            Stroke::new(1.0, Color32::from_rgb(0x38, 0x38, 0x38)),
-            egui::StrokeKind::Inside,
-        );
+        p.rect_stroke(ctx_bar.shrink(0.5), theme::cr(8), Stroke::new(1.0, Color32::from_rgb(0x38, 0x38, 0x38)), egui::StrokeKind::Inside);
         ui.interact(ctx_bar, ui.id().with("ctx-toolbar-block"), Sense::click_and_drag());
 
         let mut cx = ctx_bar.left() + 4.0;
@@ -172,20 +164,8 @@ pub fn show(app: &mut App, ui: &mut Ui, screen: Rect) {
         if more_resp.hovered() {
             p.rect_filled(more_r, theme::cr(theme::RADIUS_MEDIUM), theme::BG_TOOLBAR_HOVER);
         }
-        p.text(
-            Pos2::new(more_r.left() + 6.0, more_r.center().y),
-            egui::Align2::LEFT_CENTER,
-            "More",
-            theme::font_small(),
-            theme::TEXT,
-        );
-        icons::paint(
-            &p,
-            Icon::ChevronDown,
-            Pos2::new(more_r.right() - 9.0, more_r.center().y),
-            theme::TOOL_CHEVRON_ICON,
-            theme::ICON_SECONDARY,
-        );
+        p.text(Pos2::new(more_r.left() + 6.0, more_r.center().y), egui::Align2::LEFT_CENTER, "More", theme::font_small(), theme::TEXT);
+        icons::paint(&p, Icon::ChevronDown, Pos2::new(more_r.right() - 9.0, more_r.center().y), theme::TOOL_CHEVRON_ICON, theme::ICON_SECONDARY);
         if more_resp.on_hover_text("More actions   Ctrl+K").clicked() {
             app.cmdk.open = true;
             app.cmdk.focus_requested = true;
@@ -260,13 +240,7 @@ pub fn show(app: &mut App, ui: &mut Ui, screen: Rect) {
     } else if aresp.hovered() {
         p.rect_filled(ar, theme::cr(theme::RADIUS_MEDIUM), theme::BG_TOOLBAR_HOVER);
     }
-    icons::paint(
-        &p,
-        Icon::Sparkle,
-        ar.center(),
-        theme::TOOL_ICON_SIZE,
-        if actions_open { Color32::WHITE } else { theme::ICON },
-    );
+    icons::paint(&p, Icon::Sparkle, ar.center(), theme::TOOL_ICON_SIZE, if actions_open { Color32::WHITE } else { theme::ICON });
     if aresp.on_hover_text("Actions   Ctrl+K").clicked() {
         super::menus::run(app, ui.ctx(), super::menus::Action::OpenPalette);
     }
@@ -355,44 +329,18 @@ fn show_dev_mode_toolbar(app: &mut App, ui: &mut Ui, screen: Rect) {
         + dev_toggle_w;
 
     let bar = Rect::from_min_size(
-        Pos2::new(
-            screen.center().x - w / 2.0,
-            screen.bottom() - theme::TOOLBELT_BOTTOM_MARGIN - theme::TOOLBELT_HEIGHT,
-        ),
+        Pos2::new(screen.center().x - w / 2.0, screen.bottom() - theme::TOOLBELT_BOTTOM_MARGIN - theme::TOOLBELT_HEIGHT),
         Vec2::new(w, theme::TOOLBELT_HEIGHT),
     );
     let p = ui.painter().clone();
 
     // Floating `↩ Re-center  ⇧2` pill 8px above the Dev Mode bottom toolbar
-    let recenter_rect = Rect::from_min_size(
-        Pos2::new(bar.center().x - 59.0, bar.top() - 8.0 - 28.0),
-        Vec2::new(118.0, 28.0),
-    );
+    let recenter_rect = Rect::from_min_size(Pos2::new(bar.center().x - 59.0, bar.top() - 8.0 - 28.0), Vec2::new(118.0, 28.0));
     widgets::record(ui, "dev-recenter", recenter_rect);
     let recenter_resp = ui.interact(recenter_rect, ui.id().with("dev-recenter"), Sense::click());
-    widgets::shadow(
-        &p,
-        recenter_rect,
-        6,
-        Vec2::new(0.0, 2.0),
-        6.0,
-        theme::SHADOW_COLOR,
-    );
-    p.rect_filled(
-        recenter_rect,
-        theme::cr(6),
-        if recenter_resp.hovered() {
-            Color32::from_rgb(0x36, 0x36, 0x36)
-        } else {
-            Color32::from_rgb(0x2C, 0x2C, 0x2C)
-        },
-    );
-    p.rect_stroke(
-        recenter_rect,
-        theme::cr(6),
-        Stroke::new(1.0, Color32::from_rgb(0x38, 0x38, 0x38)),
-        egui::StrokeKind::Inside,
-    );
+    widgets::shadow(&p, recenter_rect, 6, Vec2::new(0.0, 2.0), 6.0, theme::SHADOW_COLOR);
+    p.rect_filled(recenter_rect, theme::cr(6), if recenter_resp.hovered() { Color32::from_rgb(0x36, 0x36, 0x36) } else { Color32::from_rgb(0x2C, 0x2C, 0x2C) });
+    p.rect_stroke(recenter_rect, theme::cr(6), Stroke::new(1.0, Color32::from_rgb(0x38, 0x38, 0x38)), egui::StrokeKind::Inside);
     p.text(
         Pos2::new(recenter_rect.left() + 10.0, recenter_rect.center().y),
         egui::Align2::LEFT_CENTER,
@@ -419,12 +367,7 @@ fn show_dev_mode_toolbar(app: &mut App, ui: &mut Ui, screen: Rect) {
     widgets::shadow(&p, bar, theme::RADIUS_LARGE, Vec2::new(0.0, 3.0), 8.0, theme::SHADOW_COLOR);
     widgets::shadow(&p, bar, theme::RADIUS_LARGE, Vec2::new(0.0, 1.0), 3.0, theme::SHADOW_COLOR_STRONG);
     p.rect_filled(bar, theme::cr(theme::RADIUS_LARGE), theme::BG_TOOLBAR);
-    p.rect_stroke(
-        bar.shrink(0.5),
-        theme::cr(theme::RADIUS_LARGE),
-        Stroke::new(1.0, theme::INNER_HIGHLIGHT),
-        egui::StrokeKind::Inside,
-    );
+    p.rect_stroke(bar.shrink(0.5), theme::cr(theme::RADIUS_LARGE), Stroke::new(1.0, theme::INNER_HIGHLIGHT), egui::StrokeKind::Inside);
     ui.interact(bar, ui.id().with("toolbar-block-dev"), Sense::click_and_drag());
 
     let mut x = bar.left() + theme::TOOLBELT_PADDING;
@@ -466,12 +409,7 @@ fn show_dev_mode_toolbar(app: &mut App, ui: &mut Ui, screen: Rect) {
                     if app.dev.annot.is_some() {
                         app.dev.annot = None;
                     } else if let Some(&id) = app.selection.first() {
-                        app.dev.annot = Some(crate::dev::AnnotEdit {
-                            node: id,
-                            index: None,
-                            text: String::new(),
-                            props: Vec::new(),
-                        });
+                        app.dev.annot = Some(crate::dev::AnnotEdit { node: id, index: None, text: String::new(), props: Vec::new() });
                     } else {
                         app.set_tool(Tool::Comment);
                     }
@@ -502,15 +440,7 @@ fn show_dev_mode_toolbar(app: &mut App, ui: &mut Ui, screen: Rect) {
     let toggle_r = Rect::from_min_size(Pos2::new(x, y), Vec2::new(dev_toggle_w, theme::TOOL_BUTTON));
     widgets::record(ui, "dev-mode-toggle", toggle_r);
     let toggle_resp = ui.interact(toggle_r, ui.id().with("dev-mode-toggle"), Sense::click());
-    p.rect_filled(
-        toggle_r,
-        theme::cr(theme::RADIUS_MEDIUM),
-        if toggle_resp.hovered() {
-            Color32::from_rgb(0x22, 0xD4, 0x89)
-        } else {
-            dev_green
-        },
-    );
+    p.rect_filled(toggle_r, theme::cr(theme::RADIUS_MEDIUM), if toggle_resp.hovered() { Color32::from_rgb(0x22, 0xD4, 0x89) } else { dev_green });
     icons::paint(&p, Icon::Dev, toggle_r.center(), 16.0, Color32::WHITE);
     if toggle_resp.on_hover_text("Exit Dev Mode   Shift+D").clicked() {
         app.ui.dev_mode = false;
@@ -548,10 +478,7 @@ pub fn apply_contextual_action(app: &mut App, key: &str) {
                     cropped_nodes += 1;
                 }
             });
-            app.show_toast(
-                format!("Crop applied ({clipped_frames} frame clip toggled, {cropped_nodes} layer bounds cropped)"),
-                false,
-            );
+            app.show_toast(format!("Crop applied ({clipped_frames} frame clip toggled, {cropped_nodes} layer bounds cropped)"), false);
         }
         "ctx-select-area" => {
             if sel.len() == 1 {
@@ -607,12 +534,7 @@ pub fn apply_contextual_action(app: &mut App, key: &str) {
         }
         "ctx-edit-prompt" => {
             if app.cmdk.query.trim().is_empty() {
-                if let Some(first_name) = sel
-                    .first()
-                    .and_then(|id| app.doc.get(*id))
-                    .map(|n| n.name.trim().to_string())
-                    .filter(|s| !s.is_empty())
-                {
+                if let Some(first_name) = sel.first().and_then(|id| app.doc.get(*id)).map(|n| n.name.trim().to_string()).filter(|s| !s.is_empty()) {
                     app.cmdk.query = first_name;
                 }
             }
@@ -675,24 +597,10 @@ mod tests {
             let mut events = Vec::new();
             if let Some(pos) = click {
                 events.push(egui::Event::PointerMoved(pos));
-                events.push(egui::Event::PointerButton {
-                    pos,
-                    button: egui::PointerButton::Primary,
-                    pressed: true,
-                    modifiers: egui::Modifiers::NONE,
-                });
-                events.push(egui::Event::PointerButton {
-                    pos,
-                    button: egui::PointerButton::Primary,
-                    pressed: false,
-                    modifiers: egui::Modifiers::NONE,
-                });
+                events.push(egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed: true, modifiers: egui::Modifiers::NONE });
+                events.push(egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed: false, modifiers: egui::Modifiers::NONE });
             }
-            let raw = egui::RawInput {
-                screen_rect: Some(screen),
-                events,
-                ..Default::default()
-            };
+            let raw = egui::RawInput { screen_rect: Some(screen), events, ..Default::default() };
             let _ = ctx.run_ui(raw, |ui| {
                 crate::panels::rail::show(app, ui, Rect::from_min_size(Pos2::new(0.0, 32.0), Vec2::new(40.0, 868.0)));
                 crate::panels::left::show(app, ui, Rect::from_min_size(Pos2::new(40.0, 32.0), Vec2::new(240.0, 868.0)));
@@ -710,9 +618,7 @@ mod tests {
         run_frame(&mut app, Some(agents_btn.center()));
         assert_eq!(app.ui.rail, Some(RailItem::Agents));
         run_frame(&mut app, None);
-        let agents_hdr = get_rect("agents-runtime-add-btn")
-            .or_else(|| get_rect("agents-header-back"))
-            .expect("agents header rect");
+        let agents_hdr = get_rect("agents-runtime-add-btn").or_else(|| get_rect("agents-header-back")).expect("agents header rect");
         assert!(agents_hdr.top() < 60.0, "Agents header sits at top of Left Side Panel without duplicate file_header");
 
         // UF-01 & UF-02: Click Assets in Left Rail -> opens full-height Assets Left Side Panel without duplicate file_header.
@@ -801,15 +707,7 @@ mod tests {
 
         // 1. Crop toggles clips_content on frame
         apply_contextual_action(&mut app, "ctx-crop");
-        assert!(
-            app.doc
-                .get(frame_id)
-                .unwrap()
-                .kind
-                .frame_props()
-                .unwrap()
-                .clips_content
-        );
+        assert!(app.doc.get(frame_id).unwrap().kind.frame_props().unwrap().clips_content);
         assert!(app.hist.can_undo());
 
         // 2. Remove background removes solid fill from selected frame

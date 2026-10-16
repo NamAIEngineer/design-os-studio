@@ -65,12 +65,7 @@ pub enum FileFilter {
 }
 
 impl FileFilter {
-    pub const ALL: [FileFilter; 4] = [
-        FileFilter::AllFiles,
-        FileFilter::DesignFiles,
-        FileFilter::Boards,
-        FileFilter::SpecBundles,
-    ];
+    pub const ALL: [FileFilter; 4] = [FileFilter::AllFiles, FileFilter::DesignFiles, FileFilter::Boards, FileFilter::SpecBundles];
 
     pub fn label(self) -> &'static str {
         match self {
@@ -92,12 +87,7 @@ pub enum Sort {
 }
 
 impl Sort {
-    pub const ALL: [Sort; 4] = [
-        Sort::LastOpened,
-        Sort::LastModified,
-        Sort::Name,
-        Sort::DateCreated,
-    ];
+    pub const ALL: [Sort; 4] = [Sort::LastOpened, Sort::LastModified, Sort::Name, Sort::DateCreated];
 
     pub fn label(self) -> &'static str {
         match self {
@@ -139,11 +129,7 @@ pub struct Snapshot {
 
 impl Snapshot {
     pub fn project_name(&self, id: &str) -> &str {
-        self.projects
-            .iter()
-            .find(|p| p.id == id)
-            .map(|p| p.name.as_str())
-            .unwrap_or("")
+        self.projects.iter().find(|p| p.id == id).map(|p| p.name.as_str()).unwrap_or("")
     }
 }
 
@@ -221,15 +207,8 @@ impl Home {
 
     pub fn refresh(&mut self, lib: &Library) {
         let projects = lib.list_projects();
-        let files = projects
-            .iter()
-            .flat_map(|p| lib.files_in(&p.id, None).unwrap_or_default())
-            .collect();
-        self.snap = Snapshot {
-            projects,
-            files,
-            trash: lib.list_trash(),
-        };
+        let files = projects.iter().flat_map(|p| lib.files_in(&p.id, None).unwrap_or_default()).collect();
+        self.snap = Snapshot { projects, files, trash: lib.list_trash() };
         self.dirty = false;
         // A section pointing at something that no longer exists falls back to Recents.
         if let Section::Project(p, f) = &self.section {
@@ -256,33 +235,18 @@ impl Home {
     pub fn visible_files(&self) -> Vec<FileEntry> {
         let q = self.search.trim().to_lowercase();
         let mut v: Vec<FileEntry> = if !q.is_empty() {
-            self.snap
-                .files
-                .iter()
-                .filter(|f| f.name.to_lowercase().contains(&q))
-                .cloned()
-                .collect()
+            self.snap.files.iter().filter(|f| f.name.to_lowercase().contains(&q)).cloned().collect()
         } else {
             match &self.section {
                 Section::Recents => self.snap.files.clone(),
-                Section::AllProjects => self
-                    .snap
-                    .files
-                    .iter()
-                    .filter(|f| f.folder.is_some())
-                    .cloned()
-                    .collect(),
+                Section::AllProjects => self.snap.files.iter().filter(|f| f.folder.is_some()).cloned().collect(),
                 Section::Templates => self
                     .snap
                     .files
                     .iter()
                     .filter(|f| {
                         let low = f.name.to_ascii_lowercase();
-                        low.contains("template")
-                            || low.contains("spec")
-                            || low.contains("kit")
-                            || low.contains("starter")
-                            || low.contains("bundle")
+                        low.contains("template") || low.contains("spec") || low.contains("kit") || low.contains("starter") || low.contains("bundle")
                     })
                     .cloned()
                     .collect(),
@@ -302,21 +266,9 @@ impl Home {
                     })
                     .cloned()
                     .collect(),
-                Section::Drafts => self
-                    .snap
-                    .files
-                    .iter()
-                    .filter(|f| f.folder.is_none())
-                    .cloned()
-                    .collect(),
+                Section::Drafts => self.snap.files.iter().filter(|f| f.folder.is_none()).cloned().collect(),
                 Section::Starred => self.snap.files.iter().filter(|f| f.starred).cloned().collect(),
-                Section::Project(p, folder) => self
-                    .snap
-                    .files
-                    .iter()
-                    .filter(|f| &f.project == p && &f.folder == folder)
-                    .cloned()
-                    .collect(),
+                Section::Project(p, folder) => self.snap.files.iter().filter(|f| &f.project == p && &f.folder == folder).cloned().collect(),
                 Section::Trash => vec![],
             }
         };
@@ -391,22 +343,12 @@ impl Home {
                 let Some(pr) = self.snap.projects.iter().find(|x| &x.id == p) else {
                     return vec![];
                 };
-                let mut v: Vec<(String, String)> = pr
-                    .folders
-                    .iter()
-                    .filter(|f| &f.parent == parent)
-                    .map(|f| (f.id.clone(), f.name.clone()))
-                    .collect();
+                let mut v: Vec<(String, String)> = pr.folders.iter().filter(|f| &f.parent == parent).map(|f| (f.id.clone(), f.name.clone())).collect();
                 v.sort_by_key(|(_, n)| n.to_lowercase());
                 v
             }
             Section::AllProjects => {
-                let mut v: Vec<(String, String)> = self
-                    .snap
-                    .projects
-                    .iter()
-                    .flat_map(|pr| pr.folders.iter().map(|f| (f.id.clone(), f.name.clone())))
-                    .collect();
+                let mut v: Vec<(String, String)> = self.snap.projects.iter().flat_map(|pr| pr.folders.iter().map(|f| (f.id.clone(), f.name.clone()))).collect();
                 v.sort_by_key(|(_, n)| n.to_lowercase());
                 v
             }
@@ -519,18 +461,8 @@ pub fn show(app: &mut App, ui: &mut Ui) {
 fn menus(h: &mut Home, ctx: &egui::Context, acts: &mut Vec<Act>) {
     use crate::widgets::menu::{popup_menu, MenuItem, MenuResult};
     if let Some(anchor) = h.filter_menu {
-        let items: Vec<MenuItem> = FileFilter::ALL
-            .iter()
-            .map(|f| MenuItem::new(f.label()).checked(*f == h.filter))
-            .collect();
-        match popup_menu(
-            ctx,
-            egui::Id::new("home-filter-menu"),
-            anchor.left_bottom() + Vec2::new(0.0, 4.0),
-            168.0,
-            &items,
-            Some(anchor),
-        ) {
+        let items: Vec<MenuItem> = FileFilter::ALL.iter().map(|f| MenuItem::new(f.label()).checked(*f == h.filter)).collect();
+        match popup_menu(ctx, egui::Id::new("home-filter-menu"), anchor.left_bottom() + Vec2::new(0.0, 4.0), 168.0, &items, Some(anchor)) {
             MenuResult::Picked(i) => {
                 h.filter_menu = None;
                 acts.push(Act::SetFilter(FileFilter::ALL[i]));
@@ -540,18 +472,8 @@ fn menus(h: &mut Home, ctx: &egui::Context, acts: &mut Vec<Act>) {
         }
     }
     if let Some(anchor) = h.sort_menu {
-        let items: Vec<MenuItem> = Sort::ALL
-            .iter()
-            .map(|s| MenuItem::new(s.label()).checked(*s == h.sort))
-            .collect();
-        match popup_menu(
-            ctx,
-            egui::Id::new("home-sort-menu"),
-            anchor.left_bottom() + Vec2::new(0.0, 4.0),
-            168.0,
-            &items,
-            Some(anchor),
-        ) {
+        let items: Vec<MenuItem> = Sort::ALL.iter().map(|s| MenuItem::new(s.label()).checked(*s == h.sort)).collect();
+        match popup_menu(ctx, egui::Id::new("home-sort-menu"), anchor.left_bottom() + Vec2::new(0.0, 4.0), 168.0, &items, Some(anchor)) {
             MenuResult::Picked(i) => {
                 h.sort_menu = None;
                 acts.push(Act::SetSort(Sort::ALL[i]));
@@ -587,10 +509,7 @@ pub fn context_entries(h: &Home, target: &Target) -> Vec<(crate::widgets::menu::
                 (MenuItem::new("Rename"), Act::RenameFile(id.clone())),
                 (MenuItem::new("Duplicate"), Act::Duplicate(id.clone())),
                 (MenuItem::new("Move to\u{2026}").sep(), Act::MoveTo(id.clone())),
-                (
-                    MenuItem::new(if starred { "Remove star" } else { "Star" }),
-                    Act::Star(id.clone(), !starred),
-                ),
+                (MenuItem::new(if starred { "Remove star" } else { "Star" }), Act::Star(id.clone(), !starred)),
                 (MenuItem::new("Show in folder").sep(), Act::Reveal(id.clone())),
                 (MenuItem::new("Move to trash").sep(), Act::Trash(id.clone())),
                 (MenuItem::new("Export .fig\u{2026}"), Act::ExportFig(id.clone())),
@@ -602,13 +521,7 @@ pub fn context_entries(h: &Home, target: &Target) -> Vec<(crate::widgets::menu::
             (MenuItem::new("Move to trash"), Act::DeleteProject(id.clone())),
         ],
         Target::Folder(p, f) => {
-            let nested = h
-                .snap
-                .projects
-                .iter()
-                .find(|x| &x.id == p)
-                .and_then(|pr| pr.folders.iter().find(|x| &x.id == f))
-                .is_some_and(|x| x.parent.is_some());
+            let nested = h.snap.projects.iter().find(|x| &x.id == p).and_then(|pr| pr.folders.iter().find(|x| &x.id == f)).is_some_and(|x| x.parent.is_some());
             let mut v = vec![
                 (MenuItem::new("New subfolder"), Act::NewFolder(p.clone(), Some(f.clone()))),
                 (MenuItem::new("Rename"), Act::RenameFolder(p.clone(), f.clone())),
@@ -618,10 +531,7 @@ pub fn context_entries(h: &Home, target: &Target) -> Vec<(crate::widgets::menu::
             }
             v
         }
-        Target::TrashItem(id) => vec![
-            (MenuItem::new("Restore"), Act::Restore(id.clone())),
-            (MenuItem::new("Empty trash\u{2026}"), Act::EmptyTrash),
-        ],
+        Target::TrashItem(id) => vec![(MenuItem::new("Restore"), Act::Restore(id.clone())), (MenuItem::new("Empty trash\u{2026}"), Act::EmptyTrash)],
     }
 }
 
@@ -639,13 +549,7 @@ fn drag_ghost(h: &mut Home, ui: &Ui, acts: &mut Vec<Act>) {
     let r = Rect::from_min_size(ptr + Vec2::new(12.0, 8.0), Vec2::new(w, 28.0));
     p.rect_filled(r, theme::cr(theme::RADIUS_MEDIUM), theme::BG_BRAND);
     let shown = crate::widgets::elide(&p, &name, &font, 200.0);
-    p.text(
-        r.left_center() + Vec2::new(12.0, 0.0),
-        egui::Align2::LEFT_CENTER,
-        shown,
-        font,
-        egui::Color32::WHITE,
-    );
+    p.text(r.left_center() + Vec2::new(12.0, 0.0), egui::Align2::LEFT_CENTER, shown, font, egui::Color32::WHITE);
     ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
     if released {
         if let Some((_, to)) = h.drop_rects.iter().rev().find(|(r, _)| r.contains(ptr)) {
@@ -700,14 +604,7 @@ pub fn apply(app: &mut App, act: Act) {
         Act::Open(id) => app.open_library_file(&id),
         Act::OpenWindow(id) => {
             let exe = std::env::current_exe();
-            match exe.and_then(|e| {
-                std::process::Command::new(e)
-                    .arg("--library")
-                    .arg(lib.root())
-                    .arg("--open-id")
-                    .arg(&id)
-                    .spawn()
-            }) {
+            match exe.and_then(|e| std::process::Command::new(e).arg("--library").arg(lib.root()).arg("--open-id").arg(&id).spawn()) {
                 Ok(_) => app.show_toast("Opened in a new window", false),
                 Err(e) => app.show_toast(format!("Cannot open a new window: {e}"), true),
             }
@@ -715,30 +612,21 @@ pub fn apply(app: &mut App, act: Act) {
         Act::NewFile => {
             let target = match app.home_target() {
                 Some(t) => Some(t),
-                None => app
-                    .home
-                    .as_ref()
-                    .and_then(|h| h.snap.projects.first().map(|p| (p.id.clone(), None))),
+                None => app.home.as_ref().and_then(|h| h.snap.projects.first().map(|p| (p.id.clone(), None))),
             };
             app.new_library_file(target);
         }
         Act::NewBoard => {
             let target = match app.home_target() {
                 Some(t) => Some(t),
-                None => app
-                    .home
-                    .as_ref()
-                    .and_then(|h| h.snap.projects.first().map(|p| (p.id.clone(), None))),
+                None => app.home.as_ref().and_then(|h| h.snap.projects.first().map(|p| (p.id.clone(), None))),
             };
             app.new_library_board(target);
         }
         Act::NewDeck => {
             let target = match app.home_target() {
                 Some(t) => Some(t),
-                None => app
-                    .home
-                    .as_ref()
-                    .and_then(|h| h.snap.projects.first().map(|p| (p.id.clone(), None))),
+                None => app.home.as_ref().and_then(|h| h.snap.projects.first().map(|p| (p.id.clone(), None))),
             };
             app.new_library_deck(target);
         }
@@ -818,10 +706,7 @@ pub fn apply(app: &mut App, act: Act) {
             if let Some(paths) = paths {
                 let target = match app.home_target() {
                     Some(t) => Some(t),
-                    None => app
-                        .home
-                        .as_ref()
-                        .and_then(|h| h.snap.projects.first().map(|p| (p.id.clone(), None))),
+                    None => app.home.as_ref().and_then(|h| h.snap.projects.first().map(|p| (p.id.clone(), None))),
                 };
                 let target = match target {
                     Some(t) => Some(t),
@@ -854,12 +739,7 @@ pub fn apply(app: &mut App, act: Act) {
             changed = false;
         }
         Act::RenameFolder(p, f) => {
-            let name = lib
-                .project(&p)
-                .ok()
-                .and_then(|pr| pr.folders.into_iter().find(|x| x.id == f))
-                .map(|x| x.name)
-                .unwrap_or_default();
+            let name = lib.project(&p).ok().and_then(|pr| pr.folders.into_iter().find(|x| x.id == f)).map(|x| x.name).unwrap_or_default();
             app.dialog = Some(Dialog::prompt(Intent::RenameFolder(p, f), "Rename folder", &name, "Rename"));
             changed = false;
         }
@@ -901,16 +781,8 @@ pub fn apply(app: &mut App, act: Act) {
             if let Ok(doc) = lib.load_file(&id) {
                 match designos_fig::export_fig(&doc) {
                     Ok(bytes) => {
-                        let safe_name: String = doc
-                            .name
-                            .chars()
-                            .map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
-                            .collect();
-                        let stem = if safe_name.trim_matches('_').is_empty() {
-                            "export".to_string()
-                        } else {
-                            safe_name
-                        };
+                        let safe_name: String = doc.name.chars().map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '_' }).collect();
+                        let stem = if safe_name.trim_matches('_').is_empty() { "export".to_string() } else { safe_name };
                         let out_dir = lib.path("exports");
                         let _ = std::fs::create_dir_all(&out_dir);
                         let out_path = out_dir.join(format!("{stem}.fig"));
@@ -921,10 +793,7 @@ pub fn apply(app: &mut App, act: Act) {
                             let _ = std::fs::write(&tmp_path, &bytes);
                             tmp_path
                         };
-                        app.show_toast(
-                            format!("Exported {} ({} bytes .fig v106) -> {}", doc.name, bytes.len(), saved_path.display()),
-                            false,
-                        );
+                        app.show_toast(format!("Exported {} ({} bytes .fig v106) -> {}", doc.name, bytes.len(), saved_path.display()), false);
                     }
                     Err(e) => app.show_toast(format!("Export .fig failed: {e}"), true),
                 }
@@ -946,17 +815,8 @@ pub fn apply(app: &mut App, act: Act) {
         }
         Act::EmptyTrash => {
             let n = app.home.as_ref().map(|h| h.snap.trash.len()).unwrap_or(0);
-            let body = if n == 1 {
-                "1 item will be permanently deleted."
-            } else {
-                "These items will be permanently deleted."
-            };
-            let mut d = Dialog::confirm(
-                Intent::EmptyTrash,
-                "Empty the trash?",
-                &[body, "This cannot be undone."],
-                "Empty trash",
-            );
+            let body = if n == 1 { "1 item will be permanently deleted." } else { "These items will be permanently deleted." };
+            let mut d = Dialog::confirm(Intent::EmptyTrash, "Empty the trash?", &[body, "This cannot be undone."], "Empty trash");
             d.danger = true;
             app.dialog = Some(d);
             changed = false;
@@ -1047,29 +907,15 @@ mod sidebar {
         }
         let avatar_r = Rect::from_center_size(Pos2::new(x0 + 22.0, ws_rect.center().y), Vec2::splat(20.0));
         p.rect_filled(avatar_r, CornerRadius::same(5), Color32::from_rgb(0x27, 0x27, 0x2A));
-        p.rect_stroke(
-            avatar_r,
-            CornerRadius::same(5),
-            Stroke::new(1.0, Color32::from_rgb(0x3F, 0x3F, 0x46)),
-            StrokeKind::Inside,
-        );
+        p.rect_stroke(avatar_r, CornerRadius::same(5), Stroke::new(1.0, Color32::from_rgb(0x3F, 0x3F, 0x46)), StrokeKind::Inside);
         icons::paint(&p, Icon::Folder, avatar_r.center(), 12.0, theme::BG_BRAND);
         let ws_font = egui::FontId::new(12.0, egui::FontFamily::Name(theme::FAMILY_MEDIUM.into()));
-        p.text(
-            Pos2::new(x0 + 38.0, ws_rect.center().y),
-            Align2::LEFT_CENTER,
-            "Personal Workspace",
-            ws_font,
-            UI3_TEXT_PRI,
-        );
+        p.text(Pos2::new(x0 + 38.0, ws_rect.center().y), Align2::LEFT_CENTER, "Personal Workspace", ws_font, UI3_TEXT_PRI);
         let ver = format!("v{}", env!("CARGO_PKG_VERSION"));
         let mut ver_font = theme::font_mono();
         ver_font.size = 10.0;
         let ver_w = widgets::text_width(&p, &ver, &ver_font) + 10.0;
-        let ver_r = Rect::from_center_size(
-            Pos2::new(ws_rect.right() - ver_w * 0.5 - 4.0, ws_rect.center().y),
-            Vec2::new(ver_w, 16.0),
-        );
+        let ver_r = Rect::from_center_size(Pos2::new(ws_rect.right() - ver_w * 0.5 - 4.0, ws_rect.center().y), Vec2::new(ver_w, 16.0));
         p.rect_filled(ver_r, CornerRadius::same(4), UI3_PILL_ACTIVE);
         p.text(ver_r.center(), Align2::CENTER_CENTER, ver, ver_font, UI3_TEXT_SEC);
         if ws_resp.clicked() {
@@ -1110,10 +956,9 @@ mod sidebar {
         y += 32.0 + 10.0;
 
         // 3. Primary Navigation (`Recents`, `Templates & Specs`)
-        for (icon, label, section, key) in [
-            (Icon::Clock, "Recents", Section::Recents, "recents"),
-            (Icon::Specs, "Templates & Specs", Section::Templates, "templates"),
-        ] {
+        for (icon, label, section, key) in
+            [(Icon::Clock, "Recents", Section::Recents, "recents"), (Icon::Specs, "Templates & Specs", Section::Templates, "templates")]
+        {
             let r = Rect::from_min_size(Pos2::new(x0 + 8.0, y), Vec2::new(w - 16.0, ROW_H));
             let selected = h.section == section && !h.searching();
             if row(ui, r, Id::new(("home-nav", key)), icon, label, 0.0, selected, false, key).clicked() {
@@ -1129,13 +974,7 @@ mod sidebar {
         let ws_badge_c = Pos2::new(x0 + 20.0, y + 12.0);
         p.circle_filled(ws_badge_c, 7.0, UI3_BLUE.gamma_multiply(0.25));
         p.text(ws_badge_c, Align2::CENTER_CENTER, "P", theme::font_small_strong(), UI3_BLUE);
-        p.text(
-            Pos2::new(x0 + 32.0, y + 12.0),
-            Align2::LEFT_CENTER,
-            "FILES & PROJECTS",
-            theme::font_small_strong(),
-            theme::TEXT_SECONDARY,
-        );
+        p.text(Pos2::new(x0 + 32.0, y + 12.0), Align2::LEFT_CENTER, "FILES & PROJECTS", theme::font_small_strong(), theme::TEXT_SECONDARY);
         let plus = Rect::from_min_size(Pos2::new(x0 + w - 12.0 - 24.0, y), Vec2::splat(24.0));
         if widgets::icon_button(ui, plus, "home-new-project", Icon::Plus, false, "New project").clicked() {
             acts.push(Act::NewProject);
@@ -1164,10 +1003,7 @@ mod sidebar {
         let bottom_reserve = 52.0 + 48.0 + ROW_H + 16.0 + starred_rows_n as f32 * 26.0;
 
         // 5. Project Tree (`Getting started`, `Marketing`, and nested folders)
-        let list = Rect::from_min_max(
-            Pos2::new(x0, y),
-            Pos2::new(x0 + w, (rect.bottom() - bottom_reserve).max(y + 64.0)),
-        );
+        let list = Rect::from_min_max(Pos2::new(x0, y), Pos2::new(x0 + w, (rect.bottom() - bottom_reserve).max(y + 64.0)));
         let rows = tree_rows(h);
         let content_h = rows.len() as f32 * ROW_H + 8.0;
         crate::panels::wheel_scroll(ui, list, &mut h.side_scroll, content_h);
@@ -1179,19 +1015,10 @@ mod sidebar {
         let mut dropzones: Vec<(Rect, DropTo)> = vec![];
         crate::panels::clipped(ui, list, |ui| {
             if rows.is_empty() {
-                ui.painter().text(
-                    Pos2::new(x0 + 20.0, list.top() + 16.0),
-                    Align2::LEFT_CENTER,
-                    "No projects yet",
-                    theme::font_body(),
-                    theme::TEXT_TERTIARY,
-                );
+                ui.painter().text(Pos2::new(x0 + 20.0, list.top() + 16.0), Align2::LEFT_CENTER, "No projects yet", theme::font_body(), theme::TEXT_TERTIARY);
             }
             for (i, tr) in rows.iter().enumerate() {
-                let r = Rect::from_min_size(
-                    Pos2::new(x0 + 8.0, list.top() + i as f32 * ROW_H - scroll),
-                    Vec2::new(w - 16.0, ROW_H),
-                );
+                let r = Rect::from_min_size(Pos2::new(x0 + 8.0, list.top() + i as f32 * ROW_H - scroll), Vec2::new(w - 16.0, ROW_H));
                 if r.bottom() < list.top() || r.top() > list.bottom() {
                     continue;
                 }
@@ -1211,13 +1038,7 @@ mod sidebar {
                 );
                 if let Some(open) = tr.expanded {
                     let c = Pos2::new(r.left() + 10.0 + tr.depth as f32 * INDENT, r.center().y);
-                    icons::paint(
-                        ui.painter(),
-                        if open { Icon::ChevronDown } else { Icon::ChevronRight },
-                        c,
-                        12.0,
-                        theme::ICON_TERTIARY,
-                    );
+                    icons::paint(ui.painter(), if open { Icon::ChevronDown } else { Icon::ChevronRight }, c, 12.0, theme::ICON_TERTIARY);
                 }
                 let on_chevron = tr.expanded.is_some() && ptr.is_some_and(|p| p.x < r.left() + 22.0 + tr.depth as f32 * INDENT);
                 if resp.clicked() {
@@ -1259,17 +1080,7 @@ mod sidebar {
         sy += 6.0;
         let star_r = Rect::from_min_size(Pos2::new(x0 + 8.0, sy), Vec2::new(w - 16.0, ROW_H));
         let star_selected = h.section == Section::Starred && !h.searching();
-        let star_resp = row(
-            ui,
-            star_r,
-            Id::new(("home-nav", "starred")),
-            Icon::Star,
-            "Starred",
-            0.0,
-            star_selected,
-            false,
-            "starred",
-        );
+        let star_resp = row(ui, star_r, Id::new(("home-nav", "starred")), Icon::Star, "Starred", 0.0, star_selected, false, "starred");
         icons::paint(
             &p,
             if h.starred_expanded { Icon::ChevronDown } else { Icon::ChevronRight },
@@ -1294,21 +1105,9 @@ mod sidebar {
                 if sresp.hovered() {
                     p.rect_filled(sr_row, CornerRadius::same(5), UI3_PILL_HOVER);
                 }
-                icons::paint(
-                    &p,
-                    Icon::File,
-                    Pos2::new(sr_row.left() + 12.0, sr_row.center().y),
-                    13.0,
-                    UI3_BLUE,
-                );
+                icons::paint(&p, Icon::File, Pos2::new(sr_row.left() + 12.0, sr_row.center().y), 13.0, UI3_BLUE);
                 let stxt = widgets::elide(&p, &sf.name, &theme::font_small(), sr_row.width() - 28.0);
-                p.text(
-                    Pos2::new(sr_row.left() + 24.0, sr_row.center().y),
-                    Align2::LEFT_CENTER,
-                    stxt,
-                    theme::font_small(),
-                    theme::TEXT_SECONDARY,
-                );
+                p.text(Pos2::new(sr_row.left() + 24.0, sr_row.center().y), Align2::LEFT_CENTER, stxt, theme::font_small(), theme::TEXT_SECONDARY);
                 if sresp.clicked() {
                     acts.push(Act::Open(sf.id.clone()));
                 }
@@ -1318,37 +1117,18 @@ mod sidebar {
 
         // 7. Auto-Update & Upstream Figma Watchdog Status Card (`US-09` / `DIR-11`)
         let trash_h = 46.0;
-        let updater_r = Rect::from_min_size(
-            Pos2::new(x0 + 8.0, rect.bottom() - trash_h - 46.0),
-            Vec2::new(w - 16.0, 40.0),
-        );
+        let updater_r = Rect::from_min_size(Pos2::new(x0 + 8.0, rect.bottom() - trash_h - 46.0), Vec2::new(w - 16.0, 40.0));
         super::updater::show_sidebar_card_in_rect(ui, updater_r, &mut h.updater);
 
         // 8. Bottom `Trash` Row (`V3.3` / `D85`: separate count pill badge instead of parenthetical string)
         widgets::hline(&p, x0, x0 + w, rect.bottom() - trash_h, UI3_BORDER);
         let tr = Rect::from_min_size(Pos2::new(x0 + 8.0, rect.bottom() - trash_h + 9.0), Vec2::new(w - 16.0, ROW_H));
         let n = h.snap.trash.len();
-        let trash_resp = row(
-            ui,
-            tr,
-            Id::new("home-trash"),
-            Icon::Trash,
-            "Trash",
-            0.0,
-            h.section == Section::Trash && !h.searching(),
-            false,
-            "trash",
-        );
+        let trash_resp = row(ui, tr, Id::new("home-trash"), Icon::Trash, "Trash", 0.0, h.section == Section::Trash && !h.searching(), false, "trash");
         if n > 0 {
             let badge_r = Rect::from_center_size(Pos2::new(tr.right() - 22.0, tr.center().y), Vec2::new(22.0, 16.0));
             p.rect_filled(badge_r, CornerRadius::same(8), Color32::from_rgb(0x27, 0x27, 0x2A));
-            p.text(
-                badge_r.center(),
-                Align2::CENTER_CENTER,
-                n.to_string(),
-                theme::font_mono(),
-                UI3_TEXT_SEC,
-            );
+            p.text(badge_r.center(), Align2::CENTER_CENTER, n.to_string(), theme::font_mono(), UI3_TEXT_SEC);
         }
         if trash_resp.clicked() {
             acts.push(Act::Go(Section::Trash));
@@ -1405,17 +1185,7 @@ mod sidebar {
 
     /// One sidebar row: icon, label, hover / `#27272A` selected / drop-target highlight.
     #[allow(clippy::too_many_arguments)]
-    fn row(
-        ui: &mut Ui,
-        r: Rect,
-        id: Id,
-        icon: Icon,
-        label: &str,
-        indent: f32,
-        selected: bool,
-        drop_hover: bool,
-        record: &str,
-    ) -> Response {
+    fn row(ui: &mut Ui, r: Rect, id: Id, icon: Icon, label: &str, indent: f32, selected: bool, drop_hover: bool, record: &str) -> Response {
         let resp = ui.interact(r, id, Sense::click());
         let p = ui.painter();
         if drop_hover {
@@ -1426,26 +1196,10 @@ mod sidebar {
             p.rect_filled(r, CornerRadius::same(6), UI3_PILL_HOVER);
         }
         let ix = r.left() + 12.0 + indent;
-        icons::paint(
-            p,
-            icon,
-            Pos2::new(ix + 14.0, r.center().y),
-            15.0,
-            if selected { Color32::WHITE } else { theme::ICON_SECONDARY },
-        );
-        let font = if selected {
-            theme::font_body_strong()
-        } else {
-            theme::font_body()
-        };
+        icons::paint(p, icon, Pos2::new(ix + 14.0, r.center().y), 15.0, if selected { Color32::WHITE } else { theme::ICON_SECONDARY });
+        let font = if selected { theme::font_body_strong() } else { theme::font_body() };
         let shown = widgets::elide(p, label, &font, r.right() - (ix + 30.0) - 8.0);
-        p.text(
-            Pos2::new(ix + 30.0, r.center().y),
-            Align2::LEFT_CENTER,
-            shown,
-            font,
-            if selected { Color32::WHITE } else { theme::TEXT },
-        );
+        p.text(Pos2::new(ix + 30.0, r.center().y), Align2::LEFT_CENTER, shown, font, if selected { Color32::WHITE } else { theme::TEXT });
         widgets::record(ui, &format!("home-{record}"), r);
         resp
     }
@@ -1541,30 +1295,10 @@ mod main_view {
             let fw = widgets::text_width(&p, &filter_lbl, &theme::font_body()) + 36.0;
             let fr = Rect::from_min_size(Pos2::new(rect.left() + pad, y), Vec2::new(fw, 28.0));
             let fresp = ui.interact(fr, Id::new("home-filter"), Sense::click());
-            p.rect_filled(
-                fr,
-                CornerRadius::same(6),
-                if h.filter_menu.is_some() || fresp.hovered() {
-                    UI3_BORDER
-                } else {
-                    UI3_SURFACE
-                },
-            );
+            p.rect_filled(fr, CornerRadius::same(6), if h.filter_menu.is_some() || fresp.hovered() { UI3_BORDER } else { UI3_SURFACE });
             p.rect_stroke(fr, CornerRadius::same(6), Stroke::new(1.0, UI3_BORDER), StrokeKind::Inside);
-            p.text(
-                Pos2::new(fr.left() + 10.0, fr.center().y),
-                Align2::LEFT_CENTER,
-                &filter_lbl,
-                theme::font_body(),
-                theme::TEXT,
-            );
-            icons::paint(
-                &p,
-                Icon::ChevronDown,
-                Pos2::new(fr.right() - 12.0, fr.center().y),
-                theme::CHEVRON_SMALL,
-                theme::ICON_SECONDARY,
-            );
+            p.text(Pos2::new(fr.left() + 10.0, fr.center().y), Align2::LEFT_CENTER, &filter_lbl, theme::font_body(), theme::TEXT);
+            icons::paint(&p, Icon::ChevronDown, Pos2::new(fr.right() - 12.0, fr.center().y), theme::CHEVRON_SMALL, theme::ICON_SECONDARY);
             widgets::record(ui, "home-filter", fr);
             if fresp.clicked() {
                 h.filter_menu = if h.filter_menu.is_some() { None } else { Some(fr) };
@@ -1575,30 +1309,10 @@ mod main_view {
             let sw = widgets::text_width(&p, &sort_lbl, &theme::font_body()) + 36.0;
             let sr = Rect::from_min_size(Pos2::new(fr.right() + 8.0, y), Vec2::new(sw, 28.0));
             let sresp = ui.interact(sr, Id::new("home-sort"), Sense::click());
-            p.rect_filled(
-                sr,
-                CornerRadius::same(6),
-                if h.sort_menu.is_some() || sresp.hovered() {
-                    UI3_BORDER
-                } else {
-                    UI3_SURFACE
-                },
-            );
+            p.rect_filled(sr, CornerRadius::same(6), if h.sort_menu.is_some() || sresp.hovered() { UI3_BORDER } else { UI3_SURFACE });
             p.rect_stroke(sr, CornerRadius::same(6), Stroke::new(1.0, UI3_BORDER), StrokeKind::Inside);
-            p.text(
-                Pos2::new(sr.left() + 10.0, sr.center().y),
-                Align2::LEFT_CENTER,
-                &sort_lbl,
-                theme::font_body(),
-                theme::TEXT,
-            );
-            icons::paint(
-                &p,
-                Icon::ChevronDown,
-                Pos2::new(sr.right() - 12.0, sr.center().y),
-                theme::CHEVRON_SMALL,
-                theme::ICON_SECONDARY,
-            );
+            p.text(Pos2::new(sr.left() + 10.0, sr.center().y), Align2::LEFT_CENTER, &sort_lbl, theme::font_body(), theme::TEXT);
+            icons::paint(&p, Icon::ChevronDown, Pos2::new(sr.right() - 12.0, sr.center().y), theme::CHEVRON_SMALL, theme::ICON_SECONDARY);
             widgets::record(ui, "home-sort", sr);
             if sresp.clicked() {
                 h.sort_menu = if h.sort_menu.is_some() { None } else { Some(sr) };
@@ -1606,10 +1320,9 @@ mod main_view {
             }
 
             let mut x = rect.right() - pad;
-            for (mode, icon, key, tip) in [
-                (ViewMode::List, Icon::ListView, "home-view-list", "List view"),
-                (ViewMode::Grid, Icon::GridView, "home-view-grid", "Grid view"),
-            ] {
+            for (mode, icon, key, tip) in
+                [(ViewMode::List, Icon::ListView, "home-view-list", "List view"), (ViewMode::Grid, Icon::GridView, "home-view-grid", "Grid view")]
+            {
                 let br = Rect::from_min_size(Pos2::new(x - 28.0, y), Vec2::splat(28.0));
                 x -= 28.0 + 4.0;
                 if widgets::icon_button(ui, br, key, icon, h.view == mode, tip).clicked() {
@@ -1703,11 +1416,7 @@ mod main_view {
                 p.text(r.center(), Align2::CENTER_CENTER, label, font, theme::TEXT);
             }
             Kind::Danger => {
-                let bg = if resp.hovered() {
-                    theme::DANGER.gamma_multiply(0.2)
-                } else {
-                    Color32::TRANSPARENT
-                };
+                let bg = if resp.hovered() { theme::DANGER.gamma_multiply(0.2) } else { Color32::TRANSPARENT };
                 p.rect_filled(r, radius, bg);
                 p.rect_stroke(r, radius, Stroke::new(1.0, theme::DANGER), StrokeKind::Inside);
                 p.text(r.center(), Align2::CENTER_CENTER, label, font, theme::DANGER);
@@ -1718,22 +1427,10 @@ mod main_view {
     }
 
     fn section_heading(p: &egui::Painter, x: f32, y: f32, title: &str, subtitle: Option<&str>) -> f32 {
-        p.text(
-            Pos2::new(x, y + 10.0),
-            Align2::LEFT_CENTER,
-            title,
-            theme::font_body_strong(),
-            theme::TEXT,
-        );
+        p.text(Pos2::new(x, y + 10.0), Align2::LEFT_CENTER, title, theme::font_body_strong(), theme::TEXT);
         if let Some(sub) = subtitle {
             let tw = widgets::text_width(p, title, &theme::font_body_strong());
-            p.text(
-                Pos2::new(x + tw + 10.0, y + 10.0),
-                Align2::LEFT_CENTER,
-                sub,
-                theme::font_small(),
-                theme::TEXT_SECONDARY,
-            );
+            p.text(Pos2::new(x + tw + 10.0, y + 10.0), Align2::LEFT_CENTER, sub, theme::font_small(), theme::TEXT_SECONDARY);
         }
         28.0
     }
@@ -1839,31 +1536,17 @@ mod main_view {
             let x0 = content.left() + pad;
             let mut y = content.top() + pad - scroll;
 
-            y += section_heading(
-                &p,
-                x0,
-                y,
-                "Starter Templates & UI Kits",
-                Some("Click any kit to create an editable file in your workspace"),
-            );
+            y += section_heading(&p, x0, y, "Starter Templates & UI Kits", Some("Click any kit to create an editable file in your workspace"));
 
             for (i, (title, badge, accent, icon, desc, btn_lbl, act, record)) in cards.iter().enumerate() {
-                let r = Rect::from_min_size(
-                    Pos2::new(x0 + (i % tcols) as f32 * (tcw + tgap_x), y + (i / tcols) as f32 * (tch + tgap_y)),
-                    Vec2::new(tcw, tch),
-                );
+                let r = Rect::from_min_size(Pos2::new(x0 + (i % tcols) as f32 * (tcw + tgap_x), y + (i / tcols) as f32 * (tch + tgap_y)), Vec2::new(tcw, tch));
                 if r.bottom() < content.top() || r.top() > content.bottom() {
                     continue;
                 }
                 let resp = ui.interact(r, Id::new(("home-tpl-card", *record)), Sense::click());
                 let hot = resp.hovered();
                 p.rect_filled(r, CornerRadius::same(8), UI3_SURFACE);
-                p.rect_stroke(
-                    r,
-                    CornerRadius::same(8),
-                    Stroke::new(if hot { 1.5 } else { 1.0 }, if hot { *accent } else { UI3_BORDER }),
-                    StrokeKind::Inside,
-                );
+                p.rect_stroke(r, CornerRadius::same(8), Stroke::new(if hot { 1.5 } else { 1.0 }, if hot { *accent } else { UI3_BORDER }), StrokeKind::Inside);
 
                 // Top preview banner (72px)
                 let banner = Rect::from_min_size(r.min + Vec2::new(1.0, 1.0), Vec2::new(r.width() - 2.0, 72.0));
@@ -1880,16 +1563,8 @@ mod main_view {
 
                 // Subtle decorative wireframe bars inside banner
                 let bar_y = banner.bottom() - 14.0;
-                p.rect_filled(
-                    Rect::from_min_size(Pos2::new(r.left() + 12.0, bar_y), Vec2::new(64.0, 4.0)),
-                    CornerRadius::same(2),
-                    accent.gamma_multiply(0.45),
-                );
-                p.rect_filled(
-                    Rect::from_min_size(Pos2::new(r.left() + 82.0, bar_y), Vec2::new(40.0, 4.0)),
-                    CornerRadius::same(2),
-                    accent.gamma_multiply(0.25),
-                );
+                p.rect_filled(Rect::from_min_size(Pos2::new(r.left() + 12.0, bar_y), Vec2::new(64.0, 4.0)), CornerRadius::same(2), accent.gamma_multiply(0.45));
+                p.rect_filled(Rect::from_min_size(Pos2::new(r.left() + 82.0, bar_y), Vec2::new(40.0, 4.0)), CornerRadius::same(2), accent.gamma_multiply(0.25));
 
                 // Title & description
                 p.text(
@@ -1899,12 +1574,7 @@ mod main_view {
                     theme::font_body_strong(),
                     theme::TEXT,
                 );
-                let galley = p.layout(
-                    (*desc).to_string(),
-                    theme::font_small(),
-                    theme::TEXT_SECONDARY,
-                    r.width() - 24.0,
-                );
+                let galley = p.layout((*desc).to_string(), theme::font_small(), theme::TEXT_SECONDARY, r.width() - 24.0);
                 p.galley(Pos2::new(r.left() + 12.0, banner.bottom() + 28.0), galley, theme::TEXT_SECONDARY);
 
                 // Bottom CTA button
@@ -1912,13 +1582,7 @@ mod main_view {
                 let btn_bg = if hot { *accent } else { UI3_MAIN_BG };
                 p.rect_filled(btn_r, CornerRadius::same(5), btn_bg);
                 p.rect_stroke(btn_r, CornerRadius::same(5), Stroke::new(1.0, if hot { *accent } else { UI3_BORDER }), StrokeKind::Inside);
-                p.text(
-                    btn_r.center(),
-                    Align2::CENTER_CENTER,
-                    *btn_lbl,
-                    theme::font_small_strong(),
-                    if hot { Color32::WHITE } else { theme::TEXT },
-                );
+                p.text(btn_r.center(), Align2::CENTER_CENTER, *btn_lbl, theme::font_small_strong(), if hot { Color32::WHITE } else { theme::TEXT });
 
                 widgets::record(ui, record, r);
                 if resp.clicked() {
@@ -1981,16 +1645,8 @@ mod main_view {
         let proj_total = h.snap.projects.len() + 1; // +1 for `+ New project` card
         let proj_rows_h = proj_total.div_ceil(pcols) as f32 * (pch + pgap_y);
 
-        let all_folders: Vec<(String, String, String, String)> = h
-            .snap
-            .projects
-            .iter()
-            .flat_map(|pr| {
-                pr.folders
-                    .iter()
-                    .map(move |fl| (pr.id.clone(), pr.name.clone(), fl.id.clone(), fl.name.clone()))
-            })
-            .collect();
+        let all_folders: Vec<(String, String, String, String)> =
+            h.snap.projects.iter().flat_map(|pr| pr.folders.iter().map(move |fl| (pr.id.clone(), pr.name.clone(), fl.id.clone(), fl.name.clone()))).collect();
         let (cw, ch, gap_x, gap_y) = (theme::HOME_CARD_W, theme::HOME_CARD_H, theme::HOME_CARD_GAP, 24.0);
         let cols = (((inner_w + gap_x) / (cw + gap_x)).floor() as usize).max(1);
         let folder_total = all_folders.len() + 1; // +1 for `+ New folder` tile
@@ -2025,19 +1681,10 @@ mod main_view {
             let mut y = content.top() + pad - scroll;
 
             // Section 1: Projects
-            y += section_heading(
-                &p,
-                x0,
-                y,
-                "Projects",
-                Some(&format!("{} workspace project{}", projects.len(), if projects.len() == 1 { "" } else { "s" })),
-            );
+            y += section_heading(&p, x0, y, "Projects", Some(&format!("{} workspace project{}", projects.len(), if projects.len() == 1 { "" } else { "s" })));
 
             for (i, pr) in projects.iter().enumerate() {
-                let r = Rect::from_min_size(
-                    Pos2::new(x0 + (i % pcols) as f32 * (pcw + pgap_x), y + (i / pcols) as f32 * (pch + pgap_y)),
-                    Vec2::new(pcw, pch),
-                );
+                let r = Rect::from_min_size(Pos2::new(x0 + (i % pcols) as f32 * (pcw + pgap_x), y + (i / pcols) as f32 * (pch + pgap_y)), Vec2::new(pcw, pch));
                 if r.bottom() < content.top() || r.top() > content.bottom() {
                     continue;
                 }
@@ -2048,12 +1695,7 @@ mod main_view {
                 let hot = card_resp.hovered() || plus_resp.hovered();
 
                 p.rect_filled(r, CornerRadius::same(8), if over { theme::BG_SELECTED_HOVER } else { UI3_SURFACE });
-                p.rect_stroke(
-                    r,
-                    CornerRadius::same(8),
-                    Stroke::new(if hot { 1.5 } else { 1.0 }, if hot { UI3_BLUE } else { UI3_BORDER }),
-                    StrokeKind::Inside,
-                );
+                p.rect_stroke(r, CornerRadius::same(8), Stroke::new(if hot { 1.5 } else { 1.0 }, if hot { UI3_BLUE } else { UI3_BORDER }), StrokeKind::Inside);
 
                 // Top 2x2 preview grid (96px tall)
                 let preview = Rect::from_min_size(r.min + Vec2::new(8.0, 8.0), Vec2::new(r.width() - 16.0, 92.0));
@@ -2075,18 +1717,8 @@ mod main_view {
                 }
 
                 // Top-right `+ Folder` mini button
-                p.rect_filled(
-                    plus_r,
-                    CornerRadius::same(5),
-                    if plus_resp.hovered() { UI3_BLUE } else { Color32::from_black_alpha(170) },
-                );
-                p.text(
-                    plus_r.center(),
-                    Align2::CENTER_CENTER,
-                    "+ Folder",
-                    theme::font_small_strong(),
-                    Color32::WHITE,
-                );
+                p.rect_filled(plus_r, CornerRadius::same(5), if plus_resp.hovered() { UI3_BLUE } else { Color32::from_black_alpha(170) });
+                p.text(plus_r.center(), Align2::CENTER_CENTER, "+ Folder", theme::font_small_strong(), Color32::WHITE);
                 widgets::record(ui, &format!("home-project-new-folder-{}", pr.name), plus_r);
 
                 // Bottom metadata
@@ -2108,13 +1740,7 @@ mod main_view {
                     pr.folders.len(),
                     if pr.folders.len() == 1 { "" } else { "s" },
                 );
-                p.text(
-                    Pos2::new(r.left() + 36.0, preview.bottom() + 33.0),
-                    Align2::LEFT_CENTER,
-                    sub,
-                    theme::font_small(),
-                    theme::TEXT_SECONDARY,
-                );
+                p.text(Pos2::new(r.left() + 36.0, preview.bottom() + 33.0), Align2::LEFT_CENTER, sub, theme::font_small(), theme::TEXT_SECONDARY);
 
                 widgets::record(ui, &format!("home-project-card-{}", pr.name), r);
                 if plus_resp.clicked() {
@@ -2138,23 +1764,12 @@ mod main_view {
                 let np_resp = ui.interact(np_r, Id::new("home-card-new-project"), Sense::click());
                 let hot = np_resp.hovered();
                 p.rect_filled(np_r, CornerRadius::same(8), if hot { UI3_SURFACE } else { UI3_MAIN_BG });
-                p.rect_stroke(
-                    np_r,
-                    CornerRadius::same(8),
-                    Stroke::new(1.0, if hot { UI3_BLUE } else { UI3_BORDER }),
-                    StrokeKind::Inside,
-                );
+                p.rect_stroke(np_r, CornerRadius::same(8), Stroke::new(1.0, if hot { UI3_BLUE } else { UI3_BORDER }), StrokeKind::Inside);
                 let c = np_r.center();
                 p.circle_filled(Pos2::new(c.x, c.y - 14.0), 18.0, UI3_BLUE.gamma_multiply(0.18));
                 icons::paint(&p, Icon::Plus, Pos2::new(c.x, c.y - 14.0), 16.0, UI3_BLUE);
                 p.text(Pos2::new(c.x, c.y + 14.0), Align2::CENTER_CENTER, "+ New project", theme::font_body_strong(), theme::TEXT);
-                p.text(
-                    Pos2::new(c.x, c.y + 31.0),
-                    Align2::CENTER_CENTER,
-                    "Organize files and nested folders",
-                    theme::font_small(),
-                    theme::TEXT_SECONDARY,
-                );
+                p.text(Pos2::new(c.x, c.y + 31.0), Align2::CENTER_CENTER, "Organize files and nested folders", theme::font_small(), theme::TEXT_SECONDARY);
                 widgets::record(ui, "home-card-new-project", np_r);
                 if np_resp.clicked() {
                     acts.push(Act::NewProject);
@@ -2163,19 +1778,10 @@ mod main_view {
             y += proj_rows_h + 12.0;
 
             // Section 2: Folders
-            y += section_heading(
-                &p,
-                x0,
-                y,
-                "Folders",
-                Some("Subfolders across your projects"),
-            );
+            y += section_heading(&p, x0, y, "Folders", Some("Subfolders across your projects"));
             for (i, (pid, pname, fid, fname)) in all_folders.iter().enumerate() {
                 let r = Rect::from_min_size(
-                    Pos2::new(
-                        x0 + (i % cols) as f32 * (cw + gap_x),
-                        y + (i / cols) as f32 * (theme::HOME_FOLDER_H + 12.0),
-                    ),
+                    Pos2::new(x0 + (i % cols) as f32 * (cw + gap_x), y + (i / cols) as f32 * (theme::HOME_FOLDER_H + 12.0)),
                     Vec2::new(cw, theme::HOME_FOLDER_H),
                 );
                 if r.bottom() < content.top() || r.top() > content.bottom() {
@@ -2213,10 +1819,7 @@ mod main_view {
             // `+ New folder` tile
             let nf_idx = all_folders.len();
             let nf_r = Rect::from_min_size(
-                Pos2::new(
-                    x0 + (nf_idx % cols) as f32 * (cw + gap_x),
-                    y + (nf_idx / cols) as f32 * (theme::HOME_FOLDER_H + 12.0),
-                ),
+                Pos2::new(x0 + (nf_idx % cols) as f32 * (cw + gap_x), y + (nf_idx / cols) as f32 * (theme::HOME_FOLDER_H + 12.0)),
                 Vec2::new(cw, theme::HOME_FOLDER_H),
             );
             if nf_r.bottom() >= content.top() && nf_r.top() <= content.bottom() {
@@ -2225,13 +1828,7 @@ mod main_view {
                 p.rect_filled(nf_r, CornerRadius::same(8), if hot { UI3_BORDER } else { UI3_SURFACE });
                 p.rect_stroke(nf_r, CornerRadius::same(8), Stroke::new(1.0, if hot { UI3_TEAL } else { UI3_BORDER }), StrokeKind::Inside);
                 icons::paint(&p, Icon::Plus, Pos2::new(nf_r.left() + 22.0, nf_r.center().y), 16.0, UI3_TEAL);
-                p.text(
-                    Pos2::new(nf_r.left() + 42.0, nf_r.center().y),
-                    Align2::LEFT_CENTER,
-                    "+ New folder",
-                    theme::font_body_strong(),
-                    theme::TEXT,
-                );
+                p.text(Pos2::new(nf_r.left() + 42.0, nf_r.center().y), Align2::LEFT_CENTER, "+ New folder", theme::font_body_strong(), theme::TEXT);
                 widgets::record(ui, "home-tile-new-folder", nf_r);
                 if nf_resp.clicked() {
                     if let Some(first_p) = projects.first() {
@@ -2298,11 +1895,7 @@ mod main_view {
 
         let (cw, ch, gap_x, gap_y) = (theme::HOME_CARD_W, theme::HOME_CARD_H, theme::HOME_CARD_GAP, 24.0);
         let cols = (((inner_w + gap_x) / (cw + gap_x)).floor() as usize).max(1);
-        let pub_rows_h = if published_libs.is_empty() {
-            0.0
-        } else {
-            28.0 + published_libs.len() as f32 * 56.0 + 12.0
-        };
+        let pub_rows_h = if published_libs.is_empty() { 0.0 } else { 28.0 + published_libs.len() as f32 * 56.0 + 12.0 };
         let file_rows_h = if files.is_empty() {
             0.0
         } else if list {
@@ -2322,11 +1915,8 @@ mod main_view {
         let mut drag = None;
         let ctx = ui.ctx().clone();
 
-        let lib_sub = format!(
-            "{} published librar{} \u{b7} Shared components & styles",
-            published_libs.len(),
-            if published_libs.len() == 1 { "y" } else { "ies" }
-        );
+        let lib_sub =
+            format!("{} published librar{} \u{b7} Shared components & styles", published_libs.len(), if published_libs.len() == 1 { "y" } else { "ies" });
         let hub_cards: [(&str, Icon, Color32, &str, (&str, Act, &str), Option<(&str, Act, &str)>); 4] = [
             (
                 "Shared Component Libraries",
@@ -2376,10 +1966,7 @@ mod main_view {
             );
 
             for (i, (title, icon, accent, desc, (btn1_lbl, btn1_act, btn1_key), btn2_opt)) in hub_cards.iter().enumerate() {
-                let r = Rect::from_min_size(
-                    Pos2::new(x0 + (i % rcols) as f32 * (rcw + rgap_x), y + (i / rcols) as f32 * (rch + rgap_y)),
-                    Vec2::new(rcw, rch),
-                );
+                let r = Rect::from_min_size(Pos2::new(x0 + (i % rcols) as f32 * (rcw + rgap_x), y + (i / rcols) as f32 * (rch + rgap_y)), Vec2::new(rcw, rch));
                 if r.bottom() < content.top() || r.top() > content.bottom() {
                     continue;
                 }
@@ -2446,13 +2033,7 @@ mod main_view {
                     let resp = ui.interact(row_r, Id::new(("home-pub-lib", &lib_idx.id)), Sense::click());
                     p.rect_filled(row_r, CornerRadius::same(8), if resp.hovered() { UI3_BORDER } else { UI3_SURFACE });
                     icons::paint(&p, Icon::Book, Pos2::new(row_r.left() + 22.0, row_r.center().y), 18.0, UI3_BLUE);
-                    p.text(
-                        Pos2::new(row_r.left() + 44.0, row_r.center().y - 8.0),
-                        Align2::LEFT_CENTER,
-                        &lib_idx.name,
-                        theme::font_body_strong(),
-                        theme::TEXT,
-                    );
+                    p.text(Pos2::new(row_r.left() + 44.0, row_r.center().y - 8.0), Align2::LEFT_CENTER, &lib_idx.name, theme::font_body_strong(), theme::TEXT);
                     let meta = format!(
                         "v{} \u{b7} {} components \u{b7} {} styles \u{b7} {} variables",
                         lib_idx.latest_version(),
@@ -2460,13 +2041,7 @@ mod main_view {
                         lib_idx.styles,
                         lib_idx.variables,
                     );
-                    p.text(
-                        Pos2::new(row_r.left() + 44.0, row_r.center().y + 9.0),
-                        Align2::LEFT_CENTER,
-                        meta,
-                        theme::font_small(),
-                        theme::TEXT_SECONDARY,
-                    );
+                    p.text(Pos2::new(row_r.left() + 44.0, row_r.center().y + 9.0), Align2::LEFT_CENTER, meta, theme::font_small(), theme::TEXT_SECONDARY);
                     widgets::record(ui, &format!("home-published-library-{}", lib_idx.name), row_r);
                     if resp.clicked() {
                         if let Some(fid) = &lib_idx.source_file {
@@ -2544,12 +2119,7 @@ mod main_view {
         if list {
             let hr = Rect::from_min_size(Pos2::new(x0, y), Vec2::new(inner_w, 28.0));
             let cols_x = list_columns(hr.right());
-            for (x, label) in [
-                (hr.left() + 60.0, "Name"),
-                (cols_x.0, "Location"),
-                (cols_x.1, "Last modified"),
-                (cols_x.2, "Last viewed"),
-            ] {
+            for (x, label) in [(hr.left() + 60.0, "Name"), (cols_x.0, "Location"), (cols_x.1, "Last modified"), (cols_x.2, "Last viewed")] {
                 p.text(Pos2::new(x, hr.center().y), Align2::LEFT_CENTER, label, theme::font_small_medium(), theme::TEXT_TERTIARY);
             }
             y += 28.0;
@@ -2558,10 +2128,7 @@ mod main_view {
             let r = if list {
                 Rect::from_min_size(Pos2::new(x0, y + i as f32 * theme::HOME_LIST_ROW_H), Vec2::new(inner_w, theme::HOME_LIST_ROW_H))
             } else {
-                Rect::from_min_size(
-                    Pos2::new(x0 + (i % cols) as f32 * (cw + gap_x), y + (i / cols) as f32 * (ch + gap_y)),
-                    Vec2::new(cw, ch),
-                )
+                Rect::from_min_size(Pos2::new(x0 + (i % cols) as f32 * (cw + gap_x), y + (i / cols) as f32 * (ch + gap_y)), Vec2::new(cw, ch))
             };
             if r.bottom() < content.top() || r.top() > content.bottom() {
                 continue;
@@ -2600,11 +2167,7 @@ mod main_view {
             widgets::record(ui, &format!("home-kind-{}", if board { "board" } else { "design" }), r);
             if resp.hovered() || star.hovered() || f.starred {
                 if star.hovered() || (!list && resp.hovered()) {
-                    p.circle_filled(
-                        star_r.center(),
-                        12.0,
-                        Color32::from_black_alpha(if f.starred && !star.hovered() { 80 } else { 150 }),
-                    );
+                    p.circle_filled(star_r.center(), 12.0, Color32::from_black_alpha(if f.starred && !star.hovered() { 80 } else { 150 }));
                 }
                 paint_star(p, star_r.center(), f.starred, star.hovered());
             }
@@ -2617,28 +2180,15 @@ mod main_view {
 
     fn empty_state(h: &Home, ui: &Ui, area: Rect) {
         let (title, body) = if h.searching() {
-            (
-                format!("No files match \u{201c}{}\u{201d}", h.search.trim()),
-                "Try a different name or clear the filter.".to_string(),
-            )
+            (format!("No files match \u{201c}{}\u{201d}", h.search.trim()), "Try a different name or clear the filter.".to_string())
         } else {
             match &h.section {
-                Section::Recents | Section::Drafts | Section::AllProjects | Section::Templates | Section::Resources => (
-                    "No files yet".into(),
-                    "Create a design file, FigJam board, or import a .fig, .svg or .designos file to get started.".into(),
-                ),
-                Section::Starred => (
-                    "Nothing starred".into(),
-                    "Hover a file thumbnail or right-click a file and choose Star to keep it handy here.".into(),
-                ),
-                Section::Project(..) => (
-                    "This project is empty".into(),
-                    "Create a design file here, or drag files in from other projects.".into(),
-                ),
-                Section::Trash => (
-                    "Trash is empty".into(),
-                    "Files and projects you delete wait here until you empty the trash.".into(),
-                ),
+                Section::Recents | Section::Drafts | Section::AllProjects | Section::Templates | Section::Resources => {
+                    ("No files yet".into(), "Create a design file, FigJam board, or import a .fig, .svg or .designos file to get started.".into())
+                }
+                Section::Starred => ("Nothing starred".into(), "Hover a file thumbnail or right-click a file and choose Star to keep it handy here.".into()),
+                Section::Project(..) => ("This project is empty".into(), "Create a design file here, or drag files in from other projects.".into()),
+                Section::Trash => ("Trash is empty".into(), "Files and projects you delete wait here until you empty the trash.".into()),
             }
         };
         let p = ui.painter();
@@ -2654,8 +2204,7 @@ mod main_view {
         let files = h.files();
         let folders = h.folders();
         let is_drafts = h.section == Section::Drafts && !h.searching();
-        let is_getting_started =
-            matches!(&h.section, Section::Project(pid, None) if h.snap.project_name(pid) == "Getting started") && !h.searching();
+        let is_getting_started = matches!(&h.section, Section::Project(pid, None) if h.snap.project_name(pid) == "Getting started") && !h.searching();
         if files.is_empty() && folders.is_empty() && !is_drafts && !is_getting_started {
             empty_state(h, ui, content);
             return;
@@ -2667,11 +2216,8 @@ mod main_view {
         let (cw, ch, gap_x, gap_y) = (theme::HOME_CARD_W, theme::HOME_CARD_H, theme::HOME_CARD_GAP, 24.0);
         let cols = (((inner_w + gap_x) / (cw + gap_x)).floor() as usize).max(1);
         let drafts_strip_h = if is_drafts { 64.0 } else { 0.0 };
-        let folder_rows = if list {
-            folders.len() as f32 * theme::HOME_LIST_ROW_H
-        } else {
-            folders.len().div_ceil(cols) as f32 * (theme::HOME_FOLDER_H + 12.0)
-        };
+        let folder_rows =
+            if list { folders.len() as f32 * theme::HOME_LIST_ROW_H } else { folders.len().div_ceil(cols) as f32 * (theme::HOME_FOLDER_H + 12.0) };
         let file_rows = if files.is_empty() {
             0.0
         } else if list {
@@ -2680,13 +2226,7 @@ mod main_view {
             files.len().div_ceil(cols) as f32 * (ch + gap_y)
         };
         let starter_kits_h = if is_getting_started { 164.0 } else { 0.0 };
-        let content_h = pad
-            + drafts_strip_h
-            + folder_rows
-            + if folder_rows > 0.0 { 12.0 } else { 0.0 }
-            + file_rows
-            + starter_kits_h
-            + pad;
+        let content_h = pad + drafts_strip_h + folder_rows + if folder_rows > 0.0 { 12.0 } else { 0.0 } + file_rows + starter_kits_h + pad;
         crate::panels::wheel_scroll(ui, content, &mut h.scroll, content_h);
         let scroll = h.scroll;
         let ptr = ui.input(|i| i.pointer.hover_pos());
@@ -2700,11 +2240,7 @@ mod main_view {
         let mut zones: Vec<(Rect, DropTo)> = vec![];
         let section = h.section.clone();
         let ctx = ui.ctx().clone();
-        let project_id = if let Section::Project(p, _) = &section {
-            Some(p.clone())
-        } else {
-            None
-        };
+        let project_id = if let Section::Project(p, _) = &section { Some(p.clone()) } else { None };
         crate::panels::clipped(ui, content, |ui| {
             let p = ui.painter().clone();
             let mut y = content.top() + pad - scroll;
@@ -2713,30 +2249,9 @@ mod main_view {
             // ---- Drafts Quick-Create Strip (`+ New Design File`, `+ New FigJam Board`, `+ New Slide Deck`)
             if is_drafts {
                 let quick_items: [(&str, &str, Icon, Color32, Act, &str); 3] = [
-                    (
-                        "+ New Design File",
-                        "Blank vector & auto-layout canvas",
-                        Icon::Pen,
-                        UI3_BLUE,
-                        Act::NewFile,
-                        "home-drafts-new-file",
-                    ),
-                    (
-                        "+ New FigJam Board",
-                        "Infinite whiteboard, stickies & flows",
-                        Icon::Sticky,
-                        UI3_AMBER,
-                        Act::NewBoard,
-                        "home-drafts-new-board",
-                    ),
-                    (
-                        "+ New Slide Deck",
-                        "16:9 presentation deck with speaker notes",
-                        Icon::Play,
-                        UI3_TEAL,
-                        Act::NewDeck,
-                        "home-drafts-new-deck",
-                    ),
+                    ("+ New Design File", "Blank vector & auto-layout canvas", Icon::Pen, UI3_BLUE, Act::NewFile, "home-drafts-new-file"),
+                    ("+ New FigJam Board", "Infinite whiteboard, stickies & flows", Icon::Sticky, UI3_AMBER, Act::NewBoard, "home-drafts-new-board"),
+                    ("+ New Slide Deck", "16:9 presentation deck with speaker notes", Icon::Play, UI3_TEAL, Act::NewDeck, "home-drafts-new-deck"),
                 ];
                 let qw = ((inner_w - 24.0) / 3.0).max(180.0);
                 for (qi, (qtitle, qsub, qicon, qcol, qact, qkey)) in quick_items.iter().enumerate() {
@@ -2744,12 +2259,7 @@ mod main_view {
                     let qresp = ui.interact(qr, Id::new(("home-draft-quick", *qkey)), Sense::click());
                     let hot = qresp.hovered();
                     p.rect_filled(qr, CornerRadius::same(8), if hot { UI3_BORDER } else { UI3_SURFACE });
-                    p.rect_stroke(
-                        qr,
-                        CornerRadius::same(8),
-                        Stroke::new(1.0, if hot { *qcol } else { UI3_BORDER }),
-                        StrokeKind::Inside,
-                    );
+                    p.rect_stroke(qr, CornerRadius::same(8), Stroke::new(1.0, if hot { *qcol } else { UI3_BORDER }), StrokeKind::Inside);
                     let ib = Rect::from_min_size(Pos2::new(qr.left() + 10.0, qr.center().y - 13.0), Vec2::splat(26.0));
                     p.rect_filled(ib, CornerRadius::same(6), qcol.gamma_multiply(0.22));
                     icons::paint(&p, *qicon, ib.center(), 14.0, *qcol);
@@ -2781,23 +2291,14 @@ mod main_view {
                     Rect::from_min_size(Pos2::new(x0, y + i as f32 * theme::HOME_LIST_ROW_H), Vec2::new(inner_w, theme::HOME_LIST_ROW_H))
                 } else {
                     Rect::from_min_size(
-                        Pos2::new(
-                            x0 + (i % cols) as f32 * (cw + gap_x),
-                            y + (i / cols) as f32 * (theme::HOME_FOLDER_H + 12.0),
-                        ),
+                        Pos2::new(x0 + (i % cols) as f32 * (cw + gap_x), y + (i / cols) as f32 * (theme::HOME_FOLDER_H + 12.0)),
                         Vec2::new(cw, theme::HOME_FOLDER_H),
                     )
                 };
                 if r.bottom() < content.top() || r.top() > content.bottom() {
                     continue;
                 }
-                let pid = project_id.clone().or_else(|| {
-                    h.snap
-                        .projects
-                        .iter()
-                        .find(|pr| pr.folders.iter().any(|fl| &fl.id == fid))
-                        .map(|pr| pr.id.clone())
-                });
+                let pid = project_id.clone().or_else(|| h.snap.projects.iter().find(|pr| pr.folders.iter().any(|fl| &fl.id == fid)).map(|pr| pr.id.clone()));
                 let Some(pid) = pid else { continue };
                 let resp = ui.interact(r, Id::new(("home-folder", fid)), Sense::click());
                 let over = dragging && ptr.is_some_and(|q| r.contains(q));
@@ -2869,10 +2370,7 @@ mod main_view {
                 let r = if list {
                     Rect::from_min_size(Pos2::new(x0, y + i as f32 * theme::HOME_LIST_ROW_H), Vec2::new(inner_w, theme::HOME_LIST_ROW_H))
                 } else {
-                    Rect::from_min_size(
-                        Pos2::new(x0 + (i % cols) as f32 * (cw + gap_x), y + (i / cols) as f32 * (ch + gap_y)),
-                        Vec2::new(cw, ch),
-                    )
+                    Rect::from_min_size(Pos2::new(x0 + (i % cols) as f32 * (cw + gap_x), y + (i / cols) as f32 * (ch + gap_y)), Vec2::new(cw, ch))
                 };
                 if r.bottom() < content.top() || r.top() > content.bottom() {
                     continue;
@@ -2911,11 +2409,7 @@ mod main_view {
                 widgets::record(ui, &format!("home-kind-{}", if board { "board" } else { "design" }), r);
                 if resp.hovered() || star.hovered() || f.starred {
                     if star.hovered() || (!list && resp.hovered()) {
-                        p.circle_filled(
-                            star_r.center(),
-                            12.0,
-                            Color32::from_black_alpha(if f.starred && !star.hovered() { 80 } else { 150 }),
-                        );
+                        p.circle_filled(star_r.center(), 12.0, Color32::from_black_alpha(if f.starred && !star.hovered() { 80 } else { 150 }));
                     }
                     paint_star(&p, star_r.center(), f.starred, star.hovered());
                 }
@@ -2925,11 +2419,7 @@ mod main_view {
                 }
             }
             if !files.is_empty() {
-                y += if list {
-                    files.len() as f32 * theme::HOME_LIST_ROW_H
-                } else {
-                    files.len().div_ceil(cols) as f32 * (ch + gap_y)
-                };
+                y += if list { files.len() as f32 * theme::HOME_LIST_ROW_H } else { files.len().div_ceil(cols) as f32 * (ch + gap_y) };
             }
 
             // ---- Starter Kits row inside `Getting started`
@@ -2943,38 +2433,10 @@ mod main_view {
                     Some("Populate this project with full multi-screen samples"),
                 );
                 let starters: [(&str, &str, Icon, Color32, TemplateKind, &str); 4] = [
-                    (
-                        "Mobile Banking Kit",
-                        "4 iOS screens & prototype",
-                        Icon::Pen,
-                        UI3_BLUE,
-                        TemplateKind::MobileBanking,
-                        "home-starter-mobile",
-                    ),
-                    (
-                        "SaaS Web Dashboard",
-                        "1440px analytics UI & table",
-                        Icon::Frame,
-                        UI3_TEAL,
-                        TemplateKind::WebDashboard,
-                        "home-starter-web",
-                    ),
-                    (
-                        "Design System & Tokens",
-                        "Component sets & variables",
-                        Icon::Component,
-                        UI3_AMBER,
-                        TemplateKind::DesignSystem,
-                        "home-starter-system",
-                    ),
-                    (
-                        "Launch Brainstorm Board",
-                        "FigJam stickies & connectors",
-                        Icon::Sticky,
-                        UI3_ORANGE,
-                        TemplateKind::FigJamBoard,
-                        "home-starter-board",
-                    ),
+                    ("Mobile Banking Kit", "4 iOS screens & prototype", Icon::Pen, UI3_BLUE, TemplateKind::MobileBanking, "home-starter-mobile"),
+                    ("SaaS Web Dashboard", "1440px analytics UI & table", Icon::Frame, UI3_TEAL, TemplateKind::WebDashboard, "home-starter-web"),
+                    ("Design System & Tokens", "Component sets & variables", Icon::Component, UI3_AMBER, TemplateKind::DesignSystem, "home-starter-system"),
+                    ("Launch Brainstorm Board", "FigJam stickies & connectors", Icon::Sticky, UI3_ORANGE, TemplateKind::FigJamBoard, "home-starter-board"),
                 ];
                 let sw = ((inner_w - 36.0) / 4.0).max(170.0);
                 for (si, (stitle, ssub, sicon, scol, skind, skey)) in starters.iter().enumerate() {
@@ -2982,12 +2444,7 @@ mod main_view {
                     let sresp = ui.interact(sr, Id::new(("home-starter-kit", *skey)), Sense::click());
                     let hot = sresp.hovered();
                     p.rect_filled(sr, CornerRadius::same(8), UI3_SURFACE);
-                    p.rect_stroke(
-                        sr,
-                        CornerRadius::same(8),
-                        Stroke::new(1.0, if hot { *scol } else { UI3_BORDER }),
-                        StrokeKind::Inside,
-                    );
+                    p.rect_stroke(sr, CornerRadius::same(8), Stroke::new(1.0, if hot { *scol } else { UI3_BORDER }), StrokeKind::Inside);
                     let ib = Rect::from_min_size(Pos2::new(sr.left() + 12.0, sr.top() + 12.0), Vec2::splat(24.0));
                     p.rect_filled(ib, CornerRadius::same(6), scol.gamma_multiply(0.22));
                     icons::paint(&p, *sicon, ib.center(), 13.0, *scol);
@@ -3079,9 +2536,7 @@ mod main_view {
             Some((t, size)) => {
                 let pad = if area.width() > 80.0 { 6.0 } else { 3.0 };
                 let inner = area.shrink(pad);
-                let k = (inner.width() / size.x.max(1.0))
-                    .min(inner.height() / size.y.max(1.0))
-                    .min(2.0);
+                let k = (inner.width() / size.x.max(1.0)).min(inner.height() / size.y.max(1.0)).min(2.0);
                 let fit = Rect::from_center_size(inner.center(), size * k);
                 let inner_cr = CornerRadius::same(if area.width() > 80.0 { 4 } else { 2 });
                 let uv = Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0));
@@ -3146,13 +2601,7 @@ mod main_view {
         let tx = r.left() + 34.0;
         let w = (r.width() - 42.0).max(40.0);
         let y_title = thumb.bottom() + 17.0;
-        p.text(
-            Pos2::new(tx, y_title),
-            Align2::LEFT_CENTER,
-            widgets::elide(p, &f.name, &theme::font_body_strong(), w),
-            theme::font_body_strong(),
-            theme::TEXT,
-        );
+        p.text(Pos2::new(tx, y_title), Align2::LEFT_CENTER, widgets::elide(p, &f.name, &theme::font_body_strong(), w), theme::font_body_strong(), theme::TEXT);
         let loc = if project.is_empty() { "Drafts" } else { project };
         let subtitle = format!("{} \u{b7} In {loc}", edited(now, f.modified));
         p.text(
@@ -3189,27 +2638,9 @@ mod main_view {
             theme::TEXT,
         );
         let loc = if project.is_empty() { "Drafts" } else { project };
-        p.text(
-            Pos2::new(cols.0, r.center().y),
-            Align2::LEFT_CENTER,
-            widgets::elide(p, loc, &font, 150.0),
-            font.clone(),
-            theme::TEXT_SECONDARY,
-        );
-        p.text(
-            Pos2::new(cols.1, r.center().y),
-            Align2::LEFT_CENTER,
-            relative(now, f.modified),
-            font.clone(),
-            theme::TEXT_SECONDARY,
-        );
-        p.text(
-            Pos2::new(cols.2, r.center().y),
-            Align2::LEFT_CENTER,
-            relative(now, f.opened),
-            font,
-            theme::TEXT_SECONDARY,
-        );
+        p.text(Pos2::new(cols.0, r.center().y), Align2::LEFT_CENTER, widgets::elide(p, loc, &font, 150.0), font.clone(), theme::TEXT_SECONDARY);
+        p.text(Pos2::new(cols.1, r.center().y), Align2::LEFT_CENTER, relative(now, f.modified), font.clone(), theme::TEXT_SECONDARY);
+        p.text(Pos2::new(cols.2, r.center().y), Align2::LEFT_CENTER, relative(now, f.opened), font, theme::TEXT_SECONDARY);
     }
 
     fn trash_view(h: &mut Home, ui: &mut Ui, content: Rect, acts: &mut Vec<Act>) {
@@ -3253,42 +2684,16 @@ mod main_view {
                     menu = ui.input(|i| i.pointer.interact_pos()).map(|at| (Target::TrashItem(it.id.clone()), at));
                 }
                 let is_file = it.kind == designos_library::TrashKind::File;
-                icons::paint(
-                    &p,
-                    if is_file { Icon::File } else { Icon::Frame },
-                    Pos2::new(r.left() + 24.0, r.center().y),
-                    20.0,
-                    theme::ICON_SECONDARY,
-                );
-                p.text(
-                    Pos2::new(r.left() + 48.0, r.center().y - 9.0),
-                    Align2::LEFT_CENTER,
-                    &it.name,
-                    theme::font_body_strong(),
-                    theme::TEXT,
-                );
+                icons::paint(&p, if is_file { Icon::File } else { Icon::Frame }, Pos2::new(r.left() + 24.0, r.center().y), 20.0, theme::ICON_SECONDARY);
+                p.text(Pos2::new(r.left() + 48.0, r.center().y - 9.0), Align2::LEFT_CENTER, &it.name, theme::font_body_strong(), theme::TEXT);
                 let from = match (&it.project_name, is_file) {
                     (Some(pn), true) => format!("Deleted {} \u{b7} from {pn}", relative(now, it.trashed)),
                     (_, false) => format!("Project \u{b7} deleted {}", relative(now, it.trashed)),
                     _ => format!("Deleted {}", relative(now, it.trashed)),
                 };
-                p.text(
-                    Pos2::new(r.left() + 48.0, r.center().y + 9.0),
-                    Align2::LEFT_CENTER,
-                    from,
-                    theme::font_body(),
-                    theme::TEXT_SECONDARY,
-                );
+                p.text(Pos2::new(r.left() + 48.0, r.center().y + 9.0), Align2::LEFT_CENTER, from, theme::font_body(), theme::TEXT_SECONDARY);
                 let mut right = r.right() - 8.0;
-                let b = button(
-                    ui,
-                    &p,
-                    &mut right,
-                    r.center().y,
-                    "Restore",
-                    Kind::Secondary,
-                    &format!("home-restore-{}", it.name),
-                );
+                let b = button(ui, &p, &mut right, r.center().y, "Restore", Kind::Secondary, &format!("home-restore-{}", it.name));
                 if b.clicked() {
                     acts.push(Act::Restore(it.id.clone()));
                 }
@@ -3398,10 +2803,7 @@ mod tests {
     #[test]
     fn home_sections_do_not_fallback_to_recents_and_templates_create_real_files() {
         let mut home = Home::new();
-        home.snap.files = vec![
-            entry("f-welcome", "Welcome", "p1", None, false, 200, 200),
-            entry("f-untitled", "Untitled", "p1", None, false, 300, 300),
-        ];
+        home.snap.files = vec![entry("f-welcome", "Welcome", "p1", None, false, 200, 200), entry("f-untitled", "Untitled", "p1", None, false, 300, 300)];
 
         home.section = Section::Recents;
         assert_eq!(home.visible_files().len(), 2);
@@ -3439,6 +2841,3 @@ mod tests {
         let _ = std::fs::remove_dir_all(&tmp);
     }
 }
-
-
-

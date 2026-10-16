@@ -330,8 +330,8 @@ pub fn parse_css(s: &str, keep_alpha: u8) -> Option<[u8; 4]> {
     let u = to_u8(c, 1.0);
     // #RGBA / #RRGGBBAA and "transparent" carry their own alpha; plain hex / named colors keep the current one.
     let hex_part = t.trim_start_matches('#');
-    let has_explicit_alpha = t.eq_ignore_ascii_case("transparent")
-        || matches!(hex_part.len(), 4 | 5 | 7 | 8) && hex_part.chars().all(|ch| ch.is_ascii_hexdigit());
+    let has_explicit_alpha =
+        t.eq_ignore_ascii_case("transparent") || matches!(hex_part.len(), 4 | 5 | 7 | 8) && hex_part.chars().all(|ch| ch.is_ascii_hexdigit());
     Some([u[0], u[1], u[2], if has_explicit_alpha { u[3] } else { keep_alpha }])
 }
 
@@ -847,7 +847,14 @@ pub fn show(ui: &mut Ui, pos: Pos2, st: &mut State, paint: &mut Paint, env: &Env
             ImageScaleMode::Tile => "Scale: Tile",
         };
         let hdr_r = Rect::from_min_size(Pos2::new(rect.left() + PAD, y + 8.0), Vec2::new(AREA, 24.0));
-        text_on_baseline(ui.painter(), hdr_r.left(), centered_baseline(hdr_r, &theme::font_body_strong()), "Image fill", theme::font_body_strong(), theme::TEXT);
+        text_on_baseline(
+            ui.painter(),
+            hdr_r.left(),
+            centered_baseline(hdr_r, &theme::font_body_strong()),
+            "Image fill",
+            theme::font_body_strong(),
+            theme::TEXT,
+        );
         let scale_r = Rect::from_min_size(Pos2::new(hdr_r.right() - 84.0, hdr_r.top()), Vec2::new(84.0, 24.0));
         super::record(ui, "picker-image-scale", scale_r);
         let scale_resp = ui.interact(scale_r, ui.id().with("picker-image-scale"), Sense::click());
@@ -1600,4 +1607,3 @@ mod tests {
         assert_ne!(b1, b2);
     }
 }
-

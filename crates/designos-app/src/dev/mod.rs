@@ -381,4 +381,3 @@ mod tests {
         assert_eq!(swift_text(raw), "Hello \\\"World\\\" \\\\ line1\\nline2 $100");
     }
 }
-

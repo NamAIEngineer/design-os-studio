@@ -13,6 +13,8 @@
 //! `QA & Coverage`, `Wireframes & UI Contract`, `Gates & Canvas`), and 1-click **`Copy cho AI`**
 //! citation blocks (`File: <path>:<start>-<end>`, `Mục`, `Trang reader`, `Project`, `Yêu cầu của tôi`).
 
+#![allow(dead_code)]
+
 use crate::app::App;
 use crate::icons::{self, Icon};
 use crate::panels::{clipped, scrollbar, wheel_scroll};
@@ -107,13 +109,7 @@ impl SpecTab {
     /// Alias for Tab 5 (`Gates, Decisions & Canvas`).
     pub const CanvasLinks: SpecTab = SpecTab::CanvasScreens;
 
-    pub const ALL: [SpecTab; 5] = [
-        SpecTab::Overview,
-        SpecTab::UseCases,
-        SpecTab::Plan,
-        SpecTab::JsonSpec,
-        SpecTab::CanvasScreens,
-    ];
+    pub const ALL: [SpecTab; 5] = [SpecTab::Overview, SpecTab::UseCases, SpecTab::Plan, SpecTab::JsonSpec, SpecTab::CanvasScreens];
 
     pub fn label(self) -> &'static str {
         match self {
@@ -372,17 +368,9 @@ pub struct FigmaParityScorecard {
     pub overall_parity_pct: f32,
     #[serde(default, alias = "gap_pct", alias = "delta_to_100_pct", alias = "remaining_pct")]
     pub remaining_gap_pct: f32,
-    #[serde(
-        default = "default_target_figma_version",
-        alias = "figma_version",
-        alias = "upstream_figma_version"
-    )]
+    #[serde(default = "default_target_figma_version", alias = "figma_version", alias = "upstream_figma_version")]
     pub target_figma_version: String,
-    #[serde(
-        default = "default_target_fig_schema_version",
-        alias = "fig_schema_version",
-        alias = "kiwi_schema_version"
-    )]
+    #[serde(default = "default_target_fig_schema_version", alias = "fig_schema_version", alias = "kiwi_schema_version")]
     pub target_fig_schema_version: u32,
     #[serde(default)]
     pub pillars: Vec<ParityPillar>,
@@ -521,12 +509,7 @@ impl FigmaParityScorecard {
             }
         }
         if let Some(root) = find_workspace_root() {
-            let p = root
-                .join("plans")
-                .join("specs")
-                .join("designos-studio-v2")
-                .join("research")
-                .join("parity-scorecard.json");
+            let p = root.join("plans").join("specs").join("designos-studio-v2").join("research").join("parity-scorecard.json");
             if let Ok(raw) = std::fs::read_to_string(&p) {
                 if let Some(card) = Self::from_json_str(&raw) {
                     return card;
@@ -573,12 +556,8 @@ impl SpecPackage {
         let us_count = self.stories.len();
         let ac_count: usize = self.stories.iter().map(|s| s.acceptance_criteria.len()).sum();
         let scn_count: usize = self.stories.iter().map(|s| s.scenarios.len()).sum();
-        let passed_scn_count: usize = self
-            .stories
-            .iter()
-            .flat_map(|s| s.scenarios.iter())
-            .filter(|scn| matches!(scn.status.to_ascii_lowercase().as_str(), "passed" | "passing"))
-            .count();
+        let passed_scn_count: usize =
+            self.stories.iter().flat_map(|s| s.scenarios.iter()).filter(|scn| matches!(scn.status.to_ascii_lowercase().as_str(), "passed" | "passing")).count();
         let screen_count = self.screens.len();
         let contract_row_count = self.ui_contract.len();
         let total_gates = self.gates.len();
@@ -589,11 +568,7 @@ impl SpecPackage {
             .find(|g| g.status == "PENDING" || g.status == "CHANGES_REQUESTED")
             .map(|g| format!("{} ({})", g.gate_id.to_uppercase(), g.stage.to_uppercase()));
         let blocking_open_count = self.open_items.iter().filter(|o| o.blocking).count();
-        let freshness = if self.gates.iter().all(|g| g.freshness == "CURRENT") {
-            "CURRENT".to_string()
-        } else {
-            "STALE".to_string()
-        };
+        let freshness = if self.gates.iter().all(|g| g.freshness == "CURRENT") { "CURRENT".to_string() } else { "STALE".to_string() };
         SpecKpiMetrics {
             req_count,
             us_count,
@@ -686,15 +661,9 @@ pub type SpecsPanelState = SpecsState;
 pub fn active_section_toc(pkg: &SpecPackage, state: &SpecsState) -> Vec<(String, f32)> {
     match state.active_tab {
         SpecTab::Overview => {
-            let mut items = vec![
-                ("1. Feature Contract Outcome".to_string(), 0.0),
-                ("2. 11-Stage Pipeline".to_string(), 140.0),
-            ];
+            let mut items = vec![("1. Feature Contract Outcome".to_string(), 0.0), ("2. 11-Stage Pipeline".to_string(), 140.0)];
             for (idx, req) in pkg.requirements.iter().take(6).enumerate() {
-                items.push((
-                    format!("{} · {}", req.id, req.requirement),
-                    280.0 + idx as f32 * 64.0,
-                ));
+                items.push((format!("{} · {}", req.id, req.requirement), 280.0 + idx as f32 * 64.0));
             }
             items.push(("3. Business Rules (BR)".to_string(), 680.0));
             items
@@ -702,10 +671,7 @@ pub fn active_section_toc(pkg: &SpecPackage, state: &SpecsState) -> Vec<(String,
         SpecTab::UseCases => {
             let mut items = Vec::new();
             for (idx, us) in pkg.stories.iter().take(8).enumerate() {
-                items.push((
-                    format!("{} · {}", us.id, us.title),
-                    idx as f32 * 44.0,
-                ));
+                items.push((format!("{} · {}", us.id, us.title), idx as f32 * 44.0));
             }
             items.push(("Acceptance Criteria (AC)".to_string(), 380.0));
             items.push(("Edge Cases & States".to_string(), 620.0));
@@ -719,25 +685,16 @@ pub fn active_section_toc(pkg: &SpecPackage, state: &SpecsState) -> Vec<(String,
         SpecTab::JsonSpec => {
             let mut items = vec![("1. Screen Inventory (S01..S11)".to_string(), 0.0)];
             for (idx, scr) in pkg.screens.iter().take(4).enumerate() {
-                items.push((
-                    format!("{} · {}", scr.id, scr.name),
-                    90.0 + idx as f32 * 56.0,
-                ));
+                items.push((format!("{} · {}", scr.id, scr.name), 90.0 + idx as f32 * 56.0));
             }
             items.push(("2. UI Contract (ux/ui-contract.md)".to_string(), 340.0));
             items.push(("3. Declarative .spec.json Blueprints".to_string(), 620.0));
             items
         }
         SpecTab::CanvasScreens => {
-            let mut items = vec![
-                ("1. Figma 1:1 Parity Scorecard".to_string(), 0.0),
-                ("2. 5 Approval Gates (G1..G5)".to_string(), 260.0),
-            ];
+            let mut items = vec![("1. Figma 1:1 Parity Scorecard".to_string(), 0.0), ("2. 5 Approval Gates (G1..G5)".to_string(), 260.0)];
             for (idx, d) in pkg.decisions.iter().take(3).enumerate() {
-                items.push((
-                    format!("{} · {}", d.id, d.decision),
-                    520.0 + idx as f32 * 60.0,
-                ));
+                items.push((format!("{} · {}", d.id, d.decision), 520.0 + idx as f32 * 60.0));
             }
             items.push(("3. Live Canvas Screen Links".to_string(), 740.0));
             items
@@ -764,28 +721,11 @@ pub struct GherkinLine {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum MdBlock {
-    Heading {
-        level: u8,
-        text: String,
-    },
-    UserStory {
-        id_and_title: String,
-        as_a: String,
-        i_want: String,
-        so_that: String,
-    },
-    Gherkin {
-        lines: Vec<GherkinLine>,
-    },
-    CodeBlock {
-        lang: String,
-        lines: Vec<String>,
-    },
-    Bullet {
-        badge: Option<String>,
-        bold_key: Option<String>,
-        text: String,
-    },
+    Heading { level: u8, text: String },
+    UserStory { id_and_title: String, as_a: String, i_want: String, so_that: String },
+    Gherkin { lines: Vec<GherkinLine> },
+    CodeBlock { lang: String, lines: Vec<String> },
+    Bullet { badge: Option<String>, bold_key: Option<String>, text: String },
     Paragraph(String),
 }
 
@@ -861,10 +801,7 @@ impl SpecsState {
         if let Some(r) = &root {
             let specs_root = r.join("plans").join("specs");
             if let Ok(entries) = std::fs::read_dir(&specs_root) {
-                let mut dirs: Vec<PathBuf> = entries
-                    .filter_map(|e| e.ok().map(|e| e.path()))
-                    .filter(|p| p.is_dir())
-                    .collect();
+                let mut dirs: Vec<PathBuf> = entries.filter_map(|e| e.ok().map(|e| e.path())).filter(|p| p.is_dir()).collect();
                 dirs.sort();
                 for dir in dirs {
                     if let Some(pkg) = load_package_dir(&dir, &standalone_specs) {
@@ -876,9 +813,7 @@ impl SpecsState {
 
         // Only fall back to external `product-os-spec-driven` reference bundles if the workspace has no specs
         if pkgs.is_empty() {
-            let mut external_candidates = vec![
-                PathBuf::from("/Users/jangtrinh/Products/product-os-spec-driven/reference/baseline-v0.2"),
-            ];
+            let mut external_candidates = vec![PathBuf::from("/Users/jangtrinh/Products/product-os-spec-driven/reference/baseline-v0.2")];
             if let Some(r) = &root {
                 if let Some(parent) = r.parent() {
                     external_candidates.push(parent.join("product-os-spec-driven/reference/baseline-v0.2"));
@@ -913,9 +848,7 @@ impl SpecsState {
                 } else {
                     3
                 };
-                let completeness = (!p.stories.is_empty() as u8)
-                    + (!p.requirements.is_empty() as u8)
-                    + (!p.ui_contract.is_empty() as u8);
+                let completeness = (!p.stories.is_empty() as u8) + (!p.requirements.is_empty() as u8) + (!p.ui_contract.is_empty() as u8);
                 (featured, 3u8.saturating_sub(completeness))
             };
             rank(a).cmp(&rank(b)).then_with(|| a.slug.cmp(&b.slug))
@@ -952,11 +885,7 @@ impl SpecsState {
 
     pub fn approve_gate_with_persist(&mut self, gate_id: &str, persist: bool) -> bool {
         self.ensure_loaded();
-        let idx = if self.selected_pkg < self.packages.len() {
-            self.selected_pkg
-        } else {
-            0
-        };
+        let idx = if self.selected_pkg < self.packages.len() { self.selected_pkg } else { 0 };
         let Some(pkg) = self.packages.get_mut(idx) else {
             return false;
         };
@@ -999,9 +928,7 @@ impl SpecsState {
             if let (Some(root), Some(rel_path)) = (find_workspace_root(), matched_file_path) {
                 let disk_path = root.join(&rel_path);
                 if let Ok(raw) = std::fs::read_to_string(&disk_path) {
-                    let next_raw = raw
-                        .replacen("GATE: PENDING", "GATE: APPROVED", 1)
-                        .replacen("GATE: CHANGES_REQUESTED", "GATE: APPROVED", 1);
+                    let next_raw = raw.replacen("GATE: PENDING", "GATE: APPROVED", 1).replacen("GATE: CHANGES_REQUESTED", "GATE: APPROVED", 1);
                     let _ = std::fs::write(&disk_path, next_raw);
                 }
             }
@@ -1052,17 +979,10 @@ pub fn format_copy_for_ai(
 
 /// Formats the 5-Pillar Figma 1:1 Parity Scorecard (`US-12` / `DIR-16`) as a `"Copy Parity Report cho AI"` citation block.
 #[allow(dead_code)]
-pub fn format_parity_report_for_ai(
-    scorecard: &FigmaParityScorecard,
-    reader_view: &str,
-    project_name: &str,
-) -> String {
+pub fn format_parity_report_for_ai(scorecard: &FigmaParityScorecard, reader_view: &str, project_name: &str) -> String {
     let mut quote = format!(
         "Figma 1:1 Parity Scorecard (vs Figma Desktop {} · .fig v{}): Overall Match: {:.1}% | Remaining to 100%: {:.1}%\n",
-        scorecard.target_figma_version,
-        scorecard.target_fig_schema_version,
-        scorecard.overall_parity_pct,
-        scorecard.remaining_gap_pct,
+        scorecard.target_figma_version, scorecard.target_fig_schema_version, scorecard.overall_parity_pct, scorecard.remaining_gap_pct,
     );
     for p in &scorecard.pillars {
         quote.push_str(&format!(
@@ -1075,10 +995,7 @@ pub fn format_parity_report_for_ai(
             p.weighted_gap_pct(),
         ));
         for g in &p.remaining_gaps {
-            quote.push_str(&format!(
-                "  - [{} · {}] {} (-{:.2}% · {})\n",
-                g.id, p.id, g.title, g.impact_pct, g.file_hint
-            ));
+            quote.push_str(&format!("  - [{} · {}] {} (-{:.2}% · {})\n", g.id, p.id, g.title, g.impact_pct, g.file_hint));
         }
     }
     format_copy_for_ai(
@@ -1087,10 +1004,7 @@ pub fn format_parity_report_for_ai(
         1,
         48,
         "PARITY-SCORECARD",
-        &format!(
-            "Figma 1:1 Parity Meter ({:.1}% Match · {:.1}% Remaining)",
-            scorecard.overall_parity_pct, scorecard.remaining_gap_pct
-        ),
+        &format!("Figma 1:1 Parity Meter ({:.1}% Match · {:.1}% Remaining)", scorecard.overall_parity_pct, scorecard.remaining_gap_pct),
         reader_view,
         project_name,
         "Đóng các khoảng cách Parity còn lại để tiến tới 100% khớp 1:1 với Figma Desktop 126.9.13.",
@@ -1354,27 +1268,11 @@ pub fn parse_screen_inventory(md: &str) -> Vec<ScreenInventorySpec> {
         for (_line_no, cells) in rows {
             if cells.len() >= 3 && cells[0].starts_with('S') {
                 let states = if cells.len() >= 4 {
-                    cells[3]
-                        .split(',')
-                        .map(|s| s.trim().to_string())
-                        .filter(|s| !s.is_empty())
-                        .collect()
+                    cells[3].split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect()
                 } else {
-                    vec![
-                        "normal".to_string(),
-                        "empty".to_string(),
-                        "loading".to_string(),
-                        "error".to_string(),
-                        "disabled".to_string(),
-                        "focus".to_string(),
-                    ]
+                    vec!["normal".to_string(), "empty".to_string(), "loading".to_string(), "error".to_string(), "disabled".to_string(), "focus".to_string()]
                 };
-                out.push(ScreenInventorySpec {
-                    id: cells[0].clone(),
-                    name: cells[1].clone(),
-                    story: cells[2].clone(),
-                    states,
-                });
+                out.push(ScreenInventorySpec { id: cells[0].clone(), name: cells[1].clone(), story: cells[2].clone(), states });
             }
         }
     }
@@ -1415,12 +1313,7 @@ pub fn parse_decisions_and_open_items(md: &str) -> (Vec<DecisionSpec>, Vec<OpenI
     for (_headers, rows) in parse_markdown_table_rows(md) {
         for (line_no, cells) in rows {
             if cells.len() >= 3 && cells[0].starts_with('D') && cells[0][1..].chars().all(|c| c.is_ascii_digit()) {
-                decisions.push(DecisionSpec {
-                    id: cells[0].clone(),
-                    decision: cells[1].clone(),
-                    source_detail: cells[2].clone(),
-                    line_number: line_no,
-                });
+                decisions.push(DecisionSpec { id: cells[0].clone(), decision: cells[1].clone(), source_detail: cells[2].clone(), line_number: line_no });
             } else if cells.len() >= 5 && cells[0].starts_with("OPEN") {
                 let blocking = cells[1].contains("blocking") || cells[4].contains("blocking") && !cells[4].contains("non-blocking");
                 open_items.push(OpenItemSpec {
@@ -1481,46 +1374,16 @@ pub fn parse_gate_markdown(md: &str, default_gate_id: &str, file_path: &str) -> 
         if let Some(json_end) = after_fence.find("```") {
             let json_raw = after_fence[..json_end].trim();
             if let Ok(val) = serde_json::from_str::<Value>(json_raw) {
-                let stage = val
-                    .get("stage")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or(default_stage)
-                    .to_string();
-                let gate_id = val
-                    .get("gate_id")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or(default_gate_id)
-                    .to_string();
-                let freshness = val
-                    .get("freshness")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("CURRENT")
-                    .to_string();
-                let config_sha256 = val
-                    .get("config_sha256")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string();
-                let verdict = val
-                    .get("review")
-                    .and_then(|r| r.get("verdict"))
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("PASS")
-                    .to_string();
+                let stage = val.get("stage").and_then(|v| v.as_str()).unwrap_or(default_stage).to_string();
+                let gate_id = val.get("gate_id").and_then(|v| v.as_str()).unwrap_or(default_gate_id).to_string();
+                let freshness = val.get("freshness").and_then(|v| v.as_str()).unwrap_or("CURRENT").to_string();
+                let config_sha256 = val.get("config_sha256").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                let verdict = val.get("review").and_then(|r| r.get("verdict")).and_then(|v| v.as_str()).unwrap_or("PASS").to_string();
 
                 let mut rubric = Vec::new();
-                if let Some(arr) = val
-                    .get("review")
-                    .and_then(|r| r.get("criteria"))
-                    .and_then(|c| c.as_array())
-                {
+                if let Some(arr) = val.get("review").and_then(|r| r.get("criteria")).and_then(|c| c.as_array()) {
                     for item in arr {
-                        let name = item
-                            .get("name")
-                            .or_else(|| item.get("id"))
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("Criterion")
-                            .to_string();
+                        let name = item.get("name").or_else(|| item.get("id")).and_then(|v| v.as_str()).unwrap_or("Criterion").to_string();
                         let score = item.get("score").and_then(|v| v.as_u64()).unwrap_or(2) as u8;
                         let max = item.get("max").and_then(|v| v.as_u64()).unwrap_or(2) as u8;
                         rubric.push((name, score, max));
@@ -1532,16 +1395,8 @@ pub fn parse_gate_markdown(md: &str, default_gate_id: &str, file_path: &str) -> 
                     }
                 }
 
-                let approved_by = val
-                    .get("approval")
-                    .and_then(|a| a.get("by"))
-                    .and_then(|v| v.as_str())
-                    .map(|s| s.to_string());
-                let approved_at = val
-                    .get("approval")
-                    .and_then(|a| a.get("at"))
-                    .and_then(|v| v.as_str())
-                    .map(|s| s.to_string());
+                let approved_by = val.get("approval").and_then(|a| a.get("by")).and_then(|v| v.as_str()).map(|s| s.to_string());
+                let approved_at = val.get("approval").and_then(|a| a.get("at")).and_then(|v| v.as_str()).map(|s| s.to_string());
 
                 return Some(GateRecordSpec {
                     gate_id,
@@ -1565,13 +1420,11 @@ pub fn parse_gate_markdown(md: &str, default_gate_id: &str, file_path: &str) -> 
     }
     let approved_by = md.lines().find_map(|l| {
         let t = l.trim().trim_matches('*').trim();
-        t.strip_prefix("Reviewer:")
-            .map(|r| r.trim().trim_matches('*').trim().trim_matches('`').to_string())
+        t.strip_prefix("Reviewer:").map(|r| r.trim().trim_matches('*').trim().trim_matches('`').to_string())
     });
     let approved_at = md.lines().find_map(|l| {
         let t = l.trim().trim_matches('*').trim();
-        t.strip_prefix("Reviewed At:")
-            .map(|r| r.trim().trim_matches('*').trim().trim_matches('`').to_string())
+        t.strip_prefix("Reviewed At:").map(|r| r.trim().trim_matches('*').trim().trim_matches('`').to_string())
     });
 
     Some(GateRecordSpec {
@@ -1606,19 +1459,8 @@ pub fn build_pipeline_stages(gates: &[GateRecordSpec]) -> Vec<PipelineStageSpec>
     stage_defs
         .into_iter()
         .map(|(index, id, owner, gate_id)| {
-            let status = gates
-                .iter()
-                .find(|g| g.gate_id == gate_id || g.stage == id)
-                .map(|g| g.status.clone())
-                .unwrap_or_else(|| "APPROVED".to_string());
-            PipelineStageSpec {
-                index,
-                id: id.to_string(),
-                owner: owner.to_string(),
-                enabled: true,
-                gate_id: gate_id.to_string(),
-                status,
-            }
+            let status = gates.iter().find(|g| g.gate_id == gate_id || g.stage == id).map(|g| g.status.clone()).unwrap_or_else(|| "APPROVED".to_string());
+            PipelineStageSpec { index, id: id.to_string(), owner: owner.to_string(), enabled: true, gate_id: gate_id.to_string(), status }
         })
         .collect()
 }
@@ -1662,17 +1504,9 @@ fn parse_scenarios_frontmatter(raw: &str) -> Vec<ScenarioSpec> {
             let id = item.get("id").and_then(|v| v.as_str()).unwrap_or("SCN-01").to_string();
             let method = item.get("method").and_then(|v| v.as_str()).unwrap_or("auto").to_string();
             let status = item.get("status").and_then(|v| v.as_str()).unwrap_or("passed").to_string();
-            let ac_refs = item
-                .get("ac")
-                .and_then(|v| v.as_array())
-                .map(|a| a.iter().filter_map(|x| x.as_str().map(|s| s.to_string())).collect())
-                .unwrap_or_default();
-            out.push(ScenarioSpec {
-                id,
-                ac_refs,
-                method,
-                status,
-            });
+            let ac_refs =
+                item.get("ac").and_then(|v| v.as_array()).map(|a| a.iter().filter_map(|x| x.as_str().map(|s| s.to_string())).collect()).unwrap_or_default();
+            out.push(ScenarioSpec { id, ac_refs, method, status });
         }
         if !out.is_empty() {
             return out;
@@ -1741,9 +1575,7 @@ fn load_package_dir(dir: &Path, standalone_specs: &[(String, PathBuf, String)]) 
     // Legacy v1 package (`brainstorm.md`, `usecases.md`, `plan.md`)
     let brainstorm_md = std::fs::read_to_string(dir.join("brainstorm.md")).unwrap_or_default();
     let usecases_md = std::fs::read_to_string(dir.join("usecases.md")).unwrap_or_default();
-    let plan_md = std::fs::read_to_string(dir.join("plan.md"))
-        .or_else(|_| std::fs::read_to_string(dir.join("roadmap.md")))
-        .unwrap_or_default();
+    let plan_md = std::fs::read_to_string(dir.join("plan.md")).or_else(|_| std::fs::read_to_string(dir.join("roadmap.md"))).unwrap_or_default();
 
     if brainstorm_md.is_empty() && usecases_md.is_empty() && plan_md.is_empty() {
         return None;
@@ -1757,14 +1589,7 @@ fn load_package_dir(dir: &Path, standalone_specs: &[(String, PathBuf, String)]) 
         .replace("Design OS Studio", "design:os studio")
         .replace("DESIGN:OS", "design:os");
 
-    Some(synthesize_v2_from_legacy(
-        slug,
-        title,
-        brainstorm_md,
-        usecases_md,
-        plan_md,
-        json_specs,
-    ))
+    Some(synthesize_v2_from_legacy(slug, title, brainstorm_md, usecases_md, plan_md, json_specs))
 }
 
 fn load_v2_package_dir(dir: &Path, slug: &str, json_specs: Vec<(String, PathBuf, String)>) -> Option<SpecPackage> {
@@ -1792,20 +1617,16 @@ fn load_v2_package_dir(dir: &Path, slug: &str, json_specs: Vec<(String, PathBuf,
         .or_else(|_| std::fs::read_to_string(dir.join("intake/BRD.md")))
         .or_else(|_| std::fs::read_to_string(dir.join("SPEC.md")))
         .unwrap_or_default();
-    let contract_md = std::fs::read_to_string(dir.join("contract/FC-001.md"))
-        .or_else(|_| std::fs::read_to_string(dir.join("contracts/PRD-contract.md")))
-        .unwrap_or_default();
-    let prd_md = std::fs::read_to_string(dir.join("prd/PRD.md"))
-        .or_else(|_| std::fs::read_to_string(dir.join("PRD.md")))
-        .unwrap_or_default();
+    let contract_md =
+        std::fs::read_to_string(dir.join("contract/FC-001.md")).or_else(|_| std::fs::read_to_string(dir.join("contracts/PRD-contract.md"))).unwrap_or_default();
+    let prd_md = std::fs::read_to_string(dir.join("prd/PRD.md")).or_else(|_| std::fs::read_to_string(dir.join("PRD.md"))).unwrap_or_default();
     let screen_inv_md = std::fs::read_to_string(dir.join("ux/screen-inventory.md")).unwrap_or_default();
     let ui_contract_md = std::fs::read_to_string(dir.join("ux/ui-contract.md")).unwrap_or_default();
     let decisions_md = std::fs::read_to_string(dir.join("decisions/decision-log.md"))
         .or_else(|_| std::fs::read_to_string(dir.join("review/DECISIONS.md")))
         .unwrap_or_default();
 
-    let (contract_id, contract_title, contract_outcome, business_rules) =
-        parse_contract_md(&contract_md, &format!("{root_display}/contract/FC-001.md"));
+    let (contract_id, contract_title, contract_outcome, business_rules) = parse_contract_md(&contract_md, &format!("{root_display}/contract/FC-001.md"));
     let requirements = parse_prd_requirements(&prd_md, &format!("{root_display}/prd/PRD.md"));
 
     let mut stories = Vec::new();
@@ -1815,10 +1636,7 @@ fn load_v2_package_dir(dir: &Path, slug: &str, json_specs: Vec<(String, PathBuf,
             .filter_map(|e| e.ok().map(|e| e.path()))
             .filter(|p| {
                 p.is_file()
-                    && p.file_name()
-                        .and_then(|n| n.to_str())
-                        .map(|n| (n.starts_with("US-") || n.starts_with("NF-")) && n.ends_with(".md"))
-                        .unwrap_or(false)
+                    && p.file_name().and_then(|n| n.to_str()).map(|n| (n.starts_with("US-") || n.starts_with("NF-")) && n.ends_with(".md")).unwrap_or(false)
             })
             .collect();
         us_paths.sort();
@@ -1844,10 +1662,8 @@ fn load_v2_package_dir(dir: &Path, slug: &str, json_specs: Vec<(String, PathBuf,
     let mut gates = Vec::new();
     let gates_dir = dir.join("review/gates");
     if let Ok(entries) = std::fs::read_dir(&gates_dir) {
-        let mut gpaths: Vec<PathBuf> = entries
-            .filter_map(|e| e.ok().map(|e| e.path()))
-            .filter(|p| p.extension().and_then(|x| x.to_str()) == Some("md"))
-            .collect();
+        let mut gpaths: Vec<PathBuf> =
+            entries.filter_map(|e| e.ok().map(|e| e.path())).filter(|p| p.extension().and_then(|x| x.to_str()) == Some("md")).collect();
         gpaths.sort();
         for gp in gpaths {
             let stem = gp.file_stem().and_then(|s| s.to_str()).unwrap_or("gate");
@@ -1860,13 +1676,7 @@ fn load_v2_package_dir(dir: &Path, slug: &str, json_specs: Vec<(String, PathBuf,
         }
     }
     if gates.is_empty() {
-        for (gid, stg) in [
-            ("g1-intake", "intake"),
-            ("g2-contract", "contract"),
-            ("g3-us", "us"),
-            ("g4-uiux", "uiux"),
-            ("g5-handoff", "handoff"),
-        ] {
+        for (gid, stg) in [("g1-intake", "intake"), ("g2-contract", "contract"), ("g3-us", "us"), ("g4-uiux", "uiux"), ("g5-handoff", "handoff")] {
             gates.push(GateRecordSpec {
                 gate_id: gid.to_string(),
                 stage: stg.to_string(),
@@ -1890,11 +1700,7 @@ fn load_v2_package_dir(dir: &Path, slug: &str, json_specs: Vec<(String, PathBuf,
     }
 
     let pipeline_stages = build_pipeline_stages(&gates);
-    let brainstorm_md = if !intake_md.is_empty() {
-        format!("{intake_md}\n\n{prd_md}")
-    } else {
-        prd_md.clone()
-    };
+    let brainstorm_md = if !intake_md.is_empty() { format!("{intake_md}\n\n{prd_md}") } else { prd_md.clone() };
     let plan_md = format!("{contract_md}\n\n{ui_contract_md}\n\n{decisions_md}");
 
     Some(SpecPackage {
@@ -1926,8 +1732,7 @@ fn load_v2_package_dir(dir: &Path, slug: &str, json_specs: Vec<(String, PathBuf,
 
 fn embedded_v2_package(standalone_specs: Vec<(String, PathBuf, String)>) -> SpecPackage {
     let root_display = "plans/specs/designos-studio-v2".to_string();
-    let (contract_id, contract_title, contract_outcome, business_rules) =
-        parse_contract_md(V2_FC_001_MD, "plans/specs/designos-studio-v2/contract/FC-001.md");
+    let (contract_id, contract_title, contract_outcome, business_rules) = parse_contract_md(V2_FC_001_MD, "plans/specs/designos-studio-v2/contract/FC-001.md");
     let requirements = parse_prd_requirements(V2_PRD_MD, "plans/specs/designos-studio-v2/prd/PRD.md");
     let stories = [
         (V2_US_01_MD, "plans/specs/designos-studio-v2/us/US-01.md"),
@@ -2024,13 +1829,7 @@ fn synthesize_v2_from_legacy(
     let mut us_idx = 1usize;
 
     for b in &blocks {
-        if let MdBlock::UserStory {
-            id_and_title,
-            as_a,
-            i_want,
-            so_that,
-        } = b
-        {
+        if let MdBlock::UserStory { id_and_title, as_a, i_want, so_that } = b {
             let us_id = format!("US-{us_idx:02}");
             let req_id = format!("REQ-{us_idx:02}");
             requirements.push(RequirementSpec {
@@ -2154,11 +1953,8 @@ fn extract_first_heading(md: &str) -> Option<String> {
     for line in md.lines() {
         let trimmed = line.trim();
         if let Some(rest) = trimmed.strip_prefix("# ") {
-            let clean = rest
-                .trim_start_matches("Brainstorm:")
-                .trim_start_matches("Implementation Plan:")
-                .trim_start_matches("Use Cases & Acceptance Criteria:")
-                .trim();
+            let clean =
+                rest.trim_start_matches("Brainstorm:").trim_start_matches("Implementation Plan:").trim_start_matches("Use Cases & Acceptance Criteria:").trim();
             if !clean.is_empty() {
                 return Some(clean.to_string());
             }
@@ -2208,17 +2004,10 @@ pub fn parse_markdown_blocks(md: &str) -> Vec<MdBlock> {
                 i += 1;
             }
             if lang == "gherkin" {
-                let parsed = code_lines
-                    .into_iter()
-                    .filter(|l| !l.trim().is_empty())
-                    .map(parse_gherkin_line)
-                    .collect();
+                let parsed = code_lines.into_iter().filter(|l| !l.trim().is_empty()).map(parse_gherkin_line).collect();
                 blocks.push(MdBlock::Gherkin { lines: parsed });
             } else {
-                blocks.push(MdBlock::CodeBlock {
-                    lang,
-                    lines: code_lines.into_iter().map(|s| s.to_string()).collect(),
-                });
+                blocks.push(MdBlock::CodeBlock { lang, lines: code_lines.into_iter().map(|s| s.to_string()).collect() });
             }
             continue;
         }
@@ -2260,46 +2049,28 @@ pub fn parse_markdown_blocks(md: &str) -> Vec<MdBlock> {
                     }
                     i += 1;
                 }
-                blocks.push(MdBlock::UserStory {
-                    id_and_title,
-                    as_a,
-                    i_want,
-                    so_that,
-                });
+                blocks.push(MdBlock::UserStory { id_and_title, as_a, i_want, so_that });
                 continue;
             }
         }
 
         if let Some(h3) = trimmed.strip_prefix("### ") {
-            blocks.push(MdBlock::Heading {
-                level: 3,
-                text: strip_inline_md(h3),
-            });
+            blocks.push(MdBlock::Heading { level: 3, text: strip_inline_md(h3) });
             i += 1;
             continue;
         }
         if let Some(h2) = trimmed.strip_prefix("## ") {
-            blocks.push(MdBlock::Heading {
-                level: 2,
-                text: strip_inline_md(h2),
-            });
+            blocks.push(MdBlock::Heading { level: 2, text: strip_inline_md(h2) });
             i += 1;
             continue;
         }
         if let Some(h1) = trimmed.strip_prefix("# ") {
-            blocks.push(MdBlock::Heading {
-                level: 1,
-                text: strip_inline_md(h1),
-            });
+            blocks.push(MdBlock::Heading { level: 1, text: strip_inline_md(h1) });
             i += 1;
             continue;
         }
 
-        if let Some(bullet_body) = trimmed
-            .strip_prefix("- ")
-            .or_else(|| trimmed.strip_prefix("* "))
-            .or_else(|| strip_numbered_prefix(trimmed))
-        {
+        if let Some(bullet_body) = trimmed.strip_prefix("- ").or_else(|| trimmed.strip_prefix("* ")).or_else(|| strip_numbered_prefix(trimmed)) {
             let (badge, bold_key, text) = parse_bullet_parts(bullet_body);
             blocks.push(MdBlock::Bullet { badge, bold_key, text });
             i += 1;
@@ -2325,41 +2096,17 @@ fn strip_numbered_prefix(s: &str) -> Option<&str> {
 fn parse_gherkin_line(line: &str) -> GherkinLine {
     let t = line.trim();
     if let Some(rest) = t.strip_prefix("Scenario:") {
-        GherkinLine {
-            keyword: GherkinKeyword::Scenario,
-            keyword_text: "Scenario:".to_string(),
-            rest: rest.trim().to_string(),
-        }
+        GherkinLine { keyword: GherkinKeyword::Scenario, keyword_text: "Scenario:".to_string(), rest: rest.trim().to_string() }
     } else if let Some(rest) = t.strip_prefix("Given ") {
-        GherkinLine {
-            keyword: GherkinKeyword::Given,
-            keyword_text: "Given".to_string(),
-            rest: rest.trim().to_string(),
-        }
+        GherkinLine { keyword: GherkinKeyword::Given, keyword_text: "Given".to_string(), rest: rest.trim().to_string() }
     } else if let Some(rest) = t.strip_prefix("When ") {
-        GherkinLine {
-            keyword: GherkinKeyword::When,
-            keyword_text: "When".to_string(),
-            rest: rest.trim().to_string(),
-        }
+        GherkinLine { keyword: GherkinKeyword::When, keyword_text: "When".to_string(), rest: rest.trim().to_string() }
     } else if let Some(rest) = t.strip_prefix("Then ") {
-        GherkinLine {
-            keyword: GherkinKeyword::Then,
-            keyword_text: "Then".to_string(),
-            rest: rest.trim().to_string(),
-        }
+        GherkinLine { keyword: GherkinKeyword::Then, keyword_text: "Then".to_string(), rest: rest.trim().to_string() }
     } else if let Some(rest) = t.strip_prefix("And ") {
-        GherkinLine {
-            keyword: GherkinKeyword::And,
-            keyword_text: "And".to_string(),
-            rest: rest.trim().to_string(),
-        }
+        GherkinLine { keyword: GherkinKeyword::And, keyword_text: "And".to_string(), rest: rest.trim().to_string() }
     } else {
-        GherkinLine {
-            keyword: GherkinKeyword::Other,
-            keyword_text: String::new(),
-            rest: t.to_string(),
-        }
+        GherkinLine { keyword: GherkinKeyword::Other, keyword_text: String::new(), rest: t.to_string() }
     }
 }
 
@@ -2368,12 +2115,7 @@ fn parse_bullet_parts(body: &str) -> (Option<String>, Option<String>, String) {
     if let Some(after_open) = trimmed.strip_prefix("**") {
         if let Some(end_bold) = after_open.find("**") {
             let key = after_open[..end_bold].trim().trim_end_matches(':').to_string();
-            let remainder = after_open[end_bold + 2..]
-                .trim()
-                .trim_start_matches(':')
-                .trim_start_matches('—')
-                .trim_start_matches('-')
-                .trim();
+            let remainder = after_open[end_bold + 2..].trim().trim_start_matches(':').trim_start_matches('—').trim_start_matches('-').trim();
             let badge = detect_moscow_or_uc_badge(&key);
             return (badge, Some(key), strip_inline_md(remainder));
         }
@@ -2457,12 +2199,7 @@ impl App {
 
     /// Exports the selected frame (or first screen on the active page) to `examples/specs/<slug>.spec.json`.
     pub fn export_active_frame_to_spec(&mut self) {
-        let target_id = self
-            .selection
-            .first()
-            .copied()
-            .or_else(|| self.doc.get(self.page).and_then(|p| p.children.first().copied()))
-            .unwrap_or(self.page);
+        let target_id = self.selection.first().copied().or_else(|| self.doc.get(self.page).and_then(|p| p.children.first().copied())).unwrap_or(self.page);
         let node_name = self.doc.get(target_id).map(|n| n.name.clone()).unwrap_or_else(|| "screen".to_string());
         let slug: String = node_name
             .to_ascii_lowercase()
@@ -2474,9 +2211,7 @@ impl App {
             .collect::<Vec<_>>()
             .join("-");
         let filename = format!("{}.spec.json", if slug.is_empty() { "canvas-screen" } else { &slug });
-        let out_dir = find_workspace_root()
-            .map(|r| r.join("examples").join("specs"))
-            .unwrap_or_else(|| std::env::temp_dir().join("designos_specs"));
+        let out_dir = find_workspace_root().map(|r| r.join("examples").join("specs")).unwrap_or_else(|| std::env::temp_dir().join("designos_specs"));
         let _ = std::fs::create_dir_all(&out_dir);
         let out_path = out_dir.join(&filename);
         match self.doc.export_spec(target_id) {
@@ -2525,33 +2260,14 @@ pub fn show_left(app: &mut App, ui: &mut Ui, rect: Rect) {
     let header_rect = Rect::from_min_size(rect.min, Vec2::new(rect.width(), header_h));
     widgets::hline(&p, header_rect.left(), header_rect.right(), header_rect.bottom() - 1.0, TOKEN_BORDER);
 
-    icons::paint(
-        &p,
-        Icon::Specs,
-        Pos2::new(header_rect.left() + 16.0, header_rect.center().y),
-        13.0,
-        TOKEN_TEXT_MUTED,
-    );
+    icons::paint(&p, Icon::Specs, Pos2::new(header_rect.left() + 16.0, header_rect.center().y), 13.0, TOKEN_TEXT_MUTED);
     let hub_label = widgets::elide(&p, "Figma Specs", &theme::font_body_strong(), (header_rect.width() - 102.0).max(40.0));
-    p.text(
-        Pos2::new(header_rect.left() + 28.0, header_rect.center().y),
-        Align2::LEFT_CENTER,
-        hub_label,
-        theme::font_body_strong(),
-        TOKEN_TEXT,
-    );
+    p.text(Pos2::new(header_rect.left() + 28.0, header_rect.center().y), Align2::LEFT_CENTER, hub_label, theme::font_body_strong(), TOKEN_TEXT);
 
     let toggle_w = 58.0;
-    let toggle_rect = Rect::from_min_size(
-        Pos2::new(header_rect.right() - toggle_w - 10.0, header_rect.center().y - 11.0),
-        Vec2::new(toggle_w, 22.0),
-    );
+    let toggle_rect = Rect::from_min_size(Pos2::new(header_rect.right() - toggle_w - 10.0, header_rect.center().y - 11.0), Vec2::new(toggle_w, 22.0));
     let toggle_resp = ui.interact(toggle_rect, Id::new("specs-reader-toggle"), Sense::click());
-    let toggle_bg = if app.specs.open || toggle_resp.hovered() {
-        TOKEN_SURFACE_2
-    } else {
-        TOKEN_SURFACE_3
-    };
+    let toggle_bg = if app.specs.open || toggle_resp.hovered() { TOKEN_SURFACE_2 } else { TOKEN_SURFACE_3 };
     p.rect_filled(toggle_rect, CornerRadius::same(5), toggle_bg);
     p.rect_stroke(toggle_rect, CornerRadius::same(5), Stroke::new(1.0, TOKEN_BORDER), StrokeKind::Inside);
     p.text(
@@ -2567,10 +2283,8 @@ pub fn show_left(app: &mut App, ui: &mut Ui, rect: Rect) {
     }
 
     let bottom_h = 68.0;
-    let body_rect = Rect::from_min_max(
-        Pos2::new(rect.left(), header_rect.bottom()),
-        Pos2::new(rect.right(), (rect.bottom() - bottom_h).max(header_rect.bottom() + 40.0)),
-    );
+    let body_rect =
+        Rect::from_min_max(Pos2::new(rect.left(), header_rect.bottom()), Pos2::new(rect.right(), (rect.bottom() - bottom_h).max(header_rect.bottom() + 40.0)));
     let bottom_rect = Rect::from_min_max(Pos2::new(rect.left(), body_rect.bottom()), rect.max);
 
     let pkg_count = app.specs.packages.len();
@@ -2610,13 +2324,7 @@ pub fn show_left(app: &mut App, ui: &mut Ui, rect: Rect) {
             p.rect_filled(all_click_r, CornerRadius::same(5), TOKEN_SURFACE_3);
         }
         let all_lbl = widgets::elide(&p, "All specifications", &theme::font_body_medium(), (all_click_r.width() - 16.0).max(40.0));
-        p.text(
-            Pos2::new(all_click_r.left() + 8.0, all_click_r.center().y),
-            Align2::LEFT_CENTER,
-            all_lbl,
-            theme::font_body_medium(),
-            TOKEN_TEXT,
-        );
+        p.text(Pos2::new(all_click_r.left() + 8.0, all_click_r.center().y), Align2::LEFT_CENTER, all_lbl, theme::font_body_medium(), TOKEN_TEXT);
         widgets::record(ui, "specs-left-all-specs", all_click_r);
         if all_resp.clicked() {
             app.specs.active_tab = SpecTab::Overview;
@@ -2624,11 +2332,7 @@ pub fn show_left(app: &mut App, ui: &mut Ui, rect: Rect) {
             app.specs.scroll = 0.0;
         }
 
-        p.rect_filled(
-            new_btn_r,
-            CornerRadius::same(5),
-            if new_resp.hovered() { TOKEN_SURFACE_2 } else { TOKEN_SURFACE_3 },
-        );
+        p.rect_filled(new_btn_r, CornerRadius::same(5), if new_resp.hovered() { TOKEN_SURFACE_2 } else { TOKEN_SURFACE_3 });
         p.rect_stroke(new_btn_r, CornerRadius::same(5), Stroke::new(1.0, TOKEN_BORDER), StrokeKind::Inside);
         let nc = new_btn_r.center();
         p.line_segment([Pos2::new(nc.x - 4.5, nc.y), Pos2::new(nc.x + 4.5, nc.y)], Stroke::new(1.4, TOKEN_TEXT));
@@ -2704,17 +2408,8 @@ pub fn show_left(app: &mut App, ui: &mut Ui, rect: Rect) {
             }
             let ver_tag = if pkg.format_version == "2" { ".md · v2" } else { ".md · v1" };
             let ver_w = widgets::text_width(&p, ver_tag, &theme::font_small()) + 8.0;
-            p.text(
-                Pos2::new(row_r.right() - 8.0, row_r.center().y),
-                Align2::RIGHT_CENTER,
-                ver_tag,
-                theme::font_small(),
-                TOKEN_TEXT_SUBTLE,
-            );
-            let clean_title = pkg
-                .title
-                .replace("DESIGN:OS Studio", "design:os studio")
-                .replace("Design OS Studio", "design:os studio");
+            p.text(Pos2::new(row_r.right() - 8.0, row_r.center().y), Align2::RIGHT_CENTER, ver_tag, theme::font_small(), TOKEN_TEXT_SUBTLE);
+            let clean_title = pkg.title.replace("DESIGN:OS Studio", "design:os studio").replace("Design OS Studio", "design:os studio");
             let title_str = widgets::elide(&p, &clean_title, &theme::font_body_medium(), (row_r.width() - ver_w - 18.0).max(36.0));
             p.text(
                 Pos2::new(row_r.left() + 10.0, row_r.center().y),
@@ -2761,11 +2456,7 @@ pub fn show_left(app: &mut App, ui: &mut Ui, rect: Rect) {
         draw_left_section_header(&p, Pos2::new(body_rect.left() + pad_x, y), row_w, "USER STORIES");
         y += 22.0;
 
-        let stories_list = app
-            .specs
-            .current_package()
-            .map(|pkg| pkg.stories.clone())
-            .unwrap_or_default();
+        let stories_list = app.specs.current_package().map(|pkg| pkg.stories.clone()).unwrap_or_default();
         for (s_idx, st) in stories_list.iter().enumerate() {
             let row_r = Rect::from_min_size(Pos2::new(body_rect.left() + pad_x, y), Vec2::new(row_w, 26.0));
             let active = app.specs.active_tab == SpecTab::UseCases && app.specs.selected_story == s_idx;
@@ -2778,13 +2469,7 @@ pub fn show_left(app: &mut App, ui: &mut Ui, rect: Rect) {
                 p.rect_filled(row_r, CornerRadius::same(5), TOKEN_SURFACE_3);
             }
             let id_w = widgets::text_width(&p, &st.id, &theme::font_mono()) + 8.0;
-            p.text(
-                Pos2::new(row_r.left() + 10.0, row_r.center().y),
-                Align2::LEFT_CENTER,
-                &st.id,
-                theme::font_mono(),
-                TOKEN_TEXT_SUBTLE,
-            );
+            p.text(Pos2::new(row_r.left() + 10.0, row_r.center().y), Align2::LEFT_CENTER, &st.id, theme::font_mono(), TOKEN_TEXT_SUBTLE);
             let st_title = widgets::elide(&p, &st.title, &theme::font_body(), (row_r.width() - id_w - 18.0).max(36.0));
             p.text(
                 Pos2::new(row_r.left() + 10.0 + id_w, row_r.center().y),
@@ -2807,18 +2492,11 @@ pub fn show_left(app: &mut App, ui: &mut Ui, rect: Rect) {
         draw_left_section_header(&p, Pos2::new(body_rect.left() + pad_x, y), row_w, "CANVAS BLUEPRINTS");
         y += 22.0;
 
-        let json_list = app
-            .specs
-            .current_package()
-            .map(|pkg| pkg.json_specs.clone())
-            .unwrap_or_default();
+        let json_list = app.specs.current_package().map(|pkg| pkg.json_specs.clone()).unwrap_or_default();
         for (j_idx, (j_name, _j_path, j_raw)) in json_list.iter().enumerate() {
             let row_r = Rect::from_min_size(Pos2::new(body_rect.left() + pad_x, y), Vec2::new(row_w, 26.0));
             let apply_w = 44.0;
-            let apply_r = Rect::from_min_size(
-                Pos2::new(row_r.right() - apply_w - 4.0, row_r.center().y - 10.0),
-                Vec2::new(apply_w, 20.0),
-            );
+            let apply_r = Rect::from_min_size(Pos2::new(row_r.right() - apply_w - 4.0, row_r.center().y - 10.0), Vec2::new(apply_w, 20.0));
             let main_click_r = Rect::from_min_max(row_r.min, Pos2::new(apply_r.left() - 4.0, row_r.bottom()));
             let row_resp = ui.interact(main_click_r, Id::new(("spec-json-row", j_idx)), Sense::click());
             let apply_resp = ui.interact(apply_r, Id::new(("spec-json-apply", j_idx)), Sense::click());
@@ -2836,11 +2514,7 @@ pub fn show_left(app: &mut App, ui: &mut Ui, rect: Rect) {
                 if active { TOKEN_TEXT } else { TOKEN_TEXT_MUTED },
             );
 
-            p.rect_filled(
-                apply_r,
-                CornerRadius::same(4),
-                if apply_resp.hovered() { TOKEN_SURFACE_2 } else { TOKEN_SURFACE_3 },
-            );
+            p.rect_filled(apply_r, CornerRadius::same(4), if apply_resp.hovered() { TOKEN_SURFACE_2 } else { TOKEN_SURFACE_3 });
             p.rect_stroke(apply_r, CornerRadius::same(4), Stroke::new(1.0, TOKEN_BORDER), StrokeKind::Inside);
             p.text(apply_r.center(), Align2::CENTER_CENTER, "Apply", theme::font_small(), TOKEN_TEXT_MUTED);
             widgets::record(ui, &format!("spec-json-apply:{j_idx}"), apply_r);
@@ -2931,10 +2605,7 @@ pub fn show_left(app: &mut App, ui: &mut Ui, rect: Rect) {
 
 /// Materializes the active Markdown Spec (`PRD: ...`) as a live Figma Spec Card Frame on the canvas (`https://www.figma.com/specs/`).
 pub fn drop_spec_card_onto_canvas(app: &mut App, pkg: &SpecPackage) {
-    let clean_title = pkg
-        .title
-        .replace("DESIGN:OS Studio", "design:os studio")
-        .replace("Design OS Studio", "design:os studio");
+    let clean_title = pkg.title.replace("DESIGN:OS Studio", "design:os studio").replace("Design OS Studio", "design:os studio");
     let spec_card_json = serde_json::json!({
         "name": format!("Spec: {}", clean_title),
         "preset": "easeui-panel",
@@ -3029,16 +2700,9 @@ pub fn show_reader(app: &mut App, ui: &mut Ui, rect: Rect) {
 
     // Right-side lightweight controls: `Canvas` (`hero-view-canvas`), `Paper/Slate` (`specs-theme-toggle`), `Copy .md` (`specs-copy-md`), `Share` (`specs-share-btn`)
     let canvas_btn_w = 56.0;
-    let canvas_btn = Rect::from_min_size(
-        Pos2::new(bar_rect.right() - canvas_btn_w - 10.0, bar_rect.center().y - 12.0),
-        Vec2::new(canvas_btn_w, 24.0),
-    );
+    let canvas_btn = Rect::from_min_size(Pos2::new(bar_rect.right() - canvas_btn_w - 10.0, bar_rect.center().y - 12.0), Vec2::new(canvas_btn_w, 24.0));
     let canvas_resp = ui.interact(canvas_btn, Id::new("hero-view-canvas"), Sense::click());
-    p.rect_filled(
-        canvas_btn,
-        CornerRadius::same(5),
-        if canvas_resp.hovered() { pal.surface_2 } else { pal.doc_sheet },
-    );
+    p.rect_filled(canvas_btn, CornerRadius::same(5), if canvas_resp.hovered() { pal.surface_2 } else { pal.doc_sheet });
     p.rect_stroke(canvas_btn, CornerRadius::same(5), Stroke::new(1.0, pal.border), StrokeKind::Inside);
     p.text(canvas_btn.center(), Align2::CENTER_CENTER, "Canvas", theme::font_small_medium(), pal.text);
     widgets::record(ui, "hero-view-canvas", canvas_btn);
@@ -3047,59 +2711,29 @@ pub fn show_reader(app: &mut App, ui: &mut Ui, rect: Rect) {
     }
 
     let theme_btn_w = 50.0;
-    let theme_btn = Rect::from_min_size(
-        Pos2::new(canvas_btn.left() - theme_btn_w - 6.0, bar_rect.center().y - 12.0),
-        Vec2::new(theme_btn_w, 24.0),
-    );
+    let theme_btn = Rect::from_min_size(Pos2::new(canvas_btn.left() - theme_btn_w - 6.0, bar_rect.center().y - 12.0), Vec2::new(theme_btn_w, 24.0));
     let theme_resp = ui.interact(theme_btn, Id::new("specs-theme-toggle"), Sense::click());
-    p.rect_filled(
-        theme_btn,
-        CornerRadius::same(5),
-        if theme_resp.hovered() { pal.surface_2 } else { pal.doc_sheet },
-    );
+    p.rect_filled(theme_btn, CornerRadius::same(5), if theme_resp.hovered() { pal.surface_2 } else { pal.doc_sheet });
     p.rect_stroke(theme_btn, CornerRadius::same(5), Stroke::new(1.0, pal.border), StrokeKind::Inside);
-    p.text(
-        theme_btn.center(),
-        Align2::CENTER_CENTER,
-        if app.specs.light_mode { "Paper" } else { "Slate" },
-        theme::font_small_medium(),
-        pal.text_muted,
-    );
+    p.text(theme_btn.center(), Align2::CENTER_CENTER, if app.specs.light_mode { "Paper" } else { "Slate" }, theme::font_small_medium(), pal.text_muted);
     widgets::record(ui, "specs-theme-toggle", theme_btn);
     if theme_resp.clicked() {
         app.specs.light_mode = !app.specs.light_mode;
     }
 
     let copy_md_w = 62.0;
-    let copy_md_btn = Rect::from_min_size(
-        Pos2::new(theme_btn.left() - copy_md_w - 6.0, bar_rect.center().y - 12.0),
-        Vec2::new(copy_md_w, 24.0),
-    );
+    let copy_md_btn = Rect::from_min_size(Pos2::new(theme_btn.left() - copy_md_w - 6.0, bar_rect.center().y - 12.0), Vec2::new(copy_md_w, 24.0));
     let copy_md_resp = ui.interact(copy_md_btn, Id::new("specs-copy-md"), Sense::click());
-    p.rect_filled(
-        copy_md_btn,
-        CornerRadius::same(5),
-        if copy_md_resp.hovered() { pal.surface_2 } else { pal.doc_sheet },
-    );
+    p.rect_filled(copy_md_btn, CornerRadius::same(5), if copy_md_resp.hovered() { pal.surface_2 } else { pal.doc_sheet });
     p.rect_stroke(copy_md_btn, CornerRadius::same(5), Stroke::new(1.0, pal.border), StrokeKind::Inside);
-    p.text(
-        copy_md_btn.center(),
-        Align2::CENTER_CENTER,
-        "Copy .md",
-        theme::font_small_medium(),
-        pal.text_muted,
-    );
+    p.text(copy_md_btn.center(), Align2::CENTER_CENTER, "Copy .md", theme::font_small_medium(), pal.text_muted);
     widgets::record(ui, "specs-copy-md", copy_md_btn);
     if copy_md_resp.clicked() {
         let md_body = match app.specs.active_tab {
             SpecTab::Overview => pkg.brainstorm_md.clone(),
             SpecTab::UseCases => pkg.usecases_md.clone(),
             SpecTab::Plan => pkg.plan_md.clone(),
-            SpecTab::JsonSpec => pkg
-                .json_specs
-                .get(app.specs.selected_json_spec)
-                .map(|(_, _, raw)| raw.clone())
-                .unwrap_or_else(|| pkg.plan_md.clone()),
+            SpecTab::JsonSpec => pkg.json_specs.get(app.specs.selected_json_spec).map(|(_, _, raw)| raw.clone()).unwrap_or_else(|| pkg.plan_md.clone()),
             SpecTab::CanvasScreens => pkg.plan_md.clone(),
         };
         ui.ctx().copy_text(md_body.clone());
@@ -3108,31 +2742,14 @@ pub fn show_reader(app: &mut App, ui: &mut Ui, rect: Rect) {
     }
 
     let share_btn_w = 48.0;
-    let share_btn = Rect::from_min_size(
-        Pos2::new(copy_md_btn.left() - share_btn_w - 6.0, bar_rect.center().y - 12.0),
-        Vec2::new(share_btn_w, 24.0),
-    );
+    let share_btn = Rect::from_min_size(Pos2::new(copy_md_btn.left() - share_btn_w - 6.0, bar_rect.center().y - 12.0), Vec2::new(share_btn_w, 24.0));
     let share_resp = ui.interact(share_btn, Id::new("specs-share-btn"), Sense::click());
-    p.rect_filled(
-        share_btn,
-        CornerRadius::same(5),
-        if share_resp.hovered() { pal.surface_2 } else { pal.doc_sheet },
-    );
+    p.rect_filled(share_btn, CornerRadius::same(5), if share_resp.hovered() { pal.surface_2 } else { pal.doc_sheet });
     p.rect_stroke(share_btn, CornerRadius::same(5), Stroke::new(1.0, pal.border), StrokeKind::Inside);
-    p.text(
-        share_btn.center(),
-        Align2::CENTER_CENTER,
-        "Share",
-        theme::font_small_medium(),
-        pal.text_muted,
-    );
+    p.text(share_btn.center(), Align2::CENTER_CENTER, "Share", theme::font_small_medium(), pal.text_muted);
     widgets::record(ui, "specs-share-btn", share_btn);
     if share_resp.clicked() {
-        let deep_link = format!(
-            "designos://specs/{}#{}",
-            pkg.slug,
-            app.specs.active_tab.anchor()
-        );
+        let deep_link = format!("designos://specs/{}#{}", pkg.slug, app.specs.active_tab.anchor());
         ui.ctx().copy_text(deep_link.clone());
         app.specs.last_ai_copy = Some(deep_link);
         app.show_toast("Copied Spec deep-link to clipboard", false);
@@ -3160,7 +2777,13 @@ pub fn show_reader(app: &mut App, ui: &mut Ui, rect: Rect) {
             Align2::CENTER_CENTER,
             lbl,
             if active { theme::font_small_strong() } else { theme::font_small_medium() },
-            if active { pal.text } else if resp.hovered() { pal.text_muted } else { pal.text_subtle },
+            if active {
+                pal.text
+            } else if resp.hovered() {
+                pal.text_muted
+            } else {
+                pal.text_subtle
+            },
         );
         if active {
             let ind = Rect::from_min_size(Pos2::new(tr.left() + 6.0, bar_rect.bottom() - 2.0), Vec2::new(tr.width() - 12.0, 2.0));
@@ -3175,25 +2798,14 @@ pub fn show_reader(app: &mut App, ui: &mut Ui, rect: Rect) {
 
     // Top-left Figma Specs Breadcrumb: `< design:os studio  /  PRD: ...`
     let bc_max_w = (tab_right - bar_rect.left() - 24.0).max(60.0);
-    let clean_title = pkg
-        .title
-        .replace("DESIGN:OS Studio", "design:os studio")
-        .replace("Design OS Studio", "design:os studio");
+    let clean_title = pkg.title.replace("DESIGN:OS Studio", "design:os studio").replace("Design OS Studio", "design:os studio");
     let bc_text = format!("< design:os studio  /  PRD: {clean_title}");
     let bc_clean = widgets::elide(&p, &bc_text, &theme::font_body_medium(), bc_max_w);
-    p.text(
-        Pos2::new(bar_rect.left() + 16.0, bar_rect.center().y),
-        Align2::LEFT_CENTER,
-        bc_clean,
-        theme::font_body_medium(),
-        pal.text_muted,
-    );
+    p.text(Pos2::new(bar_rect.left() + 16.0, bar_rect.center().y), Align2::LEFT_CENTER, bc_clean, theme::font_body_medium(), pal.text_muted);
 
     // 2. Main Editorial Document Area (reserve 52px at bottom for the floating Figma Specs `✦ Ask anything` Agent Bar)
-    let content_rect = Rect::from_min_max(
-        Pos2::new(rect.left(), bar_rect.bottom()),
-        Pos2::new(rect.right(), (rect.bottom() - 52.0).max(bar_rect.bottom() + 80.0)),
-    );
+    let content_rect =
+        Rect::from_min_max(Pos2::new(rect.left(), bar_rect.bottom()), Pos2::new(rect.right(), (rect.bottom() - 52.0).max(bar_rect.bottom() + 80.0)));
 
     match app.specs.active_tab {
         SpecTab::Overview => render_po_view_tab(app, ui, content_rect, &pkg),
@@ -3205,52 +2817,23 @@ pub fn show_reader(app: &mut App, ui: &mut Ui, rect: Rect) {
 
     // 3. Bottom-Left Floating Figma Specs Agent Pill (`[ ✦ Ask @agent about this Spec   (↑) ]`)
     let ask_w = (rect.width() - 40.0).min(460.0).max(180.0);
-    let ask_rect = Rect::from_min_size(
-        Pos2::new(rect.left() + 20.0, rect.bottom() - 42.0),
-        Vec2::new(ask_w, 32.0),
-    );
+    let ask_rect = Rect::from_min_size(Pos2::new(rect.left() + 20.0, rect.bottom() - 42.0), Vec2::new(ask_w, 32.0));
     p.rect_filled(ask_rect, CornerRadius::same(99), pal.doc_sheet);
     p.rect_stroke(ask_rect, CornerRadius::same(99), Stroke::new(1.0, pal.border), StrokeKind::Inside);
     widgets::record(ui, "specs-ask-agent-bar", ask_rect);
 
-    icons::paint(
-        &p,
-        Icon::Sparkle,
-        Pos2::new(ask_rect.left() + 16.0, ask_rect.center().y),
-        13.0,
-        Color32::from_rgb(0x0D, 0x99, 0xFF),
-    );
+    icons::paint(&p, Icon::Sparkle, Pos2::new(ask_rect.left() + 16.0, ask_rect.center().y), 13.0, Color32::from_rgb(0x0D, 0x99, 0xFF));
     let send_c = Pos2::new(ask_rect.right() - 16.0, ask_rect.center().y);
     let send_r = Rect::from_center_size(send_c, Vec2::splat(22.0));
     let send_resp = ui.interact(send_r, Id::new("specs-ask-agent-send"), Sense::click());
-    p.circle_filled(
-        send_c,
-        10.0,
-        if send_resp.hovered() {
-            Color32::from_rgb(0x25, 0xA8, 0xFF)
-        } else {
-            Color32::from_rgb(0x0D, 0x99, 0xFF)
-        },
-    );
+    p.circle_filled(send_c, 10.0, if send_resp.hovered() { Color32::from_rgb(0x25, 0xA8, 0xFF) } else { Color32::from_rgb(0x0D, 0x99, 0xFF) });
     // Vector up-arrow inside the send button
-    p.line_segment(
-        [Pos2::new(send_c.x, send_c.y + 4.5), Pos2::new(send_c.x, send_c.y - 4.5)],
-        Stroke::new(1.6, Color32::WHITE),
-    );
-    p.line_segment(
-        [Pos2::new(send_c.x - 3.5, send_c.y - 1.0), Pos2::new(send_c.x, send_c.y - 4.5)],
-        Stroke::new(1.6, Color32::WHITE),
-    );
-    p.line_segment(
-        [Pos2::new(send_c.x + 3.5, send_c.y - 1.0), Pos2::new(send_c.x, send_c.y - 4.5)],
-        Stroke::new(1.6, Color32::WHITE),
-    );
+    p.line_segment([Pos2::new(send_c.x, send_c.y + 4.5), Pos2::new(send_c.x, send_c.y - 4.5)], Stroke::new(1.6, Color32::WHITE));
+    p.line_segment([Pos2::new(send_c.x - 3.5, send_c.y - 1.0), Pos2::new(send_c.x, send_c.y - 4.5)], Stroke::new(1.6, Color32::WHITE));
+    p.line_segment([Pos2::new(send_c.x + 3.5, send_c.y - 1.0), Pos2::new(send_c.x, send_c.y - 4.5)], Stroke::new(1.6, Color32::WHITE));
     widgets::record(ui, "specs-ask-agent-send", send_r);
 
-    let edit_rect = Rect::from_min_max(
-        Pos2::new(ask_rect.left() + 30.0, ask_rect.top() + 5.0),
-        Pos2::new(send_r.left() - 6.0, ask_rect.bottom() - 5.0),
-    );
+    let edit_rect = Rect::from_min_max(Pos2::new(ask_rect.left() + 30.0, ask_rect.top() + 5.0), Pos2::new(send_r.left() - 6.0, ask_rect.bottom() - 5.0));
     let mut submit_ask = false;
     ui.scope_builder(egui::UiBuilder::new().max_rect(edit_rect), |ui| {
         let te = egui::TextEdit::singleline(&mut app.specs.ask_input)
@@ -3259,11 +2842,7 @@ pub fn show_reader(app: &mut App, ui: &mut Ui, rect: Rect) {
             .frame(egui::Frame::NONE)
             .font(theme::font_body())
             .text_color(pal.text)
-            .hint_text(
-                egui::RichText::new("Ask @agent about this Spec")
-                    .font(theme::font_body())
-                    .color(pal.text_muted),
-            );
+            .hint_text(egui::RichText::new("Ask @agent about this Spec").font(theme::font_body()).color(pal.text_muted));
         let resp = ui.add(te);
         if resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
             submit_ask = true;
@@ -3273,18 +2852,9 @@ pub fn show_reader(app: &mut App, ui: &mut Ui, rect: Rect) {
     if send_resp.clicked() || submit_ask {
         let typed = app.specs.ask_input.trim().to_string();
         let prompt = if typed.is_empty() {
-            format!(
-                "@prd Reference @spec://{}/prd/PRD.md ({}) and implement the active User Story onto the Canvas",
-                pkg.slug, pkg.contract_id
-            )
+            format!("@prd Reference @spec://{}/prd/PRD.md ({}) and implement the active User Story onto the Canvas", pkg.slug, pkg.contract_id)
         } else {
-            format!(
-                "@prd @spec://{}/{} ({}) {}",
-                pkg.slug,
-                app.specs.active_tab.anchor(),
-                pkg.contract_id,
-                typed
-            )
+            format!("@prd @spec://{}/{} ({}) {}", pkg.slug, app.specs.active_tab.anchor(), pkg.contract_id, typed)
         };
         app.specs.ask_input.clear();
         let fp = app.file_path.clone();
@@ -3323,27 +2893,9 @@ pub fn show_right(app: &mut App, ui: &mut Ui, rect: Rect) {
     let header_rect = Rect::from_min_size(rect.min, Vec2::new(rect.width(), header_h));
     widgets::hline(&p, header_rect.left(), header_rect.right(), header_rect.bottom() - 1.0, TOKEN_BORDER);
 
-    icons::paint(
-        &p,
-        Icon::Specs,
-        Pos2::new(header_rect.left() + 14.0, header_rect.center().y),
-        13.0,
-        TOKEN_TEXT_MUTED,
-    );
-    p.text(
-        Pos2::new(header_rect.left() + 26.0, header_rect.center().y),
-        Align2::LEFT_CENTER,
-        "Spec Inspector",
-        theme::font_body_strong(),
-        TOKEN_TEXT,
-    );
-    p.text(
-        Pos2::new(header_rect.right() - 12.0, header_rect.center().y),
-        Align2::RIGHT_CENTER,
-        ".md · v2",
-        theme::font_small(),
-        TOKEN_TEXT_SUBTLE,
-    );
+    icons::paint(&p, Icon::Specs, Pos2::new(header_rect.left() + 14.0, header_rect.center().y), 13.0, TOKEN_TEXT_MUTED);
+    p.text(Pos2::new(header_rect.left() + 26.0, header_rect.center().y), Align2::LEFT_CENTER, "Spec Inspector", theme::font_body_strong(), TOKEN_TEXT);
+    p.text(Pos2::new(header_rect.right() - 12.0, header_rect.center().y), Align2::RIGHT_CENTER, ".md · v2", theme::font_small(), TOKEN_TEXT_SUBTLE);
 
     let Some(pkg) = app.specs.current_package().cloned() else {
         return;
@@ -3369,24 +2921,13 @@ pub fn show_right(app: &mut App, ui: &mut Ui, rect: Rect) {
         let row_w = (body_rect.width() - pad_x * 2.0).max(80.0);
 
         // 1. ON THIS PAGE (Dynamic Interactive TOC Outline per active SpecTab)
-        p.text(
-            Pos2::new(body_rect.left() + pad_x, y),
-            Align2::LEFT_CENTER,
-            "ON THIS PAGE",
-            theme::font_small_strong(),
-            TOKEN_TEXT_SUBTLE,
-        );
+        p.text(Pos2::new(body_rect.left() + pad_x, y), Align2::LEFT_CENTER, "ON THIS PAGE", theme::font_small_strong(), TOKEN_TEXT_SUBTLE);
         y += 20.0;
 
         let active_toc_idx = toc_entries
             .iter()
             .enumerate()
-            .min_by(|(_, (_, a)), (_, (_, b))| {
-                (app.specs.scroll - *a)
-                    .abs()
-                    .partial_cmp(&(app.specs.scroll - *b).abs())
-                    .unwrap_or(std::cmp::Ordering::Equal)
-            })
+            .min_by(|(_, (_, a)), (_, (_, b))| (app.specs.scroll - *a).abs().partial_cmp(&(app.specs.scroll - *b).abs()).unwrap_or(std::cmp::Ordering::Equal))
             .map(|(i, _)| i)
             .unwrap_or(0);
 
@@ -3421,13 +2962,7 @@ pub fn show_right(app: &mut App, ui: &mut Ui, rect: Rect) {
         y += 14.0;
 
         // 2. SPEC COMMENTS & ANNOTATIONS (Interactive comment cards + Resolve + Post)
-        p.text(
-            Pos2::new(body_rect.left() + pad_x, y),
-            Align2::LEFT_CENTER,
-            "SPEC COMMENTS & ANNOTATIONS",
-            theme::font_small_strong(),
-            TOKEN_TEXT_SUBTLE,
-        );
+        p.text(Pos2::new(body_rect.left() + pad_x, y), Align2::LEFT_CENTER, "SPEC COMMENTS & ANNOTATIONS", theme::font_small_strong(), TOKEN_TEXT_SUBTLE);
         y += 18.0;
 
         let comments_snapshot = app.specs.comments.clone();
@@ -3443,11 +2978,7 @@ pub fn show_right(app: &mut App, ui: &mut Ui, rect: Rect) {
 
             let res_btn = Rect::from_min_size(Pos2::new(ccard.right() - 54.0, ccard.top() + 6.0), Vec2::new(48.0, 18.0));
             let res_resp = ui.interact(res_btn, Id::new(("specs-comment-resolve", ci)), Sense::click());
-            p.rect_filled(
-                res_btn,
-                CornerRadius::same(4),
-                if res_resp.hovered() { TOKEN_SURFACE_2 } else { TOKEN_SURFACE },
-            );
+            p.rect_filled(res_btn, CornerRadius::same(4), if res_resp.hovered() { TOKEN_SURFACE_2 } else { TOKEN_SURFACE });
             p.rect_stroke(res_btn, CornerRadius::same(4), Stroke::new(1.0, TOKEN_BORDER), StrokeKind::Inside);
             p.text(res_btn.center(), Align2::CENTER_CENTER, "Resolve", theme::font_small(), TOKEN_TEXT_MUTED);
             widgets::record(ui, &format!("specs-comment-resolve-{ci}"), res_btn);
@@ -3455,35 +2986,12 @@ pub fn show_right(app: &mut App, ui: &mut Ui, rect: Rect) {
                 resolve_idx = Some(ci);
             }
 
-            let hdr_str = widgets::elide(
-                &p,
-                &format!("{} · {}", cmt.author, cmt.time),
-                &theme::font_small_strong(),
-                (row_w - 64.0).max(36.0),
-            );
-            p.text(
-                Pos2::new(ccard.left() + 8.0, ccard.top() + 15.0),
-                Align2::LEFT_CENTER,
-                hdr_str,
-                theme::font_small_strong(),
-                TOKEN_TEXT,
-            );
+            let hdr_str = widgets::elide(&p, &format!("{} · {}", cmt.author, cmt.time), &theme::font_small_strong(), (row_w - 64.0).max(36.0));
+            p.text(Pos2::new(ccard.left() + 8.0, ccard.top() + 15.0), Align2::LEFT_CENTER, hdr_str, theme::font_small_strong(), TOKEN_TEXT);
             let body_l1 = widgets::elide(&p, &cmt.body, &theme::font_small(), (row_w - 16.0).max(40.0));
-            p.text(
-                Pos2::new(ccard.left() + 8.0, ccard.top() + 36.0),
-                Align2::LEFT_CENTER,
-                body_l1,
-                theme::font_small(),
-                TOKEN_TEXT_MUTED,
-            );
+            p.text(Pos2::new(ccard.left() + 8.0, ccard.top() + 36.0), Align2::LEFT_CENTER, body_l1, theme::font_small(), TOKEN_TEXT_MUTED);
             let status_l2 = widgets::elide(&p, "Open thread · @spec", &theme::font_small(), (row_w - 16.0).max(40.0));
-            p.text(
-                Pos2::new(ccard.left() + 8.0, ccard.top() + 52.0),
-                Align2::LEFT_CENTER,
-                status_l2,
-                theme::font_small(),
-                TOKEN_TEXT_SUBTLE,
-            );
+            p.text(Pos2::new(ccard.left() + 8.0, ccard.top() + 52.0), Align2::LEFT_CENTER, status_l2, theme::font_small(), TOKEN_TEXT_SUBTLE);
             y += 74.0;
         }
         if let Some(ci) = resolve_idx {
@@ -3509,11 +3017,7 @@ pub fn show_right(app: &mut App, ui: &mut Ui, rect: Rect) {
                 .frame(egui::Frame::NONE)
                 .font(theme::font_small())
                 .text_color(TOKEN_TEXT)
-                .hint_text(
-                    egui::RichText::new("Comment…")
-                        .font(theme::font_small())
-                        .color(TOKEN_TEXT_SUBTLE),
-                );
+                .hint_text(egui::RichText::new("Comment…").font(theme::font_small()).color(TOKEN_TEXT_SUBTLE));
             let resp = ui.add(te);
             if resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
                 submit_comment = true;
@@ -3521,11 +3025,7 @@ pub fn show_right(app: &mut App, ui: &mut Ui, rect: Rect) {
         });
 
         let post_resp = ui.interact(post_r, Id::new("specs-comment-post"), Sense::click());
-        p.rect_filled(
-            post_r,
-            CornerRadius::same(5),
-            if post_resp.hovered() { TOKEN_SURFACE_2 } else { TOKEN_SURFACE_3 },
-        );
+        p.rect_filled(post_r, CornerRadius::same(5), if post_resp.hovered() { TOKEN_SURFACE_2 } else { TOKEN_SURFACE_3 });
         p.rect_stroke(post_r, CornerRadius::same(5), Stroke::new(1.0, TOKEN_BORDER), StrokeKind::Inside);
         p.text(post_r.center(), Align2::CENTER_CENTER, "Post", theme::font_small_medium(), TOKEN_TEXT);
         widgets::record(ui, "specs-comment-post", post_r);
@@ -3536,12 +3036,7 @@ pub fn show_right(app: &mut App, ui: &mut Ui, rect: Rect) {
                 app.specs.comment_draft.trim().to_string()
             };
             app.specs.comment_draft.clear();
-            app.specs.comments.push(SpecComment {
-                author: "You".to_string(),
-                time: "just now".to_string(),
-                body,
-                resolved: false,
-            });
+            app.specs.comments.push(SpecComment { author: "You".to_string(), time: "just now".to_string(), body, resolved: false });
         }
         y += 32.0;
 
@@ -3549,13 +3044,7 @@ pub fn show_right(app: &mut App, ui: &mut Ui, rect: Rect) {
         y += 14.0;
 
         // 3. PROPERTIES & CONNECTORS
-        p.text(
-            Pos2::new(body_rect.left() + pad_x, y),
-            Align2::LEFT_CENTER,
-            "PROPERTIES & CONNECTORS",
-            theme::font_small_strong(),
-            TOKEN_TEXT_SUBTLE,
-        );
+        p.text(Pos2::new(body_rect.left() + pad_x, y), Align2::LEFT_CENTER, "PROPERTIES & CONNECTORS", theme::font_small_strong(), TOKEN_TEXT_SUBTLE);
         y += 20.0;
 
         let props = [
@@ -3566,21 +3055,9 @@ pub fn show_right(app: &mut App, ui: &mut Ui, rect: Rect) {
             ("Parity", format!("{:.1}% (387/387)", pkg.parity_scorecard.overall_parity_pct)),
         ];
         for (k, v) in props {
-            p.text(
-                Pos2::new(body_rect.left() + pad_x, y),
-                Align2::LEFT_CENTER,
-                k,
-                theme::font_small(),
-                TOKEN_TEXT_SUBTLE,
-            );
+            p.text(Pos2::new(body_rect.left() + pad_x, y), Align2::LEFT_CENTER, k, theme::font_small(), TOKEN_TEXT_SUBTLE);
             let v_clean = widgets::elide(&p, &v, &theme::font_small_medium(), (row_w - 68.0).max(40.0));
-            p.text(
-                Pos2::new(body_rect.right() - pad_x, y),
-                Align2::RIGHT_CENTER,
-                v_clean,
-                theme::font_small_medium(),
-                TOKEN_TEXT,
-            );
+            p.text(Pos2::new(body_rect.right() - pad_x, y), Align2::RIGHT_CENTER, v_clean, theme::font_small_medium(), TOKEN_TEXT);
             y += 22.0;
         }
 
@@ -3589,29 +3066,14 @@ pub fn show_right(app: &mut App, ui: &mut Ui, rect: Rect) {
         y += 14.0;
 
         // 4. AGENT & CANVAS ACTIONS (`Claude · Codex · AGY · Grok`)
-        p.text(
-            Pos2::new(body_rect.left() + pad_x, y),
-            Align2::LEFT_CENTER,
-            "BUILD WITH AGENT & CANVAS",
-            theme::font_small_strong(),
-            TOKEN_TEXT_SUBTLE,
-        );
+        p.text(Pos2::new(body_rect.left() + pad_x, y), Align2::LEFT_CENTER, "BUILD WITH AGENT & CANVAS", theme::font_small_strong(), TOKEN_TEXT_SUBTLE);
         y += 18.0;
 
         // Button 1: Reference @spec in Agent (`hero-copy-ai` / `specs-right-ref-agent`)
         let btn_ai = Rect::from_min_size(Pos2::new(body_rect.left() + pad_x, y), Vec2::new(row_w, 28.0));
         let resp_ai = ui.interact(btn_ai, Id::new("hero-copy-ai"), Sense::click());
-        p.rect_filled(
-            btn_ai,
-            CornerRadius::same(6),
-            if resp_ai.hovered() { TOKEN_SURFACE_2 } else { TOKEN_SURFACE_3 },
-        );
-        p.rect_stroke(
-            btn_ai,
-            CornerRadius::same(6),
-            Stroke::new(1.0, Color32::from_rgb(0x0D, 0x99, 0xFF)),
-            StrokeKind::Inside,
-        );
+        p.rect_filled(btn_ai, CornerRadius::same(6), if resp_ai.hovered() { TOKEN_SURFACE_2 } else { TOKEN_SURFACE_3 });
+        p.rect_stroke(btn_ai, CornerRadius::same(6), Stroke::new(1.0, Color32::from_rgb(0x0D, 0x99, 0xFF)), StrokeKind::Inside);
         let b_ai_lbl = widgets::elide(&p, "Reference @spec in Agent", &theme::font_small_strong(), (row_w - 16.0).max(40.0));
         p.text(btn_ai.center(), Align2::CENTER_CENTER, b_ai_lbl, theme::font_small_strong(), TOKEN_TEXT);
         widgets::record(ui, "hero-copy-ai", btn_ai);
@@ -3650,11 +3112,7 @@ pub fn show_right(app: &mut App, ui: &mut Ui, rect: Rect) {
         // Button 2: Open in Agent Chat (`spec-right-open-agent`)
         let btn_chat = Rect::from_min_size(Pos2::new(body_rect.left() + pad_x, y), Vec2::new(row_w, 28.0));
         let resp_chat = ui.interact(btn_chat, Id::new("spec-right-open-agent"), Sense::click());
-        p.rect_filled(
-            btn_chat,
-            CornerRadius::same(6),
-            if resp_chat.hovered() { TOKEN_SURFACE_2 } else { TOKEN_SURFACE_3 },
-        );
+        p.rect_filled(btn_chat, CornerRadius::same(6), if resp_chat.hovered() { TOKEN_SURFACE_2 } else { TOKEN_SURFACE_3 });
         p.rect_stroke(btn_chat, CornerRadius::same(6), Stroke::new(1.0, TOKEN_BORDER), StrokeKind::Inside);
         let b_chat_lbl = widgets::elide(&p, "Open Agent Chat (Claude/Codex/Grok)", &theme::font_small_medium(), (row_w - 16.0).max(40.0));
         p.text(btn_chat.center(), Align2::CENTER_CENTER, b_chat_lbl, theme::font_small_medium(), TOKEN_TEXT_MUTED);
@@ -3662,21 +3120,14 @@ pub fn show_right(app: &mut App, ui: &mut Ui, rect: Rect) {
         if resp_chat.clicked() {
             let active_us = pkg.stories.get(app.specs.selected_story).or_else(|| pkg.stories.first());
             let story_ref = active_us.map(|u| u.id.as_str()).unwrap_or("US-01");
-            open_agent_prompt = Some(format!(
-                "@prd Reference plans/specs/{}/prd/PRD.md & {} and build on Canvas",
-                pkg.slug, story_ref
-            ));
+            open_agent_prompt = Some(format!("@prd Reference plans/specs/{}/prd/PRD.md & {} and build on Canvas", pkg.slug, story_ref));
         }
         y += 34.0;
 
         // Button 3: Drop Spec Card onto Canvas (`hero-apply-spec`)
         let btn_apply = Rect::from_min_size(Pos2::new(body_rect.left() + pad_x, y), Vec2::new(row_w, 28.0));
         let resp_apply = ui.interact(btn_apply, Id::new("hero-apply-spec"), Sense::click());
-        p.rect_filled(
-            btn_apply,
-            CornerRadius::same(6),
-            if resp_apply.hovered() { TOKEN_SURFACE_2 } else { TOKEN_SURFACE_3 },
-        );
+        p.rect_filled(btn_apply, CornerRadius::same(6), if resp_apply.hovered() { TOKEN_SURFACE_2 } else { TOKEN_SURFACE_3 });
         p.rect_stroke(btn_apply, CornerRadius::same(6), Stroke::new(1.0, TOKEN_BORDER), StrokeKind::Inside);
         let b_apply_lbl = widgets::elide(&p, "Drop Spec Card on Canvas", &theme::font_small_medium(), (row_w - 16.0).max(40.0));
         p.text(btn_apply.center(), Align2::CENTER_CENTER, b_apply_lbl, theme::font_small_medium(), TOKEN_TEXT_MUTED);
@@ -3690,12 +3141,7 @@ pub fn show_right(app: &mut App, ui: &mut Ui, rect: Rect) {
     if let Some(payload) = copied_payload {
         ui.ctx().copy_text(payload.clone());
         app.specs.last_ai_copy = Some(payload);
-        let spec_ref = format!(
-            "@spec://{}/{} ({})",
-            pkg.slug,
-            app.specs.active_tab.anchor(),
-            pkg.contract_id
-        );
+        let spec_ref = format!("@spec://{}/{} ({})", pkg.slug, app.specs.active_tab.anchor(), pkg.contract_id);
         if app.terminal.input_line.trim().is_empty() {
             app.terminal.input_line = format!("{spec_ref} ");
         } else if !app.terminal.input_line.contains(&spec_ref) {
@@ -3751,48 +3197,20 @@ fn render_po_view_tab(app: &mut App, ui: &mut Ui, rect: Rect, pkg: &SpecPackage)
 
         // Interactive Status Pill (`specs-status-pill`) on the right of the Eyebrow row
         let status_pill_w = 104.0;
-        let status_pill_r = Rect::from_min_size(
-            Pos2::new(col_x + col_w - status_pill_w, y - 10.0),
-            Vec2::new(status_pill_w, 20.0),
-        );
+        let status_pill_r = Rect::from_min_size(Pos2::new(col_x + col_w - status_pill_w, y - 10.0), Vec2::new(status_pill_w, 20.0));
         let status_resp = ui.interact(status_pill_r, Id::new("specs-status-pill"), Sense::click());
-        p.rect_filled(
-            status_pill_r,
-            CornerRadius::same(99),
-            if status_resp.hovered() { pal.surface_2 } else { pal.surface },
-        );
-        p.rect_stroke(
-            status_pill_r,
-            CornerRadius::same(99),
-            Stroke::new(1.0, Color32::from_rgb(0x0D, 0x99, 0xFF)),
-            StrokeKind::Inside,
-        );
-        let status_lbl = widgets::elide(
-            &p,
-            &pkg.status.to_uppercase(),
-            &theme::font_small_strong(),
-            status_pill_w - 12.0,
-        );
-        p.text(
-            status_pill_r.center(),
-            Align2::CENTER_CENTER,
-            status_lbl,
-            theme::font_small_strong(),
-            Color32::from_rgb(0x0D, 0x99, 0xFF),
-        );
+        p.rect_filled(status_pill_r, CornerRadius::same(99), if status_resp.hovered() { pal.surface_2 } else { pal.surface });
+        p.rect_stroke(status_pill_r, CornerRadius::same(99), Stroke::new(1.0, Color32::from_rgb(0x0D, 0x99, 0xFF)), StrokeKind::Inside);
+        let status_lbl = widgets::elide(&p, &pkg.status.to_uppercase(), &theme::font_small_strong(), status_pill_w - 12.0);
+        p.text(status_pill_r.center(), Align2::CENTER_CENTER, status_lbl, theme::font_small_strong(), Color32::from_rgb(0x0D, 0x99, 0xFF));
         widgets::record(ui, "specs-status-pill", status_pill_r);
         if status_resp.clicked() {
             cycle_pkg_status = true;
         }
 
         // Dynamic Eyebrow Metadata derived from `pkg.project_name`, `pkg.format_version`, `pkg.contract_id`, `pkg.status`
-        let eyebrow = format!(
-            "{} · SPEC FORMAT V{} · {} · {}",
-            pkg.project_name.to_uppercase(),
-            pkg.format_version,
-            pkg.contract_id,
-            pkg.status.to_uppercase()
-        );
+        let eyebrow =
+            format!("{} · SPEC FORMAT V{} · {} · {}", pkg.project_name.to_uppercase(), pkg.format_version, pkg.contract_id, pkg.status.to_uppercase());
         let eb_clean = widgets::elide(&p, &eyebrow, &theme::font_mono(), (col_w - status_pill_w - 10.0).max(60.0));
         p.text(Pos2::new(col_x, y), Align2::LEFT_CENTER, eb_clean, theme::font_mono(), pal.text_subtle);
         y += 28.0;
@@ -3803,10 +3221,7 @@ fn render_po_view_tab(app: &mut App, ui: &mut Ui, rect: Rect, pkg: &SpecPackage)
                 p.circle_filled(Pos2::new(col_x + dc, y + dr), 1.1, pal.text_subtle);
             }
         }
-        let clean_title = pkg
-            .title
-            .replace("DESIGN:OS Studio", "design:os studio")
-            .replace("Design OS Studio", "design:os studio");
+        let clean_title = pkg.title.replace("DESIGN:OS Studio", "design:os studio").replace("Design OS Studio", "design:os studio");
         let h1_str = widgets::elide(&p, &format!("PRD: {clean_title}"), &FontId::proportional(22.0), col_w);
         p.text(Pos2::new(col_x, y), Align2::LEFT_CENTER, h1_str, FontId::proportional(22.0), pal.text);
         y += 28.0;
@@ -3819,24 +3234,14 @@ fn render_po_view_tab(app: &mut App, ui: &mut Ui, rect: Rect, pkg: &SpecPackage)
                 p.circle_filled(Pos2::new(col_x + dc, y + dr), 1.1, pal.text_subtle);
             }
         }
-        p.text(
-            Pos2::new(col_x, y),
-            Align2::LEFT_CENTER,
-            "Problem & product outcome",
-            FontId::proportional(16.0),
-            pal.text,
-        );
+        p.text(Pos2::new(col_x, y), Align2::LEFT_CENTER, "Problem & product outcome", FontId::proportional(16.0), pal.text);
         y += 24.0;
 
         // Highlighted thesis sentence (Figma Specs yellow highlight on annotated sentence)
         let hl_text = "Written product intent, live Canvas frames, and AI coding agents must share one Markdown container.";
         let hl_clean = widgets::elide(&p, hl_text, &theme::font_body_medium(), col_w - 12.0);
         let hl_w = widgets::text_width(&p, &hl_clean, &theme::font_body_medium()) + 10.0;
-        let hl_bg = if app.specs.light_mode {
-            Color32::from_rgb(0xFE, 0xF0, 0x8A)
-        } else {
-            Color32::from_rgba_unmultiplied(0xF5, 0xC5, 0x42, 46)
-        };
+        let hl_bg = if app.specs.light_mode { Color32::from_rgb(0xFE, 0xF0, 0x8A) } else { Color32::from_rgba_unmultiplied(0xF5, 0xC5, 0x42, 46) };
         let hl_rect = Rect::from_min_size(Pos2::new(col_x - 4.0, y - 10.0), Vec2::new(hl_w.min(col_w), 20.0));
         p.rect_filled(hl_rect, CornerRadius::same(3), hl_bg);
         p.text(Pos2::new(col_x, y), Align2::LEFT_CENTER, hl_clean, theme::font_body_medium(), pal.text);
@@ -3846,25 +3251,14 @@ fn render_po_view_tab(app: &mut App, ui: &mut Ui, rect: Rect, pkg: &SpecPackage)
         y += 18.0;
 
         // Section 2: Bidirectional Figma Canvas Flow Embed inside the Markdown Spec (`1px #0D99FF` selection frame!)
-        p.text(
-            Pos2::new(col_x, y),
-            Align2::LEFT_CENTER,
-            "Architecture & live canvas flow",
-            FontId::proportional(16.0),
-            pal.text,
-        );
+        p.text(Pos2::new(col_x, y), Align2::LEFT_CENTER, "Architecture & live canvas flow", FontId::proportional(16.0), pal.text);
         y += 20.0;
 
         let embed_h = 92.0;
         let embed_rect = Rect::from_min_size(Pos2::new(col_x, y), Vec2::new(col_w, embed_h));
         let embed_resp = ui.interact(embed_rect, Id::new("spec-inline-canvas-embed"), Sense::click());
         p.rect_filled(embed_rect, CornerRadius::same(6), pal.surface);
-        p.rect_stroke(
-            embed_rect,
-            CornerRadius::same(6),
-            Stroke::new(1.5, Color32::from_rgb(0x0D, 0x99, 0xFF)),
-            StrokeKind::Inside,
-        );
+        p.rect_stroke(embed_rect, CornerRadius::same(6), Stroke::new(1.5, Color32::from_rgb(0x0D, 0x99, 0xFF)), StrokeKind::Inside);
         p.text(
             Pos2::new(embed_rect.left() + 12.0, embed_rect.top() + 14.0),
             Align2::LEFT_CENTER,
@@ -3889,33 +3283,15 @@ fn render_po_view_tab(app: &mut App, ui: &mut Ui, rect: Rect, pkg: &SpecPackage)
         y += embed_h + 26.0;
 
         // Section 3: Recent Baseline & Verification Table (Mirrors Figma Specs `prod_1.png` / `blog_4.png` rounded table)
-        p.text(
-            Pos2::new(col_x, y),
-            Align2::LEFT_CENTER,
-            "Baseline & verification metrics",
-            FontId::proportional(16.0),
-            pal.text,
-        );
+        p.text(Pos2::new(col_x, y), Align2::LEFT_CENTER, "Baseline & verification metrics", FontId::proportional(16.0), pal.text);
         y += 18.0;
 
         let metrics_rows = [
-            (
-                "Figma 126.9.13 UI3 & .fig v106 binary parity",
-                format!("{:.1}% (387 / 387)", pkg.parity_scorecard.overall_parity_pct),
-            ),
+            ("Figma 126.9.13 UI3 & .fig v106 binary parity", format!("{:.1}% (387 / 387)", pkg.parity_scorecard.overall_parity_pct)),
             ("PRD requirements & user stories", format!("{} REQs · {} US", kpi.req_count, kpi.us_count)),
-            (
-                "Acceptance criteria & Gherkin scenarios",
-                format!("{}/{} passed", kpi.passed_scn_count, kpi.scn_count),
-            ),
-            (
-                "Behavioral UI contract selector coverage",
-                format!("{} screens · {} rows", kpi.screen_count, kpi.contract_row_count),
-            ),
-            (
-                "Pipeline quality gates (G1–G5)",
-                format!("{}/{} approved ({})", kpi.approved_gates, kpi.total_gates, kpi.freshness),
-            ),
+            ("Acceptance criteria & Gherkin scenarios", format!("{}/{} passed", kpi.passed_scn_count, kpi.scn_count)),
+            ("Behavioral UI contract selector coverage", format!("{} screens · {} rows", kpi.screen_count, kpi.contract_row_count)),
+            ("Pipeline quality gates (G1–G5)", format!("{}/{} approved ({})", kpi.approved_gates, kpi.total_gates, kpi.freshness)),
         ];
         let tbl_h = 30.0 + metrics_rows.len() as f32 * 30.0;
         let tbl_rect = Rect::from_min_size(Pos2::new(col_x, y), Vec2::new(col_w, tbl_h));
@@ -3924,13 +3300,7 @@ fn render_po_view_tab(app: &mut App, ui: &mut Ui, rect: Rect, pkg: &SpecPackage)
 
         let th_y = tbl_rect.top() + 15.0;
         p.text(Pos2::new(tbl_rect.left() + 14.0, th_y), Align2::LEFT_CENTER, "Measure", theme::font_small_strong(), pal.text);
-        p.text(
-            Pos2::new(tbl_rect.right() - 14.0, th_y),
-            Align2::RIGHT_CENTER,
-            "Verified total",
-            theme::font_small_strong(),
-            pal.text,
-        );
+        p.text(Pos2::new(tbl_rect.right() - 14.0, th_y), Align2::RIGHT_CENTER, "Verified total", theme::font_small_strong(), pal.text);
         let mut ry = tbl_rect.top() + 30.0;
         for (m_lbl, m_val) in &metrics_rows {
             widgets::hline(&p, tbl_rect.left() + 1.0, tbl_rect.right() - 1.0, ry, pal.hairline);
@@ -3944,13 +3314,7 @@ fn render_po_view_tab(app: &mut App, ui: &mut Ui, rect: Rect, pkg: &SpecPackage)
         y = tbl_rect.bottom() + 28.0;
 
         // Section 4: PRD Requirements (`prd/PRD.md`)
-        p.text(
-            Pos2::new(col_x, y),
-            Align2::LEFT_CENTER,
-            "Product requirements (prd/PRD.md)",
-            FontId::proportional(16.0),
-            pal.text,
-        );
+        p.text(Pos2::new(col_x, y), Align2::LEFT_CENTER, "Product requirements (prd/PRD.md)", FontId::proportional(16.0), pal.text);
         y += 18.0;
 
         for req in &pkg.requirements {
@@ -3958,20 +3322,8 @@ fn render_po_view_tab(app: &mut App, ui: &mut Ui, rect: Rect, pkg: &SpecPackage)
             y += 12.0;
             let us_joined = req.us_refs.join(", ");
             let us_w = widgets::text_width(&p, &us_joined, &theme::font_mono()) + 12.0;
-            p.text(
-                Pos2::new(col_x + col_w, y + 8.0),
-                Align2::RIGHT_CENTER,
-                &us_joined,
-                theme::font_mono(),
-                pal.text_subtle,
-            );
-            p.text(
-                Pos2::new(col_x, y + 8.0),
-                Align2::LEFT_CENTER,
-                &req.id,
-                theme::font_mono(),
-                pal.text,
-            );
+            p.text(Pos2::new(col_x + col_w, y + 8.0), Align2::RIGHT_CENTER, &us_joined, theme::font_mono(), pal.text_subtle);
+            p.text(Pos2::new(col_x, y + 8.0), Align2::LEFT_CENTER, &req.id, theme::font_mono(), pal.text);
             let prose_x = col_x + 64.0;
             let prose_w = (col_w - 64.0 - us_w).max(60.0);
             y = draw_wrapped_prose(&p, Pos2::new(prose_x, y + 8.0), prose_w, &req.requirement, &theme::font_body(), pal.text_muted, 19.0);
@@ -3981,13 +3333,7 @@ fn render_po_view_tab(app: &mut App, ui: &mut Ui, rect: Rect, pkg: &SpecPackage)
         y += 18.0;
 
         // Section 5: Core Business Rules (`contract/FC-001.md`)
-        p.text(
-            Pos2::new(col_x, y),
-            Align2::LEFT_CENTER,
-            "Business rules (contract/FC-001.md)",
-            FontId::proportional(16.0),
-            pal.text,
-        );
+        p.text(Pos2::new(col_x, y), Align2::LEFT_CENTER, "Business rules (contract/FC-001.md)", FontId::proportional(16.0), pal.text);
         y += 18.0;
 
         for br in pkg.business_rules.iter().take(10) {
@@ -4057,14 +3403,7 @@ fn render_dev_view_tab(app: &mut App, ui: &mut Ui, rect: Rect, pkg: &SpecPackage
         let mut y = rect.top() + 34.0 - scroll;
 
         // Eyebrow + Prev/Next Story Navigation
-        let meta = format!(
-            "{}  ·  {}  ·  {}  ·  {}  ·  {}",
-            us.id,
-            us.priority,
-            us.wave,
-            us.req_refs.join(", "),
-            us.file_path
-        );
+        let meta = format!("{}  ·  {}  ·  {}  ·  {}  ·  {}", us.id, us.priority, us.wave, us.req_refs.join(", "), us.file_path);
         let meta_clean = widgets::elide(&p, &meta, &theme::font_mono(), (col_w - 110.0).max(60.0));
         p.text(Pos2::new(col_x, y), Align2::LEFT_CENTER, meta_clean, theme::font_mono(), pal.text_subtle);
 
@@ -4095,15 +3434,7 @@ fn render_dev_view_tab(app: &mut App, ui: &mut Ui, rect: Rect, pkg: &SpecPackage
 
         // 1. User Story Callout (`2px` left vertical bar)
         let bar_top = y - 4.0;
-        y = draw_wrapped_prose(
-            &p,
-            Pos2::new(col_x + 14.0, y + 6.0),
-            col_w - 14.0,
-            &us.user_story_md,
-            &theme::font_body_medium(),
-            pal.text,
-            20.0,
-        );
+        y = draw_wrapped_prose(&p, Pos2::new(col_x + 14.0, y + 6.0), col_w - 14.0, &us.user_story_md, &theme::font_body_medium(), pal.text, 20.0);
         let bar_rect = Rect::from_min_max(Pos2::new(col_x, bar_top), Pos2::new(col_x + 2.0, y));
         p.rect_filled(bar_rect, CornerRadius::same(1), Color32::from_rgb(0x0D, 0x99, 0xFF));
         y += 20.0;
@@ -4183,21 +3514,9 @@ fn render_qa_coverage_tab(app: &mut App, ui: &mut Ui, rect: Rect, pkg: &SpecPack
 
         let mut y = rect.top() + 34.0 - scroll;
 
-        p.text(
-            Pos2::new(col_x, y),
-            Align2::LEFT_CENTER,
-            "QUALITY ASSURANCE · TRACEABILITY & PARITY SCORECARD",
-            theme::font_mono(),
-            pal.text_subtle,
-        );
+        p.text(Pos2::new(col_x, y), Align2::LEFT_CENTER, "QUALITY ASSURANCE · TRACEABILITY & PARITY SCORECARD", theme::font_mono(), pal.text_subtle);
         y += 26.0;
-        p.text(
-            Pos2::new(col_x, y),
-            Align2::LEFT_CENTER,
-            "Verification & Traceability Matrix",
-            FontId::proportional(20.0),
-            pal.text,
-        );
+        p.text(Pos2::new(col_x, y), Align2::LEFT_CENTER, "Verification & Traceability Matrix", FontId::proportional(20.0), pal.text);
         y += 24.0;
         widgets::hline(&p, col_x, col_x + col_w, y, pal.hairline);
         y += 20.0;
@@ -4217,13 +3536,7 @@ fn render_qa_coverage_tab(app: &mut App, ui: &mut Ui, rect: Rect, pkg: &SpecPack
         }
 
         y += 22.0;
-        p.text(
-            Pos2::new(col_x, y),
-            Align2::LEFT_CENTER,
-            "Requirement -> Story -> Acceptance -> Scenario trace",
-            FontId::proportional(15.0),
-            pal.text,
-        );
+        p.text(Pos2::new(col_x, y), Align2::LEFT_CENTER, "Requirement -> Story -> Acceptance -> Scenario trace", FontId::proportional(15.0), pal.text);
         y += 18.0;
 
         for us in &pkg.stories {
@@ -4271,31 +3584,14 @@ fn render_wireframes_and_contract_tab(app: &mut App, ui: &mut Ui, rect: Rect, pk
 
         let mut y = rect.top() + 34.0 - scroll;
 
-        p.text(
-            Pos2::new(col_x, y),
-            Align2::LEFT_CENTER,
-            "DECLARATIVE BLUEPRINTS (.SPEC.JSON) & UI CONTRACT",
-            theme::font_mono(),
-            pal.text_subtle,
-        );
+        p.text(Pos2::new(col_x, y), Align2::LEFT_CENTER, "DECLARATIVE BLUEPRINTS (.SPEC.JSON) & UI CONTRACT", theme::font_mono(), pal.text_subtle);
         y += 26.0;
-        p.text(
-            Pos2::new(col_x, y),
-            Align2::LEFT_CENTER,
-            "Canvas Blueprints & Behavioral UI Contract",
-            FontId::proportional(20.0),
-            pal.text,
-        );
+        p.text(Pos2::new(col_x, y), Align2::LEFT_CENTER, "Canvas Blueprints & Behavioral UI Contract", FontId::proportional(20.0), pal.text);
         y += 24.0;
         widgets::hline(&p, col_x, col_x + col_w, y, pal.hairline);
         y += 20.0;
 
-        if let Some((j_name, _j_path, j_raw)) = pkg
-            .json_specs
-            .get(app.specs.selected_json_spec)
-            .or_else(|| pkg.json_specs.first())
-            .cloned()
-        {
+        if let Some((j_name, _j_path, j_raw)) = pkg.json_specs.get(app.specs.selected_json_spec).or_else(|| pkg.json_specs.first()).cloned() {
             let summary = summarize_json_spec(&j_raw);
             let box_r = Rect::from_min_size(Pos2::new(col_x, y), Vec2::new(col_w, 54.0));
             p.rect_filled(box_r, CornerRadius::same(6), pal.surface);
@@ -4311,12 +3607,7 @@ fn render_wireframes_and_contract_tab(app: &mut App, ui: &mut Ui, rect: Rect, pk
                 apply_json_action = Some((j_name.clone(), j_raw.clone()));
             }
 
-            let info = format!(
-                "{}  ·  {} nodes  ·  {} tokens",
-                j_name,
-                summary.total_nodes,
-                summary.easeui_tokens.len()
-            );
+            let info = format!("{}  ·  {} nodes  ·  {} tokens", j_name, summary.total_nodes, summary.easeui_tokens.len());
             let clean = widgets::elide(&p, &info, &theme::font_body_medium(), (apply_btn.left() - box_r.left() - 24.0).max(48.0));
             p.text(Pos2::new(box_r.left() + 14.0, box_r.center().y), Align2::LEFT_CENTER, clean, theme::font_body_medium(), pal.text);
             y = box_r.bottom() + 24.0;
@@ -4337,13 +3628,7 @@ fn render_wireframes_and_contract_tab(app: &mut App, ui: &mut Ui, rect: Rect, pk
 
         // Section: UI Contract & Component Rules (`ux/ui-contract.md`)
         y += 22.0;
-        p.text(
-            Pos2::new(col_x, y),
-            Align2::LEFT_CENTER,
-            "UI Contract & Component Rules (ux/ui-contract.md)",
-            FontId::proportional(15.0),
-            pal.text,
-        );
+        p.text(Pos2::new(col_x, y), Align2::LEFT_CENTER, "UI Contract & Component Rules (ux/ui-contract.md)", FontId::proportional(15.0), pal.text);
         y += 18.0;
         for row in pkg.ui_contract.iter().take(24) {
             widgets::hline(&p, col_x, col_x + col_w, y, pal.hairline);
@@ -4396,21 +3681,9 @@ fn render_gates_and_canvas_tab(app: &mut App, ui: &mut Ui, rect: Rect, pkg: &Spe
 
         let mut y = rect.top() + 34.0 - scroll;
 
-        p.text(
-            Pos2::new(col_x, y),
-            Align2::LEFT_CENTER,
-            "PIPELINE GATES (G1–G5) & ARCHITECTURAL DECISIONS",
-            theme::font_mono(),
-            pal.text_subtle,
-        );
+        p.text(Pos2::new(col_x, y), Align2::LEFT_CENTER, "PIPELINE GATES (G1–G5) & ARCHITECTURAL DECISIONS", theme::font_mono(), pal.text_subtle);
         y += 26.0;
-        p.text(
-            Pos2::new(col_x, y),
-            Align2::LEFT_CENTER,
-            "Quality Gates & Decision Ledger",
-            FontId::proportional(20.0),
-            pal.text,
-        );
+        p.text(Pos2::new(col_x, y), Align2::LEFT_CENTER, "Quality Gates & Decision Ledger", FontId::proportional(20.0), pal.text);
         y += 24.0;
         widgets::hline(&p, col_x, col_x + col_w, y, pal.hairline);
         y += 20.0;
@@ -4467,36 +3740,18 @@ fn render_gates_and_canvas_tab(app: &mut App, ui: &mut Ui, rect: Rect, pkg: &Spe
 fn draw_left_section_header(p: &Painter, pos: Pos2, width: f32, title: &str) {
     let r = Rect::from_min_size(pos, Vec2::new(width, 18.0));
     let txt = widgets::elide(p, title, &theme::font_small_strong(), (width - 12.0).max(36.0));
-    p.text(
-        Pos2::new(r.left() + 8.0, r.center().y),
-        Align2::LEFT_CENTER,
-        txt,
-        theme::font_small_strong(),
-        TOKEN_TEXT_SUBTLE,
-    );
+    p.text(Pos2::new(r.left() + 8.0, r.center().y), Align2::LEFT_CENTER, txt, theme::font_small_strong(), TOKEN_TEXT_SUBTLE);
 }
 
 /// Renders natural multi-line word-wrapped editorial prose (up to 24 lines per paragraph block)
 /// and returns the next `y` coordinate.
-fn draw_wrapped_prose(
-    p: &Painter,
-    pos: Pos2,
-    max_width: f32,
-    text: &str,
-    font: &FontId,
-    color: Color32,
-    line_height: f32,
-) -> f32 {
+fn draw_wrapped_prose(p: &Painter, pos: Pos2, max_width: f32, text: &str, font: &FontId, color: Color32, line_height: f32) -> f32 {
     let width_budget = max_width.max(48.0);
     let mut lines: Vec<String> = Vec::new();
     let mut current = String::new();
 
     for word in text.split_whitespace() {
-        let candidate = if current.is_empty() {
-            word.to_string()
-        } else {
-            format!("{current} {word}")
-        };
+        let candidate = if current.is_empty() { word.to_string() } else { format!("{current} {word}") };
         if widgets::text_width(p, &candidate, font) <= width_budget || current.is_empty() {
             current = candidate;
         } else {
@@ -4521,8 +3776,6 @@ fn draw_wrapped_prose(
     y
 }
 
-
-
 // ─────────────────────────────────────────────────────────────────────────────
 // Unit Tests
 // ─────────────────────────────────────────────────────────────────────────────
@@ -4544,16 +3797,10 @@ mod tests {
         assert!(pkg.requirements.len() >= 13, "must parse REQ-01..REQ-13+ from PRD.md");
         assert!(pkg.stories.len() >= 11, "must parse US-01..US-11+ from us/*.md");
         assert!(pkg.screens.len() >= 11, "must parse S01..S11+ from screen-inventory.md");
-        assert!(
-            pkg.ui_contract.len() >= 66 && pkg.ui_contract.len() % 6 == 0,
-            "must parse 66+ rows (6 states per screen) from ui-contract.md"
-        );
+        assert!(pkg.ui_contract.len() >= 66 && pkg.ui_contract.len() % 6 == 0, "must parse 66+ rows (6 states per screen) from ui-contract.md");
         assert_eq!(pkg.gates.len(), 5, "must parse G1..G5 gate files");
         assert_eq!(pkg.parity_scorecard.pillars.len(), 5, "must load 5-pillar Figma 1:1 Parity Scorecard");
-        assert_eq!(
-            pkg.parity_scorecard.overall_parity_pct + pkg.parity_scorecard.remaining_gap_pct,
-            100.0
-        );
+        assert_eq!(pkg.parity_scorecard.overall_parity_pct + pkg.parity_scorecard.remaining_gap_pct, 100.0);
         assert!(!pkg.json_specs.is_empty(), "must include .spec.json blueprints");
     }
 
@@ -4610,33 +3857,20 @@ mod tests {
         assert!(us11.req_refs.contains(&"REQ-13".to_string()));
 
         let contract_rows = parse_ui_contract(V2_UI_CONTRACT_MD);
-        assert!(
-            contract_rows.len() >= 66 && contract_rows.len() % 6 == 0,
-            "11+ screens x 6 states = 66+ behavioral selector rows"
-        );
+        assert!(contract_rows.len() >= 66 && contract_rows.len() % 6 == 0, "11+ screens x 6 states = 66+ behavioral selector rows");
         assert_eq!(contract_rows[0].screen, "S01");
         assert_eq!(contract_rows[0].state, "normal");
         assert_eq!(contract_rows[0].us, "US-01");
         assert_eq!(contract_rows[0].scn, "SCN-01-03");
 
-        let g1 = parse_gate_markdown(
-            V2_GATE_G1_MD,
-            "g1-intake",
-            "plans/specs/designos-studio-v2/review/gates/g1-intake.md",
-        )
-        .expect("valid g1-intake.md");
+        let g1 = parse_gate_markdown(V2_GATE_G1_MD, "g1-intake", "plans/specs/designos-studio-v2/review/gates/g1-intake.md").expect("valid g1-intake.md");
         assert_eq!(g1.status, "APPROVED");
         assert_eq!(g1.verdict, "PASS");
         assert_eq!(g1.freshness, "CURRENT");
         assert_eq!(g1.rubric.len(), 6);
         assert!(g1.rubric.iter().all(|(_, s, m)| *s == 2 && *m == 2));
 
-        let g4 = parse_gate_markdown(
-            V2_GATE_G4_MD,
-            "g4-uiux",
-            "plans/specs/designos-studio-v2/review/gates/g4-uiux.md",
-        )
-        .expect("valid g4-uiux.md");
+        let g4 = parse_gate_markdown(V2_GATE_G4_MD, "g4-uiux", "plans/specs/designos-studio-v2/review/gates/g4-uiux.md").expect("valid g4-uiux.md");
         assert!(matches!(g4.status.as_str(), "APPROVED" | "PENDING"));
         assert_eq!(g4.verdict, "PASS");
     }
@@ -4650,11 +3884,7 @@ mod tests {
 
         let weight_sum: f32 = fallback.pillars.iter().map(|p| p.weight_pct).sum();
         assert_eq!(weight_sum, 100.0, "5 pillars must sum to 100% weight");
-        assert_eq!(
-            fallback.overall_parity_pct + fallback.remaining_gap_pct,
-            100.0,
-            "overall_parity_pct + remaining_gap_pct must equal 100.0"
-        );
+        assert_eq!(fallback.overall_parity_pct + fallback.remaining_gap_pct, 100.0, "overall_parity_pct + remaining_gap_pct must equal 100.0");
         assert!(fallback.overall_parity_pct >= 99.0);
         assert_eq!(fallback.compute_weighted_parity_pct(), fallback.overall_parity_pct);
 
@@ -4760,10 +3990,7 @@ mod tests {
 
         for tab in SpecTab::ALL {
             app.specs.active_tab = tab;
-            let raw = egui::RawInput {
-                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1600.0, 960.0))),
-                ..Default::default()
-            };
+            let raw = egui::RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1600.0, 960.0))), ..Default::default() };
             let out = ctx.run_ui(raw, |ui| {
                 show_left(&mut app, ui, left_rect);
                 show_reader(&mut app, ui, reader_rect);
@@ -4809,11 +4036,7 @@ mod tests {
         app.specs.active_tab = SpecTab::Overview;
 
         let render_all = |ctx: &egui::Context, app: &mut App, events: Vec<egui::Event>| {
-            let raw = egui::RawInput {
-                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1600.0, 960.0))),
-                events,
-                ..Default::default()
-            };
+            let raw = egui::RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1600.0, 960.0))), events, ..Default::default() };
             let _ = ctx.run_ui(raw, |ui| {
                 show_left(app, ui, left_rect);
                 show_reader(app, ui, reader_rect);
@@ -4821,8 +4044,7 @@ mod tests {
             });
         };
         let get_rect = |ctx: &egui::Context, name: &str| -> Rect {
-            ctx.data(|d| d.get_temp::<Rect>(Id::new(("test-rect", name.to_string()))))
-                .unwrap_or_else(|| panic!("{name} recorded"))
+            ctx.data(|d| d.get_temp::<Rect>(Id::new(("test-rect", name.to_string())))).unwrap_or_else(|| panic!("{name} recorded"))
         };
         let click_at = |ctx: &egui::Context, app: &mut App, pos: Pos2| {
             render_all(
@@ -4830,18 +4052,8 @@ mod tests {
                 app,
                 vec![
                     egui::Event::PointerMoved(pos),
-                    egui::Event::PointerButton {
-                        pos,
-                        button: egui::PointerButton::Primary,
-                        pressed: true,
-                        modifiers: egui::Modifiers::NONE,
-                    },
-                    egui::Event::PointerButton {
-                        pos,
-                        button: egui::PointerButton::Primary,
-                        pressed: false,
-                        modifiers: egui::Modifiers::NONE,
-                    },
+                    egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed: true, modifiers: egui::Modifiers::NONE },
+                    egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed: false, modifiers: egui::Modifiers::NONE },
                 ],
             );
         };
@@ -4910,4 +4122,3 @@ mod tests {
         }
     }
 }
-

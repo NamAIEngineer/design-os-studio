@@ -51,11 +51,7 @@ pub fn scrollbar(ui: &mut Ui, rect: Rect, scroll: f32, content_h: f32) {
     let max_scroll = content_h - rect.height();
     let track = Rect::from_min_size(egui::pos2(rect.right() - 8.0, rect.top()), egui::vec2(8.0, track_len));
     crate::widgets::record(ui, "scrollbar-track", track);
-    let resp = ui.interact(
-        track,
-        ui.id().with(("scrollbar", track.min.x as i32, track.min.y as i32)),
-        egui::Sense::click_and_drag(),
-    );
+    let resp = ui.interact(track, ui.id().with(("scrollbar", track.min.x as i32, track.min.y as i32)), egui::Sense::click_and_drag());
     let mut cur_scroll = scroll;
     if (resp.clicked() || resp.dragged()) && max_scroll > 0.0 {
         if let Some(pos) = resp.interact_pointer_pos() {

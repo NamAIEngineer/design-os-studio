@@ -73,7 +73,11 @@ fn same_kind(a: &NodeKind, b: &NodeKind) -> bool {
 
 #[inline]
 fn fbits(v: f32) -> u32 {
-    if v == 0.0 { 0 } else { v.to_bits() }
+    if v == 0.0 {
+        0
+    } else {
+        v.to_bits()
+    }
 }
 
 /// The fields of a node that determine its geometry.
@@ -133,22 +137,8 @@ impl GeomSrc {
     fn shape_hash(n: &Node, bucket: i32, font_gen: usize) -> u64 {
         let mut h = IdHasher::default();
         let canonical_frame = NodeKind::Frame(d::FrameProps::default());
-        let disc = if is_frame_like(&n.kind) {
-            std::mem::discriminant(&canonical_frame)
-        } else {
-            std::mem::discriminant(&n.kind)
-        };
-        (
-            bucket,
-            font_gen,
-            fbits(n.size.x),
-            fbits(n.size.y),
-            n.corner_radii.map(fbits),
-            fbits(n.corner_smoothing),
-            fbits(n.stroke.weight),
-            disc,
-        )
-            .hash(&mut h);
+        let disc = if is_frame_like(&n.kind) { std::mem::discriminant(&canonical_frame) } else { std::mem::discriminant(&n.kind) };
+        (bucket, font_gen, fbits(n.size.x), fbits(n.size.y), n.corner_radii.map(fbits), fbits(n.corner_smoothing), fbits(n.stroke.weight), disc).hash(&mut h);
         match &n.kind {
             NodeKind::Text(tp) => {
                 (&tp.content, fbits(tp.style.font_size), &tp.style.font_family, tp.style.font_weight, tp.runs.len()).hash(&mut h);

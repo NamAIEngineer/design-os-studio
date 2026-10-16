@@ -140,11 +140,7 @@ impl App {
     /// Called when a library file was opened or created: a fresh history context.
     pub fn history_open_file(&mut self) {
         self.history.reset();
-        self.history.last_version_hash = if self.autosave.saved_hash != 0 {
-            self.autosave.saved_hash
-        } else {
-            doc_hash(&self.doc)
-        };
+        self.history.last_version_hash = if self.autosave.saved_hash != 0 { self.autosave.saved_hash } else { doc_hash(&self.doc) };
     }
 
     /// Reloads the version list when it is stale.

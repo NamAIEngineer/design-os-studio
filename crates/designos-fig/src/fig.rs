@@ -100,14 +100,7 @@ fn extract_fast_derived(raw_changes: &[KiwiValue], num_blobs: usize) -> HashMap<
             let size = o.get("size").and_then(|s| Some(Vec2::new(kiwi_f32(s, "x")?, kiwi_f32(s, "y")?)));
             let transform = o.get("transform").map(|t| {
                 let g = |k: &str, d: f32| kiwi_f32(t, k).unwrap_or(d);
-                Affine {
-                    a: g("m00", 1.0),
-                    c: g("m01", 0.0),
-                    tx: g("m02", 0.0),
-                    b: g("m10", 0.0),
-                    d: g("m11", 1.0),
-                    ty: g("m12", 0.0),
-                }
+                Affine { a: g("m00", 1.0), c: g("m01", 0.0), tx: g("m02", 0.0), b: g("m10", 0.0), d: g("m11", 1.0), ty: g("m12", 0.0) }
             });
             let parse_geo = |k: &str| -> Option<Vec<(usize, bool)>> {
                 let g_arr = o.get(k).and_then(KiwiValue::as_array)?;
@@ -135,13 +128,7 @@ fn extract_fast_derived(raw_changes: &[KiwiValue], num_blobs: usize) -> HashMap<
             if size.is_none() && transform.is_none() && fill_geometry.is_none() && stroke_geometry.is_none() {
                 continue;
             }
-            entries.push(FastDerivedEntry {
-                path,
-                size,
-                transform,
-                fill_geometry,
-                stroke_geometry,
-            });
+            entries.push(FastDerivedEntry { path, size, transform, fill_geometry, stroke_geometry });
         }
         if !entries.is_empty() {
             map.insert(id, entries);
@@ -247,10 +234,7 @@ impl<'a> Lk<'a> {
             }
             for h in j.get("handoffStatusMap").map(|m| rest_import::farr(m, "entries")).unwrap_or(&[]) {
                 let Some(gid) = h.get("guid").and_then(guid_str) else { continue };
-                let status = h
-                    .get("handoffStatus")
-                    .and_then(|s| fstr(s, "status").or_else(|| s.as_str()))
-                    .or_else(|| fstr(h, "status"));
+                let status = h.get("handoffStatus").and_then(|s| fstr(s, "status").or_else(|| s.as_str())).or_else(|| fstr(h, "status"));
                 let mapped = match status {
                     Some("BUILD" | "READY_FOR_DEV") => Some("READY_FOR_DEV"),
                     Some("COMPLETED") => Some("COMPLETED"),
@@ -387,21 +371,14 @@ pub(crate) fn message_to_rest(msg: &KiwiValue, name: &str) -> Value {
 /// enums by name), as `fig2json` prints them. For synthetic test fixtures.
 #[doc(hidden)]
 pub fn import_fig_node_changes(changes: &Value, name: &str) -> Result<Document, FigError> {
-    let list = changes
-        .as_array()
-        .or_else(|| changes.get("nodeChanges").and_then(Value::as_array))
-        .cloned()
-        .unwrap_or_default();
+    let list = changes.as_array().or_else(|| changes.get("nodeChanges").and_then(Value::as_array)).cloned().unwrap_or_default();
     let owned_blobs: Vec<Vec<u8>> = changes
         .get("blobs")
         .and_then(Value::as_array)
         .map(|arr| {
             arr.iter()
                 .map(|b| {
-                    b.get("bytes")
-                        .and_then(Value::as_array)
-                        .map(|bytes| bytes.iter().filter_map(|x| x.as_u64().map(|n| n as u8)).collect())
-                        .unwrap_or_default()
+                    b.get("bytes").and_then(Value::as_array).map(|bytes| bytes.iter().filter_map(|x| x.as_u64().map(|n| n as u8)).collect()).unwrap_or_default()
                 })
                 .collect()
         })
@@ -522,11 +499,7 @@ fn symbol_id_str(v: &Value) -> Option<String> {
         let key = fstr(ar, "key").unwrap_or("");
         let ver = fstr(ar, "version").unwrap_or("");
         if !key.is_empty() {
-            return Some(if ver.is_empty() {
-                format!("assetRef:{key}")
-            } else {
-                format!("assetRef:{key}:{ver}")
-            });
+            return Some(if ver.is_empty() { format!("assetRef:{key}") } else { format!("assetRef:{key}:{ver}") });
         }
     }
     None
@@ -651,7 +624,9 @@ fn extract_fig_metadata(nc: &Value, orig_ty: &str, large_file: bool) -> Option<V
             | "annotationCategories"
             | "makeContentState"
             | "widgetSyncedState"
-            | "widgetPropertyMenuItems" if !val.is_null() => {
+            | "widgetPropertyMenuItems"
+                if !val.is_null() =>
+            {
                 if let Ok(s) = serde_json::to_string(val) {
                     meta.insert(k.clone(), Value::String(s));
                 }
@@ -855,11 +830,7 @@ fn convert_node(nc: &Value, id: &str, lk: &Lk) -> Option<Map<String, Value>> {
     copy(&mut m, nc, "miterLimit", "strokeMiterLimit");
     let indep_borders = nc.get("borderStrokeWeightsIndependent").and_then(Value::as_bool) == Some(true);
     if indep_borders || ["borderTopWeight", "borderRightWeight", "borderBottomWeight", "borderLeftWeight"].iter().any(|k| nc.get(*k).is_some()) {
-        let w = if indep_borders {
-            fnum(nc, "strokeWeight").unwrap_or(1.0)
-        } else {
-            fnum(nc, "strokeWeight").unwrap_or(0.0)
-        };
+        let w = if indep_borders { fnum(nc, "strokeWeight").unwrap_or(1.0) } else { fnum(nc, "strokeWeight").unwrap_or(0.0) };
         let g = |k: &str| fnum(nc, k).unwrap_or(w);
         m.insert(
             "individualStrokeWeights".into(),
@@ -1034,10 +1005,7 @@ fn convert_node(nc: &Value, id: &str, lk: &Lk) -> Option<Map<String, Value>> {
             if let Some(e) = nc.get("connectorEnd") {
                 m.insert("connectorEnd".into(), conv_ep(e));
             }
-            if let Some(lt) = fstr(nc, "connectorLineType")
-                .or_else(|| fstr(nc, "connectorLineStyle"))
-                .or_else(|| fstr(nc, "connectorType"))
-            {
+            if let Some(lt) = fstr(nc, "connectorLineType").or_else(|| fstr(nc, "connectorLineStyle")).or_else(|| fstr(nc, "connectorType")) {
                 m.insert("connectorLineType".into(), lt.into());
             }
             if let Some(sc) = nc.get("connectorStartStrokeCap").or_else(|| nc.get("connectorStartCap")) {
@@ -1079,9 +1047,7 @@ fn bound_variables(nc: &Value, lk: &Lk) -> Option<Value> {
             return Some(a);
         }
         let fs = v.get("fontStyleValue")?;
-        fs.get("asFloat")
-            .and_then(|inner| inner.get("value")?.get("alias"))
-            .or_else(|| fs.get("asString").and_then(|inner| inner.get("value")?.get("alias")))
+        fs.get("asFloat").and_then(|inner| inner.get("value")?.get("alias")).or_else(|| fs.get("asString").and_then(|inner| inner.get("value")?.get("alias")))
     }
     let alias = |data: &Value| -> Option<Value> {
         let a = alias_target(data)?;
@@ -1189,10 +1155,7 @@ fn component_props(m: &mut Map<String, Value>, nc: &Value, lk: &Lk) {
                 .unwrap_or_default();
             def.insert("variantOptions".into(), Value::Array(options));
         } else if *ty == "INSTANCE_SWAP" {
-            let prefs: Vec<Value> = rest_import::farr(d, "preferredValues")
-                .iter()
-                .filter_map(|p| guid_str(p).map(Value::String))
-                .collect();
+            let prefs: Vec<Value> = rest_import::farr(d, "preferredValues").iter().filter_map(|p| guid_str(p).map(Value::String)).collect();
             if !prefs.is_empty() {
                 def.insert("preferredValues".into(), Value::Array(prefs));
             }
@@ -1229,16 +1192,10 @@ fn component_props(m: &mut Map<String, Value>, nc: &Value, lk: &Lk) {
     let mut vspecs = Map::new();
     for s in rest_import::farr(nc, "variantPropSpecs") {
         let Some(val) = fstr(s, "value") else { continue };
-        let prop_name = fstr(s, "propertyName")
-            .or_else(|| fstr(s, "name"))
-            .map(String::from)
-            .or_else(|| {
-                let gid = s.get("propDefId").or_else(|| s.get("defID")).and_then(guid_str)?;
-                lk.prop_defs
-                    .get(&gid)
-                    .map(|(k, _)| k.split('#').next().unwrap_or(k).to_string())
-                    .or_else(|| Some(format!("propDefId:{gid}")))
-            });
+        let prop_name = fstr(s, "propertyName").or_else(|| fstr(s, "name")).map(String::from).or_else(|| {
+            let gid = s.get("propDefId").or_else(|| s.get("defID")).and_then(guid_str)?;
+            lk.prop_defs.get(&gid).map(|(k, _)| k.split('#').next().unwrap_or(k).to_string()).or_else(|| Some(format!("propDefId:{gid}")))
+        });
         if let Some(name) = prop_name.filter(|n| !n.is_empty()) {
             vspecs.insert(name, Value::String(val.to_string()));
         }
@@ -1363,10 +1320,7 @@ fn convert_override(o: &Value, lk: &Lk) -> Map<String, Value> {
                 m.insert("relativeTransform".into(), matrix_json(val));
             }
             "effects" => {
-                m.insert(
-                    "effects".into(),
-                    Value::Array(val.as_array().map(Vec::as_slice).unwrap_or(&[]).iter().filter_map(convert_effect).collect()),
-                );
+                m.insert("effects".into(), Value::Array(val.as_array().map(Vec::as_slice).unwrap_or(&[]).iter().filter_map(convert_effect).collect()));
                 has_vars = true;
             }
             "fillGeometry" | "strokeGeometry" => {
@@ -1487,11 +1441,7 @@ fn convert_override(o: &Value, lk: &Lk) -> Map<String, Value> {
     }
     if has_borders {
         let indep_borders = obj.get("borderStrokeWeightsIndependent").and_then(Value::as_bool) == Some(true);
-        let w = if indep_borders {
-            fnum(o, "strokeWeight").unwrap_or(1.0)
-        } else {
-            fnum(o, "strokeWeight").unwrap_or(0.0)
-        };
+        let w = if indep_borders { fnum(o, "strokeWeight").unwrap_or(1.0) } else { fnum(o, "strokeWeight").unwrap_or(0.0) };
         let g = |k: &str| fnum(o, k).unwrap_or(w);
         m.insert(
             "individualStrokeWeights".into(),
@@ -1642,11 +1592,7 @@ fn override_entries(list: Option<&Value>, lk: &Lk, derived: bool) -> Vec<Value> 
     let Some(a) = list.and_then(Value::as_array) else { return Vec::new() };
     a.iter()
         .filter_map(|o| {
-            let set = if derived {
-                convert_derived_override(o, lk)
-            } else {
-                convert_override(o, lk)
-            };
+            let set = if derived { convert_derived_override(o, lk) } else { convert_override(o, lk) };
             if set.is_empty() {
                 return None;
             }

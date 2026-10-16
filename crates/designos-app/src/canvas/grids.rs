@@ -189,11 +189,7 @@ pub fn compute_css_grid_overlay(al: &AutoLayout, frame_size: DV, child_sizes: &[
     for r in 0..rows {
         if let GridTrack::Flex(fr) = al.grid_row_tracks.get(r).copied().unwrap_or(GridTrack::Flex(1.0)) {
             if al.counter_sizing != Sizing::Hug || row_heights[r] <= 0.0 {
-                let share = if row_flex_total > 0.0 {
-                    rem_h * (fr.max(0.1) / row_flex_total)
-                } else {
-                    rem_h / rows as f32
-                };
+                let share = if row_flex_total > 0.0 { rem_h * (fr.max(0.1) / row_flex_total) } else { rem_h / rows as f32 };
                 row_heights[r] = row_heights[r].max(share).max(1.0);
             }
         }
@@ -216,31 +212,14 @@ pub fn compute_css_grid_overlay(al: &AutoLayout, frame_size: DV, child_sizes: &[
     let mut cells = Vec::with_capacity(rows * cols);
     for r in 0..rows {
         for c in 0..cols {
-            cells.push(CssGridCell {
-                row: r,
-                col: c,
-                rect: Rect::new(col_x[c], row_y[r], col_widths[c], row_heights[r]),
-            });
+            cells.push(CssGridCell { row: r, col: c, rect: Rect::new(col_x[c], row_y[r], col_widths[c], row_heights[r]) });
         }
     }
 
     let col_tracks = (0..cols).map(|c| al.grid_col_tracks.get(c).copied().unwrap_or_default()).collect();
     let row_tracks = (0..rows).map(|r| al.grid_row_tracks.get(r).copied().unwrap_or_default()).collect();
 
-    CssGridOverlay {
-        cols,
-        rows,
-        col_x,
-        col_widths,
-        row_y,
-        row_heights,
-        col_gap,
-        row_gap,
-        padding: al.padding,
-        cells,
-        col_tracks,
-        row_tracks,
-    }
+    CssGridOverlay { cols, rows, col_x, col_widths, row_y, row_heights, col_gap, row_gap, padding: al.padding, cells, col_tracks, row_tracks }
 }
 
 /// Returns the 2D CSS Grid overlay geometry if `id` is a container with `LayoutDirection::Grid`.
@@ -332,9 +311,7 @@ fn layout_grids(app: &App, p: &Painter, rect: ERect) {
     let z = app.view.zoom.max(1e-3);
     let view = Rect::new(app.view.offset.x, app.view.offset.y, rect.width() / z, rect.height() / z);
     let win = (view.x, view.y, view.x + view.w, view.y + view.h);
-    let overlaps_win = |(x0, y0, x1, y1): (f32, f32, f32, f32)| {
-        x0 <= win.2 && win.0 <= x1 && y0 <= win.3 && win.1 <= y1
-    };
+    let overlaps_win = |(x0, y0, x1, y1): (f32, f32, f32, f32)| x0 <= win.2 && win.0 <= x1 && y0 <= win.3 && win.1 <= y1;
     let Some(page) = app.doc.get(app.page) else { return };
     let idx = super::interact::active_index(app);
 
@@ -372,11 +349,7 @@ fn layout_grids(app: &App, p: &Painter, rect: ERect) {
         let w = parent_world * n.transform;
         let own_bb = super::affine_rect_aabb(&w, n.size);
         if !n.children.is_empty() {
-            let descend = if idx.is_none() && n.kind.frame_props().is_some_and(|f| f.clips_content) {
-                own_bb.intersects(&view)
-            } else {
-                true
-            };
+            let descend = if idx.is_none() && n.kind.frame_props().is_some_and(|f| f.clips_content) { own_bb.intersects(&view) } else { true };
             if descend {
                 for &cid in &n.children {
                     if idx.and_then(|i| i.bounds_of(cid)).map_or(true, overlaps_win) {

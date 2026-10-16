@@ -303,14 +303,11 @@ pub(crate) fn apply_type_style(ts: &mut TextStyle, v: &Value) {
         if let Some(arr) = fvs.as_array() {
             for fv in arr {
                 let Some(val) = fnum(fv, "value") else { continue };
-                let tag = fstr(fv, "axisName")
-                    .filter(|s| !s.is_empty())
-                    .map(String::from)
-                    .or_else(|| {
-                        let t = fv.get("axisTag")?.as_u64()? as u32;
-                        let bytes = t.to_be_bytes();
-                        std::str::from_utf8(&bytes).ok().map(|s| s.trim_end_matches(' ').to_string())
-                    });
+                let tag = fstr(fv, "axisName").filter(|s| !s.is_empty()).map(String::from).or_else(|| {
+                    let t = fv.get("axisTag")?.as_u64()? as u32;
+                    let bytes = t.to_be_bytes();
+                    std::str::from_utf8(&bytes).ok().map(|s| s.trim_end_matches(' ').to_string())
+                });
                 if let Some(tag) = tag.filter(|t| !t.is_empty()) {
                     ts.set_axis(&tag, val);
                 }
@@ -641,15 +638,8 @@ impl<'a> Ctx<'a> {
                     self.rest_overrides.push((id, nid.to_string(), fields));
                 }
             }
-            let fast_derived = fstr(v, "id")
-                .and_then(|sid| self.fast_derived_map.and_then(|m| m.get(sid)))
-                .map(Vec::as_slice)
-                .unwrap_or(&[]);
-            let ov = Overrides {
-                set: parse_override_entries(v.get("_overrides")),
-                derived: parse_override_entries(v.get("_derived")),
-                fast_derived,
-            };
+            let fast_derived = fstr(v, "id").and_then(|sid| self.fast_derived_map.and_then(|m| m.get(sid))).map(Vec::as_slice).unwrap_or(&[]);
+            let ov = Overrides { set: parse_override_entries(v.get("_overrides")), derived: parse_override_entries(v.get("_derived")), fast_derived };
             if !ov.set.is_empty() || !ov.derived.is_empty() || !ov.fast_derived.is_empty() {
                 self.overrides.insert(id, ov);
             }
@@ -666,8 +656,12 @@ impl<'a> Ctx<'a> {
     fn build_node(&mut self, id: NodeId, ty: &str, v: &Value, pinfo: ParentInfo) -> (Node, Option<LayoutDirection>) {
         let frame = || frame_props(v);
         // Text outlines (glyph paths) are not stored; the renderer lays text out itself.
-        let fill_geo = (ty != "TEXT").then(|| parse_geometry_cached(farr(v, "fillGeometry"), &mut self.path_cache, &mut self.blob_cache, self.blobs)).filter(|g| !g.is_empty());
-        let stroke_geo = (ty != "TEXT").then(|| parse_geometry_cached(farr(v, "strokeGeometry"), &mut self.path_cache, &mut self.blob_cache, self.blobs)).filter(|g| !g.is_empty());
+        let fill_geo = (ty != "TEXT")
+            .then(|| parse_geometry_cached(farr(v, "fillGeometry"), &mut self.path_cache, &mut self.blob_cache, self.blobs))
+            .filter(|g| !g.is_empty());
+        let stroke_geo = (ty != "TEXT")
+            .then(|| parse_geometry_cached(farr(v, "strokeGeometry"), &mut self.path_cache, &mut self.blob_cache, self.blobs))
+            .filter(|g| !g.is_empty());
         let kind = match ty {
             "FRAME" => NodeKind::Frame(frame()),
             "GROUP" => NodeKind::Group,
@@ -704,11 +698,7 @@ impl<'a> Ctx<'a> {
             "VECTOR" | "BRUSH" => {
                 // an editable network when the file carries one; Figma's own outline stays the rendered geometry
                 let network = v.get("vectorNetwork").and_then(crate::vecnet::network_from_json).filter(|n| !n.vertices.is_empty());
-                let paths = fill_geo
-                    .clone()
-                    .or_else(|| stroke_geo.clone())
-                    .or_else(|| network.as_ref().map(|n| n.to_paths()))
-                    .unwrap_or_default();
+                let paths = fill_geo.clone().or_else(|| stroke_geo.clone()).or_else(|| network.as_ref().map(|n| n.to_paths())).unwrap_or_default();
                 NodeKind::Vector { paths, network }
             }
             "TEXT" => NodeKind::Text(text_props(v)),
@@ -733,9 +723,7 @@ impl<'a> Ctx<'a> {
         }
         n.visible = fbool(v, "visible").unwrap_or(true);
         n.locked = fbool(v, "locked").unwrap_or(false);
-        n.lock_aspect = fbool(v, "preserveRatio")
-            .or_else(|| fbool(v, "lockAspect"))
-            .unwrap_or(false);
+        n.lock_aspect = fbool(v, "preserveRatio").or_else(|| fbool(v, "lockAspect")).unwrap_or(false);
         n.opacity = fnum(v, "opacity").unwrap_or(1.0);
         n.variables = crate::variables::parse_node_variables(v);
         n.blend = fstr(v, "blendMode").map(blend).unwrap_or(default_blend);
@@ -750,10 +738,7 @@ impl<'a> Ctx<'a> {
                 }
             }
         }
-        if let Some(desc) = fstr(v, "symbolDescription")
-            .or_else(|| fstr(v, "description"))
-            .filter(|s| !s.is_empty())
-        {
+        if let Some(desc) = fstr(v, "symbolDescription").or_else(|| fstr(v, "description")).filter(|s| !s.is_empty()) {
             n.component.description = desc.to_string();
         }
         if let Some(bub) = fbool(v, "propsAreBubbled") {
@@ -1145,10 +1130,7 @@ impl<'a> Ctx<'a> {
                         .split(',')
                         .filter_map(|part| {
                             let part = part.trim();
-                            self.ids
-                                .get(part)
-                                .copied()
-                                .or_else(|| part.parse::<u64>().ok().map(NodeId))
+                            self.ids.get(part).copied().or_else(|| part.parse::<u64>().ok().map(NodeId))
                         })
                         .collect()
                 };
@@ -1379,11 +1361,7 @@ impl<'a> Ctx<'a> {
             return;
         }
         let fast_clone = self.rest_overrides.is_empty() && self.doc.nodes.len() >= 10_000;
-        let prefix = if fast_clone {
-            String::new()
-        } else {
-            self.doc.get(inst).and_then(|n| n.source_id.clone()).unwrap_or_default()
-        };
+        let prefix = if fast_clone { String::new() } else { self.doc.get(inst).and_then(|n| n.source_id.clone()).unwrap_or_default() };
         let kids = self.doc.get(comp).map(|n| n.children.clone()).unwrap_or_default();
         let mut budget = 50_000usize;
         for k in kids {
@@ -1572,12 +1550,7 @@ impl<'a> Ctx<'a> {
     /// first) down from the instance. Clone source ids look like
     /// `I<instance>;<original>`; only the part after the last `;` identifies the
     /// original node.
-    fn resolve_path_cached<S: AsRef<str>>(
-        &self,
-        inst: NodeId,
-        path: &[S],
-        subtree_maps: &mut HashMap<NodeId, HashMap<String, NodeId>>,
-    ) -> Option<NodeId> {
+    fn resolve_path_cached<S: AsRef<str>>(&self, inst: NodeId, path: &[S], subtree_maps: &mut HashMap<NodeId, HashMap<String, NodeId>>) -> Option<NodeId> {
         let mut cur = inst;
         for g_ref in path {
             let g = g_ref.as_ref();
@@ -1592,9 +1565,7 @@ impl<'a> Ctx<'a> {
             };
             cur = match found {
                 Some(f) => f,
-                None if cur == inst && (self.node_matches(inst, g) || node.component.source.is_some_and(|src| self.node_matches(src, g))) => {
-                    inst
-                }
+                None if cur == inst && (self.node_matches(inst, g) || node.component.source.is_some_and(|src| self.node_matches(src, g))) => inst,
                 None => return None,
             };
         }
@@ -1654,7 +1625,8 @@ impl<'a> Ctx<'a> {
             n.fill_geometry = Some(g).filter(|g| !g.is_empty());
         }
         if has("strokeGeometry") {
-            n.stroke_geometry = Some(parse_geometry_cached(farr(set, "strokeGeometry"), &mut self.path_cache, &mut self.blob_cache, self.blobs)).filter(|g| !g.is_empty());
+            n.stroke_geometry =
+                Some(parse_geometry_cached(farr(set, "strokeGeometry"), &mut self.path_cache, &mut self.blob_cache, self.blobs)).filter(|g| !g.is_empty());
         }
         if derived_only {
             return swapped;
@@ -1827,7 +1799,11 @@ impl<'a> Ctx<'a> {
                 k => match k.frame_props().and_then(|f| f.auto_layout) {
                     Some(al) => {
                         let along = (al.direction == LayoutDirection::Horizontal) == dir_h;
-                        if along { al.primary_sizing } else { al.counter_sizing }
+                        if along {
+                            al.primary_sizing
+                        } else {
+                            al.counter_sizing
+                        }
                     }
                     None => Sizing::Fixed,
                 },
@@ -2115,12 +2091,7 @@ fn parse_transform(v: &Value) -> Option<Affine> {
     Some(Affine { a: r0[0], c: r0[1], tx: r0[2], b: r1[0], d: r1[1], ty: r1[2] })
 }
 
-fn parse_geometry_cached(
-    items: &[Value],
-    cache: &mut HashMap<String, Path>,
-    blob_cache: &mut HashMap<(usize, bool), Path>,
-    blobs: &[&[u8]],
-) -> Vec<Path> {
+fn parse_geometry_cached(items: &[Value], cache: &mut HashMap<String, Path>, blob_cache: &mut HashMap<(usize, bool), Path>, blobs: &[&[u8]]) -> Vec<Path> {
     let mut out = Vec::with_capacity(items.len());
     for g in items {
         let odd = matches!(fstr(g, "windingRule"), Some("EVENODD"));

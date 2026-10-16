@@ -154,11 +154,7 @@ impl Engine {
                 } else {
                     self.resolve_default_page()?
                 };
-                let anchor = CommentAnchor {
-                    page,
-                    node: a.node_id.map(NodeId),
-                    offset: Vec2::new(a.x, a.y),
-                };
+                let anchor = CommentAnchor { page, node: a.node_id.map(NodeId), offset: Vec2::new(a.x, a.y) };
                 let mut seq = self.doc.comments.len() + 1;
                 let thread_id = loop {
                     let candidate = format!("t{seq}");
@@ -182,12 +178,7 @@ impl Engine {
                     resolved: false,
                 });
                 self.exec(Command::SetComments { comments })?;
-                let resolved = self
-                    .doc
-                    .resolve_comment_targets()
-                    .into_iter()
-                    .find(|t| t.id == thread_id)
-                    .ok_or("Failed to resolve comment thread")?;
+                let resolved = self.doc.resolve_comment_targets().into_iter().find(|t| t.id == thread_id).ok_or("Failed to resolve comment thread")?;
                 let mut out = serde_json::to_value(&resolved).map_err(|e| e.to_string())?;
                 if let Some(obj) = out.as_object_mut() {
                     obj.insert("thread".into(), serde_json::to_value(&resolved).map_err(|e| e.to_string())?);
@@ -205,10 +196,7 @@ impl Engine {
                     bounded_text("author", author, 256)?;
                 }
                 let mut comments = self.doc.comments.clone();
-                let t = comments
-                    .iter_mut()
-                    .find(|t| t.id == a.thread_id)
-                    .ok_or_else(|| format!("comment thread '{}' not found", a.thread_id))?;
+                let t = comments.iter_mut().find(|t| t.id == a.thread_id).ok_or_else(|| format!("comment thread '{}' not found", a.thread_id))?;
                 let msg_id = format!("{}-{}", t.id, t.messages.len() + 1);
                 t.messages.push(Comment {
                     id: msg_id,
@@ -221,21 +209,13 @@ impl Engine {
                     t.resolved = resolved;
                 }
                 self.exec(Command::SetComments { comments })?;
-                let resolved_thread = self
-                    .doc
-                    .resolve_comment_targets()
-                    .into_iter()
-                    .find(|t| t.id == a.thread_id)
-                    .ok_or("Failed to resolve comment thread")?;
+                let resolved_thread = self.doc.resolve_comment_targets().into_iter().find(|t| t.id == a.thread_id).ok_or("Failed to resolve comment thread")?;
                 Ok(json!({"thread": resolved_thread, "changed": true}))
             }
             "designos_resolve_comment" => {
                 let a: ResolveCommentArgs = parse(args)?;
                 let mut comments = self.doc.comments.clone();
-                let t = comments
-                    .iter_mut()
-                    .find(|t| t.id == a.thread_id)
-                    .ok_or_else(|| format!("comment thread '{}' not found", a.thread_id))?;
+                let t = comments.iter_mut().find(|t| t.id == a.thread_id).ok_or_else(|| format!("comment thread '{}' not found", a.thread_id))?;
                 let changed = t.resolved != a.resolved;
                 t.resolved = a.resolved;
                 if changed {
@@ -283,11 +263,7 @@ impl Engine {
                     let trimmed = annotation.trim();
                     if !trimmed.is_empty() {
                         bounded_text("annotation", trimmed, 10_000)?;
-                        node.dev.annotations.push(Annotation {
-                            text: trimmed.to_string(),
-                            properties: Vec::new(),
-                            category: None,
-                        });
+                        node.dev.annotations.push(Annotation { text: trimmed.to_string(), properties: Vec::new(), category: None });
                     }
                 }
                 self.exec(Command::Update { node: Box::new(node) })?;

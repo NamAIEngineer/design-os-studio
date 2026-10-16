@@ -224,8 +224,7 @@ impl TabsState {
             app.terminal.bind_session(&format!("tab-{active_id}"));
             self.entries[self.active_idx].hist = std::mem::take(&mut app.hist);
             self.entries[self.active_idx].terminal = std::mem::take(&mut app.terminal);
-            self.entries[self.active_idx].dirty =
-                self.entries[self.active_idx].hist.can_undo() || app.autosave.pending();
+            self.entries[self.active_idx].dirty = self.entries[self.active_idx].hist.can_undo() || app.autosave.pending();
             self.hist_in_app = false;
         }
     }
@@ -241,11 +240,7 @@ impl TabsState {
 
         let mut doc = tab.doc.clone();
         crate::io::ensure_page(&mut doc);
-        let page = if doc.pages.contains(&tab.page) {
-            tab.page
-        } else {
-            doc.pages[0]
-        };
+        let page = if doc.pages.contains(&tab.page) { tab.page } else { doc.pages[0] };
         app.doc = doc;
         app.page = page;
         app.selection = tab.selection.clone();
@@ -328,11 +323,7 @@ impl TabsState {
             self.parked_in_home = false;
             // Check if the file now in `app` matches an existing tab
             if let Some(lf) = &app.lib_file {
-                if let Some(existing) = self
-                    .entries
-                    .iter()
-                    .position(|t| t.lib_file.as_ref().is_some_and(|tlf| tlf.id == lf.id))
-                {
+                if let Some(existing) = self.entries.iter().position(|t| t.lib_file.as_ref().is_some_and(|tlf| tlf.id == lf.id)) {
                     let tab_id = self.entries[existing].id;
                     self.active_idx = existing;
                     app.terminal = std::mem::take(&mut self.entries[existing].terminal);
@@ -343,11 +334,7 @@ impl TabsState {
                     return;
                 }
             } else if let Some(path) = &app.file_path {
-                if let Some(existing) = self
-                    .entries
-                    .iter()
-                    .position(|t| t.file_path.as_ref() == Some(path))
-                {
+                if let Some(existing) = self.entries.iter().position(|t| t.file_path.as_ref() == Some(path)) {
                     let tab_id = self.entries[existing].id;
                     self.active_idx = existing;
                     app.terminal = std::mem::take(&mut self.entries[existing].terminal);
@@ -359,9 +346,10 @@ impl TabsState {
                 }
             }
             // If it differs from the previously active tab, open it as a new tab!
-            let differs = self.entries.get(self.active_idx).is_some_and(|cur| {
-                cur.lib_file != app.lib_file || cur.file_path != app.file_path || cur.title != ProjectTab::derive_title(app)
-            });
+            let differs = self
+                .entries
+                .get(self.active_idx)
+                .is_some_and(|cur| cur.lib_file != app.lib_file || cur.file_path != app.file_path || cur.title != ProjectTab::derive_title(app));
             if differs {
                 let id = self.alloc_id();
                 let tab = ProjectTab::from_app(id, app, None);
@@ -458,11 +446,7 @@ impl TabsState {
     /// Focuses an existing tab with `file_path == Some(path)`, or opens `path` in a new tab.
     #[allow(dead_code)]
     pub fn open_or_focus_path(&mut self, app: &mut App, path: &Path) -> Option<usize> {
-        if let Some(idx) = self
-            .entries
-            .iter()
-            .position(|t| t.file_path.as_deref() == Some(path))
-        {
+        if let Some(idx) = self.entries.iter().position(|t| t.file_path.as_deref() == Some(path)) {
             self.switch_to(idx, app);
             return Some(idx);
         }
@@ -473,14 +457,7 @@ impl TabsState {
                 return None;
             }
         };
-        let title = if doc.name.trim().is_empty() {
-            path.file_stem()
-                .and_then(|s| s.to_str())
-                .unwrap_or("Untitled")
-                .to_string()
-        } else {
-            doc.name.clone()
-        };
+        let title = if doc.name.trim().is_empty() { path.file_stem().and_then(|s| s.to_str()).unwrap_or("Untitled").to_string() } else { doc.name.clone() };
         let kind = ProjectTabKind::from_doc(&doc);
         let idx = self.open_new_tab(app, &title, doc, kind);
         let svg = path.extension().is_some_and(|e| e.eq_ignore_ascii_case("svg"));
@@ -496,11 +473,7 @@ impl TabsState {
     /// Focuses an existing tab with `lib_file.id == file_id`, or opens `file_id` from the library in a new tab.
     #[allow(dead_code)]
     pub fn open_or_focus_lib_file(&mut self, app: &mut App, file_id: &str) -> Option<usize> {
-        if let Some(idx) = self
-            .entries
-            .iter()
-            .position(|t| t.lib_file.as_ref().is_some_and(|lf| lf.id == file_id))
-        {
+        if let Some(idx) = self.entries.iter().position(|t| t.lib_file.as_ref().is_some_and(|lf| lf.id == file_id)) {
             self.switch_to(idx, app);
             return Some(idx);
         }
@@ -695,13 +668,10 @@ enum TabUiAction {
 /// Renders the 1:1 Figma UI3 Top Window Tab Bar (`32px` height) inside `ui`.
 #[allow(dead_code)]
 pub fn show_top_tab_bar(ui: &mut Ui, app: &mut App) {
-    egui::Panel::top("project_tabs_bar")
-        .exact_size(TOP_TAB_BAR_HEIGHT)
-        .frame(egui::Frame::NONE)
-        .show(ui, |ui| {
-            let rect = ui.max_rect();
-            show_top_tab_bar_ui(ui, rect, app);
-        });
+    egui::Panel::top("project_tabs_bar").exact_size(TOP_TAB_BAR_HEIGHT).frame(egui::Frame::NONE).show(ui, |ui| {
+        let rect = ui.max_rect();
+        show_top_tab_bar_ui(ui, rect, app);
+    });
 }
 
 /// Renders the 1:1 Figma UI3 Top Window Tab Bar (`32px` height) inside `bar_rect`.
@@ -714,11 +684,7 @@ pub fn show_top_tab_bar_ui(ui: &mut Ui, bar_rect: Rect, app: &mut App) {
 
     let p = ui.painter_at(bar_rect);
     p.rect_filled(bar_rect, 0.0, TAB_BAR_BG);
-    p.hline(
-        bar_rect.x_range(),
-        bar_rect.bottom() - 0.5,
-        Stroke::new(1.0, TAB_BAR_BORDER),
-    );
+    p.hline(bar_rect.x_range(), bar_rect.bottom() - 0.5, Stroke::new(1.0, TAB_BAR_BORDER));
 
     let mut actions: Vec<TabUiAction> = Vec::new();
     let cy = bar_rect.center().y;
@@ -739,28 +705,13 @@ pub fn show_top_tab_bar_ui(ui: &mut Ui, bar_rect: Rect, app: &mut App) {
         }
         if is_home {
             p.rect_filled(home_rect, theme::cr(6), TAB_ACTIVE_BG);
-            p.rect_stroke(
-                home_rect,
-                theme::cr(6),
-                Stroke::new(1.0, TAB_ACTIVE_BORDER),
-                StrokeKind::Inside,
-            );
+            p.rect_stroke(home_rect, theme::cr(6), Stroke::new(1.0, TAB_ACTIVE_BORDER), StrokeKind::Inside);
         } else if resp.hovered() {
             p.rect_filled(home_rect, theme::cr(6), TAB_HOVER_BG);
         }
-        let fg = if is_home || resp.hovered() {
-            theme::TEXT
-        } else {
-            theme::TEXT_SECONDARY
-        };
+        let fg = if is_home || resp.hovered() { theme::TEXT } else { theme::TEXT_SECONDARY };
         paint_home_glyph(&p, Pos2::new(home_rect.left() + 14.0, cy), fg);
-        p.text(
-            Pos2::new(home_rect.left() + 26.0, cy),
-            Align2::LEFT_CENTER,
-            "Home",
-            if is_home { theme::font_body_strong() } else { theme::font_body() },
-            fg,
-        );
+        p.text(Pos2::new(home_rect.left() + 26.0, cy), Align2::LEFT_CENTER, "Home", if is_home { theme::font_body_strong() } else { theme::font_body() }, fg);
         if resp.clicked() {
             actions.push(TabUiAction::ClickHome);
         }
@@ -768,11 +719,7 @@ pub fn show_top_tab_bar_ui(ui: &mut Ui, bar_rect: Rect, app: &mut App) {
     }
 
     // Divider between Home button and open project tabs
-    p.vline(
-        x,
-        (bar_rect.top() + 8.0)..=(bar_rect.bottom() - 8.0),
-        Stroke::new(1.0, TAB_ACTIVE_BORDER),
-    );
+    p.vline(x, (bar_rect.top() + 8.0)..=(bar_rect.bottom() - 8.0), Stroke::new(1.0, TAB_ACTIVE_BORDER));
     x += 6.0;
 
     // 3. Open Project Tabs Strip
@@ -788,11 +735,7 @@ pub fn show_top_tab_bar_ui(ui: &mut Ui, bar_rect: Rect, app: &mut App) {
         let tab_id = tab.id;
         let is_active = !is_home && idx == active_idx;
         let is_dirty = tab.dirty || (is_active && active_dirty_live);
-        let tab_w = if tab.pinned && tab.title.len() <= 8 {
-            ideal_w.min(132.0)
-        } else {
-            ideal_w
-        };
+        let tab_w = if tab.pinned && tab.title.len() <= 8 { ideal_w.min(132.0) } else { ideal_w };
         let tab_rect = Rect::from_min_size(Pos2::new(x, bar_rect.top() + 3.0), Vec2::new(tab_w, 26.0));
         if tab_rect.right() > bar_rect.right() - 104.0 {
             break;
@@ -800,33 +743,14 @@ pub fn show_top_tab_bar_ui(ui: &mut Ui, bar_rect: Rect, app: &mut App) {
         widgets::record(ui, &format!("project-tab-{idx}"), tab_rect);
         widgets::record(ui, &format!("project-tab-id-{tab_id}"), tab_rect);
 
-        let close_rect = Rect::from_center_size(
-            Pos2::new(tab_rect.right() - 13.0, tab_rect.center().y),
-            Vec2::splat(18.0),
-        );
+        let close_rect = Rect::from_center_size(Pos2::new(tab_rect.right() - 13.0, tab_rect.center().y), Vec2::splat(18.0));
         widgets::record(ui, &format!("tab-close-{tab_id}"), close_rect);
 
         // Exclude close_rect from tab_hit_rect so clicking `×` never triggers tab switch instead of close
-        let tab_hit_right = if tab.pinned {
-            tab_rect.right()
-        } else {
-            (close_rect.left() - 2.0).max(tab_rect.left() + 24.0)
-        };
+        let tab_hit_right = if tab.pinned { tab_rect.right() } else { (close_rect.left() - 2.0).max(tab_rect.left() + 24.0) };
         let tab_hit_rect = Rect::from_min_max(tab_rect.min, Pos2::new(tab_hit_right, tab_rect.bottom()));
-        let tab_resp = ui.interact(
-            tab_hit_rect,
-            ui.id().with(("project-tab", tab_id)),
-            Sense::click(),
-        );
-        let close_resp = if !tab.pinned {
-            Some(ui.interact(
-                close_rect,
-                ui.id().with(("tab-close", tab_id)),
-                Sense::click(),
-            ))
-        } else {
-            None
-        };
+        let tab_resp = ui.interact(tab_hit_rect, ui.id().with(("project-tab", tab_id)), Sense::click());
+        let close_resp = if !tab.pinned { Some(ui.interact(close_rect, ui.id().with(("tab-close", tab_id)), Sense::click())) } else { None };
 
         let hovered = tab_resp.hovered() || close_resp.as_ref().is_some_and(|r| r.hovered());
         if hovered {
@@ -835,86 +759,42 @@ pub fn show_top_tab_bar_ui(ui: &mut Ui, bar_rect: Rect, app: &mut App) {
 
         if is_active {
             p.rect_filled(tab_rect, theme::cr_each(6, 6, 4, 4), TAB_ACTIVE_BG);
-            p.rect_stroke(
-                tab_rect,
-                theme::cr_each(6, 6, 4, 4),
-                Stroke::new(1.0, TAB_ACTIVE_BORDER),
-                StrokeKind::Inside,
-            );
+            p.rect_stroke(tab_rect, theme::cr_each(6, 6, 4, 4), Stroke::new(1.0, TAB_ACTIVE_BORDER), StrokeKind::Inside);
         } else if hovered {
             p.rect_filled(tab_rect, theme::cr(5), TAB_HOVER_BG);
         } else {
             // Subtle right separator between inactive tabs
-            p.vline(
-                tab_rect.right() + 1.0,
-                (tab_rect.top() + 5.0)..=(tab_rect.bottom() - 5.0),
-                Stroke::new(1.0, TAB_BAR_BORDER),
-            );
+            p.vline(tab_rect.right() + 1.0, (tab_rect.top() + 5.0)..=(tab_rect.bottom() - 5.0), Stroke::new(1.0, TAB_BAR_BORDER));
         }
 
         // Colored file-type icon badge (or Figma Dev Mode #1BC47D `</>` badge when dev_mode is active)
-        let badge_rect = Rect::from_center_size(
-            Pos2::new(tab_rect.left() + 13.0, tab_rect.center().y),
-            Vec2::splat(14.0),
-        );
+        let badge_rect = Rect::from_center_size(Pos2::new(tab_rect.left() + 13.0, tab_rect.center().y), Vec2::splat(14.0));
         let in_dev_mode = tab.dev_mode || (is_active && app.ui.dev_mode);
-        let (badge_col, badge_icon) = if in_dev_mode {
-            (Color32::from_rgb(0x1B, 0xC4, 0x7D), Icon::Dev)
-        } else {
-            (tab.kind.badge_color(), tab.kind.icon())
-        };
+        let (badge_col, badge_icon) = if in_dev_mode { (Color32::from_rgb(0x1B, 0xC4, 0x7D), Icon::Dev) } else { (tab.kind.badge_color(), tab.kind.icon()) };
         if in_dev_mode {
             p.rect_filled(badge_rect, theme::cr(3), badge_col);
             icons::paint(&p, badge_icon, badge_rect.center(), 10.0, Color32::from_rgb(0x0D, 0x1F, 0x16));
         } else {
-            p.rect_filled(
-                badge_rect,
-                theme::cr(3),
-                Color32::from_rgba_unmultiplied(badge_col.r(), badge_col.g(), badge_col.b(), 38),
-            );
+            p.rect_filled(badge_rect, theme::cr(3), Color32::from_rgba_unmultiplied(badge_col.r(), badge_col.g(), badge_col.b(), 38));
             icons::paint(&p, badge_icon, badge_rect.center(), 11.0, badge_col);
         }
 
         let mut text_left = badge_rect.right() + 6.0;
         if tab.pinned {
-            icons::paint(
-                &p,
-                Icon::Lock,
-                Pos2::new(text_left + 5.0, tab_rect.center().y),
-                10.0,
-                theme::TEXT_SECONDARY,
-            );
+            icons::paint(&p, Icon::Lock, Pos2::new(text_left + 5.0, tab_rect.center().y), 10.0, theme::TEXT_SECONDARY);
             text_left += 13.0;
         }
 
         let right_reserve = if tab.pinned { 10.0 } else { 24.0 } + if is_dirty { 10.0 } else { 0.0 };
         let max_title_w = (tab_rect.right() - right_reserve - text_left).max(24.0);
-        let font = if is_active {
-            theme::font_body_strong()
-        } else {
-            theme::font_body()
-        };
-        let fg = if is_active || hovered {
-            theme::TEXT
-        } else {
-            theme::TEXT_SECONDARY
-        };
+        let font = if is_active { theme::font_body_strong() } else { theme::font_body() };
+        let fg = if is_active || hovered { theme::TEXT } else { theme::TEXT_SECONDARY };
         let display_title = truncate_tab_title(&p, &tab.title, &font, max_title_w);
-        p.text(
-            Pos2::new(text_left, tab_rect.center().y),
-            Align2::LEFT_CENTER,
-            &display_title,
-            font,
-            fg,
-        );
+        p.text(Pos2::new(text_left, tab_rect.center().y), Align2::LEFT_CENTER, &display_title, font, fg);
 
         // Unsaved/modified dot `•`
         if is_dirty {
-            let dot_x = if tab.pinned {
-                tab_rect.right() - 10.0
-            } else {
-                close_rect.left() - 6.0
-            };
+            let dot_x = if tab.pinned { tab_rect.right() - 10.0 } else { close_rect.left() - 6.0 };
             p.circle_filled(Pos2::new(dot_x, tab_rect.center().y), 3.0, BADGE_DESIGN_BLUE);
         }
 
@@ -930,13 +810,7 @@ pub fn show_top_tab_bar_ui(ui: &mut Ui, bar_rect: Rect, app: &mut App) {
             } else {
                 theme::TEXT_SECONDARY
             };
-            icons::paint(
-                &p,
-                Icon::Close,
-                close_rect.center(),
-                10.0,
-                close_fg,
-            );
+            icons::paint(&p, Icon::Close, close_rect.center(), 10.0, close_fg);
         }
 
         let close_clicked = close_resp.as_ref().is_some_and(|r| r.clicked());
@@ -948,10 +822,7 @@ pub fn show_top_tab_bar_ui(ui: &mut Ui, bar_rect: Rect, app: &mut App) {
             actions.push(TabUiAction::CloseTab(idx));
         }
         if tab_resp.secondary_clicked() {
-            let pos = ui
-                .ctx()
-                .input(|i| i.pointer.interact_pos())
-                .unwrap_or_else(|| tab_rect.left_bottom());
+            let pos = ui.ctx().input(|i| i.pointer.interact_pos()).unwrap_or_else(|| tab_rect.left_bottom());
             app.tabs.ctx_menu_tab = Some((idx, pos));
         }
 
@@ -967,21 +838,12 @@ pub fn show_top_tab_bar_ui(ui: &mut Ui, bar_rect: Rect, app: &mut App) {
             ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
             p.rect_filled(plus_rect, theme::cr(5), TAB_HOVER_BG);
         }
-        icons::paint(
-            &p,
-            Icon::Plus,
-            plus_rect.center(),
-            13.0,
-            if plus_resp.hovered() { theme::TEXT } else { theme::TEXT_SECONDARY },
-        );
+        icons::paint(&p, Icon::Plus, plus_rect.center(), 13.0, if plus_resp.hovered() { theme::TEXT } else { theme::TEXT_SECONDARY });
         if plus_resp.clicked() {
             actions.push(TabUiAction::NewDesignTab);
         }
         if plus_resp.secondary_clicked() {
-            let pos = ui
-                .ctx()
-                .input(|i| i.pointer.interact_pos())
-                .unwrap_or_else(|| plus_rect.left_bottom());
+            let pos = ui.ctx().input(|i| i.pointer.interact_pos()).unwrap_or_else(|| plus_rect.left_bottom());
             app.tabs.new_menu_pos = Some(pos);
         }
     }
@@ -995,11 +857,7 @@ pub fn show_top_tab_bar_ui(ui: &mut Ui, bar_rect: Rect, app: &mut App) {
             ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
             p.rect_filled(upd_rect, theme::cr(5), TAB_HOVER_BG);
         }
-        p.circle_filled(
-            Pos2::new(upd_rect.left() + 8.0, upd_rect.center().y),
-            2.5,
-            Color32::from_rgb(0x1B, 0xC4, 0x7D),
-        );
+        p.circle_filled(Pos2::new(upd_rect.left() + 8.0, upd_rect.center().y), 2.5, Color32::from_rgb(0x1B, 0xC4, 0x7D));
         p.text(
             Pos2::new(upd_rect.left() + 14.0, upd_rect.center().y),
             Align2::LEFT_CENTER,
@@ -1013,22 +871,12 @@ pub fn show_top_tab_bar_ui(ui: &mut Ui, bar_rect: Rect, app: &mut App) {
                 home.updater.modal_open = true;
                 let sha_short: String = home.updater.current_binary_sha256.chars().take(12).collect();
                 let badge = home.updater.upstream.summary_badge();
-                format!(
-                    "design:os v{} verified (SHA-256 {}…) · {}",
-                    env!("CARGO_PKG_VERSION"),
-                    sha_short,
-                    badge
-                )
+                format!("design:os v{} verified (SHA-256 {}…) · {}", env!("CARGO_PKG_VERSION"), sha_short, badge)
             } else {
                 let mut probe = crate::home::updater::UpdaterState::new();
                 probe.check_for_updates();
                 let sha_short: String = probe.current_binary_sha256.chars().take(12).collect();
-                format!(
-                    "design:os v{} up to date (SHA-256 {}…) · {}",
-                    env!("CARGO_PKG_VERSION"),
-                    sha_short,
-                    probe.upstream.summary_badge()
-                )
+                format!("design:os v{} up to date (SHA-256 {}…) · {}", env!("CARGO_PKG_VERSION"), sha_short, probe.upstream.summary_badge())
             };
             app.show_toast(msg, false);
         }
@@ -1036,19 +884,8 @@ pub fn show_top_tab_bar_ui(ui: &mut Ui, bar_rect: Rect, app: &mut App) {
 
     // 4b. Right-Click Menu on `+` Button (`New Design File` / `New FigJam Board` / `New Slide Deck`)
     if let Some(pos) = app.tabs.new_menu_pos {
-        let items = vec![
-            MenuItem::new("New Design File").shortcut("Ctrl+T"),
-            MenuItem::new("New FigJam Board"),
-            MenuItem::new("New Slide Deck"),
-        ];
-        match popup_menu(
-            ui.ctx(),
-            egui::Id::new("project-tab-new-menu"),
-            pos,
-            188.0,
-            &items,
-            None,
-        ) {
+        let items = vec![MenuItem::new("New Design File").shortcut("Ctrl+T"), MenuItem::new("New FigJam Board"), MenuItem::new("New Slide Deck")];
+        match popup_menu(ui.ctx(), egui::Id::new("project-tab-new-menu"), pos, 188.0, &items, None) {
             MenuResult::Picked(0) => {
                 app.tabs.new_menu_pos = None;
                 actions.push(TabUiAction::NewDesignTab);
@@ -1077,19 +914,10 @@ pub fn show_top_tab_bar_ui(ui: &mut Ui, bar_rect: Rect, app: &mut App) {
                 MenuItem::new("New Design Tab").shortcut("Ctrl+T"),
                 MenuItem::new("Duplicate Tab").sep(),
                 MenuItem::new(if pinned { "Unpin Tab" } else { "Pin Tab" }),
-                MenuItem::new("Close Tab")
-                    .shortcut("Ctrl+W")
-                    .disabled(pinned),
+                MenuItem::new("Close Tab").shortcut("Ctrl+W").disabled(pinned),
                 MenuItem::new("Close Other Tabs").disabled(!can_close_others),
             ];
-            match popup_menu(
-                ui.ctx(),
-                egui::Id::new("project-tab-ctx-menu"),
-                pos,
-                184.0,
-                &items,
-                None,
-            ) {
+            match popup_menu(ui.ctx(), egui::Id::new("project-tab-ctx-menu"), pos, 184.0, &items, None) {
                 MenuResult::Picked(0) => {
                     app.tabs.ctx_menu_tab = None;
                     actions.push(TabUiAction::NewDesignTab);
@@ -1259,36 +1087,25 @@ mod tests {
         let p1_b = app.doc.add_page("Page 2");
         app.page = p1_b;
         let r1_id = app.doc.alloc_id();
-        let r1 = app
-            .doc
-            .insert(p1_b, Node::rectangle(r1_id, DRect::new(10.0, 20.0, 120.0, 80.0)))
-            .unwrap();
+        let r1 = app.doc.insert(p1_b, Node::rectangle(r1_id, DRect::new(10.0, 20.0, 120.0, 80.0))).unwrap();
         // Record an undoable edit in Tab 1
         app.rename(r1, "HeroRectTab1");
         app.selection = vec![r1];
-        app.view = View {
-            offset: DVec2::new(42.0, 84.0),
-            zoom: 2.25,
-        };
+        app.view = View { offset: DVec2::new(42.0, 84.0), zoom: 2.25 };
         assert!(app.hist.can_undo(), "Tab 1 has undo history");
 
         // Open Tab 2 and Tab 3
         let mut doc2 = Document::new("Tab 2");
         let p2 = doc2.add_page("Board Page");
         let r2_id = doc2.alloc_id();
-        let r2 = doc2
-            .insert(p2, Node::rectangle(r2_id, DRect::new(0.0, 0.0, 60.0, 60.0)))
-            .unwrap();
+        let r2 = doc2.insert(p2, Node::rectangle(r2_id, DRect::new(0.0, 0.0, 60.0, 60.0))).unwrap();
         let idx2 = app.open_new_tab("Tab 2", doc2, ProjectTabKind::Board);
         assert_eq!(idx2, 1);
         assert_eq!(app.doc.name, "Tab 2");
         assert!(!app.hist.can_undo(), "Tab 2 starts with clean history");
         app.rename(r2, "BoardNodeTab2");
         app.selection = vec![r2];
-        app.view = View {
-            offset: DVec2::new(-120.0, 30.0),
-            zoom: 0.75,
-        };
+        app.view = View { offset: DVec2::new(-120.0, 30.0), zoom: 0.75 };
 
         let doc3 = Document::new("Tab 3");
         let idx3 = app.open_new_tab("Tab 3", doc3, ProjectTabKind::Design);

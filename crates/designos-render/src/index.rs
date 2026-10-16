@@ -120,20 +120,13 @@ fn is_chrome_node(doc: &Document, n: &Node, id: NodeId) -> bool {
         return true;
     }
     if matches!(&n.kind, NodeKind::Unknown { type_name } if type_name.eq_ignore_ascii_case("SLICE"))
-        || (matches!(n.kind, NodeKind::Rectangle)
-            && n.fills.is_empty()
-            && n.stroke.paints.is_empty()
-            && n.name.starts_with("Slice"))
+        || (matches!(n.kind, NodeKind::Rectangle) && n.fills.is_empty() && n.stroke.paints.is_empty() && n.name.starts_with("Slice"))
     {
         return true;
     }
-    let has_own = n.component.overrides.contains(&designos_doc::OverrideField::SlotContent)
-        || !n.component.bindings.is_empty();
+    let has_own = n.component.overrides.contains(&designos_doc::OverrideField::SlotContent) || !n.component.bindings.is_empty();
     let has_src = n.component.source.is_some_and(|s| {
-        doc.get(s).is_some_and(|sn| {
-            sn.component.overrides.contains(&designos_doc::OverrideField::SlotContent)
-                || !sn.component.bindings.is_empty()
-        })
+        doc.get(s).is_some_and(|sn| sn.component.overrides.contains(&designos_doc::OverrideField::SlotContent) || !sn.component.bindings.is_empty())
     });
     (has_own || has_src) && designos_doc::is_slot_container(doc, id)
 }
@@ -403,9 +396,7 @@ impl SceneIndex {
                 for cx in cx0..=cx1 {
                     if let Some(bucket) = self.top_grid.get(&(cx, cy)) {
                         for &id in bucket {
-                            if seen.insert(id, ()).is_none()
-                                && self.entries.get(&id).is_some_and(|e| e.parent == self.page && overlaps(e.bounds, rect))
-                            {
+                            if seen.insert(id, ()).is_none() && self.entries.get(&id).is_some_and(|e| e.parent == self.page && overlaps(e.bounds, rect)) {
                                 out.push(id);
                             }
                         }
@@ -416,9 +407,7 @@ impl SceneIndex {
             for (&(cx, cy), bucket) in &self.top_grid {
                 if cx >= cx0 && cx <= cx1 && cy >= cy0 && cy <= cy1 {
                     for &id in bucket {
-                        if seen.insert(id, ()).is_none()
-                            && self.entries.get(&id).is_some_and(|e| e.parent == self.page && overlaps(e.bounds, rect))
-                        {
+                        if seen.insert(id, ()).is_none() && self.entries.get(&id).is_some_and(|e| e.parent == self.page && overlaps(e.bounds, rect)) {
                             out.push(id);
                         }
                     }
@@ -426,9 +415,7 @@ impl SceneIndex {
             }
         }
         for &id in &self.top_large {
-            if seen.insert(id, ()).is_none()
-                && self.entries.get(&id).is_some_and(|e| e.parent == self.page && overlaps(e.bounds, rect))
-            {
+            if seen.insert(id, ()).is_none() && self.entries.get(&id).is_some_and(|e| e.parent == self.page && overlaps(e.bounds, rect)) {
                 out.push(id);
             }
         }
@@ -476,11 +463,7 @@ impl SceneIndex {
         let mut ancestors: Vec<NodeId> = Vec::new();
         let mut cur = dirty_id;
         loop {
-            let Some(p) = doc
-                .get(cur)
-                .and_then(|n| n.parent)
-                .or_else(|| self.entries.get(&cur).and_then(|e| e.parent))
-            else {
+            let Some(p) = doc.get(cur).and_then(|n| n.parent).or_else(|| self.entries.get(&cur).and_then(|e| e.parent)) else {
                 return false;
             };
             if p == page {
@@ -536,17 +519,12 @@ impl SceneIndex {
                         if same_linear {
                             let dx = new_wts[4] - old_e.world_ts[4];
                             let dy = new_wts[5] - old_e.world_ts[5];
-                            let stationary = dx.abs() <= 1e-5
-                                && dy.abs() <= 1e-5
-                                && n.variables.modes.is_empty()
-                                && n.component.values.is_empty();
+                            let stationary = dx.abs() <= 1e-5 && dy.abs() <= 1e-5 && n.variables.modes.is_empty() && n.component.values.is_empty();
                             let pure_translate = (dx.abs() > 1e-5 || dy.abs() > 1e-5)
                                 && n.children.len() as u32 == old_e.children_len
                                 && (n.size.x - old_e.size.0).abs() < 1e-4
                                 && (n.size.y - old_e.size.1).abs() < 1e-4
-                                && n.children.iter().all(|c| {
-                                    self.entries.get(c).is_some_and(|ce| ce.parent == Some(dirty_id))
-                                });
+                                && n.children.iter().all(|c| self.entries.get(c).is_some_and(|ce| ce.parent == Some(dirty_id)));
                             if stationary || pure_translate {
                                 let children_box = if pure_translate {
                                     self.translate_descendants(dirty_id, dx, dy, rev);
@@ -748,11 +726,7 @@ impl SceneIndex {
                 self.bg_blur.push(sub);
             }
         }
-        let children: Box<[NodeId]> = if n.children.is_empty() {
-            Box::new([])
-        } else {
-            n.children.as_slice().into()
-        };
+        let children: Box<[NodeId]> = if n.children.is_empty() { Box::new([]) } else { n.children.as_slice().into() };
         self.entries.insert(
             id,
             Entry {
@@ -1008,12 +982,7 @@ mod tests {
         assert!(!inc_idx.update_subtree(&doc, page, 2));
         assert!(!inc_idx.update_subtree(&doc, other_node_id, 2));
 
-        let query_rects = [
-            (0.0, 0.0, 600.0, 600.0),
-            (1800.0, 100.0, 2500.0, 800.0),
-            (-4000.0, -4000.0, -3000.0, -3000.0),
-            (5000.0, 5000.0, 5500.0, 5500.0),
-        ];
+        let query_rects = [(0.0, 0.0, 600.0, 600.0), (1800.0, 100.0, 2500.0, 800.0), (-4000.0, -4000.0, -3000.0, -3000.0), (5000.0, 5000.0, 5500.0, 5500.0)];
 
         // 1. Move deep child `child1` far outside unclipped `f1` so `g1` and `f1` bounds expand across cells
         doc.get_mut(child1).unwrap().transform = Affine::translate(2600.0, 2600.0);
@@ -1044,14 +1013,8 @@ mod tests {
             assert_eq!(inc_out, full_out, "query_top_level mismatch for rect {:?}", r);
 
             // Also verify against brute-force scan of top-level page children
-            let mut expected: Vec<NodeId> = doc
-                .get(page)
-                .unwrap()
-                .children
-                .iter()
-                .copied()
-                .filter(|&cid| full_idx.bounds_of(cid).is_some_and(|b| overlaps(b, r)))
-                .collect();
+            let mut expected: Vec<NodeId> =
+                doc.get(page).unwrap().children.iter().copied().filter(|&cid| full_idx.bounds_of(cid).is_some_and(|b| overlaps(b, r))).collect();
             expected.sort_by_key(|n| n.0);
             assert_eq!(inc_out, expected);
         }

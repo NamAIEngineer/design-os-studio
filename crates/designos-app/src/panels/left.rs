@@ -406,13 +406,7 @@ fn file_header(app: &mut App, ui: &mut Ui, inner: Rect, y: f32) {
         let sub_r = Rect::from_min_size(Pos2::new(x0 - 2.0, sub_y - 9.0), Vec2::new(w + 6.0, 18.0));
         widgets::record(ui, "left-header-subtitle", sub_r);
         let resp = ui.interact(sub_r, ui.id().with("left-header-subtitle"), Sense::click());
-        p.text(
-            Pos2::new(x0, sub_y),
-            Align2::LEFT_CENTER,
-            text,
-            theme::font_body(),
-            if resp.hovered() { theme::TEXT } else { theme::TEXT_SECONDARY },
-        );
+        p.text(Pos2::new(x0, sub_y), Align2::LEFT_CENTER, text, theme::font_body(), if resp.hovered() { theme::TEXT } else { theme::TEXT_SECONDARY });
         if resp.on_hover_text("Return to Home / Drafts").clicked() {
             app.go_home();
         }
@@ -433,13 +427,7 @@ fn file_header(app: &mut App, ui: &mut Ui, inner: Rect, y: f32) {
         let sub_r = Rect::from_min_size(Pos2::new(x0 - 2.0, sub_y - 9.0), Vec2::new(w + 6.0, 18.0));
         widgets::record(ui, "left-header-subtitle", sub_r);
         let resp = ui.interact(sub_r, ui.id().with("left-header-subtitle"), Sense::click());
-        p.text(
-            Pos2::new(x0, sub_y),
-            Align2::LEFT_CENTER,
-            text,
-            theme::font_body(),
-            if resp.hovered() { theme::TEXT } else { theme::TEXT_SECONDARY },
-        );
+        p.text(Pos2::new(x0, sub_y), Align2::LEFT_CENTER, text, theme::font_body(), if resp.hovered() { theme::TEXT } else { theme::TEXT_SECONDARY });
         if resp.on_hover_text("Return to Home / Drafts").clicked() {
             app.go_home();
         }

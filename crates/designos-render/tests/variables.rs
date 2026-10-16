@@ -123,10 +123,7 @@ fn per_side_stroke_renders_with_fill_geometry_and_visible_variable_binding() {
         VariableCollection {
             id: "c".into(),
             name: "C".into(),
-            modes: vec![
-                VariableMode { id: "on".into(), name: "On".into() },
-                VariableMode { id: "off".into(), name: "Off".into() },
-            ],
+            modes: vec![VariableMode { id: "on".into(), name: "On".into() }, VariableMode { id: "off".into(), name: "Off".into() }],
             default_mode: "on".into(),
             variables: vec!["vis".into()],
             key: None,
@@ -139,12 +136,7 @@ fn per_side_stroke_renders_with_fill_geometry_and_visible_variable_binding() {
             name: "vis".into(),
             collection: "c".into(),
             kind: VariableKind::Boolean,
-            values: [
-                ("on".to_string(), VariableValue::Boolean(true)),
-                ("off".to_string(), VariableValue::Boolean(false)),
-            ]
-            .into_iter()
-            .collect(),
+            values: [("on".to_string(), VariableValue::Boolean(true)), ("off".to_string(), VariableValue::Boolean(false))].into_iter().collect(),
             description: String::new(),
             scopes: vec![],
             hidden_from_publishing: false,
@@ -163,4 +155,3 @@ fn per_side_stroke_renders_with_fill_geometry_and_visible_variable_binding() {
     let pm_off = t.render(100, 80);
     assert_eq!(px(&pm_off, 40, 48), WHITE);
 }
-

@@ -410,13 +410,7 @@ pub fn show(app: &mut App, ui: &mut Ui, region: Rect) {
     let p = ui.painter().clone();
     // ---- 1. Figma UI3 40px Header Row: "Assets" + Libraries book icon button
     let hdr_h = SEARCH_H;
-    p.text(
-        Pos2::new(region.left() + 12.0, region.top() + hdr_h * 0.5),
-        Align2::LEFT_CENTER,
-        "Assets",
-        theme::font_large_strong(),
-        Color32::WHITE,
-    );
+    p.text(Pos2::new(region.left() + 12.0, region.top() + hdr_h * 0.5), Align2::LEFT_CENTER, "Assets", theme::font_large_strong(), Color32::WHITE);
     let libs_btn = Rect::from_min_size(Pos2::new(region.right() - 8.0 - VIEW_BTN, region.top() + (hdr_h - VIEW_BTN) * 0.5), Vec2::splat(VIEW_BTN));
     widgets::record(ui, "assets-libraries", libs_btn);
     if widgets::icon_button(ui, libs_btn, "assets-libraries", Icon::BookOpen, app.libs.open, "Libraries").clicked() {
@@ -428,10 +422,7 @@ pub fn show(app: &mut App, ui: &mut Ui, region: Rect) {
     let search_y = region.top() + hdr_h + 8.0;
     let toggle_w = VIEW_BTN * 2.0 + 2.0;
     let filter_btn_w = VIEW_BTN + 4.0;
-    let sr = Rect::from_min_size(
-        Pos2::new(region.left() + 8.0, search_y),
-        Vec2::new((region.width() - 16.0 - filter_btn_w - toggle_w - 4.0).max(80.0), 28.0),
-    );
+    let sr = Rect::from_min_size(Pos2::new(region.left() + 8.0, search_y), Vec2::new((region.width() - 16.0 - filter_btn_w - toggle_w - 4.0).max(80.0), 28.0));
     p.rect_filled(sr, theme::cr(6), Color32::from_rgb(0x1E, 0x1E, 0x1E));
     p.rect_stroke(sr, theme::cr(6), Stroke::new(1.0, Color32::from_rgb(0x0D, 0x99, 0xFF)), StrokeKind::Inside);
     icons::paint(&p, Icon::Search, Pos2::new(sr.left() + 14.0, sr.center().y), 14.0, theme::ICON_SECONDARY);
@@ -493,13 +484,7 @@ pub fn show(app: &mut App, ui: &mut Ui, region: Rect) {
 
     // ---- 4. "All libraries" section + vertical "Created in this file" card + "Add more libraries" button
     let sec_top = pill_y + 26.0;
-    p.text(
-        Pos2::new(region.left() + 12.0, sec_top + 8.0),
-        Align2::LEFT_CENTER,
-        "All libraries",
-        theme::font_body_strong(),
-        Color32::WHITE,
-    );
+    p.text(Pos2::new(region.left() + 12.0, sec_top + 8.0), Align2::LEFT_CENTER, "All libraries", theme::font_body_strong(), Color32::WHITE);
 
     type AssetsDocCacheVal = (Vec<AssetEntry>, Vec<AssetEntry>, usize, std::collections::HashSet<NodeId>);
     thread_local! {
@@ -513,13 +498,7 @@ pub fn show(app: &mut App, ui: &mut Ui, region: Rect) {
             }
         }
         let local_comps = app.local_components();
-        let real_count = local_comps.len().max(
-            app.doc
-                .nodes
-                .values()
-                .filter(|n| matches!(n.kind, NodeKind::Component(_) | NodeKind::ComponentSet(_)))
-                .count(),
-        );
+        let real_count = local_comps.len().max(app.doc.nodes.values().filter(|n| matches!(n.kind, NodeKind::Component(_) | NodeKind::ComponentSet(_))).count());
         let unavail_comps = app.unavailable_library_components();
         let used_components: std::collections::HashSet<NodeId> = if cat == 2 {
             let mut set = std::collections::HashSet::new();
@@ -539,28 +518,15 @@ pub fn show(app: &mut App, ui: &mut Ui, region: Rect) {
         *cache.borrow_mut() = Some((assets_key, val.clone()));
         val
     });
-    let card_r = Rect::from_min_size(
-        Pos2::new(region.left() + 12.0, sec_top + 22.0),
-        Vec2::new((region.width() - 24.0).max(80.0), 86.0),
-    );
+    let card_r = Rect::from_min_size(Pos2::new(region.left() + 12.0, sec_top + 22.0), Vec2::new((region.width() - 24.0).max(80.0), 86.0));
     widgets::record(ui, "assets-created-in-file", card_r);
     widgets::record(ui, "assets-created-in-file-card", card_r);
     let card_resp = ui.interact(card_r, ui.id().with("assets-created-in-file-card"), Sense::click());
     let preview_r = Rect::from_min_size(card_r.min, Vec2::new(card_r.width(), 52.0));
-    p.rect_filled(
-        preview_r,
-        theme::cr(8),
-        if card_resp.hovered() { Color32::from_rgb(0x38, 0x38, 0x38) } else { Color32::from_rgb(0x2C, 0x2C, 0x2C) },
-    );
+    p.rect_filled(preview_r, theme::cr(8), if card_resp.hovered() { Color32::from_rgb(0x38, 0x38, 0x38) } else { Color32::from_rgb(0x2C, 0x2C, 0x2C) });
     p.rect_stroke(preview_r, theme::cr(8), Stroke::new(1.0, Color32::from_rgb(0x38, 0x38, 0x38)), StrokeKind::Inside);
     icons::paint(&p, Icon::Component, preview_r.center(), 18.0, Color32::from_rgb(0x8C, 0x8C, 0x8C));
-    p.text(
-        Pos2::new(card_r.left() + 2.0, preview_r.bottom() + 11.0),
-        Align2::LEFT_CENTER,
-        "Created in this file",
-        theme::font_body_strong(),
-        Color32::WHITE,
-    );
+    p.text(Pos2::new(card_r.left() + 2.0, preview_r.bottom() + 11.0), Align2::LEFT_CENTER, "Created in this file", theme::font_body_strong(), Color32::WHITE);
     p.text(
         Pos2::new(card_r.left() + 2.0, preview_r.bottom() + 26.0),
         Align2::LEFT_CENTER,
@@ -578,17 +544,10 @@ pub fn show(app: &mut App, ui: &mut Ui, region: Rect) {
         }
     }
 
-    let add_libs_r = Rect::from_min_size(
-        Pos2::new(region.left() + 12.0, card_r.bottom() + 6.0),
-        Vec2::new((region.width() - 24.0).max(80.0), 28.0),
-    );
+    let add_libs_r = Rect::from_min_size(Pos2::new(region.left() + 12.0, card_r.bottom() + 6.0), Vec2::new((region.width() - 24.0).max(80.0), 28.0));
     widgets::record(ui, "assets-add-more-libraries", add_libs_r);
     let add_libs_resp = ui.interact(add_libs_r, ui.id().with("assets-add-more-libs"), Sense::click());
-    p.rect_filled(
-        add_libs_r,
-        theme::cr(6),
-        if add_libs_resp.hovered() { Color32::from_rgb(0x38, 0x38, 0x38) } else { Color32::from_rgb(0x2C, 0x2C, 0x2C) },
-    );
+    p.rect_filled(add_libs_r, theme::cr(6), if add_libs_resp.hovered() { Color32::from_rgb(0x38, 0x38, 0x38) } else { Color32::from_rgb(0x2C, 0x2C, 0x2C) });
     p.rect_stroke(add_libs_r, theme::cr(6), Stroke::new(1.0, Color32::from_rgb(0x38, 0x38, 0x38)), StrokeKind::Inside);
     p.text(add_libs_r.center(), Align2::CENTER_CENTER, "Add more libraries", theme::font_body_strong(), Color32::WHITE);
     if add_libs_resp.clicked() {

@@ -56,12 +56,7 @@ struct Ctx<'a> {
 impl<'a> Ctx<'a> {
     fn new(doc: &'a mut Document) -> Self {
         let saved_dirty = doc.dirty.clone();
-        Ctx {
-            s: doc,
-            cmds: Vec::new(),
-            invs: Vec::new(),
-            saved_dirty,
-        }
+        Ctx { s: doc, cmds: Vec::new(), invs: Vec::new(), saved_dirty }
     }
     fn push(&mut self, c: Command) {
         if let Ok(inv) = c.clone().apply(self.s) {
@@ -150,11 +145,7 @@ pub fn instances_of_any(doc: &Document, comps: &[NodeId]) -> Vec<NodeId> {
         let c0 = comps[0];
         return doc.nodes.values().filter(|n| instance_component(n) == Some(c0)).map(|n| n.id).collect();
     }
-    doc.nodes
-        .values()
-        .filter(|n| instance_component(n).is_some_and(|c| comps.contains(&c)))
-        .map(|n| n.id)
-        .collect()
+    doc.nodes.values().filter(|n| instance_component(n).is_some_and(|c| comps.contains(&c))).map(|n| n.id).collect()
 }
 
 /// Components defined by `owner`: itself for a component, its variants for a set.
@@ -215,27 +206,18 @@ fn is_top(n: &Node) -> bool {
 /// override/binding on itself or its master component node, or bound to a `PropKind::Slot` property).
 pub fn is_slot_container(doc: &Document, id: NodeId) -> bool {
     let Some(n) = doc.get(id) else { return false };
-    if n.component.overrides.contains(&OverrideField::SlotContent)
-        || n.component.bindings.contains_key(&OverrideField::SlotContent)
-    {
+    if n.component.overrides.contains(&OverrideField::SlotContent) || n.component.bindings.contains_key(&OverrideField::SlotContent) {
         return true;
     }
     if let Some(src_id) = n.component.source {
         if let Some(src) = doc.get(src_id) {
-            if src.component.overrides.contains(&OverrideField::SlotContent)
-                || src.component.bindings.contains_key(&OverrideField::SlotContent)
-            {
+            if src.component.overrides.contains(&OverrideField::SlotContent) || src.component.bindings.contains_key(&OverrideField::SlotContent) {
                 return true;
             }
             if !src.component.bindings.is_empty() {
                 if let Some(comp) = enclosing_component(doc, src_id) {
                     let defs = prop_defs(doc, comp);
-                    if src
-                        .component
-                        .bindings
-                        .values()
-                        .any(|pname| defs.iter().any(|d| d.name == *pname && matches!(d.kind, PropKind::Slot)))
-                    {
+                    if src.component.bindings.values().any(|pname| defs.iter().any(|d| d.name == *pname && matches!(d.kind, PropKind::Slot))) {
                         return true;
                     }
                 }
@@ -245,11 +227,7 @@ pub fn is_slot_container(doc: &Document, id: NodeId) -> bool {
     if !n.component.bindings.is_empty() {
         if let Some(comp) = enclosing_component(doc, id) {
             let defs = prop_defs(doc, comp);
-            if n.component
-                .bindings
-                .values()
-                .any(|pname| defs.iter().any(|d| d.name == *pname && matches!(d.kind, PropKind::Slot)))
-            {
+            if n.component.bindings.values().any(|pname| defs.iter().any(|d| d.name == *pname && matches!(d.kind, PropKind::Slot))) {
                 return true;
             }
         }

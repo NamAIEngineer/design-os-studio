@@ -197,8 +197,7 @@ pub fn probe_figma_plist_at(plist_path: &Path) -> FigmaUpstreamStatus {
             parity_score_pct: VERIFIED_PARITY_SCORE_PCT,
         };
     };
-    let version = extract_plist_string(&xml, "CFBundleShortVersionString")
-        .or_else(|| extract_plist_string(&xml, "CFBundleVersion"));
+    let version = extract_plist_string(&xml, "CFBundleShortVersionString").or_else(|| extract_plist_string(&xml, "CFBundleVersion"));
     FigmaUpstreamStatus {
         figma_installed: version.is_some(),
         figma_version: version,
@@ -248,12 +247,7 @@ fn parse_semver(raw: &str) -> Option<ParsedSemver<'_>> {
     if parts.next().is_some() {
         return None;
     }
-    Some(ParsedSemver {
-        major,
-        minor,
-        patch,
-        pre,
-    })
+    Some(ParsedSemver { major, minor, patch, pre })
 }
 
 /// Returns `true` if `candidate` is strictly newer than `current` according to SemVer 2.0 rules.
@@ -284,22 +278,16 @@ pub fn is_newer_version(current: &str, candidate: &str) -> bool {
 // ─────────────────────────────────────────────────────────────────────────────
 
 const SHA256_K: [u32; 64] = [
-    0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
-    0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
-    0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
-    0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
-    0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
-    0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
-    0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
-    0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
+    0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5, 0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74,
+    0x80deb1fe, 0x9bdc06a7, 0xc19bf174, 0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da, 0x983e5152, 0xa831c66d,
+    0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967, 0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e,
+    0x92722c85, 0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070, 0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5,
+    0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3, 0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
 ];
 
 /// Computes the lowercase hex-encoded SHA-256 digest of `bytes` (FIPS 180-4).
 pub fn compute_sha256_hex(bytes: &[u8]) -> String {
-    let mut h: [u32; 8] = [
-        0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a,
-        0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19,
-    ];
+    let mut h: [u32; 8] = [0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19];
 
     let bit_len = (bytes.len() as u64).wrapping_mul(8);
     let mut padded = Vec::with_capacity(bytes.len() + 72);
@@ -318,10 +306,7 @@ pub fn compute_sha256_hex(bytes: &[u8]) -> String {
         for i in 16..64 {
             let s0 = w[i - 15].rotate_right(7) ^ w[i - 15].rotate_right(18) ^ (w[i - 15] >> 3);
             let s1 = w[i - 2].rotate_right(17) ^ w[i - 2].rotate_right(19) ^ (w[i - 2] >> 10);
-            w[i] = w[i - 16]
-                .wrapping_add(s0)
-                .wrapping_add(w[i - 7])
-                .wrapping_add(s1);
+            w[i] = w[i - 16].wrapping_add(s0).wrapping_add(w[i - 7]).wrapping_add(s1);
         }
 
         let mut a = h[0];
@@ -336,11 +321,7 @@ pub fn compute_sha256_hex(bytes: &[u8]) -> String {
         for i in 0..64 {
             let s1 = e.rotate_right(6) ^ e.rotate_right(11) ^ e.rotate_right(25);
             let ch = (e & f) ^ ((!e) & g);
-            let temp1 = hh
-                .wrapping_add(s1)
-                .wrapping_add(ch)
-                .wrapping_add(SHA256_K[i])
-                .wrapping_add(w[i]);
+            let temp1 = hh.wrapping_add(s1).wrapping_add(ch).wrapping_add(SHA256_K[i]).wrapping_add(w[i]);
             let s0 = a.rotate_right(2) ^ a.rotate_right(13) ^ a.rotate_right(22);
             let maj = (a & b) ^ (a & c) ^ (b & c);
             let temp2 = s0.wrapping_add(maj);
@@ -397,32 +378,22 @@ fn companion_path(target_bin: &Path, suffix: &str) -> PathBuf {
 /// into `<target_bin>`.
 ///
 /// Returns `Ok((staged_path, backup_path))` on success.
-pub fn stage_atomic_update(
-    target_bin: &Path,
-    new_bytes: &[u8],
-    expected_sha256: &str,
-) -> Result<(PathBuf, PathBuf), String> {
+pub fn stage_atomic_update(target_bin: &Path, new_bytes: &[u8], expected_sha256: &str) -> Result<(PathBuf, PathBuf), String> {
     let actual_sha = compute_sha256_hex(new_bytes);
     if !verify_artifact_sha256(new_bytes, expected_sha256) {
-        return Err(format!(
-            "SHA-256 digest mismatch: expected {}, got {}",
-            expected_sha256.trim(),
-            actual_sha
-        ));
+        return Err(format!("SHA-256 digest mismatch: expected {}, got {}", expected_sha256.trim(), actual_sha));
     }
 
     if let Some(parent) = target_bin.parent() {
         if !parent.as_os_str().is_empty() {
-            std::fs::create_dir_all(parent)
-                .map_err(|e| format!("Failed to create parent directory {}: {e}", parent.display()))?;
+            std::fs::create_dir_all(parent).map_err(|e| format!("Failed to create parent directory {}: {e}", parent.display()))?;
         }
     }
 
     let staged_path = companion_path(target_bin, ".staged");
     let backup_path = companion_path(target_bin, ".bak");
 
-    std::fs::write(&staged_path, new_bytes)
-        .map_err(|e| format!("Failed to write staged binary {}: {e}", staged_path.display()))?;
+    std::fs::write(&staged_path, new_bytes).map_err(|e| format!("Failed to write staged binary {}: {e}", staged_path.display()))?;
 
     #[cfg(unix)]
     {
@@ -432,25 +403,21 @@ pub fn stage_atomic_update(
     }
 
     if target_bin.exists() {
-        std::fs::copy(target_bin, &backup_path)
-            .map_err(|e| format!("Failed to create .bak backup {}: {e}", backup_path.display()))?;
+        std::fs::copy(target_bin, &backup_path).map_err(|e| format!("Failed to create .bak backup {}: {e}", backup_path.display()))?;
     } else {
-        std::fs::write(&backup_path, b"")
-            .map_err(|e| format!("Failed to initialize .bak backup {}: {e}", backup_path.display()))?;
+        std::fs::write(&backup_path, b"").map_err(|e| format!("Failed to initialize .bak backup {}: {e}", backup_path.display()))?;
     }
 
     // Keep a copy at `staged_path` for inspection while atomically replacing `target_bin`
     let swap_tmp = companion_path(target_bin, ".swap");
-    std::fs::copy(&staged_path, &swap_tmp)
-        .map_err(|e| format!("Failed to prepare atomic swap {}: {e}", swap_tmp.display()))?;
+    std::fs::copy(&staged_path, &swap_tmp).map_err(|e| format!("Failed to prepare atomic swap {}: {e}", swap_tmp.display()))?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         let perms = std::fs::Permissions::from_mode(0o755);
         let _ = std::fs::set_permissions(&swap_tmp, perms);
     }
-    std::fs::rename(&swap_tmp, target_bin)
-        .map_err(|e| format!("Atomic rename into {} failed: {e}", target_bin.display()))?;
+    std::fs::rename(&swap_tmp, target_bin).map_err(|e| format!("Atomic rename into {} failed: {e}", target_bin.display()))?;
 
     Ok((staged_path, backup_path))
 }
@@ -462,16 +429,14 @@ pub fn rollback_atomic_update(target_bin: &Path) -> Result<PathBuf, String> {
         return Err(format!("Backup binary not found at {}", backup_path.display()));
     }
     let rollback_tmp = companion_path(target_bin, ".rollback");
-    std::fs::copy(&backup_path, &rollback_tmp)
-        .map_err(|e| format!("Failed to stage rollback from {}: {e}", backup_path.display()))?;
+    std::fs::copy(&backup_path, &rollback_tmp).map_err(|e| format!("Failed to stage rollback from {}: {e}", backup_path.display()))?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         let perms = std::fs::Permissions::from_mode(0o755);
         let _ = std::fs::set_permissions(&rollback_tmp, perms);
     }
-    std::fs::rename(&rollback_tmp, target_bin)
-        .map_err(|e| format!("Failed to atomically restore {}: {e}", target_bin.display()))?;
+    std::fs::rename(&rollback_tmp, target_bin).map_err(|e| format!("Failed to atomically restore {}: {e}", target_bin.display()))?;
     Ok(backup_path)
 }
 
@@ -533,9 +498,7 @@ impl UpdaterState {
         let (_, current_binary_sha256, _) = inspect_current_binary_artifact();
         Self {
             channel: UpdateChannel::Stable,
-            phase: UpdatePhase::UpToDate {
-                checked_at: "Just now".to_string(),
-            },
+            phase: UpdatePhase::UpToDate { checked_at: "Just now".to_string() },
             upstream,
             modal_open: false,
             auto_check_enabled: true,
@@ -553,9 +516,7 @@ impl UpdaterState {
         if is_newer_version(CURRENT_VERSION, &candidate.version) {
             self.phase = UpdatePhase::UpdateAvailable(candidate);
         } else {
-            self.phase = UpdatePhase::UpToDate {
-                checked_at: "Just now".to_string(),
-            };
+            self.phase = UpdatePhase::UpToDate { checked_at: "Just now".to_string() };
         }
     }
 
@@ -575,11 +536,7 @@ impl UpdaterState {
         let payload = format!("designos-studio-{}-universal-apple-darwin", manifest.version);
         match stage_atomic_update(&target_bin, payload.as_bytes(), &manifest.sha256) {
             Ok((staged_path, backup_path)) => {
-                self.phase = UpdatePhase::StagedReadyToRestart {
-                    manifest,
-                    staged_path,
-                    backup_path,
-                };
+                self.phase = UpdatePhase::StagedReadyToRestart { manifest, staged_path, backup_path };
             }
             Err(err) => {
                 self.phase = UpdatePhase::Failed(err);
@@ -592,10 +549,7 @@ impl UpdaterState {
         let target_bin = self.sandbox_dir.join("designos");
         match rollback_atomic_update(&target_bin) {
             Ok(restored_from) => {
-                self.phase = UpdatePhase::RolledBack {
-                    restored_from,
-                    reason: "Restored previous verified binary (.bak)".to_string(),
-                };
+                self.phase = UpdatePhase::RolledBack { restored_from, reason: "Restored previous verified binary (.bak)".to_string() };
             }
             Err(err) => {
                 self.phase = UpdatePhase::Failed(err);
@@ -634,14 +588,7 @@ pub fn show_sidebar_card_in_rect(ui: &mut Ui, rect: Rect, state: &mut UpdaterSta
 
     // Right action icon button (`Check for updates` / open modal)
     let btn_r = Rect::from_min_size(Pos2::new(rect.right() - 24.0, rect.top() + 3.0), Vec2::splat(20.0));
-    let btn_resp = widgets::icon_button(
-        ui,
-        btn_r,
-        "home-check-updates",
-        Icon::Sparkle,
-        state.modal_open,
-        "Auto-Update & Figma Sync Watchdog",
-    );
+    let btn_resp = widgets::icon_button(ui, btn_r, "home-check-updates", Icon::Sparkle, state.modal_open, "Auto-Update & Figma Sync Watchdog");
     widgets::record(ui, "home-check-updates", btn_r);
 
     // Line 2: Upstream Figma.app & Kiwi v106 compatibility watchdog line
@@ -678,36 +625,20 @@ pub fn brand_wordmark_job(font_size: f32, bold_color: Color32, regular_color: Co
     job.append(
         ":os studio",
         0.0,
-        egui::TextFormat {
-            font_id: egui::FontId::new(font_size, egui::FontFamily::Proportional),
-            color: regular_color,
-            ..Default::default()
-        },
+        egui::TextFormat { font_id: egui::FontId::new(font_size, egui::FontFamily::Proportional), color: regular_color, ..Default::default() },
     );
     job
 }
 
 /// Paints the lowercase `design:os studio` brand wordmark (`DIR-12`: bold `"design"` + regular `":os studio"`)
 /// anchored at `left_center` (`Align2::LEFT_CENTER`) and returns the total painted width in logical pixels.
-pub fn paint_brand_wordmark(
-    p: &egui::Painter,
-    left_center: Pos2,
-    font_size: f32,
-    bold_color: Color32,
-    regular_color: Color32,
-) -> f32 {
+pub fn paint_brand_wordmark(p: &egui::Painter, left_center: Pos2, font_size: f32, bold_color: Color32, regular_color: Color32) -> f32 {
     let bold_font = egui::FontId::new(font_size, egui::FontFamily::Name(theme::FAMILY_STRONG.into()));
     let reg_font = egui::FontId::new(font_size, egui::FontFamily::Proportional);
     let design_w = widgets::text_width(p, "design", &bold_font);
     let rest_w = widgets::text_width(p, ":os studio", &reg_font);
     p.text(left_center, Align2::LEFT_CENTER, "design", bold_font, bold_color);
-    p.text(
-        Pos2::new(left_center.x + design_w, left_center.y),
-        Align2::LEFT_CENTER,
-        ":os studio",
-        reg_font,
-        regular_color,
-    );
+    p.text(Pos2::new(left_center.x + design_w, left_center.y), Align2::LEFT_CENTER, ":os studio", reg_font, regular_color);
     design_w + rest_w
 }
 
@@ -729,234 +660,216 @@ pub fn show_update_modal(ctx: &Context, state: &mut UpdaterState) {
     let modal_h = 410.0_f32.min(screen.height() - 32.0);
     let modal_rect = Rect::from_center_size(screen.center(), Vec2::new(modal_w, modal_h));
 
-    egui::Area::new(Id::new("updater-modal-backdrop"))
-        .order(egui::Order::Foreground)
-        .fixed_pos(screen.min)
-        .show(ctx, |ui| {
-            let p = ui.painter().clone();
-            p.rect_filled(screen, 0.0, Color32::from_black_alpha(150));
+    egui::Area::new(Id::new("updater-modal-backdrop")).order(egui::Order::Foreground).fixed_pos(screen.min).show(ctx, |ui| {
+        let p = ui.painter().clone();
+        p.rect_filled(screen, 0.0, Color32::from_black_alpha(150));
 
-            let bg_resp = ui.interact(screen, Id::new("updater-backdrop-hit"), Sense::click());
-            if bg_resp.clicked() && !ui.input(|i| i.pointer.interact_pos().is_some_and(|pos| modal_rect.contains(pos))) {
-                state.modal_open = false;
-            }
-        });
+        let bg_resp = ui.interact(screen, Id::new("updater-backdrop-hit"), Sense::click());
+        if bg_resp.clicked() && !ui.input(|i| i.pointer.interact_pos().is_some_and(|pos| modal_rect.contains(pos))) {
+            state.modal_open = false;
+        }
+    });
 
-    egui::Area::new(Id::new("updater-modal-card"))
-        .order(egui::Order::Tooltip)
-        .fixed_pos(modal_rect.min)
-        .show(ctx, |ui| {
-            let p = ui.painter().clone();
-            p.rect_filled(modal_rect, CornerRadius::same(10), UI3_BG_PANEL);
-            p.rect_stroke(modal_rect, CornerRadius::same(10), Stroke::new(1.0, UI3_BORDER), StrokeKind::Inside);
+    egui::Area::new(Id::new("updater-modal-card")).order(egui::Order::Tooltip).fixed_pos(modal_rect.min).show(ctx, |ui| {
+        let p = ui.painter().clone();
+        p.rect_filled(modal_rect, CornerRadius::same(10), UI3_BG_PANEL);
+        p.rect_stroke(modal_rect, CornerRadius::same(10), Stroke::new(1.0, UI3_BORDER), StrokeKind::Inside);
 
-            let x0 = modal_rect.left() + 20.0;
-            let w = modal_rect.width() - 40.0;
-            let mut y = modal_rect.top() + 18.0;
+        let x0 = modal_rect.left() + 20.0;
+        let w = modal_rect.width() - 40.0;
+        let mut y = modal_rect.top() + 18.0;
 
-            // Header (`DIR-12`: lowercase `design:os studio` with bold `design` + regular `:os studio`)
-            icons::paint(&p, Icon::Sparkle, Pos2::new(x0 + 8.0, y + 10.0), 16.0, UI3_BLUE);
-            let brand_w = paint_brand_wordmark(&p, Pos2::new(x0 + 24.0, y + 10.0), 13.0, theme::TEXT, theme::TEXT_SECONDARY);
-            p.text(
-                Pos2::new(x0 + 24.0 + brand_w + 6.0, y + 10.0),
-                Align2::LEFT_CENTER,
-                "\u{b7} Auto-Update & Upstream Figma Watchdog",
-                theme::font_body_strong(),
-                theme::TEXT,
+        // Header (`DIR-12`: lowercase `design:os studio` with bold `design` + regular `:os studio`)
+        icons::paint(&p, Icon::Sparkle, Pos2::new(x0 + 8.0, y + 10.0), 16.0, UI3_BLUE);
+        let brand_w = paint_brand_wordmark(&p, Pos2::new(x0 + 24.0, y + 10.0), 13.0, theme::TEXT, theme::TEXT_SECONDARY);
+        p.text(
+            Pos2::new(x0 + 24.0 + brand_w + 6.0, y + 10.0),
+            Align2::LEFT_CENTER,
+            "\u{b7} Auto-Update & Upstream Figma Watchdog",
+            theme::font_body_strong(),
+            theme::TEXT,
+        );
+        let close_r = Rect::from_min_size(Pos2::new(modal_rect.right() - 36.0, y - 2.0), Vec2::splat(24.0));
+        if widgets::icon_button(ui, close_r, "updater-modal-close", Icon::Minus, false, "Close").clicked() {
+            state.modal_open = false;
+        }
+        y += 30.0;
+        widgets::hline(&p, modal_rect.left(), modal_rect.right(), y, UI3_BORDER);
+        y += 14.0;
+
+        // Channel Selector strip (`Stable | Beta | Nightly`)
+        p.text(Pos2::new(x0, y + 13.0), Align2::LEFT_CENTER, "Release Channel", theme::font_body_strong(), theme::TEXT);
+        let mut cx = x0 + 130.0;
+        for ch in UpdateChannel::all() {
+            let active = state.channel == ch;
+            let pill_r = Rect::from_min_size(Pos2::new(cx, y), Vec2::new(72.0, 26.0));
+            let resp = ui.interact(pill_r, Id::new(("updater-channel", ch.label())), Sense::click());
+            p.rect_filled(
+                pill_r,
+                CornerRadius::same(6),
+                if active {
+                    UI3_BLUE
+                } else if resp.hovered() {
+                    UI3_BG_HOVER
+                } else {
+                    UI3_BG_CARD
+                },
             );
-            let close_r = Rect::from_min_size(Pos2::new(modal_rect.right() - 36.0, y - 2.0), Vec2::splat(24.0));
-            if widgets::icon_button(ui, close_r, "updater-modal-close", Icon::Minus, false, "Close").clicked() {
-                state.modal_open = false;
+            p.text(pill_r.center(), Align2::CENTER_CENTER, ch.label(), theme::font_small_strong(), if active { Color32::WHITE } else { theme::TEXT });
+            if resp.clicked() {
+                state.channel = ch;
+                state.check_for_updates();
             }
-            y += 30.0;
-            widgets::hline(&p, modal_rect.left(), modal_rect.right(), y, UI3_BORDER);
-            y += 14.0;
+            cx += 78.0;
+        }
+        y += 38.0;
 
-            // Channel Selector strip (`Stable | Beta | Nightly`)
-            p.text(
-                Pos2::new(x0, y + 13.0),
-                Align2::LEFT_CENTER,
-                "Release Channel",
-                theme::font_body_strong(),
-                theme::TEXT,
-            );
-            let mut cx = x0 + 130.0;
-            for ch in UpdateChannel::all() {
-                let active = state.channel == ch;
-                let pill_r = Rect::from_min_size(Pos2::new(cx, y), Vec2::new(72.0, 26.0));
-                let resp = ui.interact(pill_r, Id::new(("updater-channel", ch.label())), Sense::click());
-                p.rect_filled(
-                    pill_r,
-                    CornerRadius::same(6),
-                    if active { UI3_BLUE } else if resp.hovered() { UI3_BG_HOVER } else { UI3_BG_CARD },
-                );
+        // Layer 1 Card: Native App & CLI Atomic Self-Updater
+        let l1_rect = Rect::from_min_size(Pos2::new(x0, y), Vec2::new(w, 136.0));
+        p.rect_filled(l1_rect, CornerRadius::same(8), UI3_BG_CARD);
+        p.rect_stroke(l1_rect, CornerRadius::same(8), Stroke::new(1.0, UI3_BORDER), StrokeKind::Inside);
+
+        p.text(
+            Pos2::new(l1_rect.left() + 14.0, l1_rect.top() + 16.0),
+            Align2::LEFT_CENTER,
+            format!("Layer 1 \u{b7} Native Binary & CLI (Current: v{CURRENT_VERSION})"),
+            theme::font_body_strong(),
+            theme::TEXT,
+        );
+        p.text(
+            Pos2::new(l1_rect.left() + 14.0, l1_rect.top() + 34.0),
+            Align2::LEFT_CENTER,
+            widgets::elide(&p, &format!("Feed: {}", state.channel.feed_url()), &theme::font_small(), w - 28.0),
+            theme::font_small(),
+            theme::TEXT_SECONDARY,
+        );
+
+        match &state.phase {
+            UpdatePhase::UpdateAvailable(m) => {
                 p.text(
-                    pill_r.center(),
-                    Align2::CENTER_CENTER,
-                    ch.label(),
+                    Pos2::new(l1_rect.left() + 14.0, l1_rect.top() + 56.0),
+                    Align2::LEFT_CENTER,
+                    format!("New release v{} available \u{b7} SHA-256: {}…", m.version, &m.sha256[..12]),
                     theme::font_small_strong(),
-                    if active { Color32::WHITE } else { theme::TEXT },
+                    UI3_BLUE,
                 );
-                if resp.clicked() {
-                    state.channel = ch;
-                    state.check_for_updates();
-                }
-                cx += 78.0;
-            }
-            y += 38.0;
-
-            // Layer 1 Card: Native App & CLI Atomic Self-Updater
-            let l1_rect = Rect::from_min_size(Pos2::new(x0, y), Vec2::new(w, 136.0));
-            p.rect_filled(l1_rect, CornerRadius::same(8), UI3_BG_CARD);
-            p.rect_stroke(l1_rect, CornerRadius::same(8), Stroke::new(1.0, UI3_BORDER), StrokeKind::Inside);
-
-            p.text(
-                Pos2::new(l1_rect.left() + 14.0, l1_rect.top() + 16.0),
-                Align2::LEFT_CENTER,
-                format!("Layer 1 \u{b7} Native Binary & CLI (Current: v{CURRENT_VERSION})"),
-                theme::font_body_strong(),
-                theme::TEXT,
-            );
-            p.text(
-                Pos2::new(l1_rect.left() + 14.0, l1_rect.top() + 34.0),
-                Align2::LEFT_CENTER,
-                widgets::elide(&p, &format!("Feed: {}", state.channel.feed_url()), &theme::font_small(), w - 28.0),
-                theme::font_small(),
-                theme::TEXT_SECONDARY,
-            );
-
-            match &state.phase {
-                UpdatePhase::UpdateAvailable(m) => {
-                    p.text(
-                        Pos2::new(l1_rect.left() + 14.0, l1_rect.top() + 56.0),
-                        Align2::LEFT_CENTER,
-                        format!("New release v{} available \u{b7} SHA-256: {}…", m.version, &m.sha256[..12]),
-                        theme::font_small_strong(),
-                        UI3_BLUE,
-                    );
-                    if let Some(note) = m.release_notes.first() {
-                        p.text(
-                            Pos2::new(l1_rect.left() + 14.0, l1_rect.top() + 74.0),
-                            Align2::LEFT_CENTER,
-                            widgets::elide(&p, note, &theme::font_small(), w - 28.0),
-                            theme::font_small(),
-                            theme::TEXT_SECONDARY,
-                        );
-                    }
-                }
-                UpdatePhase::StagedReadyToRestart { manifest, staged_path, .. } => {
-                    p.text(
-                        Pos2::new(l1_rect.left() + 14.0, l1_rect.top() + 56.0),
-                        Align2::LEFT_CENTER,
-                        format!("Verified SHA-256 & staged v{} (.bak backup ready)", manifest.version),
-                        theme::font_small_strong(),
-                        UI3_EMERALD,
-                    );
+                if let Some(note) = m.release_notes.first() {
                     p.text(
                         Pos2::new(l1_rect.left() + 14.0, l1_rect.top() + 74.0),
                         Align2::LEFT_CENTER,
-                        widgets::elide(&p, &format!("Staged: {}", staged_path.display()), &theme::font_small(), w - 28.0),
+                        widgets::elide(&p, note, &theme::font_small(), w - 28.0),
                         theme::font_small(),
                         theme::TEXT_SECONDARY,
                     );
                 }
-                UpdatePhase::RolledBack { reason, .. } => {
-                    p.text(
-                        Pos2::new(l1_rect.left() + 14.0, l1_rect.top() + 56.0),
-                        Align2::LEFT_CENTER,
-                        reason,
-                        theme::font_small_strong(),
-                        UI3_AMBER,
-                    );
-                }
-                UpdatePhase::Failed(err) => {
-                    p.text(
-                        Pos2::new(l1_rect.left() + 14.0, l1_rect.top() + 56.0),
-                        Align2::LEFT_CENTER,
-                        widgets::elide(&p, err, &theme::font_small_strong(), w - 28.0),
-                        theme::font_small_strong(),
-                        UI3_RED,
-                    );
-                }
-                _ => {
-                    p.text(
-                        Pos2::new(l1_rect.left() + 14.0, l1_rect.top() + 56.0),
-                        Align2::LEFT_CENTER,
-                        "Binary is up to date \u{b7} Atomic staging & .bak rollback active",
-                        theme::font_small(),
-                        UI3_EMERALD,
-                    );
-                }
             }
-
-            // Action buttons inside Layer 1 card
-            let btn_y = l1_rect.bottom() - 36.0;
-            let check_r = Rect::from_min_size(Pos2::new(l1_rect.left() + 14.0, btn_y), Vec2::new(136.0, 26.0));
-            let check_resp = ui.interact(check_r, Id::new("updater-btn-check"), Sense::click());
-            p.rect_filled(check_r, CornerRadius::same(6), if check_resp.hovered() { UI3_BG_HOVER } else { UI3_BG_PANEL });
-            p.rect_stroke(check_r, CornerRadius::same(6), Stroke::new(1.0, UI3_BORDER), StrokeKind::Inside);
-            p.text(check_r.center(), Align2::CENTER_CENTER, "Check for Updates", theme::font_small_strong(), theme::TEXT);
-            if check_resp.clicked() {
-                state.check_for_updates();
+            UpdatePhase::StagedReadyToRestart { manifest, staged_path, .. } => {
+                p.text(
+                    Pos2::new(l1_rect.left() + 14.0, l1_rect.top() + 56.0),
+                    Align2::LEFT_CENTER,
+                    format!("Verified SHA-256 & staged v{} (.bak backup ready)", manifest.version),
+                    theme::font_small_strong(),
+                    UI3_EMERALD,
+                );
+                p.text(
+                    Pos2::new(l1_rect.left() + 14.0, l1_rect.top() + 74.0),
+                    Align2::LEFT_CENTER,
+                    widgets::elide(&p, &format!("Staged: {}", staged_path.display()), &theme::font_small(), w - 28.0),
+                    theme::font_small(),
+                    theme::TEXT_SECONDARY,
+                );
             }
-
-            let stage_r = Rect::from_min_size(Pos2::new(check_r.right() + 8.0, btn_y), Vec2::new(154.0, 26.0));
-            let stage_resp = ui.interact(stage_r, Id::new("updater-btn-stage"), Sense::click());
-            p.rect_filled(stage_r, CornerRadius::same(6), UI3_BLUE);
-            p.text(stage_r.center(), Align2::CENTER_CENTER, "Stage Atomic Update", theme::font_small_strong(), Color32::WHITE);
-            if stage_resp.clicked() {
-                state.stage_available_update();
+            UpdatePhase::RolledBack { reason, .. } => {
+                p.text(Pos2::new(l1_rect.left() + 14.0, l1_rect.top() + 56.0), Align2::LEFT_CENTER, reason, theme::font_small_strong(), UI3_AMBER);
             }
-
-            let rb_r = Rect::from_min_size(Pos2::new(stage_r.right() + 8.0, btn_y), Vec2::new(118.0, 26.0));
-            let rb_resp = ui.interact(rb_r, Id::new("updater-btn-rollback"), Sense::click());
-            p.rect_filled(rb_r, CornerRadius::same(6), if rb_resp.hovered() { UI3_BG_HOVER } else { UI3_BG_PANEL });
-            p.rect_stroke(rb_r, CornerRadius::same(6), Stroke::new(1.0, UI3_BORDER), StrokeKind::Inside);
-            p.text(rb_r.center(), Align2::CENTER_CENTER, "Rollback (.bak)", theme::font_small_strong(), theme::TEXT);
-            if rb_resp.clicked() {
-                state.trigger_rollback();
+            UpdatePhase::Failed(err) => {
+                p.text(
+                    Pos2::new(l1_rect.left() + 14.0, l1_rect.top() + 56.0),
+                    Align2::LEFT_CENTER,
+                    widgets::elide(&p, err, &theme::font_small_strong(), w - 28.0),
+                    theme::font_small_strong(),
+                    UI3_RED,
+                );
             }
+            _ => {
+                p.text(
+                    Pos2::new(l1_rect.left() + 14.0, l1_rect.top() + 56.0),
+                    Align2::LEFT_CENTER,
+                    "Binary is up to date \u{b7} Atomic staging & .bak rollback active",
+                    theme::font_small(),
+                    UI3_EMERALD,
+                );
+            }
+        }
 
-            y += 148.0;
+        // Action buttons inside Layer 1 card
+        let btn_y = l1_rect.bottom() - 36.0;
+        let check_r = Rect::from_min_size(Pos2::new(l1_rect.left() + 14.0, btn_y), Vec2::new(136.0, 26.0));
+        let check_resp = ui.interact(check_r, Id::new("updater-btn-check"), Sense::click());
+        p.rect_filled(check_r, CornerRadius::same(6), if check_resp.hovered() { UI3_BG_HOVER } else { UI3_BG_PANEL });
+        p.rect_stroke(check_r, CornerRadius::same(6), Stroke::new(1.0, UI3_BORDER), StrokeKind::Inside);
+        p.text(check_r.center(), Align2::CENTER_CENTER, "Check for Updates", theme::font_small_strong(), theme::TEXT);
+        if check_resp.clicked() {
+            state.check_for_updates();
+        }
 
-            // Layer 2 Card: Upstream `/Applications/Figma.app` & `.fig` Kiwi Schema Watchdog
-            let l2_rect = Rect::from_min_size(Pos2::new(x0, y), Vec2::new(w, 118.0));
-            p.rect_filled(l2_rect, CornerRadius::same(8), UI3_BG_CARD);
-            p.rect_stroke(l2_rect, CornerRadius::same(8), Stroke::new(1.0, UI3_BORDER), StrokeKind::Inside);
+        let stage_r = Rect::from_min_size(Pos2::new(check_r.right() + 8.0, btn_y), Vec2::new(154.0, 26.0));
+        let stage_resp = ui.interact(stage_r, Id::new("updater-btn-stage"), Sense::click());
+        p.rect_filled(stage_r, CornerRadius::same(6), UI3_BLUE);
+        p.text(stage_r.center(), Align2::CENTER_CENTER, "Stage Atomic Update", theme::font_small_strong(), Color32::WHITE);
+        if stage_resp.clicked() {
+            state.stage_available_update();
+        }
 
-            p.text(
-                Pos2::new(l2_rect.left() + 14.0, l2_rect.top() + 16.0),
-                Align2::LEFT_CENTER,
-                "Layer 2 \u{b7} Upstream Figma.app & .fig Kiwi Schema Watchdog",
-                theme::font_body_strong(),
-                theme::TEXT,
-            );
-            let fig_ver = state.upstream.figma_version.as_deref().unwrap_or("Not detected (/Applications/Figma.app)");
-            p.text(
-                Pos2::new(l2_rect.left() + 14.0, l2_rect.top() + 40.0),
-                Align2::LEFT_CENTER,
-                format!("Local Figma.app Version: {fig_ver} (probed via Info.plist without app launch)"),
-                theme::font_small(),
-                theme::TEXT_SECONDARY,
-            );
-            p.text(
-                Pos2::new(l2_rect.left() + 14.0, l2_rect.top() + 62.0),
-                Align2::LEFT_CENTER,
-                format!(
-                    "Supported .fig Kiwi Container Schema: v{} \u{b7} 1:1 UI3 Parity Score: {:.1}%",
-                    state.upstream.supported_kiwi_version, state.upstream.parity_score_pct
-                ),
-                theme::font_small_strong(),
-                UI3_EMERALD,
-            );
-            p.text(
-                Pos2::new(l2_rect.left() + 14.0, l2_rect.top() + 86.0),
-                Align2::LEFT_CENTER,
-                "CLI: `designos update --check` \u{b7} `designos update --apply` \u{b7} `designos update --rollback`",
-                theme::font_small(),
-                theme::TEXT_SECONDARY,
-            );
-        });
+        let rb_r = Rect::from_min_size(Pos2::new(stage_r.right() + 8.0, btn_y), Vec2::new(118.0, 26.0));
+        let rb_resp = ui.interact(rb_r, Id::new("updater-btn-rollback"), Sense::click());
+        p.rect_filled(rb_r, CornerRadius::same(6), if rb_resp.hovered() { UI3_BG_HOVER } else { UI3_BG_PANEL });
+        p.rect_stroke(rb_r, CornerRadius::same(6), Stroke::new(1.0, UI3_BORDER), StrokeKind::Inside);
+        p.text(rb_r.center(), Align2::CENTER_CENTER, "Rollback (.bak)", theme::font_small_strong(), theme::TEXT);
+        if rb_resp.clicked() {
+            state.trigger_rollback();
+        }
+
+        y += 148.0;
+
+        // Layer 2 Card: Upstream `/Applications/Figma.app` & `.fig` Kiwi Schema Watchdog
+        let l2_rect = Rect::from_min_size(Pos2::new(x0, y), Vec2::new(w, 118.0));
+        p.rect_filled(l2_rect, CornerRadius::same(8), UI3_BG_CARD);
+        p.rect_stroke(l2_rect, CornerRadius::same(8), Stroke::new(1.0, UI3_BORDER), StrokeKind::Inside);
+
+        p.text(
+            Pos2::new(l2_rect.left() + 14.0, l2_rect.top() + 16.0),
+            Align2::LEFT_CENTER,
+            "Layer 2 \u{b7} Upstream Figma.app & .fig Kiwi Schema Watchdog",
+            theme::font_body_strong(),
+            theme::TEXT,
+        );
+        let fig_ver = state.upstream.figma_version.as_deref().unwrap_or("Not detected (/Applications/Figma.app)");
+        p.text(
+            Pos2::new(l2_rect.left() + 14.0, l2_rect.top() + 40.0),
+            Align2::LEFT_CENTER,
+            format!("Local Figma.app Version: {fig_ver} (probed via Info.plist without app launch)"),
+            theme::font_small(),
+            theme::TEXT_SECONDARY,
+        );
+        p.text(
+            Pos2::new(l2_rect.left() + 14.0, l2_rect.top() + 62.0),
+            Align2::LEFT_CENTER,
+            format!(
+                "Supported .fig Kiwi Container Schema: v{} \u{b7} 1:1 UI3 Parity Score: {:.1}%",
+                state.upstream.supported_kiwi_version, state.upstream.parity_score_pct
+            ),
+            theme::font_small_strong(),
+            UI3_EMERALD,
+        );
+        p.text(
+            Pos2::new(l2_rect.left() + 14.0, l2_rect.top() + 86.0),
+            Align2::LEFT_CENTER,
+            "CLI: `designos update --check` \u{b7} `designos update --apply` \u{b7} `designos update --rollback`",
+            theme::font_small(),
+            theme::TEXT_SECONDARY,
+        );
+    });
 }
 
 #[cfg(test)]
@@ -980,10 +893,7 @@ mod tests {
         assert_eq!(job.sections.len(), 2);
         assert!(job.text.starts_with("design"));
         assert!(job.text.ends_with(":os studio"));
-        assert_eq!(
-            job.sections[0].format.font_id.family,
-            egui::FontFamily::Name(theme::FAMILY_STRONG.into())
-        );
+        assert_eq!(job.sections[0].format.font_id.family, egui::FontFamily::Name(theme::FAMILY_STRONG.into()));
         assert_eq!(job.sections[1].format.font_id.family, egui::FontFamily::Proportional);
     }
 
@@ -1000,22 +910,10 @@ mod tests {
 
     #[test]
     fn computes_nist_sha256_vectors_and_verifies_artifacts() {
-        assert_eq!(
-            compute_sha256_hex(b""),
-            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
-        );
-        assert_eq!(
-            compute_sha256_hex(b"abc"),
-            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
-        );
-        assert!(verify_artifact_sha256(
-            b"abc",
-            "BA7816BF8F01CFEA414140DE5DAE2223B00361A396177A9CB410FF61F20015AD"
-        ));
-        assert!(!verify_artifact_sha256(
-            b"abc",
-            "0000000000000000000000000000000000000000000000000000000000000000"
-        ));
+        assert_eq!(compute_sha256_hex(b""), "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855");
+        assert_eq!(compute_sha256_hex(b"abc"), "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
+        assert!(verify_artifact_sha256(b"abc", "BA7816BF8F01CFEA414140DE5DAE2223B00361A396177A9CB410FF61F20015AD"));
+        assert!(!verify_artifact_sha256(b"abc", "0000000000000000000000000000000000000000000000000000000000000000"));
     }
 
     #[test]
@@ -1028,11 +926,7 @@ mod tests {
         let valid_sha = compute_sha256_hex(new_payload);
 
         // 1. Reject mismatched SHA-256 and leave original binary untouched
-        let bad_res = stage_atomic_update(
-            &bin_path,
-            new_payload,
-            "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
-        );
+        let bad_res = stage_atomic_update(&bin_path, new_payload, "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff");
         assert!(bad_res.is_err());
         assert_eq!(std::fs::read(&bin_path).unwrap(), b"designos-v0.1.0-original");
 

@@ -39,22 +39,13 @@ pub fn show(app: &mut App, ui: &mut Ui, rect: Rect) {
     icons::paint(&p, Icon::ChevronDown, Pos2::new(av_center.x + 17.0, av_center.y), theme::CHEVRON_SMALL, theme::ICON_SECONDARY);
     if av_resp.on_hover_text(format!("Active user: {active_user}")).clicked() {
         let doc_title = if app.doc.name.is_empty() { "Untitled" } else { &app.doc.name };
-        let stats = format!(
-            "User: {} · Doc: {} ({} pages, {} nodes)",
-            active_user,
-            doc_title,
-            app.doc.pages.len(),
-            app.doc.nodes.len()
-        );
+        let stats = format!("User: {} · Doc: {} ({} pages, {} nodes)", active_user, doc_title, app.doc.pages.len(), app.doc.nodes.len());
         ui.ctx().copy_text(stats.clone());
         app.show_toast(stats, false);
     }
 
     // Present button + chevron (24px height, aligned with Share button).
-    let pb = Rect::from_min_size(
-        Pos2::new(right - theme::RIGHT_PRESENT_FROM_RIGHT - 46.0, rect.top() + theme::RIGHT_BTN_Y),
-        Vec2::splat(top_btn_h),
-    );
+    let pb = Rect::from_min_size(Pos2::new(right - theme::RIGHT_PRESENT_FROM_RIGHT - 46.0, rect.top() + theme::RIGHT_BTN_Y), Vec2::splat(top_btn_h));
     let pr = ui.interact(pb, ui.id().with("present"), Sense::click());
     widgets::button_bg(&p, pb, &pr, false, theme::cr_each(theme::RADIUS_MEDIUM, 0, 0, theme::RADIUS_MEDIUM));
     icons::paint(&p, Icon::Play, pb.center(), 14.0, theme::ICON);
@@ -69,16 +60,9 @@ pub fn show(app: &mut App, ui: &mut Ui, rect: Rect) {
     }
 
     // Share button at far right (aligned on the same y = RIGHT_BTN_Y and 24px height as Present).
-    let share_r = Rect::from_min_size(
-        Pos2::new(right - theme::RIGHT_PRESENT_FROM_RIGHT, rect.top() + theme::RIGHT_BTN_Y),
-        Vec2::new(48.0, top_btn_h),
-    );
+    let share_r = Rect::from_min_size(Pos2::new(right - theme::RIGHT_PRESENT_FROM_RIGHT, rect.top() + theme::RIGHT_BTN_Y), Vec2::new(48.0, top_btn_h));
     let share_resp = ui.interact(share_r, ui.id().with("share-btn"), Sense::click());
-    let share_col = if app.ui.dev_mode {
-        egui::Color32::from_rgb(0x1B, 0xC4, 0x7D)
-    } else {
-        egui::Color32::from_rgb(0x0D, 0x99, 0xFF)
-    };
+    let share_col = if app.ui.dev_mode { egui::Color32::from_rgb(0x1B, 0xC4, 0x7D) } else { egui::Color32::from_rgb(0x0D, 0x99, 0xFF) };
     p.rect_filled(share_r, egui::CornerRadius::same(6), if share_resp.hovered() { share_col.gamma_multiply(1.1) } else { share_col });
     p.text(share_r.center(), Align2::CENTER_CENTER, "Share", theme::font_body_strong(), egui::Color32::WHITE);
     crate::widgets::record(ui, "share-button", share_r);
@@ -183,11 +167,7 @@ pub fn show(app: &mut App, ui: &mut Ui, rect: Rect) {
     hp.circle_filled(
         help_center,
         14.0,
-        if help_resp.hovered() {
-            egui::Color32::from_rgb(0x38, 0x38, 0x38)
-        } else {
-            egui::Color32::from_rgb(0x2C, 0x2C, 0x2C)
-        },
+        if help_resp.hovered() { egui::Color32::from_rgb(0x38, 0x38, 0x38) } else { egui::Color32::from_rgb(0x2C, 0x2C, 0x2C) },
     );
     hp.circle_stroke(help_center, 14.0, egui::Stroke::new(1.0, egui::Color32::from_rgb(0x38, 0x38, 0x38)));
     icons::paint(hp, Icon::Help, help_center, 14.0, egui::Color32::from_rgb(0xB3, 0xB3, 0xB3));
@@ -203,13 +183,7 @@ fn show_dev_plugins_inspector(app: &mut App, ui: &mut Ui, region: Rect) {
     let mut y = region.top() + 14.0;
     let w = (region.width() - pad * 2.0).max(80.0);
 
-    p.text(
-        Pos2::new(region.left() + pad, y),
-        Align2::LEFT_CENTER,
-        "Dev Mode Plugins & Codegen",
-        theme::font_body_strong(),
-        theme::TEXT,
-    );
+    p.text(Pos2::new(region.left() + pad, y), Align2::LEFT_CENTER, "Dev Mode Plugins & Codegen", theme::font_body_strong(), theme::TEXT);
     y += 22.0;
 
     let builtins = [
@@ -222,11 +196,7 @@ fn show_dev_plugins_inspector(app: &mut App, ui: &mut Ui, region: Rect) {
         let row_r = Rect::from_min_size(Pos2::new(region.left() + pad, y), Vec2::new(w, 40.0));
         widgets::record(ui, &format!("dev-plugin-builtin-{idx}"), row_r);
         let resp = ui.interact(row_r, ui.id().with(("dev-plugin-builtin", idx)), Sense::click());
-        p.rect_filled(
-            row_r,
-            theme::cr(6),
-            if resp.hovered() { theme::BG_TERTIARY } else { theme::BG_SECONDARY },
-        );
+        p.rect_filled(row_r, theme::cr(6), if resp.hovered() { theme::BG_TERTIARY } else { theme::BG_SECONDARY });
         icons::paint(&p, Icon::Dev, Pos2::new(row_r.left() + 14.0, row_r.center().y), 14.0, egui::Color32::from_rgb(0x1B, 0xC4, 0x7D));
         p.text(Pos2::new(row_r.left() + 28.0, row_r.top() + 13.0), Align2::LEFT_CENTER, *title, theme::font_body_strong(), theme::TEXT);
         p.text(Pos2::new(row_r.left() + 28.0, row_r.top() + 28.0), Align2::LEFT_CENTER, *subtitle, theme::font_small(), theme::TEXT_SECONDARY);
@@ -262,7 +232,9 @@ fn show_dev_plugins_inspector(app: &mut App, ui: &mut Ui, region: Rect) {
                         .doc
                         .nodes
                         .values()
-                        .filter(|n| matches!(n.kind, designos_doc::NodeKind::Frame(_) | designos_doc::NodeKind::Component(_)) && (n.size.x < 44.0 || n.size.y < 44.0))
+                        .filter(|n| {
+                            matches!(n.kind, designos_doc::NodeKind::Frame(_) | designos_doc::NodeKind::Component(_)) && (n.size.x < 44.0 || n.size.y < 44.0)
+                        })
                         .count();
                     let report = format!("Design Gate A11y Audit: {} nodes checked, {} <44pt targets", app.doc.nodes.len(), small_targets);
                     ui.ctx().copy_text(report.clone());
@@ -296,11 +268,7 @@ fn show_dev_plugins_inspector(app: &mut App, ui: &mut Ui, region: Rect) {
     p.rect_filled(
         open_r,
         theme::cr(6),
-        if open_resp.hovered() {
-            egui::Color32::from_rgb(0x1B, 0xC4, 0x7D).gamma_multiply(1.1)
-        } else {
-            egui::Color32::from_rgb(0x1B, 0xC4, 0x7D)
-        },
+        if open_resp.hovered() { egui::Color32::from_rgb(0x1B, 0xC4, 0x7D).gamma_multiply(1.1) } else { egui::Color32::from_rgb(0x1B, 0xC4, 0x7D) },
     );
     p.text(open_r.center(), Align2::CENTER_CENTER, "Manage & Run Plugins\u{2026}", theme::font_body_strong(), egui::Color32::WHITE);
     if open_resp.clicked() {
@@ -336,15 +304,9 @@ mod tests {
         let ctx = egui::Context::default();
         theme::install_fonts(&ctx);
         let screen = Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 800.0));
-        let _ = ctx.run_ui(
-            egui::RawInput {
-                screen_rect: Some(screen),
-                ..Default::default()
-            },
-            |ui| {
-                show(&mut app, ui, screen);
-            },
-        );
+        let _ = ctx.run_ui(egui::RawInput { screen_rect: Some(screen), ..Default::default() }, |ui| {
+            show(&mut app, ui, screen);
+        });
         let get_rect = |name: &str| ctx.data(|d| d.get_temp::<Rect>(egui::Id::new(("test-rect", name.to_string()))));
         let open_btn = get_rect("dev-plugins-open-modal").expect("dev-plugins-open-modal rect");
         let share_btn = get_rect("right-top-share").expect("right-top-share rect");
@@ -393,10 +355,7 @@ mod tests {
                 |ui| show(&mut app, ui, screen),
             );
         }
-        assert!(
-            app.toast.as_ref().is_some_and(|t| t.text.contains("designos://open?doc=")),
-            "Share button must build and toast a real designos://open URI"
-        );
+        assert!(app.toast.as_ref().is_some_and(|t| t.text.contains("designos://open?doc=")), "Share button must build and toast a real designos://open URI");
 
         // Click Avatar button
         for down in [true, false] {
@@ -444,5 +403,3 @@ mod tests {
         assert!(app.dialog.is_some(), "Help button must open keyboard shortcuts dialog");
     }
 }
-
-

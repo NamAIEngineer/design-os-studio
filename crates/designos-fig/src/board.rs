@@ -52,16 +52,12 @@ fn board_text_props(v: &Value, base: TextProps) -> TextProps {
 
 fn shape_from_name(s: &str) -> ShapeKind {
     match s {
-        "ROUNDED_RECTANGLE" | "SPEECH_BUBBLE" | "ENG_FOLDER" | "ENG_FILE" | "DOCUMENT_SINGLE" | "DOCUMENT_MULTIPLE" => {
-            ShapeKind::RoundedRect
-        }
+        "ROUNDED_RECTANGLE" | "SPEECH_BUBBLE" | "ENG_FOLDER" | "ENG_FILE" | "DOCUMENT_SINGLE" | "DOCUMENT_MULTIPLE" => ShapeKind::RoundedRect,
         "ELLIPSE" | "ENG_DATABASE" | "ENG_QUEUE" | "SUMMING_JUNCTION" | "OR" => ShapeKind::Ellipse,
         "DIAMOND" | "SHIELD" => ShapeKind::Diamond,
         "TRIANGLE_UP" => ShapeKind::Triangle,
         "TRIANGLE_DOWN" => ShapeKind::TriangleDown,
-        "PARALLELOGRAM_RIGHT" | "PARALLELOGRAM_LEFT" | "PARALLELOGRAM" | "TRAPEZOID" | "MANUAL_INPUT" => {
-            ShapeKind::Parallelogram
-        }
+        "PARALLELOGRAM_RIGHT" | "PARALLELOGRAM_LEFT" | "PARALLELOGRAM" | "TRAPEZOID" | "MANUAL_INPUT" => ShapeKind::Parallelogram,
         "STAR" | "PLUS" => ShapeKind::Star,
         "HEXAGON" | "OCTAGON" | "CHEVRON" | "ARROW_LEFT" | "ARROW_RIGHT" => ShapeKind::Hexagon,
         "PENTAGON" => ShapeKind::Pentagon,

@@ -31,8 +31,7 @@ pub const TOP_TITLE_BAR_HEIGHT: f32 = 28.0;
 
 #[allow(dead_code)]
 pub fn is_typing_in_agent_panel(app: &App, ctx: &Context) -> bool {
-    let agent_rail_open =
-        !app.ui.left_collapsed && matches!(app.ui.rail, Some(crate::app::RailItem::Agents | crate::app::RailItem::Tools));
+    let agent_rail_open = !app.ui.left_collapsed && matches!(app.ui.rail, Some(crate::app::RailItem::Agents | crate::app::RailItem::Tools));
     ctx.egui_wants_keyboard_input() || app.terminal.is_capturing_keyboard(agent_rail_open)
 }
 
@@ -261,16 +260,16 @@ impl Shell {
                 app.vars.full = panel == "variables";
                 app.open_variables();
             }
-            Some(p @ (
-                "micro-autolayout"
+            Some(
+                p @ ("micro-autolayout"
                 | "micro-css-grid"
                 | "micro-smart-selection"
                 | "micro-shape-controls"
                 | "micro-vector-edit"
                 | "micro-layer-picker"
                 | "micro-dev-boxmodel"
-                | "micro-scale-tool"
-            )) => {
+                | "micro-scale-tool"),
+            ) => {
                 apply_micro_interaction_showcase_preset(&mut app, p);
             }
             Some(spec) => {
@@ -337,8 +336,7 @@ impl Shell {
         if self.app.plugins.open || self.app.dialog.is_some() || self.app.history.save_modal.is_some() || self.app.dev.compare.is_some() {
             return;
         }
-        let agent_rail_open =
-            !self.app.ui.left_collapsed && matches!(self.app.ui.rail, Some(crate::app::RailItem::Agents | crate::app::RailItem::Tools));
+        let agent_rail_open = !self.app.ui.left_collapsed && matches!(self.app.ui.rail, Some(crate::app::RailItem::Agents | crate::app::RailItem::Tools));
         let capturing_terminal = self.app.terminal.is_capturing_keyboard(agent_rail_open);
         if capturing_terminal {
             return;
@@ -353,8 +351,7 @@ impl Shell {
             return;
         }
         let editing_text = self.app.canvas.text.is_some();
-        let eyedropper_active = self.app.props.eyedropper.is_some()
-            || self.app.props.picker.as_ref().is_some_and(|pk| pk.eyedrop);
+        let eyedropper_active = self.app.props.eyedropper.is_some() || self.app.props.picker.as_ref().is_some_and(|pk| pk.eyedrop);
         if typing && !editing_text && !eyedropper_active {
             return;
         }
@@ -393,11 +390,8 @@ impl Shell {
     /// - `Alt + ArrowLeft / ArrowRight`: letter spacing `±0.5px` (`Shift` -> `±2.0px`)
     fn try_typography_shortcut(&mut self, key: Key, m: egui::Modifiers) -> bool {
         let app = &mut self.app;
-        let has_text = app.canvas.text.is_some()
-            || app
-                .selection
-                .iter()
-                .any(|id| app.doc.get(*id).is_some_and(|n| matches!(n.kind, designos_doc::NodeKind::Text(_))));
+        let has_text =
+            app.canvas.text.is_some() || app.selection.iter().any(|id| app.doc.get(*id).is_some_and(|n| matches!(n.kind, designos_doc::NodeKind::Text(_))));
         if !has_text {
             return false;
         }
@@ -436,8 +430,7 @@ impl Shell {
                 Key::ArrowUp | Key::ArrowDown => {
                     let step = if m.shift { 10.0 } else { 1.0 } * if key == Key::ArrowUp { 1.0 } else { -1.0 };
                     crate::panels::typography::set_style(app, &sel, |st| {
-                        let base_px = crate::richtext::line_height_px(st.line_height, st.font_size)
-                            .unwrap_or_else(|| (st.font_size * 1.2).round());
+                        let base_px = crate::richtext::line_height_px(st.line_height, st.font_size).unwrap_or_else(|| (st.font_size * 1.2).round());
                         st.line_height = designos_doc::LineHeight::Pixels((base_px + step).max(1.0));
                     });
                     return true;
@@ -692,16 +685,7 @@ impl Shell {
             Key::End if !m.alt => app.step_frame(true, false),
             Key::PageUp => app.step_page(false),
             Key::PageDown => app.step_page(true),
-            Key::Num0
-            | Key::Num1
-            | Key::Num2
-            | Key::Num3
-            | Key::Num4
-            | Key::Num5
-            | Key::Num6
-            | Key::Num7
-            | Key::Num8
-            | Key::Num9
+            Key::Num0 | Key::Num1 | Key::Num2 | Key::Num3 | Key::Num4 | Key::Num5 | Key::Num6 | Key::Num7 | Key::Num8 | Key::Num9
                 if !m.shift && !m.alt && !app.selection.is_empty() =>
             {
                 let digit = match key {
@@ -899,15 +883,10 @@ impl Shell {
         let window_full = ui.max_rect();
         let show_title_bar = self.app.tabs.always_visible && self.shot.is_none() && self.app.proto.present.is_none();
         let after_title_rect = if show_title_bar {
-            let title_bar_rect =
-                Rect::from_min_max(window_full.min, Pos2::new(window_full.right(), window_full.top() + TOP_TITLE_BAR_HEIGHT));
+            let title_bar_rect = Rect::from_min_max(window_full.min, Pos2::new(window_full.right(), window_full.top() + TOP_TITLE_BAR_HEIGHT));
             let tp = ui.painter_at(title_bar_rect);
             tp.rect_filled(title_bar_rect, 0.0, egui::Color32::from_rgb(0x18, 0x18, 0x1B));
-            tp.hline(
-                title_bar_rect.x_range(),
-                title_bar_rect.bottom() - 0.5,
-                egui::Stroke::new(1.0, egui::Color32::from_rgb(0x27, 0x27, 0x2A)),
-            );
+            tp.hline(title_bar_rect.x_range(), title_bar_rect.bottom() - 0.5, egui::Stroke::new(1.0, egui::Color32::from_rgb(0x27, 0x27, 0x2A)));
             let cy = title_bar_rect.center().y;
             let x = title_bar_rect.left() + 76.0;
             let font_bold = theme::font_body_strong();
@@ -930,7 +909,8 @@ impl Shell {
         };
         let show_tab_bar = self.app.tabs.is_bar_visible(self.app.home.is_some()) && self.app.proto.present.is_none();
         let full = if show_tab_bar {
-            let bar_rect = Rect::from_min_max(after_title_rect.min, Pos2::new(after_title_rect.right(), after_title_rect.top() + crate::tabs::TOP_TAB_BAR_HEIGHT));
+            let bar_rect =
+                Rect::from_min_max(after_title_rect.min, Pos2::new(after_title_rect.right(), after_title_rect.top() + crate::tabs::TOP_TAB_BAR_HEIGHT));
             crate::tabs::show_top_tab_bar_ui(ui, bar_rect, &mut self.app);
             Rect::from_min_max(Pos2::new(after_title_rect.left(), bar_rect.bottom()), after_title_rect.max)
         } else {
@@ -967,11 +947,8 @@ impl Shell {
         let rail_w = theme::RAIL_WIDTH + theme::BORDER_WIDTH;
         let is_ai_panel = matches!(self.app.ui.rail, Some(crate::app::RailItem::Agents | crate::app::RailItem::Tools));
         let max_left_w = (full.width() - right_w - rail_w - 160.0).max(220.0);
-        let base_panel_w = if is_ai_panel {
-            self.app.ui.ai_panel_width.clamp(260.0, max_left_w)
-        } else {
-            self.app.ui.left_panel_width.clamp(200.0, max_left_w)
-        };
+        let base_panel_w =
+            if is_ai_panel { self.app.ui.ai_panel_width.clamp(260.0, max_left_w) } else { self.app.ui.left_panel_width.clamp(200.0, max_left_w) };
         let panel_w = base_panel_w + theme::BORDER_WIDTH;
         let rail_rect = Rect::from_min_max(full.min, Pos2::new(full.left() + rail_w, full.bottom()));
         let left_rect = Rect::from_min_max(Pos2::new(rail_rect.right(), full.top()), Pos2::new(rail_rect.right() + panel_w, full.bottom()));
@@ -986,12 +963,7 @@ impl Shell {
         if self.shot.is_none() {
             self.app.terminal.ensure_default_tab(self.app.file_path.as_deref());
         }
-        self.app.terminal.sync_live_file_context(
-            &self.app.doc,
-            self.app.page,
-            &self.app.selection,
-            self.app.file_path.as_deref(),
-        );
+        self.app.terminal.sync_live_file_context(&self.app.doc, self.app.page, &self.app.selection, self.app.file_path.as_deref());
         if let Some(ai_copy) = self.app.specs.last_ai_copy.take() {
             self.app.terminal.send_copy_for_ai(&ai_copy);
         }
@@ -1007,11 +979,7 @@ impl Shell {
         } else {
             let specs_reader_open = false;
             let max_dock_h = (canvas_rect.height() - 100.0).max(200.0);
-            let dock_h = if self.app.terminal.dock_open {
-                self.app.terminal.dock_height.clamp(160.0, max_dock_h)
-            } else {
-                0.0
-            };
+            let dock_h = if self.app.terminal.dock_open { self.app.terminal.dock_height.clamp(160.0, max_dock_h) } else { 0.0 };
             let main_canvas_rect =
                 Rect::from_min_max(canvas_rect.min, Pos2::new(canvas_rect.right(), (canvas_rect.bottom() - dock_h).max(canvas_rect.top() + 80.0)));
             let dock_rect = Rect::from_min_max(Pos2::new(canvas_rect.left(), main_canvas_rect.bottom()), canvas_rect.max);
@@ -1028,19 +996,13 @@ impl Shell {
                 let file_path = self.app.file_path.clone();
                 let term_actions = crate::terminal::show_dock(&mut self.app.terminal, ui, dock_rect, file_path.as_deref());
                 execute_terminal_actions(&mut self.app, term_actions);
-                let dock_handle_rect = Rect::from_min_max(
-                    Pos2::new(dock_rect.left(), dock_rect.top() - 3.0),
-                    Pos2::new(dock_rect.right(), dock_rect.top() + 3.0),
-                );
+                let dock_handle_rect =
+                    Rect::from_min_max(Pos2::new(dock_rect.left(), dock_rect.top() - 3.0), Pos2::new(dock_rect.right(), dock_rect.top() + 3.0));
                 widgets::record(ui, "dock-resize-handle", dock_handle_rect);
                 let dock_drag = ui.interact(dock_handle_rect, ui.id().with("dock-resize-handle"), egui::Sense::drag());
                 if dock_drag.hovered() || dock_drag.dragged() {
                     ctx.set_cursor_icon(egui::CursorIcon::ResizeVertical);
-                    ui.painter().hline(
-                        dock_rect.x_range(),
-                        dock_rect.top(),
-                        egui::Stroke::new(2.0, theme::BG_BRAND),
-                    );
+                    ui.painter().hline(dock_rect.x_range(), dock_rect.top(), egui::Stroke::new(2.0, theme::BG_BRAND));
                 }
                 if dock_drag.dragged() {
                     if let Some(pointer) = ctx.input(|i| i.pointer.interact_pos()) {
@@ -1068,19 +1030,13 @@ impl Shell {
                 left::show(&mut self.app, ui, left_rect);
             }
             if !self.app.ui.left_collapsed {
-                let handle_rect = Rect::from_min_max(
-                    Pos2::new(left_rect.right() - 3.0, left_rect.top()),
-                    Pos2::new(left_rect.right() + 3.0, left_rect.bottom()),
-                );
+                let handle_rect =
+                    Rect::from_min_max(Pos2::new(left_rect.right() - 3.0, left_rect.top()), Pos2::new(left_rect.right() + 3.0, left_rect.bottom()));
                 widgets::record(ui, "left-panel-resize-handle", handle_rect);
                 let drag_resp = ui.interact(handle_rect, ui.id().with("left-panel-resize-handle"), egui::Sense::drag());
                 if drag_resp.hovered() || drag_resp.dragged() {
                     ctx.set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
-                    ui.painter().vline(
-                        left_rect.right() - 0.5,
-                        left_rect.y_range(),
-                        egui::Stroke::new(2.0, theme::BG_BRAND),
-                    );
+                    ui.painter().vline(left_rect.right() - 0.5, left_rect.y_range(), egui::Stroke::new(2.0, theme::BG_BRAND));
                 }
                 if drag_resp.dragged() {
                     if let Some(pointer) = ctx.input(|i| i.pointer.interact_pos()) {
@@ -1106,11 +1062,7 @@ impl Shell {
                     right::show(&mut self.app, ui, right_rect);
                 }
                 if !specs_reader_open {
-                    let tb_rect = if deck || self.app.terminal.dock_open {
-                        main_canvas_rect
-                    } else {
-                        canvas_rect_for_toolbar(full)
-                    };
+                    let tb_rect = if deck || self.app.terminal.dock_open { main_canvas_rect } else { canvas_rect_for_toolbar(full) };
                     toolbar::show(&mut self.app, ui, tb_rect);
                 }
             }
@@ -1165,11 +1117,7 @@ pub fn execute_terminal_actions(app: &mut App, actions: Vec<crate::terminal::Ter
                 Ok(raw) => match designos_doc::Document::from_json(&raw) {
                     Ok(mut new_doc) => {
                         crate::io::ensure_page(&mut new_doc);
-                        let keep_page = if new_doc.pages.contains(&app.page) {
-                            app.page
-                        } else {
-                            new_doc.pages[0]
-                        };
+                        let keep_page = if new_doc.pages.contains(&app.page) { app.page } else { new_doc.pages[0] };
                         app.doc = new_doc;
                         app.page = keep_page;
                         app.sanitize();
@@ -1269,8 +1217,7 @@ pub fn execute_cmdk_action(app: &mut App, action: crate::cmdk::CmdKAction) {
 /// Figma A-to-Z Micro-Interaction & Feature categories (`--panel micro-*`).
 pub fn apply_micro_interaction_showcase_preset(app: &mut App, preset: &str) {
     use designos_doc::{
-        Affine, AutoLayout, Color, DevStatus, GridTrack, LayoutDirection, Node, NodeKind, Paint,
-        Rect as DRect, Sizing, Stroke as DStroke, Vec2 as DV,
+        Affine, AutoLayout, Color, DevStatus, GridTrack, LayoutDirection, Node, NodeKind, Paint, Rect as DRect, Sizing, Stroke as DStroke, Vec2 as DV,
     };
     app.ui.rulers = true;
     let page = app.page;
@@ -1412,13 +1359,7 @@ pub fn apply_micro_interaction_showcase_preset(app: &mut App, preset: &str) {
             let eid = app.doc.insert(page, ell).unwrap();
 
             let sid = app.doc.alloc_id();
-            let mut star = Node::new(
-                sid,
-                NodeKind::Star {
-                    count: 7,
-                    inner_ratio: 0.44,
-                },
-            );
+            let mut star = Node::new(sid, NodeKind::Star { count: 7, inner_ratio: 0.44 });
             star.name = "Star · 7 pts · 44%".into();
             star.transform = Affine::translate(2680.0, 1450.0);
             star.size = DV::new(220.0, 220.0);
@@ -1444,11 +1385,7 @@ pub fn apply_micro_interaction_showcase_preset(app: &mut App, preset: &str) {
             vec_node.transform = Affine::translate(2420.0, 1820.0);
             vec_node.size = DV::new(340.0, 220.0);
             vec_node.fills = vec![Paint::solid(Color::rgba(13, 153, 255, 68))];
-            vec_node.stroke = DStroke {
-                paints: vec![Paint::solid(Color::rgb(0x0D, 0x99, 0xFF))],
-                weight: 3.0,
-                ..Default::default()
-            };
+            vec_node.stroke = DStroke { paints: vec![Paint::solid(Color::rgb(0x0D, 0x99, 0xFF))], weight: 3.0, ..Default::default() };
             let vid = app.doc.insert(page, vec_node).unwrap();
             app.selection = vec![vid];
             crate::canvas::vector::enter(app, vid);
@@ -1497,11 +1434,7 @@ pub fn apply_micro_interaction_showcase_preset(app: &mut App, preset: &str) {
             let mut card = Node::frame(sid, DRect::new(2420.0, 2200.0, 320.0, 200.0));
             card.name = "Scale Tool (K) · 1.25× Proportional".into();
             card.fills = vec![Paint::solid(Color::rgb(0x1E, 0x1E, 0x24))];
-            card.stroke = DStroke {
-                paints: vec![Paint::solid(Color::rgb(0x0D, 0x99, 0xFF))],
-                weight: 2.5,
-                ..Default::default()
-            };
+            card.stroke = DStroke { paints: vec![Paint::solid(Color::rgb(0x0D, 0x99, 0xFF))], weight: 2.5, ..Default::default() };
             card.corner_radii = [18.0; 4];
             let sid = app.doc.insert(page, card).unwrap();
             app.selection = vec![sid];

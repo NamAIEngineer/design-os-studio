@@ -55,11 +55,7 @@ fn show_prototype_settings_btn(app: &mut App, ui: &mut Ui, pane: &mut Pane) {
     let btn_r = pane.rect(theme::SECTION_CONTENT_X, 0.0, theme::SECTION_CONTENT_W, 28.0);
     record(ui, "proto-show-settings", btn_r);
     let resp = ui.interact(btn_r, ui.id().with("proto-show-settings"), Sense::click());
-    ui.painter().rect_filled(
-        btn_r,
-        theme::cr(6),
-        if resp.hovered() { Color32::from_rgb(0x38, 0x38, 0x38) } else { Color32::from_rgb(0x2C, 0x2C, 0x2C) },
-    );
+    ui.painter().rect_filled(btn_r, theme::cr(6), if resp.hovered() { Color32::from_rgb(0x38, 0x38, 0x38) } else { Color32::from_rgb(0x2C, 0x2C, 0x2C) });
     ui.painter().rect_stroke(btn_r, theme::cr(6), Stroke::new(1.0, Color32::from_rgb(0x38, 0x38, 0x38)), StrokeKind::Inside);
     ui.painter().text(btn_r.center(), Align2::CENTER_CENTER, "Show prototype settings", theme::font_body_strong(), Color32::WHITE);
     if resp.clicked() {
@@ -976,10 +972,7 @@ mod tests {
         app.ui.right_tab = Some(crate::app::RightTab::Prototype);
         let ctx = egui::Context::default();
         theme::install_fonts(&ctx);
-        let raw = egui::RawInput {
-            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1200.0, 800.0))),
-            ..Default::default()
-        };
+        let raw = egui::RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1200.0, 800.0))), ..Default::default() };
         let _ = ctx.run_ui(raw, |ui| {
             crate::panels::assets::show(&mut app, ui, Rect::from_min_size(Pos2::new(40.0, 0.0), Vec2::new(240.0, 700.0)));
             crate::panels::right::show(&mut app, ui, Rect::from_min_size(Pos2::new(960.0, 0.0), Vec2::new(240.0, 700.0)));

@@ -4,6 +4,17 @@
 //! [`Document`], the renderer draws it, the app edits it through [`Command`]s.
 //! Coordinates are in Figma units (1 unit = 1 CSS px at 100% zoom), y down.
 
+#![allow(
+    clippy::field_reassign_with_default,
+    clippy::needless_range_loop,
+    clippy::question_mark,
+    clippy::manual_is_multiple_of,
+    clippy::collapsible_if,
+    clippy::match_like_matches_macro,
+    clippy::needless_borrow,
+    clippy::redundant_guards
+)]
+
 mod board;
 mod comments;
 mod components;
@@ -220,10 +231,7 @@ mod serde_images {
         }
     }
 
-    pub fn serialize<S: Serializer>(
-        map: &BTreeMap<String, Vec<u8>>,
-        serializer: S,
-    ) -> Result<S::Ok, S::Error> {
+    pub fn serialize<S: Serializer>(map: &BTreeMap<String, Vec<u8>>, serializer: S) -> Result<S::Ok, S::Error> {
         let mut m = serializer.serialize_map(Some(map.len()))?;
         for (k, v) in map {
             let hex = to_hex_prefixed(v);
@@ -232,9 +240,7 @@ mod serde_images {
         m.end()
     }
 
-    pub fn deserialize<'de, D: Deserializer<'de>>(
-        deserializer: D,
-    ) -> Result<BTreeMap<String, Vec<u8>>, D::Error> {
+    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<BTreeMap<String, Vec<u8>>, D::Error> {
         struct MapVisitor;
         impl<'de> Visitor<'de> for MapVisitor {
             type Value = BTreeMap<String, Vec<u8>>;
@@ -328,8 +334,7 @@ impl Document {
         self.dirty.epoch += 1;
         let ep = self.dirty.epoch;
         let idx = (self.dirty.removed_write_pos as usize) % REMOVED_RING_CAP;
-        self.dirty.removed_evicted_epoch =
-            self.dirty.removed_evicted_epoch.max(self.dirty.removed_ring[idx].0);
+        self.dirty.removed_evicted_epoch = self.dirty.removed_evicted_epoch.max(self.dirty.removed_ring[idx].0);
         self.dirty.removed_ring[idx] = (ep, id);
         self.dirty.removed_write_pos += 1;
     }
@@ -337,12 +342,7 @@ impl Document {
     /// Appends the unique [`NodeId`]s modified or inserted into `dirty_out` and
     /// removed [`NodeId`]s into `removed_out` since `since_epoch`, returning `true`
     /// if no full-tree/full-geom invalidation or ring eviction occurred since `since_epoch`.
-    pub fn dirty_changes_since(
-        &self,
-        since_epoch: u64,
-        dirty_out: &mut Vec<NodeId>,
-        removed_out: &mut Vec<NodeId>,
-    ) -> bool {
+    pub fn dirty_changes_since(&self, since_epoch: u64, dirty_out: &mut Vec<NodeId>, removed_out: &mut Vec<NodeId>) -> bool {
         dirty_out.clear();
         removed_out.clear();
         if since_epoch > self.dirty.epoch
@@ -388,10 +388,7 @@ impl Document {
         if since_epoch == self.dirty.epoch {
             return true;
         }
-        if since_epoch > self.dirty.epoch
-            || since_epoch < self.dirty.geom_full_epoch
-            || since_epoch < self.dirty.evicted_epoch
-        {
+        if since_epoch > self.dirty.epoch || since_epoch < self.dirty.geom_full_epoch || since_epoch < self.dirty.evicted_epoch {
             return false;
         }
         let count = (self.dirty.write_pos as usize).min(DIRTY_RING_CAP);
@@ -722,7 +719,9 @@ mod tests {
         let id = d.alloc_id();
         d.insert(page, Node::rectangle(id, Rect::new(1.0, 2.0, 30.0, 40.0))).unwrap();
         let rect_json = serde_json::to_string(d.get(id).unwrap()).unwrap();
-        for omitted in ["\"source_id\"", "\"children\"", "\"effects\"", "\"style_refs\"", "\"fill_geometry\"", "\"stroke_geometry\"", "\"corner_radii\"", "\"stroke\""] {
+        for omitted in
+            ["\"source_id\"", "\"children\"", "\"effects\"", "\"style_refs\"", "\"fill_geometry\"", "\"stroke_geometry\"", "\"corner_radii\"", "\"stroke\""]
+        {
             assert!(!rect_json.contains(omitted), "{omitted} should be omitted on default node: {rect_json}");
         }
         let back = Document::from_json(&d.to_json().unwrap()).unwrap();
@@ -764,14 +763,7 @@ mod tests {
         d.nodes.insert(source_target_id, Node::rectangle(source_target_id, Rect::new(0.0, 0.0, 4.0, 4.0)));
 
         let inst_id = d.alloc_id();
-        let mut inst = Node::new(
-            inst_id,
-            NodeKind::Instance {
-                frame: FrameProps::default(),
-                component: Some(comp_id),
-                component_key: None,
-            },
-        );
+        let mut inst = Node::new(inst_id, NodeKind::Instance { frame: FrameProps::default(), component: Some(comp_id), component_key: None });
         inst.component.source = Some(source_target_id);
         inst.component.values.insert("Icon".into(), PropValue::Instance(swap_val_id));
         d.insert(page, inst).unwrap();
@@ -789,18 +781,7 @@ mod tests {
         let removed = d.prune_unreachable();
         assert_eq!(removed, 2);
 
-        for kept in [
-            page,
-            frame,
-            rect,
-            inst_id,
-            comp_id,
-            comp_child_id,
-            swap_default_id,
-            swap_pref_id,
-            swap_val_id,
-            source_target_id,
-        ] {
+        for kept in [page, frame, rect, inst_id, comp_id, comp_child_id, swap_default_id, swap_pref_id, swap_val_id, source_target_id] {
             assert!(d.get(kept).is_some(), "expected node {kept:?} to be preserved");
         }
         assert!(d.get(orphan_parent).is_none());

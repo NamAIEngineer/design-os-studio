@@ -214,8 +214,10 @@ pub fn replace_color(doc: &mut Document, ed: &mut Edit, roots: &[NodeId], old: C
         }
     };
     for id in ids {
-        let has =
-            doc.get(id).map(|n| paint_lists(n).iter().any(|l| l.iter().any(|p| matches!(&p.kind, PaintKind::Solid(c) if rgb_key(c) == old_key)))).unwrap_or(false);
+        let has = doc
+            .get(id)
+            .map(|n| paint_lists(n).iter().any(|l| l.iter().any(|p| matches!(&p.kind, PaintKind::Solid(c) if rgb_key(c) == old_key))))
+            .unwrap_or(false);
         if !has {
             continue;
         }

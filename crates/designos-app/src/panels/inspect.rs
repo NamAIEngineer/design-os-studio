@@ -264,11 +264,7 @@ pub(crate) fn kv(ui: &mut Ui, app: &mut App, c: &mut Cur, label: &str, value: &s
         ui.painter().rect_filled(r.expand2(Vec2::new(8.0, 0.0)), theme::cr(theme::RADIUS_MEDIUM), theme::BG_SECONDARY);
     }
     ui.painter().text(Pos2::new(r.left(), r.center().y), Align2::LEFT_CENTER, label, theme::font_body(), theme::TEXT_SECONDARY);
-    let val_font = if is_numeric_or_technical_value(value) {
-        theme::font_mono()
-    } else {
-        theme::font_body()
-    };
+    let val_font = if is_numeric_or_technical_value(value) { theme::font_mono() } else { theme::font_body() };
     let val = elide(ui.painter(), value, &val_font, r.width() - 100.0);
     ui.painter().text(Pos2::new(r.left() + 100.0, r.center().y), Align2::LEFT_CENTER, val, val_font, theme::TEXT);
     if resp.clicked() {
@@ -525,11 +521,7 @@ fn body(app: &mut App, ui: &mut Ui, c: &mut Cur, id: NodeId, count: usize) {
         if is_connected { Color32::from_rgb(0x4A, 0xDE, 0x80) } else { Color32::from_rgb(0xB3, 0xB3, 0xB3) },
     );
     if cc_resp.on_hover_text("Click to generate & copy design:os Code Connect snippet").clicked() {
-        let comp_ident: String = n
-            .name
-            .chars()
-            .filter(|ch| ch.is_alphanumeric())
-            .collect::<String>();
+        let comp_ident: String = n.name.chars().filter(|ch| ch.is_alphanumeric()).collect::<String>();
         let comp_ident = if comp_ident.is_empty() { format!("Node{}", id.0) } else { comp_ident };
         let snippet = format!(
             "import designos from \"@designos/code-connect\";\nimport {{ {comp_ident} }} from \"./{comp_ident}\";\n\ndesignos.connect({comp_ident}, \"designos://node/{}\", {{\n  example: () => <{comp_ident} />,\n}});\n",
@@ -539,11 +531,7 @@ fn body(app: &mut App, ui: &mut Ui, c: &mut Cur, id: NodeId, count: usize) {
         let note = format!("Code Connect: <{comp_ident} />");
         app.dev_edit(id, |d| {
             if !d.annotations.iter().any(|a| a.text == note) {
-                d.annotations.push(Annotation {
-                    text: note,
-                    properties: vec!["Width".into(), "Height".into()],
-                    category: None,
-                });
+                d.annotations.push(Annotation { text: note, properties: vec!["Width".into(), "Height".into()], category: None });
             }
         });
         app.show_toast("Copied design:os Code Connect snippet & attached mapping", false);
@@ -552,12 +540,7 @@ fn body(app: &mut App, ui: &mut Ui, c: &mut Cur, id: NodeId, count: usize) {
 
     let cc_desc = "Publish components to a library, then you can connect them to your codebase with Code Connect. Learn more";
     let cc_text_r = c.rect(PAD, 0.0, c.w - 2.0 * PAD, 44.0);
-    let cc_galley = ui.painter().layout(
-        cc_desc.to_string(),
-        theme::font_body(),
-        Color32::from_rgb(0x8C, 0x8C, 0x8C),
-        cc_text_r.width(),
-    );
+    let cc_galley = ui.painter().layout(cc_desc.to_string(), theme::font_body(), Color32::from_rgb(0x8C, 0x8C, 0x8C), cc_text_r.width());
     let cc_h = cc_galley.size().y;
     ui.painter().galley(cc_text_r.min, cc_galley, Color32::from_rgb(0x8C, 0x8C, 0x8C));
     c.y += cc_h + 8.0;
@@ -582,20 +565,10 @@ fn body(app: &mut App, ui: &mut Ui, c: &mut Cur, id: NodeId, count: usize) {
     widgets::record(ui, "dev-add-redlines", redline_r);
     if small_button(ui, redline_r, "dev-add-redlines", "+ Add redlines") {
         app.dev.show_redlines = true;
-        let spec_note = format!(
-            "Redlines: {}×{}px · ({}, {})",
-            fmt_num(n.size.x),
-            fmt_num(n.size.y),
-            fmt_num(n.transform.tx),
-            fmt_num(n.transform.ty)
-        );
+        let spec_note = format!("Redlines: {}×{}px · ({}, {})", fmt_num(n.size.x), fmt_num(n.size.y), fmt_num(n.transform.tx), fmt_num(n.transform.ty));
         app.dev_edit(id, |d| {
             if !d.annotations.iter().any(|a| a.text == spec_note) {
-                d.annotations.push(Annotation {
-                    text: spec_note,
-                    properties: vec!["Width".into(), "Height".into()],
-                    category: None,
-                });
+                d.annotations.push(Annotation { text: spec_note, properties: vec!["Width".into(), "Height".into()], category: None });
             }
         });
         app.show_toast("Added measurement redline annotation to node", false);
@@ -707,12 +680,7 @@ fn body(app: &mut App, ui: &mut Ui, c: &mut Cur, id: NodeId, count: usize) {
         ui.painter().text(Pos2::new(style_r.left(), style_r.center().y), Align2::LEFT_CENTER, "Style", theme::font_body(), theme::TEXT_SECONDARY);
         ui.painter().text(Pos2::new(style_r.left() + 100.0, style_r.center().y), Align2::LEFT_CENTER, &style_name, theme::font_body_strong(), theme::TEXT);
         if style_resp.on_hover_text("Click to copy CSS font shorthand").clicked() {
-            let css_font = format!(
-                "font: {} {}px \"{}\";",
-                t.style.font_weight,
-                fmt_num(t.style.font_size),
-                t.style.font_family
-            );
+            let css_font = format!("font: {} {}px \"{}\";", t.style.font_weight, fmt_num(t.style.font_size), t.style.font_family);
             copy(app, ui, css_font, "CSS font");
         }
         c.y += ROW_H;
@@ -1033,13 +1001,7 @@ mod tests {
         theme::install_fonts(&ctx);
         let region = Rect::from_min_size(Pos2::new(660.0, 40.0), Vec2::new(260.0, 1200.0));
         let screen = Rect::from_min_size(Pos2::ZERO, Vec2::new(1000.0, 1300.0));
-        let _ = ctx.run_ui(
-            egui::RawInput {
-                screen_rect: Some(screen),
-                ..Default::default()
-            },
-            |ui| show(&mut app, ui, region),
-        );
+        let _ = ctx.run_ui(egui::RawInput { screen_rect: Some(screen), ..Default::default() }, |ui| show(&mut app, ui, region));
         let get_rect = |name: &str| ctx.data(|d| d.get_temp::<Rect>(egui::Id::new(("test-rect", name.to_string()))));
         let cc_rect = get_rect("dev-code-connect").expect("dev-code-connect");
         let red_rect = get_rect("dev-add-redlines").expect("dev-add-redlines");
@@ -1072,4 +1034,3 @@ mod tests {
         assert!(annots.iter().any(|a| a.text.contains("Redlines: 320×180px")));
     }
 }
-

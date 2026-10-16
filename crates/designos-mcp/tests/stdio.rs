@@ -28,7 +28,13 @@ async fn stdio_handshake_discovery_edit_and_error_recovery() {
         client.call_tool(call("designos_redo", json!({}))).await.unwrap();
         let restored = client.call_tool(call("designos_get_node", json!({"node_id":id}))).await.unwrap();
         assert_eq!(restored.is_error, Some(false));
-        let applied = client.call_tool(call("designos_apply_spec", json!({"spec":{"name":"Stdio Screen","preset":"easeui-card","children":[{"name":"Title","kind":"text","text":"Hello MCP"}]}}))).await.unwrap();
+        let applied = client
+            .call_tool(call(
+                "designos_apply_spec",
+                json!({"spec":{"name":"Stdio Screen","preset":"easeui-card","children":[{"name":"Title","kind":"text","text":"Hello MCP"}]}}),
+            ))
+            .await
+            .unwrap();
         assert_eq!(applied.is_error, Some(false));
         let comments = client.call_tool(call("designos_list_comments", json!({}))).await.unwrap();
         assert_eq!(comments.is_error, Some(false));

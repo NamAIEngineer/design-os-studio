@@ -496,11 +496,7 @@ impl App {
             (v2(0.0, 0.0), self.doc.get(parent).map(|p| p.children.len()).unwrap_or(0))
         };
         let lists = clipboard::instantiate(&mut self.doc, &clip);
-        let first_orig = lists
-            .first()
-            .and_then(|l| l.first())
-            .map(|r| v2(r.transform.tx, r.transform.ty))
-            .unwrap_or(v2(0.0, 0.0));
+        let first_orig = lists.first().and_then(|l| l.first()).map(|r| v2(r.transform.tx, r.transform.ty)).unwrap_or(v2(0.0, 0.0));
         let delta = v2(target_local.x - first_orig.x, target_local.y - first_orig.y);
         let mut tx = Tx::new();
         let mut new_sel = Vec::new();
@@ -542,11 +538,7 @@ impl App {
                 continue;
             }
             let lists = clipboard::instantiate(&mut self.doc, &clip);
-            let first_orig = lists
-                .first()
-                .and_then(|l| l.first())
-                .map(|r| v2(r.transform.tx, r.transform.ty))
-                .unwrap_or(v2(0.0, 0.0));
+            let first_orig = lists.first().and_then(|l| l.first()).map(|r| v2(r.transform.tx, r.transform.ty)).unwrap_or(v2(0.0, 0.0));
             let delta = v2(tx0 - first_orig.x, ty0 - first_orig.y);
             for (k, mut nodes) in lists.into_iter().enumerate() {
                 if let Some(root) = nodes.first_mut() {
@@ -631,11 +623,8 @@ impl App {
         if self.selection.is_empty() {
             return 0;
         }
-        let targets: Vec<(String, std::mem::Discriminant<NodeKind>)> = self
-            .selection
-            .iter()
-            .filter_map(|&id| self.doc.get(id).map(|n| (n.name.clone(), std::mem::discriminant(&n.kind))))
-            .collect();
+        let targets: Vec<(String, std::mem::Discriminant<NodeKind>)> =
+            self.selection.iter().filter_map(|&id| self.doc.get(id).map(|n| (n.name.clone(), std::mem::discriminant(&n.kind)))).collect();
         if targets.is_empty() {
             return 0;
         }
@@ -919,11 +908,7 @@ impl App {
         }
         let mut tx = Tx::new();
         for id in ids {
-            let has_al = self
-                .doc
-                .get(id)
-                .and_then(|n| n.kind.frame_props())
-                .is_some_and(|fp| fp.auto_layout.is_some());
+            let has_al = self.doc.get(id).and_then(|n| n.kind.frame_props()).is_some_and(|fp| fp.auto_layout.is_some());
             if has_al {
                 if let Some(n) = tx.ed.node(&mut self.doc, id) {
                     if let Some(fp) = n.kind.frame_props_mut() {
@@ -944,11 +929,7 @@ impl App {
         let mut seen_parents = Vec::new();
         let mut al_parents = Vec::new();
         let forward_dir = dx > 0.0 || dy > 0.0;
-        let ordered_tops: Vec<NodeId> = if forward_dir {
-            tops.iter().rev().copied().collect()
-        } else {
-            tops
-        };
+        let ordered_tops: Vec<NodeId> = if forward_dir { tops.iter().rev().copied().collect() } else { tops };
         for id in &ordered_tops {
             let flow_al = self.doc.get(*id).and_then(|n| {
                 if n.layout_child.absolute {
@@ -961,10 +942,18 @@ impl App {
             if let Some((parent_id, dir)) = flow_al {
                 let delta_idx: isize = match dir {
                     LayoutDirection::Horizontal | LayoutDirection::Grid if dx != 0.0 => {
-                        if dx > 0.0 { 1 } else { -1 }
+                        if dx > 0.0 {
+                            1
+                        } else {
+                            -1
+                        }
                     }
                     LayoutDirection::Vertical | LayoutDirection::Grid if dy != 0.0 => {
-                        if dy > 0.0 { 1 } else { -1 }
+                        if dy > 0.0 {
+                            1
+                        } else {
+                            -1
+                        }
                     }
                     _ => 0,
                 };
@@ -1065,7 +1054,11 @@ impl App {
             }
             _ => {
                 self.opacity_buffer = Some((digit, self.now));
-                if digit == 0 { 1.0 } else { (digit as f32) / 10.0 }
+                if digit == 0 {
+                    1.0
+                } else {
+                    (digit as f32) / 10.0
+                }
             }
         };
         let ids = self.selection.clone();
@@ -1078,10 +1071,7 @@ impl App {
             return;
         }
         let idx = crate::canvas::interact::active_index(self);
-        let top_aabbs: Vec<(NodeId, Rect)> = tops
-            .iter()
-            .map(|&t| (t, crate::canvas::fast_world_aabb(&self.doc, idx, t)))
-            .collect();
+        let top_aabbs: Vec<(NodeId, Rect)> = tops.iter().map(|&t| (t, crate::canvas::fast_world_aabb(&self.doc, idx, t))).collect();
         let target = if top_aabbs.len() == 1 {
             match self.doc.get(top_aabbs[0].0).and_then(|n| n.parent) {
                 Some(p) if !matches!(self.doc.get(p).map(|n| &n.kind), Some(NodeKind::Page { .. })) => crate::canvas::fast_world_aabb(&self.doc, idx, p),
@@ -1133,10 +1123,7 @@ impl App {
             return;
         }
         let idx = crate::canvas::interact::active_index(self);
-        let top_aabbs: Vec<(NodeId, Rect)> = tops
-            .iter()
-            .map(|&t| (t, crate::canvas::fast_world_aabb(&self.doc, idx, t)))
-            .collect();
+        let top_aabbs: Vec<(NodeId, Rect)> = tops.iter().map(|&t| (t, crate::canvas::fast_world_aabb(&self.doc, idx, t))).collect();
         let Some(group_bb) = union_all(top_aabbs.iter().map(|(_, r)| *r)) else {
             return;
         };
@@ -1210,11 +1197,7 @@ impl App {
         let cross_origin = if horiz { sorted[0].1.y } else { sorted[0].1.x };
         let mut tx = Tx::new();
         for (id, bb) in sorted {
-            let world_delta = if horiz {
-                v2(cursor - bb.x, cross_origin - bb.y)
-            } else {
-                v2(cross_origin - bb.x, cursor - bb.y)
-            };
+            let world_delta = if horiz { v2(cursor - bb.x, cross_origin - bb.y) } else { v2(cross_origin - bb.x, cursor - bb.y) };
             cursor += (if horiz { bb.w } else { bb.h }) + gap;
             let d = delta_to_parent(&self.doc, id, world_delta);
             if let Some(n) = tx.ed.node(&mut self.doc, id) {
@@ -1439,11 +1422,7 @@ impl App {
         let Some(idx) = self.doc.pages.iter().position(|&p| p == self.page) else {
             return;
         };
-        let next = if forward {
-            idx.checked_add(1).filter(|&i| i < self.doc.pages.len())
-        } else {
-            idx.checked_sub(1)
-        };
+        let next = if forward { idx.checked_add(1).filter(|&i| i < self.doc.pages.len()) } else { idx.checked_sub(1) };
         if let Some(i) = next {
             let target = self.doc.pages[i];
             self.switch_page(target);
@@ -1456,9 +1435,7 @@ impl App {
         let Some(page_node) = self.doc.get(self.page) else {
             return;
         };
-        let is_frame_like = |n: &Node| {
-            n.visible && matches!(n.kind, NodeKind::Frame(_) | NodeKind::Component(_) | NodeKind::ComponentSet(_))
-        };
+        let is_frame_like = |n: &Node| n.visible && matches!(n.kind, NodeKind::Frame(_) | NodeKind::Component(_) | NodeKind::ComponentSet(_));
         let mut frames = Vec::new();
         for &cid in &page_node.children {
             let Some(cn) = self.doc.get(cid) else { continue };
@@ -1479,15 +1456,10 @@ impl App {
             return;
         }
         let idx = crate::canvas::interact::active_index(self);
-        let mut items: Vec<(NodeId, Rect)> = frames
-            .into_iter()
-            .map(|id| (id, crate::canvas::fast_world_aabb(&self.doc, idx, id)))
-            .collect();
+        let mut items: Vec<(NodeId, Rect)> = frames.into_iter().map(|id| (id, crate::canvas::fast_world_aabb(&self.doc, idx, id))).collect();
         items.sort_by(|a, b| a.1.x.total_cmp(&b.1.x).then_with(|| a.1.y.total_cmp(&b.1.y)));
         let len = items.len();
-        let cur_idx = self.selection.first().and_then(|&sel| {
-            items.iter().position(|&(fid, _)| fid == sel || self.doc.is_ancestor(fid, sel))
-        });
+        let cur_idx = self.selection.first().and_then(|&sel| items.iter().position(|&(fid, _)| fid == sel || self.doc.is_ancestor(fid, sel)));
         let target_idx = match cur_idx {
             Some(i) => {
                 if forward {
@@ -1511,10 +1483,7 @@ impl App {
         } else {
             let z = self.view.zoom.clamp(theme::ZOOM_MIN, theme::ZOOM_MAX);
             let size = self.canvas_rect.size();
-            self.view = View {
-                zoom: z,
-                offset: Vec2::new(b.x + b.w / 2.0 - size.x / 2.0 / z, b.y + b.h / 2.0 - size.y / 2.0 / z),
-            };
+            self.view = View { zoom: z, offset: Vec2::new(b.x + b.w / 2.0 - size.x / 2.0 / z, b.y + b.h / 2.0 - size.y / 2.0 / z) };
         }
     }
 
@@ -1934,14 +1903,7 @@ mod tests {
         app.undo();
 
         // 3. Paste to replace ids[1] (at x=100, y=20) preserves child index in parent
-        let orig_idx = app
-            .doc
-            .get(app.page)
-            .unwrap()
-            .children
-            .iter()
-            .position(|&c| c == ids[1])
-            .unwrap();
+        let orig_idx = app.doc.get(app.page).unwrap().children.iter().position(|&c| c == ids[1]).unwrap();
         app.selection = vec![ids[1]];
         app.paste_to_replace();
         let replaced_id = app.selection[0];
@@ -1991,12 +1953,7 @@ mod tests {
         let fid = d.alloc_id();
         let mut f = Node::frame(fid, Rect::new(0.0, 0.0, 400.0, 300.0));
         if let Some(fp) = f.kind.frame_props_mut() {
-            fp.auto_layout = Some(AutoLayout {
-                direction: LayoutDirection::Grid,
-                grid_columns: 2,
-                grid_rows: 2,
-                ..Default::default()
-            });
+            fp.auto_layout = Some(AutoLayout { direction: LayoutDirection::Grid, grid_columns: 2, grid_rows: 2, ..Default::default() });
         }
         d.insert(page, f).unwrap();
         let mut app = App::new(d);

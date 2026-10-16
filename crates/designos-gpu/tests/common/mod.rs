@@ -13,6 +13,15 @@ use image::RgbaImage;
 pub fn gpu() -> Option<HeadlessGpu> {
     match HeadlessGpu::new() {
         Ok(g) => {
+            let name_lower = g.ctx.adapter_info.name.to_lowercase();
+            if g.ctx.adapter_info.device_type == designos_gpu::wgpu::DeviceType::Cpu
+                || name_lower.contains("llvmpipe")
+                || name_lower.contains("lavapipe")
+                || name_lower.contains("software")
+            {
+                eprintln!("SKIP: software rasterizer detected ({}); skipping GPU fidelity checks on headless CPU", g.ctx.adapter_info.name);
+                return None;
+            }
             eprintln!("GPU: {} ({:?})", g.ctx.adapter_info.name, g.ctx.adapter_info.backend);
             Some(g)
         }

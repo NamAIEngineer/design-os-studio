@@ -48,18 +48,10 @@ impl LiveSessionBridge {
         let live_spec_path = env_spec
             .or_else(|| session_dir.as_ref().map(|d| d.join("live-spec.json")))
             .or_else(|| Some(PathBuf::from("/tmp/designos-live-agent-out.spec.json")));
-        let context_json_path = env_ctx
-            .or_else(|| session_dir.as_ref().map(|d| d.join("context.json")))
-            .or_else(|| Some(PathBuf::from("/tmp/designos-live-context.json")));
+        let context_json_path =
+            env_ctx.or_else(|| session_dir.as_ref().map(|d| d.join("context.json"))).or_else(|| Some(PathBuf::from("/tmp/designos-live-context.json")));
 
-        Self {
-            session_dir,
-            live_canvas_path,
-            live_doc_sync_path,
-            live_spec_path,
-            context_json_path,
-            last_canvas_mtime: None,
-        }
+        Self { session_dir, live_canvas_path, live_doc_sync_path, live_spec_path, context_json_path, last_canvas_mtime: None }
     }
 
     /// Creates a `LiveSessionBridge` bound to a specific per-file `session_dir` (`/tmp/designos-sessions/<session_id>`).
@@ -135,12 +127,7 @@ impl Session {
         if !root.is_dir() {
             return Err("Workspace must be a directory".into());
         }
-        let mut s = Self {
-            engine: Engine::default(),
-            root,
-            dirty: false,
-            bridge: LiveSessionBridge::from_env(),
-        };
+        let mut s = Self { engine: Engine::default(), root, dirty: false, bridge: LiveSessionBridge::from_env() };
         s.sync_from_live_canvas_if_newer();
         Ok(s)
     }
@@ -151,12 +138,7 @@ impl Session {
         if !root.is_dir() {
             return Err("Workspace must be a directory".into());
         }
-        let mut s = Self {
-            engine: Engine::default(),
-            root,
-            dirty: false,
-            bridge: LiveSessionBridge::for_session_dir(session_dir),
-        };
+        let mut s = Self { engine: Engine::default(), root, dirty: false, bridge: LiveSessionBridge::for_session_dir(session_dir) };
         s.sync_from_live_canvas_if_newer();
         Ok(s)
     }
@@ -268,8 +250,11 @@ impl Session {
         if requested.extension().and_then(|x| x.to_str()) != Some("png") {
             return Err("Render path must end in .png".into());
         }
-        let parent =
-            requested.parent().ok_or("Render path needs a parent directory")?.canonicalize().map_err(|e| format!("Render directory must already exist: {e}"))?;
+        let parent = requested
+            .parent()
+            .ok_or("Render path needs a parent directory")?
+            .canonicalize()
+            .map_err(|e| format!("Render directory must already exist: {e}"))?;
         if !parent.starts_with(&self.root) {
             return Err("Path must stay inside the configured workspace".into());
         }
@@ -281,8 +266,11 @@ impl Session {
         if requested.extension().and_then(|x| x.to_str()) != Some("fig") {
             return Err("Export path must end in .fig".into());
         }
-        let parent =
-            requested.parent().ok_or("Export path needs a parent directory")?.canonicalize().map_err(|e| format!("Export directory must already exist: {e}"))?;
+        let parent = requested
+            .parent()
+            .ok_or("Export path needs a parent directory")?
+            .canonicalize()
+            .map_err(|e| format!("Export directory must already exist: {e}"))?;
         if !parent.starts_with(&self.root) {
             return Err("Path must stay inside the configured workspace".into());
         }
@@ -329,12 +317,7 @@ impl Session {
                 let path = self.output_path_allow_overwrite(&a.path, a.overwrite)?;
                 let bytes = self.engine.doc.to_json().map_err(|e| e.to_string())?;
                 if a.overwrite {
-                    let mut file = fs::OpenOptions::new()
-                        .write(true)
-                        .create(true)
-                        .truncate(true)
-                        .open(&path)
-                        .map_err(|e| format!("Cannot save file: {e}"))?;
+                    let mut file = fs::OpenOptions::new().write(true).create(true).truncate(true).open(&path).map_err(|e| format!("Cannot save file: {e}"))?;
                     file.write_all(bytes.as_bytes()).and_then(|_| file.sync_all()).map_err(|e| format!("Cannot save design: {e}"))?;
                 } else {
                     // create_new also rejects existing symlinks and never truncates a user's file.
@@ -383,12 +366,8 @@ impl Session {
                 let a: crate::engine::ExportFigArgs = parse(args)?;
                 let path = self.fig_output_path(&a.output_path)?;
                 let bytes = designos_fig::export_fig(&self.engine.doc).map_err(|e| format!("Failed to export .fig: {e}"))?;
-                let mut file = fs::OpenOptions::new()
-                    .write(true)
-                    .create(true)
-                    .truncate(true)
-                    .open(&path)
-                    .map_err(|e| format!("Cannot write .fig file: {e}"))?;
+                let mut file =
+                    fs::OpenOptions::new().write(true).create(true).truncate(true).open(&path).map_err(|e| format!("Cannot write .fig file: {e}"))?;
                 file.write_all(&bytes).and_then(|_| file.sync_all()).map_err(|e| format!("Cannot write .fig file: {e}"))?;
                 Ok(json!({"output_path": path, "path": path, "bytes": bytes.len(), "saved": true}))
             }
@@ -464,10 +443,7 @@ impl DesignOSServer {
     }
 
     pub fn call(&self, name: &str, args: Value) -> Result<Value, String> {
-        self.session
-            .lock()
-            .map_err(|_| "Session unavailable; restart the MCP server".to_string())?
-            .call(name, args)
+        self.session.lock().map_err(|_| "Session unavailable; restart the MCP server".to_string())?.call(name, args)
     }
 }
 
@@ -595,4 +571,3 @@ mod tests {
         let _ = fs::remove_dir_all(&sess_dir);
     }
 }
-

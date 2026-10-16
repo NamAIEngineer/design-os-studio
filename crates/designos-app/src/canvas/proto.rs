@@ -45,11 +45,10 @@ pub fn hotspot_pos(app: &App, rect: ERect, id: NodeId) -> Pos2 {
 
 /// The hotspot under `pos`, if any (selected layers win over hovered).
 pub fn hotspot_at(app: &App, rect: ERect, pos: Pos2) -> Option<NodeId> {
-    hotspot_layers(app).into_iter().rev().find(|id| {
-        geom::hotspot_magnets(screen_rect(app, rect, *id))
-            .iter()
-            .any(|&mp| (mp - pos).length() <= theme::PROTO_HOTSPOT_HIT)
-    })
+    hotspot_layers(app)
+        .into_iter()
+        .rev()
+        .find(|id| geom::hotspot_magnets(screen_rect(app, rect, *id)).iter().any(|&mp| (mp - pos).length() <= theme::PROTO_HOTSPOT_HIT))
 }
 
 /// Hit-tests existing prototype noodles on the canvas, returning `(src, reaction_index)` when within 6px.

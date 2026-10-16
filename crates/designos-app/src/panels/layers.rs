@@ -191,8 +191,7 @@ fn compute_visible_rows(app: &App) -> Vec<Row> {
 }
 
 fn structural_hash(app: &App) -> u64 {
-    let mut h = (app.doc.pages.len() as u64)
-        .wrapping_mul(0x9E37_79B9_7F4A_7C15)
+    let mut h = (app.doc.pages.len() as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15)
         ^ (app.doc.nodes.len() as u64).wrapping_mul(0xBF58_476D_1CE4_E5B9)
         ^ (app.layers.expanded.len() as u64).wrapping_mul(0x94D0_49BB_1331_11EB);
     if let Some(page) = app.doc.get(app.page) {
@@ -211,9 +210,7 @@ fn structural_hash(app: &App) -> u64 {
             if let Some(en) = app.doc.get(eid) {
                 let first = en.children.first().map_or(0, |c| c.0);
                 let last = en.children.last().map_or(0, |c| c.0);
-                let item = eid
-                    .0
-                    .wrapping_mul(0x517C_C1B7_2722_0A95)
+                let item = eid.0.wrapping_mul(0x517C_C1B7_2722_0A95)
                     ^ (en.children.len() as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15)
                     ^ first.rotate_left(13)
                     ^ last.rotate_left(29);
@@ -229,13 +226,7 @@ fn structural_hash(app: &App) -> u64 {
 }
 
 fn current_cache_key(app: &App) -> (NodeId, u64, u64, bool, String) {
-    (
-        app.page,
-        structural_hash(app),
-        app.layers.expanded_gen,
-        app.layers.filter_open,
-        app.layers.filter.clone(),
-    )
+    (app.page, structural_hash(app), app.layers.expanded_gen, app.layers.filter_open, app.layers.filter.clone())
 }
 
 /// The rows to show: the whole tree, or only what matches the name filter.
@@ -303,21 +294,13 @@ pub fn show(app: &mut App, ui: &mut Ui, region: Rect) {
 
     let first = (scroll / theme::LAYER_ROW_HEIGHT).floor().max(0.0) as usize;
     let last = (((scroll + region.height()) / theme::LAYER_ROW_HEIGHT).ceil() as usize + 1).min(total_rows);
-    let visible_slice: Vec<Row> = if first < last {
-        app.layers.rows_cache[first..last].to_vec()
-    } else {
-        Vec::new()
-    };
+    let visible_slice: Vec<Row> = if first < last { app.layers.rows_cache[first..last].to_vec() } else { Vec::new() };
     let selected: HashSet<NodeId> = app.selection.iter().copied().collect();
 
     // Drag bookkeeping.
     let pointer = ui.input(|i| i.pointer.interact_pos());
     if let (Some(ids), Some(pos)) = (app.layers.drag.clone(), pointer) {
-        app.layers.drop = if region.contains(pos) {
-            drop_for(pos.y - region.top() + scroll, &app.layers.rows_cache, &app.doc, &ids)
-        } else {
-            None
-        };
+        app.layers.drop = if region.contains(pos) { drop_for(pos.y - region.top() + scroll, &app.layers.rows_cache, &app.doc, &ids) } else { None };
     }
 
     clipped(ui, region, |ui| {
@@ -325,14 +308,8 @@ pub fn show(app: &mut App, ui: &mut Ui, region: Rect) {
         for (offset, row) in visible_slice.iter().copied().enumerate() {
             let i = first + offset;
             let Some(node) = app.doc.get(row.id) else { continue };
-            let (node_parent, comp, icon, node_name, node_visible, node_locked) = (
-                node.parent,
-                is_component_like(node),
-                kind_icon(&node.kind),
-                node.name.clone(),
-                node.visible,
-                node.locked,
-            );
+            let (node_parent, comp, icon, node_name, node_visible, node_locked) =
+                (node.parent, is_component_like(node), kind_icon(&node.kind), node.name.clone(), node.visible, node.locked);
             let rr = Rect::from_min_size(
                 Pos2::new(region.left(), region.top() + i as f32 * theme::LAYER_ROW_HEIGHT - scroll),
                 Vec2::new(region.width(), theme::LAYER_ROW_HEIGHT),
@@ -366,7 +343,12 @@ pub fn show(app: &mut App, ui: &mut Ui, region: Rect) {
             } else if under_sel {
                 p.rect_filled(rr, 0.0, theme::BG_SELECTED_SECONDARY);
                 if canvas_hov {
-                    p.rect_stroke(rr.shrink2(Vec2::new(8.0, 0.0)), theme::cr(theme::RADIUS_MEDIUM), Stroke::new(1.0, theme::BORDER_SELECTED), StrokeKind::Inside);
+                    p.rect_stroke(
+                        rr.shrink2(Vec2::new(8.0, 0.0)),
+                        theme::cr(theme::RADIUS_MEDIUM),
+                        Stroke::new(1.0, theme::BORDER_SELECTED),
+                        StrokeKind::Inside,
+                    );
                 }
             } else if canvas_hov {
                 p.rect_stroke(rr.shrink2(Vec2::new(8.0, 0.0)), theme::cr(theme::RADIUS_MEDIUM), Stroke::new(1.0, theme::BORDER_SELECTED), StrokeKind::Inside);
@@ -454,16 +436,7 @@ pub fn show(app: &mut App, ui: &mut Ui, region: Rect) {
                 }
                 let mut tab_dir: Option<bool> = None;
                 ui.input_mut(|i| {
-                    if let Some(idx) = i.events.iter().position(|ev| {
-                        matches!(
-                            ev,
-                            egui::Event::Key {
-                                key: egui::Key::Tab,
-                                pressed: true,
-                                ..
-                            }
-                        )
-                    }) {
+                    if let Some(idx) = i.events.iter().position(|ev| matches!(ev, egui::Event::Key { key: egui::Key::Tab, pressed: true, .. })) {
                         if let egui::Event::Key { modifiers, .. } = i.events.remove(idx) {
                             tab_dir = Some(!modifiers.shift);
                         }
@@ -475,11 +448,7 @@ pub fn show(app: &mut App, ui: &mut Ui, region: Rect) {
                     if cur_buf != node_name {
                         app.rename(row.id, &cur_buf);
                     }
-                    let next_idx = if forward {
-                        (i + 1 < app.layers.rows_cache.len()).then_some(i + 1)
-                    } else {
-                        i.checked_sub(1)
-                    };
+                    let next_idx = if forward { (i + 1 < app.layers.rows_cache.len()).then_some(i + 1) } else { i.checked_sub(1) };
                     if let Some(ni) = next_idx.and_then(|idx| app.layers.rows_cache.get(idx).map(|r| r.id)) {
                         app.layers.renaming = Some(ni);
                         app.layers.rename_started = false;
@@ -554,9 +523,7 @@ pub fn show(app: &mut App, ui: &mut Ui, region: Rect) {
             // Selection clicks.
             let mods = ui.input(|i| i.modifiers);
             if resp.double_clicked() {
-                let over_icon = ui
-                    .input(|i| i.pointer.interact_pos())
-                    .is_some_and(|pos| pos.x >= chev.right() && pos.x < text_left);
+                let over_icon = ui.input(|i| i.pointer.interact_pos()).is_some_and(|pos| pos.x >= chev.right() && pos.x < text_left);
                 if over_icon {
                     app.select_only(row.id);
                     app.layers.anchor = Some(row.id);

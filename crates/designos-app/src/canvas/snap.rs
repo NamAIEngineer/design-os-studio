@@ -74,12 +74,7 @@ pub fn snap_values(mine: &[f32], targets: &[f32], threshold: f32) -> Option<(f32
     best
 }
 
-fn snap_axis_rects(
-    mine: &[f32],
-    others: &[Rect],
-    coords: fn(&Rect) -> [f32; 3],
-    threshold: f32,
-) -> Option<(f32, f32)> {
+fn snap_axis_rects(mine: &[f32], others: &[Rect], coords: fn(&Rect) -> [f32; 3], threshold: f32) -> Option<(f32, f32)> {
     if mine.is_empty() {
         return None;
     }
@@ -357,4 +352,3 @@ mod tests {
         assert_eq!(vals, vec![20.0, 130.0, 30.0, 30.0]);
     }
 }
-

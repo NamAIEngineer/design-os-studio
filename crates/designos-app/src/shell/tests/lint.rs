@@ -64,21 +64,12 @@ fn audit_sim(label: &str, s: &mut Sim, check_canvas_purple: bool) -> Vec<lint::F
     lint::take_icons();
     s.frame(vec![]);
     let (texts, boxes) = lint::scan_shapes(&s.shapes);
-    assert!(
-        texts.len() > 8 && boxes.len() > 8,
-        "[{label}] only {} texts / {} boxes painted",
-        texts.len(),
-        boxes.len()
-    );
+    assert!(texts.len() > 8 && boxes.len() > 8, "[{label}] only {} texts / {} boxes painted", texts.len(), boxes.len());
     let icons = lint::take_icons();
     let mut out = lint::check_text(&texts, &boxes);
     out.extend(lint::check_icons(&icons));
     out.extend(lint::check_pointer_targets(&icons));
-    let exclude = if check_canvas_purple || s.app().home.is_some() {
-        None
-    } else {
-        Some(s.app().canvas_rect)
-    };
+    let exclude = if check_canvas_purple || s.app().home.is_some() { None } else { Some(s.app().canvas_rect) };
     out.extend(lint::check_no_purple_chrome(&s.shapes, exclude));
     out.extend(lint::check_contrast(&s.shapes, exclude));
     for f in &mut out {
@@ -104,11 +95,7 @@ fn design_os_gates_audit_all_studio_screens_zero_overflow_zero_purple_and_valid_
         ("home resources", crate::home::Section::Resources),
         ("home drafts", crate::home::Section::Drafts),
     ] {
-        let mut s = Sim::with(Options {
-            home: true,
-            library: Some(lib_dir.clone()),
-            ..Options::default()
-        });
+        let mut s = Sim::with(Options { home: true, library: Some(lib_dir.clone()), ..Options::default() });
         s.shell.app.tabs.always_visible = true;
         if let Some(h) = s.shell.app.home.as_mut() {
             h.section = section;
@@ -129,15 +116,7 @@ fn design_os_gates_audit_all_studio_screens_zero_overflow_zero_purple_and_valid_
 
     // 2. Audit Dev Mode, Assets Panel, Variables Modal, Plugins Modal, Specs Reader, Agents Panel, Libraries Modal, Cmd+K Modal
     for (label, opts) in [
-        (
-            "dev mode",
-            Options {
-                select: Some("Welcome".into()),
-                dev: Some("css".into()),
-                dev_demo: true,
-                ..Options::default()
-            },
-        ),
+        ("dev mode", Options { select: Some("Welcome".into()), dev: Some("css".into()), dev_demo: true, ..Options::default() }),
         ("assets panel", Options { panel: Some("assets".into()), ..Options::default() }),
         ("variables modal", Options { panel: Some("variables".into()), ..Options::default() }),
         ("plugins modal", Options { panel: Some("plugins".into()), ..Options::default() }),
@@ -187,18 +166,12 @@ fn design_os_gates_audit_all_studio_screens_zero_overflow_zero_purple_and_valid_
         }
         let bar = crate::panels::toolbar::toolbar_rect(s.ctx.content_rect());
         if bar.height() < 24.0 {
-            all.push(lint::Finding {
-                what: "[editor chrome] bottom toolbar below 24px height floor".into(),
-                detail: format!("rect {:?}", bar),
-            });
+            all.push(lint::Finding { what: "[editor chrome] bottom toolbar below 24px height floor".into(), detail: format!("rect {:?}", bar) });
         }
         for gi in 0..crate::canvas::tools::GROUPS.len() {
             let gb = crate::panels::toolbar::group_button_rect(s.ctx.content_rect(), gi);
             if gb.width() < 24.0 || gb.height() < 24.0 {
-                all.push(lint::Finding {
-                    what: format!("[editor chrome] toolbar group button {gi} below 24x24px floor"),
-                    detail: format!("rect {:?}", gb),
-                });
+                all.push(lint::Finding { what: format!("[editor chrome] toolbar group button {gi} below 24x24px floor"), detail: format!("rect {:?}", gb) });
             }
         }
     }
@@ -210,4 +183,3 @@ fn design_os_gates_audit_all_studio_screens_zero_overflow_zero_purple_and_valid_
     }
     assert!(all.is_empty(), "{} studio screen gate findings", all.len());
 }
-

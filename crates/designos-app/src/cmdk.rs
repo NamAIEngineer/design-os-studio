@@ -1412,11 +1412,7 @@ pub fn populate_realistic_content(doc: &mut Document, page: NodeId, selection: &
 /// from the selected nodes (or top-level page children if selection is empty).
 /// If a selected frame has no direct fills, strips the background fill from its first backdrop child.
 pub fn remove_background_on_selection(doc: &mut Document, page: NodeId, selection: &[NodeId]) -> usize {
-    let targets: Vec<NodeId> = if !selection.is_empty() {
-        selection.to_vec()
-    } else {
-        doc.get(page).map(|pg| pg.children.clone()).unwrap_or_default()
-    };
+    let targets: Vec<NodeId> = if !selection.is_empty() { selection.to_vec() } else { doc.get(page).map(|pg| pg.children.clone()).unwrap_or_default() };
 
     let mut modified = 0usize;
     for nid in targets {
@@ -1455,11 +1451,7 @@ pub fn remove_background_on_selection(doc: &mut Document, page: NodeId, selectio
 /// snaps fractional node coordinates/sizes (`transform.tx`, `transform.ty`, `size.x`, `size.y`) to
 /// integer device pixels, and sharpens sub-pixel stroke weights to crisp integer widths.
 pub fn boost_resolution_on_selection(doc: &mut Document, page: NodeId, selection: &[NodeId]) -> usize {
-    let roots: Vec<NodeId> = if !selection.is_empty() {
-        selection.to_vec()
-    } else {
-        doc.get(page).map(|pg| pg.children.clone()).unwrap_or_default()
-    };
+    let roots: Vec<NodeId> = if !selection.is_empty() { selection.to_vec() } else { doc.get(page).map(|pg| pg.children.clone()).unwrap_or_default() };
 
     let mut visited = Vec::new();
     for r in &roots {
@@ -1721,10 +1713,7 @@ mod tests {
         node.fills = vec![
             Paint::solid(Color::from_hex("#18181B").unwrap()),
             Paint {
-                kind: PaintKind::Image {
-                    image_ref: "hero-asset".into(),
-                    scale_mode: designos_doc::ImageScaleMode::Fit,
-                },
+                kind: PaintKind::Image { image_ref: "hero-asset".into(), scale_mode: designos_doc::ImageScaleMode::Fit },
                 opacity: 0.85,
                 visible: true,
                 blend: designos_doc::BlendMode::Normal,
@@ -1746,10 +1735,7 @@ mod tests {
         assert_eq!(updated.size.x, 200.0);
         assert_eq!(updated.size.y, 120.0);
         assert_eq!(updated.stroke.weight, 1.0);
-        assert!(matches!(
-            updated.fills[0].kind,
-            PaintKind::Image { scale_mode: designos_doc::ImageScaleMode::Fill, .. }
-        ));
+        assert!(matches!(updated.fills[0].kind, PaintKind::Image { scale_mode: designos_doc::ImageScaleMode::Fill, .. }));
         assert_eq!(updated.fills[0].opacity, 1.0);
     }
 }

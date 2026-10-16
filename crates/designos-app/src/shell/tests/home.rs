@@ -524,4 +524,3 @@ fn userflows_uf01_to_uf08_end_to_end_figma_parity() {
         let _ = tab.child.kill();
     }
 }
-

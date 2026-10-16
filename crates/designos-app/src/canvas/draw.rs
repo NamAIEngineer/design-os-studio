@@ -23,20 +23,17 @@ pub const FIGMA_SLICE_GREEN: Color32 = Color32::from_rgb(0x14, 0xAE, 0x5C);
 /// Whether `n` is a Slice node (either imported `SLICE` or drawn with `Tool::Slice`).
 pub fn is_slice_node(n: &Node) -> bool {
     matches!(&n.kind, NodeKind::Unknown { type_name } if type_name.eq_ignore_ascii_case("SLICE"))
-        || (matches!(n.kind, NodeKind::Rectangle)
-            && n.fills.is_empty()
-            && n.stroke.paints.is_empty()
-            && n.name.starts_with("Slice"))
+        || (matches!(n.kind, NodeKind::Rectangle) && n.fills.is_empty() && n.stroke.paints.is_empty() && n.name.starts_with("Slice"))
 }
 
 #[inline]
 fn fast_is_slot_container(doc: &designos_doc::Document, n: &Node, id: NodeId) -> bool {
-    let has_own = n.component.overrides.contains(&designos_doc::OverrideField::SlotContent)
-        || !n.component.bindings.is_empty();
-    let has_src = n.component.source.and_then(|s| doc.get(s)).is_some_and(|sn| {
-        sn.component.overrides.contains(&designos_doc::OverrideField::SlotContent)
-            || !sn.component.bindings.is_empty()
-    });
+    let has_own = n.component.overrides.contains(&designos_doc::OverrideField::SlotContent) || !n.component.bindings.is_empty();
+    let has_src = n
+        .component
+        .source
+        .and_then(|s| doc.get(s))
+        .is_some_and(|sn| sn.component.overrides.contains(&designos_doc::OverrideField::SlotContent) || !sn.component.bindings.is_empty());
     (has_own || has_src) && designos_doc::is_slot_container(doc, id)
 }
 
@@ -138,14 +135,7 @@ pub fn label_rects(app: &App, rect: ERect) -> Vec<(NodeId, ERect)> {
     for id in &page.children {
         let Some(n) = app.doc.get(*id) else { continue };
         if !n.visible
-            || !matches!(
-                n.kind,
-                NodeKind::Frame(_)
-                    | NodeKind::Section
-                    | NodeKind::Component(_)
-                    | NodeKind::ComponentSet(_)
-                    | NodeKind::Instance { .. }
-            )
+            || !matches!(n.kind, NodeKind::Frame(_) | NodeKind::Section | NodeKind::Component(_) | NodeKind::ComponentSet(_) | NodeKind::Instance { .. })
         {
             continue;
         }
@@ -164,10 +154,7 @@ pub fn label_rects(app: &App, rect: ERect) -> Vec<(NodeId, ERect)> {
             continue;
         }
         let w_px = bb.w * app.view.zoom;
-        let is_comp_like = matches!(
-            n.kind,
-            NodeKind::Component(_) | NodeKind::ComponentSet(_) | NodeKind::Instance { .. }
-        );
+        let is_comp_like = matches!(n.kind, NodeKind::Component(_) | NodeKind::ComponentSet(_) | NodeKind::Instance { .. });
         let icon_w = if is_comp_like { 18.0 } else { 0.0 };
         let text_w = n.name.chars().count() as f32 * theme::FONT_SIZE_LABEL_CANVAS * 0.66 + icon_w + 16.0;
         let w = text_w.min(w_px.max(24.0));
@@ -244,15 +231,8 @@ fn draw_component_slot_and_slice_chrome(app: &App, p: &Painter, rect: ERect) {
         return;
     }
     let z = app.view.zoom.max(1e-3);
-    let win = (
-        app.view.offset.x - 64.0,
-        app.view.offset.y - 64.0,
-        app.view.offset.x + rect.width() / z + 64.0,
-        app.view.offset.y + rect.height() / z + 64.0,
-    );
-    let overlaps_win = |(x0, y0, x1, y1): (f32, f32, f32, f32)| {
-        x0 <= win.2 && win.0 <= x1 && y0 <= win.3 && win.1 <= y1
-    };
+    let win = (app.view.offset.x - 64.0, app.view.offset.y - 64.0, app.view.offset.x + rect.width() / z + 64.0, app.view.offset.y + rect.height() / z + 64.0);
+    let overlaps_win = |(x0, y0, x1, y1): (f32, f32, f32, f32)| x0 <= win.2 && win.0 <= x1 && y0 <= win.3 && win.1 <= y1;
     let idx = super::interact::active_index(app);
     let key = (app.doc.runtime_id(), app.page, app.doc.mutation_epoch());
     let in_transform_drag = matches!(
@@ -307,13 +287,9 @@ fn draw_component_slot_and_slice_chrome(app: &App, p: &Painter, rect: ERect) {
                 continue;
             }
         }
-        let corners = [
-            world.apply(DV::ZERO),
-            world.apply(DV::new(n.size.x, 0.0)),
-            world.apply(DV::new(n.size.x, n.size.y)),
-            world.apply(DV::new(0.0, n.size.y)),
-        ]
-        .map(|c| app.view.to_screen(rect.min, c));
+        let corners =
+            [world.apply(DV::ZERO), world.apply(DV::new(n.size.x, 0.0)), world.apply(DV::new(n.size.x, n.size.y)), world.apply(DV::new(0.0, n.size.y))]
+                .map(|c| app.view.to_screen(rect.min, c));
         if is_comp_set && !app.is_selected(id) {
             dashed_quad(p, &corners, 6.0, 4.0, Stroke::new(1.25, FIGMA_COMPONENT_PURPLE.gamma_multiply(0.85)));
         }
@@ -328,11 +304,7 @@ fn draw_component_slot_and_slice_chrome(app: &App, p: &Painter, rect: ERect) {
             }
         }
         if is_slice {
-            let col = if app.is_selected(id) || app.hover == Some(id) {
-                Color32::from_rgb(0xF5, 0x9E, 0x0B)
-            } else {
-                FIGMA_SLICE_GREEN
-            };
+            let col = if app.is_selected(id) || app.hover == Some(id) { Color32::from_rgb(0xF5, 0x9E, 0x0B) } else { FIGMA_SLICE_GREEN };
             dashed_quad(p, &corners, 5.0, 3.0, Stroke::new(1.0, col));
             let font = theme::font_small_strong();
             let w = crate::widgets::text_width(p, "Slice", &font) + 8.0;
@@ -349,10 +321,7 @@ pub fn dev_status_badge_rect(id: NodeId, n: &Node, label_rect: ERect) -> Option<
     let _ = id;
     let text_w = status.label().chars().count() as f32 * theme::FONT_SIZE_SMALL * 0.62 + 12.0;
     let h = 16.0;
-    let r = ERect::from_min_size(
-        Pos2::new(label_rect.right() + 6.0, label_rect.center().y - h * 0.5),
-        EV::new(text_w, h),
-    );
+    let r = ERect::from_min_size(Pos2::new(label_rect.right() + 6.0, label_rect.center().y - h * 0.5), EV::new(text_w, h));
     Some((r, status))
 }
 
@@ -411,12 +380,7 @@ fn draw_css_grid_overlays(app: &App, p: &Painter, rect: ERect) {
         // 2. Dotted/dashed cell boundary lines for every (row, col) cell rect.
         for cell in &ov.cells {
             let r = &cell.rect;
-            let c_pts = [
-                to_s(r.x, r.y),
-                to_s(r.x + r.w, r.y),
-                to_s(r.x + r.w, r.y + r.h),
-                to_s(r.x, r.y + r.h),
-            ];
+            let c_pts = [to_s(r.x, r.y), to_s(r.x + r.w, r.y), to_s(r.x + r.w, r.y + r.h), to_s(r.x, r.y + r.h)];
             dashed_quad(p, &c_pts, 3.0, 3.0, cell_stroke);
         }
 
@@ -614,8 +578,7 @@ pub fn overlays(app: &App, ui: &Ui, rect: ERect) {
     let p = ui.painter().with_clip_rect(rect);
     let to_s = |v: DV| app.view.to_screen(rect.min, v);
     let light = page_is_light(app);
-    let sel_set: Option<std::collections::HashSet<NodeId>> =
-        (app.selection.len() > 16).then(|| app.selection.iter().copied().collect());
+    let sel_set: Option<std::collections::HashSet<NodeId>> = (app.selection.len() > 16).then(|| app.selection.iter().copied().collect());
     let is_sel = |id: NodeId| sel_set.as_ref().map_or_else(|| app.is_selected(id), |s| s.contains(&id));
 
     // Persistent ComponentSet dashed border, Slot indicator, and Slice export border.
@@ -675,12 +638,7 @@ pub fn overlays(app: &App, ui: &Ui, rect: ERect) {
             let (w, h) = (n.size.x, n.size.y);
             let w_xform = super::fast_world_transform(&app.doc, fid);
             let quad = |x0: f32, y0: f32, x1: f32, y1: f32| {
-                vec![
-                    to_s(w_xform.apply(v2(x0, y0))),
-                    to_s(w_xform.apply(v2(x1, y0))),
-                    to_s(w_xform.apply(v2(x1, y1))),
-                    to_s(w_xform.apply(v2(x0, y1))),
-                ]
+                vec![to_s(w_xform.apply(v2(x0, y0))), to_s(w_xform.apply(v2(x1, y0))), to_s(w_xform.apply(v2(x1, y1))), to_s(w_xform.apply(v2(x0, y1)))]
             };
             if pt > 0.0 {
                 p.add(egui::Shape::convex_polygon(quad(0.0, 0.0, w, pt.min(h)), pad_tint, Stroke::NONE));
@@ -761,17 +719,13 @@ pub fn overlays(app: &App, ui: &Ui, rect: ERect) {
             // Aspect ratio magnetic snap diagonal dashed line (`#94`).
             if let Interaction::Resize(res) = &app.canvas.inter {
                 let ratio_locked = match &res.kind {
-                    super::ResizeKind::Single { id, size0, .. } => {
-                        app.doc.get(*id).is_some_and(|n| {
-                            size0.x > 1.0 && size0.y > 1.0 && n.size.x > 1.0 && n.size.y > 1.0
-                                && ((n.size.x / n.size.y) - (size0.x / size0.y)).abs() <= 0.015
-                        })
-                    }
+                    super::ResizeKind::Single { id, size0, .. } => app.doc.get(*id).is_some_and(|n| {
+                        size0.x > 1.0 && size0.y > 1.0 && n.size.x > 1.0 && n.size.y > 1.0 && ((n.size.x / n.size.y) - (size0.x / size0.y)).abs() <= 0.015
+                    }),
                     super::ResizeKind::Multi { bbox0, .. } => {
                         let bw = (corners[1].x - corners[0].x).abs();
                         let bh = (corners[3].y - corners[0].y).abs();
-                        bbox0.w > 1.0 && bbox0.h > 1.0 && bw > 1.0 && bh > 1.0
-                            && ((bw / bh) - (bbox0.w / bbox0.h)).abs() <= 0.015
+                        bbox0.w > 1.0 && bbox0.h > 1.0 && bw > 1.0 && bh > 1.0 && ((bw / bh) - (bbox0.w / bbox0.h)).abs() <= 0.015
                     }
                 };
                 if ratio_locked {
@@ -1068,16 +1022,12 @@ mod tests {
             let fx = (f_idx % 10) as f32 * 600.0;
             let fy = (f_idx / 10) as f32 * 500.0;
             let fid = doc.alloc_id();
-            let frame = doc
-                .insert(page, Node::frame(fid, Rect::new(fx, fy, 480.0, 400.0)))
-                .unwrap();
+            let frame = doc.insert(page, Node::frame(fid, Rect::new(fx, fy, 480.0, 400.0))).unwrap();
             for c_idx in 0..49 {
                 let cx = (c_idx % 7) as f32 * 60.0 + 10.0;
                 let cy = (c_idx / 7) as f32 * 50.0 + 10.0;
                 let cid = doc.alloc_id();
-                let child = doc
-                    .insert(frame, Node::rectangle(cid, Rect::new(cx, cy, 48.0, 36.0)))
-                    .unwrap();
+                let child = doc.insert(frame, Node::rectangle(cid, Rect::new(cx, cy, 48.0, 36.0))).unwrap();
                 if first_leaf.is_none() {
                     first_leaf = Some(child);
                 }
@@ -1101,26 +1051,9 @@ mod tests {
 
         let start = std::time::Instant::now();
         let labels = label_rects(&app, screen_rect);
-        let hit = super::super::hit::hit_test_with_index(
-            &app.doc,
-            app.page,
-            v2(25.0, 25.0),
-            2.0,
-            false,
-            &[],
-            Some(&idx),
-        );
-        let marquee = super::super::hit::marquee_select_with_index(
-            &app.doc,
-            app.page,
-            &Rect::new(0.0, 0.0, 120.0, 100.0),
-            Some(&idx),
-        );
-        let snapped = super::super::snap::snap_rect(
-            &Rect::new(71.0, 10.0, 48.0, 36.0),
-            &targets,
-            4.0,
-        );
+        let hit = super::super::hit::hit_test_with_index(&app.doc, app.page, v2(25.0, 25.0), 2.0, false, &[], Some(&idx));
+        let marquee = super::super::hit::marquee_select_with_index(&app.doc, app.page, &Rect::new(0.0, 0.0, 120.0, 100.0), Some(&idx));
+        let snapped = super::super::snap::snap_rect(&Rect::new(71.0, 10.0, 48.0, 36.0), &targets, 4.0);
         let elapsed = start.elapsed();
 
         assert!(!labels.is_empty());
@@ -1156,11 +1089,7 @@ mod tests {
                 let y = (i / 20) as f32 * 90.0;
                 let mut n = Node::rectangle(id, Rect::new(x, y, 100.0, 60.0));
                 if i % 3 == 0 {
-                    n.kind = NodeKind::Instance {
-                        frame: Default::default(),
-                        component: Some(comp),
-                        component_key: None,
-                    };
+                    n.kind = NodeKind::Instance { frame: Default::default(), component: Some(comp), component_key: None };
                 }
                 d.insert(sec, n).unwrap();
             }
@@ -1168,12 +1097,7 @@ mod tests {
         };
 
         // Pick the largest page (e.g., "V-Builder" with 159,644 nodes in VSF - PCP.fig).
-        let largest_page = doc
-            .pages
-            .iter()
-            .copied()
-            .max_by_key(|&pid| doc.get(pid).map_or(0, |p| p.children.len()))
-            .unwrap_or(doc.pages[0]);
+        let largest_page = doc.pages.iter().copied().max_by_key(|&pid| doc.get(pid).map_or(0, |p| p.children.len())).unwrap_or(doc.pages[0]);
 
         let mut app = App::new(doc);
         app.page = largest_page;
@@ -1242,12 +1166,7 @@ mod tests {
 
         // 4. Multi-Selection (200 layers + Marquee Select across 4000x3000 world rect)
         let t3 = std::time::Instant::now();
-        let marquee_hits = super::super::hit::marquee_select_with_index(
-            &app.doc,
-            app.page,
-            &Rect::new(-2000.0, -2000.0, 4000.0, 3000.0),
-            Some(&idx),
-        );
+        let marquee_hits = super::super::hit::marquee_select_with_index(&app.doc, app.page, &Rect::new(-2000.0, -2000.0, 4000.0, 3000.0), Some(&idx));
         app.selection = multi_nodes;
         let _top4 = app.top_selection();
         let _box4 = super::super::interact::selection_box(&app);
@@ -1275,27 +1194,14 @@ mod tests {
         let chrome_ms = t_chrome.elapsed().as_secs_f64() * 1000.0;
 
         let t_hit = std::time::Instant::now();
-        let _hit = super::super::hit::hit_test_with_index(
-            &app.doc,
-            app.page,
-            DV::new(400.0, 300.0),
-            8.0,
-            false,
-            &[],
-            Some(&idx),
-        );
+        let _hit = super::super::hit::hit_test_with_index(&app.doc, app.page, DV::new(400.0, 300.0), 8.0, false, &[], Some(&idx));
         let hit_ms = t_hit.elapsed().as_secs_f64() * 1000.0;
 
         // 7. Live Edit / Drag Commit (comp_ops::with_sync + layout_node)
         let t_ws = std::time::Instant::now();
         let mut moved = app.doc.get(sample_leaf).unwrap().clone();
         moved.transform.tx += 1.0;
-        let _cmd = crate::comp_ops::with_sync(
-            &mut app.doc,
-            designos_doc::Command::Update {
-                node: Box::new(moved),
-            },
-        );
+        let _cmd = crate::comp_ops::with_sync(&mut app.doc, designos_doc::Command::Update { node: Box::new(moved) });
         let with_sync_ms = t_ws.elapsed().as_secs_f64() * 1000.0;
 
         let t_layout = std::time::Instant::now();
@@ -1335,4 +1241,3 @@ mod tests {
         assert!(layout_ms < 10.0, "layout_node took {:.3}ms", layout_ms);
     }
 }
-

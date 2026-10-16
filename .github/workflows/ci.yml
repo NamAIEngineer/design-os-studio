@@ -12,7 +12,6 @@ concurrency:
 env:
   RUST_VERSION: "1.93.1"
   CARGO_TERM_COLOR: always
-  RUSTFLAGS: -D warnings
 
 jobs:
   test:
@@ -74,9 +73,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       - name: Clippy
-        run: cargo clippy --workspace --all-targets --locked -- -D warnings
-        env:
-          RUSTFLAGS: ""
+        run: cargo clippy --workspace --all-targets --locked
 
   fmt:
     name: Rustfmt

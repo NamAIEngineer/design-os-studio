@@ -302,14 +302,7 @@ impl<'a> serde::ser::SerializeStructVariant for HashSerializer<'a> {
 pub(crate) fn doc_hash(doc: &Document) -> u64 {
     if doc.nodes.len() > 5_000 {
         let mut h = std::collections::hash_map::DefaultHasher::new();
-        (
-            doc.runtime_id(),
-            doc.mutation_epoch(),
-            doc.nodes.len(),
-            doc.pages.len(),
-            &doc.name,
-        )
-            .hash(&mut h);
+        (doc.runtime_id(), doc.mutation_epoch(), doc.nodes.len(), doc.pages.len(), &doc.name).hash(&mut h);
         return h.finish();
     }
     use serde::Serialize;

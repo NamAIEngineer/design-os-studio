@@ -899,11 +899,7 @@ fn hscrollbar(ui: &mut Ui, strip: Rect, sx: &mut f32, drawn_w: f32, modes: usize
     let ratio = (view_w / content).clamp(0.1, 1.0);
     let thumb_w = track.width() * ratio;
     let max_sx = (drawn_w - view_w).max(0.0);
-    let resp = ui.interact(
-        track,
-        ui.id().with(("scrollbar", track.min.x as i32, track.min.y as i32)),
-        Sense::click_and_drag(),
-    );
+    let resp = ui.interact(track, ui.id().with(("scrollbar", track.min.x as i32, track.min.y as i32)), Sense::click_and_drag());
     if (resp.clicked() || resp.dragged()) && max_sx > 0.0 {
         if let Some(pos) = resp.interact_pointer_pos() {
             let denom = (track.width() - thumb_w).max(1.0);

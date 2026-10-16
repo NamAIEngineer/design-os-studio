@@ -98,10 +98,7 @@ fn main() {
     } else {
         #[cfg(target_os = "macos")]
         {
-            viewport = viewport
-                .with_fullsize_content_view(true)
-                .with_titlebar_shown(false)
-                .with_title_shown(false);
+            viewport = viewport.with_fullsize_content_view(true).with_titlebar_shown(false).with_title_shown(false);
         }
     }
     let native = eframe::NativeOptions { viewport, ..Default::default() };
@@ -201,10 +198,7 @@ fn run_agent_cli(opts: &cli::Options) -> Result<(), String> {
     }
 
     if let Some(text) = &opts.add_comment {
-        let page_id = selected_node
-            .and_then(|nid| doc.page_of(nid))
-            .or_else(|| doc.pages.first().copied())
-            .ok_or("Document has no pages")?;
+        let page_id = selected_node.and_then(|nid| doc.page_of(nid)).or_else(|| doc.pages.first().copied()).ok_or("Document has no pages")?;
         let anchor_node = selected_node.filter(|nid| !doc.pages.contains(nid));
         let offset = match anchor_node.and_then(|nid| doc.get(nid)) {
             Some(n) => designos_doc::Vec2::new((n.size.x * 0.5).min(24.0), (n.size.y * 0.5).min(24.0)),
@@ -223,20 +217,12 @@ fn run_agent_cli(opts: &cli::Options) -> Result<(), String> {
             resolved: false,
         });
         save_target.save(&doc)?;
-        let resolved = doc
-            .resolve_comment_targets()
-            .into_iter()
-            .find(|c| c.id == thread_id)
-            .ok_or("Failed to resolve created comment")?;
+        let resolved = doc.resolve_comment_targets().into_iter().find(|c| c.id == thread_id).ok_or("Failed to resolve created comment")?;
         println!("{}", serde_json::to_string_pretty(&resolved).unwrap());
     }
 
     if let Some(thread_id) = &opts.reply_comment {
-        let t = doc
-            .comments
-            .iter_mut()
-            .find(|t| t.id == *thread_id)
-            .ok_or_else(|| format!("Comment thread '{thread_id}' not found"))?;
+        let t = doc.comments.iter_mut().find(|t| t.id == *thread_id).ok_or_else(|| format!("Comment thread '{thread_id}' not found"))?;
         let msg_text = opts.message.clone().unwrap_or_else(|| "Updated per feedback.".into());
         t.messages.push(comments::model::comment(designos_library::new_id(), "Agent", &msg_text));
         if opts.resolve {
@@ -254,11 +240,7 @@ fn run_agent_cli(opts: &cli::Options) -> Result<(), String> {
     }
 
     if let Some(thread_id) = &opts.resolve_comment {
-        let t = doc
-            .comments
-            .iter_mut()
-            .find(|t| t.id == *thread_id)
-            .ok_or_else(|| format!("Comment thread '{thread_id}' not found"))?;
+        let t = doc.comments.iter_mut().find(|t| t.id == *thread_id).ok_or_else(|| format!("Comment thread '{thread_id}' not found"))?;
         t.resolved = true;
         save_target.save(&doc)?;
         let out = serde_json::json!({
@@ -355,12 +337,7 @@ mod icon_tests {
         )
         .unwrap();
 
-        let opts = super::cli::parse([
-            doc_path.to_string_lossy().into_owned(),
-            "--apply-spec".into(),
-            spec_in.to_string_lossy().into_owned(),
-        ])
-        .unwrap();
+        let opts = super::cli::parse([doc_path.to_string_lossy().into_owned(), "--apply-spec".into(), spec_in.to_string_lossy().into_owned()]).unwrap();
         super::run_agent_cli(&opts).unwrap();
 
         let opts_comment = super::cli::parse([

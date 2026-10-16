@@ -487,7 +487,6 @@ pub fn select_sibling(doc: &Document, page: NodeId, selection: &[NodeId], forwar
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1033,4 +1032,3 @@ mod tests {
         assert_eq!(select_sibling(&f.doc, f.page, &[e], true), vec![b]);
     }
 }
-

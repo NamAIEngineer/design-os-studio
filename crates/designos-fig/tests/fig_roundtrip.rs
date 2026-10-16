@@ -1,16 +1,11 @@
 use designos_doc::*;
 use designos_fig::testkit::sample_fig;
-use designos_fig::{
-    commands_blob_to_path, export_fig, import_fig, import_fig_node_changes, path_to_commands_blob,
-};
+use designos_fig::{commands_blob_to_path, export_fig, import_fig, import_fig_node_changes, path_to_commands_blob};
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
 
 fn find<'a>(doc: &'a Document, name: &str) -> &'a Node {
-    doc.nodes
-        .values()
-        .find(|n| n.name == name)
-        .unwrap_or_else(|| panic!("no node named {name}"))
+    doc.nodes.values().find(|n| n.name == name).unwrap_or_else(|| panic!("no node named {name}"))
 }
 
 #[test]
@@ -21,11 +16,7 @@ fn commands_blob_roundtrip_preserves_all_verbs_and_winding_rules() {
                 PathCmd::MoveTo(Vec2::new(10.0, 20.0)),
                 PathCmd::LineTo(Vec2::new(110.0, 20.0)),
                 PathCmd::QuadTo(Vec2::new(130.0, 20.0), Vec2::new(130.0, 40.0)),
-                PathCmd::CubicTo(
-                    Vec2::new(130.0, 70.0),
-                    Vec2::new(90.0, 90.0),
-                    Vec2::new(60.0, 90.0),
-                ),
+                PathCmd::CubicTo(Vec2::new(130.0, 70.0), Vec2::new(90.0, 90.0), Vec2::new(60.0, 90.0)),
                 PathCmd::Close,
             ],
             fill_rule,
@@ -55,18 +46,14 @@ fn export_fig_then_import_fig_roundtrips_sample_and_rich_documents() {
     assert_eq!(al.padding, [12.0, 16.0, 12.0, 16.0]);
 
     let title = find(&doc2, "Title");
-    let NodeKind::Text(tp) = &title.kind else {
-        panic!("expected Text")
-    };
+    let NodeKind::Text(tp) = &title.kind else { panic!("expected Text") };
     assert_eq!(tp.content, "Hi \u{1F600}!");
     assert_eq!(tp.runs.len(), 1);
     assert_eq!(tp.runs[0].style.font_weight, 700);
     assert!(tp.runs[0].style.italic);
 
     let tri = find(&doc2, "Tri");
-    let NodeKind::Vector { paths, .. } = &tri.kind else {
-        panic!("expected Vector")
-    };
+    let NodeKind::Vector { paths, .. } = &tri.kind else { panic!("expected Vector") };
     assert_eq!(paths[0].cmds.len(), 4);
 
     // 2. Build a rich Document with variables, asymmetric auto-layout, wrap, individual stroke weights,
@@ -78,14 +65,7 @@ fn export_fig_then_import_fig_roundtrips_sample_and_rich_documents() {
     let img_hash = "0102030405060708090a0b0c0d0e0f1011121314";
     rich.images.insert(img_hash.into(), fake_png.clone());
 
-    rich.guides.insert(
-        page_id,
-        vec![Guide {
-            axis: GuideAxis::X,
-            offset: 120.0,
-            frame: None,
-        }],
-    );
+    rich.guides.insert(page_id, vec![Guide { axis: GuideAxis::X, offset: 120.0, frame: None }]);
 
     // Variable collection + variables
     rich.variable_collections.insert(
@@ -93,22 +73,9 @@ fn export_fig_then_import_fig_roundtrips_sample_and_rich_documents() {
         VariableCollection {
             id: "VariableCollectionId:10:1".into(),
             name: "Theme".into(),
-            modes: vec![
-                VariableMode {
-                    id: "10:0".into(),
-                    name: "Light".into(),
-                },
-                VariableMode {
-                    id: "10:1".into(),
-                    name: "Dark".into(),
-                },
-            ],
+            modes: vec![VariableMode { id: "10:0".into(), name: "Light".into() }, VariableMode { id: "10:1".into(), name: "Dark".into() }],
             default_mode: "10:0".into(),
-            variables: vec![
-                "VariableID:10:10".into(),
-                "VariableID:10:11".into(),
-                "VariableID:10:12".into(),
-            ],
+            variables: vec!["VariableID:10:10".into(), "VariableID:10:11".into(), "VariableID:10:12".into()],
             key: Some("theme_key".into()),
         },
     );
@@ -147,14 +114,8 @@ fn export_fig_then_import_fig_roundtrips_sample_and_rich_documents() {
         },
     );
     let mut alias_vals = BTreeMap::new();
-    alias_vals.insert(
-        "10:0".into(),
-        VariableValue::Alias("VariableID:10:10".into()),
-    );
-    alias_vals.insert(
-        "10:1".into(),
-        VariableValue::Alias("VariableID:10:10".into()),
-    );
+    alias_vals.insert("10:0".into(), VariableValue::Alias("VariableID:10:10".into()));
+    alias_vals.insert("10:1".into(), VariableValue::Alias("VariableID:10:10".into()));
     rich.variables.insert(
         "VariableID:10:12".into(),
         Variable {
@@ -192,14 +153,8 @@ fn export_fig_then_import_fig_roundtrips_sample_and_rich_documents() {
     comp_node.name = "PrimaryButton".into();
     comp_node.size = Vec2::new(160.0, 48.0);
     comp_node.dev.status = Some(DevStatus::ReadyForDev);
-    comp_node
-        .variables
-        .bindings
-        .insert("paddingLeft".into(), "VariableID:10:11".into());
-    comp_node
-        .variables
-        .bindings
-        .insert("itemSpacing".into(), "VariableID:10:11".into());
+    comp_node.variables.bindings.insert("paddingLeft".into(), "VariableID:10:11".into());
+    comp_node.variables.bindings.insert("itemSpacing".into(), "VariableID:10:11".into());
     rich.insert(page_id, comp_node).unwrap();
 
     // Child shape inside PrimaryButton with side_weights + image fill + variable binding
@@ -210,10 +165,7 @@ fn export_fig_then_import_fig_roundtrips_sample_and_rich_documents() {
     bg_rect.fills = vec![
         Paint::solid(Color::rgb(240, 242, 245)),
         Paint {
-            kind: PaintKind::Image {
-                image_ref: img_hash.into(),
-                scale_mode: ImageScaleMode::Fill,
-            },
+            kind: PaintKind::Image { image_ref: img_hash.into(), scale_mode: ImageScaleMode::Fill },
             opacity: 0.9,
             visible: true,
             blend: BlendMode::Normal,
@@ -229,16 +181,8 @@ fn export_fig_then_import_fig_roundtrips_sample_and_rich_documents() {
         miter_limit: 4.0,
         side_weights: Some([1.0, 2.0, 3.0, 4.0]),
     };
-    bg_rect.layout_child = LayoutChild {
-        horizontal: Sizing::Fill,
-        vertical: Sizing::Fill,
-        grow: 1.0,
-        ..LayoutChild::default()
-    };
-    bg_rect
-        .variables
-        .bindings
-        .insert("fills/0".into(), "VariableID:10:10".into());
+    bg_rect.layout_child = LayoutChild { horizontal: Sizing::Fill, vertical: Sizing::Fill, grow: 1.0, ..LayoutChild::default() };
+    bg_rect.variables.bindings.insert("fills/0".into(), "VariableID:10:10".into());
     rich.insert(comp_id, bg_rect).unwrap();
 
     // Export and re-import
@@ -251,12 +195,7 @@ fn export_fig_then_import_fig_roundtrips_sample_and_rich_documents() {
 
     let imp_comp = find(&rich_imp, "PrimaryButton");
     assert_eq!(imp_comp.dev.status, Some(DevStatus::ReadyForDev));
-    let imp_al = imp_comp
-        .kind
-        .frame_props()
-        .unwrap()
-        .auto_layout
-        .expect("auto_layout");
+    let imp_al = imp_comp.kind.frame_props().unwrap().auto_layout.expect("auto_layout");
     assert_eq!(imp_al.direction, LayoutDirection::Horizontal);
     assert_eq!(imp_al.padding, [8.0, 16.0, 12.0, 20.0]);
     assert_eq!(imp_al.item_spacing, 10.0);
@@ -278,13 +217,7 @@ fn export_fig_then_import_fig_roundtrips_sample_and_rich_documents() {
 #[test]
 fn fig_import_resolves_symbol_overrides_bindings_nested_swaps_and_handoff_map() {
     let g = |s: u64, l: u64| -> Value { json!({"sessionID": s, "localID": l}) };
-    let node = |id: (u64, u64),
-                parent: (u64, u64),
-                pos: &str,
-                ty: &str,
-                name: &str,
-                extra: Value|
-     -> Value {
+    let node = |id: (u64, u64), parent: (u64, u64), pos: &str, ty: &str, name: &str, extra: Value| -> Value {
         let mut v = json!({
             "guid": g(id.0, id.1),
             "parentIndex": {"guid": g(parent.0, parent.1), "position": pos},
@@ -304,70 +237,112 @@ fn fig_import_resolves_symbol_overrides_bindings_nested_swaps_and_handoff_map() 
 
     let changes = json!([
         node((0, 0), (0, 0), "!", "DOCUMENT", "Document", json!({})),
-        node((1, 10), (0, 0), "a", "VARIABLE_SET", "Tokens", json!({
-            "variableSetModes": [
-                {"id": g(1, 100), "name": "Default", "sortPosition": "a"}
-            ]
-        })),
-        node((1, 11), (1, 10), "a", "VARIABLE", "color/primary", json!({
-            "variableSetID": g(1, 10),
-            "variableResolvedType": "COLOR",
-            "variableDataValues": {
-                "entries": [{
-                    "modeID": g(1, 100),
-                    "variableData": {
-                        "dataType": "COLOR",
-                        "value": {"colorValue": {"r": 0.1, "g": 0.3, "b": 0.9, "a": 1.0}}
-                    }
-                }]
-            }
-        })),
-        node((1, 12), (1, 10), "b", "VARIABLE", "color/accent", json!({
-            "variableSetID": g(1, 10),
-            "variableResolvedType": "COLOR",
-            "variableDataValues": {
-                "entries": [{
-                    "modeID": g(1, 100),
-                    "variableData": {
-                        "dataType": "COLOR",
-                        "value": {"colorValue": {"r": 0.95, "g": 0.35, "b": 0.25, "a": 1.0}}
-                    }
-                }]
-            }
-        })),
-        node((1, 13), (1, 10), "c", "VARIABLE", "space/lg", json!({
-            "variableSetID": g(1, 10),
-            "variableResolvedType": "FLOAT",
-            "variableDataValues": {
-                "entries": [{
-                    "modeID": g(1, 100),
-                    "variableData": {
-                        "dataType": "FLOAT",
-                        "value": {"floatValue": 24.0}
-                    }
-                }]
-            }
-        })),
-        node((1, 14), (1, 10), "d", "VARIABLE", "font/style", json!({
-            "variableSetID": g(1, 10),
-            "variableResolvedType": "STRING",
-            "variableDataValues": {
-                "entries": [{
-                    "modeID": g(1, 100),
-                    "variableData": {
-                        "dataType": "STRING",
-                        "value": {"textValue": "Bold"}
-                    }
-                }]
-            }
-        })),
-        node((1, 2), (0, 0), "b", "CANVAS", "Page 1", json!({
-            "handoffStatusMap": {
-                "entries": [
-                    {"guid": g(1, 50), "handoffStatus": "READY_FOR_DEV"}
+        node(
+            (1, 10),
+            (0, 0),
+            "a",
+            "VARIABLE_SET",
+            "Tokens",
+            json!({
+                "variableSetModes": [
+                    {"id": g(1, 100), "name": "Default", "sortPosition": "a"}
                 ]
-            }
-        })),
+            })
+        ),
+        node(
+            (1, 11),
+            (1, 10),
+            "a",
+            "VARIABLE",
+            "color/primary",
+            json!({
+                "variableSetID": g(1, 10),
+                "variableResolvedType": "COLOR",
+                "variableDataValues": {
+                    "entries": [{
+                        "modeID": g(1, 100),
+                        "variableData": {
+                            "dataType": "COLOR",
+                            "value": {"colorValue": {"r": 0.1, "g": 0.3, "b": 0.9, "a": 1.0}}
+                        }
+                    }]
+                }
+            })
+        ),
+        node(
+            (1, 12),
+            (1, 10),
+            "b",
+            "VARIABLE",
+            "color/accent",
+            json!({
+                "variableSetID": g(1, 10),
+                "variableResolvedType": "COLOR",
+                "variableDataValues": {
+                    "entries": [{
+                        "modeID": g(1, 100),
+                        "variableData": {
+                            "dataType": "COLOR",
+                            "value": {"colorValue": {"r": 0.95, "g": 0.35, "b": 0.25, "a": 1.0}}
+                        }
+                    }]
+                }
+            })
+        ),
+        node(
+            (1, 13),
+            (1, 10),
+            "c",
+            "VARIABLE",
+            "space/lg",
+            json!({
+                "variableSetID": g(1, 10),
+                "variableResolvedType": "FLOAT",
+                "variableDataValues": {
+                    "entries": [{
+                        "modeID": g(1, 100),
+                        "variableData": {
+                            "dataType": "FLOAT",
+                            "value": {"floatValue": 24.0}
+                        }
+                    }]
+                }
+            })
+        ),
+        node(
+            (1, 14),
+            (1, 10),
+            "d",
+            "VARIABLE",
+            "font/style",
+            json!({
+                "variableSetID": g(1, 10),
+                "variableResolvedType": "STRING",
+                "variableDataValues": {
+                    "entries": [{
+                        "modeID": g(1, 100),
+                        "variableData": {
+                            "dataType": "STRING",
+                            "value": {"textValue": "Bold"}
+                        }
+                    }]
+                }
+            })
+        ),
+        node(
+            (1, 2),
+            (0, 0),
+            "b",
+            "CANVAS",
+            "Page 1",
+            json!({
+                "handoffStatusMap": {
+                    "entries": [
+                        {"guid": g(1, 50), "handoffStatus": "READY_FOR_DEV"}
+                    ]
+                }
+            })
+        ),
         // IconA (SYMBOL) with child StarShape
         node((1, 20), (1, 2), "a", "SYMBOL", "IconA", json!({})),
         node((1, 21), (1, 20), "a", "STAR", "StarShape", json!({})),
@@ -375,107 +350,134 @@ fn fig_import_resolves_symbol_overrides_bindings_nested_swaps_and_handoff_map() 
         node((1, 30), (1, 2), "b", "SYMBOL", "IconB", json!({})),
         node((1, 31), (1, 30), "a", "ELLIPSE", "CircleShape", json!({})),
         // Card (SYMBOL) with nested IconSlot (instance of IconA) and Surface (bound to color/primary)
-        node((1, 40), (1, 2), "c", "SYMBOL", "Card", json!({
-            "size": {"x": 200.0, "y": 100.0},
-            "stackMode": "HORIZONTAL",
-            "stackSpacing": 8.0
-        })),
-        node((1, 41), (1, 40), "a", "INSTANCE", "IconSlot", json!({
-            "symbolData": {"symbolID": g(1, 20)}
-        })),
-        node((1, 42), (1, 40), "b", "ROUNDED_RECTANGLE", "Surface", json!({
-            "size": {"x": 160.0, "y": 80.0},
-            "fillPaints": [{
-                "type": "SOLID",
-                "color": {"r": 0.1, "g": 0.3, "b": 0.9, "a": 1.0},
-                "opacity": 1.0,
-                "visible": true,
-                "colorVar": {
-                    "dataType": "ALIAS",
-                    "value": {"alias": {"guid": g(1, 11)}}
-                }
-            }],
-            "strokePaints": [{
-                "type": "SOLID",
-                "color": {"r": 0.1, "g": 0.3, "b": 0.9, "a": 1.0},
-                "opacity": 1.0,
-                "visible": true,
-                "colorVar": {
-                    "dataType": "ALIAS",
-                    "value": {"alias": {"guid": g(1, 11)}}
-                }
-            }],
-            "strokeWeight": 1.0
-        })),
+        node(
+            (1, 40),
+            (1, 2),
+            "c",
+            "SYMBOL",
+            "Card",
+            json!({
+                "size": {"x": 200.0, "y": 100.0},
+                "stackMode": "HORIZONTAL",
+                "stackSpacing": 8.0
+            })
+        ),
+        node(
+            (1, 41),
+            (1, 40),
+            "a",
+            "INSTANCE",
+            "IconSlot",
+            json!({
+                "symbolData": {"symbolID": g(1, 20)}
+            })
+        ),
+        node(
+            (1, 42),
+            (1, 40),
+            "b",
+            "ROUNDED_RECTANGLE",
+            "Surface",
+            json!({
+                "size": {"x": 160.0, "y": 80.0},
+                "fillPaints": [{
+                    "type": "SOLID",
+                    "color": {"r": 0.1, "g": 0.3, "b": 0.9, "a": 1.0},
+                    "opacity": 1.0,
+                    "visible": true,
+                    "colorVar": {
+                        "dataType": "ALIAS",
+                        "value": {"alias": {"guid": g(1, 11)}}
+                    }
+                }],
+                "strokePaints": [{
+                    "type": "SOLID",
+                    "color": {"r": 0.1, "g": 0.3, "b": 0.9, "a": 1.0},
+                    "opacity": 1.0,
+                    "visible": true,
+                    "colorVar": {
+                        "dataType": "ALIAS",
+                        "value": {"alias": {"guid": g(1, 11)}}
+                    }
+                }],
+                "strokeWeight": 1.0
+            })
+        ),
         // CardInstance (INSTANCE of Card)
-        node((1, 50), (1, 2), "d", "INSTANCE", "CardInstance", json!({
-            "size": {"x": 240.0, "y": 120.0},
-            "stackMode": "HORIZONTAL",
-            "parameterConsumptionMap": {
-                "entries": [
-                    {
-                        "variableField": "STACK_HORIZONTAL_PADDING",
-                        "variableData": {
-                            "dataType": "ALIAS",
-                            "value": {"alias": {"guid": g(1, 13)}}
-                        }
-                    },
-                    {
-                        "variableField": "FONT_STYLE",
-                        "variableData": {
-                            "dataType": "FONT_STYLE",
-                            "value": {
-                                "fontStyleValue": {
-                                    "asString": {
-                                        "dataType": "ALIAS",
-                                        "value": {"alias": {"guid": g(1, 14)}}
+        node(
+            (1, 50),
+            (1, 2),
+            "d",
+            "INSTANCE",
+            "CardInstance",
+            json!({
+                "size": {"x": 240.0, "y": 120.0},
+                "stackMode": "HORIZONTAL",
+                "parameterConsumptionMap": {
+                    "entries": [
+                        {
+                            "variableField": "STACK_HORIZONTAL_PADDING",
+                            "variableData": {
+                                "dataType": "ALIAS",
+                                "value": {"alias": {"guid": g(1, 13)}}
+                            }
+                        },
+                        {
+                            "variableField": "FONT_STYLE",
+                            "variableData": {
+                                "dataType": "FONT_STYLE",
+                                "value": {
+                                    "fontStyleValue": {
+                                        "asString": {
+                                            "dataType": "ALIAS",
+                                            "value": {"alias": {"guid": g(1, 14)}}
+                                        }
                                     }
                                 }
                             }
                         }
-                    }
-                ]
-            },
-            "symbolData": {
-                "symbolID": g(1, 40),
-                "symbolOverrides": [
-                    {
-                        "guidPath": {"guids": [g(1, 42)]},
-                        "fillPaints": [{
-                            "type": "SOLID",
-                            "color": {"r": 1.0, "g": 1.0, "b": 1.0, "a": 1.0},
-                            "opacity": 1.0,
-                            "visible": true
-                        }],
-                        "strokePaints": [{
-                            "type": "SOLID",
-                            "color": {"r": 0.95, "g": 0.35, "b": 0.25, "a": 1.0},
-                            "opacity": 1.0,
-                            "visible": true,
-                            "colorVar": {
-                                "dataType": "ALIAS",
-                                "value": {"alias": {"guid": g(1, 12)}}
-                            }
-                        }],
-                        "borderStrokeWeightsIndependent": true,
-                        "borderTopWeight": 2.0,
-                        "borderRightWeight": 4.0,
-                        "borderBottomWeight": 6.0,
-                        "borderLeftWeight": 8.0,
-                        "stackChildPrimaryGrow": 1.0,
-                        "stackChildAlignSelf": "STRETCH"
-                    },
-                    {
-                        "guidPath": {"guids": [g(1, 41)]},
-                        "overriddenSymbolID": g(1, 30)
-                    }
-                ]
-            }
-        }))
+                    ]
+                },
+                "symbolData": {
+                    "symbolID": g(1, 40),
+                    "symbolOverrides": [
+                        {
+                            "guidPath": {"guids": [g(1, 42)]},
+                            "fillPaints": [{
+                                "type": "SOLID",
+                                "color": {"r": 1.0, "g": 1.0, "b": 1.0, "a": 1.0},
+                                "opacity": 1.0,
+                                "visible": true
+                            }],
+                            "strokePaints": [{
+                                "type": "SOLID",
+                                "color": {"r": 0.95, "g": 0.35, "b": 0.25, "a": 1.0},
+                                "opacity": 1.0,
+                                "visible": true,
+                                "colorVar": {
+                                    "dataType": "ALIAS",
+                                    "value": {"alias": {"guid": g(1, 12)}}
+                                }
+                            }],
+                            "borderStrokeWeightsIndependent": true,
+                            "borderTopWeight": 2.0,
+                            "borderRightWeight": 4.0,
+                            "borderBottomWeight": 6.0,
+                            "borderLeftWeight": 8.0,
+                            "stackChildPrimaryGrow": 1.0,
+                            "stackChildAlignSelf": "STRETCH"
+                        },
+                        {
+                            "guidPath": {"guids": [g(1, 41)]},
+                            "overriddenSymbolID": g(1, 30)
+                        }
+                    ]
+                }
+            })
+        )
     ]);
 
-    let doc = import_fig_node_changes(&changes, "Override Fidelity Doc")
-        .expect("import_fig_node_changes");
+    let doc = import_fig_node_changes(&changes, "Override Fidelity Doc").expect("import_fig_node_changes");
 
     let card_inst = find(&doc, "CardInstance");
 
@@ -483,71 +485,28 @@ fn fig_import_resolves_symbol_overrides_bindings_nested_swaps_and_handoff_map() 
     assert_eq!(card_inst.dev.status, Some(DevStatus::ReadyForDev));
 
     // 2. parameterConsumptionMap resolved STACK_HORIZONTAL_PADDING and FONT_STYLE
-    assert_eq!(
-        card_inst
-            .variables
-            .bindings
-            .get("paddingLeft")
-            .map(String::as_str),
-        Some("VariableID:1:13")
-    );
-    assert_eq!(
-        card_inst
-            .variables
-            .bindings
-            .get("paddingRight")
-            .map(String::as_str),
-        Some("VariableID:1:13")
-    );
-    assert_eq!(
-        card_inst
-            .variables
-            .bindings
-            .get("fontWeight")
-            .map(String::as_str),
-        Some("VariableID:1:14")
-    );
+    assert_eq!(card_inst.variables.bindings.get("paddingLeft").map(String::as_str), Some("VariableID:1:13"));
+    assert_eq!(card_inst.variables.bindings.get("paddingRight").map(String::as_str), Some("VariableID:1:13"));
+    assert_eq!(card_inst.variables.bindings.get("fontWeight").map(String::as_str), Some("VariableID:1:14"));
 
     // 3. Surface inside CardInstance:
     // - literal fillPaints override cleared master's fills/0 variable binding
     // - bound strokePaints override updated strokes/0 binding to VariableID:1:12
     // - independent border weights and stackChild overrides applied
-    let inst_surface = card_inst
-        .children
-        .iter()
-        .filter_map(|id| doc.get(*id))
-        .find(|n| n.name == "Surface")
-        .expect("Surface inside CardInstance");
+    let inst_surface = card_inst.children.iter().filter_map(|id| doc.get(*id)).find(|n| n.name == "Surface").expect("Surface inside CardInstance");
     assert!(
         !inst_surface.variables.bindings.contains_key("fills/0"),
         "stale fills/0 binding from master component must be cleared when fillPaints is overridden with literal color"
     );
-    assert_eq!(
-        inst_surface
-            .variables
-            .bindings
-            .get("strokes/0")
-            .map(String::as_str),
-        Some("VariableID:1:12")
-    );
+    assert_eq!(inst_surface.variables.bindings.get("strokes/0").map(String::as_str), Some("VariableID:1:12"));
     assert_eq!(inst_surface.stroke.side_weights, Some([2.0, 4.0, 6.0, 8.0]));
     assert_eq!(inst_surface.layout_child.grow, 1.0);
     assert_eq!(inst_surface.layout_child.horizontal, Sizing::Fill);
     assert_eq!(inst_surface.layout_child.vertical, Sizing::Fill);
 
     // 4. IconSlot inside CardInstance: overriddenSymbolID swapped it from IconA (StarShape) to IconB (CircleShape)
-    let inst_icon_slot = card_inst
-        .children
-        .iter()
-        .filter_map(|id| doc.get(*id))
-        .find(|n| n.name == "IconSlot")
-        .expect("IconSlot inside CardInstance");
-    let icon_child_names: Vec<&str> = inst_icon_slot
-        .children
-        .iter()
-        .filter_map(|id| doc.get(*id))
-        .map(|n| n.name.as_str())
-        .collect();
+    let inst_icon_slot = card_inst.children.iter().filter_map(|id| doc.get(*id)).find(|n| n.name == "IconSlot").expect("IconSlot inside CardInstance");
+    let icon_child_names: Vec<&str> = inst_icon_slot.children.iter().filter_map(|id| doc.get(*id)).map(|n| n.name.as_str()).collect();
     assert_eq!(icon_child_names, vec!["CircleShape"]);
 }
 
@@ -585,26 +544,14 @@ fn roundtrip_figma_parity_grid_slots_axes_props_and_overrides() {
 
     // 2. Text node with OpenType features (on + off) and variable font axes
     let txt_id = doc.alloc_id();
-    let mut style = TextStyle {
-        font_family: "Inter Variable".into(),
-        font_size: 24.0,
-        font_weight: 650,
-        ..TextStyle::default()
-    };
+    let mut style = TextStyle { font_family: "Inter Variable".into(), font_size: 24.0, font_weight: 650, ..TextStyle::default() };
     style.set_feature("tnum", true);
     style.set_feature("ss01", true);
     style.set_feature("liga", false);
     style.set_axis("wght", 650.0);
     style.set_axis("wdth", 112.5);
     style.set_axis("opsz", 24.0);
-    let mut txt_node = Node::new(
-        txt_id,
-        NodeKind::Text(TextProps {
-            content: "Variable Axes & OT".into(),
-            style,
-            ..TextProps::default()
-        }),
-    );
+    let mut txt_node = Node::new(txt_id, NodeKind::Text(TextProps { content: "Variable Axes & OT".into(), style, ..TextProps::default() }));
     txt_node.name = "VarFontLabel".into();
     txt_node.size = Vec2::new(220.0, 32.0);
     doc.insert(page_id, txt_node).unwrap();
@@ -627,56 +574,30 @@ fn roundtrip_figma_parity_grid_slots_axes_props_and_overrides() {
     card_comp.name = "ModalCard".into();
     card_comp.size = Vec2::new(320.0, 200.0);
     card_comp.component.props = vec![
-        ComponentPropDef {
-            name: "ShowFooter#1:0".into(),
-            kind: PropKind::Boolean,
-            default: PropValue::Bool(true),
-        },
-        ComponentPropDef {
-            name: "Title#1:1".into(),
-            kind: PropKind::Text,
-            default: PropValue::Text("Default Title".into()),
-        },
+        ComponentPropDef { name: "ShowFooter#1:0".into(), kind: PropKind::Boolean, default: PropValue::Bool(true) },
+        ComponentPropDef { name: "Title#1:1".into(), kind: PropKind::Text, default: PropValue::Text("Default Title".into()) },
         ComponentPropDef {
             name: "HeaderIcon#1:2".into(),
-            kind: PropKind::InstanceSwap {
-                preferred: vec![icon_a_id, icon_b_id],
-            },
+            kind: PropKind::InstanceSwap { preferred: vec![icon_a_id, icon_b_id] },
             default: PropValue::Instance(icon_a_id),
         },
-        ComponentPropDef {
-            name: "BodySlot#1:3".into(),
-            kind: PropKind::Slot,
-            default: PropValue::Slot(vec![]),
-        },
+        ComponentPropDef { name: "BodySlot#1:3".into(), kind: PropKind::Slot, default: PropValue::Slot(vec![]) },
     ];
     doc.insert(page_id, card_comp).unwrap();
 
     let title_id = doc.alloc_id();
-    let mut title_node = Node::new(
-        title_id,
-        NodeKind::Text(TextProps {
-            content: "Default Title".into(),
-            style: TextStyle::default(),
-            ..TextProps::default()
-        }),
-    );
+    let mut title_node =
+        Node::new(title_id, NodeKind::Text(TextProps { content: "Default Title".into(), style: TextStyle::default(), ..TextProps::default() }));
     title_node.name = "CardTitle".into();
     title_node.size = Vec2::new(200.0, 24.0);
-    title_node
-        .component
-        .bindings
-        .insert(OverrideField::Characters, "Title#1:1".into());
+    title_node.component.bindings.insert(OverrideField::Characters, "Title#1:1".into());
     doc.insert(card_comp_id, title_node).unwrap();
 
     let slot_frame_id = doc.alloc_id();
     let mut slot_frame = Node::new(slot_frame_id, NodeKind::Frame(FrameProps::default()));
     slot_frame.name = "BodyContainer".into();
     slot_frame.size = Vec2::new(280.0, 120.0);
-    slot_frame
-        .component
-        .bindings
-        .insert(OverrideField::SlotContent, "BodySlot#1:3".into());
+    slot_frame.component.bindings.insert(OverrideField::SlotContent, "BodySlot#1:3".into());
     doc.insert(card_comp_id, slot_frame).unwrap();
 
     let footer_id = doc.alloc_id();
@@ -684,16 +605,11 @@ fn roundtrip_figma_parity_grid_slots_axes_props_and_overrides() {
     footer_rect.name = "FooterBg".into();
     footer_rect.size = Vec2::new(280.0, 36.0);
     footer_rect.fills = vec![Paint::solid(Color::rgb(230, 230, 230))];
-    footer_rect
-        .component
-        .bindings
-        .insert(OverrideField::Visible, "ShowFooter#1:0".into());
+    footer_rect.component.bindings.insert(OverrideField::Visible, "ShowFooter#1:0".into());
     doc.insert(card_comp_id, footer_rect).unwrap();
 
     // Create instance of ModalCard with overrides and prop assignments
-    create_instance(&mut doc, card_comp_id, page_id, Vec2::new(400.0, 0.0))
-        .apply(&mut doc)
-        .expect("create_instance");
+    create_instance(&mut doc, card_comp_id, page_id, Vec2::new(400.0, 0.0)).apply(&mut doc).expect("create_instance");
     let inst_id = instances_of(&doc, card_comp_id)[0];
 
     let custom_slot_child_id = doc.alloc_id();
@@ -705,19 +621,10 @@ fn roundtrip_figma_parity_grid_slots_axes_props_and_overrides() {
     let inst_children = doc.get(inst_id).unwrap().children.clone();
     if let Some(inst) = doc.get_mut(inst_id) {
         inst.name = "ModalCardInstance".into();
-        inst.component
-            .values
-            .insert("ShowFooter#1:0".into(), PropValue::Bool(false));
-        inst.component
-            .values
-            .insert("Title#1:1".into(), PropValue::Text("Assigned Title".into()));
-        inst.component
-            .values
-            .insert("HeaderIcon#1:2".into(), PropValue::Instance(icon_b_id));
-        inst.component.values.insert(
-            "BodySlot#1:3".into(),
-            PropValue::Slot(vec![custom_slot_child_id]),
-        );
+        inst.component.values.insert("ShowFooter#1:0".into(), PropValue::Bool(false));
+        inst.component.values.insert("Title#1:1".into(), PropValue::Text("Assigned Title".into()));
+        inst.component.values.insert("HeaderIcon#1:2".into(), PropValue::Instance(icon_b_id));
+        inst.component.values.insert("BodySlot#1:3".into(), PropValue::Slot(vec![custom_slot_child_id]));
     }
 
     for cid in inst_children {
@@ -766,14 +673,7 @@ fn roundtrip_figma_parity_grid_slots_axes_props_and_overrides() {
     assert!(tp.style.is_feature_enabled("tnum"));
     assert!(tp.style.is_feature_enabled("ss01"));
     assert!(!tp.style.is_feature_enabled("liga"));
-    assert_eq!(
-        tp.style
-            .features
-            .iter()
-            .find(|(k, _)| k.eq_ignore_ascii_case("liga"))
-            .map(|(_, v)| *v),
-        Some(0)
-    );
+    assert_eq!(tp.style.features.iter().find(|(k, _)| k.eq_ignore_ascii_case("liga")).map(|(_, v)| *v), Some(0));
     assert_eq!(tp.style.get_axis("wght"), Some(650.0));
     assert_eq!(tp.style.get_axis("wdth"), Some(112.5));
     assert_eq!(tp.style.get_axis("opsz"), Some(24.0));
@@ -781,18 +681,9 @@ fn roundtrip_figma_parity_grid_slots_axes_props_and_overrides() {
     // Verify 3: Component props & bindings (including Slot)
     let rt_comp = find(&rt, "ModalCard");
     assert_eq!(rt_comp.component.props.len(), 4);
-    assert!(rt_comp
-        .component
-        .props
-        .iter()
-        .any(|p| p.name == "BodySlot" && p.kind == PropKind::Slot));
+    assert!(rt_comp.component.props.iter().any(|p| p.name == "BodySlot" && p.kind == PropKind::Slot));
     let rt_icon_b = find(&rt, "IconHeart");
-    let swap_def = rt_comp
-        .component
-        .props
-        .iter()
-        .find(|p| p.name == "HeaderIcon")
-        .expect("HeaderIcon prop def");
+    let swap_def = rt_comp.component.props.iter().find(|p| p.name == "HeaderIcon").expect("HeaderIcon prop def");
     match &swap_def.kind {
         PropKind::InstanceSwap { preferred } => {
             assert!(preferred.contains(&rt_icon_b.id));
@@ -800,76 +691,33 @@ fn roundtrip_figma_parity_grid_slots_axes_props_and_overrides() {
         other => panic!("expected InstanceSwap prop kind, got {other:?}"),
     }
 
-    let rt_slot_container = rt_comp
-        .children
-        .iter()
-        .filter_map(|id| rt.get(*id))
-        .find(|n| n.name == "BodyContainer")
-        .expect("BodyContainer inside ModalCard");
-    assert_eq!(
-        rt_slot_container
-            .component
-            .bindings
-            .get(&OverrideField::SlotContent)
-            .map(String::as_str),
-        Some("BodySlot")
-    );
+    let rt_slot_container = rt_comp.children.iter().filter_map(|id| rt.get(*id)).find(|n| n.name == "BodyContainer").expect("BodyContainer inside ModalCard");
+    assert_eq!(rt_slot_container.component.bindings.get(&OverrideField::SlotContent).map(String::as_str), Some("BodySlot"));
     assert!(is_slot_container(&rt, rt_slot_container.id));
 
     // Verify 4: Instance prop values & materialized symbolOverrides
     let rt_inst = find(&rt, "ModalCardInstance");
-    assert_eq!(
-        rt_inst.component.values.get("ShowFooter"),
-        Some(&PropValue::Bool(false))
-    );
-    assert_eq!(
-        rt_inst.component.values.get("Title"),
-        Some(&PropValue::Text("Assigned Title".into()))
-    );
-    assert_eq!(
-        rt_inst.component.values.get("HeaderIcon"),
-        Some(&PropValue::Instance(rt_icon_b.id))
-    );
+    assert_eq!(rt_inst.component.values.get("ShowFooter"), Some(&PropValue::Bool(false)));
+    assert_eq!(rt_inst.component.values.get("Title"), Some(&PropValue::Text("Assigned Title".into())));
+    assert_eq!(rt_inst.component.values.get("HeaderIcon"), Some(&PropValue::Instance(rt_icon_b.id)));
     let rt_banner = find(&rt, "InjectedBanner");
-    assert_eq!(
-        rt_inst.component.values.get("BodySlot"),
-        Some(&PropValue::Slot(vec![rt_banner.id]))
-    );
+    assert_eq!(rt_inst.component.values.get("BodySlot"), Some(&PropValue::Slot(vec![rt_banner.id])));
 
-    let inst_title = rt_inst
-        .children
-        .iter()
-        .filter_map(|id| rt.get(*id))
-        .find(|n| n.name == "CardTitle")
-        .expect("CardTitle in ModalCardInstance");
+    let inst_title = rt_inst.children.iter().filter_map(|id| rt.get(*id)).find(|n| n.name == "CardTitle").expect("CardTitle in ModalCardInstance");
     let NodeKind::Text(ref inst_tp) = inst_title.kind else {
         panic!("expected CardTitle Text");
     };
     assert_eq!(inst_tp.content, "Overridden Modal Title");
 
-    let inst_footer = rt_inst
-        .children
-        .iter()
-        .filter_map(|id| rt.get(*id))
-        .find(|n| n.name == "FooterBg")
-        .expect("FooterBg in ModalCardInstance");
+    let inst_footer = rt_inst.children.iter().filter_map(|id| rt.get(*id)).find(|n| n.name == "FooterBg").expect("FooterBg in ModalCardInstance");
     assert!(!inst_footer.visible);
-    assert_eq!(
-        inst_footer.fills,
-        vec![Paint::solid(Color::rgb(255, 64, 128))]
-    );
+    assert_eq!(inst_footer.fills, vec![Paint::solid(Color::rgb(255, 64, 128))]);
 }
 
 #[test]
 fn rea_v106_all_seven_gaps_fidelity_and_roundtrip() {
     let g = |s: u64, l: u64| -> Value { json!({"sessionID": s, "localID": l}) };
-    let node = |id: (u64, u64),
-                parent: (u64, u64),
-                pos: &str,
-                ty: &str,
-                name: &str,
-                extra: Value|
-     -> Value {
+    let node = |id: (u64, u64), parent: (u64, u64), pos: &str, ty: &str, name: &str, extra: Value| -> Value {
         let mut v = json!({
             "guid": g(id.0, id.1),
             "parentIndex": {"guid": g(parent.0, parent.1), "position": pos},
@@ -899,183 +747,308 @@ fn rea_v106_all_seven_gaps_fidelity_and_roundtrip() {
     let changes = json!([
         node((0, 0), (0, 0), "!", "DOCUMENT", "REA_v106", json!({})),
         // Active variable set + variables for GAP-03
-        node((2, 1), (0, 0), "a", "VARIABLE_SET", "Semantic", json!({
-            "variableSetModes": [
-                {"id": g(2, 10), "name": "Light", "sortPosition": "a"}
-            ]
-        })),
-        node((2, 11), (2, 1), "a", "VARIABLE", "vis/showBadge", json!({
-            "variableSetID": g(2, 1),
-            "variableResolvedType": "BOOLEAN",
-            "variableDataValues": {
-                "entries": [{
-                    "modeID": g(2, 10),
-                    "variableData": {"dataType": "BOOLEAN", "value": {"boolValue": false}}
-                }]
-            }
-        })),
-        node((2, 12), (2, 1), "b", "VARIABLE", "copy/title", json!({
-            "variableSetID": g(2, 1),
-            "variableResolvedType": "STRING",
-            "variableDataValues": {
-                "entries": [{
-                    "modeID": g(2, 10),
-                    "variableData": {"dataType": "STRING", "value": {"textValue": "Bound Headline"}}
-                }]
-            }
-        })),
-        node((2, 13), (2, 1), "c", "VARIABLE", "border/top", json!({
-            "variableSetID": g(2, 1),
-            "variableResolvedType": "FLOAT",
-            "variableDataValues": {
-                "entries": [{
-                    "modeID": g(2, 10),
-                    "variableData": {"dataType": "FLOAT", "value": {"floatValue": 3.0}}
-                }]
-            }
-        })),
+        node(
+            (2, 1),
+            (0, 0),
+            "a",
+            "VARIABLE_SET",
+            "Semantic",
+            json!({
+                "variableSetModes": [
+                    {"id": g(2, 10), "name": "Light", "sortPosition": "a"}
+                ]
+            })
+        ),
+        node(
+            (2, 11),
+            (2, 1),
+            "a",
+            "VARIABLE",
+            "vis/showBadge",
+            json!({
+                "variableSetID": g(2, 1),
+                "variableResolvedType": "BOOLEAN",
+                "variableDataValues": {
+                    "entries": [{
+                        "modeID": g(2, 10),
+                        "variableData": {"dataType": "BOOLEAN", "value": {"boolValue": false}}
+                    }]
+                }
+            })
+        ),
+        node(
+            (2, 12),
+            (2, 1),
+            "b",
+            "VARIABLE",
+            "copy/title",
+            json!({
+                "variableSetID": g(2, 1),
+                "variableResolvedType": "STRING",
+                "variableDataValues": {
+                    "entries": [{
+                        "modeID": g(2, 10),
+                        "variableData": {"dataType": "STRING", "value": {"textValue": "Bound Headline"}}
+                    }]
+                }
+            })
+        ),
+        node(
+            (2, 13),
+            (2, 1),
+            "c",
+            "VARIABLE",
+            "border/top",
+            json!({
+                "variableSetID": g(2, 1),
+                "variableResolvedType": "FLOAT",
+                "variableDataValues": {
+                    "entries": [{
+                        "modeID": g(2, 10),
+                        "variableData": {"dataType": "FLOAT", "value": {"floatValue": 3.0}}
+                    }]
+                }
+            })
+        ),
         // GAP-07: Soft-deleted variable set and variable must be ignored
-        node((2, 99), (0, 0), "z", "VARIABLE_SET", "DeletedSet", json!({
-            "isSoftDeleted": true,
-            "variableSetModes": [{"id": g(2, 990), "name": "Default", "sortPosition": "a"}]
-        })),
-        node((2, 98), (2, 1), "z", "VARIABLE", "deleted/token", json!({
-            "isSoftDeleted": true,
-            "variableSetID": g(2, 1),
-            "variableResolvedType": "FLOAT",
-            "variableDataValues": {"entries": []}
-        })),
+        node(
+            (2, 99),
+            (0, 0),
+            "z",
+            "VARIABLE_SET",
+            "DeletedSet",
+            json!({
+                "isSoftDeleted": true,
+                "variableSetModes": [{"id": g(2, 990), "name": "Default", "sortPosition": "a"}]
+            })
+        ),
+        node(
+            (2, 98),
+            (2, 1),
+            "z",
+            "VARIABLE",
+            "deleted/token",
+            json!({
+                "isSoftDeleted": true,
+                "variableSetID": g(2, 1),
+                "variableResolvedType": "FLOAT",
+                "variableDataValues": {"entries": []}
+            })
+        ),
         node((1, 1), (0, 0), "b", "CANVAS", "Page 1", json!({})),
         // GAP-07: Soft-deleted canvas node must be ignored
-        node((1, 999), (1, 1), "z", "FRAME", "GhostDeletedFrame", json!({
-            "isSoftDeleted": true
-        })),
+        node(
+            (1, 999),
+            (1, 1),
+            "z",
+            "FRAME",
+            "GhostDeletedFrame",
+            json!({
+                "isSoftDeleted": true
+            })
+        ),
         // GAP-01 & GAP-02 & GAP-03: Frame with per-side border weights WITHOUT borderStrokeWeightsIndependent
         // and per-corner radii WITHOUT rectangleCornerRadiiIndependent, plus variableConsumptionMap
-        node((1, 10), (1, 1), "a", "FRAME", "HeaderBar", json!({
-            "strokeWeight": 1.0,
-            "borderTopWeight": 0.0,
-            "borderRightWeight": 0.0,
-            "borderBottomWeight": 2.0,
-            "borderLeftWeight": 0.0,
-            "rectangleTopLeftCornerRadius": 10.0,
-            "rectangleTopRightCornerRadius": 10.0,
-            "rectangleBottomRightCornerRadius": 0.0,
-            "rectangleBottomLeftCornerRadius": 0.0,
-            "variableConsumptionMap": {
-                "entries": [
-                    var_alias("VISIBLE", 2, 11),
-                    var_alias("BORDER_TOP_WEIGHT", 2, 13),
-                    var_alias("BORDER_RIGHT_WEIGHT", 2, 13),
-                    var_alias("BORDER_BOTTOM_WEIGHT", 2, 13),
-                    var_alias("BORDER_LEFT_WEIGHT", 2, 13)
-                ]
-            }
-        })),
-        node((1, 11), (1, 10), "a", "TEXT", "HeaderText", json!({
-            "textData": {"characters": "Placeholder"},
-            "variableConsumptionMap": {
-                "entries": [
-                    var_alias("TEXT_DATA", 2, 12)
-                ]
-            }
-        })),
+        node(
+            (1, 10),
+            (1, 1),
+            "a",
+            "FRAME",
+            "HeaderBar",
+            json!({
+                "strokeWeight": 1.0,
+                "borderTopWeight": 0.0,
+                "borderRightWeight": 0.0,
+                "borderBottomWeight": 2.0,
+                "borderLeftWeight": 0.0,
+                "rectangleTopLeftCornerRadius": 10.0,
+                "rectangleTopRightCornerRadius": 10.0,
+                "rectangleBottomRightCornerRadius": 0.0,
+                "rectangleBottomLeftCornerRadius": 0.0,
+                "variableConsumptionMap": {
+                    "entries": [
+                        var_alias("VISIBLE", 2, 11),
+                        var_alias("BORDER_TOP_WEIGHT", 2, 13),
+                        var_alias("BORDER_RIGHT_WEIGHT", 2, 13),
+                        var_alias("BORDER_BOTTOM_WEIGHT", 2, 13),
+                        var_alias("BORDER_LEFT_WEIGHT", 2, 13)
+                    ]
+                }
+            })
+        ),
+        node(
+            (1, 11),
+            (1, 10),
+            "a",
+            "TEXT",
+            "HeaderText",
+            json!({
+                "textData": {"characters": "Placeholder"},
+                "variableConsumptionMap": {
+                    "entries": [
+                        var_alias("TEXT_DATA", 2, 12)
+                    ]
+                }
+            })
+        ),
         // GAP-04: v106 CSS Grid Frame using gridColumnGap, gridRowGap, gridColumnsSizing, gridRowsSizing,
         // and child using gridColumnAnchor / gridRowAnchor
-        node((1, 20), (1, 1), "b", "FRAME", "V106Grid", json!({
-            "stackMode": "GRID",
-            "gridColumnGap": 16.0,
-            "gridRowGap": 24.0,
-            "gridColumnsSizing": "1fr 2fr 120px auto",
-            "gridRowsSizing": "repeat(2, 80px)",
-            "variableConsumptionMap": {
-                "entries": [
-                    var_alias("GRID_COLUMN_GAP", 2, 13),
-                    var_alias("GRID_ROW_GAP", 2, 13)
-                ]
-            }
-        })),
-        node((1, 21), (1, 20), "a", "ROUNDED_RECTANGLE", "V106GridCell", json!({
-            "gridColumnAnchor": 2,
-            "gridRowAnchor": 1,
-            "gridColumnSpan": 2,
-            "gridRowSpan": 1
-        })),
+        node(
+            (1, 20),
+            (1, 1),
+            "b",
+            "FRAME",
+            "V106Grid",
+            json!({
+                "stackMode": "GRID",
+                "gridColumnGap": 16.0,
+                "gridRowGap": 24.0,
+                "gridColumnsSizing": "1fr 2fr 120px auto",
+                "gridRowsSizing": "repeat(2, 80px)",
+                "variableConsumptionMap": {
+                    "entries": [
+                        var_alias("GRID_COLUMN_GAP", 2, 13),
+                        var_alias("GRID_ROW_GAP", 2, 13)
+                    ]
+                }
+            })
+        ),
+        node(
+            (1, 21),
+            (1, 20),
+            "a",
+            "ROUNDED_RECTANGLE",
+            "V106GridCell",
+            json!({
+                "gridColumnAnchor": 2,
+                "gridRowAnchor": 1,
+                "gridColumnSpan": 2,
+                "gridRowSpan": 1
+            })
+        ),
         // GAP-05 & GAP-06: Master component with auto-layout Hug & Fill child, plus Instance with
         // symbolOverrides (sizing overrides) and derivedSymbolData (size & transform via master guid)
-        node((1, 30), (1, 1), "c", "SYMBOL", "ButtonComp", json!({
-            "size": {"x": 120.0, "y": 40.0},
-            "stackMode": "HORIZONTAL",
-            "stackPrimarySizing": "RESIZE_TO_FIT",
-            "stackCounterSizing": "RESIZE_TO_FIT_WITH_IMPLICIT_SIZE"
-        })),
-        node((1, 31), (1, 30), "a", "ROUNDED_RECTANGLE", "BtnBg", json!({
-            "overrideKey": g(9, 31),
-            "size": {"x": 100.0, "y": 32.0},
-            "stackChildPrimaryGrow": 1.0,
-            "stackChildAlignSelf": "STRETCH"
-        })),
-        node((1, 32), (1, 1), "d", "INSTANCE", "ButtonInst", json!({
-            "size": {"x": 240.0, "y": 48.0},
-            "stackMode": "HORIZONTAL",
-            "stackPrimarySizing": "FIXED",
-            "stackCounterSizing": "FIXED",
-            "symbolData": {
-                "symbolID": g(1, 30),
-                "symbolOverrides": [
-                    {
-                        "guidPath": {"guids": [g(9, 31)]},
-                        "stackChildPrimaryGrow": 0.0,
-                        "stackChildAlignSelf": "AUTO",
-                        "variableConsumptionMap": {
-                            "entries": [
-                                var_alias("VISIBLE", 2, 11)
-                            ]
+        node(
+            (1, 30),
+            (1, 1),
+            "c",
+            "SYMBOL",
+            "ButtonComp",
+            json!({
+                "size": {"x": 120.0, "y": 40.0},
+                "stackMode": "HORIZONTAL",
+                "stackPrimarySizing": "RESIZE_TO_FIT",
+                "stackCounterSizing": "RESIZE_TO_FIT_WITH_IMPLICIT_SIZE"
+            })
+        ),
+        node(
+            (1, 31),
+            (1, 30),
+            "a",
+            "ROUNDED_RECTANGLE",
+            "BtnBg",
+            json!({
+                "overrideKey": g(9, 31),
+                "size": {"x": 100.0, "y": 32.0},
+                "stackChildPrimaryGrow": 1.0,
+                "stackChildAlignSelf": "STRETCH"
+            })
+        ),
+        node(
+            (1, 32),
+            (1, 1),
+            "d",
+            "INSTANCE",
+            "ButtonInst",
+            json!({
+                "size": {"x": 240.0, "y": 48.0},
+                "stackMode": "HORIZONTAL",
+                "stackPrimarySizing": "FIXED",
+                "stackCounterSizing": "FIXED",
+                "symbolData": {
+                    "symbolID": g(1, 30),
+                    "symbolOverrides": [
+                        {
+                            "guidPath": {"guids": [g(9, 31)]},
+                            "stackChildPrimaryGrow": 0.0,
+                            "stackChildAlignSelf": "AUTO",
+                            "variableConsumptionMap": {
+                                "entries": [
+                                    var_alias("VISIBLE", 2, 11)
+                                ]
+                            }
                         }
+                    ]
+                },
+                "derivedSymbolData": [
+                    {
+                        // Uses master node GUID (1, 31) rather than overrideKey (9, 31)!
+                        "guidPath": {"guids": [g(1, 31)]},
+                        "size": {"x": 220.0, "y": 44.0},
+                        "transform": {"m00": 1.0, "m01": 0.0, "m02": 10.0, "m10": 0.0, "m11": 1.0, "m12": 2.0}
                     }
                 ]
-            },
-            "derivedSymbolData": [
-                {
-                    // Uses master node GUID (1, 31) rather than overrideKey (9, 31)!
-                    "guidPath": {"guids": [g(1, 31)]},
-                    "size": {"x": 220.0, "y": 44.0},
-                    "transform": {"m00": 1.0, "m01": 0.0, "m02": 10.0, "m10": 0.0, "m11": 1.0, "m12": 2.0}
-                }
-            ]
-        })),
+            })
+        ),
         // GAP-07: Section with sectionStatusInfo, Sticky, ShapeWithText, and Connector linking two nodes
-        node((1, 40), (1, 1), "e", "SECTION", "DevSection", json!({
-            "sectionStatusInfo": {"status": "READY_FOR_DEV"}
-        })),
-        node((1, 41), (1, 1), "f", "STICKY", "NoteA", json!({
-            "authorVisible": true,
-            "textData": {"characters": "Sticky content"}
-        })),
-        node((1, 42), (1, 1), "g", "SHAPE_WITH_TEXT", "DecisionNode", json!({
-            "shapeWithTextType": "DIAMOND",
-            "textData": {"characters": "Approve?"}
-        })),
-        node((1, 43), (1, 1), "h", "CONNECTOR", "FlowConnector", json!({
-            "connectorLineStyle": "CURVED",
-            "connectorStartStrokeCap": "NONE",
-            "connectorEndStrokeCap": "ARROW_EQUILATERAL",
-            "connectorStart": {
-                "endpointNodeId": g(1, 41),
-                "position": {"x": 100.0, "y": 25.0},
-                "magnet": "RIGHT"
-            },
-            "connectorEnd": {
-                "endpointNodeId": g(1, 42),
-                "position": {"x": 200.0, "y": 25.0},
-                "magnet": "LEFT"
-            },
-            "textData": {"characters": "Yes"}
-        }))
+        node(
+            (1, 40),
+            (1, 1),
+            "e",
+            "SECTION",
+            "DevSection",
+            json!({
+                "sectionStatusInfo": {"status": "READY_FOR_DEV"}
+            })
+        ),
+        node(
+            (1, 41),
+            (1, 1),
+            "f",
+            "STICKY",
+            "NoteA",
+            json!({
+                "authorVisible": true,
+                "textData": {"characters": "Sticky content"}
+            })
+        ),
+        node(
+            (1, 42),
+            (1, 1),
+            "g",
+            "SHAPE_WITH_TEXT",
+            "DecisionNode",
+            json!({
+                "shapeWithTextType": "DIAMOND",
+                "textData": {"characters": "Approve?"}
+            })
+        ),
+        node(
+            (1, 43),
+            (1, 1),
+            "h",
+            "CONNECTOR",
+            "FlowConnector",
+            json!({
+                "connectorLineStyle": "CURVED",
+                "connectorStartStrokeCap": "NONE",
+                "connectorEndStrokeCap": "ARROW_EQUILATERAL",
+                "connectorStart": {
+                    "endpointNodeId": g(1, 41),
+                    "position": {"x": 100.0, "y": 25.0},
+                    "magnet": "RIGHT"
+                },
+                "connectorEnd": {
+                    "endpointNodeId": g(1, 42),
+                    "position": {"x": 200.0, "y": 25.0},
+                    "magnet": "LEFT"
+                },
+                "textData": {"characters": "Yes"}
+            })
+        )
     ]);
 
-    let doc = import_fig_node_changes(&changes, "REA_v106")
-        .expect("import_fig_node_changes");
+    let doc = import_fig_node_changes(&changes, "REA_v106").expect("import_fig_node_changes");
 
     // Verify GAP-07: soft-deleted nodes and variables are filtered out
     assert!(doc.nodes.values().all(|n| n.name != "GhostDeletedFrame"));
@@ -1101,19 +1074,8 @@ fn rea_v106_all_seven_gaps_fidelity_and_roundtrip() {
     assert_eq!(grid_al.counter_spacing, 24.0);
     assert_eq!(grid_al.grid_columns, 4);
     assert_eq!(grid_al.grid_rows, 2);
-    assert_eq!(
-        &grid_al.grid_col_tracks[..4],
-        &[
-            GridTrack::Flex(1.0),
-            GridTrack::Flex(2.0),
-            GridTrack::Fixed(120.0),
-            GridTrack::Hug
-        ]
-    );
-    assert_eq!(
-        &grid_al.grid_row_tracks[..2],
-        &[GridTrack::Fixed(80.0), GridTrack::Fixed(80.0)]
-    );
+    assert_eq!(&grid_al.grid_col_tracks[..4], &[GridTrack::Flex(1.0), GridTrack::Flex(2.0), GridTrack::Fixed(120.0), GridTrack::Hug]);
+    assert_eq!(&grid_al.grid_row_tracks[..2], &[GridTrack::Fixed(80.0), GridTrack::Fixed(80.0)]);
     assert_eq!(grid.variables.bindings.get("itemSpacing").map(String::as_str), Some("VariableID:2:13"));
     assert_eq!(grid.variables.bindings.get("counterAxisSpacing").map(String::as_str), Some("VariableID:2:13"));
 
@@ -1128,12 +1090,7 @@ fn rea_v106_all_seven_gaps_fidelity_and_roundtrip() {
     let btn_inst_al = btn_inst.kind.frame_props().unwrap().auto_layout.unwrap();
     assert_eq!(btn_inst_al.primary_sizing, Sizing::Fixed);
     assert_eq!(btn_inst_al.counter_sizing, Sizing::Fixed);
-    let inst_bg = btn_inst
-        .children
-        .iter()
-        .filter_map(|id| doc.get(*id))
-        .find(|n| n.name == "BtnBg")
-        .expect("BtnBg in ButtonInst");
+    let inst_bg = btn_inst.children.iter().filter_map(|id| doc.get(*id)).find(|n| n.name == "BtnBg").expect("BtnBg in ButtonInst");
     assert_eq!(inst_bg.layout_child.grow, 0.0);
     assert_eq!(inst_bg.layout_child.horizontal, Sizing::Fixed);
     assert_eq!(inst_bg.layout_child.vertical, Sizing::Fixed);
@@ -1181,15 +1138,7 @@ fn rea_v106_all_seven_gaps_fidelity_and_roundtrip() {
     let rt = import_fig(&bytes).expect("import_fig");
     let rt_grid = find(&rt, "V106Grid");
     let rt_al = rt_grid.kind.frame_props().unwrap().auto_layout.unwrap();
-    assert_eq!(
-        &rt_al.grid_col_tracks[..4],
-        &[
-            GridTrack::Flex(1.0),
-            GridTrack::Flex(2.0),
-            GridTrack::Fixed(120.0),
-            GridTrack::Hug
-        ]
-    );
+    assert_eq!(&rt_al.grid_col_tracks[..4], &[GridTrack::Flex(1.0), GridTrack::Flex(2.0), GridTrack::Fixed(120.0), GridTrack::Hug]);
     let rt_header = find(&rt, "HeaderBar");
     assert!(rt_header.variables.bindings.contains_key("visible"));
     assert!(rt_header.variables.bindings.contains_key("strokeTopWeight"));
@@ -1209,13 +1158,7 @@ fn rea_v106_all_seven_gaps_fidelity_and_roundtrip() {
 #[test]
 fn fig_v106_schema_functional_fields_roundtrip() {
     let g = |s: u64, l: u64| -> Value { json!({"sessionID": s, "localID": l}) };
-    let node = |id: (u64, u64),
-                parent: (u64, u64),
-                pos: &str,
-                ty: &str,
-                name: &str,
-                extra: Value|
-     -> Value {
+    let node = |id: (u64, u64), parent: (u64, u64), pos: &str, ty: &str, name: &str, extra: Value| -> Value {
         let mut v = json!({
             "guid": g(id.0, id.1),
             "parentIndex": {"guid": g(parent.0, parent.1), "position": pos},
@@ -1294,8 +1237,7 @@ fn fig_v106_schema_functional_fields_roundtrip() {
         )
     ]);
 
-    let doc = import_fig_node_changes(&changes, "v106")
-        .expect("import_fig_node_changes v106 functional fields");
+    let doc = import_fig_node_changes(&changes, "v106").expect("import_fig_node_changes v106 functional fields");
 
     // Check DesignSystemCard
     let card = find(&doc, "DesignSystemCard");
@@ -1318,27 +1260,9 @@ fn fig_v106_schema_functional_fields_roundtrip() {
     };
     assert!(!tp.style.is_feature_enabled("liga"));
     assert!(!tp.style.is_feature_enabled("calt"));
-    assert_eq!(
-        tp.style
-            .features
-            .iter()
-            .find(|(k, _)| k.eq_ignore_ascii_case("liga"))
-            .map(|(_, v)| *v),
-        Some(0)
-    );
-    assert_eq!(
-        tp.style
-            .features
-            .iter()
-            .find(|(k, _)| k.eq_ignore_ascii_case("calt"))
-            .map(|(_, v)| *v),
-        Some(0)
-    );
-    assert!(
-        (tp.style.letter_spacing - 1.25).abs() < 1e-4,
-        "expected letter_spacing 1.25 from textTracking, got {}",
-        tp.style.letter_spacing
-    );
+    assert_eq!(tp.style.features.iter().find(|(k, _)| k.eq_ignore_ascii_case("liga")).map(|(_, v)| *v), Some(0));
+    assert_eq!(tp.style.features.iter().find(|(k, _)| k.eq_ignore_ascii_case("calt")).map(|(_, v)| *v), Some(0));
+    assert!((tp.style.letter_spacing - 1.25).abs() < 1e-4, "expected letter_spacing 1.25 from textTracking, got {}", tp.style.letter_spacing);
 
     // Export back to binary .fig and re-import to verify lossless round-trip
     let exported = export_fig(&doc).expect("export_fig");
@@ -1368,13 +1292,7 @@ fn fig_v106_schema_functional_fields_roundtrip() {
 #[test]
 fn fig_v106_wave5_schema_99pct_coverage_roundtrip() {
     let g = |s: u64, l: u64| -> Value { json!({"sessionID": s, "localID": l}) };
-    let node = |id: (u64, u64),
-                parent: (u64, u64),
-                pos: &str,
-                ty: &str,
-                name: &str,
-                extra: Value|
-     -> Value {
+    let node = |id: (u64, u64), parent: (u64, u64), pos: &str, ty: &str, name: &str, extra: Value| -> Value {
         let mut v = json!({
             "guid": g(id.0, id.1),
             "parentIndex": {"guid": g(parent.0, parent.1), "position": pos},
@@ -1540,12 +1458,7 @@ fn fig_v106_wave5_schema_99pct_coverage_roundtrip() {
     assert_eq!(det.detached_symbol_id.as_deref(), Some("assetRef:sym-key-99:v3"));
 
     let inst = find(&doc, "VariantBtnInst");
-    let inst_child = inst
-        .children
-        .iter()
-        .filter_map(|id| doc.get(*id))
-        .find(|n| n.name == "VariantBtnChild")
-        .expect("VariantBtnChild");
+    let inst_child = inst.children.iter().filter_map(|id| doc.get(*id)).find(|n| n.name == "VariantBtnChild").expect("VariantBtnChild");
     assert_eq!(inst_child.component.override_level, Some(1));
     assert_eq!(inst_child.component.detached_symbol_id.as_deref(), Some("guid:1:20"));
 
@@ -1588,14 +1501,7 @@ fn fig_v106_wave5_schema_99pct_coverage_roundtrip() {
     assert_eq!(rt_det.detached_symbol_id.as_deref(), Some("assetRef:sym-key-99:v3"));
 
     let rt_inst = find(&rt, "VariantBtnInst");
-    let rt_inst_child = rt_inst
-        .children
-        .iter()
-        .filter_map(|id| rt.get(*id))
-        .find(|n| n.name == "VariantBtnChild")
-        .expect("VariantBtnChild after roundtrip");
+    let rt_inst_child = rt_inst.children.iter().filter_map(|id| rt.get(*id)).find(|n| n.name == "VariantBtnChild").expect("VariantBtnChild after roundtrip");
     assert_eq!(rt_inst_child.component.override_level, Some(1));
     assert_eq!(rt_inst_child.component.detached_symbol_id.as_deref(), Some("guid:1:20"));
 }
-
-

@@ -23,8 +23,24 @@ Open and save 700,000+ record enterprise Figma `.fig` v106 binary archives in ~1
 </p>
 
 <p align="center">
-  <a href="#quickstart">Quickstart</a> · <a href="#what-it-makes">What it makes</a> · <a href="#visual-proof-gallery">Visual proof</a> · <a href="#100-figma-micro-interactions">100 Micro-Interactions</a> · <a href="#installation">Install</a> · <a href="#how-it-works">How it works</a> · <a href="#commands--diagnostics">Commands</a> · <a href="#quality-bar--limitations">Limits</a>
+  <a href="#quickstart">Quickstart</a> · <a href="#launch-motion-films-60fps">Launch Videos</a> · <a href="#what-it-makes">What it makes</a> · <a href="#visual-proof-gallery">Visual proof</a> · <a href="#100-figma-micro-interactions">100 Micro-Interactions</a> · <a href="#installation">Install</a> · <a href="#how-it-works">How it works</a> · <a href="#commands--diagnostics">Commands</a> · <a href="#quality-bar--limitations">Limits</a>
 </p>
+
+---
+
+## Launch Motion Films (`1440×1440 @ 60fps` · One-Shape UI Motion + Real Studio Assets)
+
+<p align="center">
+  <a href="https://jangtrinh.github.io/design-os-studio/#videos">
+    <img src="docs/videos/designos-studio-launch-preview.gif" alt="DESIGN:OS Studio One-Shape UI Motion + Real Studio Captures Launch Film Preview" width="540">
+  </a>
+</p>
+
+| Film | MP4 (`1440×1440 @ 60fps`, `4× tmix`) | 28-Beat Contact Sheet (`100.60 BPM`) | Highlights |
+| :--- | :--- | :--- | :--- |
+| **01 · Launch Hero** | [`docs/videos/01-designos-studio-launch-hero.mp4`](docs/videos/01-designos-studio-launch-hero.mp4) (`9.6 MB`) | [`01-beat-contact-sheet.png`](docs/videos/01-designos-studio-launch-hero-beat-contact-sheet.png) | `723,136` Kiwi records load in `1.54s` on Metal, UI3 Dark Chrome, Agentic PTY Chat, 11-Stage Spec Reader, `⌘K` AI Synth, Variables, Components & Dev Mode |
+| **02 · 100/100 Micro-Interactions** | [`docs/videos/02-figma-100-micro-interactions.mp4`](docs/videos/02-figma-100-micro-interactions.mp4) (`8.0 MB`) | [`02-beat-contact-sheet.png`](docs/videos/02-figma-100-micro-interactions-beat-contact-sheet.png) | Auto-Layout 5.0 edge double-click `Fixed -> Hug -> Fill`, CSS Grid track pills, Smart Selection ring swaps, Corner/Arc/Star handles, Vector Network tangents & Scale Tool (`K`) |
+| **03 · Agent-First & Dev Mode** | [`docs/videos/03-agent-first-specs-and-devmode.mp4`](docs/videos/03-agent-first-specs-and-devmode.mp4) (`7.8 MB`) | [`03-beat-contact-sheet.png`](docs/videos/03-agent-first-specs-and-devmode-beat-contact-sheet.png) | 22-tool `designos-mcp` server, Claude/Codex/Antigravity PTY Chat, Spec Reader `g1..g5` gates, Variables Light/Dark scrub, 5-target Dev Mode codegen & Prototype flows |
 
 ---
 

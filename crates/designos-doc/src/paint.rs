@@ -549,4 +549,3 @@ mod tests {
         assert_eq!(Color::from_hex("rebeccapurple"), Some(Color::rgb(102, 51, 153)));
     }
 }
-

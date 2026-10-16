@@ -965,31 +965,16 @@ fn launch_visual_proof_presets_render_all_eight_micro_interaction_showcases() {
         "micro-scale-tool",
     ];
     for p in presets {
-        let mut s = Sim::with(Options {
-            fixture: Some("showcase".into()),
-            select: Some("Home".into()),
-            panel: Some(p.into()),
-            ..Default::default()
-        });
+        let mut s = Sim::with(Options { fixture: Some("showcase".into()), select: Some("Home".into()), panel: Some(p.into()), ..Default::default() });
         s.frame(vec![]);
-        assert!(
-            !s.shapes.is_empty(),
-            "preset {p} must render non-empty shapes on the canvas/chrome"
-        );
-        assert!(
-            !s.app().selection.is_empty(),
-            "preset {p} must maintain an active selection"
-        );
+        assert!(!s.shapes.is_empty(), "preset {p} must render non-empty shapes on the canvas/chrome");
+        assert!(!s.app().selection.is_empty(), "preset {p} must maintain an active selection");
     }
 }
 
 #[test]
 fn launch_e2e_proves_100_figma_micro_interactions_end_to_end() {
-    let mut s = Sim::with(Options {
-        fixture: Some("showcase".into()),
-        select: Some("Home".into()),
-        ..Default::default()
-    });
+    let mut s = Sim::with(Options { fixture: Some("showcase".into()), select: Some("Home".into()), ..Default::default() });
 
     // 1. Smart Selection & Tidy Up (#15, #16)
     super::apply_micro_interaction_showcase_preset(&mut s.shell.app, "micro-smart-selection");
@@ -1000,13 +985,8 @@ fn launch_e2e_proves_100_figma_micro_interactions_end_to_end() {
     s.shell.app.doc.get_mut(sel[1]).unwrap().transform.tx += 35.0;
     s.shell.app.doc.get_mut(sel[1]).unwrap().transform.ty += 18.0;
     let crect = s.app().canvas_rect;
-    let tidy_rect = crate::canvas::draw::tidy_up_pill_rect(s.app(), crect)
-        .expect("3-node selection exposes Tidy up pill");
-    assert!(crate::canvas::interact::try_click_canvas_action_pill(
-        &mut s.shell.app,
-        crect,
-        tidy_rect.center(),
-    ));
+    let tidy_rect = crate::canvas::draw::tidy_up_pill_rect(s.app(), crect).expect("3-node selection exposes Tidy up pill");
+    assert!(crate::canvas::interact::try_click_canvas_action_pill(&mut s.shell.app, crect, tidy_rect.center(),));
     let x0 = s.app().doc.get(sel[0]).unwrap().transform.tx;
     let x1 = s.app().doc.get(sel[1]).unwrap().transform.tx;
     let x2 = s.app().doc.get(sel[2]).unwrap().transform.tx;
@@ -1022,11 +1002,7 @@ fn launch_e2e_proves_100_figma_micro_interactions_end_to_end() {
     let pills = crate::canvas::draw::grid_track_pill_rects(s.app(), crect);
     assert!(!pills.is_empty(), "CSS Grid exposes clickable track header pills");
     let (grid_id, _is_col, col_idx, first_pill) = pills[0];
-    assert!(crate::canvas::interact::try_click_canvas_action_pill(
-        &mut s.shell.app,
-        crect,
-        first_pill.center(),
-    ));
+    assert!(crate::canvas::interact::try_click_canvas_action_pill(&mut s.shell.app, crect, first_pill.center(),));
     let track_after = s.app().doc.get(grid_id).unwrap().kind.frame_props().unwrap().auto_layout.as_ref().unwrap().grid_col_tracks[col_idx];
     assert!(matches!(track_after, designos_doc::GridTrack::Fixed(_)), "1fr cycles to Fixed(px) on click");
 
@@ -1056,11 +1032,7 @@ fn launch_e2e_proves_100_figma_micro_interactions_end_to_end() {
     s.shell.app.copy_properties();
     s.shell.app.selection = vec![sel[0]];
     s.shell.app.paste_properties();
-    assert_eq!(
-        s.app().doc.get(sel[0]).unwrap().fills,
-        s.app().doc.get(sel[1]).unwrap().fills,
-        "Cmd+Alt+V pastes visual fills onto target node"
-    );
+    assert_eq!(s.app().doc.get(sel[0]).unwrap().fills, s.app().doc.get(sel[1]).unwrap().fills, "Cmd+Alt+V pastes visual fills onto target node");
 
     s.shell.app.selection = vec![sel[0], sel[1]];
     let gap_before = s.app().doc.get(sel[1]).unwrap().transform.tx - s.app().doc.get(sel[0]).unwrap().transform.tx;
@@ -1068,4 +1040,3 @@ fn launch_e2e_proves_100_figma_micro_interactions_end_to_end() {
     let gap_after = s.app().doc.get(sel[1]).unwrap().transform.tx - s.app().doc.get(sel[0]).unwrap().transform.tx;
     assert!((gap_before - gap_after).abs() < 1e-3, "Shift+Align preserves relative offset within group");
 }
-

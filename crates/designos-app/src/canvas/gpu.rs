@@ -35,15 +35,7 @@ impl Default for GpuView {
         let mut compiler = SceneCompiler::new();
         // re-flattening curves for a new zoom level may take at most this long per frame
         compiler.geom.budget = Some(std::time::Duration::from_millis(8));
-        Self {
-            pref: true,
-            available: false,
-            max_texture: 0,
-            compiler,
-            last_key: None,
-            last_compile_ms: 0.0,
-            last_stats: None,
-        }
+        Self { pref: true, available: false, max_texture: 0, compiler, last_key: None, last_compile_ms: 0.0, last_stats: None }
     }
 }
 
@@ -146,15 +138,8 @@ pub fn paint(app: &mut App, ui: &Ui, rect: ERect) -> bool {
     }
     let rev = super::tiles::take_rev(app);
     let vp = Viewport { offset: app.view.offset, zoom: app.view.zoom, dpr: ppp };
-    let key: FrameKey = (
-        app.page,
-        rev,
-        [vp.offset.x.to_bits(), vp.offset.y.to_bits()],
-        vp.zoom.to_bits(),
-        vp.dpr.to_bits(),
-        size,
-        designos_render::font_generation(),
-    );
+    let key: FrameKey =
+        (app.page, rev, [vp.offset.x.to_bits(), vp.offset.y.to_bits()], vp.zoom.to_bits(), vp.dpr.to_bits(), size, designos_render::font_generation());
     let (doc, page) = (&app.doc, app.page);
     let g = &mut app.canvas.gpu;
     if g.last_key == Some(key) && g.compiler.geom.stale_hits == 0 {

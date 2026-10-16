@@ -11,10 +11,7 @@ use std::{
 use url::Url;
 
 const REPOSITORY: &str = "jangtrinh/design-os-plugins";
-const ALLOWED_REPOS: &[(&str, &str)] = &[
-    ("jangtrinh", "design-os-plugins"),
-    ("jangtrinh", "designos-plugins"),
-];
+const ALLOWED_REPOS: &[(&str, &str)] = &[("jangtrinh", "design-os-plugins"), ("jangtrinh", "designos-plugins")];
 const MAX_BYTES: usize = 2 * 1024 * 1024;
 const MAX_TOTAL_BYTES: usize = 8 * 1024 * 1024;
 static NEXT_TEMP: AtomicU64 = AtomicU64::new(0);
@@ -315,10 +312,7 @@ pub fn install(root: &Path, input: &str) -> Result<InstalledPlugin, String> {
         .redirects(0)
         .user_agent("designos-plugin-installer")
         .build();
-    let token = std::env::var("DESIGNOS_PLUGINS_TOKEN")
-        .or_else(|_| std::env::var("DESIGNOS_PLUGINS_TOKEN"))
-        .ok()
-        .filter(|value| !value.trim().is_empty());
+    let token = std::env::var("DESIGNOS_PLUGINS_TOKEN").or_else(|_| std::env::var("DESIGNOS_PLUGINS_TOKEN")).ok().filter(|value| !value.trim().is_empty());
     install_with(root, input, |url| {
         // All supplied URLs were constructed from the validated native repository path.
         // Send credentials only to GitHub's API, never to downloaded plugin code.

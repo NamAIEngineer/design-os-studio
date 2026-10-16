@@ -623,12 +623,7 @@ impl Ctx<'_> {
         // (plus sub-pixel corner-radius / stroke approximation when zoomed out in `zoom_lod`).
         if matches!(
             n.kind,
-            NodeKind::Rectangle
-                | NodeKind::Section
-                | NodeKind::Frame(_)
-                | NodeKind::Component(_)
-                | NodeKind::ComponentSet(_)
-                | NodeKind::Instance { .. }
+            NodeKind::Rectangle | NodeKind::Section | NodeKind::Frame(_) | NodeKind::Component(_) | NodeKind::ComponentSet(_) | NodeKind::Instance { .. }
         ) && n.fill_geometry.is_none()
             && n.stroke_geometry.is_none()
             && (n.effects.is_empty() || (zoom_lod && scale < 0.25))
@@ -817,7 +812,9 @@ impl Ctx<'_> {
         let zoom_lod = self.zoom_lod();
         let sclip = match how {
             StrokeClip::None => clip,
-            StrokeClip::Inside | StrokeClip::Outside if (zoom_lod && n.stroke.weight * ts_scale(&ts) <= 1.25) || (interactive && self.progs.len() >= 48) => clip,
+            StrokeClip::Inside | StrokeClip::Outside if (zoom_lod && n.stroke.weight * ts_scale(&ts) <= 1.25) || (interactive && self.progs.len() >= 48) => {
+                clip
+            }
             StrokeClip::Inside | StrokeClip::Outside => {
                 let Some(shape) = &g.fill else { return };
                 let b = mesh.bounds;
@@ -930,13 +927,7 @@ impl Ctx<'_> {
         alpha: f32,
     ) -> bool {
         let Some(sh) = &g.shape else { return false };
-        if !sh.is_rect
-            || !sh.fillable
-            || n.fill_geometry.is_some()
-            || has_visible_strokes(n)
-            || !identity_like(&ts)
-            || (ts.sx - ts.sy).abs() > 1e-4 * ts.sx
-        {
+        if !sh.is_rect || !sh.fillable || n.fill_geometry.is_some() || has_visible_strokes(n) || !identity_like(&ts) || (ts.sx - ts.sy).abs() > 1e-4 * ts.sx {
             return false;
         }
         let mut fills = visible_fills(n);

@@ -218,19 +218,11 @@ impl<'a> ExportCtx<'a> {
     }
 
     fn resolve_var_guid(&self, id: &str) -> Option<(u32, u32)> {
-        self.var_guids
-            .get(id)
-            .copied()
-            .or_else(|| self.var_guids.get(&format!("VariableID:{id}")).copied())
-            .or_else(|| parse_guid_pair(id))
+        self.var_guids.get(id).copied().or_else(|| self.var_guids.get(&format!("VariableID:{id}")).copied()).or_else(|| parse_guid_pair(id))
     }
 
     fn resolve_coll_guid(&self, id: &str) -> Option<(u32, u32)> {
-        self.coll_guids
-            .get(id)
-            .copied()
-            .or_else(|| self.coll_guids.get(&format!("VariableCollectionId:{id}")).copied())
-            .or_else(|| parse_guid_pair(id))
+        self.coll_guids.get(id).copied().or_else(|| self.coll_guids.get(&format!("VariableCollectionId:{id}")).copied()).or_else(|| parse_guid_pair(id))
     }
 
     fn resolve_prop_guid(&self, scope_node: NodeId, prop_name: &str) -> (u32, u32) {
@@ -279,12 +271,7 @@ fn pos_str(idx: usize) -> String {
 fn build_message(doc: &Document) -> V {
     let mut cx = ExportCtx::new(doc);
     // 1. Root DOCUMENT record.
-    cx.changes.push(msg(vec![
-        ("guid", guid(0, 0)),
-        ("phase", en("CREATED")),
-        ("type", en("DOCUMENT")),
-        ("name", V::String(doc.name.clone())),
-    ]));
+    cx.changes.push(msg(vec![("guid", guid(0, 0)), ("phase", en("CREATED")), ("type", en("DOCUMENT")), ("name", V::String(doc.name.clone()))]));
 
     // 2. User pages (CANVAS records) and their subtrees.
     for (pidx, &pid) in doc.pages.iter().enumerate() {
@@ -350,13 +337,7 @@ fn build_message(doc: &Document) -> V {
     }
 
     let blobs: Vec<V> = cx.blobs.into_iter().map(|b| msg(vec![("bytes", V::Bytes(b))])).collect();
-    msg(vec![
-        ("type", en("NODE_CHANGES")),
-        ("sessionID", V::Uint(0)),
-        ("ackID", V::Uint(0)),
-        ("nodeChanges", V::Array(cx.changes)),
-        ("blobs", V::Array(blobs)),
-    ])
+    msg(vec![("type", en("NODE_CHANGES")), ("sessionID", V::Uint(0)), ("ackID", V::Uint(0)), ("nodeChanges", V::Array(cx.changes)), ("blobs", V::Array(blobs))])
 }
 
 fn collect_page_handoff(cx: &ExportCtx, page: NodeId) -> Vec<V> {
@@ -507,14 +488,7 @@ fn export_styles_on_internal(cx: &mut ExportCtx, internal_guid: (u32, u32), idx:
     }
 }
 
-fn export_node_rec(
-    cx: &mut ExportCtx,
-    id: NodeId,
-    parent_guid: (u32, u32),
-    sibling_idx: usize,
-    parent_dir: Option<LayoutDirection>,
-    in_component: bool,
-) {
+fn export_node_rec(cx: &mut ExportCtx, id: NodeId, parent_guid: (u32, u32), sibling_idx: usize, parent_dir: Option<LayoutDirection>, in_component: bool) {
     let Some(node) = cx.doc.get(id).cloned() else { return };
     let nguid = cx.node_guids[&id];
     let (ty, is_state_group) = match &node.kind {
@@ -609,12 +583,7 @@ fn export_node_rec(
     if let Some(lvl) = node.component.override_level {
         fields.push(("overrideLevel", V::Uint(lvl.max(0) as u32)));
     }
-    if let Some(ds) = node
-        .detached_symbol_id
-        .as_deref()
-        .or(node.component.detached_symbol_id.as_deref())
-        .filter(|s| !s.is_empty())
-    {
+    if let Some(ds) = node.detached_symbol_id.as_deref().or(node.component.detached_symbol_id.as_deref()).filter(|s| !s.is_empty()) {
         fields.push(("detachedSymbolId", encode_detached_symbol_id(ds)));
     }
     append_fig_metadata(&mut fields, &node.fig_metadata);
@@ -855,11 +824,7 @@ fn export_node_rec(
                     ExportConstraint::Width(v) => ("CONTENT_WIDTH", v),
                     ExportConstraint::Height(v) => ("CONTENT_HEIGHT", v),
                 };
-                msg(vec![
-                    ("suffix", V::String(e.suffix.clone())),
-                    ("imageType", en(img_ty)),
-                    ("constraint", msg(vec![("type", en(cty)), ("value", fl(cval))])),
-                ])
+                msg(vec![("suffix", V::String(e.suffix.clone())), ("imageType", en(img_ty)), ("constraint", msg(vec![("type", en(cty)), ("value", fl(cval))]))])
             })
             .collect();
         fields.push(("exportSettings", V::Array(exs)));
@@ -878,13 +843,9 @@ fn export_node_rec(
     }
 
     // Style references.
-    for (k, field_name) in [
-        ("fill", "styleIdForFill"),
-        ("stroke", "styleIdForStrokeFill"),
-        ("text", "styleIdForText"),
-        ("effect", "styleIdForEffect"),
-        ("grid", "styleIdForGrid"),
-    ] {
+    for (k, field_name) in
+        [("fill", "styleIdForFill"), ("stroke", "styleIdForStrokeFill"), ("text", "styleIdForText"), ("effect", "styleIdForEffect"), ("grid", "styleIdForGrid")]
+    {
         if let Some(sid) = node.style_refs.get(k) {
             if let Some(&sg) = cx.style_guids.get(sid) {
                 fields.push((field_name, msg(vec![("guid", guid(sg.0, sg.1))])));
@@ -937,11 +898,7 @@ fn export_node_rec(
                     };
                     df.push(("initialValue", msg(vec![("guidValue", guid(tg.0, tg.1))])));
                     if !preferred.is_empty() {
-                        let prefs: Vec<V> = preferred
-                            .iter()
-                            .filter_map(|pid| cx.node_guids.get(pid).copied())
-                            .map(|g| guid(g.0, g.1))
-                            .collect();
+                        let prefs: Vec<V> = preferred.iter().filter_map(|pid| cx.node_guids.get(pid).copied()).map(|g| guid(g.0, g.1)).collect();
                         if !prefs.is_empty() {
                             df.push(("preferredValues", V::Array(prefs)));
                         }
@@ -954,10 +911,7 @@ fn export_node_rec(
                         _ => options.first().cloned().unwrap_or_default(),
                     };
                     df.push(("initialValue", msg(vec![("textValue", msg(vec![("characters", V::String(s))]))])));
-                    variant_orders.push(msg(vec![
-                        ("property", V::String(bare_name)),
-                        ("values", V::Array(options.iter().cloned().map(V::String).collect())),
-                    ]));
+                    variant_orders.push(msg(vec![("property", V::String(bare_name)), ("values", V::Array(options.iter().cloned().map(V::String).collect()))]));
                 }
                 PropKind::Slot => {
                     df.push(("type", en("SLOT")));
@@ -977,9 +931,7 @@ fn export_node_rec(
             let def_g = cx.resolve_prop_guid(id, prop_name);
             let val_msg = match pval {
                 PropValue::Bool(b) => msg(vec![("boolValue", V::Bool(*b))]),
-                PropValue::Text(s) | PropValue::Variant(s) => {
-                    msg(vec![("textValue", msg(vec![("characters", V::String(s.clone()))]))])
-                }
+                PropValue::Text(s) | PropValue::Variant(s) => msg(vec![("textValue", msg(vec![("characters", V::String(s.clone()))]))]),
                 PropValue::Instance(tid) => {
                     let tg = cx.node_guids.get(tid).copied().unwrap_or((0, 0));
                     msg(vec![("guidValue", guid(tg.0, tg.1))])
@@ -987,12 +939,7 @@ fn export_node_rec(
                 PropValue::Slot(ids) => {
                     let s = ids
                         .iter()
-                        .map(|i| {
-                            cx.node_guids
-                                .get(i)
-                                .map(|g| format!("{}:{}", g.0, g.1))
-                                .unwrap_or_else(|| i.0.to_string())
-                        })
+                        .map(|i| cx.node_guids.get(i).map(|g| format!("{}:{}", g.0, g.1)).unwrap_or_else(|| i.0.to_string()))
                         .collect::<Vec<_>>()
                         .join(",");
                     msg(vec![("textValue", msg(vec![("characters", V::String(s))]))])
@@ -1015,10 +962,7 @@ fn export_node_rec(
                 continue;
             };
             let def_g = cx.resolve_prop_guid(id, prop_name);
-            prop_refs.push(msg(vec![
-                ("defID", guid(def_g.0, def_g.1)),
-                ("componentPropNodeField", en(node_field)),
-            ]));
+            prop_refs.push(msg(vec![("defID", guid(def_g.0, def_g.1)), ("componentPropNodeField", en(node_field))]));
         }
         if !prop_refs.is_empty() {
             fields.push(("componentPropRefs", V::Array(prop_refs)));
@@ -1028,10 +972,8 @@ fn export_node_rec(
         let mut vspecs = Vec::new();
         for (prop_name, val) in &node.component.variant_props {
             let def_g = cx.resolve_prop_guid(id, prop_name);
-            let bare_name = prop_name
-                .strip_prefix("propDefId:")
-                .map(|_| String::new())
-                .unwrap_or_else(|| prop_name.split('#').next().unwrap_or(prop_name).to_string());
+            let bare_name =
+                prop_name.strip_prefix("propDefId:").map(|_| String::new()).unwrap_or_else(|| prop_name.split('#').next().unwrap_or(prop_name).to_string());
             let mut vspec = vec![("propDefId", guid(def_g.0, def_g.1)), ("value", V::String(val.clone()))];
             if !bare_name.is_empty() {
                 vspec.push(("propertyName", V::String(bare_name)));
@@ -1064,10 +1006,7 @@ fn export_node_rec(
     // Kind-specific fields.
     match &node.kind {
         NodeKind::Ellipse(arc) => {
-            fields.push((
-                "arcData",
-                st(vec![("startingAngle", fl(arc.start)), ("endingAngle", fl(arc.end)), ("innerRadius", fl(arc.inner_radius))]),
-            ));
+            fields.push(("arcData", st(vec![("startingAngle", fl(arc.start)), ("endingAngle", fl(arc.end)), ("innerRadius", fl(arc.inner_radius))])));
         }
         NodeKind::Polygon { count } => {
             fields.push(("count", V::Uint(*count)));
@@ -1118,23 +1057,18 @@ fn export_node_rec(
             encode_text_node(&mut fields, &sp.text);
         }
         NodeKind::ShapeWithText(sp) => {
-            let st_name = node
-                .fig_metadata
-                .get("shapeWithTextType")
-                .map(String::as_str)
-                .filter(|s| !s.is_empty())
-                .unwrap_or(match sp.shape {
-                    ShapeKind::Square => "SQUARE",
-                    ShapeKind::RoundedRect => "ROUNDED_RECTANGLE",
-                    ShapeKind::Ellipse => "ELLIPSE",
-                    ShapeKind::Diamond => "DIAMOND",
-                    ShapeKind::Triangle => "TRIANGLE_UP",
-                    ShapeKind::TriangleDown => "TRIANGLE_DOWN",
-                    ShapeKind::Parallelogram => "PARALLELOGRAM_RIGHT",
-                    ShapeKind::Star => "STAR",
-                    ShapeKind::Hexagon => "HEXAGON",
-                    ShapeKind::Pentagon => "PENTAGON",
-                });
+            let st_name = node.fig_metadata.get("shapeWithTextType").map(String::as_str).filter(|s| !s.is_empty()).unwrap_or(match sp.shape {
+                ShapeKind::Square => "SQUARE",
+                ShapeKind::RoundedRect => "ROUNDED_RECTANGLE",
+                ShapeKind::Ellipse => "ELLIPSE",
+                ShapeKind::Diamond => "DIAMOND",
+                ShapeKind::Triangle => "TRIANGLE_UP",
+                ShapeKind::TriangleDown => "TRIANGLE_DOWN",
+                ShapeKind::Parallelogram => "PARALLELOGRAM_RIGHT",
+                ShapeKind::Star => "STAR",
+                ShapeKind::Hexagon => "HEXAGON",
+                ShapeKind::Pentagon => "PENTAGON",
+            });
             fields.push(("shapeWithTextType", V::String(st_name.into())));
             encode_text_node(&mut fields, &sp.text);
         }
@@ -1163,10 +1097,7 @@ fn export_node_rec(
                 Magnet::Center => "CENTER",
             };
             let end_msg = |ep: &ConnectorEnd| {
-                let mut ef = vec![
-                    ("position", vec2(ep.point.x, ep.point.y)),
-                    ("magnet", V::String(mag_name(ep.magnet).into())),
-                ];
+                let mut ef = vec![("position", vec2(ep.point.x, ep.point.y)), ("magnet", V::String(mag_name(ep.magnet).into()))];
                 if let Some(tg) = ep.node.and_then(|nid| cx.node_guids.get(&nid).copied()) {
                     ef.push(("endpointNodeId", guid(tg.0, tg.1)));
                 }
@@ -1264,10 +1195,7 @@ fn encode_node_mode_entries(cx: &ExportCtx, vars: &NodeVariables) -> Vec<V> {
     for (cid, mid) in &vars.modes {
         let Some(cg) = cx.resolve_coll_guid(cid) else { continue };
         let Some(&mg) = cx.mode_guids.get(mid) else { continue };
-        mode_entries.push(msg(vec![
-            ("variableSetID", msg(vec![("guid", guid(cg.0, cg.1))])),
-            ("variableModeID", guid(mg.0, mg.1)),
-        ]));
+        mode_entries.push(msg(vec![("variableSetID", msg(vec![("guid", guid(cg.0, cg.1))])), ("variableModeID", guid(mg.0, mg.1))]));
     }
     mode_entries
 }
@@ -1275,21 +1203,11 @@ fn encode_node_mode_entries(cx: &ExportCtx, vars: &NodeVariables) -> Vec<V> {
 fn collect_instance_overrides(cx: &ExportCtx, inst_id: NodeId) -> Vec<V> {
     let mut out = Vec::new();
     let Some(inst) = cx.doc.get(inst_id) else { return out };
-    let mut stack: Vec<(NodeId, Vec<(u32, u32)>)> = inst
-        .children
-        .iter()
-        .rev()
-        .map(|&cid| (cid, Vec::new()))
-        .collect();
+    let mut stack: Vec<(NodeId, Vec<(u32, u32)>)> = inst.children.iter().rev().map(|&cid| (cid, Vec::new())).collect();
 
     while let Some((cid, mut path)) = stack.pop() {
         let Some(n) = cx.doc.get(cid) else { continue };
-        let step_g = n
-            .component
-            .source
-            .and_then(|s| cx.node_guids.get(&s).copied())
-            .or_else(|| cx.node_guids.get(&cid).copied())
-            .unwrap_or((1, cid.0 as u32));
+        let step_g = n.component.source.and_then(|s| cx.node_guids.get(&s).copied()).or_else(|| cx.node_guids.get(&cid).copied()).unwrap_or((1, cid.0 as u32));
         path.push(step_g);
 
         if !n.component.overrides.is_empty()
@@ -1304,13 +1222,7 @@ fn collect_instance_overrides(cx: &ExportCtx, inst_id: NodeId) -> Vec<V> {
             if let Some(lvl) = n.component.override_level {
                 ov.push(("overrideLevel", V::Uint(lvl.max(0) as u32)));
             }
-            if let Some(ds) = n
-                .component
-                .detached_symbol_id
-                .as_deref()
-                .or(n.detached_symbol_id.as_deref())
-                .filter(|s| !s.is_empty())
-            {
+            if let Some(ds) = n.component.detached_symbol_id.as_deref().or(n.detached_symbol_id.as_deref()).filter(|s| !s.is_empty()) {
                 ov.push(("detachedSymbolId", encode_detached_symbol_id(ds)));
             }
 
@@ -1346,12 +1258,7 @@ fn collect_instance_overrides(cx: &ExportCtx, inst_id: NodeId) -> Vec<V> {
                     .iter()
                     .enumerate()
                     .map(|(i, p)| {
-                        let cv = n
-                            .variables
-                            .bindings
-                            .get(&format!("fills/{i}"))
-                            .and_then(|vid| cx.resolve_var_guid(vid))
-                            .map(alias_var_data);
+                        let cv = n.variables.bindings.get(&format!("fills/{i}")).and_then(|vid| cx.resolve_var_guid(vid)).map(alias_var_data);
                         encode_paint(p, cv)
                     })
                     .collect();
@@ -1365,12 +1272,7 @@ fn collect_instance_overrides(cx: &ExportCtx, inst_id: NodeId) -> Vec<V> {
                     .iter()
                     .enumerate()
                     .map(|(i, p)| {
-                        let cv = n
-                            .variables
-                            .bindings
-                            .get(&format!("strokes/{i}"))
-                            .and_then(|vid| cx.resolve_var_guid(vid))
-                            .map(alias_var_data);
+                        let cv = n.variables.bindings.get(&format!("strokes/{i}")).and_then(|vid| cx.resolve_var_guid(vid)).map(alias_var_data);
                         encode_paint(p, cv)
                     })
                     .collect();
@@ -1390,12 +1292,7 @@ fn collect_instance_overrides(cx: &ExportCtx, inst_id: NodeId) -> Vec<V> {
                     .iter()
                     .enumerate()
                     .filter_map(|(i, e)| {
-                        let cv = n
-                            .variables
-                            .bindings
-                            .get(&format!("effects/{i}/color"))
-                            .and_then(|vid| cx.resolve_var_guid(vid))
-                            .map(alias_var_data);
+                        let cv = n.variables.bindings.get(&format!("effects/{i}/color")).and_then(|vid| cx.resolve_var_guid(vid)).map(alias_var_data);
                         encode_effect(e, cv)
                     })
                     .collect();
@@ -1454,12 +1351,7 @@ fn collect_instance_overrides(cx: &ExportCtx, inst_id: NodeId) -> Vec<V> {
                         ov.push(("stackCounterSizing", en(if al.counter_sizing == Sizing::Hug { "RESIZE_TO_FIT_WITH_IMPLICIT_SIZE" } else { "FIXED" })));
                     }
                 }
-                let parent_dir = n
-                    .parent
-                    .and_then(|p| cx.doc.get(p))
-                    .and_then(|p| p.kind.frame_props())
-                    .and_then(|f| f.auto_layout)
-                    .map(|a| a.direction);
+                let parent_dir = n.parent.and_then(|p| cx.doc.get(p)).and_then(|p| p.kind.frame_props()).and_then(|f| f.auto_layout).map(|a| a.direction);
                 let lc = &n.layout_child;
                 let (prim_fill, counter_fill) = match parent_dir {
                     Some(LayoutDirection::Horizontal | LayoutDirection::Grid) => (lc.horizontal == Sizing::Fill || lc.grow > 0.0, lc.vertical == Sizing::Fill),
@@ -1637,8 +1529,7 @@ fn encode_paint(p: &Paint, color_var: Option<V>) -> V {
     let mut fields = Vec::new();
     let push_grad = |fields: &mut Vec<(&str, V)>, ty: &str, handles: &[Vec2; 3], stops: &[GradientStop]| {
         fields.push(("type", en(ty)));
-        let st_list: Vec<V> =
-            stops.iter().map(|s| st(vec![("color", color(s.color.r, s.color.g, s.color.b, s.color.a)), ("position", fl(s.pos))])).collect();
+        let st_list: Vec<V> = stops.iter().map(|s| st(vec![("color", color(s.color.r, s.color.g, s.color.b, s.color.a)), ("position", fl(s.pos))])).collect();
         fields.push(("stops", V::Array(st_list)));
         fields.push(("transform", gradient_matrix_from_handles(handles)));
     };
@@ -1707,12 +1598,9 @@ fn encode_effect(e: &Effect, color_var: Option<V>) -> Option<V> {
 
 fn encode_grid(g: &LayoutGrid) -> V {
     match g {
-        LayoutGrid::Grid { size, color: c } => msg(vec![
-            ("pattern", en("GRID")),
-            ("sectionSize", fl(*size)),
-            ("color", color(c.r, c.g, c.b, c.a)),
-            ("visible", V::Bool(true)),
-        ]),
+        LayoutGrid::Grid { size, color: c } => {
+            msg(vec![("pattern", en("GRID")), ("sectionSize", fl(*size)), ("color", color(c.r, c.g, c.b, c.a)), ("visible", V::Bool(true))])
+        }
         LayoutGrid::Columns { count, gutter, offset, color: c } => msg(vec![
             ("pattern", en("COLUMNS")),
             ("count", V::Uint(*count)),
@@ -1745,16 +1633,19 @@ fn style_name_from_weight(weight: u16, italic: bool) -> String {
         _ => "Black",
     };
     if italic {
-        if w == "Regular" { "Italic".into() } else { format!("{w} Italic") }
+        if w == "Regular" {
+            "Italic".into()
+        } else {
+            format!("{w} Italic")
+        }
     } else {
         w.into()
     }
 }
 
 const KNOWN_OT_FEATURES: &[&str] = &[
-    "LIGA", "DLIG", "CLIG", "CALT", "KERN", "SS01", "SS02", "SS03", "SS04", "SS05", "SS06", "SS07", "SS08", "SS09", "SS10", "TNUM",
-    "ONUM", "LNUM", "PNUM", "FRAC", "AFRC", "ZERO", "SMCP", "C2SC", "PCAP", "C2PC", "UNIC", "TITL", "ORDN", "SWSH", "SALT", "SUPS",
-    "SUBS", "CASE",
+    "LIGA", "DLIG", "CLIG", "CALT", "KERN", "SS01", "SS02", "SS03", "SS04", "SS05", "SS06", "SS07", "SS08", "SS09", "SS10", "TNUM", "ONUM", "LNUM", "PNUM",
+    "FRAC", "AFRC", "ZERO", "SMCP", "C2SC", "PCAP", "C2PC", "UNIC", "TITL", "ORDN", "SWSH", "SALT", "SUPS", "SUBS", "CASE",
 ];
 
 fn encode_detached_symbol_id(ds: &str) -> V {
@@ -1919,11 +1810,7 @@ fn append_ot_and_variation_fields(fields: &mut Vec<(&'static str, V)>, ts: &Text
                 for (i, b) in tag.as_bytes().iter().take(4).enumerate() {
                     bytes[i] = *b;
                 }
-                msg(vec![
-                    ("axisTag", V::Uint(u32::from_be_bytes(bytes))),
-                    ("axisName", V::String(tag.clone())),
-                    ("value", fl(*val)),
-                ])
+                msg(vec![("axisTag", V::Uint(u32::from_be_bytes(bytes))), ("axisName", V::String(tag.clone())), ("value", fl(*val))])
             })
             .collect();
         fields.push(("fontVariations", V::Array(vars)));
@@ -1932,10 +1819,8 @@ fn append_ot_and_variation_fields(fields: &mut Vec<(&'static str, V)>, ts: &Text
 
 fn append_text_style_fields(fields: &mut Vec<(&'static str, V)>, ts: &TextStyle) {
     let style_str = style_name_from_weight(ts.font_weight, ts.italic);
-    fields.push((
-        "fontName",
-        st(vec![("family", V::String(ts.font_family.clone())), ("style", V::String(style_str)), ("postscript", V::String(String::new()))]),
-    ));
+    fields
+        .push(("fontName", st(vec![("family", V::String(ts.font_family.clone())), ("style", V::String(style_str)), ("postscript", V::String(String::new()))])));
     fields.push(("fontSize", fl(ts.font_size)));
     fields.push(("letterSpacing", st(vec![("value", fl(ts.letter_spacing)), ("units", en("PIXELS"))])));
     let lh = match ts.line_height {
@@ -2044,11 +1929,7 @@ fn encode_text_node(fields: &mut Vec<(&'static str, V)>, tp: &TextProps) {
                 ("fontSize", fl(r.style.font_size)),
                 (
                     "fontName",
-                    st(vec![
-                        ("family", V::String(r.style.font_family.clone())),
-                        ("style", V::String(st_name)),
-                        ("postscript", V::String(String::new())),
-                    ]),
+                    st(vec![("family", V::String(r.style.font_family.clone())), ("style", V::String(st_name)), ("postscript", V::String(String::new()))]),
                 ),
                 ("fillPaints", V::Array(r.style.fills.iter().map(|p| encode_paint(p, None)).collect())),
                 (

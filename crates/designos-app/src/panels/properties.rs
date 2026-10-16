@@ -682,34 +682,14 @@ fn selection_ui(app: &mut App, ui: &mut Ui, pane: &mut Pane, sel: &[NodeId]) {
     }
     pane.y += theme::FIELD_HEIGHT + 8.0;
     if is_frame && !multi {
-        let slides_r = pane.rect(
-            theme::SECTION_CONTENT_X,
-            0.0,
-            theme::SECTION_CONTENT_W,
-            26.0,
-        );
+        let slides_r = pane.rect(theme::SECTION_CONTENT_X, 0.0, theme::SECTION_CONTENT_W, 26.0);
         widgets::record(ui, "copy-to-figma-slides-btn", slides_r);
         widgets::record(ui, "copy-to-slides", slides_r);
         let slides_resp = ui.interact(slides_r, ui.id().with("copy-to-figma-slides"), Sense::click());
-        let slides_bg = if slides_resp.hovered() {
-            Color32::from_rgb(0x38, 0x38, 0x38)
-        } else {
-            Color32::from_rgb(0x2C, 0x2C, 0x2C)
-        };
+        let slides_bg = if slides_resp.hovered() { Color32::from_rgb(0x38, 0x38, 0x38) } else { Color32::from_rgb(0x2C, 0x2C, 0x2C) };
         ui.painter().rect_filled(slides_r, theme::cr(6), slides_bg);
-        ui.painter().rect_stroke(
-            slides_r,
-            theme::cr(6),
-            Stroke::new(1.0, Color32::from_rgb(0x38, 0x38, 0x38)),
-            StrokeKind::Inside,
-        );
-        ui.painter().text(
-            slides_r.center(),
-            Align2::CENTER_CENTER,
-            "Copy to Slide Deck",
-            theme::font_small(),
-            theme::TEXT,
-        );
+        ui.painter().rect_stroke(slides_r, theme::cr(6), Stroke::new(1.0, Color32::from_rgb(0x38, 0x38, 0x38)), StrokeKind::Inside);
+        ui.painter().text(slides_r.center(), Align2::CENTER_CENTER, "Copy to Slide Deck", theme::font_small(), theme::TEXT);
         if slides_resp.on_hover_text("Copy selected frame to Slide Deck").clicked() {
             if let Some(s) = app.copy_selection() {
                 ui.ctx().copy_text(s);
@@ -835,11 +815,7 @@ fn selection_ui(app: &mut App, ui: &mut Ui, pane: &mut Pane, sel: &[NodeId]) {
         title(ui, pane, "Typography", None, false);
         let var_pill = pane.rect(theme::SECTION_TRAILING_X, -26.0, 24.0, 20.0);
         widgets::record(ui, "typo-var-pill", var_pill);
-        if ui
-            .interact(var_pill, ui.id().with("typo-var-pill"), Sense::click())
-            .on_hover_text("Apply typography variable or style")
-            .clicked()
-        {
+        if ui.interact(var_pill, ui.id().with("typo-var-pill"), Sense::click()).on_hover_text("Apply typography variable or style").clicked() {
             app.open_variables();
         }
         super::typography::section(app, ui, pane, sel, t);
@@ -1142,14 +1118,7 @@ fn auto_layout_ui(app: &mut App, ui: &mut Ui, pane: &mut Pane, sel: &[NodeId], a
     if sbr.clicked() || dbl_or_x {
         let next = if pi == 3 { LayoutAlign::Start } else { LayoutAlign::SpaceBetween };
         update_al(app, sel, |al| al.primary_align = next);
-        app.show_toast(
-            if next == LayoutAlign::SpaceBetween {
-                "Align: Space between (Auto)"
-            } else {
-                "Align: Packed"
-            },
-            false,
-        );
+        app.show_toast(if next == LayoutAlign::SpaceBetween { "Align: Space between (Auto)" } else { "Align: Packed" }, false);
     }
     let v_icons = [Icon::AlignTop, Icon::AlignVCenter, Icon::AlignBottom];
     if let Some(i) = segmented(ui, pane, theme::FIELD_COL_X[1] + 16.0, "al-cross", &v_icons, Some(ci)) {
@@ -1354,10 +1323,7 @@ pub(super) fn paint_rows(app: &mut App, ui: &mut Ui, pane: &mut Pane, sel: &[Nod
         app.props.selected_property = Some(if stroke { SelectedProperty::Stroke(dst_i) } else { SelectedProperty::Fill(dst_i) });
         app.props.drag_property = None;
     } else if ui.ctx().input(|inp| inp.pointer.any_released())
-        && matches!(
-            (stroke, app.props.drag_property),
-            (false, Some(SelectedProperty::Fill(_))) | (true, Some(SelectedProperty::Stroke(_)))
-        )
+        && matches!((stroke, app.props.drag_property), (false, Some(SelectedProperty::Fill(_))) | (true, Some(SelectedProperty::Stroke(_))))
     {
         app.props.drag_property = None;
     }
@@ -1378,25 +1344,13 @@ fn swatch_sources(app: &App) -> Vec<(String, Vec<Color32>)> {
     thread_local! {
         static SWATCH_CACHE: std::cell::RefCell<Option<((u64, NodeId, u64, usize, usize), Vec<(String, Vec<Color32>)>)>> = const { std::cell::RefCell::new(None) };
     }
-    let key = (
-        app.doc.runtime_id(),
-        app.page,
-        app.doc.mutation_epoch(),
-        app.doc.styles.len(),
-        app.doc.variables.len(),
-    );
-    if let Some(cached) = SWATCH_CACHE.with(|c| {
-        c.borrow().as_ref().filter(|(k, _)| *k == key).map(|(_, v)| v.clone())
-    }) {
+    let key = (app.doc.runtime_id(), app.page, app.doc.mutation_epoch(), app.doc.styles.len(), app.doc.variables.len());
+    if let Some(cached) = SWATCH_CACHE.with(|c| c.borrow().as_ref().filter(|(k, _)| *k == key).map(|(_, v)| v.clone())) {
         return cached;
     }
     let conv = |cs: Vec<Color>| cs.into_iter().map(|c| to_c32(c, 1.0)).collect::<Vec<_>>();
     let page = conv(crate::styles::selection_colors(&app.doc, &[app.page]));
-    let doc = if app.doc.nodes.len() > 20_000 {
-        page.clone()
-    } else {
-        conv(crate::styles::selection_colors(&app.doc, &app.doc.pages.clone()))
-    };
+    let doc = if app.doc.nodes.len() > 20_000 { page.clone() } else { conv(crate::styles::selection_colors(&app.doc, &app.doc.pages.clone())) };
     let styles: Vec<Color32> = crate::styles::style_entries(&app.doc, false)
         .iter()
         .filter_map(|e| match app.doc.styles.get(&e.key) {
@@ -1539,15 +1493,10 @@ fn create_style(app: &mut App, pk: &mut Picker) {
 }
 
 fn try_sample_color_token(app: &mut App, p: Pos2, target: PickTarget, ids: &[NodeId]) -> bool {
-    let hit = app
-        .hover
-        .or_else(|| crate::canvas::interact::hit_under(app, app.view.to_page(app.canvas_rect.min, p), true));
+    let hit = app.hover.or_else(|| crate::canvas::interact::hit_under(app, app.view.to_page(app.canvas_rect.min, p), true));
     let Some(hid) = hit else { return false };
     let (style_key, var_id) = match app.doc.get(hid) {
-        Some(n) => (
-            n.style_refs.get("fill").cloned(),
-            n.variables.bindings.get("fills/0").cloned(),
-        ),
+        Some(n) => (n.style_refs.get("fill").cloned(), n.variables.bindings.get("fills/0").cloned()),
         None => return false,
     };
     if let Some(key) = style_key {
@@ -1574,14 +1523,8 @@ pub(super) fn picker_popup(app: &mut App, ui: &mut Ui, region: Rect) {
     let Some(mut pk) = app.props.picker.take() else {
         if let Some(target) = app.props.eyedropper {
             ctx.set_cursor_icon(egui::CursorIcon::Crosshair);
-            let (clicked, ptr, esc, shift) = ctx.input(|i| {
-                (
-                    i.pointer.primary_pressed(),
-                    i.pointer.interact_pos(),
-                    i.key_pressed(egui::Key::Escape),
-                    i.modifiers.shift,
-                )
-            });
+            let (clicked, ptr, esc, shift) =
+                ctx.input(|i| (i.pointer.primary_pressed(), i.pointer.interact_pos(), i.key_pressed(egui::Key::Escape), i.modifiers.shift));
             if esc {
                 app.props.eyedropper = None;
             } else if let (true, Some(p)) = (clicked, ptr) {
@@ -1703,14 +1646,8 @@ pub(super) fn picker_popup(app: &mut App, ui: &mut Ui, region: Rect) {
     // Eyedropper: the next canvas click samples the colour under the pointer.
     if pk.eyedrop {
         ctx.set_cursor_icon(egui::CursorIcon::Crosshair);
-        let (clicked, ptr, esc, shift) = ctx.input(|i| {
-            (
-                i.pointer.primary_pressed(),
-                i.pointer.interact_pos(),
-                i.key_pressed(egui::Key::Escape),
-                i.modifiers.shift,
-            )
-        });
+        let (clicked, ptr, esc, shift) =
+            ctx.input(|i| (i.pointer.primary_pressed(), i.pointer.interact_pos(), i.key_pressed(egui::Key::Escape), i.modifiers.shift));
         if esc {
             pk.eyedrop = false;
             app.props.eyedropper = None;
@@ -1864,116 +1801,97 @@ fn gradient_handles(app: &mut App, ctx: &egui::Context, pk: &mut Picker, changed
     let mut line_inserted: Option<f32> = None;
     let mut any_handle_or_stop_interacted = false;
 
-    egui::Area::new(egui::Id::new("gradient-handles"))
-        .order(egui::Order::Foreground)
-        .fixed_pos(canvas.min)
-        .interactable(true)
-        .show(ctx, |ui| {
-            let p = ui.painter().with_clip_rect(canvas);
-            let stroke = |w: f32, c: Color32| Stroke::new(w, c);
-            p.line_segment([pts[0].1, pts[1].1], stroke(3.0, Color32::from_black_alpha(0x66)));
-            p.line_segment([pts[0].1, pts[1].1], stroke(1.5, Color32::WHITE));
-            p.line_segment([pts[0].1, pts[2].1], stroke(1.0, Color32::from_white_alpha(0xB2)));
-            let stops = widgets::picker::stops_of(&pk.paint.kind).cloned().unwrap_or_default();
-            let shift = ui.input(|inp| inp.modifiers.shift);
-            let alt = ui.input(|inp| inp.modifiers.alt);
+    egui::Area::new(egui::Id::new("gradient-handles")).order(egui::Order::Foreground).fixed_pos(canvas.min).interactable(true).show(ctx, |ui| {
+        let p = ui.painter().with_clip_rect(canvas);
+        let stroke = |w: f32, c: Color32| Stroke::new(w, c);
+        p.line_segment([pts[0].1, pts[1].1], stroke(3.0, Color32::from_black_alpha(0x66)));
+        p.line_segment([pts[0].1, pts[1].1], stroke(1.5, Color32::WHITE));
+        p.line_segment([pts[0].1, pts[2].1], stroke(1.0, Color32::from_white_alpha(0xB2)));
+        let stops = widgets::picker::stops_of(&pk.paint.kind).cloned().unwrap_or_default();
+        let shift = ui.input(|inp| inp.modifiers.shift);
+        let alt = ui.input(|inp| inp.modifiers.alt);
 
-            for (i, c) in &pts {
-                let r = Rect::from_center_size(*c, Vec2::splat(16.0));
-                let resp = ui.interact(r, ui.id().with(("gh", *i)), Sense::click_and_drag());
-                if resp.clicked() || resp.dragged() || resp.drag_started() {
-                    any_handle_or_stop_interacted = true;
-                }
-                if resp.dragged() {
-                    if let Some(mut pt) = resp.interact_pointer_pos() {
-                        if shift && (*i == 0 || *i == 1) {
-                            let anchor = if *i == 0 { pts[1].1 } else { pts[0].1 };
-                            let d = pt - anchor;
-                            let len = d.length();
-                            if len > 1.0 {
-                                let step = 15.0_f32.to_radians();
-                                let snapped = (d.y.atan2(d.x) / step).round() * step;
-                                pt = anchor + egui::vec2(snapped.cos() * len, snapped.sin() * len);
-                            }
+        for (i, c) in &pts {
+            let r = Rect::from_center_size(*c, Vec2::splat(16.0));
+            let resp = ui.interact(r, ui.id().with(("gh", *i)), Sense::click_and_drag());
+            if resp.clicked() || resp.dragged() || resp.drag_started() {
+                any_handle_or_stop_interacted = true;
+            }
+            if resp.dragged() {
+                if let Some(mut pt) = resp.interact_pointer_pos() {
+                    if shift && (*i == 0 || *i == 1) {
+                        let anchor = if *i == 0 { pts[1].1 } else { pts[0].1 };
+                        let d = pt - anchor;
+                        let len = d.length();
+                        if len > 1.0 {
+                            let step = 15.0_f32.to_radians();
+                            let snapped = (d.y.atan2(d.x) / step).round() * step;
+                            pt = anchor + egui::vec2(snapped.cos() * len, snapped.sin() * len);
                         }
-                        let local = inv.apply(view.to_page(origin, pt));
-                        moved = Some((
-                            *i,
-                            DVec2::new(local.x / size.x.max(1e-3), local.y / size.y.max(1e-3)),
-                            shift,
-                        ));
                     }
-                }
-                let fill = if *i == 0 {
-                    stops.first().map(|s| to_c32(s.color, 1.0))
-                } else if *i == 1 {
-                    stops.last().map(|s| to_c32(s.color, 1.0))
-                } else {
-                    None
-                };
-                let rad = if *i == 2 { 4.0 } else { 6.5 };
-                p.circle_filled(*c, rad + 1.5, Color32::from_black_alpha(0x4D));
-                p.circle_filled(*c, rad, Color32::WHITE);
-                if let Some(f) = fill {
-                    p.circle_filled(*c, rad - 2.0, f);
+                    let local = inv.apply(view.to_page(origin, pt));
+                    moved = Some((*i, DVec2::new(local.x / size.x.max(1e-3), local.y / size.y.max(1e-3)), shift));
                 }
             }
-
-            // Interactive stop squares along the gradient axis.
-            let ab = pts[1].1 - pts[0].1;
-            let ab_len_sq = ab.length_sq().max(1.0);
-            for (si, s) in stops.iter().enumerate() {
-                let c = pts[0].1 + ab * s.pos.clamp(0.0, 1.0);
-                let sr = Rect::from_center_size(c, Vec2::splat(12.0));
-                let sresp = ui.interact(sr, ui.id().with(("gh-stop", si)), Sense::click_and_drag());
-                if sresp.clicked() || sresp.drag_started() || sresp.dragged() {
-                    any_handle_or_stop_interacted = true;
-                    stop_selected = Some(si);
-                }
-                if sresp.drag_started() && alt {
-                    if let Some(pt) = sresp.interact_pointer_pos() {
-                        let t = ((pt - pts[0].1).dot(ab) / ab_len_sq).clamp(0.0, 1.0);
-                        stop_duplicated = Some((si, t));
-                    }
-                } else if sresp.dragged() {
-                    if let Some(pt) = sresp.interact_pointer_pos() {
-                        let t = ((pt - pts[0].1).dot(ab) / ab_len_sq).clamp(0.0, 1.0);
-                        stop_moved = Some((si, t));
-                    }
-                }
-                let sel = pk.state.sel == si;
-                p.rect_filled(
-                    Rect::from_center_size(c, Vec2::splat(10.0)),
-                    theme::cr(3),
-                    if sel { Color32::WHITE } else { Color32::from_white_alpha(0xCC) },
-                );
-                if sel {
-                    p.rect_stroke(
-                        Rect::from_center_size(c, Vec2::splat(12.0)),
-                        theme::cr(3),
-                        Stroke::new(1.5, theme::BORDER_SELECTED),
-                        StrokeKind::Outside,
-                    );
-                }
-                p.rect_filled(Rect::from_center_size(c, Vec2::splat(6.0)), theme::cr(2), to_c32(s.color, 1.0));
+            let fill = if *i == 0 {
+                stops.first().map(|s| to_c32(s.color, 1.0))
+            } else if *i == 1 {
+                stops.last().map(|s| to_c32(s.color, 1.0))
+            } else {
+                None
+            };
+            let rad = if *i == 2 { 4.0 } else { 6.5 };
+            p.circle_filled(*c, rad + 1.5, Color32::from_black_alpha(0x4D));
+            p.circle_filled(*c, rad, Color32::WHITE);
+            if let Some(f) = fill {
+                p.circle_filled(*c, rad - 2.0, f);
             }
+        }
 
-            // Click on the gradient line between stops to insert a new interpolated stop.
-            if !any_handle_or_stop_interacted {
-                let (clicked, ptr) = ui.input(|inp| (inp.pointer.primary_clicked(), inp.pointer.interact_pos()));
-                if let (true, Some(pt)) = (clicked, ptr) {
+        // Interactive stop squares along the gradient axis.
+        let ab = pts[1].1 - pts[0].1;
+        let ab_len_sq = ab.length_sq().max(1.0);
+        for (si, s) in stops.iter().enumerate() {
+            let c = pts[0].1 + ab * s.pos.clamp(0.0, 1.0);
+            let sr = Rect::from_center_size(c, Vec2::splat(12.0));
+            let sresp = ui.interact(sr, ui.id().with(("gh-stop", si)), Sense::click_and_drag());
+            if sresp.clicked() || sresp.drag_started() || sresp.dragged() {
+                any_handle_or_stop_interacted = true;
+                stop_selected = Some(si);
+            }
+            if sresp.drag_started() && alt {
+                if let Some(pt) = sresp.interact_pointer_pos() {
                     let t = ((pt - pts[0].1).dot(ab) / ab_len_sq).clamp(0.0, 1.0);
-                    let proj = pts[0].1 + ab * t;
-                    let near_endpoint = pts.iter().any(|(_, ep)| ep.distance(pt) < 12.0);
-                    let near_stop = stops
-                        .iter()
-                        .any(|s| (pts[0].1 + ab * s.pos.clamp(0.0, 1.0)).distance(pt) < 10.0);
-                    if proj.distance(pt) < 8.0 && (0.02..=0.98).contains(&t) && !near_endpoint && !near_stop {
-                        line_inserted = Some(t);
-                    }
+                    stop_duplicated = Some((si, t));
+                }
+            } else if sresp.dragged() {
+                if let Some(pt) = sresp.interact_pointer_pos() {
+                    let t = ((pt - pts[0].1).dot(ab) / ab_len_sq).clamp(0.0, 1.0);
+                    stop_moved = Some((si, t));
                 }
             }
-        });
+            let sel = pk.state.sel == si;
+            p.rect_filled(Rect::from_center_size(c, Vec2::splat(10.0)), theme::cr(3), if sel { Color32::WHITE } else { Color32::from_white_alpha(0xCC) });
+            if sel {
+                p.rect_stroke(Rect::from_center_size(c, Vec2::splat(12.0)), theme::cr(3), Stroke::new(1.5, theme::BORDER_SELECTED), StrokeKind::Outside);
+            }
+            p.rect_filled(Rect::from_center_size(c, Vec2::splat(6.0)), theme::cr(2), to_c32(s.color, 1.0));
+        }
+
+        // Click on the gradient line between stops to insert a new interpolated stop.
+        if !any_handle_or_stop_interacted {
+            let (clicked, ptr) = ui.input(|inp| (inp.pointer.primary_clicked(), inp.pointer.interact_pos()));
+            if let (true, Some(pt)) = (clicked, ptr) {
+                let t = ((pt - pts[0].1).dot(ab) / ab_len_sq).clamp(0.0, 1.0);
+                let proj = pts[0].1 + ab * t;
+                let near_endpoint = pts.iter().any(|(_, ep)| ep.distance(pt) < 12.0);
+                let near_stop = stops.iter().any(|s| (pts[0].1 + ab * s.pos.clamp(0.0, 1.0)).distance(pt) < 10.0);
+                if proj.distance(pt) < 8.0 && (0.02..=0.98).contains(&t) && !near_endpoint && !near_stop {
+                    line_inserted = Some(t);
+                }
+            }
+        }
+    });
 
     if let Some(si) = stop_selected {
         pk.state.sel = si;

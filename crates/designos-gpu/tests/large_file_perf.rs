@@ -97,11 +97,7 @@ fn build_50k_design_system() -> (Document, NodeId, NodeId) {
                         v
                     }
                     1 => {
-                        let style = TextStyle {
-                            font_size: 11.0,
-                            fills: vec![Paint::solid(Color::rgb(0x18, 0x18, 0x1B))],
-                            ..Default::default()
-                        };
+                        let style = TextStyle { font_size: 11.0, fills: vec![Paint::solid(Color::rgb(0x18, 0x18, 0x1B))], ..Default::default() };
                         Node::text(nid, Rect::new(nx, ny, 34.0, 16.0), "Label", style)
                     }
                     2 => {
@@ -208,10 +204,7 @@ fn run_benchmark_suite(suite_name: &str, doc: &mut Document, page: NodeId, defau
     let world_w = (focus_bb.2 - focus_bb.0).max(1000.0);
     let world_h = (focus_bb.3 - focus_bb.1).max(1000.0);
     let (center, drag_target, draw_parent) = if let Some((ab_id, ab_bb, _)) = best_artboard {
-        let drag = doc
-            .get(ab_id)
-            .and_then(|ab| ab.children.iter().copied().find(|&c| compiler.index.bounds_of(c).is_some()))
-            .unwrap_or(default_drag_target);
+        let drag = doc.get(ab_id).and_then(|ab| ab.children.iter().copied().find(|&c| compiler.index.bounds_of(c).is_some())).unwrap_or(default_drag_target);
         (Vec2::new(ab_bb.0, ab_bb.1), drag, ab_id)
     } else {
         (Vec2::new(focus_bb.0 + world_w * 0.25, focus_bb.1 + world_h * 0.25), default_drag_target, page)
@@ -232,11 +225,7 @@ fn run_benchmark_suite(suite_name: &str, doc: &mut Document, page: NodeId, defau
         let mut times = Vec::with_capacity(10);
         let mut last_stats = Default::default();
         for i in 0..10 {
-            let vp = Viewport {
-                offset: Vec2::new(overview_start.x + i as f32 * 600.0, overview_start.y + i as f32 * 400.0),
-                zoom,
-                dpr,
-            };
+            let vp = Viewport { offset: Vec2::new(overview_start.x + i as f32 * 600.0, overview_start.y + i as f32 * 400.0), zoom, dpr };
             let t0 = Instant::now();
             let frame = compiler.compile(doc, page, cur_rev, &vp, size);
             times.push(t0.elapsed().as_secs_f64() * 1000.0);
@@ -254,11 +243,7 @@ fn run_benchmark_suite(suite_name: &str, doc: &mut Document, page: NodeId, defau
         let mut times = Vec::with_capacity(10);
         let mut last_stats = Default::default();
         for i in 0..10 {
-            let vp = Viewport {
-                offset: Vec2::new(center.x + i as f32 * 120.0, center.y + i as f32 * 80.0),
-                zoom,
-                dpr,
-            };
+            let vp = Viewport { offset: Vec2::new(center.x + i as f32 * 120.0, center.y + i as f32 * 80.0), zoom, dpr };
             let t0 = Instant::now();
             let frame = compiler.compile(doc, page, cur_rev, &vp, size);
             times.push(t0.elapsed().as_secs_f64() * 1000.0);
@@ -276,11 +261,7 @@ fn run_benchmark_suite(suite_name: &str, doc: &mut Document, page: NodeId, defau
         let mut times = Vec::with_capacity(10);
         let mut last_stats = Default::default();
         for i in 0..10 {
-            let vp = Viewport {
-                offset: Vec2::new(center.x + i as f32 * 60.0, center.y + i as f32 * 40.0),
-                zoom,
-                dpr,
-            };
+            let vp = Viewport { offset: Vec2::new(center.x + i as f32 * 60.0, center.y + i as f32 * 40.0), zoom, dpr };
             let t0 = Instant::now();
             let frame = compiler.compile(doc, page, cur_rev, &vp, size);
             times.push(t0.elapsed().as_secs_f64() * 1000.0);
@@ -417,13 +398,8 @@ fn large_file_compile_benchmarks() {
         let load_ms = t_load.elapsed().as_secs_f64() * 1000.0;
 
         // Find the page with the largest subtree node count
-        let (largest_page, max_page_nodes) = doc_fig
-            .pages
-            .iter()
-            .copied()
-            .map(|p| (p, doc_fig.page_node_count(p)))
-            .max_by_key(|&(_, count)| count)
-            .expect("at least one page");
+        let (largest_page, max_page_nodes) =
+            doc_fig.pages.iter().copied().map(|p| (p, doc_fig.page_node_count(p))).max_by_key(|&(_, count)| count).expect("at least one page");
         let page_name = doc_fig.get(largest_page).map(|n| n.name.clone()).unwrap_or_default();
         eprintln!(
             "Loaded VSF - PCP.fig in {:.1} ms: {} total nodes across {} pages; largest page {:?} ({:?}) has {} nodes",
