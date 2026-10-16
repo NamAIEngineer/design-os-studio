@@ -1409,6 +1409,7 @@ impl App {
     pub fn switch_page(&mut self, id: NodeId) {
         if self.doc.pages.contains(&id) {
             crate::decks::ui::flush_notes(self);
+            self.doc.ensure_page_hydrated(id);
             self.page = id;
             self.selection.clear();
             self.canvas.reset_interaction();
@@ -1540,7 +1541,9 @@ impl App {
         self.renaming_file = false;
         let mut doc = doc;
         io::ensure_page(&mut doc);
-        self.page = doc.pages[0];
+        let first_page = doc.pages[0];
+        doc.ensure_page_hydrated(first_page);
+        self.page = first_page;
         self.doc = doc;
         self.decks = Default::default();
         self.hist = History::default();

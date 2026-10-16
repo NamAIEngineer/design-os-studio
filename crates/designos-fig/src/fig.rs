@@ -60,6 +60,7 @@ pub fn decode_fig_to_json(bytes: &[u8]) -> Result<Value, FigError> {
 }
 
 /// Pre-decoded `derivedSymbolData` entry for fast `.fig` import without JSON intermediate.
+#[derive(Debug, Clone)]
 pub(crate) struct FastDerivedEntry {
     pub path: Vec<String>,
     pub size: Option<Vec2>,
@@ -96,20 +97,27 @@ fn kiwi_str(v: &KiwiValue) -> Option<&str> {
     }
 }
 
-fn extract_fast_derived(raw_changes: &[KiwiValue], num_blobs: usize) -> HashMap<String, Vec<FastDerivedEntry>> {
+fn extract_fast_derived(raw_changes: &mut [KiwiValue], num_blobs: usize) -> HashMap<String, Vec<FastDerivedEntry>> {
+    let mut needs_derived_geo = HashSet::new();
+    for nc in raw_changes.iter() {
+        if matches!(nc.get("type").and_then(kiwi_str), Some("VECTOR" | "BOOLEAN_OPERATION" | "STAR" | "REGULAR_POLYGON" | "ELLIPSE" | "LINE" | "BRUSH")) {
+            if let Some(id) = nc.get("guid").and_then(kiwi_guid_str) {
+                needs_derived_geo.insert(id);
+            }
+        }
+    }
     let mut map = HashMap::new();
-    for nc in raw_changes {
+    for nc in raw_changes.iter_mut() {
         if nc.get("type").and_then(kiwi_str) != Some("INSTANCE") {
             continue;
         }
-        let Some(arr) = nc
-            .get("derivedSymbolData")
-            .or_else(|| nc.get("symbolData").and_then(|s| s.get("derivedSymbolData")))
-            .and_then(KiwiValue::as_array)
-            .filter(|a| !a.is_empty())
-        else {
+        let derived_val = nc.take_field("derivedSymbolData").or_else(|| nc.get_mut("symbolData").and_then(|s| s.take_field("derivedSymbolData")));
+        let Some(KiwiValue::Array(arr)) = derived_val else {
             continue;
         };
+        if arr.is_empty() {
+            continue;
+        }
         let Some(id) = nc.get("guid").and_then(kiwi_guid_str) else { continue };
         let mut entries = Vec::with_capacity(arr.len());
         for o in arr {
@@ -142,14 +150,16 @@ fn extract_fast_derived(raw_changes: &[KiwiValue], num_blobs: usize) -> HashMap<
                 }
                 (!geo.is_empty()).then_some(geo)
             };
-            let fill_geometry = parse_geo("fillGeometry");
-            let stroke_geometry = parse_geo("strokeGeometry");
+            let keep_geo = path.last().is_some_and(|last| needs_derived_geo.contains(last));
+            let fill_geometry = if keep_geo { parse_geo("fillGeometry") } else { None };
+            let stroke_geometry = if keep_geo { parse_geo("strokeGeometry") } else { None };
             if size.is_none() && transform.is_none() && fill_geometry.is_none() && stroke_geometry.is_none() {
                 continue;
             }
             entries.push(FastDerivedEntry { path, size, transform, fill_geometry, stroke_geometry });
         }
         if !entries.is_empty() {
+            entries.shrink_to_fit();
             map.insert(id, entries);
         }
     }
@@ -170,14 +180,17 @@ pub fn import_fig(bytes: &[u8]) -> Result<Document, FigError> {
             .collect(),
         _ => Vec::new(),
     };
-    let raw_changes: Vec<KiwiValue> = match d.message.take_field("nodeChanges") {
+    let mut raw_changes: Vec<KiwiValue> = match d.message.take_field("nodeChanges") {
         Some(KiwiValue::Array(arr)) => arr,
         _ => Vec::new(),
     };
     drop(d.message);
 
     let large = raw_changes.len() > 5_000;
-    let fast_derived = large.then(|| extract_fast_derived(&raw_changes, owned_blobs.len()));
+    let mut fast_derived = large.then(|| extract_fast_derived(&mut raw_changes, owned_blobs.len()));
+    if large {
+        release_os_memory();
+    }
     let into_j: fn(KiwiValue) -> Value = if large { kiwi::into_json_fast } else { kiwi::into_json };
     let mut entries: Vec<Entry> = Vec::with_capacity(raw_changes.len());
     for kc in raw_changes {
@@ -194,7 +207,7 @@ pub fn import_fig(bytes: &[u8]) -> Result<Document, FigError> {
     if large {
         release_os_memory();
     }
-    let mut doc = rest_import::import_rest_value_owned(rest, true, &blob_refs, fast_derived.as_ref())?;
+    let mut doc = rest_import::import_rest_value_owned(rest, true, &blob_refs, fast_derived.as_mut())?;
     drop(fast_derived);
     drop(blob_refs);
     drop(owned_blobs);
@@ -1089,7 +1102,11 @@ fn convert_node(nc: &Value, id: &str, lk: &Lk) -> Option<Map<String, Value>> {
         }
     }
     // Precomputed outlines (text and lowered board items keep none: the renderer lays them out itself).
-    if !matches!(ty, "TEXT" | "STICKY" | "SHAPE_WITH_TEXT" | "CONNECTOR" | "STAMP") {
+    // For large files (> 5,000 nodes), skip precomputed outlines on rectangular containers and rectangles
+    // so they render analytically and take the GPU unit-quad instancing fast path.
+    let has_own_outline = matches!(ty, "TEXT" | "STICKY" | "SHAPE_WITH_TEXT" | "CONNECTOR" | "STAMP");
+    let analytic_fast_path = lk.large_file && matches!(ty, "FRAME" | "COMPONENT" | "COMPONENT_SET" | "INSTANCE" | "SECTION" | "RECTANGLE");
+    if !(has_own_outline || analytic_fast_path) {
         for k in ["fillGeometry", "strokeGeometry"] {
             if let Some(g) = lk.convert_geometry_cached(nc, k) {
                 m.insert(k.into(), g);

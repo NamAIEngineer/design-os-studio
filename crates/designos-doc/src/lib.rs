@@ -169,6 +169,16 @@ pub struct Document {
     gap_cursor: u64,
     #[serde(skip)]
     dirty: DirtyLog,
+    /// Optional on-demand hydrator that expands deferred component instances on inactive pages when switched to or exported.
+    #[serde(skip)]
+    pub page_hydrator: Option<std::sync::Arc<std::sync::Mutex<dyn PageHydrator>>>,
+}
+
+/// On-demand hydrator for deferred component instances on inactive pages of large multi-page `.fig` documents.
+pub trait PageHydrator: Send + Sync + std::fmt::Debug {
+    fn hydrate_page(&mut self, doc: &mut Document, page: NodeId) -> bool;
+    fn hydrate_all(&mut self, doc: &mut Document) -> bool;
+    fn is_hydrated(&self, page: NodeId) -> bool;
 }
 
 mod serde_images {
@@ -277,6 +287,32 @@ impl Document {
         Self { name: name.into(), ..Default::default() }
     }
 
+    /// Ensures deferred component instances on `page` are expanded on demand.
+    /// Returns `true` if any deferred instances were expanded.
+    pub fn ensure_page_hydrated(&mut self, page: NodeId) -> bool {
+        let Some(h) = self.page_hydrator.clone() else { return false };
+        let Ok(mut guard) = h.lock() else { return false };
+        if guard.is_hydrated(page) {
+            return false;
+        }
+        let changed = guard.hydrate_page(self, page);
+        if changed {
+            self.mark_tree_full_dirty();
+        }
+        changed
+    }
+
+    /// Expands all remaining deferred pages (e.g., before full-document export).
+    pub fn hydrate_all_pages(&mut self) -> bool {
+        let Some(h) = self.page_hydrator.take() else { return false };
+        let Ok(mut guard) = h.lock() else { return false };
+        let changed = guard.hydrate_all(self);
+        if changed {
+            self.mark_tree_full_dirty();
+        }
+        changed
+    }
+
     /// Hands out a fresh id. The counter never wraps: once it is exhausted (a hostile or
     /// corrupted file can carry ids near `u64::MAX`) ids come from the gaps below the largest
     /// node id instead. Loaders that can renumber (`renumber_ids_for_headroom`) make this a last
@@ -304,6 +340,10 @@ impl Document {
         }
         self.gap_cursor = candidate.saturating_add(1);
         NodeId(candidate)
+    }
+
+    pub fn peek_next_id(&self) -> NodeId {
+        NodeId(self.next_id + 1)
     }
 
     /// Allocate safely after importing a document whose stored counter may be

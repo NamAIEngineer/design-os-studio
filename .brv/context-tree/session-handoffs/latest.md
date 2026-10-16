@@ -1,4 +1,4 @@
-# Session Handoff — DESIGN:OS Studio (2026-10-16 — 100/100 Micro-Interactions Engine, Single-Typeface GitHub Pages, CI Fixes & Video Suite Quality Verdict)
+# Session Handoff — DESIGN:OS Studio (2026-10-16 — Figma Engine Phase 2 Optimization, 12-Part Continuous 60fps Video/GIF Showcase & Functional README Cleanup)
 
 **Date:** 2026-10-16
 **Repo:** `/Users/jangtrinh/Products/design-os-studio` (`https://github.com/jangtrinh/design-os-studio`)
@@ -6,41 +6,21 @@
 
 ---
 
-## ⚠️ 0. CRITICAL OWNER VERDICT ON CURRENT VIDEO SUITE (`CHƯA ĐẠT TIÊU CHUẨN` — NEEDS REWORK NEXT SESSION)
-
-- **Status of `8 × 30s` Micro-Interactions Videos (`M01..M08` in `16:9` & `9:16`)**: **REJECTED / NOT UP TO STANDARD (`"bộ này chưa đạt tiêu chuẩn"`)**.
-- **What was generated in v1 (`scripts/build-micro-8x30s-videos.mjs` + `scripts/render-micro-8x30s-videos.mjs`)**:
-  - Rendered 16 MP4 files (`Design/marketing/videos/16x9/micro-01..08-*-16x9.mp4` and `Design/marketing/videos/9x16/micro-01..08-*-9x16.mp4`, synced to `docs/videos/`) using 48 real `designos-studio` screenshots (`Design/marketing/screenshots/micro/m01..m08-step1..6.png`, 6 discrete states per video) + `SF Pro Rounded` Intro/Outro cards.
-- **Why v1 Failed the Owner Quality Bar**:
-  1. **Discrete 6-Step Screenshot Switching != True Continuous Real-Time Canvas Interaction**: Cross-switching 6 static PNG screenshots (`step1..step6`) while moving an HTML cursor overlay over a static image still looks like a **6-slide screenshot slideshow** rather than a real, continuous 60fps interaction where handles, nodes, curves, and numbers scrub continuously frame-by-frame.
-  2. **Intro / Outro & Overlay Visual Craft**: Needs genuine Apple Keynote-grade motion design and typography hierarchy, not template-like HUD pills layered over static captures.
-- **Required Architecture for Next Session (v2 True Real-Time Native Recording)**:
-  - Add a deterministic **60fps native frame-sequence recorder** directly inside `crates/designos-app` (e.g., `designos-studio --record-micro <slug> --fps 60 --frames 900 --out-dir ...`) that interpolates `App` state (`gap`, `padding`, `arc_sweep`, `inner_ratio`, `vecnet` tangent coordinates, `eyedropper` cursor position, `scale_tool` factor) **on every single frame (1..N)** and renders real GPU/CPU frames directly from Rust, OR records real-time continuous interaction on the live native canvas.
-
----
-
 ## 1. Completed & Verified in Repo (`main`)
 
-### A. 100/100 Figma A-to-Z Micro-Interactions Engine (`crates/designos-app`)
-- Full native implementation of all 100 Figma micro-interactions (`#1..#100`) across `crates/designos-app/src/canvas/` (`draw.rs`, `input.rs`, `grid.rs`, `vecnet_edit.rs`, `rulers.rs`) and `crates/designos-app/src/panels/` (`inspector.rs`, `layers.rs`, `devmode.rs`, ` bottom_bar.rs`).
-- Multi-step headless CLI preset support (`--panel micro-<slug>:1..6` in `crates/designos-app/src/cli.rs` and `crates/designos-app/src/shell.rs`) covering:
-  - `M01`: `autolayout` (pink gap drag, inline gap edit box, padding drag, `Option` mirror, edge double-click `Fixed -> Hug -> Fill`)
-  - `M02`: `grid` (2D CSS Grid track pills `1fr / px / Hug`, gutter drag, `2x1 -> 2x2` cell span)
-  - `M03`: `smart-selection` (pink gap bars, `Tidy up`, pink center ring slot swaps)
-  - `M04`: `shape-controls` (ellipse sweep/ratio/start-angle handles, star inner-ratio & point-count handles)
-  - `M05`: `vector-edit` (Vector Network vertices, cubic Bezier tangents, `Cmd` cusp break, midpoint diamond `t=0.5` split, `Shift+Delete` heal)
-  - `M06`: `layer-picker` (`Cmd+Right-Click` deep-hit overlapping layer picker, layer filter, status badge cycle, Eyedropper `I` 7×7 loupe `Tab` `HEX -> RGB -> HSL`)
-  - `M07`: `dev-boxmodel` (`Shift+D` emerald padding & orange gap box-model overlay + 5-target codegen `React / Tailwind / CSS / SwiftUI / Compose`)
-  - `M08`: `scale-tool` (`K` proportional scale tool `1.0x / 1.25x / 1.5x / 2.0x` + `Shift+1` zoom-to-fit)
+### A. Figma Engine Phase 2 Optimization (`figma-engine-phase2-optimization` — `es:feature-dev` All Phases Shipped)
+- **REA Evidence**: `ev_970f4814a2e5b6ea58ee775f70caf0e1b5b426e332a7b864acf9ab00f7e0e53b`
+- **Specs**: `plans/specs/figma-engine-phase2-optimization/{brainstorm.md,usecases.md,plan.md,STATUS.md}`
+- **4 Core Architectural Slices**:
+  1. **Slice 1 (`OPT-P2-01`, `crates/designos-fig/src/kiwi.rs`)**: Zero-allocation Kiwi wire-level field skipper (`Reader::skip_string`, `Schema::{skip_def, skip_field, skip_type}`) that skips `editInfo`, `derivedTextData`, and `derivedImmutableFrameData` on large `.fig` files (`> 2 MB`) before allocating any `KiwiValue`.
+  2. **Slice 2 (`OPT-P2-02` & `OPT-P2-03`, `crates/designos-fig/src/fig.rs`, `crates/designos-fig/src/rest_import.rs`)**: In-place `take_field("derivedSymbolData")` extraction filtering `fillGeometry`/`strokeGeometry` to non-rectangular/non-text shapes (`VECTOR | BOOLEAN_OPERATION | STAR | REGULAR_POLYGON | ELLIPSE | LINE | BRUSH`), eliminating `200,000+` pre-baked `TEXT` glyph outlines and `300,000+` rectangular `fill_geometry` paths inside instances; single-owner `NodeKind::Vector { paths }` without 2× duplicate in `n.fill_geometry`; on-demand `override_key_of(id)` resolution replacing `566,202` cloned `override_keys` entries.
+  3. **Slice 3 (`OPT-P2-04`, `crates/designos-doc/src/lib.rs`, `crates/designos-fig/src/rest_import.rs`, `crates/designos-app/src/ops.rs`, `crates/designos-app/src/shell.rs`)**: `PageHydrator` (`DeferredFigHydrator`) lazy page instance expansion — expands active `pages[0]` and main components (`COMPONENT` / `COMPONENT_SET`) on load while deferring inactive pages (`pages[1..]`) until `App::switch_page`.
+  4. **Slice 4 (`OPT-P2-05`, `crates/designos-gpu/src/geom.rs`)**: `hash_path_slice` in `GeomSrc::shape_hash` hashing sampled `PathCmd` coordinates (`MoveTo`, `LineTo`, `QuadTo`, `CubicTo`, `Close`) + fill rule and raising the per-hash shared bucket cap to `16`.
+- **Empirical Real-World Benchmarks**:
+  - **`BW - DLS.fig` (`129.63 MB`, `25` pages)**: `import_fig` in **`1.34s`**, Peak RSS **`2.25 GB`** (Memory Footprint **`1.67 GB`**, down from `3.83 GB`); `designos --screenshot` in **`3.69s`** (down from `8.18s`).
+  - **`Untitled UI v8.0.fig` (`321.04 MB`, `113` pages, `312,068` raw Kiwi records)**: `import_fig` in **`6.09s`** (down from `8.60s`), Peak RSS **`9.02 GB`** (Memory Footprint **`5.75 GB`**, down from `13.10 GB`), initial live nodes **`208,610`** (down from `878,270`, `-76.2%`); `designos --screenshot` in **`7.41s`** (Memory Footprint **`6.25 GB`**, down from `~15.0s / 13.10+ GB`).
 
-### B. `README.md` & GitHub Pages (`docs/index.html`) — `design-os-github-page` Standard + Single Typeface (`Inter`)
-- Enforced **strictly 1 typeface (`Inter`)** across `docs/assets/site.css`, `docs/index.html`, and `docs/_layouts/default.html` (`--font-sans`, `--font-display`, and `--font-mono` all use `'Inter', -apple-system, BlinkMacSystemFont, sans-serif` with `font-variant-numeric: tabular-nums`).
-- Full 9-tier comparison-first structure synced 100% between `README.md` and `docs/index.html`.
-- Passes `python3 scripts/self_check.py`, `verify-repo-delivery.py`, and `seo-aeo-geo-harness.py`.
-
-### C. Cross-Platform CI Fixes (`ubuntu-latest`, `windows-latest`, `macos-14`)
-1. **`crates/designos-gpu/tests/large_file_perf.rs`**: Adjusted debug-mode wall-clock assertion so unoptimized `cargo test` in CI passes reliably (`8ad9edb`).
-2. **`crates/designos-app/src/terminal.rs` & `canvas/draw.rs`**:
-   - Fixed Windows CI (`Test (windows-latest)`): `runtime_binary_available` checks `.exe`/`.cmd`/`.bat` + Git POSIX paths; `default_shell_program` prefers Git `bash.exe` on Windows when present; relaxed NTFS `sync_live_file_context` wall-clock threshold in `canvas/draw.rs` (`cef6d3f` — verified `Test (windows-latest)` passed `✓` in run `38874539192`).
-3. **`crates/designos-mcp/tests/session.rs`**:
-   - Fixed `Test (macos-14)` failure in run `38874539192` (`imported_stale_id_counter_does_not_overwrite_existing_nodes` panicked at `session.rs:10:28` with `AlreadyExists` because two parallel test threads called `SystemTime::now()...as_nanos()` within the same microsecond on macOS ARM64). Added `static WORKSPACE_SEQ: AtomicU64` + `fs::create_dir_all`.
+### B. 12-Part Continuous Real-Canvas Showcase & Functional `README.md` / `docs/index.html` Cleanup
+- Converted all 24 `M01..M12` videos to high-fidelity palette-optimized GIFs in `docs/videos/` and `design/marketing/videos/`.
+- Cleaned `README.md` and `docs/index.html` per owner directive: removed all `.mp4` file metadata tables and `9:16` vertical GIFs, leaving a clean 12-item functional showcase displaying only the Desktop `16:9` inline GIFs (`docs/videos/micro-01-autolayout-16x9.gif` .. `docs/videos/micro-12-components-variables-16x9.gif`).
+- Verified 100% pass on `verify-repo-delivery.py` (`D1..D5`) and `scripts/self_check.py`.
