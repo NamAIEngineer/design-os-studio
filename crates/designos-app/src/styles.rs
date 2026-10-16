@@ -111,8 +111,16 @@ impl App {
     }
 }
 
+#[inline]
+pub fn rgb_key(c: &Color) -> u32 {
+    let ch = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() as u32;
+    (ch(c.r) << 16) | (ch(c.g) << 8) | ch(c.b)
+}
+
+#[inline]
+#[allow(dead_code)]
 fn same_rgb(a: &Color, b: &Color) -> bool {
-    a.to_hex() == b.to_hex()
+    rgb_key(a) == rgb_key(b)
 }
 
 fn paint_lists(n: &Node) -> Vec<&Vec<Paint>> {
@@ -124,28 +132,74 @@ fn paint_lists(n: &Node) -> Vec<&Vec<Paint>> {
     v
 }
 
-/// Unique solid colours (opaque RGB) used by the subtrees of `roots`, in order of first use.
-pub fn selection_colors(doc: &Document, roots: &[NodeId]) -> Vec<Color> {
+pub const MAX_COLOR_WALK_NODES: usize = 512;
+pub const MAX_UNIQUE_SELECTION_COLORS: usize = 64;
+
+/// Collects unique solid colours (opaque RGB) and visible usage counts across the
+/// subtrees of `roots` in pre-order, stopping after `max_nodes` visited nodes
+/// with zero heap String allocations.
+pub fn selection_colors_with_counts(doc: &Document, roots: &[NodeId], max_nodes: usize) -> (Vec<Color>, Vec<usize>) {
+    let mut keys: Vec<u32> = Vec::new();
     let mut out: Vec<Color> = Vec::new();
-    for r in roots {
-        doc.walk(*r, |n, _| {
-            for list in paint_lists(n) {
-                for p in list {
-                    if let PaintKind::Solid(c) = &p.kind {
-                        let c = Color { a: 1.0, ..*c };
-                        if !out.iter().any(|o| same_rgb(o, &c)) {
-                            out.push(c);
-                        }
-                    }
+    let mut counts: Vec<usize> = Vec::new();
+    let mut stack: Vec<NodeId> = Vec::with_capacity(64);
+    let mut visited = 0usize;
+
+    let mut record_paint = |p: &Paint| {
+        if let PaintKind::Solid(c) = &p.kind {
+            let k = rgb_key(c);
+            if let Some(idx) = keys.iter().position(|&ek| ek == k) {
+                if p.visible {
+                    counts[idx] += 1;
+                }
+            } else if out.len() < MAX_UNIQUE_SELECTION_COLORS {
+                keys.push(k);
+                out.push(Color { a: 1.0, ..*c });
+                counts.push(usize::from(p.visible));
+            }
+        }
+    };
+
+    for &r in roots.iter().rev() {
+        stack.push(r);
+    }
+    while let Some(id) = stack.pop() {
+        if visited >= max_nodes {
+            break;
+        }
+        let Some(n) = doc.get(id) else { continue };
+        visited += 1;
+        for p in &n.fills {
+            record_paint(p);
+        }
+        for p in &n.stroke.paints {
+            record_paint(p);
+        }
+        if let NodeKind::Text(t) = &n.kind {
+            for p in &t.style.fills {
+                record_paint(p);
+            }
+            for r in &t.runs {
+                for p in &r.style.fills {
+                    record_paint(p);
                 }
             }
-        });
+        }
+        for &cid in n.children.iter().rev() {
+            stack.push(cid);
+        }
     }
-    out
+    (out, counts)
+}
+
+/// Unique solid colours (opaque RGB) used by the subtrees of `roots`, in order of first use.
+pub fn selection_colors(doc: &Document, roots: &[NodeId]) -> Vec<Color> {
+    selection_colors_with_counts(doc, roots, MAX_COLOR_WALK_NODES).0
 }
 
 /// Replaces solid colour `old` with `new` (alpha of each paint is kept) in the subtrees of `roots`.
 pub fn replace_color(doc: &mut Document, ed: &mut Edit, roots: &[NodeId], old: Color, new: Color) {
+    let old_key = rgb_key(&old);
     let mut ids = Vec::new();
     for r in roots {
         doc.walk(*r, |n, _| ids.push(n.id));
@@ -153,7 +207,7 @@ pub fn replace_color(doc: &mut Document, ed: &mut Edit, roots: &[NodeId], old: C
     let swap = |list: &mut Vec<Paint>| {
         for p in list {
             if let PaintKind::Solid(c) = &mut p.kind {
-                if same_rgb(c, &old) {
+                if rgb_key(c) == old_key {
                     *c = Color { a: c.a, ..new };
                 }
             }
@@ -161,7 +215,7 @@ pub fn replace_color(doc: &mut Document, ed: &mut Edit, roots: &[NodeId], old: C
     };
     for id in ids {
         let has =
-            doc.get(id).map(|n| paint_lists(n).iter().any(|l| l.iter().any(|p| matches!(&p.kind, PaintKind::Solid(c) if same_rgb(c, &old))))).unwrap_or(false);
+            doc.get(id).map(|n| paint_lists(n).iter().any(|l| l.iter().any(|p| matches!(&p.kind, PaintKind::Solid(c) if rgb_key(c) == old_key)))).unwrap_or(false);
         if !has {
             continue;
         }

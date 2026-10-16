@@ -26,6 +26,16 @@ struct Shot {
     requested: bool,
 }
 
+/// Height of the custom top window title bar (`🟠 design:os studio`).
+pub const TOP_TITLE_BAR_HEIGHT: f32 = 28.0;
+
+#[allow(dead_code)]
+pub fn is_typing_in_agent_panel(app: &App, ctx: &Context) -> bool {
+    let agent_rail_open =
+        !app.ui.left_collapsed && matches!(app.ui.rail, Some(crate::app::RailItem::Agents | crate::app::RailItem::Tools));
+    ctx.egui_wants_keyboard_input() || app.terminal.is_capturing_keyboard(agent_rail_open)
+}
+
 pub struct Shell {
     app: App,
     shot: Option<Shot>,
@@ -40,8 +50,13 @@ impl Shell {
         }
         opts.home = opts.wants_home();
         let screenshot = opts.screenshot.is_some();
+        let panel_was_none = opts.panel.is_none();
         let (gpu_flag, library) = (opts.gpu, opts.library.clone());
         let mut shell = Self::build(&cc.egui_ctx, opts);
+        if !screenshot && panel_was_none {
+            shell.app.ui.rail = Some(crate::app::RailItem::Agents);
+            shell.app.ui.left_collapsed = false;
+        }
         if let Some(rs) = &cc.wgpu_render_state {
             if let Some(max) = canvas::gpu::init(rs) {
                 shell.app.canvas.gpu.available = true;
@@ -246,6 +261,18 @@ impl Shell {
                 app.vars.full = panel == "variables";
                 app.open_variables();
             }
+            Some(p @ (
+                "micro-autolayout"
+                | "micro-css-grid"
+                | "micro-smart-selection"
+                | "micro-shape-controls"
+                | "micro-vector-edit"
+                | "micro-layer-picker"
+                | "micro-dev-boxmodel"
+                | "micro-scale-tool"
+            )) => {
+                apply_micro_interaction_showcase_preset(&mut app, p);
+            }
             Some(spec) => {
                 let (w, h) = opts.size.unwrap_or((theme::DEFAULT_WINDOW.0 as u32, theme::DEFAULT_WINDOW.1 as u32));
                 panels::properties::preset_popup(&mut app, spec, Vec2::new(w as f32, h as f32));
@@ -310,6 +337,12 @@ impl Shell {
         if self.app.plugins.open || self.app.dialog.is_some() || self.app.history.save_modal.is_some() || self.app.dev.compare.is_some() {
             return;
         }
+        let agent_rail_open =
+            !self.app.ui.left_collapsed && matches!(self.app.ui.rail, Some(crate::app::RailItem::Agents | crate::app::RailItem::Tools));
+        let capturing_terminal = self.app.terminal.is_capturing_keyboard(agent_rail_open);
+        if capturing_terminal {
+            return;
+        }
         let typing = ctx.egui_wants_keyboard_input();
         if self.app.vars.open {
             // The Variables view handles its own keys (and undo / redo).
@@ -320,7 +353,9 @@ impl Shell {
             return;
         }
         let editing_text = self.app.canvas.text.is_some();
-        if typing && !editing_text {
+        let eyedropper_active = self.app.props.eyedropper.is_some()
+            || self.app.props.picker.as_ref().is_some_and(|pk| pk.eyedrop);
+        if typing && !editing_text && !eyedropper_active {
             return;
         }
         let events = ctx.input(|i| i.events.clone());
@@ -338,6 +373,9 @@ impl Shell {
                 }
                 Event::Paste(s) if !editing_text => self.app.paste(Some(&s)),
                 Event::Key { key, pressed: true, modifiers, .. } => {
+                    if self.try_typography_shortcut(key, modifiers) {
+                        continue;
+                    }
                     if editing_text {
                         continue;
                     }
@@ -346,6 +384,75 @@ impl Shell {
                 _ => {}
             }
         }
+    }
+
+    /// Handles Figma typography keyboard shortcuts (`S2-09`) when editing text or when a Text node is selected:
+    /// - `Cmd/Ctrl + Shift + .` / `,`: font size `±1px` (`Alt` -> `±10px`)
+    /// - `Cmd/Ctrl + Alt + L / T / R / J`: horizontal text alignment (`Left`, `Center`, `Right`, `Justified`)
+    /// - `Alt + ArrowUp / ArrowDown`: line height `±1px` (`Shift` -> `±10px`)
+    /// - `Alt + ArrowLeft / ArrowRight`: letter spacing `±0.5px` (`Shift` -> `±2.0px`)
+    fn try_typography_shortcut(&mut self, key: Key, m: egui::Modifiers) -> bool {
+        let app = &mut self.app;
+        let has_text = app.canvas.text.is_some()
+            || app
+                .selection
+                .iter()
+                .any(|id| app.doc.get(*id).is_some_and(|n| matches!(n.kind, designos_doc::NodeKind::Text(_))));
+        if !has_text {
+            return false;
+        }
+        let sel = app.selection.clone();
+        if m.command && m.shift && matches!(key, Key::Period | Key::Comma) {
+            let delta = if m.alt { 10.0 } else { 1.0 } * if key == Key::Period { 1.0 } else { -1.0 };
+            crate::panels::typography::set_style(app, &sel, |st| {
+                st.font_size = (st.font_size + delta).clamp(1.0, 1000.0);
+            });
+            return true;
+        }
+        if m.command && m.alt && !m.shift {
+            let align = match key {
+                Key::L => Some(designos_doc::TextAlignH::Left),
+                Key::T => Some(designos_doc::TextAlignH::Center),
+                Key::R => Some(designos_doc::TextAlignH::Right),
+                Key::J => Some(designos_doc::TextAlignH::Justified),
+                _ => None,
+            };
+            if let Some(a) = align {
+                if app.canvas.text.is_some() {
+                    crate::canvas::textsession::base_style(app, |s| s.align_h = a);
+                } else {
+                    app.edit_nodes(&sel, |n| {
+                        if let designos_doc::NodeKind::Text(t) = &mut n.kind {
+                            t.style.align_h = a;
+                            n.size = crate::layout::fit_text(t, n.size);
+                        }
+                    });
+                }
+                return true;
+            }
+        }
+        if !m.command && m.alt {
+            match key {
+                Key::ArrowUp | Key::ArrowDown => {
+                    let step = if m.shift { 10.0 } else { 1.0 } * if key == Key::ArrowUp { 1.0 } else { -1.0 };
+                    crate::panels::typography::set_style(app, &sel, |st| {
+                        let base_px = crate::richtext::line_height_px(st.line_height, st.font_size)
+                            .unwrap_or_else(|| (st.font_size * 1.2).round());
+                        st.line_height = designos_doc::LineHeight::Pixels((base_px + step).max(1.0));
+                    });
+                    return true;
+                }
+                Key::ArrowLeft | Key::ArrowRight => {
+                    let step = if m.shift { 2.0 } else { 0.5 } * if key == Key::ArrowRight { 1.0 } else { -1.0 };
+                    crate::panels::typography::set_style(app, &sel, |st| {
+                        st.letter_spacing = ((st.letter_spacing + step) * 100.0).round() / 100.0;
+                    });
+                    return true;
+                }
+                _ => {}
+            }
+        }
+        false
     }
 
     fn key(&mut self, ctx: &Context, key: Key, m: egui::Modifiers) {
@@ -364,6 +471,10 @@ impl Shell {
                 (Key::S, false, _) => Some(Action::Save),
                 (Key::S, true, _) => Some(Action::SaveAs),
                 (Key::D, false, _) => Some(Action::Duplicate),
+                (Key::C, false, true) => Some(Action::CopyProperties),
+                (Key::V, false, true) => Some(Action::PasteProperties),
+                (Key::V, true, false) => Some(Action::PasteOverSelection),
+                (Key::R, true, _) => Some(Action::PasteToReplace),
                 (Key::G, false, false) => Some(Action::Group),
                 (Key::G, true, _) => Some(Action::Ungroup),
                 (Key::G, false, true) => Some(Action::FrameSelection),
@@ -371,7 +482,12 @@ impl Shell {
                 (Key::B, false, true) => Some(Action::Detach),
                 (Key::K, true, false) => Some(Action::CombineVariants),
                 (Key::A, true, false) => Some(Action::SelectInverse),
-                (Key::A, false, true) => Some(Action::SelectMatching),
+                (Key::A, false, true) => {
+                    if app.select_matching_layers() == 0 {
+                        return menus::run(app, ctx, Action::SelectMatching);
+                    }
+                    None
+                }
                 (Key::A, false, _) => Some(Action::SelectAll),
                 (Key::F, false, false) => Some(Action::Find),
                 (Key::Quote, false, _) => Some(Action::TogglePixelGrid),
@@ -384,10 +500,36 @@ impl Shell {
                 (Key::Comma, true, false) => Some(Action::TextSizeDown),
                 (Key::Num8, true, false) => Some(Action::TextBulletList),
                 (Key::Num7, true, false) => Some(Action::TextNumberedList),
-                (Key::CloseBracket, false, _) => Some(Action::BringForward),
-                (Key::OpenBracket, false, _) => Some(Action::SendBackward),
+                (Key::CloseBracket, false, true) => Some(Action::BringToFront),
+                (Key::OpenBracket, false, true) => Some(Action::SendToBack),
+                (Key::CloseBracket, false, false) => Some(Action::BringForward),
+                (Key::OpenBracket, false, false) => Some(Action::SendBackward),
                 (Key::CloseBracket, true, _) => Some(Action::BringToFront),
                 (Key::OpenBracket, true, _) => Some(Action::SendToBack),
+                (Key::ArrowLeft | Key::ArrowRight | Key::ArrowUp | Key::ArrowDown, shift, false) => {
+                    let step = if shift { theme::NUDGE_BIG } else { theme::NUDGE };
+                    let (dw, dh) = match key {
+                        Key::ArrowLeft => (-step, 0.0),
+                        Key::ArrowRight => (step, 0.0),
+                        Key::ArrowUp => (0.0, -step),
+                        _ => (0.0, step),
+                    };
+                    app.resize_selection_by(dw, dh);
+                    None
+                }
+                (Key::Num0, false, false) => Some(Action::Zoom100),
+                (Key::R, false, false) => {
+                    app.rename_selection();
+                    None
+                }
+                (Key::H, true, false) => {
+                    app.toggle_selection_visible();
+                    None
+                }
+                (Key::L, true, false) => {
+                    app.toggle_selection_locked();
+                    None
+                }
                 (Key::Equals | Key::Plus, _, _) => Some(Action::ZoomIn),
                 (Key::Minus, _, _) => Some(Action::ZoomOut),
                 (Key::Backslash, _, _) => Some(Action::ToggleSidebar),
@@ -423,7 +565,7 @@ impl Shell {
                     None
                 }
                 (Key::W, false, false) => {
-                    if app.tabs.entries.len() > 1 {
+                    if !app.tabs.entries.is_empty() {
                         let idx = app.tabs.active_idx;
                         app.close_tab(idx);
                     }
@@ -460,6 +602,8 @@ impl Shell {
                 } else if app.canvas.pen.is_some() {
                     interact::finish_pen(app);
                     app.tool = Tool::Move;
+                } else if app.props.eyedropper.is_some() {
+                    app.props.eyedropper = None;
                 } else if app.ui.menu.is_some() {
                     app.ui.menu = None;
                 } else if app.proto.editing.is_some() {
@@ -501,9 +645,18 @@ impl Shell {
                     menus::run(app, ctx, Action::SelectChildren);
                 }
             }
-            // board: Tab starts the next sticky note to the right of the selected one
-            Key::Tab if app.is_board() && !m.shift => {
-                crate::board::create::tab_next(app);
+            // board: Tab starts the next sticky note to the right of the selected one; design: Tab/Shift+Tab traverses siblings
+            Key::Tab if !m.alt => {
+                if let Some(fid) = ctx.memory(|mem| mem.focused()) {
+                    ctx.memory_mut(|mem| mem.surrender_focus(fid));
+                }
+                if app.props.eyedropper.is_some() || app.props.picker.as_ref().is_some_and(|pk| pk.eyedrop) {
+                    app.props.eyedropper_format = app.props.eyedropper_format.next();
+                } else if app.is_board() && !m.shift {
+                    crate::board::create::tab_next(app);
+                } else {
+                    app.select_sibling(!m.shift);
+                }
             }
             Key::Backslash => menus::run(app, ctx, Action::SelectParent),
             Key::ArrowLeft | Key::ArrowRight | Key::ArrowUp | Key::ArrowDown => {
@@ -521,7 +674,57 @@ impl Shell {
             Key::Num1 if m.shift => menus::run(app, ctx, Action::FitAll),
             Key::Num2 if m.shift => menus::run(app, ctx, Action::FitSelection),
             Key::Num0 if m.shift => menus::run(app, ctx, Action::Zoom100),
-            Key::A if m.shift => menus::run(app, ctx, Action::AutoLayout),
+            Key::A if m.shift && m.alt => app.remove_auto_layout(),
+            Key::A if m.shift && !m.alt => menus::run(app, ctx, Action::AutoLayout),
+            Key::A if m.alt && !m.shift => menus::run(app, ctx, Action::Align(crate::ops::Align::Left)),
+            Key::W if m.alt && !m.shift => menus::run(app, ctx, Action::Align(crate::ops::Align::Top)),
+            Key::S if m.alt && !m.shift => menus::run(app, ctx, Action::Align(crate::ops::Align::Bottom)),
+            Key::D if m.alt && !m.shift => menus::run(app, ctx, Action::Align(crate::ops::Align::Right)),
+            Key::H if m.shift && !m.alt => app.flip_selection(true),
+            Key::V if m.shift && !m.alt => app.flip_selection(false),
+            Key::H | Key::V if m.shift && m.alt => menus::run(app, ctx, Action::Distribute),
+            Key::H if m.alt && !m.shift => menus::run(app, ctx, Action::Align(crate::ops::Align::HCenter)),
+            Key::V if m.alt && !m.shift => menus::run(app, ctx, Action::Align(crate::ops::Align::VCenter)),
+            Key::OpenBracket if !m.shift && !m.alt => menus::run(app, ctx, Action::SendToBack),
+            Key::CloseBracket if !m.shift && !m.alt => menus::run(app, ctx, Action::BringToFront),
+            Key::N if !m.alt && !app.is_board() => app.step_frame(!m.shift, true),
+            Key::Home if !m.alt => app.step_frame(false, false),
+            Key::End if !m.alt => app.step_frame(true, false),
+            Key::PageUp => app.step_page(false),
+            Key::PageDown => app.step_page(true),
+            Key::Num0
+            | Key::Num1
+            | Key::Num2
+            | Key::Num3
+            | Key::Num4
+            | Key::Num5
+            | Key::Num6
+            | Key::Num7
+            | Key::Num8
+            | Key::Num9
+                if !m.shift && !m.alt && !app.selection.is_empty() =>
+            {
+                let digit = match key {
+                    Key::Num0 => 0,
+                    Key::Num1 => 1,
+                    Key::Num2 => 2,
+                    Key::Num3 => 3,
+                    Key::Num4 => 4,
+                    Key::Num5 => 5,
+                    Key::Num6 => 6,
+                    Key::Num7 => 7,
+                    Key::Num8 => 8,
+                    Key::Num9 => 9,
+                    _ => return,
+                };
+                app.apply_opacity_digit(digit);
+            }
+            Key::Q if !m.shift && !m.alt && !app.selection.is_empty() => {
+                app.select_matching_layers();
+            }
+            Key::I if !m.shift && !m.alt && !app.selection.is_empty() => {
+                app.props.eyedropper = Some(crate::panels::properties::EyedropTarget::Fill(0));
+            }
             Key::R if m.shift => menus::run(app, ctx, Action::ToggleRulers),
             Key::Quote if m.shift => menus::run(app, ctx, Action::TogglePixelGrid),
             k => {
@@ -535,15 +738,28 @@ impl Shell {
         }
     }
 
-    /// Right-click on the canvas selects the layer under the pointer and opens the selection menu.
+    /// Right-click on the canvas selects the layer under the pointer and opens the selection menu
+    /// (or the `"Select layer"` picker menu when `Cmd/Ctrl` is held `#27`).
     fn context_menu(&mut self, ui: &egui::Ui, canvas_rect: Rect) {
-        let (clicked, pos) = ui.ctx().input(|i| (i.pointer.secondary_clicked(), i.pointer.interact_pos()));
+        let (clicked, pos, cmd) = ui.ctx().input(|i| (i.pointer.secondary_clicked(), i.pointer.interact_pos(), i.modifiers.command));
         let Some(pos) = pos.filter(|p| clicked && canvas_rect.contains(*p) && !self.app.vars.open) else { return };
+        if self.app.ui.rulers && !self.app.is_board() && (pos.x - canvas_rect.left() <= theme::RULER_SIZE || pos.y - canvas_rect.top() <= theme::RULER_SIZE) {
+            return;
+        }
         let app = &mut self.app;
         if !matches!(app.canvas.inter, canvas::Interaction::None) || app.canvas.text.is_some() {
             return;
         }
         let page = app.view.to_page(app.canvas_rect.min, pos);
+        if cmd {
+            let idx = interact::active_index(app);
+            let candidates = crate::canvas::hit::hit_all_under(&app.doc, app.page, page, idx);
+            if !candidates.is_empty() {
+                app.ui.ctx_menu = None;
+                app.ui.layer_picker = Some((pos, candidates));
+                return;
+            }
+        }
         match interact::hit_under(app, page, false) {
             Some(hit) if !app.is_selected(hit) => app.select_only(hit),
             Some(_) => {}
@@ -578,25 +794,26 @@ impl eframe::App for Shell {
         [0.17, 0.17, 0.17, 1.0]
     }
 
-    /// Tab belongs to the text session (it nests list items): take it out of the input before egui
-    /// uses it to move keyboard focus between widgets.
+    /// Tab belongs to the text session (it nests list items) or to sibling layer traversal on the
+    /// canvas: take it out of the input before egui uses it to move keyboard focus between widgets.
     fn raw_input_hook(&mut self, ctx: &egui::Context, raw: &mut egui::RawInput) {
         if self.app.plugins.open {
             return;
         }
-        let Some(sess) = self.app.canvas.text.as_mut() else { return };
         if ctx.memory(|m| m.focused()).is_some() {
             return;
         }
-        raw.events.retain(|e| match e {
-            egui::Event::Key { key: egui::Key::Tab, pressed, modifiers, .. } if !modifiers.command => {
-                if *pressed {
-                    sess.tabs.push(modifiers.shift);
+        if let Some(sess) = self.app.canvas.text.as_mut() {
+            raw.events.retain(|e| match e {
+                egui::Event::Key { key: egui::Key::Tab, pressed, modifiers, .. } if !modifiers.command => {
+                    if *pressed {
+                        sess.tabs.push(modifiers.shift);
+                    }
+                    false
                 }
-                false
-            }
-            _ => true,
-        });
+                _ => true,
+            });
+        }
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
@@ -644,7 +861,7 @@ impl Shell {
     }
 
     fn sync_title(&mut self, ctx: &Context) {
-        let title = if self.app.home.is_some() { theme::APP_TITLE.to_string() } else { self.app.title() };
+        let title = theme::APP_TITLE.to_string();
         if title != self.title {
             ctx.send_viewport_cmd(egui::ViewportCommand::Title(title.clone()));
             self.title = title;
@@ -680,16 +897,47 @@ impl Shell {
         }
         self.app.scrub_sync(&ctx);
         let window_full = ui.max_rect();
+        let show_title_bar = self.app.tabs.always_visible && self.shot.is_none() && self.app.proto.present.is_none();
+        let after_title_rect = if show_title_bar {
+            let title_bar_rect =
+                Rect::from_min_max(window_full.min, Pos2::new(window_full.right(), window_full.top() + TOP_TITLE_BAR_HEIGHT));
+            let tp = ui.painter_at(title_bar_rect);
+            tp.rect_filled(title_bar_rect, 0.0, egui::Color32::from_rgb(0x18, 0x18, 0x1B));
+            tp.hline(
+                title_bar_rect.x_range(),
+                title_bar_rect.bottom() - 0.5,
+                egui::Stroke::new(1.0, egui::Color32::from_rgb(0x27, 0x27, 0x2A)),
+            );
+            let cy = title_bar_rect.center().y;
+            let x = title_bar_rect.left() + 76.0;
+            let font_bold = theme::font_body_strong();
+            let font_reg = theme::font_body();
+            let w_design = widgets::text_width(&tp, "design", &font_bold);
+            let w_rest = widgets::text_width(&tp, ":os studio", &font_reg);
+            let brand_rect = Rect::from_min_size(Pos2::new(x, title_bar_rect.top() + 2.0), Vec2::new(22.0 + w_design + w_rest + 8.0, 24.0));
+            widgets::record(ui, "window-title-brand", brand_rect);
+            crate::icons::paint(&tp, Icon::Logo, Pos2::new(x + 8.0, cy), 14.0, theme::BG_BRAND);
+            let text_x = x + 19.0;
+            tp.text(Pos2::new(text_x, cy), Align2::LEFT_CENTER, "design", font_bold, theme::TEXT);
+            tp.text(Pos2::new(text_x + w_design, cy), Align2::LEFT_CENTER, ":os studio", font_reg, theme::TEXT_SECONDARY);
+            let drag_resp = ui.interact(title_bar_rect, ui.id().with("window-title-bar-drag"), egui::Sense::click_and_drag());
+            if drag_resp.drag_started() {
+                ctx.send_viewport_cmd(egui::ViewportCommand::StartDrag);
+            }
+            Rect::from_min_max(Pos2::new(window_full.left(), title_bar_rect.bottom()), window_full.max)
+        } else {
+            window_full
+        };
         let show_tab_bar = self.app.tabs.is_bar_visible(self.app.home.is_some()) && self.app.proto.present.is_none();
         let full = if show_tab_bar {
-            let bar_rect = Rect::from_min_max(window_full.min, Pos2::new(window_full.right(), window_full.top() + crate::tabs::TOP_TAB_BAR_HEIGHT));
+            let bar_rect = Rect::from_min_max(after_title_rect.min, Pos2::new(after_title_rect.right(), after_title_rect.top() + crate::tabs::TOP_TAB_BAR_HEIGHT));
             crate::tabs::show_top_tab_bar_ui(ui, bar_rect, &mut self.app);
-            Rect::from_min_max(Pos2::new(window_full.left(), bar_rect.bottom()), window_full.max)
+            Rect::from_min_max(Pos2::new(after_title_rect.left(), bar_rect.bottom()), after_title_rect.max)
         } else {
             let mut tabs = std::mem::take(&mut self.app.tabs);
             tabs.reconcile_frame(&mut self.app);
             self.app.tabs = tabs;
-            window_full
+            after_title_rect
         };
         if self.app.home.is_some() {
             if show_tab_bar {
@@ -714,13 +962,19 @@ impl Shell {
         }
 
         ui.painter().rect_filled(full, 0.0, theme::BG);
-        let rail_w = theme::RAIL_WIDTH + theme::BORDER_WIDTH;
-        let panel_w = theme::LEFT_PANEL_WIDTH + theme::BORDER_WIDTH;
-        let rail_rect = Rect::from_min_max(full.min, Pos2::new(full.left() + rail_w, full.bottom()));
-        let left_rect = Rect::from_min_max(Pos2::new(rail_rect.right(), full.top()), Pos2::new(rail_rect.right() + panel_w, full.bottom()));
-        // a board has no right panel: its contextual toolbar floats over the canvas instead
         let board = self.app.is_board();
         let right_w = if board { 0.0 } else { theme::RIGHT_PANEL_WIDTH + theme::BORDER_WIDTH };
+        let rail_w = theme::RAIL_WIDTH + theme::BORDER_WIDTH;
+        let is_ai_panel = matches!(self.app.ui.rail, Some(crate::app::RailItem::Agents | crate::app::RailItem::Tools));
+        let max_left_w = (full.width() - right_w - rail_w - 160.0).max(220.0);
+        let base_panel_w = if is_ai_panel {
+            self.app.ui.ai_panel_width.clamp(260.0, max_left_w)
+        } else {
+            self.app.ui.left_panel_width.clamp(200.0, max_left_w)
+        };
+        let panel_w = base_panel_w + theme::BORDER_WIDTH;
+        let rail_rect = Rect::from_min_max(full.min, Pos2::new(full.left() + rail_w, full.bottom()));
+        let left_rect = Rect::from_min_max(Pos2::new(rail_rect.right(), full.top()), Pos2::new(rail_rect.right() + panel_w, full.bottom()));
         let right_rect = Rect::from_min_max(Pos2::new(full.right() - right_w, full.top()), full.max);
         let canvas_left = if self.app.ui.left_collapsed { rail_rect.right() } else { left_rect.right() };
         let deck = self.app.is_deck();
@@ -729,6 +983,15 @@ impl Shell {
         let notes_rect = Rect::from_min_max(Pos2::new(canvas_left, canvas_rect.bottom()), Pos2::new(right_rect.left(), full.bottom()));
 
         let full_vars = self.app.vars.open && self.app.vars.full;
+        if self.shot.is_none() {
+            self.app.terminal.ensure_default_tab(self.app.file_path.as_deref());
+        }
+        self.app.terminal.sync_live_file_context(
+            &self.app.doc,
+            self.app.page,
+            &self.app.selection,
+            self.app.file_path.as_deref(),
+        );
         if let Some(ai_copy) = self.app.specs.last_ai_copy.take() {
             self.app.terminal.send_copy_for_ai(&ai_copy);
         }
@@ -742,8 +1005,13 @@ impl Shell {
             let content = Rect::from_min_max(Pos2::new(rail_rect.right(), full.top()), full.max);
             crate::variables::view::show(&mut self.app, ui, content);
         } else {
-            let specs_reader_open = self.app.ui.rail == Some(crate::app::RailItem::Specs) && self.app.specs.open;
-            let dock_h = if self.app.terminal.dock_open { self.app.terminal.dock_height.clamp(180.0, (canvas_rect.height() * 0.55).max(200.0)) } else { 0.0 };
+            let specs_reader_open = false;
+            let max_dock_h = (canvas_rect.height() - 100.0).max(200.0);
+            let dock_h = if self.app.terminal.dock_open {
+                self.app.terminal.dock_height.clamp(160.0, max_dock_h)
+            } else {
+                0.0
+            };
             let main_canvas_rect =
                 Rect::from_min_max(canvas_rect.min, Pos2::new(canvas_rect.right(), (canvas_rect.bottom() - dock_h).max(canvas_rect.top() + 80.0)));
             let dock_rect = Rect::from_min_max(Pos2::new(canvas_rect.left(), main_canvas_rect.bottom()), canvas_rect.max);
@@ -760,6 +1028,25 @@ impl Shell {
                 let file_path = self.app.file_path.clone();
                 let term_actions = crate::terminal::show_dock(&mut self.app.terminal, ui, dock_rect, file_path.as_deref());
                 execute_terminal_actions(&mut self.app, term_actions);
+                let dock_handle_rect = Rect::from_min_max(
+                    Pos2::new(dock_rect.left(), dock_rect.top() - 3.0),
+                    Pos2::new(dock_rect.right(), dock_rect.top() + 3.0),
+                );
+                widgets::record(ui, "dock-resize-handle", dock_handle_rect);
+                let dock_drag = ui.interact(dock_handle_rect, ui.id().with("dock-resize-handle"), egui::Sense::drag());
+                if dock_drag.hovered() || dock_drag.dragged() {
+                    ctx.set_cursor_icon(egui::CursorIcon::ResizeVertical);
+                    ui.painter().hline(
+                        dock_rect.x_range(),
+                        dock_rect.top(),
+                        egui::Stroke::new(2.0, theme::BG_BRAND),
+                    );
+                }
+                if dock_drag.dragged() {
+                    if let Some(pointer) = ctx.input(|i| i.pointer.interact_pos()) {
+                        self.app.terminal.dock_height = (canvas_rect.bottom() - pointer.y).clamp(160.0, max_dock_h);
+                    }
+                }
             }
             rail::show(&mut self.app, ui, rail_rect);
             if self.app.ui.left_collapsed {
@@ -780,6 +1067,32 @@ impl Shell {
             } else {
                 left::show(&mut self.app, ui, left_rect);
             }
+            if !self.app.ui.left_collapsed {
+                let handle_rect = Rect::from_min_max(
+                    Pos2::new(left_rect.right() - 3.0, left_rect.top()),
+                    Pos2::new(left_rect.right() + 3.0, left_rect.bottom()),
+                );
+                widgets::record(ui, "left-panel-resize-handle", handle_rect);
+                let drag_resp = ui.interact(handle_rect, ui.id().with("left-panel-resize-handle"), egui::Sense::drag());
+                if drag_resp.hovered() || drag_resp.dragged() {
+                    ctx.set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
+                    ui.painter().vline(
+                        left_rect.right() - 0.5,
+                        left_rect.y_range(),
+                        egui::Stroke::new(2.0, theme::BG_BRAND),
+                    );
+                }
+                if drag_resp.dragged() {
+                    if let Some(pointer) = ctx.input(|i| i.pointer.interact_pos()) {
+                        let new_w = (pointer.x - rail_rect.right()).clamp(200.0, max_left_w);
+                        if is_ai_panel {
+                            self.app.ui.ai_panel_width = new_w.max(260.0);
+                        } else {
+                            self.app.ui.left_panel_width = new_w;
+                        }
+                    }
+                }
+            }
             if board {
                 if !specs_reader_open && !self.app.terminal.dock_open {
                     crate::board::toolbar::show(&mut self.app, ui, canvas_rect_for_toolbar(full));
@@ -792,8 +1105,13 @@ impl Shell {
                 } else {
                     right::show(&mut self.app, ui, right_rect);
                 }
-                if !specs_reader_open && !self.app.terminal.dock_open {
-                    toolbar::show(&mut self.app, ui, if deck { main_canvas_rect } else { canvas_rect_for_toolbar(full) });
+                if !specs_reader_open {
+                    let tb_rect = if deck || self.app.terminal.dock_open {
+                        main_canvas_rect
+                    } else {
+                        canvas_rect_for_toolbar(full)
+                    };
+                    toolbar::show(&mut self.app, ui, tb_rect);
                 }
             }
             if !specs_reader_open {
@@ -843,6 +1161,27 @@ pub fn execute_terminal_actions(app: &mut App, actions: Vec<crate::terminal::Ter
                 },
                 Err(e) => app.show_toast(format!("Failed to read {}: {e}", path.display()), true),
             },
+            crate::terminal::TerminalAction::SyncLiveDoc(path) => match std::fs::read_to_string(&path) {
+                Ok(raw) => match designos_doc::Document::from_json(&raw) {
+                    Ok(mut new_doc) => {
+                        crate::io::ensure_page(&mut new_doc);
+                        let keep_page = if new_doc.pages.contains(&app.page) {
+                            app.page
+                        } else {
+                            new_doc.pages[0]
+                        };
+                        app.doc = new_doc;
+                        app.page = keep_page;
+                        app.sanitize();
+                        app.changed();
+                        app.fit_all();
+                        app.terminal.sync_live_file_context(&app.doc, app.page, &app.selection, app.file_path.as_deref());
+                        app.show_toast("Applied live Agent changes to current page", false);
+                    }
+                    Err(e) => app.show_toast(format!("Live doc parse error: {e}"), true),
+                },
+                Err(e) => app.show_toast(format!("Failed to read live doc {}: {e}", path.display()), true),
+            },
             crate::terminal::TerminalAction::ReloadFromDisk => {
                 if let Some(p) = app.file_path.clone() {
                     app.open_path(p);
@@ -871,9 +1210,10 @@ pub fn execute_cmdk_action(app: &mut App, action: crate::cmdk::CmdKAction) {
             app.apply_node_spec(&spec, "Cmd+K Synthesizer");
         }
         crate::cmdk::CmdKAction::OpenSpecReader => {
-            app.ui.rail = Some(crate::app::RailItem::Specs);
-            app.specs.open = true;
-            app.specs.ensure_loaded();
+            app.ui.rail = Some(crate::app::RailItem::Agents);
+            app.ui.left_collapsed = false;
+            app.specs.open = false;
+            app.terminal.ensure_default_tab(app.file_path.as_deref());
             app.cmdk.open = false;
         }
         crate::cmdk::CmdKAction::OpenTerminal(preset) => {
@@ -922,6 +1262,263 @@ pub fn execute_cmdk_action(app: &mut App, action: crate::cmdk::CmdKAction) {
             }
             app.show_toast(format!("Applied {fixed_count} Figma AI change(s) (Cmd+Z to Undo)"), false);
         }
+    }
+}
+
+/// Configures `app` with a rich, deterministic visual showcase scene for each of the 8
+/// Figma A-to-Z Micro-Interaction & Feature categories (`--panel micro-*`).
+pub fn apply_micro_interaction_showcase_preset(app: &mut App, preset: &str) {
+    use designos_doc::{
+        Affine, AutoLayout, Color, DevStatus, GridTrack, LayoutDirection, Node, NodeKind, Paint,
+        Rect as DRect, Sizing, Stroke as DStroke, Vec2 as DV,
+    };
+    app.ui.rulers = true;
+    let page = app.page;
+    match preset {
+        "micro-autolayout" => {
+            let fid = app.doc.alloc_id();
+            let mut frame = Node::frame(fid, DRect::new(2400.0, 200.0, 440.0, 220.0));
+            frame.name = "Auto-Layout 5.0 · Padding & Negative Gap".into();
+            frame.fills = vec![Paint::solid(Color::rgb(0x1E, 0x1E, 0x24))];
+            frame.corner_radii = [16.0; 4];
+            if let Some(fp) = frame.kind.frame_props_mut() {
+                fp.auto_layout = Some(AutoLayout {
+                    direction: LayoutDirection::Horizontal,
+                    item_spacing: 20.0,
+                    padding: [28.0, 28.0, 28.0, 28.0],
+                    primary_sizing: Sizing::Hug,
+                    counter_sizing: Sizing::Hug,
+                    ..Default::default()
+                });
+            }
+            let fid = app.doc.insert(page, frame).unwrap();
+            for (i, (label, col)) in [
+                ("Badge · Hug", Color::rgb(0xE3, 0x63, 0x23)),
+                ("Metric · Fill", Color::rgb(0x0D, 0x99, 0xFF)),
+                ("Status · Ready", Color::rgb(0x14, 0xAE, 0x5C)),
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                let cid = app.doc.alloc_id();
+                let mut card = Node::rectangle(cid, DRect::new(0.0, 0.0, 116.0, 124.0));
+                card.name = label.into();
+                card.fills = vec![Paint::solid(col)];
+                card.corner_radii = [10.0; 4];
+                if i == 1 {
+                    card.layout_child.horizontal = Sizing::Fill;
+                }
+                let _ = app.doc.insert(fid, card);
+            }
+            let mut ed = crate::edit::Edit::default();
+            crate::layout::relayout_around(&mut app.doc, &mut ed, fid);
+            app.selection = vec![fid];
+            app.startup_zoom = Some(1.45);
+            app.canvas.al_inline = Some(crate::canvas::AutoLayoutInlineEdit {
+                id: fid,
+                kind: crate::canvas::handles::AutoLayoutHandleKind::Gap(0),
+                anchor_page: DV::new(2544.0, 290.0),
+                text: "20".into(),
+                request_focus: false,
+            });
+        }
+        "micro-css-grid" => {
+            let fid = app.doc.alloc_id();
+            let mut grid_frame = Node::frame(fid, DRect::new(2400.0, 600.0, 560.0, 340.0));
+            grid_frame.name = "2D CSS Grid · Track Pills & Span 2×1".into();
+            grid_frame.fills = vec![Paint::solid(Color::rgb(0x18, 0x18, 0x1B))];
+            grid_frame.corner_radii = [16.0; 4];
+            let mut col_tracks = [GridTrack::Flex(1.0); 8];
+            col_tracks[0] = GridTrack::Flex(1.0);
+            col_tracks[1] = GridTrack::Fixed(160.0);
+            col_tracks[2] = GridTrack::Hug;
+            let mut row_tracks = [GridTrack::Hug; 8];
+            row_tracks[0] = GridTrack::Fixed(130.0);
+            row_tracks[1] = GridTrack::Flex(1.0);
+            if let Some(fp) = grid_frame.kind.frame_props_mut() {
+                fp.auto_layout = Some(AutoLayout {
+                    direction: LayoutDirection::Grid,
+                    grid_columns: 3,
+                    grid_rows: 2,
+                    item_spacing: 16.0,
+                    counter_spacing: 16.0,
+                    padding: [24.0, 24.0, 24.0, 24.0],
+                    grid_col_tracks: col_tracks,
+                    grid_row_tracks: row_tracks,
+                    primary_sizing: Sizing::Fixed,
+                    counter_sizing: Sizing::Fixed,
+                    ..Default::default()
+                });
+            }
+            let fid = app.doc.insert(page, grid_frame).unwrap();
+            let specs = [
+                ("Hero Span 2×1", Color::rgb(0x0D, 0x99, 0xFF), 2u16, 1u16, 260.0, 120.0),
+                ("KPI Card", Color::rgb(0xE3, 0x63, 0x23), 1, 1, 130.0, 120.0),
+                ("Revenue Cell", Color::rgb(0x14, 0xAE, 0x5C), 1, 1, 150.0, 120.0),
+                ("Retention Cell", Color::rgb(0x27, 0x27, 0x2A), 2, 1, 280.0, 120.0),
+            ];
+            let mut first_child = None;
+            for (name, col, cs, rs, w, h) in specs {
+                let cid = app.doc.alloc_id();
+                let mut c = Node::rectangle(cid, DRect::new(0.0, 0.0, w, h));
+                c.name = name.into();
+                c.fills = vec![Paint::solid(col)];
+                c.corner_radii = [10.0; 4];
+                c.layout_child.col_span = cs;
+                c.layout_child.row_span = rs;
+                let cid = app.doc.insert(fid, c).unwrap();
+                if first_child.is_none() {
+                    first_child = Some(cid);
+                }
+            }
+            let mut ed = crate::edit::Edit::default();
+            crate::layout::relayout_around(&mut app.doc, &mut ed, fid);
+            app.selection = match first_child {
+                Some(c0) => vec![fid, c0],
+                None => vec![fid],
+            };
+            app.startup_zoom = Some(1.30);
+        }
+        "micro-smart-selection" => {
+            let mut ids = Vec::new();
+            for (i, (name, col)) in [
+                ("Plan · Starter", Color::rgb(0x27, 0x27, 0x2A)),
+                ("Plan · Pro", Color::rgb(0xE3, 0x63, 0x23)),
+                ("Plan · Enterprise", Color::rgb(0x0D, 0x99, 0xFF)),
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                let cid = app.doc.alloc_id();
+                let mut card = Node::rectangle(cid, DRect::new(2400.0 + (i as f32) * 184.0, 1100.0, 148.0, 190.0));
+                card.name = name.into();
+                card.fills = vec![Paint::solid(col)];
+                card.corner_radii = [14.0; 4];
+                ids.push(app.doc.insert(page, card).unwrap());
+            }
+            app.selection = ids;
+            app.startup_zoom = Some(1.30);
+        }
+        "micro-shape-controls" => {
+            let eid = app.doc.alloc_id();
+            let mut ell = Node::ellipse(eid, DRect::new(2420.0, 1450.0, 220.0, 220.0));
+            if let NodeKind::Ellipse(arc) = &mut ell.kind {
+                arc.start = -0.45;
+                arc.end = 4.15;
+                arc.inner_radius = 0.52;
+            }
+            ell.name = "Donut Arc · Sweep & Ratio".into();
+            ell.fills = vec![Paint::solid(Color::rgb(0x0D, 0x99, 0xFF))];
+            let eid = app.doc.insert(page, ell).unwrap();
+
+            let sid = app.doc.alloc_id();
+            let mut star = Node::new(
+                sid,
+                NodeKind::Star {
+                    count: 7,
+                    inner_ratio: 0.44,
+                },
+            );
+            star.name = "Star · 7 pts · 44%".into();
+            star.transform = Affine::translate(2680.0, 1450.0);
+            star.size = DV::new(220.0, 220.0);
+            star.fills = vec![Paint::solid(Color::rgb(0xE3, 0x63, 0x23))];
+            let _ = app.doc.insert(page, star);
+
+            app.selection = vec![eid];
+            app.canvas.inter = crate::canvas::Interaction::ShapeControl(crate::canvas::ShapeControlDragState {
+                tx: crate::edit::Tx::new(),
+                id: eid,
+                kind: crate::canvas::handles::ShapeControlKind::EllipseSweep,
+                start_page: DV::new(2530.0, 1560.0),
+                start_count: 0,
+                start_ratio: 0.52,
+                start_end_angle: 4.15,
+            });
+            app.startup_zoom = Some(1.50);
+        }
+        "micro-vector-edit" => {
+            let vid = app.doc.alloc_id();
+            let mut vec_node = Node::new(vid, NodeKind::Polygon { count: 6 });
+            vec_node.name = "Vector Network · Bezier & Midpoint Handles".into();
+            vec_node.transform = Affine::translate(2420.0, 1820.0);
+            vec_node.size = DV::new(340.0, 220.0);
+            vec_node.fills = vec![Paint::solid(Color::rgba(13, 153, 255, 68))];
+            vec_node.stroke = DStroke {
+                paints: vec![Paint::solid(Color::rgb(0x0D, 0x99, 0xFF))],
+                weight: 3.0,
+                ..Default::default()
+            };
+            let vid = app.doc.insert(page, vec_node).unwrap();
+            app.selection = vec![vid];
+            crate::canvas::vector::enter(app, vid);
+            if let Some(v) = app.canvas.vedit.as_mut() {
+                v.sel = [0usize, 1usize, 2usize].into_iter().collect();
+            }
+            app.startup_zoom = Some(1.60);
+        }
+        "micro-layer-picker" => {
+            if let Some(&sel) = app.selection.first() {
+                let bb = crate::canvas::fast_world_aabb(&app.doc, None, sel);
+                let center_page = DV::new(bb.x + bb.w * 0.5, bb.y + bb.h * 0.45);
+                let mut cands = crate::canvas::hit::hit_all_under(&app.doc, app.page, center_page, None);
+                if cands.is_empty() {
+                    cands.push(sel);
+                }
+                if let Some(first) = cands.first().copied() {
+                    app.hover_layer = Some(first);
+                }
+                app.ui.layer_picker = Some((Pos2::new(680.0, 410.0), cands));
+            }
+            app.startup_zoom = Some(1.05);
+        }
+        "micro-dev-boxmodel" => {
+            app.ui.dev_mode = true;
+            app.ui.right_tab = Some(crate::app::RightTab::Design);
+            app.dev.lang = crate::dev::Language::React;
+            crate::dev::preset::apply(app);
+            // Ensure an Auto-Layout frame with generous padding is selected so the emerald Box-Model padding tint is visible.
+            for (&id, n) in &mut app.doc.nodes {
+                if n.parent == Some(page) && n.kind.frame_props().is_some() {
+                    n.dev.status = Some(DevStatus::ReadyForDev);
+                }
+                if let Some(al) = n.kind.frame_props_mut().and_then(|fp| fp.auto_layout.as_mut()) {
+                    if al.padding.iter().all(|&p| p >= 12.0) {
+                        app.selection = vec![id];
+                        app.hover = Some(id);
+                    }
+                }
+            }
+            app.startup_zoom = Some(1.40);
+        }
+        "micro-scale-tool" => {
+            app.tool = crate::canvas::tools::Tool::Scale;
+            let sid = app.doc.alloc_id();
+            let mut card = Node::frame(sid, DRect::new(2420.0, 2200.0, 320.0, 200.0));
+            card.name = "Scale Tool (K) · 1.25× Proportional".into();
+            card.fills = vec![Paint::solid(Color::rgb(0x1E, 0x1E, 0x24))];
+            card.stroke = DStroke {
+                paints: vec![Paint::solid(Color::rgb(0x0D, 0x99, 0xFF))],
+                weight: 2.5,
+                ..Default::default()
+            };
+            card.corner_radii = [18.0; 4];
+            let sid = app.doc.insert(page, card).unwrap();
+            app.selection = vec![sid];
+            app.canvas.inter = crate::canvas::Interaction::Resize(crate::canvas::ResizeState {
+                tx: crate::edit::Tx::new(),
+                handle: crate::canvas::handles::Handle::BR,
+                kind: crate::canvas::ResizeKind::Single {
+                    id: sid,
+                    world0: Affine::translate(2420.0, 2200.0),
+                    t0: Affine::translate(2420.0, 2200.0),
+                    size0: DV::new(256.0, 160.0),
+                },
+                targets: vec![],
+            });
+            app.startup_zoom = Some(1.45);
+        }
+        _ => {}
     }
 }
 

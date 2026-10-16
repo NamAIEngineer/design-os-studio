@@ -68,7 +68,7 @@ fn page_background(app: &App) -> Color32 {
             let f = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() as u8;
             Color32::from_rgb(f(background.r), f(background.g), f(background.b))
         }
-        _ => Color32::from_rgb(0xF5, 0xF5, 0xF5),
+        _ => Color32::from_rgb(0x5A, 0x5A, 0x5A),
     }
 }
 

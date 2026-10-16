@@ -115,6 +115,29 @@ fn blur_reach(n: &Node) -> f32 {
     r
 }
 
+fn is_chrome_node(doc: &Document, n: &Node, id: NodeId) -> bool {
+    if matches!(n.kind, NodeKind::ComponentSet(_)) {
+        return true;
+    }
+    if matches!(&n.kind, NodeKind::Unknown { type_name } if type_name.eq_ignore_ascii_case("SLICE"))
+        || (matches!(n.kind, NodeKind::Rectangle)
+            && n.fills.is_empty()
+            && n.stroke.paints.is_empty()
+            && n.name.starts_with("Slice"))
+    {
+        return true;
+    }
+    let has_own = n.component.overrides.contains(&designos_doc::OverrideField::SlotContent)
+        || !n.component.bindings.is_empty();
+    let has_src = n.component.source.is_some_and(|s| {
+        doc.get(s).is_some_and(|sn| {
+            sn.component.overrides.contains(&designos_doc::OverrideField::SlotContent)
+                || !sn.component.bindings.is_empty()
+        })
+    });
+    (has_own || has_src) && designos_doc::is_slot_container(doc, id)
+}
+
 #[derive(Clone, Debug)]
 pub(crate) struct Entry {
     /// Page-space bounds of the node and everything it draws (empty if hidden).
@@ -124,6 +147,13 @@ pub(crate) struct Entry {
     pub blur_container: bool,
     pub mask: bool,
     pub boolean: bool,
+    pub chrome: bool,
+    pub children_len: u32,
+    pub top_order: u32,
+    pub world_ts: [f32; 6],
+    pub size: (f32, f32),
+    pub rev: u64,
+    pub children: Box<[NodeId]>,
 }
 
 /// Cached world bounds for one page, rebuilt when the revision changes.
@@ -131,6 +161,9 @@ pub(crate) struct Entry {
 pub struct SceneIndex {
     page: Option<NodeId>,
     rev: u64,
+    doc_id: u64,
+    doc_epoch: u64,
+    nodes_len: usize,
     built: bool,
     pub(crate) entries: IdMap<Entry>,
     /// Nodes with blur-like effects: (subtree bounds, reach in page units).
@@ -139,6 +172,8 @@ pub struct SceneIndex {
     pub(crate) bg_blur: Vec<B>,
     pub(crate) top_grid: HashMap<(i32, i32), Vec<NodeId>, BuildHasherDefault<IdHasher>>,
     pub(crate) top_large: Vec<NodeId>,
+    pub(crate) chrome_nodes: Vec<NodeId>,
+    top_has_mask: bool,
 }
 
 impl SceneIndex {
@@ -158,8 +193,13 @@ impl SceneIndex {
         self.bg_blur.clear();
         self.top_grid.clear();
         self.top_large.clear();
+        self.chrome_nodes.clear();
+        self.top_has_mask = false;
         self.page = Some(page);
         self.rev = rev;
+        self.doc_id = doc.runtime_id();
+        self.doc_epoch = doc.mutation_epoch();
+        self.nodes_len = doc.nodes.len();
         self.built = true;
         if let Some(p) = doc.get(page) {
             let id = sk::Transform::identity();
@@ -174,17 +214,23 @@ impl SceneIndex {
     fn rebuild_top_grid(&mut self, doc: &Document, page: NodeId) {
         self.top_grid.clear();
         self.top_large.clear();
+        self.top_has_mask = false;
         let Some(p) = doc.get(page) else { return };
-        for &cid in &p.children {
+        for (order, &cid) in p.children.iter().enumerate() {
             let Some(n) = doc.get(cid) else { continue };
             if !n.visible {
                 continue;
             }
-            let Some(entry) = self.entries.get(&cid) else { continue };
-            if is_empty(entry.bounds) {
+            if n.is_mask {
+                self.top_has_mask = true;
+            }
+            let Some(entry) = self.entries.get_mut(&cid) else { continue };
+            entry.top_order = order as u32;
+            let bounds = entry.bounds;
+            if is_empty(bounds) {
                 continue;
             }
-            let (cx0, cy0, cx1, cy1) = grid_range(entry.bounds);
+            let (cx0, cy0, cx1, cy1) = grid_range(bounds);
             let cells = (cx1 as i64 - cx0 as i64 + 1).max(1).saturating_mul((cy1 as i64 - cy0 as i64 + 1).max(1));
             if cells > 64 {
                 self.top_large.push(cid);
@@ -199,7 +245,82 @@ impl SceneIndex {
     }
 
     pub fn ensure(&mut self, doc: &Document, page: NodeId, rev: u64) {
-        self.ensure_prev(doc, page, rev);
+        if self.built && self.page == Some(page) {
+            if self.rev == rev {
+                return;
+            }
+            if self.doc_id == doc.runtime_id() {
+                let mut dirty = Vec::new();
+                let mut removed = Vec::new();
+                if doc.dirty_changes_since(self.doc_epoch, &mut dirty, &mut removed) {
+                    if dirty.is_empty() && removed.is_empty() {
+                        self.nodes_len = doc.nodes.len();
+                        self.rev = rev;
+                        self.doc_epoch = doc.mutation_epoch();
+                        return;
+                    }
+                    let mut top_dirty = false;
+                    for &rid in &removed {
+                        if let Some(old_e) = self.entries.remove(&rid) {
+                            if old_e.chrome {
+                                self.chrome_nodes.retain(|&x| x != rid);
+                            }
+                            if old_e.parent == Some(page) {
+                                top_dirty = true;
+                            }
+                        }
+                    }
+                    let mut ok = true;
+                    for &id in &dirty {
+                        if id == page {
+                            top_dirty = true;
+                            if let Some(p) = doc.get(page) {
+                                let id_ts = sk::Transform::identity();
+                                for &cid in &p.children {
+                                    if self.entries.get(&cid).map_or(true, |ce| ce.parent != Some(page)) {
+                                        self.build(doc, cid, id_ts, Some(page));
+                                    }
+                                }
+                            }
+                        } else if doc.get(id).is_some() {
+                            if doc.page_of(id) == Some(page) && !self.update_subtree(doc, id, rev) {
+                                ok = false;
+                                break;
+                            }
+                        }
+                    }
+                    if ok {
+                        if top_dirty {
+                            self.rebuild_top_grid(doc, page);
+                        }
+                        self.nodes_len = doc.nodes.len();
+                        self.rev = rev;
+                        self.doc_epoch = doc.mutation_epoch();
+                        return;
+                    }
+                }
+            }
+        }
+        self.entries.clear();
+        self.blurry.clear();
+        self.bg_blur.clear();
+        self.top_grid.clear();
+        self.top_large.clear();
+        self.chrome_nodes.clear();
+        self.top_has_mask = false;
+        self.page = Some(page);
+        self.rev = rev;
+        self.doc_id = doc.runtime_id();
+        self.doc_epoch = doc.mutation_epoch();
+        self.nodes_len = doc.nodes.len();
+        self.built = true;
+        if let Some(p) = doc.get(page) {
+            let id = sk::Transform::identity();
+            for c in &p.children {
+                self.build(doc, *c, id, Some(page));
+            }
+        }
+        self.rebuild_top_grid(doc, page);
     }
 
     /// Forgets the cached build so the next `ensure` rebuilds.
@@ -208,6 +329,8 @@ impl SceneIndex {
         self.entries.clear();
         self.top_grid.clear();
         self.top_large.clear();
+        self.chrome_nodes.clear();
+        self.top_has_mask = false;
     }
 
     /// True unless the subtree of `id` is known to miss `win`.
@@ -223,6 +346,35 @@ impl SceneIndex {
         self.entries.get(&id).map(|e| e.bounds).filter(|b| !is_empty(*b))
     }
 
+    /// Returns `(bounds, is_mask)` for a visible indexed node in a single hash lookup,
+    /// or `None` if not indexed or hidden (`is_empty(bounds)`).
+    #[inline]
+    pub fn cull_info(&self, id: NodeId) -> Option<((f32, f32, f32, f32), bool)> {
+        let e = self.entries.get(&id)?;
+        if is_empty(e.bounds) {
+            return None;
+        }
+        Some((e.bounds, e.mask))
+    }
+
+    /// Nodes on the active page that need ComponentSet / Slot / Slice overlay chrome.
+    #[inline]
+    pub fn chrome_nodes(&self) -> &[NodeId] {
+        &self.chrome_nodes
+    }
+
+    /// Cached page-space affine matrix `[sx, ky, kx, sy, tx, ty]` (`a, b, c, d, tx, ty`) for `id`.
+    #[inline]
+    pub fn world_transform_of(&self, id: NodeId) -> Option<[f32; 6]> {
+        self.entries.get(&id).map(|e| e.world_ts)
+    }
+
+    /// True if any visible top-level child of the indexed page is a mask node.
+    #[inline]
+    pub fn has_top_mask(&self) -> bool {
+        self.top_has_mask
+    }
+
     /// Appends all indexed `NodeId`s whose `bounds` overlap `rect`.
     pub fn query_rect(&self, rect: (f32, f32, f32, f32), out: &mut Vec<NodeId>) {
         if is_empty(rect) {
@@ -236,11 +388,13 @@ impl SceneIndex {
     }
 
     /// Appends top-level page children whose `Entry.bounds` overlap `rect`,
-    /// querying `top_grid` cells overlapping `rect` plus `top_large` and deduplicating.
+    /// querying `top_grid` cells overlapping `rect` plus `top_large`, deduplicating,
+    /// and preserving back-to-front paint order.
     pub fn query_top_level(&self, rect: (f32, f32, f32, f32), out: &mut Vec<NodeId>) {
         if is_empty(rect) {
             return;
         }
+        let start_len = out.len();
         let (cx0, cy0, cx1, cy1) = grid_range(rect);
         let mut seen: IdMap<()> = IdMap::default();
         let cells = (cx1 as i64 - cx0 as i64 + 1).max(1).saturating_mul((cy1 as i64 - cy0 as i64 + 1).max(1));
@@ -276,6 +430,33 @@ impl SceneIndex {
                 && self.entries.get(&id).is_some_and(|e| e.parent == self.page && overlaps(e.bounds, rect))
             {
                 out.push(id);
+            }
+        }
+        if out.len() - start_len > 1 {
+            out[start_len..].sort_unstable_by_key(|id| self.entries.get(id).map_or(u32::MAX, |e| e.top_order));
+        }
+    }
+
+    fn translate_descendants(&mut self, root: NodeId, dx: f32, dy: f32, rev: u64) {
+        let mut stack: Vec<NodeId> = Vec::new();
+        if let Some(re) = self.entries.get(&root) {
+            if !re.children.is_empty() {
+                stack.extend_from_slice(&re.children);
+            }
+        }
+        while let Some(id) = stack.pop() {
+            if let Some(e) = self.entries.get_mut(&id) {
+                if e.rev == rev {
+                    continue;
+                }
+                e.world_ts[4] += dx;
+                e.world_ts[5] += dy;
+                if !is_empty(e.bounds) {
+                    e.bounds = (e.bounds.0 + dx, e.bounds.1 + dy, e.bounds.2 + dx, e.bounds.3 + dy);
+                    if !e.children.is_empty() {
+                        stack.extend_from_slice(&e.children);
+                    }
+                }
             }
         }
     }
@@ -320,7 +501,7 @@ impl SceneIndex {
         let mut parent_ts = sk::Transform::identity();
         for &aid in ancestors.iter().rev() {
             if !self.entries.contains_key(&aid) {
-                return false;
+                return self.update_subtree(doc, aid, rev);
             }
             let Some(an) = doc.get(aid) else {
                 return false;
@@ -328,15 +509,112 @@ impl SceneIndex {
             let an = &*designos_doc::resolve_node(doc, an);
             let drawn = an.visible && !matches!(an.kind, NodeKind::Unknown { .. } | NodeKind::Page { .. });
             if !drawn {
-                return false;
+                self.rev = rev;
+                return true;
             }
             parent_ts = parent_ts.pre_concat(to_sk_transform(&an.transform));
             ancestor_transforms.push((aid, parent_ts));
         }
 
-        let old_top_bounds = self.entries.get(&top_id).map(|e| e.bounds);
+        let old_top = self.entries.get(&top_id).map(|e| (e.bounds, e.mask, e.top_order, e.parent));
         let parent = Some(ancestors.first().copied().unwrap_or(page));
-        self.build(doc, dirty_id, parent_ts, parent);
+
+        let mut fast_done = false;
+        if let Some(raw_n) = doc.get(dirty_id) {
+            let n = &*designos_doc::resolve_node(doc, raw_n);
+            let drawn = n.visible && !matches!(n.kind, NodeKind::Unknown { .. } | NodeKind::Page { .. });
+            let boolean = matches!(n.kind, NodeKind::BooleanOp(_));
+            if drawn && !boolean {
+                if let Some(old_e) = self.entries.get(&dirty_id).cloned() {
+                    if !is_empty(old_e.bounds) && !old_e.boolean && n.is_mask == old_e.mask {
+                        let ts = parent_ts.pre_concat(to_sk_transform(&n.transform));
+                        let new_wts = [ts.sx, ts.ky, ts.kx, ts.sy, ts.tx, ts.ty];
+                        let same_linear = (new_wts[0] - old_e.world_ts[0]).abs() < 1e-5
+                            && (new_wts[1] - old_e.world_ts[1]).abs() < 1e-5
+                            && (new_wts[2] - old_e.world_ts[2]).abs() < 1e-5
+                            && (new_wts[3] - old_e.world_ts[3]).abs() < 1e-5;
+                        if same_linear {
+                            let dx = new_wts[4] - old_e.world_ts[4];
+                            let dy = new_wts[5] - old_e.world_ts[5];
+                            let stationary = dx.abs() <= 1e-5
+                                && dy.abs() <= 1e-5
+                                && n.variables.modes.is_empty()
+                                && n.component.values.is_empty();
+                            let pure_translate = (dx.abs() > 1e-5 || dy.abs() > 1e-5)
+                                && n.children.len() as u32 == old_e.children_len
+                                && (n.size.x - old_e.size.0).abs() < 1e-4
+                                && (n.size.y - old_e.size.1).abs() < 1e-4
+                                && n.children.iter().all(|c| {
+                                    self.entries.get(c).is_some_and(|ce| ce.parent == Some(dirty_id))
+                                });
+                            if stationary || pure_translate {
+                                let children_box = if pure_translate {
+                                    self.translate_descendants(dirty_id, dx, dy, rev);
+                                    old_e.children
+                                } else {
+                                    for &c in &n.children {
+                                        if self.entries.get(&c).map_or(true, |ce| ce.parent != Some(dirty_id)) {
+                                            self.build(doc, c, ts, Some(dirty_id));
+                                        }
+                                    }
+                                    n.children.as_slice().into()
+                                };
+                                let m = node_margin(n);
+                                let mut sub = transformed_bounds(&ts, -m, -m, n.size.x + 2.0 * m, n.size.y + 2.0 * m);
+                                if !n.children.is_empty() {
+                                    let mut kids = EMPTY;
+                                    for c in &n.children {
+                                        let cb = self.entries.get(c).map(|e| e.bounds).unwrap_or(EMPTY);
+                                        kids = union(kids, cb);
+                                    }
+                                    if !is_empty(kids) {
+                                        if n.kind.frame_props().map(|f| f.clips_content).unwrap_or(false) {
+                                            kids = intersect(kids, transformed_bounds(&ts, 0.0, 0.0, n.size.x, n.size.y));
+                                        }
+                                        if !is_empty(kids) {
+                                            sub = union(sub, kids);
+                                        }
+                                    }
+                                }
+                                let layer_blur = n.effects.iter().any(|e| matches!(e, Effect::LayerBlur { visible: true, radius } if *radius > 0.0));
+                                let chrome = is_chrome_node(doc, n, dirty_id);
+                                if chrome {
+                                    if !self.chrome_nodes.contains(&dirty_id) {
+                                        self.chrome_nodes.push(dirty_id);
+                                    }
+                                } else if old_e.chrome {
+                                    self.chrome_nodes.retain(|&x| x != dirty_id);
+                                }
+                                self.entries.insert(
+                                    dirty_id,
+                                    Entry {
+                                        bounds: sub,
+                                        parent,
+                                        blur_container: layer_blur,
+                                        mask: n.is_mask,
+                                        boolean: false,
+                                        chrome,
+                                        children_len: n.children.len() as u32,
+                                        top_order: old_e.top_order,
+                                        world_ts: new_wts,
+                                        size: (n.size.x, n.size.y),
+                                        rev,
+                                        children: children_box,
+                                    },
+                                );
+                                fast_done = true;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if !fast_done {
+            self.build(doc, dirty_id, parent_ts, parent);
+            if let Some(e) = self.entries.get_mut(&dirty_id) {
+                e.rev = rev;
+            }
+        }
 
         for &(aid, ts) in ancestor_transforms.iter().rev() {
             let Some(an) = doc.get(aid) else {
@@ -365,13 +643,27 @@ impl SceneIndex {
             let Some(entry) = self.entries.get_mut(&aid) else {
                 break;
             };
+            if entry.children_len != an.children.len() as u32 {
+                entry.children_len = an.children.len() as u32;
+                entry.children = an.children.as_slice().into();
+            }
             if entry.bounds == sub {
                 break;
             }
             entry.bounds = sub;
         }
 
-        if self.entries.get(&top_id).map(|e| e.bounds) != old_top_bounds {
+        if let Some((_, _, top_order, _)) = old_top {
+            if let Some(e) = self.entries.get_mut(&top_id) {
+                e.top_order = top_order;
+            }
+        }
+        let top_cell = |b: Option<B>| b.filter(|b| !is_empty(*b)).map(grid_range);
+        let new_top = self.entries.get(&top_id).map(|e| (e.bounds, e.mask, e.parent));
+        if top_cell(new_top.map(|t| t.0)) != top_cell(old_top.map(|t| t.0))
+            || new_top.map(|t| t.1) != old_top.map(|t| t.1)
+            || new_top.map(|t| t.2) != old_top.map(|t| t.3)
+        {
             self.rebuild_top_grid(doc, page);
         }
         self.rev = rev;
@@ -390,12 +682,39 @@ impl SceneIndex {
         let Some(n) = doc.get(id) else { return EMPTY };
         let n = &*designos_doc::resolve_node(doc, n);
         let drawn = n.visible && !matches!(n.kind, NodeKind::Unknown { .. } | NodeKind::Page { .. });
+        let chrome = n.visible && is_chrome_node(doc, n, id);
+        if chrome {
+            if !self.chrome_nodes.contains(&id) {
+                self.chrome_nodes.push(id);
+            }
+        } else if !self.chrome_nodes.is_empty() && self.entries.get(&id).is_some_and(|e| e.chrome) {
+            self.chrome_nodes.retain(|&x| x != id);
+        }
         let boolean = matches!(n.kind, NodeKind::BooleanOp(_));
+        let children_len = n.children.len() as u32;
+        let ts = parent_ts.pre_concat(to_sk_transform(&n.transform));
+        let world_ts = [ts.sx, ts.ky, ts.kx, ts.sy, ts.tx, ts.ty];
+        let size = (n.size.x, n.size.y);
         if !drawn {
-            self.entries.insert(id, Entry { bounds: EMPTY, parent, blur_container: false, mask: n.is_mask, boolean });
+            self.entries.insert(
+                id,
+                Entry {
+                    bounds: EMPTY,
+                    parent,
+                    blur_container: false,
+                    mask: n.is_mask,
+                    boolean,
+                    chrome,
+                    children_len,
+                    top_order: 0,
+                    world_ts,
+                    size,
+                    rev: self.rev,
+                    children: Box::new([]),
+                },
+            );
             return EMPTY;
         }
-        let ts = parent_ts.pre_concat(to_sk_transform(&n.transform));
         let m = node_margin(n);
         let mut sub = transformed_bounds(&ts, -m, -m, n.size.x + 2.0 * m, n.size.y + 2.0 * m);
         let draws_kids = !n.children.is_empty() && !boolean;
@@ -429,7 +748,28 @@ impl SceneIndex {
                 self.bg_blur.push(sub);
             }
         }
-        self.entries.insert(id, Entry { bounds: sub, parent, blur_container: layer_blur, mask: n.is_mask, boolean });
+        let children: Box<[NodeId]> = if n.children.is_empty() {
+            Box::new([])
+        } else {
+            n.children.as_slice().into()
+        };
+        self.entries.insert(
+            id,
+            Entry {
+                bounds: sub,
+                parent,
+                blur_container: layer_blur,
+                mask: n.is_mask,
+                boolean,
+                chrome,
+                children_len,
+                top_order: 0,
+                world_ts,
+                size,
+                rev: self.rev,
+                children,
+            },
+        );
         sub
     }
 }
@@ -715,5 +1055,64 @@ mod tests {
             expected.sort_by_key(|n| n.0);
             assert_eq!(inc_out, expected);
         }
+    }
+
+    #[test]
+    fn incremental_insert_remove_reparent_and_translate_match_full_ensure() {
+        let mut doc = Document::new("inc-test");
+        let page = doc.add_page("page-1");
+
+        let f1_id = doc.alloc_id();
+        let mut f1 = Node::frame(f1_id, Rect::new(100.0, 100.0, 500.0, 400.0));
+        if let NodeKind::Frame(fp) = &mut f1.kind {
+            fp.clips_content = false;
+        }
+        doc.insert(page, f1).unwrap();
+
+        let g1_id = doc.alloc_id();
+        let mut g1 = Node::new(g1_id, NodeKind::Group);
+        g1.size = Vec2::new(200.0, 200.0);
+        g1.transform = Affine::translate(20.0, 30.0);
+        doc.insert(f1_id, g1).unwrap();
+
+        let r1_id = doc.alloc_id();
+        doc.insert(g1_id, Node::rectangle(r1_id, Rect::new(10.0, 15.0, 60.0, 40.0))).unwrap();
+
+        let mut inc = SceneIndex::new();
+        inc.ensure(&doc, page, 1);
+
+        // 1. Insert new child inside g1_id and a new top-level node on page
+        let r2_id = doc.alloc_id();
+        doc.insert(g1_id, Node::rectangle(r2_id, Rect::new(300.0, 250.0, 80.0, 90.0))).unwrap();
+        let top_rect_id = doc.alloc_id();
+        doc.insert(page, Node::rectangle(top_rect_id, Rect::new(2200.0, 300.0, 120.0, 120.0))).unwrap();
+        inc.ensure(&doc, page, 2);
+
+        // 2. Pure translation of top-level frame f1_id (translates g1_id, r1_id, r2_id in place)
+        doc.get_mut(f1_id).unwrap().transform.tx += 350.0;
+        doc.get_mut(f1_id).unwrap().transform.ty += 180.0;
+        inc.ensure(&doc, page, 3);
+
+        // 3. Reparent r2_id from g1_id to page, and top_rect_id into f1_id
+        doc.reparent(r2_id, page, 1).unwrap();
+        doc.reparent(top_rect_id, f1_id, 0).unwrap();
+        inc.ensure(&doc, page, 4);
+
+        // 4. Remove r1_id
+        doc.remove(r1_id).unwrap();
+        inc.ensure(&doc, page, 5);
+
+        let mut full = SceneIndex::new();
+        full.ensure(&doc, page, 5);
+
+        assert_eq!(inc.len(), full.len());
+        for id in [f1_id, g1_id, r1_id, r2_id, top_rect_id] {
+            assert_eq!(inc.bounds_of(id), full.bounds_of(id), "bounds mismatch for {:?}", id);
+        }
+        let mut inc_top = Vec::new();
+        let mut full_top = Vec::new();
+        inc.query_top_level((-1000.0, -1000.0, 5000.0, 5000.0), &mut inc_top);
+        full.query_top_level((-1000.0, -1000.0, 5000.0, 5000.0), &mut full_top);
+        assert_eq!(inc_top, full_top);
     }
 }

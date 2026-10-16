@@ -84,3 +84,37 @@ cargo test -p designos-mcp
    - Unbounded offscreen render passes (`Program`s) on 723k-node pages exhaust `egui-wgpu`'s Metal staging ring buffer and crash the GPU driver. Keep offscreen layer/mask/clip/blend `Program` creation capped at `< 64` in `interactive()` mode (falling back to hardware scissor clips).
    - In `canvas::gpu::paint`, when `last_key == Some(key) && compiler.geom.stale_hits == 0`, pass `Cb { frame: None }` so `Canvas` re-blits the cached `Output` texture at `0.0%` idle CPU without recompiling or re-uploading vertex buffers.
    - `GeomCache::get` MUST track cumulative `frame_build_nanos` against the 8ms per-frame budget (`compiler.geom.budget`) and defer uncached `Text`/`Vector`/`BooleanOp` tessellation across subsequent frames via `stale_hits`.
+
+---
+
+## 5. DESIGN:OS & Self-Evolving Design Agents
+
+All UI chrome, design tokens, component definitions, and critique loops in `design-os-studio` are governed by the **DESIGN:OS Self-Evolving Design System** (`design/`) in live parity with `crates/designos-app/src/theme.rs`.
+
+### Mandatory Design Read Order (Before Any UI / Token / Canvas Change)
+1. `design/principles.md` — Project design constitution, `## Always` / `## Never` laws (Purple Ban, `>=24px` pointer targets, 4px rhythm, Zero Fake UI Law).
+2. `design/soul.md` — Ratified project soul (`status: ratified`) and visual/ergonomic identity.
+3. `ui ds context --dir .` — Compiled design system context, token roles, and component registry.
+4. `crates/designos-app/src/theme.rs` — Authoritative Rust `egui` visual constants (must remain in 100% hex parity with `design/design.tokens.json`).
+
+### Specialized Project Design Agents (`.claude/agents/` & `.agents/agents/`)
+| Agent | Role & Responsibility |
+|---|---|
+| **`designer-jang-designos-studio`** | Soul-bound Designer for `design:os studio`: UI generation, Rust `egui` layout/token refinement in `crates/designos-app/src/`, and component registration (`ui ds component add`). Never scores its own output; records discovered gaps via `ui memory record gap`. |
+| **`curator-jang-designos-studio`** | Independent Curator & Critic (report-only; generator is NEVER grader): VSF-PCP Operate Rubric (`8×2 = 16pt`) scoring, `ui ds a11y` contrast verification, visual inspection via `designos --screenshot`, and verdict logging via `ui memory record taste_verdict`. |
+| **`figma-jang-designos-studio`** | Canvas & `.fig` / `.pen` / MCP Bridge Specialist: drives `designos-mcp` (29 tools), `designos --apply-spec`, `.fig` / `.pen` round-trip, and `design-os figma`. Verifies every canvas mutation via `--inspect-json` or `--screenshot`. |
+| **`librarian-jang-designos-studio`** | Self-Evolution & Knowledge Graduation Agent: runs `scripts/design_os_self_evolve.py`, collects open `gap` and `insight` events (`design-os librarian collect`), verifies `theme.rs` ↔ `design/design.tokens.json` parity, executes `harvest` + `heartbeat` + `memory compile`, and graduates recurrent insights (`seen > 1`) into `design/principles.md` and `scripts/zero_fake_ui_gate.py`. |
+
+### Mandatory Pre-Commit / Post-UI-Change Verification Commands
+```bash
+export PATH="/Users/jangtrinh/.local/bin:$HOME/.cargo/bin:$PATH"
+
+# 1. Zero Fake UI Deterministic Gate (12/12 invariants in crates/designos-app/src/)
+python3 scripts/zero_fake_ui_gate.py
+
+# 2. Automated Self-Evolution Engine & Rust <-> design:os Live Token Parity Audit (7/7 gates)
+python3 scripts/design_os_self_evolve.py
+
+# 3. Verify Self-Evolution Loop Proof (verdict=ALIVE, proof.level=APPLIED|IMPROVING, 0 findings)
+design-os evolution
+```

@@ -172,7 +172,9 @@ pub fn hit_test(
             let cur = to_screen(designos_doc::vector::cubic_point(&c, t1));
             let (d, f) = point_segment(p, prev, cur);
             if d <= seg_radius && best.map(|(bd, _)| d < bd).unwrap_or(true) {
-                best = Some((d, Hit::Segment(seg, ((k - 1) as f32 + f) / STEPS as f32)));
+                let raw_t = ((k - 1) as f32 + f) / STEPS as f32;
+                let snapped_t = if (raw_t - 0.5).abs() < 0.07 { 0.5 } else { raw_t };
+                best = Some((d, Hit::Segment(seg, snapped_t)));
             }
             prev = cur;
         }
@@ -378,7 +380,7 @@ pub fn press(app: &mut App, rect: ERect, pos: Pos2, mods: Modifiers) -> bool {
         Some(Hit::Vertex(i)) => {
             let Some(v) = app.canvas.vedit.as_mut() else { return true };
             v.seg = None;
-            if tool == VTool::Bend {
+            if tool == VTool::Bend || mods.command {
                 v.sel = BTreeSet::from([i]);
                 begin_drag(app, DragKind::Pull(i), world, t0, page);
             } else if mods.shift {
@@ -550,15 +552,44 @@ pub fn release(app: &mut App) {
                 return;
             }
             DragKind::Pull(vi) => {
-                // a click on a vertex with the Bend tool removes its handles
+                // a click on a vertex with the Bend tool (or Cmd+Click) toggles sharp corner <-> smooth mirrored handles
                 d.tx.cancel(&mut app.doc);
                 edit(app, |net, _| {
-                    if net.ends_at(vi).iter().all(|(s, e)| len(net.tangent(*s, *e)) < 1e-4) {
+                    if vi >= net.vertices.len() {
                         return false;
                     }
-                    net.straighten(vi);
-                    net.vertices[vi].mirror = HandleMirror::None;
-                    true
+                    let ends = net.ends_at(vi);
+                    if ends.iter().any(|(s, e)| len(net.tangent(*s, *e)) >= 1e-4) {
+                        net.straighten(vi);
+                        net.vertices[vi].mirror = HandleMirror::None;
+                        return true;
+                    }
+                    let other_v = |net: &VectorNetwork, s: usize, e: End| {
+                        if e == End::Start { net.segments[s].b } else { net.segments[s].a }
+                    };
+                    if ends.len() >= 2 {
+                        let p0 = net.pos(other_v(net, ends[0].0, ends[0].1));
+                        let p1 = net.pos(other_v(net, ends[1].0, ends[1].1));
+                        let mut dir = scale(sub(p1, p0), 0.25);
+                        if len(dir) < 1.0 {
+                            dir = v2(20.0, 0.0);
+                        }
+                        net.set_tangent(ends[0].0, ends[0].1, scale(dir, -1.0));
+                        net.set_tangent(ends[1].0, ends[1].1, dir);
+                        net.vertices[vi].mirror = HandleMirror::AngleAndLength;
+                        true
+                    } else if ends.len() == 1 {
+                        let p0 = net.pos(other_v(net, ends[0].0, ends[0].1));
+                        let mut dir = scale(sub(p0, net.pos(vi)), 0.33);
+                        if len(dir) < 1.0 {
+                            dir = v2(20.0, 0.0);
+                        }
+                        net.set_tangent(ends[0].0, ends[0].1, dir);
+                        net.vertices[vi].mirror = HandleMirror::AngleAndLength;
+                        true
+                    } else {
+                        false
+                    }
                 });
                 return;
             }
@@ -629,6 +660,58 @@ pub fn delete_selected(app: &mut App) {
             let Some(s) = seg.filter(|s| *s < net.segments.len()) else { return false };
             net.delete_segment(s);
             return !net.vertices.is_empty();
+        }
+        net.delete_vertices(sel);
+        sel.clear();
+        !net.vertices.is_empty()
+    });
+}
+
+/// Shift + Backspace / Shift + Delete (`DeleteAndHealVectorBehavior`): deletes the selected
+/// degree-2 vertices while healing the connecting curve tangents between their two neighbors.
+pub fn delete_and_heal_selected(app: &mut App) {
+    edit(app, |net, sel| {
+        if sel.is_empty() {
+            return false;
+        }
+        for &vi in sel.iter() {
+            if vi >= net.vertices.len() {
+                continue;
+            }
+            let ends = net.ends_at(vi);
+            if ends.len() == 2 {
+                let (s0, e0) = ends[0];
+                let (s1, e1) = ends[1];
+                if s0 != s1 {
+                    let opp0 = if e0 == End::Start { End::End } else { End::Start };
+                    let opp1 = if e1 == End::Start { End::End } else { End::Start };
+                    let u = net.vertex_of(s0, opp0);
+                    let w = net.vertex_of(s1, opp1);
+                    if u != w {
+                        let tu = net.tangent(s0, opp0);
+                        let tw = net.tangent(s1, opp1);
+                        let tv0 = net.tangent(s0, e0);
+                        let tv1 = net.tangent(s1, e1);
+                        if len(tv0) > 1e-4 || len(tv1) > 1e-4 {
+                            let du = dist(net.pos(u), net.pos(vi));
+                            let dw = dist(net.pos(vi), net.pos(w));
+                            let t = if du + dw > 1e-4 { (du / (du + dw)).clamp(0.15, 0.85) } else { 0.5 };
+                            let healed_tu = if len(tu) > 1e-4 {
+                                scale(tu, 1.0 / t)
+                            } else {
+                                scale(sub(net.pos(vi), net.pos(u)), 0.33)
+                            };
+                            let healed_tw = if len(tw) > 1e-4 {
+                                scale(tw, 1.0 / (1.0 - t))
+                            } else {
+                                scale(sub(net.pos(vi), net.pos(w)), 0.33)
+                            };
+                            net.set_tangent(s0, opp0, healed_tu);
+                            net.set_tangent(s1, opp1, healed_tw);
+                        }
+                    }
+                }
+            }
         }
         net.delete_vertices(sel);
         sel.clear();
@@ -770,7 +853,11 @@ pub fn key(app: &mut App, key: egui::Key, m: Modifiers) -> bool {
             true
         }
         Key::Delete | Key::Backspace => {
-            delete_selected(app);
+            if m.shift {
+                delete_and_heal_selected(app);
+            } else {
+                delete_selected(app);
+            }
             true
         }
         Key::V if !m.shift => {
@@ -837,6 +924,13 @@ pub fn overlay(app: &App, p: &Painter, rect: ERect) {
             Stroke::new(if selected { theme::CANVAS_OUTLINE_WIDTH * 2.0 } else { theme::CANVAS_OUTLINE_WIDTH }, col),
         );
         p.add(curve);
+    }
+    if let Some(Hit::Segment(seg, t)) = v.hover {
+        if seg < v.net.segments.len() {
+            let pt = sp(to_s(designos_doc::vector::cubic_point(&v.net.cubic(seg), t)));
+            p.circle_filled(pt, theme::VEDIT_HANDLE_RADIUS, theme::CANVAS_HANDLE_FILL);
+            p.circle_stroke(pt, theme::VEDIT_HANDLE_RADIUS, Stroke::new(1.5, col));
+        }
     }
     // handles
     for (s, e) in visible_handles(&v.net, &v.sel, v.seg.map(|s| s.0)) {
@@ -1438,4 +1532,48 @@ mod tests {
         reload(&mut app);
         assert!(app.canvas.vedit.is_none());
     }
+
+    #[test]
+    fn midpoint_snap_cmd_click_toggle_and_delete_and_heal() {
+        let (mut app, id) = app_with_vector();
+        enter(&mut app, id);
+
+        // 1. S2-01: hit_test near segment midpoint (0.46) snaps to exact 0.5
+        let ident = |p: DV| p;
+        let none = BTreeSet::new();
+        let near_mid = vedit(&app).net.point_on(0, 0.46);
+        assert_eq!(hit_test(&vedit(&app).net, &none, None, &ident, near_mid, 6.0, 5.0), Some(Hit::Segment(0, 0.5)));
+
+        // 2. S2-02: Cmd/Ctrl + Click (or Pull click) on sharp vertex 1 toggles to smooth mirrored handles, and clicking again straightens back
+        let rect = ERect::from_min_size(Pos2::ZERO, egui::vec2(800.0, 600.0));
+        let v1_screen = app.view.to_screen(rect.min, app.doc.world_transform(id).apply(vedit(&app).net.vertices[1].pos));
+        let cmd_mods = Modifiers { command: true, ..Modifiers::NONE };
+        assert!(press(&mut app, rect, v1_screen, cmd_mods));
+        release(&mut app);
+        let net = net_of(&app, id);
+        assert_eq!(net.vertices[1].mirror, HandleMirror::AngleAndLength);
+        let t_in = net.tangent(0, End::End);
+        let t_out = net.tangent(1, End::Start);
+        assert!(len(t_in) > 1.0 && len(t_out) > 1.0);
+        assert!((t_in.x + t_out.x).abs() < 1e-3 && (t_in.y + t_out.y).abs() < 1e-3);
+
+        // Clicking again with Cmd toggles back to sharp corner
+        assert!(press(&mut app, rect, v1_screen, cmd_mods));
+        release(&mut app);
+        let net2 = net_of(&app, id);
+        assert_eq!(net2.vertices[1].mirror, HandleMirror::None);
+        assert_eq!(net2.tangent(0, End::End), DV::ZERO);
+        assert_eq!(net2.tangent(1, End::Start), DV::ZERO);
+
+        // 3. S2-03: Shift + Backspace (delete_and_heal_selected) heals a smoothed middle vertex into a curved segment between 0 and 2
+        assert!(press(&mut app, rect, v1_screen, cmd_mods));
+        release(&mut app);
+        sel(&mut app, &[1]);
+        assert!(key(&mut app, egui::Key::Backspace, Modifiers::SHIFT));
+        let net3 = net_of(&app, id);
+        assert_eq!(net3.vertices.len(), 2);
+        assert_eq!(net3.segments.len(), 1);
+        assert!(!net3.is_straight(0), "healed segment preserves curve tangents");
+    }
 }
+

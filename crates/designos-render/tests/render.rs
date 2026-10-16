@@ -66,7 +66,7 @@ fn default_page_background() {
     let page = doc.add_page("p");
     let mut pm = Pixmap::new(4, 4).unwrap();
     render_page(&doc, page, &Viewport::default(), &mut pm);
-    assert_eq!(px(&pm, 1, 1), [0xF5, 0xF5, 0xF5, 255]);
+    assert_eq!(px(&pm, 1, 1), [0x5A, 0x5A, 0x5A, 255]);
 }
 
 #[test]

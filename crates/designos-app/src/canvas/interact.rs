@@ -32,6 +32,7 @@ struct Inp {
     mid_down: bool,
     mods: Modifiers,
     space: bool,
+    z_down: bool,
 }
 
 fn gather(ui: &Ui, typing: bool) -> Inp {
@@ -44,6 +45,7 @@ fn gather(ui: &Ui, typing: bool) -> Inp {
         mid_down: i.pointer.middle_down(),
         mods: i.modifiers,
         space: !typing && i.key_down(egui::Key::Space),
+        z_down: !typing && i.key_down(egui::Key::Z),
     })
 }
 
@@ -54,10 +56,11 @@ pub fn selection_box(app: &App) -> Option<([DV; 4], bool)> {
         [] => None,
         [one] => {
             let n = app.doc.get(*one)?;
-            Some((world_corners(&app.doc, *one), matches!(n.kind, NodeKind::Line)))
+            Some((super::fast_world_corners(&app.doc, *one), matches!(n.kind, NodeKind::Line)))
         }
         many => {
-            let bb = union_all(many.iter().map(|i| world_aabb(&app.doc, *i)))?;
+            let idx = active_index(app);
+            let bb = union_all(many.iter().take(512).map(|i| super::fast_world_aabb(&app.doc, idx, *i)))?;
             Some((rect_corners(&bb), false))
         }
     }
@@ -66,25 +69,39 @@ pub fn selection_box(app: &App) -> Option<([DV; 4], bool)> {
 /// Containers that may be descended into on click (ancestors of the selection).
 fn entered(app: &App) -> Vec<NodeId> {
     let mut v = Vec::new();
-    for id in &app.selection {
+    for id in app.selection.iter().take(64) {
         let mut cur = app.doc.get(*id).and_then(|n| n.parent);
         while let Some(p) = cur {
-            v.push(p);
+            if !v.contains(&p) {
+                v.push(p);
+            }
             cur = app.doc.get(p).and_then(|n| n.parent);
         }
     }
     v
 }
 
-fn active_index(app: &App) -> Option<&designos_render::SceneIndex> {
-    if app.canvas.dirty {
-        return None;
+pub(crate) fn active_index(app: &App) -> Option<&designos_render::SceneIndex> {
+    let gpu_idx = app.canvas.gpu.scene_index();
+    let tile_idx = app.canvas.tiles.scene_index();
+    let first_vis = app
+        .doc
+        .get(app.page)
+        .and_then(|p| p.children.iter().find(|&&cid| app.doc.get(cid).is_some_and(|n| n.visible)).copied());
+    if app.canvas.gpu.active() && first_vis.map_or(true, |cid| gpu_idx.bounds_of(cid).is_some()) {
+        return Some(gpu_idx);
     }
-    Some(if app.canvas.gpu.active() {
-        app.canvas.gpu.scene_index()
+    if first_vis.is_some_and(|cid| gpu_idx.bounds_of(cid).is_some()) {
+        return Some(gpu_idx);
+    }
+    if first_vis.is_some_and(|cid| tile_idx.bounds_of(cid).is_some()) {
+        return Some(tile_idx);
+    }
+    if !app.canvas.dirty {
+        Some(if app.canvas.gpu.active() { gpu_idx } else { tile_idx })
     } else {
-        app.canvas.tiles.scene_index()
-    })
+        None
+    }
 }
 
 pub fn hit_under(app: &App, page: DV, deep: bool) -> Option<NodeId> {
@@ -92,31 +109,136 @@ pub fn hit_under(app: &App, page: DV, deep: bool) -> Option<NodeId> {
     hit::hit_test_with_index(&app.doc, app.page, page, tol, deep, &entered(app), active_index(app))
 }
 
-/// Rects of snap candidates (everything visible near the viewport except `exclude` subtrees).
+/// Rects of snap candidates (visible nodes near the viewport/moving selection except `exclude` subtrees, capped to 128).
 pub fn snap_targets(app: &App, exclude: &[NodeId]) -> Vec<Rect> {
-    let z = app.view.zoom;
+    const MAX_SNAP_CANDIDATES: usize = 128;
+    const SNAP_RADIUS_PAGE: f32 = 2000.0;
+
+    let z = app.view.zoom.max(1e-3);
     let cr = app.canvas_rect;
     let view = Rect::new(app.view.offset.x, app.view.offset.y, cr.width() / z, cr.height() / z);
     let view = Rect::new(view.x - view.w * 0.5, view.y - view.h * 0.5, view.w * 2.0, view.h * 2.0);
-    let mut out = Vec::new();
-    fn rec(doc: &Document, id: NodeId, exclude: &[NodeId], view: &Rect, out: &mut Vec<Rect>) {
-        let Some(n) = doc.get(id) else { return };
-        for c in &n.children {
-            if exclude.contains(c) || out.len() > 4000 {
+    let idx = active_index(app).or_else(|| {
+        let g = app.canvas.gpu.scene_index();
+        app.doc
+            .get(app.page)
+            .and_then(|p| p.children.first())
+            .and_then(|&cid| g.bounds_of(cid))
+            .map(|_| g)
+    });
+
+    let moving_bb = if exclude.is_empty() {
+        None
+    } else {
+        union_all(exclude.iter().map(|&id| super::fast_world_aabb(&app.doc, idx, id)))
+    };
+    let search_rect = moving_bb
+        .map(|b| {
+            Rect::new(
+                b.x - SNAP_RADIUS_PAGE,
+                b.y - SNAP_RADIUS_PAGE,
+                b.w + SNAP_RADIUS_PAGE * 2.0,
+                b.h + SNAP_RADIUS_PAGE * 2.0,
+            )
+        })
+        .unwrap_or(view);
+
+    let mut out = Vec::with_capacity(MAX_SNAP_CANDIDATES + 8);
+    let mut visited_parents = Vec::new();
+
+    // 1. Direct siblings of the excluded/moving nodes are always highest-priority snap targets.
+    for &ex in exclude {
+        let Some(parent_id) = app.doc.get(ex).and_then(|n| n.parent) else { continue };
+        if visited_parents.contains(&parent_id) {
+            continue;
+        }
+        visited_parents.push(parent_id);
+        let Some(pn) = app.doc.get(parent_id) else { continue };
+        let parent_world = super::fast_world_transform(&app.doc, parent_id);
+        for &sib in &pn.children {
+            if exclude.contains(&sib) || out.len() >= MAX_SNAP_CANDIDATES * 2 {
                 continue;
             }
-            let Some(k) = doc.get(*c) else { continue };
-            if !k.visible {
+            let Some(sn) = app.doc.get(sib) else { continue };
+            if !sn.visible {
                 continue;
             }
-            let bb = world_aabb(doc, *c);
-            if bb.intersects(view) {
+            let bb = super::affine_rect_aabb(&(parent_world * sn.transform), sn.size);
+            if bb.intersects(&view) && bb.intersects(&search_rect) {
                 out.push(bb);
-                rec(doc, *c, exclude, view, out);
             }
         }
     }
-    rec(&app.doc, app.page, exclude, &view, &mut out);
+
+    // 2. Top-level and shallow visible containers overlapping the search window.
+    if let Some(page) = app.doc.get(app.page) {
+        let win = (
+            view.x.max(search_rect.x),
+            view.y.max(search_rect.y),
+            (view.x + view.w).min(search_rect.x + search_rect.w),
+            (view.y + view.h).min(search_rect.y + search_rect.h),
+        );
+        let mut top_ids: Vec<NodeId> = Vec::new();
+        if let Some(index) = idx {
+            if page.children.len() > 32 && win.0 <= win.2 && win.1 <= win.3 {
+                index.query_top_level(win, &mut top_ids);
+            } else {
+                top_ids.extend_from_slice(&page.children);
+            }
+        } else {
+            top_ids.extend_from_slice(&page.children);
+        }
+
+        for cid in top_ids {
+            if exclude.contains(&cid) || out.len() >= MAX_SNAP_CANDIDATES * 2 {
+                continue;
+            }
+            let Some(cn) = app.doc.get(cid) else { continue };
+            if !cn.visible {
+                continue;
+            }
+            let world = cn.transform;
+            let bb = idx
+                .and_then(|i| i.bounds_of(cid))
+                .filter(|_| cn.children.is_empty() && cn.effects.is_empty() && cn.stroke.paints.is_empty())
+                .map(|(x0, y0, x1, y1)| Rect::new(x0, y0, x1 - x0, y1 - y0))
+                .unwrap_or_else(|| super::affine_rect_aabb(&world, cn.size));
+            if !bb.intersects(&view) || !bb.intersects(&search_rect) {
+                continue;
+            }
+            if !visited_parents.contains(&app.page) {
+                out.push(bb);
+            }
+            if !visited_parents.contains(&cid) {
+                for &gc in &cn.children {
+                    if exclude.contains(&gc) || out.len() >= MAX_SNAP_CANDIDATES * 2 {
+                        break;
+                    }
+                    let Some(gn) = app.doc.get(gc) else { continue };
+                    if !gn.visible {
+                        continue;
+                    }
+                    let gbb = super::affine_rect_aabb(&(world * gn.transform), gn.size);
+                    if gbb.intersects(&view) && gbb.intersects(&search_rect) {
+                        out.push(gbb);
+                    }
+                }
+            }
+        }
+    }
+
+    if out.len() > MAX_SNAP_CANDIDATES {
+        let ref_c = moving_bb.as_ref().map(rect_center).unwrap_or_else(|| rect_center(&view));
+        out.sort_by(|a, b| {
+            let ca = rect_center(a);
+            let cb = rect_center(b);
+            let da = (ca.x - ref_c.x).abs() + (ca.y - ref_c.y).abs();
+            let db = (cb.x - ref_c.x).abs() + (cb.y - ref_c.y).abs();
+            da.partial_cmp(&db).unwrap_or(std::cmp::Ordering::Equal)
+        });
+        out.truncate(MAX_SNAP_CANDIDATES);
+    }
+
     out.extend(rulers::guide_rects(app));
     out
 }
@@ -143,7 +265,10 @@ fn snap_point(p: DV, targets: &[Rect], zoom: f32) -> (DV, snap::SnapResult) {
 // ------------------------------------------------------------------ main entry
 pub fn process(app: &mut App, ui: &mut Ui, rect: ERect, resp: &Response) {
     let ctx = ui.ctx().clone();
-    let typing = ctx.egui_wants_keyboard_input() && app.canvas.text.is_none();
+    let agent_rail_open =
+        !app.ui.left_collapsed && matches!(app.ui.rail, Some(crate::app::RailItem::Agents | crate::app::RailItem::Tools));
+    let typing =
+        (ctx.egui_wants_keyboard_input() || app.terminal.is_capturing_keyboard(agent_rail_open)) && app.canvas.text.is_none();
     let inp = gather(ui, typing);
     let hovered = resp.hovered();
 
@@ -196,6 +321,10 @@ pub fn process(app: &mut App, ui: &mut Ui, rect: ERect, resp: &Response) {
     }
 
     if (inp.pressed || inp.mid_pressed) && hovered {
+        app.terminal.viewport_focused = false;
+        if let Some(focused_id) = ctx.memory(|m| m.focused()) {
+            ctx.memory_mut(|m| m.surrender_focus(focused_id));
+        }
         on_press(app, rect, &inp);
     }
     if !matches!(app.canvas.inter, Interaction::None) {
@@ -209,6 +338,13 @@ pub fn process(app: &mut App, ui: &mut Ui, rect: ERect, resp: &Response) {
         };
         if ended {
             on_release(app, rect, &inp);
+        }
+    }
+    if resp.secondary_clicked() && hovered {
+        if let Some(pos) = inp.pos {
+            if rulers::secondary_click(app, rect, pos) {
+                app.show_toast("Cleared canvas guides", false);
+            }
         }
     }
     if resp.triple_clicked() && hovered {
@@ -246,12 +382,237 @@ fn handle_hit(app: &App, rect: ERect, pos: Pos2) -> Option<HandleHit> {
     }
 }
 
+/// Checks if the click hits an on-canvas `Ready for dev` / `Completed` status pill badge (`S3-12`),
+/// cycling `n.dev.status` (`ReadyForDev` -> `Completed` -> `ReadyForDev`) with a toast.
+pub fn try_click_dev_status_badge(app: &mut App, rect: ERect, pos: Pos2) -> bool {
+    for (id, label_r) in super::draw::label_rects(app, rect) {
+        let Some(n) = app.doc.get(id) else { continue };
+        let Some((badge_r, status)) = super::draw::dev_status_badge_rect(id, n, label_r) else { continue };
+        if badge_r.contains(pos) {
+            let next = match status {
+                designos_doc::DevStatus::ReadyForDev | designos_doc::DevStatus::Changed => designos_doc::DevStatus::Completed,
+                designos_doc::DevStatus::Completed => designos_doc::DevStatus::ReadyForDev,
+            };
+            let mut tx = Tx::new();
+            if let Some(node) = tx.ed.node(&mut app.doc, id) {
+                node.dev.status = Some(next);
+            }
+            if app.run_tx(tx) {
+                app.show_toast(format!("Status: {}", next.label()), false);
+            }
+            return true;
+        }
+    }
+    false
+}
+
+/// Checks if the click hits the on-canvas `"Tidy up"` pill (`#16`) or a 2D CSS Grid track header pill (`#18`).
+pub fn try_click_canvas_action_pill(app: &mut App, rect: ERect, pos: Pos2) -> bool {
+    if let Some(tidy_r) = super::draw::tidy_up_pill_rect(app, rect) {
+        if tidy_r.contains(pos) {
+            app.tidy_up();
+            return true;
+        }
+    }
+    for (grid_id, is_col, idx, pill_r) in super::draw::grid_track_pill_rects(app, rect) {
+        if pill_r.contains(pos) {
+            let mut tx = Tx::new();
+            let mut label = String::new();
+            if let Some(ov) = super::grids::node_css_grid_overlay(&app.doc, grid_id) {
+                if let Some(n) = tx.ed.node(&mut app.doc, grid_id) {
+                    if let Some(al) = n.kind.frame_props_mut().and_then(|fp| fp.auto_layout.as_mut()) {
+                        if is_col {
+                            if let Some(tr) = al.grid_col_tracks.get_mut(idx) {
+                                *tr = match *tr {
+                                    designos_doc::GridTrack::Flex(_) => {
+                                        designos_doc::GridTrack::Fixed(ov.col_widths.get(idx).copied().unwrap_or(120.0).round().max(24.0))
+                                    }
+                                    designos_doc::GridTrack::Fixed(_) => designos_doc::GridTrack::Hug,
+                                    designos_doc::GridTrack::Hug => designos_doc::GridTrack::Flex(1.0),
+                                };
+                                label = super::grids::format_grid_track(*tr);
+                            }
+                        } else if let Some(tr) = al.grid_row_tracks.get_mut(idx) {
+                            *tr = match *tr {
+                                designos_doc::GridTrack::Flex(_) => {
+                                    designos_doc::GridTrack::Fixed(ov.row_heights.get(idx).copied().unwrap_or(80.0).round().max(24.0))
+                                }
+                                designos_doc::GridTrack::Fixed(_) => designos_doc::GridTrack::Hug,
+                                designos_doc::GridTrack::Hug => designos_doc::GridTrack::Flex(1.0),
+                            };
+                            label = super::grids::format_grid_track(*tr);
+                        }
+                    }
+                }
+                layout::relayout_around(&mut app.doc, &mut tx.ed, grid_id);
+            }
+            if app.run_tx(tx) && !label.is_empty() {
+                app.show_toast(format!("Grid track → {label}"), false);
+            }
+            return true;
+        }
+    }
+    false
+}
+
+/// Returns `(shared_parent_id, items_with_world_aabb)` when 2 or more selected nodes
+/// share the same non-Auto-Layout parent (`S1-11`).
+pub(crate) fn smart_selection_items(app: &App) -> Option<(NodeId, Vec<(NodeId, Rect)>)> {
+    if app.selection.len() < 2 || app.selection.len() > 64 {
+        return None;
+    }
+    let first = app.selection[0];
+    let parent = app.doc.get(first)?.parent?;
+    if app
+        .doc
+        .get(parent)?
+        .kind
+        .frame_props()
+        .and_then(|fp| fp.auto_layout.as_ref())
+        .is_some()
+    {
+        return None;
+    }
+    let idx = active_index(app);
+    let mut items = Vec::with_capacity(app.selection.len());
+    for &id in &app.selection {
+        let n = app.doc.get(id)?;
+        if n.parent != Some(parent) || parent_has_auto_layout(&app.doc, id) {
+            return None;
+        }
+        items.push((id, super::fast_world_aabb(&app.doc, idx, id)));
+    }
+    Some((parent, items))
+}
+
+fn try_start_smart_selection_handle(app: &mut App, rect: ERect, pos: Pos2, page: DV) -> bool {
+    let Some((_, items)) = smart_selection_items(app) else { return false };
+    let hnds = handles::smart_selection_handles(&items);
+    let Some(kind) = handles::hit_smart_selection_handle(
+        &hnds,
+        |c| dv(app.view.to_screen(rect.min, c)),
+        dv(pos),
+        4.0,
+    ) else {
+        return false;
+    };
+    let mut min_cx = f32::MAX;
+    let mut max_cx = f32::MIN;
+    let mut min_cy = f32::MAX;
+    let mut max_cy = f32::MIN;
+    for (_, r) in &items {
+        let cx = r.x + r.w * 0.5;
+        let cy = r.y + r.h * 0.5;
+        min_cx = min_cx.min(cx);
+        max_cx = max_cx.max(cx);
+        min_cy = min_cy.min(cy);
+        max_cy = max_cy.max(cy);
+    }
+    let horiz = (max_cx - min_cx) >= (max_cy - min_cy);
+    let mut sorted_items = items;
+    if horiz {
+        sorted_items.sort_by(|a, b| a.1.x.total_cmp(&b.1.x).then_with(|| a.1.y.total_cmp(&b.1.y)));
+    } else {
+        sorted_items.sort_by(|a, b| a.1.y.total_cmp(&b.1.y).then_with(|| a.1.x.total_cmp(&b.1.x)));
+    }
+    let start_gap = match kind {
+        handles::SmartSelectionHandleKind::Gap { horiz: gh, index } => {
+            let i = index.min(sorted_items.len().saturating_sub(2));
+            let a = &sorted_items[i].1;
+            let b = &sorted_items[i + 1].1;
+            if gh {
+                (b.x - (a.x + a.w)).max(0.0)
+            } else {
+                (b.y - (a.y + a.h)).max(0.0)
+            }
+        }
+        handles::SmartSelectionHandleKind::Swap(_) => 0.0,
+    };
+    let sorted: Vec<(NodeId, Rect, f32, f32)> = sorted_items
+        .into_iter()
+        .filter_map(|(id, r)| {
+            let n = app.doc.get(id)?;
+            Some((id, r, n.transform.tx, n.transform.ty))
+        })
+        .collect();
+    app.canvas.inter = Interaction::SmartSelectionDrag(SmartSelectionDragState {
+        tx: Tx::new(),
+        kind,
+        start_page: page,
+        sorted,
+        horiz,
+        start_gap,
+    });
+    true
+}
+
+pub fn update_smart_selection_drag(app: &mut App, sd: &mut SmartSelectionDragState, cur: DV) {
+    sd.tx.ed.revert(&mut app.doc);
+    match sd.kind {
+        handles::SmartSelectionHandleKind::Gap { horiz, .. } => {
+            if sd.sorted.len() >= 2 {
+                let delta = if horiz { cur.x - sd.start_page.x } else { cur.y - sd.start_page.y };
+                let new_gap = (sd.start_gap + delta).max(0.0).round();
+                let mut cursor = if horiz {
+                    sd.sorted[0].1.x + sd.sorted[0].1.w
+                } else {
+                    sd.sorted[0].1.y + sd.sorted[0].1.h
+                };
+                for k in 1..sd.sorted.len() {
+                    let (id, aabb0, tx0, ty0) = sd.sorted[k];
+                    let target_pos = cursor + new_gap;
+                    let world_delta = if horiz {
+                        v2(target_pos - aabb0.x, 0.0)
+                    } else {
+                        v2(0.0, target_pos - aabb0.y)
+                    };
+                    let dp = delta_to_parent(&app.doc, id, world_delta);
+                    if let Some(n) = sd.tx.ed.node(&mut app.doc, id) {
+                        n.transform.tx = tx0 + dp.x;
+                        n.transform.ty = ty0 + dp.y;
+                    }
+                    cursor = target_pos + if horiz { aabb0.w } else { aabb0.h };
+                }
+            }
+        }
+        handles::SmartSelectionHandleKind::Swap(dragged_id) => {
+            if let Some(&(_, _, drag_tx0, drag_ty0)) = sd.sorted.iter().find(|&&(id, ..)| id == dragged_id) {
+                if let Some(&(other_id, _, other_tx0, other_ty0)) = sd.sorted.iter().find(|&&(id, ref r, _, _)| {
+                    id != dragged_id && cur.x >= r.x && cur.x <= r.x + r.w && cur.y >= r.y && cur.y <= r.y + r.h
+                }) {
+                    if let Some(n1) = sd.tx.ed.node(&mut app.doc, dragged_id) {
+                        n1.transform.tx = other_tx0;
+                        n1.transform.ty = other_ty0;
+                    }
+                    if let Some(n2) = sd.tx.ed.node(&mut app.doc, other_id) {
+                        n2.transform.tx = drag_tx0;
+                        n2.transform.ty = drag_ty0;
+                    }
+                }
+            }
+        }
+    }
+    app.changed();
+}
+
 fn on_press(app: &mut App, rect: ERect, inp: &Inp) {
     let Some(pos) = inp.pos else { return };
-    if inp.pressed && !inp.space && rulers::press(app, rect, pos) {
+    if app.props.eyedropper.is_some() || app.props.picker.as_ref().is_some_and(|pk| pk.eyedrop) {
         return;
     }
+    app.canvas.al_inline = None;
     let page = app.view.to_page(rect.min, pos);
+    if inp.pressed && inp.z_down && app.canvas.text.is_none() {
+        app.canvas.inter = Interaction::ZoomMarquee {
+            start: page,
+            cur: page,
+            alt: inp.mods.alt,
+        };
+        return;
+    }
+    if inp.pressed && !inp.space && rulers::press_with_alt(app, rect, pos, inp.mods.alt) {
+        return;
+    }
     // Text editing: click inside the edited node moves the caret, elsewhere ends editing.
     if let Some(sess) = &app.canvas.text {
         let id = sess.id;
@@ -262,6 +623,9 @@ fn on_press(app: &mut App, rect: ERect, inp: &Inp) {
         finish_text(app, true);
     }
     let mid = inp.mid_pressed && !inp.pressed;
+    if !mid && !inp.space && (try_click_dev_status_badge(app, rect, pos) || try_click_canvas_action_pill(app, rect, pos)) {
+        return;
+    }
     if app.canvas.vedit.is_some() && !mid && !inp.space && vector::press(app, rect, pos, inp.mods) {
         return;
     }
@@ -274,12 +638,15 @@ fn on_press(app: &mut App, rect: ERect, inp: &Inp) {
     }
     let deep = inp.mods.command;
     let over_handle = handle_hit(app, rect, pos);
-    if over_handle.is_none() && !mid && !inp.space && matches!(app.tool, Tool::Move) {
+    let over_corner = matches!(over_handle, Some(HandleHit::Resize(h)) if h.is_corner());
+    if !over_corner && !mid && !inp.space && matches!(app.tool, Tool::Move) {
         if let [sel_id] = app.selection.as_slice() {
             let sel_id = *sel_id;
-            if hit_under(app, page, deep) == Some(sel_id) && try_start_special_handle(app, rect, pos, page, sel_id) {
+            if try_start_special_handle(app, rect, pos, page, sel_id) {
                 return;
             }
+        } else if app.selection.len() >= 2 && try_start_smart_selection_handle(app, rect, pos, page) {
+            return;
         }
     }
     let target = if let Some(h) = over_handle {
@@ -343,7 +710,7 @@ fn on_press(app: &mut App, rect: ERect, inp: &Inp) {
 fn try_start_special_handle(app: &mut App, rect: ERect, pos: Pos2, page: DV, id: NodeId) -> bool {
     let Some(n) = app.doc.get(id) else { return false };
     let z = app.view.zoom;
-    let corners = world_corners(&app.doc, id).map(|c| dv(app.view.to_screen(rect.min, c)));
+    let corners = super::fast_world_corners(&app.doc, id).map(|c| dv(app.view.to_screen(rect.min, c)));
     if handles::supports_corner_radius_handles(&n.kind) {
         if let Some(corner) = handles::hit_corner_radius_handle(&corners, n.corner_radii, z, dv(pos), 4.5) {
             app.canvas.inter = Interaction::CornerRadius(CornerRadiusDragState {
@@ -365,7 +732,7 @@ fn try_start_special_handle(app: &mut App, rect: ERect, pos: Pos2, page: DV, id:
             }
         }
         let hnds = handles::auto_layout_handles(al, n.size, &child_rects, z);
-        let w_xform = app.doc.world_transform(id);
+        let w_xform = super::fast_world_transform(&app.doc, id);
         if let Some(kind) = handles::hit_auto_layout_handle(
             &hnds,
             |lc| dv(app.view.to_screen(rect.min, w_xform.apply(lc))),
@@ -382,11 +749,133 @@ fn try_start_special_handle(app: &mut App, rect: ERect, pos: Pos2, page: DV, id:
                 kind,
                 start_page: page,
                 start_value,
+                moved: false,
             });
             return true;
         }
     }
+    if let Some(kind) = handles::hit_shape_control_handle(&n.kind, &corners, z, dv(pos), 6.0) {
+        let (start_count, start_ratio, start_end_angle) = match &n.kind {
+            NodeKind::Ellipse(arc) => (0, arc.inner_radius, arc.end),
+            NodeKind::Polygon { count } => (*count, 0.0, 0.0),
+            NodeKind::Star { count, inner_ratio } => (*count, *inner_ratio, 0.0),
+            _ => (0, 0.0, 0.0),
+        };
+        app.canvas.inter = Interaction::ShapeControl(ShapeControlDragState {
+            tx: Tx::new(),
+            id,
+            kind,
+            start_page: page,
+            start_count,
+            start_ratio,
+            start_end_angle,
+        });
+        return true;
+    }
     false
+}
+
+fn special_handle_hovered(app: &App, rect: ERect, pos: Pos2) -> bool {
+    if app.selection.len() >= 2 {
+        if let Some((_, items)) = smart_selection_items(app) {
+            let hnds = handles::smart_selection_handles(&items);
+            if handles::hit_smart_selection_handle(
+                &hnds,
+                |c| dv(app.view.to_screen(rect.min, c)),
+                dv(pos),
+                4.0,
+            )
+            .is_some()
+            {
+                return true;
+            }
+        }
+        return false;
+    }
+    let [id] = app.selection.as_slice() else { return false };
+    let id = *id;
+    let Some(n) = app.doc.get(id) else { return false };
+    let z = app.view.zoom;
+    let corners = super::fast_world_corners(&app.doc, id).map(|c| dv(app.view.to_screen(rect.min, c)));
+    if handles::supports_corner_radius_handles(&n.kind)
+        && handles::hit_corner_radius_handle(&corners, n.corner_radii, z, dv(pos), 4.5).is_some()
+    {
+        return true;
+    }
+    if let Some(al) = n.kind.frame_props().and_then(|fp| fp.auto_layout.as_ref()) {
+        let mut child_rects = Vec::new();
+        for &cid in &n.children {
+            if let Some(c) = app.doc.get(cid) {
+                if c.visible && !c.layout_child.absolute {
+                    child_rects.push(Rect::new(c.transform.tx, c.transform.ty, c.size.x, c.size.y));
+                }
+            }
+        }
+        let hnds = handles::auto_layout_handles(al, n.size, &child_rects, z);
+        let w_xform = super::fast_world_transform(&app.doc, id);
+        if handles::hit_auto_layout_handle(
+            &hnds,
+            |lc| dv(app.view.to_screen(rect.min, w_xform.apply(lc))),
+            dv(pos),
+            3.0,
+        )
+        .is_some()
+        {
+            return true;
+        }
+    }
+    handles::hit_shape_control_handle(&n.kind, &corners, z, dv(pos), 6.0).is_some()
+}
+
+pub fn update_shape_control(app: &mut App, s: &mut ShapeControlDragState, cur: DV, shift: bool) {
+    let _ = (s.start_ratio, s.start_end_angle);
+    s.tx.ed.revert(&mut app.doc);
+    let inv = app.doc.world_transform(s.id).invert().unwrap_or(Affine::IDENTITY);
+    let local_p = inv.apply(cur);
+    if let Some(n) = s.tx.ed.node(&mut app.doc, s.id) {
+        let w = n.size.x.max(1.0);
+        let h = n.size.y.max(1.0);
+        let cx = w * 0.5;
+        let cy = h * 0.5;
+        let radius = (w.min(h) * 0.5).max(1.0);
+        match (&mut n.kind, s.kind) {
+            (NodeKind::Ellipse(arc), handles::ShapeControlKind::EllipseSweep) => {
+                let mut ang = (local_p.y - cy).atan2(local_p.x - cx);
+                if shift {
+                    ang = handles::snap_angle(ang, 15.0);
+                }
+                if ang <= arc.start {
+                    ang += std::f32::consts::TAU;
+                }
+                arc.end = ang.clamp(arc.start + 0.05, arc.start + std::f32::consts::TAU);
+            }
+            (NodeKind::Ellipse(arc), handles::ShapeControlKind::EllipseInnerRadius) => {
+                let d = ((local_p.x - cx).hypot(local_p.y - cy) / radius).clamp(0.0, 0.95);
+                arc.inner_radius = d;
+            }
+            (NodeKind::Ellipse(arc), handles::ShapeControlKind::EllipseStartAngle) => {
+                let mut ang = (local_p.y - cy).atan2(local_p.x - cx);
+                if shift {
+                    ang = handles::snap_angle(ang, 15.0);
+                }
+                let sweep = (s.start_end_angle - arc.start).clamp(0.05, std::f32::consts::TAU);
+                arc.start = ang;
+                arc.end = ang + sweep;
+            }
+            (NodeKind::Polygon { count }, handles::ShapeControlKind::PolygonCount)
+            | (NodeKind::Star { count, .. }, handles::ShapeControlKind::StarCount) => {
+                let dy = cur.y - s.start_page.y;
+                let delta = (dy / -8.0).round() as i32;
+                *count = (s.start_count as i32 + delta).clamp(3, 60) as u32;
+            }
+            (NodeKind::Star { inner_ratio, .. }, handles::ShapeControlKind::StarInnerRatio) => {
+                let d = ((local_p.x - cx).hypot(local_p.y - cy) / radius).clamp(0.05, 0.95);
+                *inner_ratio = d;
+            }
+            _ => {}
+        }
+    }
+    app.changed();
 }
 
 fn label_hit(app: &App, rect: ERect, pos: Pos2) -> Option<NodeId> {
@@ -399,14 +888,18 @@ fn start_resize(app: &mut App, handle: Handle, page: DV) {
         return;
     }
     let tx = Tx::new();
-    let kind = if sel.len() == 1 {
-        let id = sel[0];
-        let Some(n) = app.doc.get(id) else { return };
-        ResizeKind::Single { id, world0: app.doc.world_transform(id), t0: n.transform, size0: n.size }
-    } else {
-        let nodes: Vec<_> = sel.iter().filter_map(|id| app.doc.get(*id).map(|n| (*id, world_aabb(&app.doc, *id), n.transform, n.size))).collect();
+    let idx = active_index(app);
+    let kind = if sel.len() > 1 {
+        let nodes: Vec<_> = sel
+            .iter()
+            .filter_map(|id| app.doc.get(*id).map(|n| (*id, super::fast_world_aabb(&app.doc, idx, *id), n.transform, n.size)))
+            .collect();
         let Some(bbox0) = union_all(nodes.iter().map(|n| n.1)) else { return };
         ResizeKind::Multi { bbox0, nodes }
+    } else {
+        let id = sel[0];
+        let Some(n) = app.doc.get(id) else { return };
+        ResizeKind::Single { id, world0: super::fast_world_transform(&app.doc, id), t0: n.transform, size0: n.size }
     };
     let targets = snap_targets(app, &sel);
     let _ = page;
@@ -415,10 +908,11 @@ fn start_resize(app: &mut App, handle: Handle, page: DV) {
 
 fn start_rotate(app: &mut App, _corner: usize, page: DV) {
     let tops = app.top_selection();
+    let idx = active_index(app);
     if tops.len() > 1 {
-        let Some(bb) = union_all(tops.iter().map(|i| world_aabb(&app.doc, *i))) else { return };
+        let Some(bb) = union_all(tops.iter().map(|i| super::fast_world_aabb(&app.doc, idx, *i))) else { return };
         let center = rect_center(&bb);
-        let group = tops.iter().map(|i| (*i, app.doc.world_transform(*i))).collect();
+        let group = tops.iter().map(|i| (*i, super::fast_world_transform(&app.doc, *i))).collect();
         app.canvas.inter = Interaction::Rotate(RotateState {
             tx: Tx::new(),
             id: tops[0],
@@ -433,7 +927,7 @@ fn start_rotate(app: &mut App, _corner: usize, page: DV) {
     }
     let Some(id) = app.selection.first().copied() else { return };
     let Some(n) = app.doc.get(id) else { return };
-    let w = app.doc.world_transform(id);
+    let w = super::fast_world_transform(&app.doc, id);
     let center = w.apply(v2(n.size.x / 2.0, n.size.y / 2.0));
     app.canvas.inter = Interaction::Rotate(RotateState {
         tx: Tx::new(),
@@ -455,7 +949,7 @@ fn start_draw(app: &mut App, tool: Tool, page: DV) {
         if snapped_on(&sr.guides, snap::GuideAxis::X) { start.x } else { px(app, start.x) },
         if snapped_on(&sr.guides, snap::GuideAxis::Y) { start.y } else { px(app, start.y) },
     );
-    let parent = create::container_at(&app.doc, app.page, start, &[]);
+    let parent = create::container_at_with_index(&app.doc, active_index(app), app.page, start, &[]);
     let node = create::new_shape(app, tool);
     let id = node.id;
     let mut tx = Tx::new();
@@ -464,7 +958,7 @@ fn start_draw(app: &mut App, tool: Tool, page: DV) {
         return;
     }
     app.selection = vec![id];
-    app.canvas.inter = Interaction::Draw(DrawState { tx, tool, id, parent, start, targets, dragged: false });
+    app.canvas.inter = Interaction::Draw(DrawState { tx, tool, id, parent, start, last_page: start, targets, dragged: false });
     app.changed();
 }
 
@@ -478,6 +972,9 @@ fn on_drag(app: &mut App, ui: &Ui, rect: ERect, inp: &Inp) {
         Interaction::Pan => {
             let d = ui.input(|i| i.pointer.delta());
             app.view.offset = v2(app.view.offset.x - d.x / zoom, app.view.offset.y - d.y / zoom);
+        }
+        Interaction::ZoomMarquee { cur: c, .. } => {
+            *c = cur;
         }
         Interaction::Pending(p) => {
             if (pos - p.start_screen).length() > theme::DRAG_THRESHOLD_PX {
@@ -494,15 +991,25 @@ fn on_drag(app: &mut App, ui: &Ui, rect: ERect, inp: &Inp) {
         Interaction::Guide(g) => rulers::drag(app, g, rect, pos),
         Interaction::Connect(c) => crate::board::connect::drag(app, c, cur),
         Interaction::Marquee { start, cur: c, base } => {
+            if inp.space {
+                let delta = sub(cur, *c);
+                *start = add(*start, delta);
+            }
             *c = cur;
             let r = rect_from_points(*start, cur);
-            let mut sel = base.clone();
-            for id in hit::marquee_select_with_index(&app.doc, app.page, &r, active_index(app)) {
-                if !sel.contains(&id) {
-                    sel.push(id);
+            let hits = hit::marquee_select_with_index(&app.doc, app.page, &r, active_index(app));
+            if base.is_empty() {
+                app.selection = hits;
+            } else {
+                let mut sel = base.clone();
+                let mut seen: std::collections::HashSet<NodeId> = sel.iter().copied().collect();
+                for id in hits {
+                    if seen.insert(id) {
+                        sel.push(id);
+                    }
                 }
+                app.selection = sel;
             }
-            app.selection = sel;
         }
         Interaction::Resize(r) => update_resize(app, r, cur, inp),
         Interaction::Rotate(r) => {
@@ -546,6 +1053,13 @@ fn on_drag(app: &mut App, ui: &Ui, rect: ERect, inp: &Inp) {
             app.changed();
         }
         Interaction::AutoLayoutDrag(ad) => {
+            if dist(ad.start_page, cur) * zoom > theme::DRAG_THRESHOLD_PX {
+                ad.moved = true;
+            }
+            if !ad.moved {
+                app.canvas.inter = inter;
+                return;
+            }
             ad.tx.ed.revert(&mut app.doc);
             let horiz = app
                 .doc
@@ -566,7 +1080,10 @@ fn on_drag(app: &mut App, ui: &Ui, rect: ERect, inp: &Inp) {
                     }
                 }
             };
-            let new_val = (ad.start_value + delta).max(0.0).round();
+            let new_val = match ad.kind {
+                handles::AutoLayoutHandleKind::Gap(_) => (ad.start_value + delta).clamp(-200.0, 2000.0).round(),
+                handles::AutoLayoutHandleKind::Padding(_) => (ad.start_value + delta).max(0.0).round(),
+            };
             if let Some(n) = ad.tx.ed.node(&mut app.doc, ad.id) {
                 if let Some(al) = n.kind.frame_props_mut().and_then(|fp| fp.auto_layout.as_mut()) {
                     match ad.kind {
@@ -594,7 +1111,18 @@ fn on_drag(app: &mut App, ui: &Ui, rect: ERect, inp: &Inp) {
             layout::relayout_around(&mut app.doc, &mut ad.tx.ed, ad.id);
             app.changed();
         }
+        Interaction::SmartSelectionDrag(sd) => {
+            update_smart_selection_drag(app, sd, cur);
+        }
+        Interaction::ShapeControl(sc) => {
+            update_shape_control(app, sc, cur, inp.mods.shift);
+        }
         Interaction::Draw(d) => {
+            if inp.space {
+                let delta = sub(cur, d.last_page);
+                d.start = add(d.start, delta);
+            }
+            d.last_page = cur;
             let (mut c, snapped) = if inp.mods.command { (cur, snap::SnapResult::default()) } else { snap_point(cur, &d.targets, zoom) };
             if inp.mods.shift {
                 c = cur;
@@ -666,7 +1194,8 @@ fn start_move(app: &mut App, clicked: NodeId, start: DV, alt: bool) -> Option<Mo
             app.selection = ids.clone();
         }
     }
-    let orig_bbox = union_all(ids.iter().map(|i| world_aabb(&app.doc, *i)))?;
+    let idx = active_index(app);
+    let orig_bbox = union_all(ids.iter().map(|i| super::fast_world_aabb(&app.doc, idx, *i)))?;
     let targets = snap_targets(app, &ids);
     Some(MoveState { tx, ids, start, orig_bbox, targets, moved: false, reorder: None })
 }
@@ -715,17 +1244,25 @@ fn update_move(app: &mut App, m: &mut MoveState, cur: DV, inp: &Inp) {
         app.canvas.measures = s.measures;
     }
     // Auto-layout children follow the pointer too (their slot is decided on release).
+    let mut relayout_roots = Vec::new();
+    let mut seen_parents = Vec::new();
     for id in &m.ids {
         let dp = delta_to_parent(&app.doc, *id, d);
         if let Some(n) = m.tx.ed.node(&mut app.doc, *id) {
             n.transform.tx += dp.x;
             n.transform.ty += dp.y;
         }
-    }
-    for id in &m.ids {
         if !parent_has_auto_layout(&app.doc, *id) {
-            layout::relayout_up(&mut app.doc, &mut m.tx.ed, *id);
+            if let Some(p) = app.doc.get(*id).and_then(|n| n.parent) {
+                if !seen_parents.contains(&p) {
+                    seen_parents.push(p);
+                    relayout_roots.push(*id);
+                }
+            }
         }
+    }
+    for id in relayout_roots {
+        layout::relayout_up(&mut app.doc, &mut m.tx.ed, id);
     }
     m.reorder = match m.ids.as_slice() {
         [only] if parent_has_auto_layout(&app.doc, *only) => {
@@ -760,25 +1297,40 @@ fn update_resize(app: &mut App, r: &mut ResizeState, cur: DV, inp: &Inp) {
         }
         app.canvas.guides = s.guides;
     }
+    let is_scale_tool = app.tool == Tool::Scale;
     match &r.kind {
         ResizeKind::Single { id, world0, t0, size0 } => {
             let Some(inv) = world0.invert() else { return };
             let ml = inv.apply(mouse);
             let is_text = matches!(app.doc.get(*id).map(|n| &n.kind), Some(NodeKind::Text(_)));
             let is_line = matches!(app.doc.get(*id).map(|n| &n.kind), Some(NodeKind::Line));
-            let (mut ns, d) = handles::resize_local(*size0, r.handle, ml, inp.mods.shift && !is_line || is_text && r.handle.is_corner(), inp.mods.alt);
+            let lock_aspect = is_scale_tool || (inp.mods.shift && !is_line) || (is_text && r.handle.is_corner());
+            let (mut ns, d) = handles::resize_local(*size0, r.handle, ml, lock_aspect, inp.mods.alt);
             if is_line {
                 ns.y = 0.0;
             }
             let t = *t0 * Affine::translate(d.x, if is_line { 0.0 } else { d.y });
-            apply_resize(&mut app.doc, &mut r.tx.ed, *id, ns, t, true);
+            // Cmd/Ctrl while resizing a container ignores child constraints & auto-layout (MI-11).
+            if inp.mods.command && app.doc.get(*id).is_some_and(|n| n.kind.is_container()) {
+                if let Some(n) = r.tx.ed.node(&mut app.doc, *id) {
+                    n.size = ns;
+                    n.transform = t;
+                }
+            } else {
+                apply_resize(&mut app.doc, &mut r.tx.ed, *id, ns, t, true);
+                if is_scale_tool {
+                    let factor = (ns.x / size0.x.max(1.0)).clamp(0.05, 50.0);
+                    scale_node_properties_proportionally(&mut app.doc, &mut r.tx.ed, *id, factor);
+                }
+            }
         }
         ResizeKind::Multi { bbox0, nodes } => {
             let ml = sub(mouse, v2(bbox0.x, bbox0.y));
-            let (ns, d) = handles::resize_local(v2(bbox0.w, bbox0.h), r.handle, ml, inp.mods.shift, inp.mods.alt);
+            let (ns, d) = handles::resize_local(v2(bbox0.w, bbox0.h), r.handle, ml, inp.mods.shift || is_scale_tool, inp.mods.alt);
             let nb = Rect::new(bbox0.x + d.x, bbox0.y + d.y, ns.x, ns.y);
             let (sx, sy) = (ns.x / bbox0.w.max(1e-3), ns.y / bbox0.h.max(1e-3));
-            let mut ids = Vec::new();
+            let mut relayout_roots = Vec::new();
+            let mut seen_parents = Vec::new();
             for (id, aabb0, t0, size0) in nodes {
                 let (nx, ny) = (nb.x + (aabb0.x - bbox0.x) * sx, nb.y + (aabb0.y - bbox0.y) * sy);
                 let pinv = parent_world(&app.doc, *id).invert().unwrap_or(Affine::IDENTITY);
@@ -793,14 +1345,49 @@ fn update_resize(app: &mut App, r: &mut ResizeState, cur: DV, inp: &Inp) {
                     let t = Affine { tx: o.x, ty: o.y, ..*t0 };
                     apply_resize(&mut app.doc, &mut r.tx.ed, *id, v2((size0.x * sx).max(1.0), (size0.y * sy).max(1.0)), t, false);
                 }
-                ids.push(*id);
+                if is_scale_tool {
+                    scale_node_properties_proportionally(&mut app.doc, &mut r.tx.ed, *id, sx.clamp(0.05, 50.0));
+                }
+                if let Some(p) = app.doc.get(*id).and_then(|n| n.parent) {
+                    if !seen_parents.contains(&p) {
+                        seen_parents.push(p);
+                        relayout_roots.push(*id);
+                    }
+                }
             }
-            for id in ids {
+            for id in relayout_roots {
                 layout::relayout_up(&mut app.doc, &mut r.tx.ed, id);
             }
         }
     }
     app.changed();
+}
+
+/// Proportionally scales stroke weights, corner radii, text font size, and Auto-Layout padding/gap
+/// for `Tool::Scale` (`K` `#32`).
+fn scale_node_properties_proportionally(doc: &mut Document, ed: &mut crate::edit::Edit, id: NodeId, factor: f32) {
+    let mut stack = vec![id];
+    while let Some(cur) = stack.pop() {
+        let children = doc.get(cur).map(|n| n.children.clone()).unwrap_or_default();
+        if let Some(n) = ed.node(doc, cur) {
+            for r in &mut n.corner_radii {
+                *r = (*r * factor).max(0.0);
+            }
+            n.stroke.weight = (n.stroke.weight * factor).max(0.0);
+            if let Some(tp) = n.kind.any_text_mut() {
+                crate::richtext::apply_all(tp, |st| {
+                    st.font_size = (st.font_size * factor).clamp(4.0, 512.0);
+                });
+            }
+            if let Some(al) = n.kind.frame_props_mut().and_then(|fp| fp.auto_layout.as_mut()) {
+                for p in &mut al.padding {
+                    *p = (*p * factor).max(0.0).round();
+                }
+                al.item_spacing = (al.item_spacing * factor).round();
+            }
+        }
+        stack.extend(children);
+    }
 }
 
 // ------------------------------------------------------------------ release
@@ -822,7 +1409,8 @@ fn on_release(app: &mut App, rect: ERect, inp: &Inp) {
         Interaction::Guide(g) => rulers::release(app, g),
         Interaction::Connect(c) => crate::board::connect::release(app, c),
         Interaction::Move(mut m) => {
-            if m.moved && !m.ids.is_empty() {
+            // Holding Space on release suppresses reparenting into a different container (MI-12).
+            if m.moved && !m.ids.is_empty() && !inp.space {
                 reparent_after_move(app, &mut m, cur);
             }
             app.run_tx(m.tx);
@@ -837,7 +1425,44 @@ fn on_release(app: &mut App, rect: ERect, inp: &Inp) {
             app.run_tx(c.tx);
         }
         Interaction::AutoLayoutDrag(a) => {
-            app.run_tx(a.tx);
+            if a.moved {
+                app.run_tx(a.tx);
+            } else {
+                a.tx.ed.revert(&mut app.doc);
+                app.canvas.al_inline = Some(super::AutoLayoutInlineEdit {
+                    id: a.id,
+                    kind: a.kind,
+                    anchor_page: a.start_page,
+                    text: format!("{}", a.start_value.round() as i64),
+                    request_focus: true,
+                });
+            }
+        }
+        Interaction::SmartSelectionDrag(s) => {
+            app.run_tx(s.tx);
+        }
+        Interaction::ZoomMarquee { start, cur, alt } => {
+            let s0 = app.view.to_screen(rect.min, start);
+            let s1 = app.view.to_screen(rect.min, cur);
+            if (s1 - s0).length() > 6.0 {
+                let r = rect_from_points(start, cur);
+                let vw = rect.width().max(1.0);
+                let vh = rect.height().max(1.0);
+                let new_zoom = (vw / r.w.max(1.0))
+                    .min(vh / r.h.max(1.0))
+                    .clamp(theme::ZOOM_MIN, theme::ZOOM_MAX);
+                let cx = r.x + r.w * 0.5;
+                let cy = r.y + r.h * 0.5;
+                app.view.zoom = new_zoom;
+                app.view.offset = v2(cx - (vw * 0.5) / new_zoom, cy - (vh * 0.5) / new_zoom);
+            } else if let Some(pos) = inp.pos {
+                let factor = if alt || inp.mods.alt { 0.5 } else { 2.0 };
+                app.view.zoom_at(rect.min, pos, factor);
+            }
+            return;
+        }
+        Interaction::ShapeControl(s) => {
+            app.run_tx(s.tx);
         }
         Interaction::Draw(mut d) => {
             if !d.dragged && (crate::board::create::types_into(d.tool) || d.tool == Tool::Stamp) {
@@ -890,8 +1515,100 @@ fn on_release(app: &mut App, rect: ERect, inp: &Inp) {
     app.changed();
 }
 
+/// Renders and commits the inline Auto-Layout gap/padding popover when a pink bar is clicked (`S1-08`).
+pub fn auto_layout_inline_overlay(app: &mut App, ui: &mut Ui, rect: ERect) {
+    let Some(mut inline) = app.canvas.al_inline.take() else { return };
+    if !app.selection.contains(&inline.id) || app.doc.get(inline.id).is_none() {
+        return;
+    }
+    let screen_pt = app.view.to_screen(rect.min, inline.anchor_page);
+    let box_rect = ERect::from_center_size(screen_pt, egui::vec2(56.0, 22.0));
+    let mut commit = false;
+    let mut cancel = false;
+
+    egui::Area::new(egui::Id::new("al_inline_edit_area"))
+        .fixed_pos(box_rect.min)
+        .order(egui::Order::Foreground)
+        .show(ui.ctx(), |ui| {
+            egui::Frame::NONE
+                .fill(theme::BG_SECONDARY)
+                .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(244, 63, 94)))
+                .corner_radius(4.0)
+                .inner_margin(egui::Margin::symmetric(4, 2))
+                .show(ui, |ui| {
+                    let resp = ui.add_sized(
+                        [48.0, 18.0],
+                        egui::TextEdit::singleline(&mut inline.text)
+                            .font(egui::FontId::proportional(11.0))
+                            .horizontal_align(egui::Align::Center),
+                    );
+                    if inline.request_focus {
+                        resp.request_focus();
+                        inline.request_focus = false;
+                    }
+                    if ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                        commit = true;
+                    } else if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                        cancel = true;
+                    } else if resp.lost_focus() {
+                        commit = true;
+                    }
+                });
+        });
+
+    if cancel {
+        return;
+    }
+    if commit {
+        commit_auto_layout_inline_value(app, inline.id, inline.kind, &inline.text);
+        return;
+    }
+    app.canvas.al_inline = Some(inline);
+}
+
+pub fn commit_auto_layout_inline_value(
+    app: &mut App,
+    id: NodeId,
+    kind: handles::AutoLayoutHandleKind,
+    raw: &str,
+) -> bool {
+    let trimmed = raw.trim();
+    let is_auto = trimmed.eq_ignore_ascii_case("auto");
+    let parsed = crate::widgets::field::eval_number_expr(trimmed, None, false)
+        .or_else(|| trimmed.parse::<f32>().ok());
+    if !is_auto && parsed.is_none() {
+        return false;
+    }
+    let mut tx = Tx::new();
+    let Some(n) = tx.ed.node(&mut app.doc, id) else { return false };
+    let Some(al) = n.kind.frame_props_mut().and_then(|fp| fp.auto_layout.as_mut()) else {
+        return false;
+    };
+    match kind {
+        handles::AutoLayoutHandleKind::Gap(_) => {
+            if is_auto {
+                al.primary_align = designos_doc::LayoutAlign::SpaceBetween;
+            } else if let Some(v) = parsed {
+                if al.primary_align == designos_doc::LayoutAlign::SpaceBetween {
+                    al.primary_align = designos_doc::LayoutAlign::Start;
+                }
+                al.item_spacing = v.max(0.0).round();
+            }
+        }
+        handles::AutoLayoutHandleKind::Padding(side) => {
+            if let Some(v) = parsed {
+                al.padding[side.min(3)] = v.max(0.0).round();
+            } else {
+                return false;
+            }
+        }
+    }
+    layout::relayout_around(&mut app.doc, &mut tx.ed, id);
+    app.run_tx(tx)
+}
+
 fn reparent_after_move(app: &mut App, m: &mut MoveState, cur: DV) {
-    let target = create::container_at(&app.doc, app.page, cur, &m.ids);
+    let target = create::container_at_with_index(&app.doc, active_index(app), app.page, cur, &m.ids);
     let mut touched_parents = Vec::new();
     if let Some(r) = m.reorder.take() {
         // Dropped inside its auto-layout frame: move to the indicated slot.
@@ -970,6 +1687,11 @@ pub fn navigate_hierarchy_enter(app: &mut App, shift: bool) -> bool {
 fn on_double_click(app: &mut App, rect: ERect, inp: &Inp) {
     let Some(pos) = inp.pos else { return };
     let page = app.view.to_page(rect.min, pos);
+    // Double-click on a ruler guide removes it (`S3-08`).
+    if let Some((idx, _)) = rulers::hit_guide(app, rect, pos) {
+        rulers::remove_guide(app, idx);
+        return;
+    }
     if app.tool == Tool::Pen {
         finish_pen(app);
         app.tool = Tool::Move;
@@ -983,6 +1705,14 @@ fn on_double_click(app: &mut App, rect: ERect, inp: &Inp) {
     }
     if app.tool != Tool::Move {
         return;
+    }
+    // Double-click on a resize edge/corner handle (`S1-02`, `S1-03`, `S2-05`, `S2-06`):
+    // - Text layers: right/bottom/corner handle -> Auto-Width / Auto-Height fit
+    // - Auto-Layout frames & children: Fixed -> Hug -> Fill (or Alt+Double-Click -> Fill)
+    if let Some(HandleHit::Resize(h)) = handle_hit(app, rect, pos) {
+        if double_click_resize_edge(app, h, inp.mods.alt) {
+            return;
+        }
     }
     let tol = 2.0 / app.view.zoom;
     let deep = inp.mods.command || inp.mods.shift;
@@ -1009,6 +1739,146 @@ fn on_double_click(app: &mut App, rect: ERect, inp: &Inp) {
             app.select_only(id);
         }
     }
+}
+
+/// Applies Figma-parity double-click resize handle behavior (`S1-02`, `S1-03`, `S2-05`, `S2-06`).
+pub fn double_click_resize_edge(app: &mut App, h: Handle, alt: bool) -> bool {
+    let [id] = app.selection.as_slice() else { return false };
+    let id = *id;
+    let Some(node) = app.doc.get(id) else { return false };
+
+    // 1. Text node double-click resize (`S2-05`, `S2-06`)
+    if matches!(node.kind, NodeKind::Text(_)) {
+        let mut tx = Tx::new();
+        let Some(n) = tx.ed.node(&mut app.doc, id) else { return false };
+        let cur_size = n.size;
+        let NodeKind::Text(t) = &mut n.kind else { return false };
+        match h {
+            Handle::R | Handle::L | Handle::TR | Handle::BR | Handle::TL | Handle::BL => {
+                t.auto_resize = designos_doc::TextAutoResize::WidthAndHeight;
+                let fitted = layout::fit_text(t, cur_size);
+                n.size = fitted;
+            }
+            Handle::B | Handle::T => {
+                t.auto_resize = designos_doc::TextAutoResize::Height;
+                let fitted = layout::fit_text(t, cur_size);
+                n.size.y = fitted.y;
+            }
+        }
+        layout::relayout_around(&mut app.doc, &mut tx.ed, id);
+        return app.run_tx(tx);
+    }
+
+    // 2. Auto-Layout frame or child of Auto-Layout parent (`S1-02`, `S1-03`)
+    let has_own_al = node.kind.frame_props().is_some_and(|fp| fp.auto_layout.is_some());
+    let in_al_parent = parent_has_auto_layout(&app.doc, id);
+    if !has_own_al && !in_al_parent {
+        return false;
+    }
+
+    let mut tx = Tx::new();
+    let Some(n) = tx.ed.node(&mut app.doc, id) else { return false };
+    let affects_x = h.affects_x();
+    let affects_y = h.affects_y();
+
+    let next_sizing = |cur: designos_doc::Sizing, can_hug: bool, can_fill: bool| -> designos_doc::Sizing {
+        if alt && can_fill {
+            return designos_doc::Sizing::Fill;
+        }
+        match cur {
+            designos_doc::Sizing::Fixed => {
+                if can_hug {
+                    designos_doc::Sizing::Hug
+                } else if can_fill {
+                    designos_doc::Sizing::Fill
+                } else {
+                    designos_doc::Sizing::Fixed
+                }
+            }
+            designos_doc::Sizing::Hug => {
+                if can_fill {
+                    designos_doc::Sizing::Fill
+                } else {
+                    designos_doc::Sizing::Fixed
+                }
+            }
+            designos_doc::Sizing::Fill => {
+                if can_hug {
+                    designos_doc::Sizing::Hug
+                } else {
+                    designos_doc::Sizing::Fixed
+                }
+            }
+        }
+    };
+
+    if affects_x {
+        let cur = if has_own_al {
+            let al = n.kind.frame_props().unwrap().auto_layout.as_ref().unwrap();
+            if al.direction == designos_doc::LayoutDirection::Horizontal {
+                if n.layout_child.horizontal == designos_doc::Sizing::Fill {
+                    designos_doc::Sizing::Fill
+                } else {
+                    al.primary_sizing
+                }
+            } else if n.layout_child.horizontal == designos_doc::Sizing::Fill {
+                designos_doc::Sizing::Fill
+            } else {
+                al.counter_sizing
+            }
+        } else {
+            n.layout_child.horizontal
+        };
+        let next = next_sizing(cur, has_own_al, in_al_parent);
+        n.layout_child.horizontal = next;
+        if let Some(al) = n.kind.frame_props_mut().and_then(|fp| fp.auto_layout.as_mut()) {
+            let self_sizing = if next == designos_doc::Sizing::Fill && in_al_parent {
+                designos_doc::Sizing::Fixed
+            } else {
+                next
+            };
+            if al.direction == designos_doc::LayoutDirection::Horizontal {
+                al.primary_sizing = self_sizing;
+            } else {
+                al.counter_sizing = self_sizing;
+            }
+        }
+    }
+    if affects_y {
+        let cur = if has_own_al {
+            let al = n.kind.frame_props().unwrap().auto_layout.as_ref().unwrap();
+            if al.direction == designos_doc::LayoutDirection::Vertical {
+                if n.layout_child.vertical == designos_doc::Sizing::Fill {
+                    designos_doc::Sizing::Fill
+                } else {
+                    al.primary_sizing
+                }
+            } else if n.layout_child.vertical == designos_doc::Sizing::Fill {
+                designos_doc::Sizing::Fill
+            } else {
+                al.counter_sizing
+            }
+        } else {
+            n.layout_child.vertical
+        };
+        let next = next_sizing(cur, has_own_al, in_al_parent);
+        n.layout_child.vertical = next;
+        if let Some(al) = n.kind.frame_props_mut().and_then(|fp| fp.auto_layout.as_mut()) {
+            let self_sizing = if next == designos_doc::Sizing::Fill && in_al_parent {
+                designos_doc::Sizing::Fixed
+            } else {
+                next
+            };
+            if al.direction == designos_doc::LayoutDirection::Vertical {
+                al.primary_sizing = self_sizing;
+            } else {
+                al.counter_sizing = self_sizing;
+            }
+        }
+    }
+
+    layout::relayout_around(&mut app.doc, &mut tx.ed, id);
+    app.run_tx(tx)
 }
 
 // ------------------------------------------------------------------ pen
@@ -1105,7 +1975,7 @@ fn place_image(app: &mut App, page: DV) {
     }
     if path.extension().is_some_and(|e| e.eq_ignore_ascii_case("svg")) {
         // Vector layers, centered on the click.
-        let parent = create::container_at(&app.doc, app.page, page, &[]);
+        let parent = create::container_at_with_index(&app.doc, active_index(app), app.page, page, &[]);
         match String::from_utf8(bytes) {
             Ok(text) => {
                 if let Err(e) = crate::clipboard::place_svg(app, &text, &name, page, parent) {
@@ -1140,7 +2010,7 @@ pub fn place_video_bytes(app: &mut App, page: DV, name: &str, bytes: Vec<u8>) ->
     let (poster_key, video_key) = (format!("img-{n}"), format!("video-{n}"));
     app.doc.images.insert(poster_key.clone(), poster);
     app.doc.images.insert(video_key.clone(), bytes);
-    let parent = create::container_at(&app.doc, app.page, page, &[]);
+    let parent = create::container_at_with_index(&app.doc, active_index(app), app.page, page, &[]);
     let inv = app.doc.world_transform(parent).invert()?;
     let o = inv.apply(page);
     let id = app.doc.alloc_id();
@@ -1175,7 +2045,7 @@ pub fn place_image_bytes(app: &mut App, page: DV, name: &str, bytes: Vec<u8>) ->
     };
     let key = format!("img-{}", app.doc.images.len() + 1);
     app.doc.images.insert(key.clone(), bytes);
-    let parent = create::container_at(&app.doc, app.page, page, &[]);
+    let parent = create::container_at_with_index(&app.doc, active_index(app), app.page, page, &[]);
     let inv = app.doc.world_transform(parent).invert()?;
     let o = inv.apply(page);
     let id = app.doc.alloc_id();
@@ -1207,7 +2077,7 @@ fn text_press(app: &mut App, page: DV) {
             return;
         }
     }
-    let parent = create::container_at(&app.doc, app.page, page, &[]);
+    let parent = create::container_at_with_index(&app.doc, active_index(app), app.page, page, &[]);
     let Some((node, _)) = create::new_text(app, parent, page) else { return };
     let id = node.id;
     let mut tx = Tx::new();
@@ -1225,44 +2095,30 @@ fn update_hover_and_cursor(app: &mut App, rect: ERect, inp: &Inp, hovered: bool)
     let mut cursor = egui::CursorIcon::Default;
     let idle = matches!(app.canvas.inter, Interaction::None);
     app.canvas.cursor = None;
-    // board: magnet dots follow the pointer
-    let board_page = (hovered && app.canvas.text.is_none()).then(|| inp.pos.map(|p| app.view.to_page(rect.min, p))).flatten();
-    crate::board::connect::update_hover(app, board_page);
-    let over_dot = idle && hovered && inp.pos.is_some_and(|p| crate::board::connect::dot_hit(app, rect, p).is_some());
-    if idle && hovered && app.canvas.text.is_none() {
-        let page = inp.pos.map(|p| app.view.to_page(rect.min, p));
-        match app.tool {
-            Tool::Move | Tool::Scale => {
-                app.hover = None;
-                if inp.space {
-                    cursor = egui::CursorIcon::Grab;
-                } else if let Some(pos) = inp.pos {
-                    match handle_hit(app, rect, pos) {
-                        Some(HandleHit::Resize(h)) => cursor = h.cursor(),
-                        Some(HandleHit::Rotate(_)) => cursor = egui::CursorIcon::Alias,
-                        None => {
-                            app.hover = label_hit(app, rect, pos).or_else(|| page.and_then(|p| hit_under(app, p, inp.mods.command)));
-                        }
-                    }
-                }
-            }
-            Tool::Hand => cursor = egui::CursorIcon::Grab,
-            Tool::Text => cursor = egui::CursorIcon::Text,
-            _ => cursor = egui::CursorIcon::Crosshair,
+
+    if !idle {
+        // Skip recomputing hover / hit_under while actively panning, dragging, resizing, or marquee-selecting.
+        if app.is_board() && matches!(app.canvas.inter, Interaction::Connect(_)) {
+            let board_page = (hovered && app.canvas.text.is_none()).then(|| inp.pos.map(|p| app.view.to_page(rect.min, p))).flatten();
+            crate::board::connect::update_hover(app, board_page);
+        } else {
+            app.board.dots = None;
         }
-        if let Some(c) = inp.pos.and_then(|p| rulers::cursor_at(app, rect, p)) {
-            cursor = c;
-            app.hover = None;
-        }
-        if over_dot {
-            cursor = egui::CursorIcon::Crosshair;
-        }
-        app.canvas.cursor = Some(cursor);
-    } else if !idle {
         cursor = match &app.canvas.inter {
             Interaction::Pan => egui::CursorIcon::Grabbing,
+            Interaction::ZoomMarquee { alt, .. } => {
+                if *alt || inp.mods.alt {
+                    egui::CursorIcon::ZoomOut
+                } else {
+                    egui::CursorIcon::ZoomIn
+                }
+            }
             Interaction::Resize(r) => r.handle.cursor(),
             Interaction::Rotate(_) => egui::CursorIcon::Alias,
+            Interaction::CornerRadius(_)
+            | Interaction::AutoLayoutDrag(_)
+            | Interaction::SmartSelectionDrag(_)
+            | Interaction::ShapeControl(_) => egui::CursorIcon::PointingHand,
             Interaction::Draw(_) | Interaction::Pencil(_) | Interaction::PenDrag | Interaction::Connect(_) => egui::CursorIcon::Crosshair,
             Interaction::Guide(g) => {
                 if g.axis == snap::GuideAxis::X {
@@ -1275,10 +2131,120 @@ fn update_hover_and_cursor(app: &mut App, rect: ERect, inp: &Inp, hovered: bool)
         };
         app.canvas.cursor = Some(cursor);
         app.hover = None;
+        app.canvas.last_hover_query = None;
+        return;
+    }
+
+    // board: magnet dots follow the pointer only on board documents
+    let over_dot = if app.is_board() {
+        let board_page = (hovered && app.canvas.text.is_none()).then(|| inp.pos.map(|p| app.view.to_page(rect.min, p))).flatten();
+        crate::board::connect::update_hover(app, board_page);
+        hovered && inp.pos.is_some_and(|p| crate::board::connect::dot_hit(app, rect, p).is_some())
+    } else {
+        false
+    };
+
+    if hovered && app.canvas.text.is_none() {
+        let page = inp.pos.map(|p| app.view.to_page(rect.min, p));
+        if inp.z_down {
+            app.hover = None;
+            app.canvas.last_hover_query = None;
+            cursor = if inp.mods.alt {
+                egui::CursorIcon::ZoomOut
+            } else {
+                egui::CursorIcon::ZoomIn
+            };
+            app.canvas.cursor = Some(cursor);
+            return;
+        }
+        match app.tool {
+            Tool::Move | Tool::Scale => {
+                if inp.space {
+                    app.hover = None;
+                    app.canvas.last_hover_query = None;
+                    cursor = egui::CursorIcon::Grab;
+                } else if let Some(pos) = inp.pos {
+                    match handle_hit(app, rect, pos) {
+                        Some(HandleHit::Resize(h)) => {
+                            app.hover = None;
+                            app.canvas.last_hover_query = None;
+                            cursor = h.cursor();
+                        }
+                        Some(HandleHit::Rotate(_)) => {
+                            app.hover = None;
+                            app.canvas.last_hover_query = None;
+                            cursor = egui::CursorIcon::Alias;
+                        }
+                        None => {
+                            if special_handle_hovered(app, rect, pos) {
+                                cursor = egui::CursorIcon::PointingHand;
+                            }
+                            let query_key = (pos, app.canvas.tiles.rev(), inp.mods.command, app.view.zoom);
+                            if app.canvas.dirty || app.canvas.last_hover_query != Some(query_key) {
+                                app.hover = label_hit(app, rect, pos)
+                                    .or_else(|| page.and_then(|p| hit_under(app, p, inp.mods.command)));
+                                app.canvas.last_hover_query = Some(query_key);
+                            }
+                        }
+                    }
+                } else {
+                    app.hover = None;
+                    app.canvas.last_hover_query = None;
+                }
+            }
+            Tool::Hand => {
+                app.hover = None;
+                app.canvas.last_hover_query = None;
+                cursor = egui::CursorIcon::Grab;
+            }
+            Tool::Text => {
+                app.hover = None;
+                app.canvas.last_hover_query = None;
+                cursor = egui::CursorIcon::Text;
+            }
+            _ => {
+                app.hover = None;
+                app.canvas.last_hover_query = None;
+                cursor = egui::CursorIcon::Crosshair;
+            }
+        }
+        if let Some(c) = inp.pos.and_then(|p| rulers::cursor_at(app, rect, p)) {
+            cursor = c;
+            app.hover = None;
+            app.canvas.last_hover_query = None;
+        }
+        if over_dot {
+            cursor = egui::CursorIcon::Crosshair;
+        }
+        app.canvas.cursor = Some(cursor);
     } else if app.canvas.text.is_some() {
         app.canvas.cursor = Some(egui::CursorIcon::Text);
+        app.canvas.last_hover_query = None;
     } else if !hovered {
         app.hover = None;
+        app.canvas.last_hover_query = None;
+    }
+
+    let show_redlines = inp.mods.alt || app.ui.dev_mode || app.dev.show_redlines;
+    if show_redlines && !app.selection.is_empty() && hovered && app.canvas.text.is_none() {
+        if let Some(sel_rect) = app.selection_bounds() {
+            let idx = active_index(app);
+            let target_rect = app
+                .hover
+                .filter(|id| !app.selection.contains(id))
+                .map(|id| super::fast_world_aabb(&app.doc, idx, id));
+            let container_rect = app
+                .selection
+                .first()
+                .and_then(|&id| app.doc.get(id)?.parent)
+                .filter(|&pid| pid != app.page)
+                .map(|pid| super::fast_world_aabb(&app.doc, idx, pid));
+            app.canvas.measures = super::snap::compute_alt_measures(sel_rect, target_rect, container_rect);
+        } else {
+            app.canvas.measures.clear();
+        }
+    } else {
+        app.canvas.measures.clear();
     }
 }
 
@@ -1310,7 +2276,7 @@ mod tests {
         let (mut app, a, b) = app_with_two();
         app.selection = vec![a];
         let mut m = start_move(&mut app, a, v2(50.0, 50.0), false).unwrap();
-        let inp = Inp { pos: None, pressed: false, down: true, released: false, mid_pressed: false, mid_down: false, mods: Modifiers::NONE, space: false };
+        let inp = Inp { pos: None, pressed: false, down: true, released: false, mid_pressed: false, mid_down: false, mods: Modifiers::NONE, space: false, z_down: false };
         // move a so its right edge is 2 units from b's left edge -> snaps flush
         update_move(&mut app, &mut m, v2(50.0 + 198.0, 50.0), &inp);
         assert_eq!(app.doc.get(a).unwrap().transform.tx, 200.0);
@@ -1337,6 +2303,7 @@ mod tests {
             mid_down: false,
             mods: Modifiers { shift: true, command: true, ..Modifiers::NONE },
             space: false,
+            z_down: false,
         };
         update_move(&mut app, &mut m, v2(80.0, 10.0), &inp);
         let dup = app.doc.get(m.ids[0]).unwrap();
@@ -1368,6 +2335,7 @@ mod tests {
             mid_down: false,
             mods: Modifiers { command: true, ..Modifiers::NONE },
             space: false,
+            z_down: false,
         };
         // local (150, 120) maps to page via world0
         let target = world0.apply(v2(150.0, 120.0));
@@ -1519,6 +2487,7 @@ mod tests {
             mid_down: false,
             mods: Modifiers::NONE,
             space: false,
+            z_down: false,
         };
 
         // Start with outer group g1 selected
@@ -1534,4 +2503,189 @@ mod tests {
         on_double_click(&mut app, rect, &inp);
         assert_eq!(app.canvas.vedit.as_ref().map(|v| v.id), Some(r), "third double-click enters vector edit mode on leaf");
     }
+
+    #[test]
+    fn shortcuts_sibling_nudge_resize_opacity_and_alt_measures() {
+        let (mut app, a, b) = app_with_two();
+        // 1. Tab / Shift+Tab sibling traversal
+        app.selection = vec![b];
+        app.select_sibling(true);
+        assert_eq!(app.selection, vec![a]);
+        app.select_sibling(true);
+        assert_eq!(app.selection, vec![b]);
+        app.select_sibling(false);
+        assert_eq!(app.selection, vec![a]);
+
+        // 2. Rapid 0-9 opacity buffer
+        app.selection = vec![a];
+        app.now = 1.0;
+        app.apply_opacity_digit(5);
+        assert!((app.doc.get(a).unwrap().opacity - 0.5).abs() < 1e-5);
+        app.now = 2.0;
+        app.apply_opacity_digit(4);
+        app.now = 2.2;
+        app.apply_opacity_digit(5);
+        assert!((app.doc.get(a).unwrap().opacity - 0.45).abs() < 1e-5);
+        app.now = 3.0;
+        app.apply_opacity_digit(0);
+        assert!((app.doc.get(a).unwrap().opacity - 1.0).abs() < 1e-5);
+        app.now = 3.1;
+        app.apply_opacity_digit(0);
+        assert!((app.doc.get(a).unwrap().opacity - 0.0).abs() < 1e-5);
+
+        // 3. Resize selection by ±1px / ±10px
+        app.resize_selection_by(1.0, 10.0);
+        assert_eq!(app.doc.get(a).unwrap().size, v2(101.0, 110.0));
+        app.resize_selection_by(-1.0, -10.0);
+        assert_eq!(app.doc.get(a).unwrap().size, v2(100.0, 100.0));
+
+        // 4. Nudge free node vs Auto-Layout flow child reorder
+        app.nudge(1.0, 10.0);
+        assert_eq!(app.doc.get(a).unwrap().transform.tx, 1.0);
+        assert_eq!(app.doc.get(a).unwrap().transform.ty, 10.0);
+
+        app.selection = vec![a, b];
+        app.toggle_auto_layout();
+        let al_frame = app.selection[0];
+        assert_eq!(app.doc.get(al_frame).unwrap().children, vec![a, b]);
+        app.selection = vec![a];
+        app.nudge(1.0, 0.0);
+        assert_eq!(app.doc.get(al_frame).unwrap().children, vec![b, a]);
+        app.nudge(-1.0, 0.0);
+        assert_eq!(app.doc.get(al_frame).unwrap().children, vec![a, b]);
+
+        // 5. Alt/Option measurement guides via compute_alt_measures & remove_auto_layout
+        app.selection = vec![al_frame];
+        app.remove_auto_layout();
+        assert!(app.doc.get(al_frame).unwrap().kind.frame_props().unwrap().auto_layout.is_none());
+
+        let m = super::snap::compute_alt_measures(
+            Rect::new(0.0, 0.0, 100.0, 100.0),
+            Some(Rect::new(150.0, 0.0, 100.0, 100.0)),
+            None,
+        );
+        assert_eq!(m.len(), 1);
+        assert_eq!(m[0].value, 50.0);
+    }
+
+    #[test]
+    fn shape_control_handle_dragging_and_cmd_space_modifiers() {
+        let (mut app, _, _) = app_with_two();
+        let corners = [v2(0.0, 0.0), v2(100.0, 0.0), v2(100.0, 100.0), v2(0.0, 100.0)];
+
+        // 1. Hit-test EllipseSweep, PolygonCount, StarCount, StarInnerRatio
+        let ell_id = app.doc.alloc_id();
+        let ell = app
+            .doc
+            .insert(app.page, designos_doc::Node::ellipse(ell_id, Rect::new(0.0, 0.0, 100.0, 100.0)))
+            .unwrap();
+        let ell_pts = handles::shape_control_handles(&app.doc.get(ell).unwrap().kind, &corners, 1.0);
+        assert_eq!(
+            handles::hit_shape_control_handle(&app.doc.get(ell).unwrap().kind, &corners, 1.0, ell_pts[0], 6.0),
+            Some(handles::ShapeControlKind::EllipseSweep)
+        );
+
+        // Drag EllipseSweep to 90 degrees (bottom of ellipse: local (50, 100))
+        let mut sc_ell = ShapeControlDragState {
+            tx: Tx::new(),
+            id: ell,
+            kind: handles::ShapeControlKind::EllipseSweep,
+            start_page: ell_pts[0],
+            start_count: 0,
+            start_ratio: 0.0,
+            start_end_angle: std::f32::consts::TAU,
+        };
+        update_shape_control(&mut app, &mut sc_ell, v2(50.0, 100.0), true);
+        app.run_tx(sc_ell.tx);
+        let NodeKind::Ellipse(arc) = app.doc.get(ell).unwrap().kind else { panic!("expected ellipse") };
+        assert!((arc.end - std::f32::consts::FRAC_PI_2).abs() < 1e-3);
+
+        // Drag StarCount & StarInnerRatio
+        let star_id = app.doc.alloc_id();
+        let mut star_node = designos_doc::Node::new(star_id, NodeKind::Star { count: 5, inner_ratio: 0.382 });
+        star_node.size = v2(100.0, 100.0);
+        let star = app.doc.insert(app.page, star_node).unwrap();
+        let star_pts = handles::shape_control_handles(&app.doc.get(star).unwrap().kind, &corners, 1.0);
+        assert_eq!(
+            handles::hit_shape_control_handle(&app.doc.get(star).unwrap().kind, &corners, 1.0, star_pts[0], 6.0),
+            Some(handles::ShapeControlKind::StarCount)
+        );
+        assert_eq!(
+            handles::hit_shape_control_handle(&app.doc.get(star).unwrap().kind, &corners, 1.0, star_pts[1], 6.0),
+            Some(handles::ShapeControlKind::StarInnerRatio)
+        );
+
+        let mut sc_star_cnt = ShapeControlDragState {
+            tx: Tx::new(),
+            id: star,
+            kind: handles::ShapeControlKind::StarCount,
+            start_page: v2(50.0, 12.0),
+            start_count: 5,
+            start_ratio: 0.382,
+            start_end_angle: 0.0,
+        };
+        update_shape_control(&mut app, &mut sc_star_cnt, v2(50.0, 12.0 - 24.0), false);
+        app.run_tx(sc_star_cnt.tx);
+        let NodeKind::Star { count, .. } = app.doc.get(star).unwrap().kind else { panic!("expected star") };
+        assert_eq!(count, 8);
+
+        let mut sc_star_ratio = ShapeControlDragState {
+            tx: Tx::new(),
+            id: star,
+            kind: handles::ShapeControlKind::StarInnerRatio,
+            start_page: star_pts[1],
+            start_count: 8,
+            start_ratio: 0.382,
+            start_end_angle: 0.0,
+        };
+        update_shape_control(&mut app, &mut sc_star_ratio, v2(50.0 + 30.0, 50.0), false);
+        app.run_tx(sc_star_ratio.tx);
+        let NodeKind::Star { inner_ratio, .. } = app.doc.get(star).unwrap().kind else { panic!("expected star") };
+        assert!((inner_ratio - 0.6).abs() < 1e-3);
+
+        // 2. Cmd + Resize on a Frame ignores child constraints (MI-11)
+        let fid = app.doc.alloc_id();
+        let frame = app
+            .doc
+            .insert(app.page, designos_doc::Node::frame(fid, Rect::new(0.0, 0.0, 200.0, 200.0)))
+            .unwrap();
+        let cid = app.doc.alloc_id();
+        let mut child = designos_doc::Node::rectangle(cid, Rect::new(20.0, 20.0, 100.0, 100.0));
+        child.constraints.horizontal = designos_doc::Constraint::Scale;
+        child.constraints.vertical = designos_doc::Constraint::Scale;
+        let child = app.doc.insert(frame, child).unwrap();
+
+        let mut r = ResizeState {
+            tx: Tx::new(),
+            handle: Handle::BR,
+            kind: ResizeKind::Single {
+                id: frame,
+                world0: Affine::IDENTITY,
+                t0: Affine::IDENTITY,
+                size0: v2(200.0, 200.0),
+            },
+            targets: vec![],
+        };
+        let inp_cmd = Inp {
+            pos: None,
+            pressed: false,
+            down: true,
+            released: false,
+            mid_pressed: false,
+            mid_down: false,
+            mods: Modifiers { command: true, ..Modifiers::NONE },
+            space: false,
+            z_down: false,
+        };
+        update_resize(&mut app, &mut r, v2(400.0, 400.0), &inp_cmd);
+        app.run_tx(r.tx);
+        assert_eq!(app.doc.get(frame).unwrap().size, v2(400.0, 400.0));
+        assert_eq!(
+            app.doc.get(child).unwrap().size,
+            v2(100.0, 100.0),
+            "Cmd+Resize on Frame must leave Scale-constrained child untouched"
+        );
+    }
 }
+
+

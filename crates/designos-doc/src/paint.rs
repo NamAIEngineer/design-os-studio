@@ -21,23 +21,124 @@ impl Color {
     pub fn rgba(r: u8, g: u8, b: u8, a: u8) -> Self {
         Self { r: r as f32 / 255.0, g: g as f32 / 255.0, b: b as f32 / 255.0, a: a as f32 / 255.0 }
     }
-    /// Parses `#RGB`, `#RRGGBB` or `#RRGGBBAA`.
+    /// Parses 1..8 digit hex (`#F`, `#F0`, `#123`, `#1234`, `#RRGGBB`, `#RRGGBBAA`),
+    /// `"transparent"`, or CSS named colors (Figma module `640649`).
     pub fn from_hex(s: &str) -> Option<Self> {
-        let s = s.trim_start_matches('#');
-        let h = |i: usize| u8::from_str_radix(s.get(i..i + 2)?, 16).ok();
-        match s.len() {
-            3 => {
-                let v: Vec<u8> = s.chars().map(|c| c.to_digit(16).map(|d| d as u8 * 17)).collect::<Option<_>>()?;
-                Some(Self::rgb(v[0], v[1], v[2]))
+        let s = s.trim();
+        if s.is_empty() {
+            return None;
+        }
+        if !s.starts_with('#') {
+            let lower = s.to_ascii_lowercase();
+            let named = match lower.as_str() {
+                "transparent" => Some(Self::TRANSPARENT),
+                "black" => Some(Self::rgb(0, 0, 0)),
+                "white" => Some(Self::rgb(255, 255, 255)),
+                "red" => Some(Self::rgb(255, 0, 0)),
+                "green" => Some(Self::rgb(0, 128, 0)),
+                "blue" => Some(Self::rgb(0, 0, 255)),
+                "yellow" => Some(Self::rgb(255, 255, 0)),
+                "cyan" | "aqua" => Some(Self::rgb(0, 255, 255)),
+                "magenta" | "fuchsia" => Some(Self::rgb(255, 0, 255)),
+                "gray" | "grey" => Some(Self::rgb(128, 128, 128)),
+                "lightgray" | "lightgrey" => Some(Self::rgb(211, 211, 211)),
+                "darkgray" | "darkgrey" => Some(Self::rgb(169, 169, 169)),
+                "dimgray" | "dimgrey" => Some(Self::rgb(105, 105, 105)),
+                "slategray" | "slategrey" => Some(Self::rgb(112, 128, 144)),
+                "silver" => Some(Self::rgb(192, 192, 192)),
+                "maroon" => Some(Self::rgb(128, 0, 0)),
+                "olive" => Some(Self::rgb(128, 128, 0)),
+                "lime" => Some(Self::rgb(0, 255, 0)),
+                "teal" => Some(Self::rgb(0, 128, 128)),
+                "navy" => Some(Self::rgb(0, 0, 128)),
+                "purple" => Some(Self::rgb(128, 0, 128)),
+                "rebeccapurple" => Some(Self::rgb(102, 51, 153)),
+                "orange" => Some(Self::rgb(255, 165, 0)),
+                "orangered" => Some(Self::rgb(255, 69, 0)),
+                "coral" => Some(Self::rgb(255, 127, 80)),
+                "tomato" => Some(Self::rgb(255, 99, 71)),
+                "salmon" => Some(Self::rgb(250, 128, 114)),
+                "gold" => Some(Self::rgb(255, 215, 0)),
+                "pink" => Some(Self::rgb(255, 192, 203)),
+                "hotpink" => Some(Self::rgb(255, 105, 180)),
+                "deeppink" => Some(Self::rgb(255, 20, 147)),
+                "violet" => Some(Self::rgb(238, 130, 238)),
+                "plum" => Some(Self::rgb(221, 160, 221)),
+                "orchid" => Some(Self::rgb(218, 112, 214)),
+                "indigo" => Some(Self::rgb(75, 0, 130)),
+                "blueviolet" => Some(Self::rgb(138, 43, 226)),
+                "dodgerblue" => Some(Self::rgb(30, 144, 255)),
+                "deepskyblue" => Some(Self::rgb(0, 191, 255)),
+                "skyblue" => Some(Self::rgb(135, 206, 235)),
+                "lightblue" => Some(Self::rgb(173, 216, 230)),
+                "steelblue" => Some(Self::rgb(70, 130, 180)),
+                "royalblue" => Some(Self::rgb(65, 105, 225)),
+                "midnightblue" => Some(Self::rgb(25, 25, 112)),
+                "turquoise" => Some(Self::rgb(64, 224, 208)),
+                "aquamarine" => Some(Self::rgb(127, 255, 212)),
+                "springgreen" => Some(Self::rgb(0, 255, 127)),
+                "limegreen" => Some(Self::rgb(50, 205, 50)),
+                "forestgreen" => Some(Self::rgb(34, 139, 34)),
+                "seagreen" => Some(Self::rgb(46, 139, 87)),
+                "yellowgreen" => Some(Self::rgb(154, 205, 50)),
+                "chartreuse" => Some(Self::rgb(127, 255, 0)),
+                "brown" => Some(Self::rgb(165, 42, 42)),
+                "firebrick" => Some(Self::rgb(178, 34, 34)),
+                "crimson" => Some(Self::rgb(220, 20, 60)),
+                "darkred" => Some(Self::rgb(139, 0, 0)),
+                "chocolate" => Some(Self::rgb(210, 105, 30)),
+                "saddlebrown" => Some(Self::rgb(139, 69, 19)),
+                "sienna" => Some(Self::rgb(160, 82, 45)),
+                "peru" => Some(Self::rgb(205, 133, 63)),
+                "tan" => Some(Self::rgb(210, 180, 140)),
+                "wheat" => Some(Self::rgb(245, 222, 179)),
+                "beige" => Some(Self::rgb(245, 245, 220)),
+                "ivory" => Some(Self::rgb(255, 255, 240)),
+                "linen" => Some(Self::rgb(250, 240, 230)),
+                "lavender" => Some(Self::rgb(230, 230, 250)),
+                "aliceblue" => Some(Self::rgb(240, 248, 255)),
+                "ghostwhite" => Some(Self::rgb(248, 248, 255)),
+                "mintcream" => Some(Self::rgb(245, 255, 250)),
+                "honeydew" => Some(Self::rgb(240, 255, 240)),
+                "seashell" => Some(Self::rgb(255, 245, 238)),
+                "snow" => Some(Self::rgb(255, 250, 250)),
+                "whitesmoke" => Some(Self::rgb(245, 245, 245)),
+                "gainsboro" => Some(Self::rgb(220, 220, 220)),
+                "khaki" => Some(Self::rgb(240, 230, 140)),
+                _ => None,
+            };
+            if named.is_some() {
+                return named;
             }
-            6 => Some(Self::rgb(h(0)?, h(2)?, h(4)?)),
-            8 => Some(Self::rgba(h(0)?, h(2)?, h(4)?, h(6)?)),
+        }
+        let s = s.trim_start_matches('#');
+        let nib = |i: usize| u8::from_str_radix(s.get(i..i + 1)?, 16).ok();
+        let byte = |i: usize| u8::from_str_radix(s.get(i..i + 2)?, 16).ok();
+        match s.len() {
+            1 => {
+                let v = nib(0)? * 17;
+                Some(Self::rgb(v, v, v))
+            }
+            2 => {
+                let v = byte(0)?;
+                Some(Self::rgb(v, v, v))
+            }
+            3 => Some(Self::rgb(nib(0)? * 17, nib(1)? * 17, nib(2)? * 17)),
+            4 => Some(Self::rgba(nib(0)? * 17, nib(1)? * 17, nib(2)? * 17, nib(3)? * 17)),
+            5 => Some(Self::rgba(nib(0)? * 17, nib(1)? * 17, nib(2)? * 17, byte(3)?)),
+            6 => Some(Self::rgb(byte(0)?, byte(2)?, byte(4)?)),
+            7 => Some(Self::rgba(byte(0)?, byte(2)?, byte(4)?, nib(6)? * 17)),
+            8 => Some(Self::rgba(byte(0)?, byte(2)?, byte(4)?, byte(6)?)),
             _ => None,
         }
     }
-    pub fn to_hex(&self) -> String {
+    pub fn to_u8(&self) -> [u8; 4] {
         let c = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() as u8;
-        format!("{:02X}{:02X}{:02X}", c(self.r), c(self.g), c(self.b))
+        [c(self.r), c(self.g), c(self.b), c(self.a)]
+    }
+    pub fn to_hex(&self) -> String {
+        let [r, g, b, _] = self.to_u8();
+        format!("{r:02X}{g:02X}{b:02X}")
     }
     pub fn with_alpha(self, a: f32) -> Self {
         Self { a, ..self }
@@ -421,3 +522,31 @@ pub enum LayoutGrid {
     Columns { count: u32, gutter: f32, offset: f32, color: Color },
     Rows { count: u32, gutter: f32, offset: f32, color: Color },
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn from_hex_smart_expansion_and_named_colors() {
+        assert_eq!(Color::from_hex(""), None);
+        assert_eq!(Color::from_hex("   "), None);
+        assert_eq!(Color::from_hex("transparent"), Some(Color::TRANSPARENT));
+        assert_eq!(Color::from_hex("  TRANSPARENT "), Some(Color::TRANSPARENT));
+        assert_eq!(Color::from_hex("#F"), Some(Color::rgb(0xFF, 0xFF, 0xFF)));
+        assert_eq!(Color::from_hex("F"), Some(Color::rgb(0xFF, 0xFF, 0xFF)));
+        assert_eq!(Color::from_hex("#F0"), Some(Color::rgb(0xF0, 0xF0, 0xF0)));
+        assert_eq!(Color::from_hex("80"), Some(Color::rgb(0x80, 0x80, 0x80)));
+        assert_eq!(Color::from_hex("#123"), Some(Color::rgb(0x11, 0x22, 0x33)));
+        assert_eq!(Color::from_hex("#1234"), Some(Color::rgba(0x11, 0x22, 0x33, 0x44)));
+        assert_eq!(Color::from_hex("#12345"), Some(Color::rgba(0x11, 0x22, 0x33, 0x45)));
+        assert_eq!(Color::from_hex("#123456"), Some(Color::rgb(0x12, 0x34, 0x56)));
+        assert_eq!(Color::from_hex("#1234567"), Some(Color::rgba(0x12, 0x34, 0x56, 0x77)));
+        assert_eq!(Color::from_hex("#12345678"), Some(Color::rgba(0x12, 0x34, 0x56, 0x78)));
+        assert_eq!(Color::from_hex("red"), Some(Color::rgb(255, 0, 0)));
+        assert_eq!(Color::from_hex("blue"), Some(Color::rgb(0, 0, 255)));
+        assert_eq!(Color::from_hex("coral"), Some(Color::rgb(255, 127, 80)));
+        assert_eq!(Color::from_hex("rebeccapurple"), Some(Color::rgb(102, 51, 153)));
+    }
+}
+

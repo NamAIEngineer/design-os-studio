@@ -300,6 +300,18 @@ impl<'a> serde::ser::SerializeStructVariant for HashSerializer<'a> {
 }
 
 pub(crate) fn doc_hash(doc: &Document) -> u64 {
+    if doc.nodes.len() > 5_000 {
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        (
+            doc.runtime_id(),
+            doc.mutation_epoch(),
+            doc.nodes.len(),
+            doc.pages.len(),
+            &doc.name,
+        )
+            .hash(&mut h);
+        return h.finish();
+    }
     use serde::Serialize;
     let mut h = std::collections::hash_map::DefaultHasher::new();
     let _ = (
@@ -400,7 +412,7 @@ impl App {
         let _ = lib.mark_opened(id);
         self.home = None;
         self.ui.menu = None;
-        if needs_thumb {
+        if needs_thumb && self.doc.nodes.len() <= 25_000 {
             thumb::refresh_in_background(lib, entry.id, self.export_doc().into_owned());
         }
     }
@@ -484,7 +496,9 @@ impl App {
         self.autosave.saved_hash = doc_hash(&self.doc);
         self.autosave.changed_at = None;
         self.autosave.disk_mtime = self.watched_disk_path().and_then(|p| std::fs::metadata(p).ok()).and_then(|m| m.modified().ok());
-        thumb::refresh_in_background(lib, lf.id, self.export_doc().into_owned());
+        if self.doc.nodes.len() <= 25_000 {
+            thumb::refresh_in_background(lib, lf.id, self.export_doc().into_owned());
+        }
         Ok(())
     }
 

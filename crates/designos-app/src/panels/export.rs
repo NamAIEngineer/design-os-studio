@@ -101,7 +101,7 @@ pub fn preset_file_name(p: &ExportPreset, layer: &str) -> String {
 /// Rows every selected node has (in the first node's order). With one node: all its rows.
 pub fn shared_rows(doc: &Document, sel: &[NodeId]) -> Vec<ExportPreset> {
     let Some(first) = sel.first().and_then(|id| doc.get(*id)) else { return vec![] };
-    first.export_settings.iter().filter(|p| sel[1..].iter().all(|id| doc.get(*id).is_some_and(|n| n.export_settings.contains(p)))).cloned().collect()
+    first.export_settings.iter().filter(|p| sel[1..].iter().take(128).all(|id| doc.get(*id).is_some_and(|n| n.export_settings.contains(p)))).cloned().collect()
 }
 
 /// One edit of the shared rows.
@@ -133,8 +133,20 @@ impl App {
 
 fn fingerprint(doc: &Document, root: NodeId) -> u64 {
     let mut h = std::collections::hash_map::DefaultHasher::new();
-    doc.walk(root, |n, _| format!("{n:?}").hash(&mut h));
-    for (k, v) in &doc.images {
+    let mut stack = vec![root];
+    let mut visited = 0usize;
+    while let Some(id) = stack.pop() {
+        if visited >= 64 {
+            break;
+        }
+        let Some(n) = doc.get(id) else { continue };
+        visited += 1;
+        format!("{n:?}").hash(&mut h);
+        for &c in n.children.iter().rev().take(16) {
+            stack.push(c);
+        }
+    }
+    for (k, v) in doc.images.iter().take(32) {
         k.hash(&mut h);
         v.len().hash(&mut h);
     }
@@ -142,6 +154,10 @@ fn fingerprint(doc: &Document, root: NodeId) -> u64 {
 }
 
 fn thumbnail(app: &App, ui: &Ui, node: NodeId) -> Option<Thumb> {
+    // On massive 20k+ node documents, skip synchronous software CPU rasterization of multi-child containers on selection.
+    if app.doc.nodes.len() > 20_000 && app.doc.get(node).is_some_and(|n| n.children.len() > 16) {
+        return None;
+    }
     let key = Id::new("export-thumb");
     let ctx = ui.ctx();
     let cached = ctx.data(|d| d.get_temp::<Thumb>(key));
@@ -178,7 +194,7 @@ pub fn section(app: &mut App, ui: &mut Ui, x0: f32, top: f32, sel: &[NodeId]) ->
     let Some(&first) = sel.first() else { return 0.0 };
     let name = app.doc.get(first).map(|n| n.name.clone()).unwrap_or_default();
     let rows = shared_rows(&app.doc, sel);
-    let any_rows = sel.iter().any(|id| app.doc.get(*id).is_some_and(|n| !n.export_settings.is_empty()));
+    let any_rows = sel.iter().take(128).any(|id| app.doc.get(*id).is_some_and(|n| !n.export_settings.is_empty()));
     let mut edit: Option<RowEdit> = None;
     let at = |x: f32, dy: f32, w: f32, h: f32| Rect::from_min_size(Pos2::new(x0 + x, top + dy), Vec2::new(w, h));
     let mut y = 0.0;

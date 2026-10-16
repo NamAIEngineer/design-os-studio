@@ -41,10 +41,22 @@ fn comp_label(doc: &Document, comp: NodeId) -> String {
     }
 }
 
-fn all_components(doc: &Document) -> Vec<NodeId> {
-    let mut v: Vec<NodeId> = doc.nodes.values().filter(|n| matches!(n.kind, NodeKind::Component(_))).map(|n| n.id).collect();
-    v.sort_by_key(|id| comp_label(doc, *id));
+fn all_components_cached(app: &mut App) -> Vec<NodeId> {
+    let key = (app.doc.nodes.len() as u64) ^ (app.canvas.tiles.rev() << 32);
+    if let Some((k, cached)) = &app.props.all_components_cache {
+        if *k == key {
+            return cached.clone();
+        }
+    }
+    let mut v: Vec<NodeId> = app.doc.nodes.values().filter(|n| matches!(n.kind, NodeKind::Component(_))).map(|n| n.id).collect();
+    v.sort_by_key(|id| comp_label(&app.doc, *id));
+    app.props.all_components_cache = Some((key, v.clone()));
     v
+}
+
+fn is_dropdown_open(ui: &Ui, key: impl crate::widgets::Key) -> bool {
+    let id = ui.id().with(("dd", key));
+    ui.data(|d| d.get_temp::<bool>(id)).unwrap_or(false)
 }
 
 /// 28x16 switch; returns the new state when clicked.
@@ -76,11 +88,15 @@ fn instance_header(app: &mut App, ui: &mut Ui, pane: &mut Pane, inst: NodeId) {
     let row_y = 0.0;
     // Swap picker (the component name), "go to main" and the more menu.
     let dd = pane.rect(theme::SECTION_CONTENT_X, row_y, 156.0, theme::FIELD_HEIGHT);
-    let comps = all_components(&app.doc);
-    let names: Vec<String> = comps.iter().map(|c| comp_label(&app.doc, *c)).collect();
     widgets::record(ui, "instance-swap", dd);
-    if let Some(i) = dropdown(ui, dd, "instance-swap", &label, &names) {
-        app.swap_instance(inst, comps[i]);
+    if is_dropdown_open(ui, "instance-swap") {
+        let comps = all_components_cached(app);
+        let names: Vec<String> = comps.iter().map(|c| comp_label(&app.doc, *c)).collect();
+        if let Some(i) = dropdown(ui, dd, "instance-swap", &label, &names) {
+            app.swap_instance(inst, comps[i]);
+        }
+    } else {
+        let _ = dropdown(ui, dd, "instance-swap", &label, &[]);
     }
     ui.painter().rect_stroke(
         dd,
@@ -129,13 +145,20 @@ fn instance_header(app: &mut App, ui: &mut Ui, pane: &mut Pane, inst: NodeId) {
 }
 
 fn has_changes(app: &App, inst: NodeId) -> bool {
-    let mut any = false;
-    app.doc.walk(inst, |n, _| {
-        if !n.component.overrides.is_empty() || (n.id == inst && !n.component.values.is_empty()) {
-            any = true;
+    let mut stack = vec![inst];
+    let mut visited = 0usize;
+    while let Some(id) = stack.pop() {
+        if visited >= 512 {
+            break;
         }
-    });
-    any
+        let Some(n) = app.doc.get(id) else { continue };
+        visited += 1;
+        if !n.component.overrides.is_empty() || (n.id == inst && !n.component.values.is_empty()) {
+            return true;
+        }
+        stack.extend(n.children.iter().copied());
+    }
+    false
 }
 
 fn instance_props(app: &mut App, ui: &mut Ui, pane: &mut Pane, inst: NodeId) {
@@ -181,14 +204,18 @@ fn instance_props(app: &mut App, ui: &mut Ui, pane: &mut Pane, inst: NodeId) {
                 }
             }
             (PropKind::InstanceSwap { .. }, v) => {
-                let comps = all_components(&app.doc);
-                let names: Vec<String> = comps.iter().map(|c| comp_label(&app.doc, *c)).collect();
                 let cur = match v {
                     PropValue::Instance(c) => comp_label(&app.doc, *c),
                     _ => String::new(),
                 };
-                if let Some(i) = dropdown(ui, ctl, &key, &cur, &names) {
-                    app.set_instance_prop(inst, &def.name, Some(PropValue::Instance(comps[i])));
+                if is_dropdown_open(ui, &key) {
+                    let comps = all_components_cached(app);
+                    let names: Vec<String> = comps.iter().map(|c| comp_label(&app.doc, *c)).collect();
+                    if let Some(i) = dropdown(ui, ctl, &key, &cur, &names) {
+                        app.set_instance_prop(inst, &def.name, Some(PropValue::Instance(comps[i])));
+                    }
+                } else {
+                    let _ = dropdown(ui, ctl, &key, &cur, &[]);
                 }
             }
             _ => {}
@@ -299,10 +326,15 @@ fn component_props(app: &mut App, ui: &mut Ui, pane: &mut Pane, id: NodeId) {
                 }
             }
             (PropKind::InstanceSwap { .. }, PropValue::Instance(c)) => {
-                let comps: Vec<NodeId> = all_components(&app.doc).into_iter().filter(|x| *x != owner).collect();
-                let names: Vec<String> = comps.iter().map(|x| comp_label(&app.doc, *x)).collect();
-                if let Some(i) = dropdown(ui, ctl, &key, &comp_label(&app.doc, *c), &names) {
-                    app.set_prop_default(owner, &def.name, PropValue::Instance(comps[i]));
+                let cur_label = comp_label(&app.doc, *c);
+                if is_dropdown_open(ui, &key) {
+                    let comps: Vec<NodeId> = all_components_cached(app).into_iter().filter(|x| *x != owner).collect();
+                    let names: Vec<String> = comps.iter().map(|x| comp_label(&app.doc, *x)).collect();
+                    if let Some(i) = dropdown(ui, ctl, &key, &cur_label, &names) {
+                        app.set_prop_default(owner, &def.name, PropValue::Instance(comps[i]));
+                    }
+                } else {
+                    let _ = dropdown(ui, ctl, &key, &cur_label, &[]);
                 }
             }
             _ => {}

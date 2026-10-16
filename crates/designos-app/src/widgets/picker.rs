@@ -328,8 +328,11 @@ pub fn parse_css(s: &str, keep_alpha: u8) -> Option<[u8; 4]> {
     }
     let c = Color::from_hex(t)?;
     let u = to_u8(c, 1.0);
-    // #RRGGBBAA carries its own alpha; plain hex keeps the current one.
-    Some([u[0], u[1], u[2], if t.trim_start_matches('#').len() == 8 { u[3] } else { keep_alpha }])
+    // #RGBA / #RRGGBBAA and "transparent" carry their own alpha; plain hex / named colors keep the current one.
+    let hex_part = t.trim_start_matches('#');
+    let has_explicit_alpha = t.eq_ignore_ascii_case("transparent")
+        || matches!(hex_part.len(), 4 | 5 | 7 | 8) && hex_part.chars().all(|ch| ch.is_ascii_hexdigit());
+    Some([u[0], u[1], u[2], if has_explicit_alpha { u[3] } else { keep_alpha }])
 }
 
 // ---------------------------------------------------------------- HSB in gamma space
@@ -1065,7 +1068,7 @@ pub fn show(ui: &mut Ui, pos: Pos2, st: &mut State, paint: &mut Paint, env: &Env
         Fmt::Hex => {
             let hex_r = Rect::from_min_size(fields.min, Vec2::new(89.0, 24.0));
             let op_r = Rect::from_min_max(Pos2::new(hex_r.right() + 1.0, fields.top()), fields.right_bottom());
-            if let Some(s) = grouped_text(ui, hex_r, "picker-hex", &Color::rgba(cur[0], cur[1], cur[2], 255).to_hex(), theme::cr_each(5, 0, 0, 5), 8.0) {
+            if let Some(s) = grouped_hex_text(ui, hex_r, "picker-hex", &Color::rgba(cur[0], cur[1], cur[2], 255).to_hex(), theme::cr_each(5, 0, 0, 5), 8.0) {
                 if let Some(c) = parse_css(&s, cur[3]) {
                     typed = Some(kind_rgba(c));
                 }
@@ -1094,10 +1097,8 @@ pub fn show(ui: &mut Ui, pos: Pos2, st: &mut State, paint: &mut Paint, env: &Env
                     0 => theme::cr_each(5, 0, 0, 5),
                     _ => theme::cr(0),
                 };
-                if let Some(s) = grouped_text(ui, r, ("picker-ch", i), &fmt_num(v.round()), radius, 5.0) {
-                    if let Some(n) = field::parse_number(&s) {
-                        edited = Some((i, n));
-                    }
+                if let Some(n) = grouped_num(ui, r, ("picker-ch", i), v.round(), radius, 5.0) {
+                    edited = Some((i, n));
                 }
             }
             if let Some((i, n)) = edited {
@@ -1337,6 +1338,32 @@ fn grouped_text(ui: &mut Ui, r: Rect, key: impl Key, display: &str, radius: egui
     field::edit_text(ui, r, id, display, theme::font_body(), theme::TEXT, pad)
 }
 
+/// Hex field cell with `ArrowUp`/`ArrowDown` (`±1`) and `Shift+ArrowUp`/`ArrowDown` (`±10`) stepping.
+fn grouped_hex_text(ui: &mut Ui, r: Rect, key: impl Key, display: &str, radius: egui::CornerRadius, pad: f32) -> Option<String> {
+    let id = ui.id().with(("txt", key));
+    let focused = ui.memory(|m| m.has_focus(id));
+    ui.painter().rect_filled(r, radius, theme::BG_SECONDARY);
+    if focused {
+        ui.painter().rect_stroke(r, radius, Stroke::new(1.0, theme::BORDER_SELECTED), StrokeKind::Inside);
+    } else if ui.rect_contains_pointer(r) {
+        ui.painter().rect_stroke(r, radius, Stroke::new(1.0, theme::BORDER), StrokeKind::Inside);
+    }
+    field::edit_hex_text(ui, r, id, display, theme::font_body(), theme::TEXT, pad)
+}
+
+/// Numeric channel cell (`RGB`/`HSL`/`HSB`) with `ArrowUp`/`ArrowDown` stepping and math expression evaluation.
+fn grouped_num(ui: &mut Ui, r: Rect, key: impl Key, val: f32, radius: egui::CornerRadius, pad: f32) -> Option<f32> {
+    let id = ui.id().with(("txt", key));
+    let focused = ui.memory(|m| m.has_focus(id));
+    ui.painter().rect_filled(r, radius, theme::BG_SECONDARY);
+    if focused {
+        ui.painter().rect_stroke(r, radius, Stroke::new(1.0, theme::BORDER_SELECTED), StrokeKind::Inside);
+    } else if ui.rect_contains_pointer(r) {
+        ui.painter().rect_stroke(r, radius, Stroke::new(1.0, theme::BORDER), StrokeKind::Inside);
+    }
+    field::edit_num_text(ui, r, id, Some(val), false, theme::font_body(), theme::TEXT, pad, None)
+}
+
 /// Opacity cell: value + "%" in `text_secondary`. Returns the new alpha (0..=255).
 fn opacity_cell(ui: &mut Ui, r: Rect, alpha: u8) -> Option<u8> {
     let id = ui.id().with(("num", "picker-opacity"));
@@ -1349,11 +1376,11 @@ fn opacity_cell(ui: &mut Ui, r: Rect, alpha: u8) -> Option<u8> {
         ui.painter().rect_stroke(r, radius, Stroke::new(1.0, theme::BORDER), StrokeKind::Inside);
     }
     let text_r = Rect::from_min_max(r.min, Pos2::new(r.right() - 14.0, r.bottom()));
-    let pct = fmt_num((alpha as f32 / 255.0 * 100.0).round());
-    let res = field::edit_text(ui, text_r, id, &pct, theme::font_body(), theme::TEXT, 8.0);
+    let pct_val = (alpha as f32 / 255.0 * 100.0).round();
+    let res = field::edit_num_text(ui, text_r, id, Some(pct_val), true, theme::font_body(), theme::TEXT, 8.0, None);
     let font = theme::font_body();
     text_on_baseline(ui.painter(), r.right() - 8.0 - text_width(ui.painter(), "%", &font), centered_baseline(r, &font), "%", font, theme::TEXT_SECONDARY);
-    res.and_then(|s| field::parse_number(&s)).map(|v| (v.clamp(0.0, 100.0) / 100.0 * 255.0).round() as u8)
+    res.map(|v| (v.clamp(0.0, 100.0) / 100.0 * 255.0).round() as u8)
 }
 
 /// Gradient bar with draggable stop handles. Click empty bar to add a stop; drag a stop out
@@ -1516,6 +1543,13 @@ mod tests {
     fn css_and_hsl_roundtrip() {
         assert_eq!(parse_css("#FF8000", 255), Some([255, 128, 0, 255]));
         assert_eq!(parse_css("ff8000", 77), Some([255, 128, 0, 77]));
+        assert_eq!(parse_css("#F", 200), Some([255, 255, 255, 200]));
+        assert_eq!(parse_css("#F0", 200), Some([240, 240, 240, 200]));
+        assert_eq!(parse_css("#123", 200), Some([17, 34, 51, 200]));
+        assert_eq!(parse_css("#1234", 200), Some([17, 34, 51, 68]));
+        assert_eq!(parse_css("red", 255), Some([255, 0, 0, 255]));
+        assert_eq!(parse_css("coral", 128), Some([255, 127, 80, 128]));
+        assert_eq!(parse_css("transparent", 255), Some([0, 0, 0, 0]));
         assert_eq!(parse_css("rgb(10, 20, 30)", 255), Some([10, 20, 30, 255]));
         assert_eq!(parse_css("rgba(10 20 30 / 0.5)", 255), Some([10, 20, 30, 128]));
         assert_eq!(parse_css("nonsense", 255), None);

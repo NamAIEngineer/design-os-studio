@@ -71,3 +71,67 @@ cargo test -p designos-mcp
    - `self.interactive()` (`self.cull && self.geom.budget.is_some()`) separates live interactive rendering from headless test rendering. Keep all LOD approximations (`< 0.75px` culling, `< 3.5px` text greeking, scissor clip fallback, `< 64` `Program` cap) strictly inside `self.interactive()` so headless reference tests (`cargo test -p designos-gpu`) remain bit-exact against `designos-render`.
 4. **Cap Offscreen GPU `Program`s & Preserve `FrameKey` Reuse:**
    - Do not allocate new offscreen `Program`s beyond `self.progs.len() < 64` during interactive frames, and preserve `FrameKey` caching (`Cb { frame: None }` when `last_key == Some(key) && stale_hits == 0`) plus `frame_build_nanos` 8ms cumulative tessellation budgeting so idle CPU stays at `0.0%` and `egui-wgpu`'s Metal staging buffer never overflows.
+
+<!-- BEGIN ease-design -->
+## ease-design
+
+This project uses ease-design. Workflows, skills, and journeys live under
+`/opt/homebrew/lib/node_modules/ease-design/templates/workflows/`, `/opt/homebrew/lib/node_modules/ease-design/templates/skills/`, and `/opt/homebrew/lib/node_modules/ease-design/templates/journeys/`.
+Invoke them by following the relevant Markdown file when the user asks for
+design work (journeys cover onboarding/daily/delivery sequencing across
+multiple commands). Templates reference `knowledge/<file>` — resolve those against `/opt/homebrew/lib/node_modules/ease-design/knowledge`. The `ui` binary handles all non-LLM
+work (autofix, layout validation, token compilation, color math). Before
+forming a `ui` invocation, run `ui schema --json` for the machine-readable
+signature (positionals, flags, enums, error codes) of every (sub)command.
+
+Available slash-commands when proxied:
+/ui:generate /ui:native-macos /ui:native-ios /ui:native-ipados /ui:iterate /ui:refine /ui:redesign /ui:extract /ui:learn /ui:why /ui:from-ref /ui:from-url /ui:figma /ui:figma-comments /ui:to-figma /ui:audit /ui:design /ui:diagram /ui:chart /ui:slides /ui:evidence /ui:init.
+
+Template hashes (sha256, for drift detection):
+  journeys/daily.md: 8ff71a16d707fad4c79e20efc9d32ca1e3bdd2b66ed65f34434933a2482a2834
+  journeys/deliver.md: 87cc8f96115a8f6a4cfd3ac27fb920fd2e37e2f7d494a30ecf8ccf79528e6f2c
+  journeys/onboard.md: 1fe82ccec8e21a29fc9d00b23dfa8ad7bdab4ce912564d074d258d52dfeec67f
+  skills/apply-prompt-mode.md: fd999d84cb87170b8267f0e4c2c7577faddb96791afea77c5fd4af5263336e94
+  skills/canvas-effect.md: d9f6e8e1a54e26ac27cf97c0d77fbabb740013a0dd47dc7b8a8127e9be5f302b
+  skills/chart-craft.md: 59a9be0faa2cda77f039cb11728ba1581352986658cd3502c11917f42f604cfa
+  skills/check-consistency.md: 9ab193d1c78eda2024a8216e3377b59b7c63c6c443f160ea8bbaa28121af503b
+  skills/color-decision.md: 99919c64baf7c32c0a075df688d5f6e8fff337b3b9b14826df8a341b0beaf526
+  skills/designmd-emit.md: 6bc6bba68ed7aa4859ef7f57b7c1b1ee37749be1f1bc5129f52ca9ca05cbce81
+  skills/diagram-craft.md: 2c3c8447da17f79c941b436c859952307a59aac9b7d76835ebc18f1b5edee9a2
+  skills/figma-craft.md: aec81304427e44001a48588b335deed53eaa156e22a5e09705055738f98c00e8
+  skills/gflow-flight.md: 10a0cad32057a4ef5f7d2621f17c015377fe86a22a2e70ae50170229867d578d
+  skills/gsap-motion.md: dfd7cdcc42795c3412f0680914ca187bdbe3d83b38f19c9e78740d9ff4c4effd
+  skills/native-ios-craft.md: 596138634ba0ab887fb163456daf28379d502de080641ccd6552cba2506b2bad
+  skills/native-ipados-craft.md: 5075d18cbb257524731effcf11f7c15f39bc695f8c656faf3b4d6fa848aff83b
+  skills/native-macos-craft.md: 3154abdb10f643bdfbdbe595182ae3a2243ddd39db7c559487b8deba14c67aa4
+  skills/pick-persona.md: 7d4b1509898767bd1ba811bd2268e323f82cdde43674ae89ece021ba34e6f5a6
+  skills/score-taste.md: d78f9476e7499559af0fe793a59af94a9e426e4c65dbda435e0618e40bfbd313
+  skills/scroll-cinema.md: efad7e3dd56570cf301ed389b7f092abd07ca0b21a559b722a554991751de733
+  skills/shader-gradient.md: 533300fa259f642c940f6a1280e47006ed357955608631697971846b046ca11d
+  skills/token-model.md: 20e21df678deaf59a8fc96eea0d4eadad1d414e85eec066ee2c3869d5dc4a0e6
+  skills/verify-canvas.md: 950bd2b21fcb250a5d382f70c7e394be12a7e575d8bb145a3ff1d98938f11400
+  workflows/audit.md: 8ee10c9a645b7c9491e85e5584e847c47f3d6b8cc35039aec6e23c81ba779d7c
+  workflows/chart.md: 04e6ef0b1df3e186bdaedb6793f092bad01c35a633e160d4d705123e26d91be5
+  workflows/design.md: bfafc9ef13bd4b1108225778c05521db790ea798c385767a56a278d2bf67ebe2
+  workflows/diagram.md: 424989eaf3548ea67048a5b3bd265439495a53d9dd3a3808e1d3a51071f76086
+  workflows/evidence.md: b11b033bc022945335f664aeabe7da4e6f35286a788deac20b4bb9c499e7fdb8
+  workflows/extract.md: cac2216ffec9b86da9ee3f27a9fd4f262c7787c92787418b6960224dfc734669
+  workflows/figma-comments.md: de8102f574898a9a89854bef12f84c9c03c4ac60b0d2cce2c2860809ba64d009
+  workflows/figma.md: 1c528b97ca34489f27ddea641730e950273209d8314a879566e6b3e5b93a9d36
+  workflows/from-ref.md: dd7741c453f4b3a039271c90bef1dafb6aaa500f2792d5bcc478b2f0eefa259a
+  workflows/from-url.md: 8b40ae5d9781ca59094ef9aefa5977d0f942fa4af1f3463e287a08ee61e72167
+  workflows/generate.md: df9978fd40b9e605522a4e71b2b62a958fe5895820ca32e357de47a815e93d16
+  workflows/iterate.md: 1adceeb5d599f55897164e9a0bd387b5213fcb5669d70258409736a78c245af0
+  workflows/learn.md: 30f1f4dcc663550b7228f87178031f4c4d0f3d2b87f6bcfd8467afe3d9628f53
+  workflows/native-ios.md: 5c7ff1727ba8b7e070a44bb33ef24614b55853acf947c4bf03cf8876bc902078
+  workflows/native-ipados.md: 39a5df50990aca2d6a67b6d6e6bab114c87d987b6380bbeb5298d0132b931828
+  workflows/native-macos.md: e0328b4aaa23f00bdbd8b05ba0768313c122ff72a2b22933f3f70203ca5f8bd7
+  workflows/redesign.md: 6c69091011bca95923f5f41c11361dcebc2ada5ee73397fbf9d02c79029592cc
+  workflows/refine.md: ec50c0a8213a1823883ce16451c274377474cdf6d732eb6b14194ee86b05df13
+  workflows/slides.md: 208cb15bbe82af7902327fc41c6e5d2b1e8a74e0aef44a20542ed502e08409f0
+  workflows/to-figma.md: d00b6e45e0c057f94e6dead06d70f78b6356eb1d0bb952bfec403460b1b3fff5
+  workflows/why.md: 13b46daa75e15e60438da4c640410a3d8851ef83416a04098a7e5ba1759a67a3
+
+Do not edit content between the BEGIN/END markers — it is regenerated
+by `ui init --runtime codex --force`.
+<!-- END ease-design -->

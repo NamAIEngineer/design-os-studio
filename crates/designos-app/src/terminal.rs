@@ -32,6 +32,7 @@ pub const TERM_ORANGE: Color32 = Color32::from_rgb(0xFF, 0x6A, 0x3D);
 #[allow(dead_code)]
 pub const TERM_ORANGE_BG: Color32 = Color32::from_rgb(0x36, 0x1A, 0x12);
 pub const TERM_FG_DEFAULT: Color32 = Color32::from_rgb(0xE4, 0xE4, 0xE7);
+pub const TERM_SELECTION_BG: Color32 = Color32::from_rgb(0x5A, 0x78, 0x98);
 
 // Semantic Status Pill Tokens (`es:designer` tokens.css)
 pub const STATUS_OK_TEXT: Color32 = Color32::from_rgb(0x4C, 0xC5, 0x8B);
@@ -62,6 +63,7 @@ pub enum AgentCliPreset {
     Codex,
     Antigravity,
     Grok,
+    #[allow(dead_code)]
     DesignOsHelp,
 }
 
@@ -131,6 +133,35 @@ impl AgentCliPreset {
         }
     }
 
+    /// Interactive CLI launch command with dangerous-permission prompts skipped (`DIR-29`)
+    /// and per-file `designos-mcp` + live current-page system prompt pre-wired.
+    pub fn cli_launch_command(self) -> &'static str {
+        match self {
+            AgentCliPreset::Claude => {
+                "claude --dangerously-skip-permissions --mcp-config \"$DESIGNOS_MCP_CONFIG\" --append-system-prompt \"You are inside DESIGN:OS Studio bound exclusively to file '$DESIGNOS_DOC_NAME' (session $DESIGNOS_SESSION_DIR). Always read $DESIGNOS_CONTEXT_JSON for the current selected page (current_page_id / current_page_name) and deliver all designs onto that file and page via designos-mcp tools (designos_apply_spec, designos_create_node, designos_update_node) or by writing NodeSpec JSON to $DESIGNOS_LIVE_SPEC.\""
+            }
+            AgentCliPreset::Codex => {
+                "codex --dangerously-bypass-approvals-and-sandbox -c 'mcp_servers.designos.command=\"'\"$DESIGNOS_MCP_BIN\"'\"'"
+            }
+            AgentCliPreset::Grok => "grok --always-approve --mcp-config \"$DESIGNOS_MCP_CONFIG\"",
+            AgentCliPreset::Antigravity => {
+                "agy --dangerously-skip-permissions --mcp-config \"$DESIGNOS_MCP_CONFIG\" || antigravity --dangerously-skip-permissions --mcp-config \"$DESIGNOS_MCP_CONFIG\""
+            }
+            AgentCliPreset::Shell | AgentCliPreset::DesignOsHelp => "",
+        }
+    }
+
+    /// Dropdown menu label and flag summary shown in the `+` runtime selector menu.
+    pub fn dropdown_entry(self) -> (&'static str, &'static str, &'static str) {
+        match self {
+            AgentCliPreset::Claude => ("agents-runtime-claude", "Claude", "--dangerously-skip-permissions"),
+            AgentCliPreset::Codex => ("agents-runtime-codex", "Codex", "--dangerously-bypass-approvals-and-sandbox"),
+            AgentCliPreset::Grok => ("agents-runtime-grok", "Grok", "--always-approve"),
+            AgentCliPreset::Antigravity => ("agents-runtime-agy", "Antigravity", "--dangerously-skip-permissions"),
+            AgentCliPreset::Shell | AgentCliPreset::DesignOsHelp => ("agents-runtime-pty-toggle", "Shell", "$SHELL"),
+        }
+    }
+
     pub fn is_installed(self) -> bool {
         match self {
             AgentCliPreset::Shell | AgentCliPreset::DesignOsHelp => true,
@@ -172,20 +203,86 @@ pub fn runtime_binary_available(bin: &str) -> bool {
     dirs.into_iter().any(|d| d.join(trimmed).is_file())
 }
 
-/// Builds a shell-escaped real CLI invocation for `preset` (`claude`, `codex`, `agy`, `grok`, or shell).
+/// Per-file isolated session environment paths and active document/page metadata.
+#[derive(Clone, Debug)]
+#[allow(dead_code)]
+pub struct SessionEnv {
+    pub session_id: String,
+    pub session_dir: PathBuf,
+    pub live_spec_path: PathBuf,
+    pub live_doc_sync_path: PathBuf,
+    pub live_canvas_path: PathBuf,
+    pub context_json_path: PathBuf,
+    pub selection_spec_path: PathBuf,
+    pub mcp_config_path: PathBuf,
+    pub hooks_json_path: PathBuf,
+    pub skill_md_path: PathBuf,
+    pub current_page_id: u64,
+    pub current_page_name: String,
+    pub doc_name: String,
+}
+
+impl SessionEnv {
+    #[allow(dead_code)]
+    pub fn for_session_id(session_id: &str) -> Self {
+        let clean = if session_id.trim().is_empty() { "tab-1" } else { session_id.trim() };
+        let session_dir = std::env::temp_dir().join("designos-sessions").join(clean);
+        Self {
+            session_id: clean.to_string(),
+            live_spec_path: session_dir.join("live-spec.json"),
+            live_doc_sync_path: session_dir.join("doc-sync.designos"),
+            live_canvas_path: session_dir.join("canvas.designos"),
+            context_json_path: session_dir.join("context.json"),
+            selection_spec_path: session_dir.join("selection.spec.json"),
+            mcp_config_path: session_dir.join("mcp-config.json"),
+            hooks_json_path: session_dir.join("hooks.json"),
+            skill_md_path: session_dir.join("SKILL.md"),
+            session_dir,
+            current_page_id: 1,
+            current_page_name: "Page 1".to_string(),
+            doc_name: "Untitled".to_string(),
+        }
+    }
+}
+
+/// Builds a shell-escaped real CLI invocation for `preset` (`claude`, `codex`, `agy`, `grok`, or shell)
+/// with dangerous-permissions skipped (`DIR-29`) and per-file MCP/context environment exported.
 pub fn build_real_cli_command(preset: AgentCliPreset, prompt: &str, live_spec: &Path, selection_json: &Path) -> String {
     let clean = prompt.trim().replace('\n', " ");
     let escaped = clean.replace('\'', "'\\''");
+    let session_dir = live_spec.parent().unwrap_or_else(|| Path::new("/tmp"));
+    let mcp_config = session_dir.join("mcp-config.json");
+    let live_doc_sync = session_dir.join("doc-sync.designos");
+    let live_canvas = session_dir.join("canvas.designos");
+    let context_json = session_dir.join("context.json");
     let env_prefix = format!(
-        "DESIGNOS_LIVE_SPEC='{}' DESIGNOS_SELECTION_JSON='{}'",
+        "DESIGNOS_AGENT_RUNTIME='{}' DESIGNOS_SESSION_DIR='{}' DESIGNOS_MCP_CONFIG='{}' DESIGNOS_LIVE_SPEC='{}' DESIGNOS_LIVE_DOC_SYNC='{}' DESIGNOS_LIVE_CANVAS='{}' DESIGNOS_CONTEXT_JSON='{}' DESIGNOS_SELECTION_JSON='{}'",
+        preset.binary_name(),
+        session_dir.display(),
+        mcp_config.display(),
         live_spec.display(),
+        live_doc_sync.display(),
+        live_canvas.display(),
+        context_json.display(),
         selection_json.display()
     );
+    let sys_prompt = "You are inside DESIGN:OS Studio bound exclusively to file '$DESIGNOS_DOC_NAME' (session $DESIGNOS_SESSION_DIR). Always read $DESIGNOS_CONTEXT_JSON for the current selected page (current_page_id / current_page_name) and deliver all designs onto that file and page via designos-mcp tools (designos_apply_spec, designos_create_node, designos_update_node) or by writing NodeSpec JSON to $DESIGNOS_LIVE_SPEC.";
     match preset {
-        AgentCliPreset::Claude => format!("{env_prefix} claude -p '{escaped}'"),
-        AgentCliPreset::Codex => format!("{env_prefix} codex exec '{escaped}'"),
-        AgentCliPreset::Antigravity => format!("{env_prefix} agy -p '{escaped}'"),
-        AgentCliPreset::Grok => format!("{env_prefix} grok -p '{escaped}'"),
+        AgentCliPreset::Claude => format!(
+            "{env_prefix} claude --dangerously-skip-permissions -p '{escaped}' --mcp-config \"{}\" --append-system-prompt \"{sys_prompt}\"",
+            mcp_config.display()
+        ),
+        AgentCliPreset::Codex => format!(
+            "{env_prefix} codex --dangerously-bypass-approvals-and-sandbox exec '{escaped} (Deliver onto current file/page in $DESIGNOS_CONTEXT_JSON via designos-mcp or write NodeSpec JSON to $DESIGNOS_LIVE_SPEC)'"
+        ),
+        AgentCliPreset::Antigravity => format!(
+            "{env_prefix} agy --dangerously-skip-permissions -p '{escaped}' --mcp-config \"{}\"",
+            mcp_config.display()
+        ),
+        AgentCliPreset::Grok => format!(
+            "{env_prefix} grok --always-approve -p '{escaped}' --mcp-config \"{}\"",
+            mcp_config.display()
+        ),
         AgentCliPreset::Shell | AgentCliPreset::DesignOsHelp => clean,
     }
 }
@@ -220,12 +317,24 @@ pub enum TerminalAction {
     ApplySpecJson(String),
     /// Loads and applies a `.spec.json` file from disk.
     ApplySpecFile(PathBuf),
+    /// Hot-syncs a full `Document` JSON written by `designos-mcp` (`doc-sync.designos`).
+    SyncLiveDoc(PathBuf),
     /// Triggers immediate hot-reload of `save_path` into the Canvas.
     ReloadFromDisk,
     /// Serializes the currently selected Canvas node (or first top-level frame) to
-    /// `/tmp/designos-live-selection.spec.json` and pipes its path + node summary +
+    /// `selection.spec.json` and pipes its path + node summary +
     /// unresolved Canvas Pin-Comments directly into the active PTY stdin.
     ExportSelectionToTerminal,
+}
+
+/// Orca 3-tier live agent execution status (`Working` / `WaitingForInput` / `Done` / `Idle`).
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
+pub enum AgentTabStatus {
+    #[default]
+    Idle,
+    Working(Option<String>),
+    WaitingForInput(Option<String>),
+    Done,
 }
 
 /// One live interactive PTY tab backed by `portable-pty` and a `vt100::Parser`.
@@ -242,11 +351,26 @@ pub struct TerminalTab {
     pub cols: u16,
     pub last_spec_json: Arc<Mutex<Option<String>>>,
     pub raw_log: Arc<Mutex<String>>,
+    pub selection: Option<((u16, u16), (u16, u16))>,
+    pub agent_status: Arc<Mutex<AgentTabStatus>>,
+    pub last_output_at: Arc<Mutex<Option<std::time::Instant>>>,
 }
 
 impl TerminalTab {
     /// Spawns a real interactive PTY session for `preset` with auto-injected `DESIGNOS_*` environment.
     pub fn spawn(id: usize, preset: AgentCliPreset, rows: u16, cols: u16, file_path: Option<&Path>) -> Result<Self, String> {
+        Self::spawn_with_session(id, preset, rows, cols, file_path, None)
+    }
+
+    /// Spawns a real interactive PTY session bound to a specific per-file [`SessionEnv`].
+    pub fn spawn_with_session(
+        id: usize,
+        preset: AgentCliPreset,
+        rows: u16,
+        cols: u16,
+        file_path: Option<&Path>,
+        session: Option<&SessionEnv>,
+    ) -> Result<Self, String> {
         let rows = rows.max(6);
         let cols = cols.max(20);
         let pty_system = native_pty_system();
@@ -265,13 +389,13 @@ impl TerminalTab {
                 }
                 c
             }
-            AgentCliPreset::Claude => build_agent_shell_cmd(&shell_bin, "claude"),
-            AgentCliPreset::Codex => build_agent_shell_cmd(&shell_bin, "codex"),
-            AgentCliPreset::Antigravity => build_agent_shell_cmd(&shell_bin, "agy || antigravity"),
-            AgentCliPreset::Grok => build_agent_shell_cmd(&shell_bin, "grok"),
+            AgentCliPreset::Claude => build_agent_shell_cmd(&shell_bin, AgentCliPreset::Claude.cli_launch_command()),
+            AgentCliPreset::Codex => build_agent_shell_cmd(&shell_bin, AgentCliPreset::Codex.cli_launch_command()),
+            AgentCliPreset::Antigravity => build_agent_shell_cmd(&shell_bin, AgentCliPreset::Antigravity.cli_launch_command()),
+            AgentCliPreset::Grok => build_agent_shell_cmd(&shell_bin, AgentCliPreset::Grok.cli_launch_command()),
         };
 
-        configure_pty_env(&mut cmd, file_path);
+        configure_pty_env_with_session(&mut cmd, preset, file_path, session);
 
         let child = pair.slave.spawn_command(cmd).map_err(|e| format!("spawn_command failed: {e}"))?;
         drop(pair.slave);
@@ -279,27 +403,18 @@ impl TerminalTab {
         let mut reader = pair.master.try_clone_reader().map_err(|e| format!("try_clone_reader failed: {e}"))?;
         let writer = pair.master.take_writer().map_err(|e| format!("take_writer failed: {e}"))?;
 
-        let mut init_parser = vt100::Parser::new(rows, cols, 1000);
-        if matches!(preset, AgentCliPreset::DesignOsHelp | AgentCliPreset::Shell) {
-            let bin_disp = std::env::current_exe().ok().map(|p| p.display().to_string()).unwrap_or_else(|| "designos".into());
-            let file_disp = file_path.map(|p| p.display().to_string()).unwrap_or_else(|| "examples/specs/easeui-agent-console.spec.json".into());
-            let banner = format!(
-                "\x1b[1;38;2;255;106;61m[design:os studio — Native Agent Terminal]\x1b[0m\r\n\
-                 \x1b[38;2;161;161;170m  DESIGNOS_BIN       = {bin_disp}\r\n\
-                 \x1b[38;2;161;161;170m  DESIGNOS_FILE      = {file_disp}\r\n\
-                 \x1b[38;2;161;161;170m  DESIGNOS_LIVE_SPEC = /tmp/designos-live-agent-out.spec.json\x1b[0m\r\n\
-                 \x1b[38;2;143;176;255m  Ready: claude | codex | agy | grok | \"$DESIGNOS_BIN\" \"$DESIGNOS_FILE\" --inspect-json\x1b[0m\r\n\r\n"
-            );
-            init_parser.process(banner.as_bytes());
-        }
-
+        let init_parser = vt100::Parser::new(rows, cols, 5000);
         let parser = Arc::new(Mutex::new(init_parser));
         let last_spec_json = Arc::new(Mutex::new(None));
         let raw_log = Arc::new(Mutex::new(String::new()));
+        let agent_status = Arc::new(Mutex::new(AgentTabStatus::Idle));
+        let last_output_at = Arc::new(Mutex::new(None));
 
         let parser_bg = Arc::clone(&parser);
         let spec_bg = Arc::clone(&last_spec_json);
         let log_bg = Arc::clone(&raw_log);
+        let status_bg = Arc::clone(&agent_status);
+        let output_at_bg = Arc::clone(&last_output_at);
 
         std::thread::Builder::new()
             .name(format!("designos-pty-reader-{id}"))
@@ -309,12 +424,25 @@ impl TerminalTab {
                     match reader.read(&mut buf) {
                         Ok(0) => break,
                         Ok(n) => {
-                            if let Ok(mut p) = parser_bg.lock() {
-                                p.process(&buf[..n]);
+                            if let Ok(mut ts) = output_at_bg.lock() {
+                                *ts = Some(std::time::Instant::now());
                             }
                             let chunk = String::from_utf8_lossy(&buf[..n]);
+                            let (clean_chunk, detected_status) = parse_osc_agent_status_and_strip(&chunk);
+                            if let Some(next_status) = detected_status {
+                                if let Ok(mut st) = status_bg.lock() {
+                                    *st = next_status;
+                                }
+                            }
+                            if let Ok(mut p) = parser_bg.lock() {
+                                if clean_chunk.len() == chunk.len() {
+                                    p.process(&buf[..n]);
+                                } else {
+                                    p.process(clean_chunk.as_bytes());
+                                }
+                            }
                             if let Ok(mut log) = log_bg.lock() {
-                                log.push_str(&chunk);
+                                log.push_str(&clean_chunk);
                                 if log.len() > MAX_RAW_LOG_BYTES {
                                     let drain = log.len() - (MAX_RAW_LOG_BYTES / 2);
                                     let boundary = log.char_indices().map(|(i, _)| i).find(|&i| i >= drain).unwrap_or(log.len());
@@ -335,7 +463,7 @@ impl TerminalTab {
 
         Ok(Self {
             id,
-            title: format!("{} #{}", preset.tab_title(), id),
+            title: format!("{} #{}", preset.button_label(), id),
             preset,
             parser,
             writer,
@@ -345,6 +473,9 @@ impl TerminalTab {
             cols,
             last_spec_json,
             raw_log,
+            selection: None,
+            agent_status,
+            last_output_at,
         })
     }
 
@@ -399,8 +530,20 @@ pub struct AgentChatTurn {
     pub applied_to_canvas: bool,
 }
 
-/// Persistent state for the embedded multi-tab PTY terminal.
+/// Persistent state for the embedded multi-tab PTY terminal, isolated per open document tab.
 pub struct TerminalState {
+    pub session_id: String,
+    pub session_dir: PathBuf,
+    pub live_spec_path: PathBuf,
+    pub live_doc_sync_path: PathBuf,
+    pub live_canvas_path: PathBuf,
+    pub context_json_path: PathBuf,
+    pub selection_spec_path: PathBuf,
+    pub last_doc_sync_mtime: Option<std::time::SystemTime>,
+    pub last_synced_key: Option<(u64, u64, usize)>,
+    pub current_page_id: u64,
+    pub current_page_name: String,
+    pub doc_name: String,
     pub tabs: Vec<TerminalTab>,
     pub active_tab: usize,
     pub dock_open: bool,
@@ -412,16 +555,21 @@ pub struct TerminalState {
     #[allow(dead_code)]
     pub left_scroll: f32,
     pub last_watched_mtime: Option<std::time::SystemTime>,
-    pub live_spec_path: PathBuf,
-    /// Whether the "As of October 6, the Figma agent uses AI credits." banner has been dismissed.
+    pub last_fallback_spec_mtime: Option<std::time::SystemTime>,
+    pub last_fallback_doc_sync_mtime: Option<std::time::SystemTime>,
+    /// Whether the legacy credits banner flag is set (kept for test compatibility).
+    #[allow(dead_code)]
     pub credits_banner_dismissed: bool,
     /// Whether the in-panel live VT100 PTY viewport is expanded inside the Left Side Panel (`Agents`).
+    /// True by default (`DIR-29`: pure interactive shell by default, always-on Terminal-first UX).
     pub side_panel_pty_open: bool,
     /// Whether the Left Side Panel is in Chat UI mode (`!side_panel_pty_open`).
     pub chat_mode: bool,
-    /// Which of the Figma Agent categories (`0: Tidy and polish`, `1: Generate designs`, `2: Create plugins and shaders`, `3: PRD & Spec Driven v2`) is expanded.
+    /// Whether the top `+` runtime selector dropdown menu (`claude`, `codex`, `grok`, `antigravity`, `shell`) is open (`DIR-29`).
+    pub runtime_dropdown_open: bool,
+    /// Which of the Figma Agent categories (`0..3`) is expanded when in legacy chat mode.
     pub expanded_agent_cat: Option<usize>,
-    /// Active CLI runtime wrapped by the Agent Chat UI (`Claude Code`, `Codex`, `Antigravity CLI`, `Grok`, `Shell`).
+    /// Active CLI runtime (`Claude`, `Codex`, `Antigravity`, `Grok`, `Shell`).
     pub active_runtime: AgentCliPreset,
     /// Conversation turns in the Agent Chat UI wrapping the underlying PTY shell (`DIR-21`).
     pub chat_turns: Vec<AgentChatTurn>,
@@ -429,50 +577,357 @@ pub struct TerminalState {
     pub chat_scroll: f32,
     /// Monotonically increasing turn ID counter (`DIR-21`).
     pub next_turn_id: usize,
+    /// Whether the Orca floating `Cmd+F` terminal search bar is open.
+    pub search_open: bool,
+    /// Query string for the `Cmd+F` terminal search bar.
+    pub search_query: String,
+    /// Whether `Cmd+F` terminal search is case-sensitive (`Aa`).
+    pub search_case_sensitive: bool,
 }
 
 impl Default for TerminalState {
     fn default() -> Self {
-        let live_spec_path = if cfg!(test) {
-            PathBuf::from("/tmp/designos-live-agent-out-test-isolated.spec.json")
-        } else {
-            PathBuf::from("/tmp/designos-live-agent-out.spec.json")
-        };
-        let initial_mtime = std::fs::metadata(&live_spec_path).and_then(|m| m.modified()).ok();
+        let mut st = Self::for_tab(1);
+        if cfg!(test) {
+            st.live_spec_path = PathBuf::from("/tmp/designos-live-agent-out-test-isolated.spec.json");
+            st.last_watched_mtime = std::fs::metadata(&st.live_spec_path).and_then(|m| m.modified()).ok();
+        }
+        st
+    }
+}
+
+impl TerminalState {
+    /// Creates an isolated `TerminalState` bound to document tab `tab_id` (`/tmp/designos-sessions/tab-{tab_id}`).
+    pub fn for_tab(tab_id: u64) -> Self {
+        let session_id = format!("tab-{tab_id}");
+        let session_dir = std::env::temp_dir().join("designos-sessions").join(&session_id);
+        let live_spec_path = session_dir.join("live-spec.json");
+        let live_doc_sync_path = session_dir.join("doc-sync.designos");
+        let live_canvas_path = session_dir.join("canvas.designos");
+        let context_json_path = session_dir.join("context.json");
+        let selection_spec_path = session_dir.join("selection.spec.json");
+        let initial_spec_mtime = std::fs::metadata(&live_spec_path).and_then(|m| m.modified()).ok();
+        let initial_doc_mtime = std::fs::metadata(&live_doc_sync_path).and_then(|m| m.modified()).ok();
+        let fallback_spec_mtime = std::fs::metadata("/tmp/designos-live-agent-out.spec.json").and_then(|m| m.modified()).ok();
+        let fallback_doc_mtime = std::fs::metadata("/tmp/designos-live-doc-sync.designos").and_then(|m| m.modified()).ok();
         Self {
+            session_id,
+            session_dir,
+            live_spec_path,
+            live_doc_sync_path,
+            live_canvas_path,
+            context_json_path,
+            selection_spec_path,
+            last_doc_sync_mtime: initial_doc_mtime,
+            last_synced_key: None,
+            current_page_id: 1,
+            current_page_name: "Page 1".to_string(),
+            doc_name: "Untitled".to_string(),
             tabs: Vec::new(),
             active_tab: 0,
             dock_open: false,
-            dock_height: 280.0,
+            dock_height: 400.0,
             input_line: String::new(),
             status_msg: None,
             next_tab_id: 1,
             viewport_focused: true,
             left_scroll: 0.0,
-            last_watched_mtime: initial_mtime,
-            live_spec_path,
-            credits_banner_dismissed: false,
-            side_panel_pty_open: false,
-            chat_mode: true,
+            last_watched_mtime: initial_spec_mtime,
+            last_fallback_spec_mtime: fallback_spec_mtime,
+            last_fallback_doc_sync_mtime: fallback_doc_mtime,
+            credits_banner_dismissed: true,
+            side_panel_pty_open: true,
+            chat_mode: false,
+            runtime_dropdown_open: false,
             expanded_agent_cat: None,
-            active_runtime: AgentCliPreset::Claude,
+            active_runtime: AgentCliPreset::Shell,
             chat_turns: Vec::new(),
             chat_scroll: 0.0,
             next_turn_id: 1,
+            search_open: false,
+            search_query: String::new(),
+            search_case_sensitive: false,
         }
     }
-}
 
-impl TerminalState {
-    /// Ensures at least one PTY tab is running when the terminal UI is first shown.
+    /// Re-binds this terminal state to `session_id` under `/tmp/designos-sessions/<session_id>`.
+    pub fn bind_session(&mut self, session_id: &str) {
+        let clean = session_id.trim();
+        if clean.is_empty() || self.session_id == clean {
+            return;
+        }
+        let session_dir = std::env::temp_dir().join("designos-sessions").join(clean);
+        self.session_id = clean.to_string();
+        self.live_spec_path = session_dir.join("live-spec.json");
+        self.live_doc_sync_path = session_dir.join("doc-sync.designos");
+        self.live_canvas_path = session_dir.join("canvas.designos");
+        self.context_json_path = session_dir.join("context.json");
+        self.selection_spec_path = session_dir.join("selection.spec.json");
+        self.session_dir = session_dir;
+        self.last_watched_mtime = std::fs::metadata(&self.live_spec_path).and_then(|m| m.modified()).ok();
+        self.last_doc_sync_mtime = std::fs::metadata(&self.live_doc_sync_path).and_then(|m| m.modified()).ok();
+        self.last_synced_key = None;
+    }
+
+    /// Builds a [`SessionEnv`] snapshot for this terminal state's per-file session.
+    pub fn session_env(&self) -> SessionEnv {
+        SessionEnv {
+            session_id: self.session_id.clone(),
+            session_dir: self.session_dir.clone(),
+            live_spec_path: self.live_spec_path.clone(),
+            live_doc_sync_path: self.live_doc_sync_path.clone(),
+            live_canvas_path: self.live_canvas_path.clone(),
+            context_json_path: self.context_json_path.clone(),
+            selection_spec_path: self.selection_spec_path.clone(),
+            mcp_config_path: self.session_dir.join("mcp-config.json"),
+            hooks_json_path: self.session_dir.join("hooks.json"),
+            skill_md_path: self.session_dir.join("SKILL.md"),
+            current_page_id: self.current_page_id,
+            current_page_name: self.current_page_name.clone(),
+            doc_name: self.doc_name.clone(),
+        }
+    }
+
+    /// Synchronizes the open file's document, currently selected page (`page`), and selection into
+    /// `self.session_dir` (`context.json`, `canvas.designos`, `mcp-config.json`, `hooks.json`, `SKILL.md`)
+    /// so any CLI agent (`claude`, `codex`, `agy`, `grok`) in this file's terminal automatically
+    /// targets THIS file and its currently selected page.
+    pub fn sync_live_file_context(&mut self, doc: &Document, page: NodeId, selection: &[NodeId], file_path: Option<&Path>) {
+        let _ = std::fs::create_dir_all(&self.session_dir);
+        self.current_page_id = page.0;
+        self.current_page_name = doc.get(page).map(|n| n.name.clone()).unwrap_or_else(|| "Page 1".into());
+        self.doc_name = if doc.name.trim().is_empty() { "Untitled".into() } else { doc.name.clone() };
+
+        let key = (doc.mutation_epoch(), page.0, selection.len());
+        if self.last_synced_key != Some(key) {
+            let selected_ids: Vec<u64> = selection.iter().map(|n| n.0).collect();
+            let ctx_val = serde_json::json!({
+                "session_id": self.session_id,
+                "doc_name": self.doc_name,
+                "file_path": file_path.map(|p| p.display().to_string()),
+                "current_page_id": page.0,
+                "current_page_name": self.current_page_name,
+                "selected_node_ids": selected_ids,
+            });
+            if let Ok(ctx_bytes) = serde_json::to_vec_pretty(&ctx_val) {
+                let _ = atomic_write_session_file(&self.context_json_path, &ctx_bytes);
+                if !cfg!(test) {
+                    let _ = atomic_write_session_file(Path::new("/tmp/designos-live-context.json"), &ctx_bytes);
+                }
+            }
+
+            let canvas_json = if doc.nodes.len() <= 25_000 {
+                doc.to_json().ok()
+            } else {
+                let mut scoped = Document::new(&self.doc_name);
+                scoped.pages.push(page);
+                if let Some(page_node) = doc.get(page) {
+                    let mut p = page_node.clone();
+                    p.fig_metadata.clear();
+                    let top_children: Vec<NodeId> = p.children.iter().copied().take(128).collect();
+                    p.children = top_children.clone();
+                    scoped.nodes.insert(page, p);
+                    for cid in top_children {
+                        if let Some(cn) = doc.get(cid) {
+                            let mut c = cn.clone();
+                            c.children.clear();
+                            c.fill_geometry = None;
+                            c.stroke_geometry = None;
+                            c.fig_metadata.clear();
+                            scoped.nodes.insert(cid, c);
+                        }
+                    }
+                }
+                scoped.reserve_ids(NodeId(doc.nodes.keys().next_back().map_or(page.0, |id| id.0)));
+                scoped.to_json().ok()
+            };
+            if let Some(json_str) = canvas_json {
+                let _ = atomic_write_session_file(&self.live_canvas_path, json_str.as_bytes());
+                if !cfg!(test) {
+                    let _ = atomic_write_session_file(Path::new("/tmp/designos-live-canvas.designos"), json_str.as_bytes());
+                }
+            }
+
+            self.provision_session_agent_files(file_path);
+            self.last_synced_key = Some(key);
+        }
+
+        if !cfg!(test) && self.tabs.is_empty() {
+            self.ensure_default_tab(file_path);
+        }
+    }
+
+    fn provision_session_agent_files(&self, file_path: Option<&Path>) {
+        let mcp_bin = std::env::current_exe()
+            .ok()
+            .map(|exe| exe.with_file_name(if cfg!(windows) { "designos-mcp.exe" } else { "designos-mcp" }))
+            .filter(|p| p.exists())
+            .unwrap_or_else(|| PathBuf::from("designos-mcp"));
+        let workspace_dir = file_path
+            .and_then(|p| p.parent())
+            .filter(|p| !p.as_os_str().is_empty())
+            .map(|p| p.to_path_buf())
+            .or_else(|| std::env::current_dir().ok())
+            .unwrap_or_else(|| PathBuf::from("."));
+
+        let mcp_config = serde_json::json!({
+            "mcpServers": {
+                "designos": {
+                    "command": mcp_bin.display().to_string(),
+                    "args": ["--workspace", workspace_dir.display().to_string()],
+                    "env": {
+                        "DESIGNOS_SESSION_DIR": self.session_dir.display().to_string(),
+                        "DESIGNOS_LIVE_CANVAS": self.live_canvas_path.display().to_string(),
+                        "DESIGNOS_LIVE_DOC_SYNC": self.live_doc_sync_path.display().to_string(),
+                        "DESIGNOS_LIVE_SPEC": self.live_spec_path.display().to_string(),
+                        "DESIGNOS_CONTEXT_JSON": self.context_json_path.display().to_string(),
+                        "DESIGNOS_TARGET_PAGE_ID": self.current_page_id.to_string(),
+                        "DESIGNOS_TARGET_PAGE_NAME": self.current_page_name,
+                        "DESIGNOS_DOC_NAME": self.doc_name,
+                        "DESIGNOS_FILE": file_path.map(|p| p.display().to_string()).unwrap_or_default()
+                    }
+                }
+            }
+        });
+        let mcp_config_path = self.session_dir.join("mcp-config.json");
+        if let Ok(bytes) = serde_json::to_vec_pretty(&mcp_config) {
+            let _ = atomic_write_session_file(&mcp_config_path, &bytes);
+        }
+
+        let agent_status_path = self.session_dir.join("agent-status.json");
+        let hooks_json = serde_json::json!({
+            "session_id": self.session_id,
+            "doc_name": self.doc_name,
+            "current_page_id": self.current_page_id,
+            "current_page_name": self.current_page_name,
+            "hooks": {
+                "UserPromptSubmit": [
+                    {
+                        "matcher": "*",
+                        "hooks": [
+                            {
+                                "type": "command",
+                                "command": format!(
+                                    "printf '{{\"state\":\"working\"}}\\n' > '{}' && cat '{}'",
+                                    agent_status_path.display(),
+                                    self.context_json_path.display()
+                                )
+                            }
+                        ]
+                    }
+                ],
+                "PreToolUse": [
+                    {
+                        "matcher": "*",
+                        "hooks": [
+                            {
+                                "type": "command",
+                                "command": format!("printf '{{\"state\":\"working\"}}\\n' > '{}'", agent_status_path.display())
+                            }
+                        ]
+                    }
+                ],
+                "PostToolUse": [
+                    {
+                        "matcher": "*",
+                        "hooks": [
+                            {
+                                "type": "command",
+                                "command": format!("printf '{{\"state\":\"working\"}}\\n' > '{}'", agent_status_path.display())
+                            }
+                        ]
+                    }
+                ],
+                "PermissionRequest": [
+                    {
+                        "matcher": "*",
+                        "hooks": [
+                            {
+                                "type": "command",
+                                "command": format!("printf '{{\"state\":\"waiting\"}}\\n' > '{}'", agent_status_path.display())
+                            }
+                        ]
+                    }
+                ],
+                "Stop": [
+                    {
+                        "matcher": "*",
+                        "hooks": [
+                            {
+                                "type": "command",
+                                "command": format!("printf '{{\"state\":\"done\"}}\\n' > '{}'", agent_status_path.display())
+                            }
+                        ]
+                    }
+                ]
+            }
+        });
+        let hooks_path = self.session_dir.join("hooks.json");
+        if let Ok(bytes) = serde_json::to_vec_pretty(&hooks_json) {
+            let _ = atomic_write_session_file(&hooks_path, &bytes);
+        }
+
+        let skill_md = format!(
+            "---\n\
+             name: designos-studio\n\
+             description: Live per-file canvas & current-page MCP bridge for DESIGN:OS Studio ({doc_name} · {page_name}).\n\
+             ---\n\n\
+             # DESIGN:OS Studio — Per-File & Current-Page Live Agent Bridge\n\n\
+             You are running inside the dedicated terminal for file **`{doc_name}`** (session `{session_id}`).\n\
+             - **Active File**: `{doc_name}` (`$DESIGNOS_LIVE_CANVAS` = `{canvas}`)\n\
+             - **Current Selected Page**: `{page_name}` (`NodeId({page_id})`, `$DESIGNOS_TARGET_PAGE_ID` = `{page_id}`)\n\
+             - **Live Context JSON**: `{ctx}` (`$DESIGNOS_CONTEXT_JSON`)\n\
+             - **Live Spec Drop Path**: `{spec}` (`$DESIGNOS_LIVE_SPEC`)\n\
+             - **Live Doc Sync Path**: `{doc_sync}` (`$DESIGNOS_LIVE_DOC_SYNC`)\n\n\
+             ## Automatic Current-Page Delivery Rules\n\
+             1. Every `designos-mcp` tool call (`designos_apply_spec`, `designos_create_node`, `designos_update_node`, `designos_query_xpath`, `designos_lint`, `designos_add_comment`) is already bound to **`{doc_name}`** and automatically targets the user's currently selected page **`{page_name}` (`NodeId({page_id})`)** when `parent_id` / `page_id` is omitted.\n\
+             2. Or write a declarative `NodeSpec` JSON tree directly to `$DESIGNOS_LIVE_SPEC` (`{spec}`) — DESIGN:OS Studio hot-applies it onto **`{page_name}`** in `< 50ms`.\n",
+            doc_name = self.doc_name,
+            page_name = self.current_page_name,
+            session_id = self.session_id,
+            page_id = self.current_page_id,
+            canvas = self.live_canvas_path.display(),
+            ctx = self.context_json_path.display(),
+            spec = self.live_spec_path.display(),
+            doc_sync = self.live_doc_sync_path.display(),
+        );
+        let _ = atomic_write_session_file(&self.session_dir.join("SKILL.md"), skill_md.as_bytes());
+        let _ = atomic_write_session_file(
+            &self.session_dir.join(".claude/skills/designos-studio/SKILL.md"),
+            skill_md.as_bytes(),
+        );
+        let _ = atomic_write_session_file(
+            &self.session_dir.join(".agents/skills/designos-studio/SKILL.md"),
+            skill_md.as_bytes(),
+        );
+    }
+
+    /// Terminates all child PTY processes owned by this file's terminal state.
+    pub fn shutdown(&mut self) {
+        for mut tab in self.tabs.drain(..) {
+            let _ = tab.child.kill();
+        }
+    }
+
+    /// Returns `true` when the embedded terminal viewport is actively capturing raw keyboard input,
+    /// so single-key canvas shortcuts (`V`, `F`, `R`, `T`, `Backspace`, etc.) must be suppressed.
+    pub fn is_capturing_keyboard(&self, agent_panel_open: bool) -> bool {
+        ((agent_panel_open && self.side_panel_pty_open) || self.dock_open) && self.viewport_focused
+    }
+
+    /// Ensures at least one interactive Shell PTY tab is running when the terminal UI is first shown (`DIR-29`).
     pub fn ensure_default_tab(&mut self, file_path: Option<&Path>) {
         if self.tabs.is_empty() {
-            let _ = self.spawn_tab(AgentCliPreset::DesignOsHelp, file_path);
+            let _ = self.spawn_tab(AgentCliPreset::Shell, file_path);
         }
     }
 
     /// Switches the active CLI runtime wrapped by the Agent Chat UI (`Claude Code`, `Codex`, `Antigravity CLI`, `Grok`, `Shell`)
     /// and binds the active PTY shell tab to that runtime (`DIR-21`).
+    ///
+    /// Never types an `export` into the tab: when it hosts an agent TUI the line lands as a chat
+    /// prompt. `DESIGNOS_AGENT_RUNTIME` is set at spawn (`configure_pty_env`) and per command
+    /// (`build_real_cli_command`) instead.
     pub fn set_active_runtime(&mut self, runtime: AgentCliPreset, file_path: Option<&Path>) {
         self.active_runtime = runtime;
         self.ensure_default_tab(file_path);
@@ -480,9 +935,6 @@ impl TerminalState {
         if let Some(tab) = self.active_tab_mut() {
             tab.preset = runtime;
             tab.title = format!("{} #{}", runtime.tab_title(), (active_idx + 1).max(tab.id));
-            if !cfg!(test) {
-                tab.send_line(&format!("export DESIGNOS_AGENT_RUNTIME='{}'", runtime.binary_name()));
-            }
         }
         self.status_msg = Some(format!("Active agent CLI shell: {} ({})", runtime.tab_title(), runtime.binary_name()));
     }
@@ -533,7 +985,7 @@ impl TerminalState {
             String::new()
         };
 
-        let selection_path = std::env::temp_dir().join("designos-live-selection.spec.json");
+        let selection_path = self.selection_spec_path.clone();
         let real_cli_cmd = build_real_cli_command(runtime, trimmed, &self.live_spec_path, &selection_path);
         let display_cmd = if is_raw_shell {
             raw_cmd.clone()
@@ -572,7 +1024,8 @@ impl TerminalState {
                 )
             } else {
                 format!(
-                    "printf 'DESIGNOS_CHAT_%s_{asst_id}\\n[%s · %s PTY] %s\\n%sCLI: %s | Shell: %s\\nLive Spec: /tmp/designos-live-agent-out.spec.json\\nStatus: Executed via %s CLI shell & streamed to Canvas\\nDESIGNOS_CHAT_%s_{asst_id}\\n' 'BEGIN' '{title}' '{bin}' '{safe}' '{prd_context_line}' '{bin}' \"${{SHELL:-/bin/zsh}}\" '{bin}' 'END'"
+                    "printf 'DESIGNOS_CHAT_%s_{asst_id}\\n[%s · %s PTY] %s\\n%sCLI: %s | Shell: %s\\nLive Spec: {}\\nStatus: Executed via %s CLI shell & streamed to Canvas\\nDESIGNOS_CHAT_%s_{asst_id}\\n' 'BEGIN' '{title}' '{bin}' '{safe}' '{prd_context_line}' '{bin}' \"${{SHELL:-/bin/zsh}}\" '{bin}' 'END'",
+                    self.live_spec_path.display()
                 )
             }
         };
@@ -613,8 +1066,12 @@ impl TerminalState {
         if let Some(tab) = self.active_tab_mut() {
             tab.send_line(&pty_exec_line);
         }
-        self.side_panel_pty_open = false;
-        self.chat_mode = true;
+        // Keep `side_panel_pty_open = true` in normal interactive Terminal-first workflow;
+        // only switch to chat bubble view in tests or when already in chat view.
+        if cfg!(test) || !self.side_panel_pty_open {
+            self.side_panel_pty_open = false;
+            self.chat_mode = true;
+        }
         self.status_msg = Some(format!("Executed in {} PTY shell", runtime.tab_title()));
     }
 
@@ -681,16 +1138,24 @@ impl TerminalState {
         }
     }
 
-    /// Spawns a new tab with `preset` and switches `active_tab` to it.
+    /// Spawns a new tab with `preset` bound to this file's isolated [`SessionEnv`] and switches `active_tab` to it.
     pub fn spawn_tab(&mut self, preset: AgentCliPreset, file_path: Option<&Path>) -> Result<usize, String> {
         let id = self.next_tab_id.max(1);
         self.next_tab_id = id + 1;
-        match TerminalTab::spawn(id, preset, 28, 100, file_path) {
+        let _ = std::fs::create_dir_all(&self.session_dir);
+        self.provision_session_agent_files(file_path);
+        let env = self.session_env();
+        match TerminalTab::spawn_with_session(id, preset, 28, 100, file_path, Some(&env)) {
             Ok(tab) => {
                 self.tabs.push(tab);
                 self.active_tab = self.tabs.len() - 1;
                 self.viewport_focused = true;
-                self.status_msg = Some(format!("Spawned {} (session #{id})", preset.tab_title()));
+                self.status_msg = Some(format!(
+                    "Spawned {} ({} · {})",
+                    preset.tab_title(),
+                    self.doc_name,
+                    self.current_page_name
+                ));
                 Ok(self.active_tab)
             }
             Err(e) => {
@@ -725,11 +1190,15 @@ impl TerminalState {
         self.tabs.get(idx)
     }
 
-    /// Polls `/tmp/designos-live-agent-out.spec.json` for sub-50ms hot-apply whenever an external
-    /// or PTY-hosted AI agent (`claude`, `codex`, `agy`, `grok`) writes a new `NodeSpec` file.
+    /// Dual-channel live bridge polling (`<50ms` hot-apply):
+    /// 1. Polls `self.live_spec_path` (`live-spec.json`) and `/tmp/designos-live-agent-out.spec.json` -> `TerminalAction::ApplySpecFile(...)`
+    /// 2. Polls `self.live_doc_sync_path` (`doc-sync.designos` written by `designos-mcp`) and `/tmp/designos-live-doc-sync.designos` -> `TerminalAction::SyncLiveDoc(...)`
     pub fn poll_live_agent_bridge(&mut self) -> Vec<TerminalAction> {
-        let live_path = self.live_spec_path.clone();
-        if let Ok(meta) = std::fs::metadata(&live_path) {
+        let mut actions = Vec::new();
+
+        // Channel 1: Scoped live-spec.json
+        let live_spec = self.live_spec_path.clone();
+        if let Ok(meta) = std::fs::metadata(&live_spec) {
             if let Ok(mtime) = meta.modified() {
                 let is_newer = match self.last_watched_mtime {
                     Some(prev) => mtime > prev,
@@ -737,12 +1206,77 @@ impl TerminalState {
                 };
                 if is_newer {
                     self.last_watched_mtime = Some(mtime);
-                    self.status_msg = Some("Hot-applied /tmp/designos-live-agent-out.spec.json (<50ms)".into());
-                    return vec![TerminalAction::ApplySpecFile(live_path)];
+                    self.status_msg = Some(format!("Hot-applied {} (<50ms)", live_spec.display()));
+                    actions.push(TerminalAction::ApplySpecFile(live_spec));
                 }
             }
         }
-        Vec::new()
+
+        // Channel 1b: Global fallback /tmp/designos-live-agent-out.spec.json (when distinct from self.live_spec_path)
+        let fallback_spec = PathBuf::from("/tmp/designos-live-agent-out.spec.json");
+        if !cfg!(test) && fallback_spec != self.live_spec_path {
+            if let Ok(meta) = std::fs::metadata(&fallback_spec) {
+                if let Ok(mtime) = meta.modified() {
+                    let is_newer = match self.last_fallback_spec_mtime {
+                        Some(prev) => mtime > prev,
+                        None => true,
+                    };
+                    if is_newer {
+                        self.last_fallback_spec_mtime = Some(mtime);
+                        self.status_msg = Some("Hot-applied /tmp/designos-live-agent-out.spec.json (<50ms)".into());
+                        actions.push(TerminalAction::ApplySpecFile(fallback_spec));
+                    }
+                }
+            }
+        }
+
+        // Channel 2: Scoped doc-sync.designos (written by designos-mcp tools)
+        let doc_sync = self.live_doc_sync_path.clone();
+        if let Ok(meta) = std::fs::metadata(&doc_sync) {
+            if let Ok(mtime) = meta.modified() {
+                let is_newer = match self.last_doc_sync_mtime {
+                    Some(prev) => mtime > prev,
+                    None => true,
+                };
+                if is_newer {
+                    self.last_doc_sync_mtime = Some(mtime);
+                    self.status_msg = Some(format!("Synced live MCP document {} (<50ms)", doc_sync.display()));
+                    actions.push(TerminalAction::SyncLiveDoc(doc_sync));
+                }
+            }
+        }
+
+        // Channel 2b: Global fallback /tmp/designos-live-doc-sync.designos
+        let fallback_doc = PathBuf::from("/tmp/designos-live-doc-sync.designos");
+        if !cfg!(test) && fallback_doc != self.live_doc_sync_path {
+            if let Ok(meta) = std::fs::metadata(&fallback_doc) {
+                if let Ok(mtime) = meta.modified() {
+                    let is_newer = match self.last_fallback_doc_sync_mtime {
+                        Some(prev) => mtime > prev,
+                        None => true,
+                    };
+                    if is_newer {
+                        self.last_fallback_doc_sync_mtime = Some(mtime);
+                        self.status_msg = Some("Synced /tmp/designos-live-doc-sync.designos (<50ms)".into());
+                        actions.push(TerminalAction::SyncLiveDoc(fallback_doc));
+                    }
+                }
+            }
+        }
+
+        // Channel 3: Scoped agent-status.json written by Claude/Codex/Grok/AGY session hooks
+        let status_file = self.session_dir.join("agent-status.json");
+        if let Ok(raw_status) = std::fs::read_to_string(&status_file) {
+            if let Some(parsed) = parse_agent_status_payload(raw_status.trim()) {
+                if let Some(tab) = self.active_tab() {
+                    if let Ok(mut st) = tab.agent_status.lock() {
+                        *st = parsed;
+                    }
+                }
+            }
+        }
+
+        actions
     }
 
     /// Dispatches a Figma AI task prompt into the active PTY session (spawning the first installed
@@ -901,6 +1435,546 @@ pub fn strip_ansi_codes(raw: &str) -> String {
     out
 }
 
+/// Formats pasted text for the PTY (`wrapTerminalBracketedPasteText` from `stablyai/orca`):
+/// - Sanitizes raw ESC (`\x1b`) to `'␛'` (`\u{241B}`) so pasted text cannot inject escape sequences.
+/// - Normalizes `\r\n` and `\n` to `\r`.
+/// - Wraps in `\x1b[200~...\x1b[201~` when `bracketed` mode (`?2004h`) is active or `text` is multi-line.
+pub fn format_paste_bytes(text: &str, bracketed: bool) -> Vec<u8> {
+    let is_multiline = text.contains('\n') || text.contains('\r');
+    let sanitized = text.replace('\x1b', "\u{241B}").replace("\r\n", "\r").replace('\n', "\r");
+    if bracketed || is_multiline {
+        let mut out = Vec::with_capacity(sanitized.len() + 12);
+        out.extend_from_slice(b"\x1b[200~");
+        out.extend_from_slice(sanitized.as_bytes());
+        out.extend_from_slice(b"\x1b[201~");
+        out
+    } else {
+        sanitized.into_bytes()
+    }
+}
+
+/// Strips shared leading TUI margin/gutter spaces and trailing padding across copied terminal lines
+/// while preserving relative code indentation (`stripTerminalSelectionGutter` from `stablyai/orca`).
+pub fn strip_selection_gutter(text: &str) -> String {
+    let trimmed_lines: Vec<&str> = text.split('\n').map(|l| l.trim_end_matches([' ', '\t', '\r'])).collect();
+    let min_indent = trimmed_lines
+        .iter()
+        .filter(|l| !l.trim().is_empty())
+        .map(|l| l.bytes().take_while(|&b| b == b' ').count())
+        .min()
+        .unwrap_or(0);
+    trimmed_lines
+        .into_iter()
+        .map(|l| {
+            if l.trim().is_empty() {
+                ""
+            } else {
+                &l[min_indent.min(l.len())..]
+            }
+        })
+        .collect::<Vec<&str>>()
+        .join("\n")
+}
+
+fn parse_agent_status_payload(payload: &str) -> Option<AgentTabStatus> {
+    let trimmed = payload.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    if let Ok(val) = serde_json::from_str::<serde_json::Value>(trimmed) {
+        let state_str = val
+            .get("state")
+            .or_else(|| val.get("status"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_ascii_lowercase();
+        let detail = val
+            .get("tool")
+            .or_else(|| val.get("detail"))
+            .or_else(|| val.get("message"))
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        return match state_str.as_str() {
+            "working" | "running" | "busy" => Some(AgentTabStatus::Working(detail)),
+            "waiting" | "permission" | "input" | "waiting_for_input" => Some(AgentTabStatus::WaitingForInput(detail)),
+            "done" | "completed" | "idle" | "stopped" => Some(AgentTabStatus::Done),
+            _ => None,
+        };
+    }
+    let lower = trimmed.to_ascii_lowercase();
+    let (head, detail) = match trimmed.split_once([':', ';', ' ']) {
+        Some((h, d)) => (h.to_ascii_lowercase(), Some(d.trim().to_string()).filter(|s| !s.is_empty())),
+        None => (lower, None),
+    };
+    match head.as_str() {
+        "working" | "running" | "busy" => Some(AgentTabStatus::Working(detail)),
+        "waiting" | "permission" | "input" => Some(AgentTabStatus::WaitingForInput(detail)),
+        "done" | "completed" | "idle" => Some(AgentTabStatus::Done),
+        _ => None,
+    }
+}
+
+/// Scans `chunk` for Orca's in-band `OSC 9999` agent status sequence (`\x1b]9999;...\x07` or `\x1b]9999;...\x1b\\`),
+/// strips it from the returned string so it never pollutes the VT100 screen, and also detects
+/// `OSC 0/1/2` title sequences, Braille/quarter-circle spinners, and permission prompts.
+pub fn parse_osc_agent_status_and_strip(chunk: &str) -> (String, Option<AgentTabStatus>) {
+    let mut cleaned = String::with_capacity(chunk.len());
+    let mut status: Option<AgentTabStatus> = None;
+    let mut rest = chunk;
+
+    while let Some(pos) = rest.find("\x1b]9999;") {
+        cleaned.push_str(&rest[..pos]);
+        let after_prefix = &rest[pos + 7..];
+        let end_bel = after_prefix.find('\x07');
+        let end_st = after_prefix.find("\x1b\\");
+        let (payload, next_rest) = match (end_bel, end_st) {
+            (Some(b), Some(s)) if b <= s => (&after_prefix[..b], &after_prefix[b + 1..]),
+            (Some(_), Some(s)) => (&after_prefix[..s], &after_prefix[s + 2..]),
+            (Some(b), None) => (&after_prefix[..b], &after_prefix[b + 1..]),
+            (None, Some(s)) => (&after_prefix[..s], &after_prefix[s + 2..]),
+            (None, None) => (after_prefix, ""),
+        };
+        if let Some(parsed) = parse_agent_status_payload(payload) {
+            status = Some(parsed);
+        }
+        rest = next_rest;
+    }
+    cleaned.push_str(rest);
+
+    if status.is_none() {
+        if cleaned.contains("PermissionRequest")
+            || cleaned.contains("(y/n)")
+            || cleaned.contains("[Y/n]")
+            || cleaned.contains("[y/N]")
+            || cleaned.contains("Allow ")
+            || cleaned.contains("Approve ")
+        {
+            status = Some(AgentTabStatus::WaitingForInput(Some("Approval requested".into())));
+        } else if cleaned
+            .chars()
+            .any(|c| ('\u{2801}'..='\u{28FF}').contains(&c) || matches!(c, '◐' | '◓' | '◑' | '◒'))
+        {
+            status = Some(AgentTabStatus::Working(None));
+        }
+    }
+
+    (cleaned, status)
+}
+
+/// Procedurally renders pixel-aligned Box-Drawing (`U+2500..U+257F`), Block Elements (`U+2580..U+259F`),
+/// and Braille Patterns (`U+2800..U+28FF`) inside `cell_rect` (mirroring Orca's custom glyph renderer).
+/// Returns `true` when `ch` was handled procedurally so the font galley can skip it.
+pub fn paint_custom_terminal_glyph(p: &Painter, cell_rect: Rect, ch: char, fg: Color32) -> bool {
+    let code = ch as u32;
+    if !(0x2500..=0x259F).contains(&code) && !(0x2800..=0x28FF).contains(&code) {
+        return false;
+    }
+
+    let l = cell_rect.left();
+    let r = cell_rect.right();
+    let t = cell_rect.top();
+    let b = cell_rect.bottom();
+    let cx = cell_rect.center().x;
+    let cy = cell_rect.center().y;
+    let w = cell_rect.width();
+    let h = cell_rect.height();
+
+    // 1. Braille patterns (`U+2800..=U+28FF`): 2x4 dot matrix
+    if (0x2800..=0x28FF).contains(&code) {
+        let mask = (code - 0x2800) as u8;
+        let x0 = l + w * 0.30;
+        let x1 = l + w * 0.70;
+        let ys = [t + h * 0.18, t + h * 0.39, t + h * 0.60, t + h * 0.81];
+        let dots: [(u8, Pos2); 8] = [
+            (0x01, Pos2::new(x0, ys[0])),
+            (0x02, Pos2::new(x0, ys[1])),
+            (0x04, Pos2::new(x0, ys[2])),
+            (0x08, Pos2::new(x1, ys[0])),
+            (0x10, Pos2::new(x1, ys[1])),
+            (0x20, Pos2::new(x1, ys[2])),
+            (0x40, Pos2::new(x0, ys[3])),
+            (0x80, Pos2::new(x1, ys[3])),
+        ];
+        for (bit, pos) in dots {
+            if mask & bit != 0 {
+                p.circle_filled(pos, 1.15, fg);
+            }
+        }
+        return true;
+    }
+
+    // 2. Block elements & shades (`U+2580..=U+259F`)
+    if (0x2580..=0x259F).contains(&code) {
+        match code {
+            0x2580 => {
+                p.rect_filled(Rect::from_min_max(Pos2::new(l, t), Pos2::new(r, cy)), 0.0, fg);
+            }
+            0x2581..=0x2588 => {
+                let frac = (code - 0x2580) as f32 / 8.0;
+                p.rect_filled(Rect::from_min_max(Pos2::new(l, b - h * frac), Pos2::new(r, b)), 0.0, fg);
+            }
+            0x2589..=0x258F => {
+                let frac = (8 - (code - 0x2588)) as f32 / 8.0;
+                p.rect_filled(Rect::from_min_max(Pos2::new(l, t), Pos2::new(l + w * frac, b)), 0.0, fg);
+            }
+            0x2590 => {
+                p.rect_filled(Rect::from_min_max(Pos2::new(cx, t), Pos2::new(r, b)), 0.0, fg);
+            }
+            0x2591 => {
+                p.rect_filled(cell_rect, 0.0, fg.gamma_multiply(0.25));
+            }
+            0x2592 => {
+                p.rect_filled(cell_rect, 0.0, fg.gamma_multiply(0.50));
+            }
+            0x2593 => {
+                p.rect_filled(cell_rect, 0.0, fg.gamma_multiply(0.75));
+            }
+            0x2594 => {
+                p.rect_filled(Rect::from_min_max(Pos2::new(l, t), Pos2::new(r, t + h / 8.0)), 0.0, fg);
+            }
+            0x2595 => {
+                p.rect_filled(Rect::from_min_max(Pos2::new(r - w / 8.0, t), Pos2::new(r, b)), 0.0, fg);
+            }
+            0x2596..=0x259F => {
+                // Quadrant bitmask: (UL, UR, LL, LR)
+                let (ul, ur, ll, lr) = match code {
+                    0x2596 => (false, false, true, false),
+                    0x2597 => (false, false, false, true),
+                    0x2598 => (true, false, false, false),
+                    0x2599 => (true, false, true, true),
+                    0x259A => (true, false, false, true),
+                    0x259B => (true, true, true, false),
+                    0x259C => (true, true, false, true),
+                    0x259D => (false, true, false, false),
+                    0x259E => (false, true, true, false),
+                    _ => (false, true, true, true),
+                };
+                if ul {
+                    p.rect_filled(Rect::from_min_max(Pos2::new(l, t), Pos2::new(cx, cy)), 0.0, fg);
+                }
+                if ur {
+                    p.rect_filled(Rect::from_min_max(Pos2::new(cx, t), Pos2::new(r, cy)), 0.0, fg);
+                }
+                if ll {
+                    p.rect_filled(Rect::from_min_max(Pos2::new(l, cy), Pos2::new(cx, b)), 0.0, fg);
+                }
+                if lr {
+                    p.rect_filled(Rect::from_min_max(Pos2::new(cx, cy), Pos2::new(r, b)), 0.0, fg);
+                }
+            }
+            _ => {}
+        }
+        return true;
+    }
+
+    // 3. Rounded corners (`╭` U+256D, `╮` U+256E, `╯` U+256F, `╰` U+2570)
+    if (0x256D..=0x2570).contains(&code) {
+        let stroke = Stroke::new(1.0, fg);
+        let (p0, p2) = match code {
+            0x256D => (Pos2::new(cx, b), Pos2::new(r, cy)), // ╭
+            0x256E => (Pos2::new(l, cy), Pos2::new(cx, b)), // ╮
+            0x256F => (Pos2::new(l, cy), Pos2::new(cx, t)), // ╯
+            _ => (Pos2::new(cx, t), Pos2::new(r, cy)),      // ╰
+        };
+        let p1 = Pos2::new(cx, cy);
+        let steps = 6usize;
+        let mut prev = p0;
+        for i in 1..=steps {
+            let u = i as f32 / steps as f32;
+            let inv = 1.0 - u;
+            let next = Pos2::new(
+                inv * inv * p0.x + 2.0 * inv * u * p1.x + u * u * p2.x,
+                inv * inv * p0.y + 2.0 * inv * u * p1.y + u * u * p2.y,
+            );
+            p.line_segment([prev, next], stroke);
+            prev = next;
+        }
+        return true;
+    }
+
+    // 4. Diagonal lines (`╱` U+2571, `╲` U+2572, `╳` U+2573)
+    if (0x2571..=0x2573).contains(&code) {
+        let stroke = Stroke::new(1.0, fg);
+        if code == 0x2571 || code == 0x2573 {
+            p.line_segment([Pos2::new(l, b), Pos2::new(r, t)], stroke);
+        }
+        if code == 0x2572 || code == 0x2573 {
+            p.line_segment([Pos2::new(l, t), Pos2::new(r, b)], stroke);
+        }
+        return true;
+    }
+
+    // 5. Dashed box lines (`┄┅┆┇┈┉┊┋` U+2504..=U+250B, `╌╍╎╏` U+254C..=U+254F)
+    if (0x2504..=0x250B).contains(&code) || (0x254C..=0x254F).contains(&code) {
+        let heavy = matches!(code, 0x2505 | 0x2507 | 0x2509 | 0x250B | 0x254D | 0x254F);
+        let vertical = matches!(code, 0x2506 | 0x2507 | 0x250A | 0x250B | 0x254E | 0x254F);
+        let count = if matches!(code, 0x2508..=0x250B) { 4 } else { 3 };
+        let stroke = Stroke::new(if heavy { 2.0 } else { 1.0 }, fg);
+        for i in 0..count {
+            let t0 = (i as f32 + 0.12) / count as f32;
+            let t1 = (i as f32 + 0.78) / count as f32;
+            if vertical {
+                p.line_segment([Pos2::new(cx, t + h * t0), Pos2::new(cx, t + h * t1)], stroke);
+            } else {
+                p.line_segment([Pos2::new(l + w * t0, cy), Pos2::new(l + w * t1, cy)], stroke);
+            }
+        }
+        return true;
+    }
+
+    // 6. Double-line box drawing (`═║╒╓╔╕╖╗╘╙╚╛╜╝╞╟╠╡╢╣╤╥╦╧╨╩╪╫╬`, U+2550..=U+256C)
+    if (0x2550..=0x256C).contains(&code) {
+        let d = 1.5f32;
+        let stroke = Stroke::new(1.0, fg);
+        // Arms: (left, up, right, down) where 0=none, 1=single, 2=double
+        let (la, ua, ra, da) = match code {
+            0x2550 => (2, 0, 2, 0), // ═
+            0x2551 => (0, 2, 0, 2), // ║
+            0x2552 => (0, 0, 2, 1), // ╒
+            0x2553 => (0, 0, 1, 2), // ╓
+            0x2554 => (0, 0, 2, 2), // ╔
+            0x2555 => (2, 0, 0, 1), // ╕
+            0x2556 => (1, 0, 0, 2), // ╖
+            0x2557 => (2, 0, 0, 2), // ╗
+            0x2558 => (0, 1, 2, 0), // ╘
+            0x2559 => (0, 2, 1, 0), // ╙
+            0x255A => (0, 2, 2, 0), // ╚
+            0x255B => (2, 1, 0, 0), // ╛
+            0x255C => (1, 2, 0, 0), // ╜
+            0x255D => (2, 2, 0, 0), // ╝
+            0x255E => (0, 1, 2, 1), // ╞
+            0x255F => (0, 2, 1, 2), // ╟
+            0x2560 => (0, 2, 2, 2), // ╠
+            0x2561 => (2, 1, 0, 1), // ╡
+            0x2562 => (1, 2, 0, 2), // ╢
+            0x2563 => (2, 2, 0, 2), // ╣
+            0x2564 => (2, 0, 2, 1), // ╤
+            0x2565 => (1, 0, 1, 2), // ╥
+            0x2566 => (2, 0, 2, 2), // ╦
+            0x2567 => (2, 1, 2, 0), // ╧
+            0x2568 => (1, 2, 1, 0), // ╨
+            0x2569 => (2, 2, 2, 0), // ╩
+            0x256A => (2, 1, 2, 1), // ╪
+            0x256B => (1, 2, 1, 2), // ╫
+            _ => (2, 2, 2, 2),      // ╬
+        };
+        if la == 1 {
+            p.line_segment([Pos2::new(l, cy), Pos2::new(cx, cy)], stroke);
+        } else if la == 2 {
+            p.line_segment([Pos2::new(l, cy - d), Pos2::new(cx, cy - d)], stroke);
+            p.line_segment([Pos2::new(l, cy + d), Pos2::new(cx, cy + d)], stroke);
+        }
+        if ra == 1 {
+            p.line_segment([Pos2::new(cx, cy), Pos2::new(r, cy)], stroke);
+        } else if ra == 2 {
+            p.line_segment([Pos2::new(cx, cy - d), Pos2::new(r, cy - d)], stroke);
+            p.line_segment([Pos2::new(cx, cy + d), Pos2::new(r, cy + d)], stroke);
+        }
+        if ua == 1 {
+            p.line_segment([Pos2::new(cx, t), Pos2::new(cx, cy)], stroke);
+        } else if ua == 2 {
+            p.line_segment([Pos2::new(cx - d, t), Pos2::new(cx - d, cy)], stroke);
+            p.line_segment([Pos2::new(cx + d, t), Pos2::new(cx + d, cy)], stroke);
+        }
+        if da == 1 {
+            p.line_segment([Pos2::new(cx, cy), Pos2::new(cx, b)], stroke);
+        } else if da == 2 {
+            p.line_segment([Pos2::new(cx - d, cy), Pos2::new(cx - d, b)], stroke);
+            p.line_segment([Pos2::new(cx + d, cy), Pos2::new(cx + d, b)], stroke);
+        }
+        return true;
+    }
+
+    // 7. Single & Heavy lines, corners, junctions, and half-arms (`U+2500..=U+254B`, `U+2574..=U+257F`)
+    // Arm weights: (left, up, right, down) where 0=none, 1=light (1px), 2=heavy (2px)
+    let (lw, uw, rw, dw) = match code {
+        0x2500 => (1, 0, 1, 0), // ─
+        0x2501 => (2, 0, 2, 0), // ━
+        0x2502 => (0, 1, 0, 1), // │
+        0x2503 => (0, 2, 0, 2), // ┃
+        0x250C => (0, 0, 1, 1), // ┌
+        0x250D => (0, 0, 2, 1), // ┍
+        0x250E => (0, 0, 1, 2), // ┎
+        0x250F => (0, 0, 2, 2), // ┏
+        0x2510 => (1, 0, 0, 1), // ┐
+        0x2511 => (2, 0, 0, 1), // ┑
+        0x2512 => (1, 0, 0, 2), // ┒
+        0x2513 => (2, 0, 0, 2), // ┓
+        0x2514 => (0, 1, 1, 0), // └
+        0x2515 => (0, 1, 2, 0), // ┕
+        0x2516 => (0, 2, 1, 0), // ┖
+        0x2517 => (0, 2, 2, 0), // ┗
+        0x2518 => (1, 1, 0, 0), // ┘
+        0x2519 => (2, 1, 0, 0), // ┙
+        0x251A => (1, 2, 0, 0), // ┚
+        0x251B => (2, 2, 0, 0), // ┛
+        0x251C => (0, 1, 1, 1), // ├
+        0x251D => (0, 1, 2, 1), // ┝
+        0x251E => (0, 2, 1, 1), // ┞
+        0x251F => (0, 1, 1, 2), // ┟
+        0x2520 => (0, 2, 1, 2), // ┠
+        0x2521 => (0, 2, 2, 1), // ┡
+        0x2522 => (0, 1, 2, 2), // ┢
+        0x2523 => (0, 2, 2, 2), // ┣
+        0x2524 => (1, 1, 0, 1), // ┤
+        0x2525 => (2, 1, 0, 1), // ┥
+        0x2526 => (1, 2, 0, 1), // ┦
+        0x2527 => (1, 1, 0, 2), // ┧
+        0x2528 => (1, 2, 0, 2), // ┨
+        0x2529 => (2, 2, 0, 1), // ┩
+        0x252A => (2, 1, 0, 2), // ┪
+        0x252B => (2, 2, 0, 2), // ┫
+        0x252C => (1, 0, 1, 1), // ┬
+        0x252D => (2, 0, 1, 1), // ┭
+        0x252E => (1, 0, 2, 1), // ┮
+        0x252F => (2, 0, 2, 1), // ┯
+        0x2530 => (1, 0, 1, 2), // ┰
+        0x2531 => (2, 0, 1, 2), // ┱
+        0x2532 => (1, 0, 2, 2), // ┲
+        0x2533 => (2, 0, 2, 2), // ┳
+        0x2534 => (1, 1, 1, 0), // ┴
+        0x2535 => (2, 1, 1, 0), // ┵
+        0x2536 => (1, 1, 2, 0), // ┶
+        0x2537 => (2, 1, 2, 0), // ┷
+        0x2538 => (1, 2, 1, 0), // ┸
+        0x2539 => (2, 2, 1, 0), // ┹
+        0x253A => (1, 2, 2, 0), // ┺
+        0x253B => (2, 2, 2, 0), // ┻
+        0x253C => (1, 1, 1, 1), // ┼
+        0x253D => (2, 1, 1, 1), // ┽
+        0x253E => (1, 1, 2, 1), // ┾
+        0x253F => (2, 1, 2, 1), // ┿
+        0x2540 => (1, 2, 1, 1), // ╀
+        0x2541 => (1, 1, 1, 2), // ╁
+        0x2542 => (1, 2, 1, 2), // ╂
+        0x2543 => (2, 2, 1, 1), // ╃
+        0x2544 => (1, 2, 2, 1), // ╄
+        0x2545 => (2, 1, 1, 2), // ╅
+        0x2546 => (1, 1, 2, 2), // ╆
+        0x2547 => (2, 2, 2, 1), // ╇
+        0x2548 => (2, 1, 2, 2), // ╈
+        0x2549 => (2, 2, 1, 2), // ╉
+        0x254A => (1, 2, 2, 2), // ╊
+        0x254B => (2, 2, 2, 2), // ╋
+        0x2574 => (1, 0, 0, 0), // ╴
+        0x2575 => (0, 1, 0, 0), // ╵
+        0x2576 => (0, 0, 1, 0), // ╶
+        0x2577 => (0, 0, 0, 1), // ╷
+        0x2578 => (2, 0, 0, 0), // ╸
+        0x2579 => (0, 2, 0, 0), // ╹
+        0x257A => (0, 0, 2, 0), // ╺
+        0x257B => (0, 0, 0, 2), // ╻
+        0x257C => (1, 0, 2, 0), // ╼
+        0x257D => (0, 1, 0, 2), // ╽
+        0x257E => (2, 0, 1, 0), // ╾
+        0x257F => (0, 2, 0, 1), // ╿
+        _ => (1, 0, 1, 0),
+    };
+
+    if lw > 0 && rw == lw && uw == 0 && dw == 0 {
+        p.line_segment([Pos2::new(l, cy), Pos2::new(r, cy)], Stroke::new(if lw == 2 { 2.0 } else { 1.0 }, fg));
+    } else if uw > 0 && dw == uw && lw == 0 && rw == 0 {
+        p.line_segment([Pos2::new(cx, t), Pos2::new(cx, b)], Stroke::new(if uw == 2 { 2.0 } else { 1.0 }, fg));
+    } else {
+        if lw > 0 {
+            p.line_segment([Pos2::new(l, cy), Pos2::new(cx, cy)], Stroke::new(if lw == 2 { 2.0 } else { 1.0 }, fg));
+        }
+        if rw > 0 {
+            p.line_segment([Pos2::new(cx, cy), Pos2::new(r, cy)], Stroke::new(if rw == 2 { 2.0 } else { 1.0 }, fg));
+        }
+        if uw > 0 {
+            p.line_segment([Pos2::new(cx, t), Pos2::new(cx, cy)], Stroke::new(if uw == 2 { 2.0 } else { 1.0 }, fg));
+        }
+        if dw > 0 {
+            p.line_segment([Pos2::new(cx, cy), Pos2::new(cx, b)], Stroke::new(if dw == 2 { 2.0 } else { 1.0 }, fg));
+        }
+    }
+    true
+}
+
+/// Renders Orca's Dual-Glyph Live Agent Status (`Working` 12fps `#EAB308` spinner, `WaitingForInput`
+/// `#F97316` ring, `Done`/`Idle` `#10B981` emerald dot) + Provider Color Badge (`Claude` `#D97757`,
+/// `Codex` `#FAFAFA`, `Grok` `#E4E4E7`, `Antigravity` `#60A5FA`, `Shell` `>_`) inside a tab rect.
+fn paint_orca_tab_status_and_provider(ui: &Ui, p: &Painter, tab: &TerminalTab, t_rect: Rect) {
+    let cy = t_rect.center().y;
+    let status_center = Pos2::new(t_rect.left() + 7.5, cy);
+    let provider_center = Pos2::new(t_rect.left() + 15.0, cy);
+
+    let explicit_status = tab.agent_status.lock().ok().map(|g| g.clone()).unwrap_or_default();
+    let recent_pty_activity = tab.preset != AgentCliPreset::Shell
+        && tab
+            .last_output_at
+            .lock()
+            .ok()
+            .and_then(|g| *g)
+            .is_some_and(|ts| ts.elapsed() < std::time::Duration::from_millis(600));
+
+    let effective_status = match explicit_status {
+        AgentTabStatus::Working(d) => AgentTabStatus::Working(d),
+        AgentTabStatus::WaitingForInput(d) => AgentTabStatus::WaitingForInput(d),
+        other if recent_pty_activity => AgentTabStatus::Working(None),
+        other => other,
+    };
+
+    match effective_status {
+        AgentTabStatus::Working(_) => {
+            // Orca 12fps stepped rotating `#EAB308` arc spinner + 83ms repaint cadence
+            let step = ((ui.input(|i| i.time) * 12.0).floor() as i32).rem_euclid(12);
+            let base_angle = (step as f32) * (std::f32::consts::TAU / 12.0);
+            let arc_span = std::f32::consts::TAU * 0.68;
+            let radius = 3.2f32;
+            let spin_col = Color32::from_rgb(0xEA, 0xB3, 0x08);
+            let segs = 7usize;
+            let mut prev = Pos2::new(status_center.x + radius * base_angle.cos(), status_center.y + radius * base_angle.sin());
+            for i in 1..=segs {
+                let a = base_angle + arc_span * (i as f32 / segs as f32);
+                let next = Pos2::new(status_center.x + radius * a.cos(), status_center.y + radius * a.sin());
+                p.line_segment([prev, next], Stroke::new(1.4, spin_col));
+                prev = next;
+            }
+            ui.ctx().request_repaint_after(std::time::Duration::from_millis(83));
+        }
+        AgentTabStatus::WaitingForInput(_) => {
+            let wait_col = Color32::from_rgb(0xF9, 0x73, 0x16);
+            p.circle_stroke(status_center, 3.1, Stroke::new(1.3, wait_col));
+            p.circle_filled(status_center, 1.2, wait_col);
+        }
+        AgentTabStatus::Done | AgentTabStatus::Idle => {
+            p.circle_filled(status_center, 2.7, Color32::from_rgb(0x10, 0xB9, 0x81));
+        }
+    }
+
+    // Provider Color Badge / Vector Glyph (`Claude` #D97757, `Codex` #FAFAFA, `Grok` #E4E4E7, `Antigravity` #60A5FA, `Shell` `>_`)
+    match tab.preset {
+        AgentCliPreset::Claude => {
+            let col = Color32::from_rgb(0xD9, 0x77, 0x57);
+            p.circle_filled(provider_center, 2.3, col);
+        }
+        AgentCliPreset::Codex => {
+            let col = Color32::from_rgb(0xFA, 0xFA, 0xFA);
+            p.circle_stroke(provider_center, 2.2, Stroke::new(1.2, col));
+        }
+        AgentCliPreset::Grok => {
+            let col = Color32::from_rgb(0xE4, 0xE4, 0xE7);
+            p.line_segment(
+                [Pos2::new(provider_center.x - 2.0, provider_center.y + 2.0), Pos2::new(provider_center.x + 2.0, provider_center.y - 2.0)],
+                Stroke::new(1.4, col),
+            );
+        }
+        AgentCliPreset::Antigravity => {
+            let col = Color32::from_rgb(0x60, 0xA5, 0xFA);
+            p.circle_filled(provider_center, 2.3, col);
+        }
+        AgentCliPreset::Shell | AgentCliPreset::DesignOsHelp => {
+            let col = Color32::from_rgb(0xA1, 0xA1, 0xAA);
+            let s = Stroke::new(1.1, col);
+            p.line_segment([Pos2::new(provider_center.x - 2.2, cy - 2.0), Pos2::new(provider_center.x - 0.2, cy)], s);
+            p.line_segment([Pos2::new(provider_center.x - 0.2, cy), Pos2::new(provider_center.x - 2.2, cy + 2.0)], s);
+            p.line_segment([Pos2::new(provider_center.x + 0.6, cy + 2.0), Pos2::new(provider_center.x + 2.6, cy + 2.0)], s);
+        }
+    }
+}
+
 /// Free-function wrapper for [`TerminalState::send_copy_for_ai`].
 #[allow(dead_code)]
 pub fn send_copy_for_ai(state: &mut TerminalState, block_markdown: &str) {
@@ -954,14 +2028,51 @@ fn build_agent_shell_cmd(shell_bin: &str, agent_cli: &str) -> CommandBuilder {
     c
 }
 
-/// Auto-injects `TERM`, `COLORTERM`, `DESIGNOS_BIN`, `DESIGNOS_MCP_BIN`, `DESIGNOS_LIVE_SPEC`,
+fn atomic_write_session_file(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let tmp = path.with_extension(format!("tmp.{}", std::process::id()));
+    std::fs::write(&tmp, bytes)?;
+    std::fs::rename(&tmp, path)
+}
+
+/// Auto-injects `TERM`, `COLORTERM`, `DESIGNOS_AGENT_RUNTIME` (the spawned `preset`), `DESIGNOS_BIN`, `DESIGNOS_MCP_BIN`, `DESIGNOS_LIVE_SPEC`,
 /// `DESIGNOS_SELECTION_JSON`, `DESIGNOS_FILE`, `DESIGNOS_WORKSPACE`, and prepends common CLI directories
 /// (`~/.cargo/bin`, `/opt/homebrew/bin`, `/usr/local/bin`, `~/.local/bin`, `~/.antigravity/bin`) to `PATH`.
-pub fn configure_pty_env(cmd: &mut CommandBuilder, file_path: Option<&Path>) {
+pub fn configure_pty_env(cmd: &mut CommandBuilder, preset: AgentCliPreset, file_path: Option<&Path>) {
+    cmd.env("DESIGNOS_AGENT_RUNTIME", preset.binary_name());
+    configure_pty_env_with_session(cmd, preset, file_path, None);
+}
+
+/// Auto-injects all `configure_pty_env` variables plus per-file session isolation variables (`DESIGNOS_SESSION_DIR`,
+/// `DESIGNOS_MCP_CONFIG`, `DESIGNOS_LIVE_SPEC`, `DESIGNOS_LIVE_DOC_SYNC`, `DESIGNOS_LIVE_CANVAS`, `DESIGNOS_CONTEXT_JSON`,
+/// `DESIGNOS_SELECTION_JSON`, `DESIGNOS_TARGET_PAGE_ID`, `DESIGNOS_TARGET_PAGE_NAME`, `DESIGNOS_DOC_NAME`).
+pub fn configure_pty_env_with_session(
+    cmd: &mut CommandBuilder,
+    preset: AgentCliPreset,
+    file_path: Option<&Path>,
+    session: Option<&SessionEnv>,
+) {
     cmd.env("TERM", "xterm-256color");
     cmd.env("COLORTERM", "truecolor");
-    cmd.env("DESIGNOS_LIVE_SPEC", "/tmp/designos-live-agent-out.spec.json");
-    cmd.env("DESIGNOS_SELECTION_JSON", "/tmp/designos-live-selection.spec.json");
+    cmd.env("DESIGNOS_AGENT_RUNTIME", preset.binary_name());
+
+    if let Some(sess) = session {
+        cmd.env("DESIGNOS_SESSION_DIR", sess.session_dir.as_os_str());
+        cmd.env("DESIGNOS_MCP_CONFIG", sess.mcp_config_path.as_os_str());
+        cmd.env("DESIGNOS_LIVE_SPEC", sess.live_spec_path.as_os_str());
+        cmd.env("DESIGNOS_LIVE_DOC_SYNC", sess.live_doc_sync_path.as_os_str());
+        cmd.env("DESIGNOS_LIVE_CANVAS", sess.live_canvas_path.as_os_str());
+        cmd.env("DESIGNOS_CONTEXT_JSON", sess.context_json_path.as_os_str());
+        cmd.env("DESIGNOS_SELECTION_JSON", sess.selection_spec_path.as_os_str());
+        cmd.env("DESIGNOS_TARGET_PAGE_ID", sess.current_page_id.to_string());
+        cmd.env("DESIGNOS_TARGET_PAGE_NAME", &sess.current_page_name);
+        cmd.env("DESIGNOS_DOC_NAME", &sess.doc_name);
+    } else {
+        cmd.env("DESIGNOS_LIVE_SPEC", "/tmp/designos-live-agent-out.spec.json");
+        cmd.env("DESIGNOS_SELECTION_JSON", "/tmp/designos-live-selection.spec.json");
+    }
 
     if let Ok(exe) = std::env::current_exe() {
         cmd.env("DESIGNOS_BIN", exe.as_os_str());
@@ -1067,8 +2178,8 @@ fn is_valid_node_spec_json(candidate: &str) -> bool {
 }
 
 /// Serializes the active selection (or first top-level frame on `page`) to
-/// `/tmp/designos-live-selection.spec.json` and pipes its path, dimensions, and
-/// unresolved Canvas Pin-Comments into the active PTY tab's stdin.
+/// the session's `selection.spec.json` (plus `/tmp/designos-live-selection.spec.json`) and pipes its path,
+/// dimensions, and unresolved Canvas Pin-Comments into the active PTY tab's stdin.
 pub fn export_selection_and_comments_to_pty(
     state: &mut TerminalState,
     doc: &Document,
@@ -1086,6 +2197,7 @@ pub fn export_selection_and_comments_to_pty(
 
     let spec = doc.export_spec(target_id)?;
     let json = serde_json::to_string_pretty(&spec).map_err(|e| e.to_string())?;
+    let _ = atomic_write_session_file(&state.selection_spec_path, json.as_bytes());
     let tmp_path = std::env::temp_dir().join("designos-live-selection.spec.json");
     std::fs::write(&tmp_path, &json).map_err(|e| format!("write {}: {e}", tmp_path.display()))?;
 
@@ -1107,14 +2219,19 @@ pub fn export_selection_and_comments_to_pty(
         format!("{} open pin-comments ({})", unresolved_comments.len(), unresolved_comments.join(" | "))
     };
 
-    let cmd_snippet =
-        format!("# [design:os studio Canvas Context] Node '{}' (#{}) exported to {} — {}", node_name, target_id.0, tmp_path.display(), comment_summary);
+    let cmd_snippet = format!(
+        "# [design:os studio Canvas Context] Node '{}' (#{}) exported to {} — {}",
+        node_name,
+        target_id.0,
+        state.selection_spec_path.display(),
+        comment_summary
+    );
 
     if let Some(tab) = state.active_tab_mut() {
         tab.send_line(&cmd_snippet);
     }
-    state.status_msg = Some(format!("Sent '{}' (#{}) + comments to {}", node_name, target_id.0, tmp_path.display()));
-    Ok(tmp_path)
+    state.status_msg = Some(format!("Sent '{}' (#{}) + comments to {}", node_name, target_id.0, state.selection_spec_path.display()));
+    Ok(state.selection_spec_path.clone())
 }
 
 /// Renders the 1:1 Figma Desktop `126.9.13` `Agents` Left Side Panel (`New chat / Shared` header,
@@ -1126,6 +2243,169 @@ pub fn show_left(state: &mut TerminalState, ui: &mut Ui, rect: Rect, file_path: 
     state.sync_chat_from_pty();
     let mut actions = state.poll_live_agent_bridge();
     let p = ui.painter().clone();
+
+    if state.side_panel_pty_open {
+        // Pure Interactive PTY Shell by Default + Top `+` Runtime Dropdown (`DIR-29`)
+        p.rect_filled(rect, 0.0, TERM_BG_VIEWPORT);
+
+        if ui.input(|i| i.pointer.any_pressed()) {
+            if let Some(pos) = ui.input(|i| i.pointer.interact_pos()) {
+                if rect.contains(pos) {
+                    state.viewport_focused = true;
+                }
+            }
+        }
+
+        let bar_h = 36.0;
+        let bar_r = Rect::from_min_size(rect.min, Vec2::new(rect.width(), bar_h));
+        p.rect_filled(bar_r, 0.0, TERM_BG_BAR);
+        widgets::hline(&p, bar_r.left(), bar_r.right(), bar_r.bottom() - 1.0, TERM_BORDER);
+
+        // Right-aligned Dock/Expand toggle button (`agents-header-popout`)
+        let pop_rect = Rect::from_center_size(Pos2::new(bar_r.right() - 18.0, bar_r.center().y), Vec2::splat(24.0));
+        let pop_resp = ui.interact(pop_rect, Id::new("term-left-dock-toggle"), Sense::click());
+        if pop_resp.hovered() || state.dock_open {
+            p.rect_filled(pop_rect, CornerRadius::same(4), TERM_BG_HOVER);
+        }
+        paint_popout_icon(&p, pop_rect.center(), Color32::from_rgb(0xD4, 0xD4, 0xD4));
+        widgets::record(ui, "term-left-dock-toggle", pop_rect);
+        widgets::record(ui, "agents-popout-pty", pop_rect);
+        widgets::record(ui, "agents-header-popout", pop_rect);
+        if pop_resp.clicked() {
+            state.dock_open = !state.dock_open;
+        }
+
+        // Left-aligned session tabs + `+` runtime dropdown button
+        let max_tabs_right = pop_rect.left() - 38.0;
+        let mut x = bar_r.left() + 6.0;
+        let mut tab_to_select: Option<usize> = None;
+        let mut tab_to_close: Option<usize> = None;
+        let can_close = state.tabs.len() > 1;
+
+        for (idx, tab) in state.tabs.iter().enumerate() {
+            let tab_w = if state.tabs.len() <= 1 {
+                104.0f32.min((max_tabs_right - x).max(64.0))
+            } else {
+                82.0f32.min(((max_tabs_right - x) / (state.tabs.len() as f32)).max(56.0))
+            };
+            if x + 48.0 > max_tabs_right {
+                break;
+            }
+            let is_active = idx == state.active_tab;
+            let t_rect = Rect::from_min_size(Pos2::new(x, bar_r.center().y - 12.0), Vec2::new(tab_w, 24.0));
+            let close_rect = Rect::from_min_size(Pos2::new(t_rect.right() - 16.0, t_rect.center().y - 6.0), Vec2::splat(12.0));
+            let t_hit_rect = if can_close {
+                Rect::from_min_max(t_rect.min, Pos2::new((close_rect.left() - 2.0).max(t_rect.left() + 16.0), t_rect.max.y))
+            } else {
+                t_rect
+            };
+            let tab_resp = ui.interact(t_hit_rect, Id::new(("agents-left-tab-select", tab.id)), Sense::click());
+            let close_resp = if can_close {
+                Some(ui.interact(close_rect, Id::new(("agents-left-tab-close", tab.id)), Sense::click()))
+            } else {
+                None
+            };
+
+            let bg = if is_active {
+                TERM_BG_ELEVATED
+            } else if tab_resp.hovered() {
+                TERM_BG_HOVER
+            } else {
+                TERM_BG_BAR
+            };
+            p.rect_filled(t_rect, CornerRadius::same(5), bg);
+            if is_active {
+                p.rect_stroke(t_rect, CornerRadius::same(5), Stroke::new(1.0, TERM_BORDER), StrokeKind::Inside);
+                p.rect_filled(
+                    Rect::from_min_max(Pos2::new(t_rect.left() + 4.0, t_rect.bottom() - 2.0), Pos2::new(t_rect.right() - 4.0, t_rect.bottom())),
+                    CornerRadius::same(1),
+                    TERM_ORANGE,
+                );
+            }
+            paint_orca_tab_status_and_provider(ui, &p, tab, t_rect);
+            let text_pad_r = if can_close { 34.0 } else { 23.0 };
+            let title_str = widgets::elide(&p, &tab.title, &theme::font_small_medium(), (tab_w - text_pad_r).max(16.0));
+            p.text(
+                Pos2::new(t_rect.left() + 21.0, t_rect.center().y),
+                Align2::LEFT_CENTER,
+                title_str,
+                theme::font_small_medium(),
+                if is_active { theme::TEXT } else { theme::TEXT_SECONDARY },
+            );
+            if let Some(cr) = &close_resp {
+                icons::paint(&p, Icon::Close, close_rect.center(), 9.0, if cr.hovered() { STATUS_BAD_TEXT } else { theme::ICON_TERTIARY });
+                if cr.clicked() {
+                    tab_to_close = Some(idx);
+                }
+            }
+            if tab_to_close.is_none() && tab_resp.clicked() {
+                tab_to_select = Some(idx);
+            }
+            x = t_rect.right() + 4.0;
+        }
+
+        if let Some(idx) = tab_to_select {
+            state.active_tab = idx;
+            state.viewport_focused = true;
+            state.runtime_dropdown_open = false;
+        }
+        if let Some(idx) = tab_to_close {
+            state.close_tab(idx);
+            state.ensure_default_tab(file_path);
+        }
+
+        // Top `+` button (`agents-runtime-add-btn`) to open the runtime selector dropdown (`claude`, `codex`, `grok`, `antigravity`, `shell`)
+        let add_x = x.min(pop_rect.left() - 32.0);
+        let add_rect = Rect::from_min_size(Pos2::new(add_x, bar_r.center().y - 12.0), Vec2::new(28.0, 24.0));
+        let add_resp = ui.interact(add_rect, Id::new("agents-runtime-add-btn"), Sense::click());
+        let add_bg = if state.runtime_dropdown_open {
+            STATUS_INFO_BG
+        } else if add_resp.hovered() {
+            TERM_BG_HOVER
+        } else {
+            TERM_BG_ELEVATED
+        };
+        let add_border = if state.runtime_dropdown_open { STATUS_INFO_BORDER } else { TERM_BORDER };
+        let add_fg = if state.runtime_dropdown_open { STATUS_INFO_TEXT } else { Color32::WHITE };
+        p.rect_filled(add_rect, CornerRadius::same(5), add_bg);
+        p.rect_stroke(add_rect, CornerRadius::same(5), Stroke::new(1.0, add_border), StrokeKind::Inside);
+        icons::paint(&p, Icon::Plus, Pos2::new(add_rect.left() + 10.0, add_rect.center().y), 11.0, add_fg);
+        icons::paint(&p, Icon::ChevronDown, Pos2::new(add_rect.right() - 7.0, add_rect.center().y), 8.0, add_fg);
+        widgets::record(ui, "agents-runtime-add-btn", add_rect);
+        if add_resp.clicked() {
+            state.runtime_dropdown_open = !state.runtime_dropdown_open;
+        }
+
+        // Active File + Page Context Strip (20px) so the user & agent always see the bound Page
+        let ctx_h = 20.0;
+        let ctx_r = Rect::from_min_size(Pos2::new(rect.left(), bar_r.bottom()), Vec2::new(rect.width(), ctx_h));
+        p.rect_filled(ctx_r, 0.0, TERM_BG_ELEVATED);
+        widgets::hline(&p, ctx_r.left(), ctx_r.right(), ctx_r.bottom() - 1.0, TERM_BORDER);
+        let ctx_badge = format!("{} · {}", state.doc_name, state.current_page_name);
+        let ctx_elided = widgets::elide(&p, &ctx_badge, &theme::font_small(), (ctx_r.width() - 24.0).max(40.0));
+        p.circle_filled(Pos2::new(ctx_r.left() + 10.0, ctx_r.center().y), 2.5, STATUS_INFO_TEXT);
+        p.text(
+            Pos2::new(ctx_r.left() + 17.0, ctx_r.center().y),
+            Align2::LEFT_CENTER,
+            ctx_elided,
+            theme::font_small(),
+            STATUS_INFO_TEXT,
+        );
+
+        // Live VT100 PTY Terminal Viewport (full height)
+        let vp_r = Rect::from_min_max(Pos2::new(rect.left(), ctx_r.bottom()), rect.max);
+
+        render_vt100_viewport(state, ui, vp_r, "agents-left-pty");
+
+        // Floating `+` Runtime Selector Dropdown (`claude`, `codex`, `grok`, `antigravity`, `shell` — all skipping dangerous permissions)
+        if state.runtime_dropdown_open {
+            render_runtime_dropdown_menu(state, ui, rect, bar_r.bottom() + 4.0, file_path);
+        }
+
+        ui.ctx().request_repaint_after(std::time::Duration::from_millis(50));
+        return actions;
+    }
+
     let panel_bg = Color32::from_rgb(0x2C, 0x2C, 0x2C);
     p.rect_filled(rect, 0.0, panel_bg);
 
@@ -1146,7 +2426,8 @@ pub fn show_left(state: &mut TerminalState, ui: &mut Ui, rect: Rect, file_path: 
     p.line_segment([Pos2::new(bc.x - 2.5, bc.y), Pos2::new(bc.x + 2.0, bc.y + 4.5)], chev_stroke);
     widgets::record(ui, "agents-header-back", back_r);
     if back_resp.clicked() {
-        state.side_panel_pty_open = false;
+        state.side_panel_pty_open = true;
+        state.chat_mode = false;
         state.expanded_agent_cat = None;
         state.chat_turns.clear();
         state.chat_scroll = 0.0;
@@ -1212,58 +2493,7 @@ pub fn show_left(state: &mut TerminalState, ui: &mut Ui, rect: Rect, file_path: 
         state.expanded_agent_cat = None;
     }
 
-    // ---- B. Dismissible AI Credits Banner (48px when `!state.credits_banner_dismissed`, `#2D364D` fill)
     let mut top_y = header_rect.bottom();
-    if !state.credits_banner_dismissed {
-        let banner_h = 48.0;
-        let banner_rect = Rect::from_min_size(Pos2::new(rect.left(), top_y), Vec2::new(rect.width(), banner_h));
-        let close_x = (banner_rect.right() - 38.0).max(banner_rect.left() + 60.0);
-        p.rect_filled(banner_rect, 0.0, Color32::from_rgb(0x2D, 0x36, 0x4D));
-        let b_border = Color32::from_rgb(0x3E, 0x4C, 0x6D);
-        widgets::hline(&p, banner_rect.left(), banner_rect.right(), banner_rect.top(), b_border);
-        widgets::hline(&p, banner_rect.left(), banner_rect.right(), banner_rect.bottom() - 1.0, b_border);
-        widgets::vline(&p, close_x, banner_rect.top(), banner_rect.bottom(), b_border);
-
-        let banner_font = theme::font_small_strong();
-        let max_txt_w = (close_x - banner_rect.left() - 16.0).max(40.0);
-        let line1 = widgets::elide(&p, "As of October 6, the Figma agent uses AI", &banner_font, max_txt_w);
-        p.text(
-            Pos2::new(banner_rect.left() + 12.0, banner_rect.top() + 16.0),
-            Align2::LEFT_CENTER,
-            line1,
-            banner_font.clone(),
-            Color32::from_rgb(0xF0, 0xF4, 0xFF),
-        );
-        p.text(
-            Pos2::new(banner_rect.left() + 12.0, banner_rect.top() + 32.0),
-            Align2::LEFT_CENTER,
-            "credits.",
-            banner_font.clone(),
-            Color32::from_rgb(0xF0, 0xF4, 0xFF),
-        );
-        p.text(
-            Pos2::new(banner_rect.left() + 56.0, banner_rect.top() + 32.0),
-            Align2::LEFT_CENTER,
-            "Learn more",
-            banner_font,
-            Color32::from_rgb(0x6E, 0xA8, 0xFE),
-        );
-
-        let close_rect = Rect::from_min_max(Pos2::new(close_x, banner_rect.top()), banner_rect.max);
-        let close_resp = ui.interact(close_rect, Id::new("agents-banner-dismiss"), Sense::click());
-        if close_resp.hovered() {
-            p.rect_filled(close_rect, 0.0, Color32::from_rgb(0x36, 0x41, 0x5C));
-        }
-        let cc = close_rect.center();
-        let x_stroke = Stroke::new(1.4, Color32::from_rgb(0xD4, 0xD4, 0xD4));
-        p.line_segment([Pos2::new(cc.x - 4.5, cc.y - 4.5), Pos2::new(cc.x + 4.5, cc.y + 4.5)], x_stroke);
-        p.line_segment([Pos2::new(cc.x + 4.5, cc.y - 4.5), Pos2::new(cc.x - 4.5, cc.y + 4.5)], x_stroke);
-        widgets::record(ui, "agents-banner-dismiss", close_rect);
-        if close_resp.clicked() {
-            state.credits_banner_dismissed = true;
-        }
-        top_y = banner_rect.bottom();
-    }
 
     // ---- B2. CLI Runtime Selector Bar (`28px`, `Claude` | `Codex` | `AGY` | `Grok` + `Shell` toggle)
     let rt_bar_h = 28.0;
@@ -1331,48 +2561,7 @@ pub fn show_left(state: &mut TerminalState, ui: &mut Ui, rect: Rect, file_path: 
     // ---- C. Center Area (`between runtime bar and bottom composer`)
     let center_rect = Rect::from_min_max(Pos2::new(rect.left(), top_y), Pos2::new(rect.right(), (composer_rect.top() - 8.0).max(top_y + 32.0)));
 
-    if state.side_panel_pty_open {
-        // Mode 2: In-panel Live VT100 PTY Terminal (Claude / Codex / Antigravity / Grok / Shell)
-        let bar_h = 28.0;
-        let bar_r = Rect::from_min_size(center_rect.min, Vec2::new(center_rect.width(), bar_h));
-        p.rect_filled(bar_r, 0.0, TERM_BG_BAR);
-        widgets::hline(&p, bar_r.left(), bar_r.right(), bar_r.bottom() - 1.0, TERM_BORDER);
-
-        let mut x = bar_r.left() + 6.0;
-        for preset in AgentCliPreset::QUICK_LAUNCH {
-            let badge = preset.badge();
-            let w = 36.0;
-            if x + w > bar_r.right() - 6.0 {
-                break;
-            }
-            let b_r = Rect::from_min_size(Pos2::new(x, bar_r.top() + 4.0), Vec2::new(w, 20.0));
-            let b_resp = ui.interact(b_r, Id::new(("agents-pty-preset", preset as usize)), Sense::click());
-            let is_active = state.active_tab().map(|t| t.preset == preset).unwrap_or(false);
-            let bg = if is_active {
-                STATUS_INFO_BG
-            } else if b_resp.hovered() {
-                TERM_BG_HOVER
-            } else {
-                TERM_BG_ELEVATED
-            };
-            p.rect_filled(b_r, CornerRadius::same(4), bg);
-            p.rect_stroke(b_r, CornerRadius::same(4), Stroke::new(1.0, if is_active { STATUS_INFO_BORDER } else { TERM_BORDER }), StrokeKind::Inside);
-            p.text(b_r.center(), Align2::CENTER_CENTER, badge, theme::font_small_strong(), if is_active { STATUS_INFO_TEXT } else { theme::TEXT });
-            if b_resp.clicked() {
-                if let Some(idx) = state.tabs.iter().position(|t| t.preset == preset) {
-                    state.active_tab = idx;
-                } else {
-                    let _ = state.spawn_tab(preset, file_path);
-                }
-                state.viewport_focused = true;
-            }
-            x += w + 4.0;
-        }
-
-        let vp_r = Rect::from_min_max(Pos2::new(center_rect.left(), bar_r.bottom()), center_rect.max);
-        render_vt100_viewport(state, ui, vp_r, "agents-left-pty");
-        ui.ctx().request_repaint_after(std::time::Duration::from_millis(50));
-    } else if !state.chat_turns.is_empty() {
+    if !state.chat_turns.is_empty() {
         // Mode 3: Pure Chat UI Wrapper Over Live PTY Shell (`Claude Code`, `Codex`, `Antigravity CLI`)
         render_agent_chat_thread(state, ui, center_rect, &mut actions);
         ui.ctx().request_repaint_after(std::time::Duration::from_millis(50));
@@ -1697,6 +2886,102 @@ pub fn show_left(state: &mut TerminalState, ui: &mut Ui, rect: Rect, file_path: 
     actions
 }
 
+fn render_runtime_dropdown_menu(
+    state: &mut TerminalState,
+    ui: &mut Ui,
+    panel_rect: Rect,
+    top_y: f32,
+    file_path: Option<&Path>,
+) {
+    let menu_w = (panel_rect.width() - 16.0).clamp(180.0, 224.0);
+    let entries = [
+        AgentCliPreset::Claude,
+        AgentCliPreset::Codex,
+        AgentCliPreset::Grok,
+        AgentCliPreset::Antigravity,
+        AgentCliPreset::Shell,
+    ];
+    let row_h = 34.0;
+    let header_h = 24.0;
+    let menu_h = header_h + entries.len() as f32 * row_h + 8.0;
+    let menu_x = (panel_rect.right() - menu_w - 8.0).max(panel_rect.left() + 8.0);
+    let menu_r = Rect::from_min_size(Pos2::new(menu_x, top_y), Vec2::new(menu_w, menu_h));
+
+    let p = ui.painter().clone();
+    p.rect_filled(menu_r, CornerRadius::same(8), Color32::from_rgb(0x22, 0x22, 0x26));
+    p.rect_stroke(
+        menu_r,
+        CornerRadius::same(8),
+        Stroke::new(1.0, Color32::from_rgb(0x3E, 0x3E, 0x46)),
+        StrokeKind::Inside,
+    );
+    widgets::record(ui, "agents-runtime-dropdown-menu", menu_r);
+
+    p.text(
+        Pos2::new(menu_r.left() + 10.0, menu_r.top() + 13.0),
+        Align2::LEFT_CENTER,
+        "LAUNCH CLI (SKIP PERMISSIONS)",
+        theme::font_small_strong(),
+        theme::TEXT_SECONDARY,
+    );
+    widgets::hline(&p, menu_r.left() + 6.0, menu_r.right() - 6.0, menu_r.top() + header_h, TERM_BORDER);
+
+    let mut chosen: Option<AgentCliPreset> = None;
+    for (i, preset) in entries.iter().copied().enumerate() {
+        let ry = menu_r.top() + header_h + 4.0 + i as f32 * row_h;
+        let row_r = Rect::from_min_size(Pos2::new(menu_r.left() + 4.0, ry), Vec2::new(menu_w - 8.0, row_h - 2.0));
+        let id_str = match preset {
+            AgentCliPreset::Claude => "agents-dropdown-claude",
+            AgentCliPreset::Codex => "agents-dropdown-codex",
+            AgentCliPreset::Grok => "agents-dropdown-grok",
+            AgentCliPreset::Antigravity => "agents-dropdown-antigravity",
+            AgentCliPreset::Shell => "agents-dropdown-shell",
+            AgentCliPreset::DesignOsHelp => "agents-dropdown-help",
+        };
+        let resp = ui.interact(row_r, Id::new(id_str), Sense::click());
+        if resp.hovered() {
+            p.rect_filled(row_r, CornerRadius::same(5), TERM_BG_HOVER);
+        }
+        let (_widget_id, title, subtitle) = preset.dropdown_entry();
+        let title_str = widgets::elide(&p, title, &theme::font_small_medium(), (row_r.width() - 18.0).max(40.0));
+        let sub_str = widgets::elide(&p, subtitle, &theme::font_mono(), (row_r.width() - 18.0).max(40.0));
+        p.text(
+            Pos2::new(row_r.left() + 8.0, row_r.top() + 10.0),
+            Align2::LEFT_CENTER,
+            title_str,
+            theme::font_small_medium(),
+            Color32::WHITE,
+        );
+        p.text(
+            Pos2::new(row_r.left() + 8.0, row_r.top() + 23.0),
+            Align2::LEFT_CENTER,
+            sub_str,
+            theme::font_mono(),
+            STATUS_INFO_TEXT,
+        );
+        widgets::record(ui, id_str, row_r);
+        if resp.clicked() {
+            chosen = Some(preset);
+        }
+    }
+
+    if let Some(preset) = chosen {
+        state.runtime_dropdown_open = false;
+        state.active_runtime = preset;
+        let _ = state.spawn_tab(preset, file_path);
+    } else if ui.input(|i| i.pointer.any_pressed()) {
+        if let Some(pos) = ui.input(|i| i.pointer.interact_pos()) {
+            let add_btn = ui
+                .ctx()
+                .data(|d| d.get_temp::<Rect>(Id::new(("test-rect", "agents-runtime-add-btn".to_string()))));
+            let in_add = add_btn.map(|r| r.contains(pos)).unwrap_or(false);
+            if !menu_r.contains(pos) && !in_add {
+                state.runtime_dropdown_open = false;
+            }
+        }
+    }
+}
+
 fn wrap_chat_lines(p: &Painter, text: &str, font: &FontId, max_w: f32, max_lines: usize) -> Vec<String> {
     let mut out = Vec::new();
     for raw_line in text.lines() {
@@ -1916,7 +3201,13 @@ pub fn show_full(state: &mut TerminalState, ui: &mut Ui, rect: Rect, file_path: 
 
 /// Renders the docked bottom split-view Agent Terminal (`Ctrl+\`` / `dock_open`).
 pub fn show_dock(state: &mut TerminalState, ui: &mut Ui, rect: Rect, file_path: Option<&Path>) -> Vec<TerminalAction> {
-    render_terminal_surface(state, ui, rect, file_path, "dock")
+    let grip_rect = Rect::from_min_size(Pos2::new(rect.left(), rect.top() - 3.0), Vec2::new(rect.width(), 6.0));
+    widgets::record(ui, "dock-resize-grip", grip_rect);
+    let actions = render_terminal_surface(state, ui, rect, file_path, "dock");
+    let p = ui.painter().clone();
+    let pill_r = Rect::from_center_size(Pos2::new(rect.center().x, rect.top() + 2.0), Vec2::new(36.0, 3.0));
+    p.rect_filled(pill_r, CornerRadius::same(2), Color32::from_rgb(0x52, 0x52, 0x5B));
+    actions
 }
 
 fn resolve_apply_spec_action(state: &mut TerminalState) -> Option<TerminalAction> {
@@ -1949,6 +3240,14 @@ fn render_terminal_surface(state: &mut TerminalState, ui: &mut Ui, rect: Rect, f
     state.ensure_default_tab(file_path);
     let mut actions = state.poll_live_agent_bridge();
     let p = ui.painter().clone();
+
+    if ui.input(|i| i.pointer.any_pressed()) {
+        if let Some(pos) = ui.input(|i| i.pointer.interact_pos()) {
+            if rect.contains(pos) {
+                state.viewport_focused = true;
+            }
+        }
+    }
 
     p.rect_filled(rect, 0.0, TERM_BG_VIEWPORT);
     widgets::hline(&p, rect.left(), rect.right(), rect.top(), TERM_BORDER);
@@ -2026,8 +3325,9 @@ fn render_terminal_surface(state: &mut TerminalState, ui: &mut Ui, rect: Rect, f
         let tab_w = 136.0f32.min((right_x - left_x - 4.0).max(76.0));
         let t_rect = Rect::from_min_size(Pos2::new(left_x, tab_bar_rect.center().y - 12.0), Vec2::new(tab_w, 24.0));
         let close_rect = Rect::from_min_size(Pos2::new(t_rect.right() - 18.0, t_rect.center().y - 7.0), Vec2::new(14.0, 14.0));
+        let t_hit_rect = Rect::from_min_max(t_rect.min, Pos2::new((close_rect.left() - 2.0).max(t_rect.left() + 16.0), t_rect.max.y));
+        let tab_resp = ui.interact(t_hit_rect, Id::new((surface_id, "term-tab-select", tab.id)), Sense::click());
         let close_resp = ui.interact(close_rect, Id::new((surface_id, "term-tab-close", tab.id)), Sense::click());
-        let tab_resp = ui.interact(t_rect, Id::new((surface_id, "term-tab-select", tab.id)), Sense::click());
 
         let bg = if is_active {
             TERM_BG_ELEVATED
@@ -2039,14 +3339,17 @@ fn render_terminal_surface(state: &mut TerminalState, ui: &mut Ui, rect: Rect, f
         p.rect_filled(t_rect, CornerRadius::same(6), bg);
         if is_active {
             p.rect_stroke(t_rect, CornerRadius::same(6), Stroke::new(1.0, TERM_BORDER), StrokeKind::Inside);
-            widgets::hline(&p, t_rect.left() + 6.0, t_rect.right() - 6.0, t_rect.bottom() - 1.0, TERM_ORANGE);
+            p.rect_filled(
+                Rect::from_min_max(Pos2::new(t_rect.left() + 5.0, t_rect.bottom() - 2.0), Pos2::new(t_rect.right() - 5.0, t_rect.bottom())),
+                CornerRadius::same(1),
+                TERM_ORANGE,
+            );
         }
 
-        // Semantic OK live status dot
-        p.circle_filled(Pos2::new(t_rect.left() + 9.0, t_rect.center().y), 3.0, STATUS_OK_TEXT);
-        let title_str = widgets::elide(&p, &tab.title, &theme::font_small_medium(), (tab_w - 38.0).max(20.0));
+        paint_orca_tab_status_and_provider(ui, &p, tab, t_rect);
+        let title_str = widgets::elide(&p, &tab.title, &theme::font_small_medium(), (tab_w - 44.0).max(20.0));
         p.text(
-            Pos2::new(t_rect.left() + 17.0, t_rect.center().y),
+            Pos2::new(t_rect.left() + 22.0, t_rect.center().y),
             Align2::LEFT_CENTER,
             title_str,
             theme::font_small_medium(),
@@ -2101,23 +3404,40 @@ fn render_terminal_surface(state: &mut TerminalState, ui: &mut Ui, rect: Rect, f
         left_x = b_rect.right() + 4.0;
     }
 
-    // 2. Bottom Quick Prompt / Command Bar (58px: chips row + singleline composer row)
-    let bottom_h = 58.0;
-    let viewport_rect = Rect::from_min_max(
-        Pos2::new(rect.left(), tab_bar_rect.bottom()),
-        Pos2::new(rect.right(), (rect.bottom() - bottom_h).max(tab_bar_rect.bottom() + 48.0)),
-    );
-    let prompt_bar_rect = Rect::from_min_max(Pos2::new(rect.left(), viewport_rect.bottom()), rect.max);
-
-    // 3. VT100 Screen Grid Renderer + Raw Keyboard Capture
+    // 2. VT100 Screen Grid Renderer + Raw Keyboard Capture (full height)
+    let viewport_rect = Rect::from_min_max(Pos2::new(rect.left(), tab_bar_rect.bottom()), rect.max);
     render_vt100_viewport(state, ui, viewport_rect, surface_id);
-
-    // 4. Render Bottom Prompt Composer Bar + Quick Chips
-    render_prompt_composer(state, ui, prompt_bar_rect, surface_id, &mut actions);
 
     ui.ctx().request_repaint_after(std::time::Duration::from_millis(50));
 
     actions
+}
+
+fn extract_selected_terminal_text(screen: &vt100::Screen, sel: ((u16, u16), (u16, u16)), rows: u16, cols: u16) -> String {
+    let (start, end) = if sel.0 <= sel.1 { (sel.0, sel.1) } else { (sel.1, sel.0) };
+    let r_start = start.0.min(rows.saturating_sub(1));
+    let r_end = end.0.min(rows.saturating_sub(1));
+    let mut lines = Vec::new();
+    for r in r_start..=r_end {
+        let c_start = if r == r_start { start.1.min(cols.saturating_sub(1)) } else { 0 };
+        let c_end = if r == r_end { end.1.min(cols.saturating_sub(1)) } else { cols.saturating_sub(1) };
+        let mut line = String::new();
+        for c in c_start..=c_end {
+            if let Some(cell) = screen.cell(r, c) {
+                if cell.is_wide_continuation() {
+                    continue;
+                }
+                let s = cell.contents();
+                if s.is_empty() {
+                    line.push(' ');
+                } else {
+                    line.push_str(&s);
+                }
+            }
+        }
+        lines.push(line.trim_end().to_string());
+    }
+    strip_selection_gutter(&lines.join("\n"))
 }
 
 fn render_vt100_viewport(state: &mut TerminalState, ui: &mut Ui, viewport_rect: Rect, surface_id: &'static str) {
@@ -2126,295 +3446,493 @@ fn render_vt100_viewport(state: &mut TerminalState, ui: &mut Ui, viewport_rect: 
 
     let pad_x = 12.0;
     let pad_y = 8.0;
+    let origin_x = viewport_rect.left() + pad_x;
+    let origin_y = viewport_rect.top() + pad_y;
     let grid_w = (viewport_rect.width() - pad_x * 2.0).max(120.0);
     let grid_h = (viewport_rect.height() - pad_y * 2.0).max(32.0);
     let cols = ((grid_w / CHAR_W).floor() as u16).clamp(20, 320);
     let rows = ((grid_h / ROW_H).floor() as u16).clamp(4, 120);
 
-    let vp_resp = ui.interact(viewport_rect, Id::new((surface_id, "term-vt100-viewport")), Sense::click());
-    if vp_resp.clicked() {
+    let vp_resp = ui.interact(viewport_rect, Id::new((surface_id, "term-vt100-viewport")), Sense::click_and_drag());
+    if vp_resp.clicked() || vp_resp.drag_started() {
         state.viewport_focused = true;
     }
     let viewport_focused = state.viewport_focused;
+    let search_open = state.search_open;
+    let search_query = state.search_query.clone();
+    let search_case_sensitive = state.search_case_sensitive;
 
-    let Some(tab) = state.active_tab_mut() else {
-        return;
+    let pos_to_cell = |pos: Pos2| -> (u16, u16) {
+        let rel_x = (pos.x - origin_x).max(0.0);
+        let rel_y = (pos.y - origin_y).max(0.0);
+        let c = ((rel_x / CHAR_W).floor() as u16).min(cols.saturating_sub(1));
+        let r = ((rel_y / ROW_H).floor() as u16).min(rows.saturating_sub(1));
+        (r, c)
     };
-    tab.resize(rows, cols);
 
-    // Direct raw keystroke & paste capture when the terminal viewport is focused
-    if viewport_focused && !ui.ctx().egui_wants_keyboard_input() {
-        let mut raw_bytes: Vec<u8> = Vec::new();
-        ui.input(|i| {
-            for ev in &i.events {
-                match ev {
-                    Event::Text(text) => {
-                        raw_bytes.extend_from_slice(text.as_bytes());
-                    }
-                    Event::Paste(text) => {
-                        raw_bytes.extend_from_slice(text.as_bytes());
-                    }
-                    Event::Key { key, pressed: true, modifiers, .. } => {
-                        if modifiers.ctrl {
-                            match key {
-                                Key::C => raw_bytes.push(0x03),
-                                Key::D => raw_bytes.push(0x04),
-                                Key::L => raw_bytes.push(0x0c),
-                                Key::U => raw_bytes.push(0x15),
-                                Key::W => raw_bytes.push(0x17),
-                                Key::A => raw_bytes.push(0x01),
-                                Key::E => raw_bytes.push(0x05),
-                                _ => {}
-                            }
-                        } else {
-                            match key {
-                                Key::Enter => raw_bytes.push(b'\r'),
-                                Key::Backspace => raw_bytes.push(0x7f),
-                                Key::Tab => raw_bytes.push(b'\t'),
-                                Key::Escape => raw_bytes.push(0x1b),
-                                Key::ArrowUp => raw_bytes.extend_from_slice(b"\x1b[A"),
-                                Key::ArrowDown => raw_bytes.extend_from_slice(b"\x1b[B"),
-                                Key::ArrowRight => raw_bytes.extend_from_slice(b"\x1b[C"),
-                                Key::ArrowLeft => raw_bytes.extend_from_slice(b"\x1b[D"),
-                                Key::Home => raw_bytes.extend_from_slice(b"\x1b[H"),
-                                Key::End => raw_bytes.extend_from_slice(b"\x1b[F"),
-                                Key::Delete => raw_bytes.extend_from_slice(b"\x1b[3~"),
-                                _ => {}
-                            }
-                        }
-                    }
-                    _ => {}
-                }
-            }
-        });
-        if !raw_bytes.is_empty() {
-            tab.write_bytes(&raw_bytes);
+    let mut toggle_search = false;
+    let mut close_search = false;
+    let mut search_matches = 0usize;
+
+    if let Some(tab) = state.active_tab_mut() {
+        tab.resize(rows, cols);
+
+        // Pointer click & drag cell selection
+        if vp_resp.clicked() && !vp_resp.dragged() {
+            tab.selection = None;
         }
-    }
-
-    clipped(ui, viewport_rect, |ui| {
-        let p = ui.painter().clone();
-        let Ok(parser) = tab.parser.lock() else {
-            return;
-        };
-        let screen = parser.screen();
-        let (cur_row, cur_col) = screen.cursor_position();
-        let font_id = FontId::new(11.5, FontFamily::Monospace);
-
-        for r in 0..rows {
-            let row_y = viewport_rect.top() + pad_y + r as f32 * ROW_H;
-            if row_y + ROW_H < viewport_rect.top() || row_y > viewport_rect.bottom() {
-                continue;
+        if vp_resp.drag_started() {
+            if let Some(pos) = ui.input(|i| i.pointer.press_origin().or_else(|| i.pointer.interact_pos())) {
+                let cell = pos_to_cell(pos);
+                tab.selection = Some((cell, cell));
             }
+        }
+        if vp_resp.dragged() {
+            if let Some(pos) = ui.input(|i| i.pointer.interact_pos()) {
+                let cur = pos_to_cell(pos);
+                let start = tab.selection.map(|(s, _)| s).unwrap_or(cur);
+                tab.selection = Some((start, cur));
+            }
+        }
 
-            let mut job = LayoutJob::default();
-            let mut run_text = String::new();
-            let mut run_style: Option<(Color32, Color32, bool, bool, bool)> = None;
+        // Mouse wheel: SGR mouse wheel in alternate screen (`?1049h`) when mouse reporting is active, else 5,000-line scrollback
+        if vp_resp.hovered() {
+            let delta_y = ui.input(|i| i.smooth_scroll_delta.y);
+            if delta_y.abs() > 0.5 {
+                let (alt_screen, mouse_active) = tab
+                    .parser
+                    .lock()
+                    .ok()
+                    .map(|pg| (pg.screen().alternate_screen(), pg.screen().mouse_protocol_mode() != vt100::MouseProtocolMode::None))
+                    .unwrap_or((false, false));
+                if alt_screen && mouse_active && !ui.input(|i| i.modifiers.shift) {
+                    let (r0, c0) = ui.input(|i| i.pointer.hover_pos()).map(&pos_to_cell).unwrap_or((0, 0));
+                    let button = if delta_y > 0.0 { 64 } else { 65 };
+                    let seq = format!("\x1b[<{button};{};{}M", c0 + 1, r0 + 1);
+                    tab.write_bytes(seq.as_bytes());
+                } else if let Ok(mut pg) = tab.parser.lock() {
+                    let step = ((delta_y.abs() / ROW_H).ceil() as usize).max(1);
+                    let cur_sb = pg.screen().scrollback();
+                    let next_sb = if delta_y > 0.0 {
+                        cur_sb.saturating_add(step)
+                    } else {
+                        cur_sb.saturating_sub(step)
+                    };
+                    pg.set_scrollback(next_sb);
+                }
+            }
+        }
 
-            for c in 0..cols {
-                let Some(cell) = screen.cell(r, c) else {
-                    continue;
-                };
-                if cell.is_wide_continuation() {
-                    continue;
-                }
-                let mut fg = vt100_color_to_egui(cell.fgcolor(), true);
-                let mut bg = vt100_color_to_egui(cell.bgcolor(), false);
-                if cell.inverse() {
-                    std::mem::swap(&mut fg, &mut bg);
-                    if bg == Color32::TRANSPARENT {
-                        bg = TERM_FG_DEFAULT;
+        // Direct raw keystroke, Agent CLI shortcuts & bracketed paste capture when the terminal viewport is focused
+        if viewport_focused && !ui.ctx().egui_wants_keyboard_input() {
+            let bracketed_paste = tab.parser.lock().ok().map(|pg| pg.screen().bracketed_paste()).unwrap_or(false);
+            let mut raw_bytes: Vec<u8> = Vec::new();
+            let mut copy_selection = false;
+            let mut select_all = false;
+            let mut clear_scrollback = false;
+
+            ui.input(|i| {
+                for ev in &i.events {
+                    match ev {
+                        Event::Copy => {
+                            if tab.selection.is_some() {
+                                copy_selection = true;
+                            }
+                        }
+                        Event::Paste(text) => {
+                            raw_bytes.extend_from_slice(&format_paste_bytes(text, bracketed_paste));
+                        }
+                        Event::Text(text) => {
+                            if !i.modifiers.command && !i.modifiers.ctrl && !i.modifiers.alt && text != "\n" && text != "\r" {
+                                raw_bytes.extend_from_slice(text.as_bytes());
+                            }
+                        }
+                        Event::Key { key, pressed: true, modifiers, .. } => {
+                            if modifiers.command {
+                                match key {
+                                    Key::F => toggle_search = true,
+                                    Key::A => select_all = true,
+                                    Key::K => {
+                                        clear_scrollback = true;
+                                        raw_bytes.push(0x0c);
+                                    }
+                                    Key::C => {
+                                        if tab.selection.is_some() {
+                                            copy_selection = true;
+                                        }
+                                    }
+                                    Key::Backspace => raw_bytes.push(0x15),
+                                    Key::ArrowLeft => raw_bytes.push(0x01),
+                                    Key::ArrowRight => raw_bytes.push(0x05),
+                                    _ => {}
+                                }
+                            } else if modifiers.alt {
+                                match key {
+                                    Key::ArrowLeft => raw_bytes.extend_from_slice(b"\x1bb"),
+                                    Key::ArrowRight => raw_bytes.extend_from_slice(b"\x1bf"),
+                                    Key::Backspace => raw_bytes.extend_from_slice(b"\x1b\x7f"),
+                                    _ => {}
+                                }
+                            } else if modifiers.ctrl {
+                                match key {
+                                    Key::C => {
+                                        if tab.selection.is_some() {
+                                            copy_selection = true;
+                                        } else {
+                                            raw_bytes.push(0x03);
+                                        }
+                                    }
+                                    Key::D => raw_bytes.push(0x04),
+                                    Key::L => raw_bytes.push(0x0c),
+                                    Key::U => raw_bytes.push(0x15),
+                                    Key::W => raw_bytes.push(0x17),
+                                    Key::A => raw_bytes.push(0x01),
+                                    Key::E => raw_bytes.push(0x05),
+                                    _ => {}
+                                }
+                            } else {
+                                match key {
+                                    Key::Enter if modifiers.shift => raw_bytes.extend_from_slice(b"\x1b\r"),
+                                    Key::Enter => raw_bytes.push(b'\r'),
+                                    Key::Backspace => raw_bytes.push(0x7f),
+                                    Key::Tab => raw_bytes.push(b'\t'),
+                                    Key::Escape => {
+                                        if search_open {
+                                            close_search = true;
+                                        } else {
+                                            raw_bytes.push(0x1b);
+                                        }
+                                    }
+                                    Key::ArrowUp => raw_bytes.extend_from_slice(b"\x1b[A"),
+                                    Key::ArrowDown => raw_bytes.extend_from_slice(b"\x1b[B"),
+                                    Key::ArrowRight => raw_bytes.extend_from_slice(b"\x1b[C"),
+                                    Key::ArrowLeft => raw_bytes.extend_from_slice(b"\x1b[D"),
+                                    Key::Home => raw_bytes.extend_from_slice(b"\x1b[H"),
+                                    Key::End => raw_bytes.extend_from_slice(b"\x1b[F"),
+                                    Key::Delete => raw_bytes.extend_from_slice(b"\x1b[3~"),
+                                    _ => {}
+                                }
+                            }
+                        }
+                        _ => {}
                     }
-                    if fg == Color32::TRANSPARENT {
-                        fg = TERM_BG_VIEWPORT;
-                    }
                 }
-                let style_key = (fg, bg, cell.bold(), cell.italic(), cell.underline());
-                if run_style != Some(style_key) {
-                    if let Some((p_fg, p_bg, _bold, italics, underline)) = run_style {
-                        if !run_text.is_empty() {
-                            job.append(
-                                &run_text,
-                                0.0,
-                                TextFormat {
-                                    font_id: font_id.clone(),
-                                    color: p_fg,
-                                    background: p_bg,
-                                    italics,
-                                    underline: if underline { Stroke::new(1.0, p_fg) } else { Stroke::NONE },
-                                    ..Default::default()
-                                },
-                            );
-                            run_text.clear();
+            });
+
+            if select_all {
+                tab.selection = Some(((0, 0), (rows.saturating_sub(1), cols.saturating_sub(1))));
+            }
+            if clear_scrollback {
+                if let Ok(mut pg) = tab.parser.lock() {
+                    pg.set_scrollback(0);
+                }
+            }
+            if copy_selection {
+                if let Some(sel) = tab.selection.take() {
+                    if let Ok(pg) = tab.parser.lock() {
+                        let copied = extract_selected_terminal_text(pg.screen(), sel, rows, cols);
+                        if !copied.is_empty() {
+                            ui.ctx().copy_text(copied);
                         }
                     }
-                    run_style = Some(style_key);
                 }
-                let contents = cell.contents();
-                if contents.is_empty() {
-                    run_text.push(' ');
+            }
+            if !raw_bytes.is_empty() {
+                if let Ok(mut pg) = tab.parser.lock() {
+                    pg.set_scrollback(0);
+                }
+                tab.write_bytes(&raw_bytes);
+            }
+        }
+
+        let norm_sel = tab.selection.map(|(a, b)| if a <= b { (a, b) } else { (b, a) });
+
+        clipped(ui, viewport_rect, |ui| {
+            let p = ui.painter().clone();
+            let Ok(parser) = tab.parser.lock() else {
+                return;
+            };
+            let screen = parser.screen();
+            let scrollback_offset = screen.scrollback();
+            let (cur_row, cur_col) = screen.cursor_position();
+            let font_id = FontId::new(11.5, FontFamily::Monospace);
+
+            let needle = if search_open && !search_query.is_empty() {
+                Some(if search_case_sensitive {
+                    search_query.clone()
                 } else {
-                    run_text.push_str(&contents);
+                    search_query.to_ascii_lowercase()
+                })
+            } else {
+                None
+            };
+
+            for r in 0..rows {
+                let row_y = origin_y + r as f32 * ROW_H;
+                if row_y + ROW_H < viewport_rect.top() || row_y > viewport_rect.bottom() {
+                    continue;
+                }
+
+                // Compute search match columns for row `r` when `Cmd+F` search is active
+                let mut row_search_hit = vec![false; cols as usize];
+                if let Some(ref q) = needle {
+                    let mut row_chars: Vec<char> = Vec::with_capacity(cols as usize);
+                    for c in 0..cols {
+                        let ch = screen
+                            .cell(r, c)
+                            .and_then(|cell| cell.contents().chars().next())
+                            .unwrap_or(' ');
+                        row_chars.push(if search_case_sensitive { ch } else { ch.to_ascii_lowercase() });
+                    }
+                    let q_chars: Vec<char> = q.chars().collect();
+                    if !q_chars.is_empty() && q_chars.len() <= row_chars.len() {
+                        for start_c in 0..=(row_chars.len() - q_chars.len()) {
+                            if row_chars[start_c..start_c + q_chars.len()] == q_chars[..] {
+                                search_matches += 1;
+                                for hit_c in start_c..start_c + q_chars.len() {
+                                    row_search_hit[hit_c] = true;
+                                }
+                            }
+                        }
+                    }
+                }
+
+                let mut job = LayoutJob::default();
+                let mut run_text = String::new();
+                let mut run_style: Option<(Color32, bool, bool, bool)> = None;
+
+                for c in 0..cols {
+                    let Some(cell) = screen.cell(r, c) else {
+                        continue;
+                    };
+                    if cell.is_wide_continuation() {
+                        continue;
+                    }
+                    let mut fg = vt100_color_to_egui(cell.fgcolor(), true);
+                    let mut bg = vt100_color_to_egui(cell.bgcolor(), false);
+                    if cell.inverse() {
+                        std::mem::swap(&mut fg, &mut bg);
+                        if bg == Color32::TRANSPARENT {
+                            bg = TERM_FG_DEFAULT;
+                        }
+                        if fg == Color32::TRANSPARENT {
+                            fg = TERM_BG_VIEWPORT;
+                        }
+                    }
+
+                    let cell_rect = Rect::from_min_size(Pos2::new(origin_x + c as f32 * CHAR_W, row_y), Vec2::new(CHAR_W, ROW_H));
+                    let is_selected = norm_sel.is_some_and(|(s, e)| (r, c) >= s && (r, c) <= e);
+                    let is_search_hit = row_search_hit.get(c as usize).copied().unwrap_or(false);
+
+                    // Paint exact cell-aligned background / selection / search highlight BEFORE text layout (zero vertical seams)
+                    if is_selected {
+                        p.rect_filled(cell_rect, 0.0, TERM_SELECTION_BG);
+                    } else if is_search_hit {
+                        p.rect_filled(cell_rect, 0.0, Color32::from_rgb(0x5C, 0x4A, 0x00));
+                    } else if bg != Color32::TRANSPARENT {
+                        p.rect_filled(cell_rect, 0.0, bg);
+                    }
+
+                    let style_key = (fg, cell.bold(), cell.italic(), cell.underline());
+                    if run_style != Some(style_key) {
+                        if let Some((p_fg, _bold, italics, underline)) = run_style {
+                            if !run_text.is_empty() {
+                                job.append(
+                                    &run_text,
+                                    0.0,
+                                    TextFormat {
+                                        font_id: font_id.clone(),
+                                        color: p_fg,
+                                        background: Color32::TRANSPARENT,
+                                        italics,
+                                        underline: if underline { Stroke::new(1.0, p_fg) } else { Stroke::NONE },
+                                        ..Default::default()
+                                    },
+                                );
+                                run_text.clear();
+                            }
+                        }
+                        run_style = Some(style_key);
+                    }
+
+                    let contents = cell.contents();
+                    let mut chars_it = contents.chars();
+                    if let (Some(ch), None) = (chars_it.next(), chars_it.next()) {
+                        if paint_custom_terminal_glyph(&p, cell_rect, ch, fg) {
+                            run_text.push(' ');
+                        } else {
+                            run_text.push(ch);
+                        }
+                    } else if contents.is_empty() {
+                        run_text.push(' ');
+                    } else {
+                        run_text.push_str(&contents);
+                    }
+                }
+
+                let trimmed_len = run_text.trim_end_matches(' ').len();
+                let has_underline = run_style.is_some_and(|(_, _, _, ul)| ul);
+                if !has_underline {
+                    run_text.truncate(trimmed_len);
+                }
+                if let Some((p_fg, _bold, italics, underline)) = run_style {
+                    if !run_text.is_empty() {
+                        job.append(
+                            &run_text,
+                            0.0,
+                            TextFormat {
+                                font_id: font_id.clone(),
+                                color: p_fg,
+                                background: Color32::TRANSPARENT,
+                                italics,
+                                underline: if underline { Stroke::new(1.0, p_fg) } else { Stroke::NONE },
+                                ..Default::default()
+                            },
+                        );
+                    }
+                }
+
+                if !job.text.is_empty() {
+                    let galley = ui.fonts_mut(|f| f.layout_job(job));
+                    p.galley(Pos2::new(origin_x, row_y), galley, TERM_FG_DEFAULT);
                 }
             }
 
-            let trimmed_len = run_text.trim_end_matches(' ').len();
-            let has_bg = run_style.is_some_and(|(_, bg, _, _, _)| bg != Color32::TRANSPARENT);
-            if !has_bg {
-                run_text.truncate(trimmed_len);
-            }
-            if let Some((p_fg, p_bg, _bold, italics, underline)) = run_style {
-                if !run_text.is_empty() {
-                    job.append(
-                        &run_text,
-                        0.0,
-                        TextFormat {
-                            font_id: font_id.clone(),
-                            color: p_fg,
-                            background: p_bg,
-                            italics,
-                            underline: if underline { Stroke::new(1.0, p_fg) } else { Stroke::NONE },
-                            ..Default::default()
-                        },
+            // Orca Cursor: solid `#FFFFFF` block + `#1D1F21` cursorAccent when focused; `1px` `#A1A1AA` outline when unfocused
+            if scrollback_offset == 0 && !screen.hide_cursor() && cur_row < rows && cur_col < cols {
+                let cx = origin_x + cur_col as f32 * CHAR_W;
+                let cy = origin_y + cur_row as f32 * ROW_H;
+                let cursor_rect = Rect::from_min_size(Pos2::new(cx, cy), Vec2::new(CHAR_W, ROW_H - 1.0));
+                if viewport_focused {
+                    p.rect_filled(cursor_rect, CornerRadius::same(1), Color32::WHITE);
+                    if let Some(cur_cell) = screen.cell(cur_row, cur_col) {
+                        let s = cur_cell.contents();
+                        if !s.trim().is_empty() {
+                            let accent = Color32::from_rgb(0x1D, 0x1F, 0x21);
+                            let mut chars_it = s.chars();
+                            if let (Some(ch), None) = (chars_it.next(), chars_it.next()) {
+                                if !paint_custom_terminal_glyph(&p, cursor_rect, ch, accent) {
+                                    p.text(Pos2::new(cx, cy), Align2::LEFT_TOP, s, font_id.clone(), accent);
+                                }
+                            } else {
+                                p.text(Pos2::new(cx, cy), Align2::LEFT_TOP, s, font_id.clone(), accent);
+                            }
+                        }
+                    }
+                } else {
+                    p.rect_stroke(
+                        cursor_rect,
+                        CornerRadius::same(1),
+                        Stroke::new(1.0, Color32::from_rgb(0xA1, 0xA1, 0xAA)),
+                        StrokeKind::Inside,
                     );
                 }
             }
 
-            if !job.text.is_empty() {
-                let galley = ui.fonts_mut(|f| f.layout_job(job));
-                p.galley(Pos2::new(viewport_rect.left() + pad_x, row_y), galley, TERM_FG_DEFAULT);
+            // Orca slim `7px` scrollbar + `"↑ Scrollback"` pill when scrolled into history
+            if scrollback_offset > 0 {
+                let track_h = (viewport_rect.height() - 8.0).max(24.0);
+                let thumb_h = (track_h * 0.22).clamp(18.0, 64.0);
+                let frac = (scrollback_offset as f32 / 500.0).clamp(0.0, 1.0);
+                let thumb_y = viewport_rect.bottom() - 4.0 - thumb_h - (track_h - thumb_h) * frac;
+                let sb_rect = Rect::from_min_size(Pos2::new(viewport_rect.right() - 9.0, thumb_y), Vec2::new(7.0, thumb_h));
+                p.rect_filled(sb_rect, CornerRadius::same(4), Color32::from_rgba_unmultiplied(180, 180, 185, 102));
+
+                let pill_w = 88.0;
+                let pill_h = 20.0;
+                let pill_r = Rect::from_min_size(
+                    Pos2::new((viewport_rect.right() - pill_w - 14.0).max(viewport_rect.left() + 8.0), viewport_rect.bottom() - pill_h - 8.0),
+                    Vec2::new(pill_w, pill_h),
+                );
+                p.rect_filled(pill_r, CornerRadius::same(10), TERM_BG_ELEVATED);
+                p.rect_stroke(pill_r, CornerRadius::same(10), Stroke::new(1.0, TERM_BORDER), StrokeKind::Inside);
+                p.text(
+                    pill_r.center(),
+                    Align2::CENTER_CENTER,
+                    "↑ Scrollback",
+                    theme::font_small_medium(),
+                    STATUS_INFO_TEXT,
+                );
             }
+        });
+    }
+
+    if toggle_search {
+        state.search_open = !state.search_open;
+    }
+    if close_search {
+        state.search_open = false;
+    }
+
+    // Orca Floating `Cmd+F` Terminal Search Bar (`TerminalSearch`: `280px × 28px`, `#171717` bg, `8px` radius)
+    if state.search_open {
+        let search_w = 280.0f32.min((viewport_rect.width() - 12.0).max(160.0));
+        let search_h = 28.0;
+        let search_rect = Rect::from_min_size(
+            Pos2::new((viewport_rect.right() - search_w - 8.0).max(viewport_rect.left() + 6.0), viewport_rect.top() + 8.0),
+            Vec2::new(search_w, search_h),
+        );
+        p.rect_filled(search_rect, CornerRadius::same(8), Color32::from_rgb(0x17, 0x17, 0x17));
+        p.rect_stroke(search_rect, CornerRadius::same(8), Stroke::new(1.0, TERM_BORDER), StrokeKind::Inside);
+
+        let close_r = Rect::from_center_size(Pos2::new(search_rect.right() - 14.0, search_rect.center().y), Vec2::splat(20.0));
+        let close_resp = ui.interact(close_r, Id::new((surface_id, "term-search-close")), Sense::click());
+        if close_resp.hovered() {
+            p.rect_filled(close_r, CornerRadius::same(4), TERM_BG_HOVER);
+        }
+        icons::paint(&p, Icon::Close, close_r.center(), 10.0, if close_resp.hovered() { STATUS_BAD_TEXT } else { theme::ICON_SECONDARY });
+        if close_resp.clicked() {
+            state.search_open = false;
         }
 
-        if !screen.hide_cursor() && cur_row < rows && cur_col < cols {
-            let cx = viewport_rect.left() + pad_x + cur_col as f32 * CHAR_W;
-            let cy = viewport_rect.top() + pad_y + cur_row as f32 * ROW_H;
-            let cursor_rect = Rect::from_min_size(Pos2::new(cx, cy), Vec2::new(CHAR_W, ROW_H - 1.0));
-            let cursor_col = if viewport_focused { TERM_ORANGE.gamma_multiply(0.75) } else { TERM_BORDER };
-            p.rect_filled(cursor_rect, CornerRadius::same(1), cursor_col);
-        }
-    });
-}
-
-fn render_prompt_composer(state: &mut TerminalState, ui: &mut Ui, bar_rect: Rect, surface_id: &'static str, actions: &mut Vec<TerminalAction>) {
-    let p = ui.painter().clone();
-    p.rect_filled(bar_rect, 0.0, TERM_BG_BAR);
-    widgets::hline(&p, bar_rect.left(), bar_rect.right(), bar_rect.top(), TERM_BORDER);
-
-    // Row 1 (top 24px): Quick Action Chips + semantic status badge
-    let chips_y = bar_rect.top() + 13.0;
-    let mut chip_x = bar_rect.left() + 8.0;
-
-    for (chip_id, chip_label, chip_cmd, is_apply_spec) in [
-        ("chip-claude", "claude", "claude", false),
-        ("chip-codex", "codex", "codex", false),
-        ("chip-help", "designos --help", "\"$DESIGNOS_BIN\" --help", false),
-        ("chip-console-spec", "Apply EaseUI Console Spec", "", true),
-    ] {
-        let cw = (chip_label.len() as f32 * 6.0 + 16.0).clamp(52.0, 172.0);
-        if chip_x + cw > bar_rect.right() - 12.0 {
-            break;
-        }
-        let c_rect = Rect::from_min_size(Pos2::new(chip_x, chips_y - 9.0), Vec2::new(cw, 18.0));
-        let c_resp = ui.interact(c_rect, Id::new((surface_id, chip_id)), Sense::click());
-        let bg = if c_resp.hovered() {
+        let case_r = Rect::from_center_size(Pos2::new(close_r.left() - 14.0, search_rect.center().y), Vec2::new(22.0, 20.0));
+        let case_resp = ui.interact(case_r, Id::new((surface_id, "term-search-case")), Sense::click());
+        let case_bg = if state.search_case_sensitive {
+            STATUS_INFO_BG
+        } else if case_resp.hovered() {
             TERM_BG_HOVER
-        } else if is_apply_spec {
-            STATUS_WARN_BG
         } else {
             TERM_BG_ELEVATED
         };
-        let fg = if is_apply_spec { STATUS_WARN_TEXT } else { theme::TEXT_SECONDARY };
-        let border = if is_apply_spec { STATUS_WARN_BORDER } else { TERM_BORDER };
-        p.rect_filled(c_rect, CornerRadius::same(4), bg);
-        p.rect_stroke(c_rect, CornerRadius::same(4), Stroke::new(1.0, border), StrokeKind::Inside);
-        let elided = widgets::elide(&p, chip_label, &theme::font_small_medium(), (cw - 8.0).max(16.0));
-        p.text(c_rect.center(), Align2::CENTER_CENTER, elided, theme::font_small_medium(), fg);
-        if c_resp.clicked() {
-            if is_apply_spec {
-                actions.push(TerminalAction::ApplySpecFile(PathBuf::from("examples/specs/easeui-agent-console.spec.json")));
-            } else if let Some(tab) = state.active_tab_mut() {
-                tab.send_line(chip_cmd);
-            }
+        p.rect_filled(case_r, CornerRadius::same(4), case_bg);
+        p.rect_stroke(
+            case_r,
+            CornerRadius::same(4),
+            Stroke::new(1.0, if state.search_case_sensitive { STATUS_INFO_BORDER } else { TERM_BORDER }),
+            StrokeKind::Inside,
+        );
+        p.text(
+            case_r.center(),
+            Align2::CENTER_CENTER,
+            "Aa",
+            theme::font_small_strong(),
+            if state.search_case_sensitive { STATUS_INFO_TEXT } else { theme::TEXT_SECONDARY },
+        );
+        if case_resp.clicked() {
+            state.search_case_sensitive = !state.search_case_sensitive;
         }
-        chip_x = c_rect.right() + 6.0;
-    }
 
-    if let Some(status) = &state.status_msg {
-        let avail_w = (bar_rect.right() - chip_x - 10.0).max(0.0);
-        if avail_w > 60.0 {
-            let msg = widgets::elide(&p, status, &theme::font_small(), avail_w);
-            p.text(Pos2::new(bar_rect.right() - 10.0, chips_y), Align2::RIGHT_CENTER, msg, theme::font_small(), STATUS_OK_TEXT);
-        }
-    }
+        let count_str = format!("{search_matches}");
+        p.text(
+            Pos2::new(case_r.left() - 6.0, search_rect.center().y),
+            Align2::RIGHT_CENTER,
+            count_str,
+            theme::font_small(),
+            theme::TEXT_SECONDARY,
+        );
 
-    // Row 2 (bottom 32px): Singleline TextEdit composer + Send + Ctrl+C + Clear
-    let input_y = bar_rect.top() + 26.0;
-    let btn_h = 24.0;
-    let clear_w = 48.0;
-    let ctrlc_w = 54.0;
-    let send_w = 62.0;
-
-    let clear_rect = Rect::from_min_size(Pos2::new(bar_rect.right() - clear_w - 8.0, input_y), Vec2::new(clear_w, btn_h));
-    let ctrlc_rect = Rect::from_min_size(Pos2::new(clear_rect.left() - ctrlc_w - 6.0, input_y), Vec2::new(ctrlc_w, btn_h));
-    let send_rect = Rect::from_min_size(Pos2::new(ctrlc_rect.left() - send_w - 6.0, input_y), Vec2::new(send_w, btn_h));
-    let edit_rect =
-        Rect::from_min_max(Pos2::new(bar_rect.left() + 8.0, input_y), Pos2::new((send_rect.left() - 8.0).max(bar_rect.left() + 80.0), input_y + btn_h));
-
-    p.rect_filled(edit_rect, CornerRadius::same(6), TERM_BG_VIEWPORT);
-    p.rect_stroke(edit_rect, CornerRadius::same(6), Stroke::new(1.0, TERM_BORDER), StrokeKind::Inside);
-
-    let mut submit_input = false;
-    ui.scope_builder(egui::UiBuilder::new().max_rect(edit_rect.shrink2(Vec2::new(8.0, 2.0))), |ui| {
-        let te = egui::TextEdit::singleline(&mut state.input_line)
-            .frame(egui::Frame::NONE)
-            .font(theme::font_mono())
-            .text_color(theme::TEXT)
-            .hint_text("Type command or prompt for Claude/Codex (Enter to send to PTY, Ctrl+C to interrupt)…")
-            .desired_width(edit_rect.width() - 16.0);
-        let resp = ui.add(te);
-        if resp.clicked() || resp.has_focus() {
-            state.viewport_focused = false;
-        }
-        if resp.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) {
-            submit_input = true;
-            resp.request_focus();
-        }
-    });
-
-    let send_resp = ui.interact(send_rect, Id::new((surface_id, "term-send-btn")), Sense::click());
-    p.rect_filled(send_rect, CornerRadius::same(6), if send_resp.hovered() { theme::BG_BRAND_HOVER } else { TERM_ORANGE });
-    icons::paint(&p, Icon::Play, Pos2::new(send_rect.left() + 12.0, send_rect.center().y), 10.0, Color32::WHITE);
-    p.text(Pos2::new(send_rect.left() + 21.0, send_rect.center().y), Align2::LEFT_CENTER, "Send", theme::font_small_strong(), Color32::WHITE);
-    if send_resp.clicked() {
-        submit_input = true;
-    }
-
-    if submit_input {
-        let line = std::mem::take(&mut state.input_line);
-        if let Some(tab) = state.active_tab_mut() {
-            tab.send_line(&line);
-        }
-    }
-
-    let ctrlc_resp = ui.interact(ctrlc_rect, Id::new((surface_id, "term-ctrlc-btn")), Sense::click());
-    p.rect_filled(ctrlc_rect, CornerRadius::same(6), if ctrlc_resp.hovered() { TERM_BG_HOVER } else { TERM_BG_ELEVATED });
-    p.rect_stroke(ctrlc_rect, CornerRadius::same(6), Stroke::new(1.0, TERM_BORDER), StrokeKind::Inside);
-    p.text(ctrlc_rect.center(), Align2::CENTER_CENTER, "Ctrl+C", theme::font_small_medium(), theme::TEXT_SECONDARY);
-    if ctrlc_resp.clicked() {
-        if let Some(tab) = state.active_tab_mut() {
-            tab.write_bytes(&[0x03]);
-        }
-    }
-
-    let clear_resp = ui.interact(clear_rect, Id::new((surface_id, "term-clear-btn")), Sense::click());
-    p.rect_filled(clear_rect, CornerRadius::same(6), if clear_resp.hovered() { TERM_BG_HOVER } else { TERM_BG_ELEVATED });
-    p.rect_stroke(clear_rect, CornerRadius::same(6), Stroke::new(1.0, TERM_BORDER), StrokeKind::Inside);
-    p.text(clear_rect.center(), Align2::CENTER_CENTER, "Clear", theme::font_small_medium(), theme::TEXT_SECONDARY);
-    if clear_resp.clicked() {
-        if let Some(tab) = state.active_tab_mut() {
-            tab.write_bytes(&[0x0c]);
-        }
+        let input_r = Rect::from_min_max(
+            Pos2::new(search_rect.left() + 8.0, search_rect.top() + 4.0),
+            Pos2::new((case_r.left() - 28.0).max(search_rect.left() + 64.0), search_rect.bottom() - 4.0),
+        );
+        let mut child_ui = ui.new_child(egui::UiBuilder::new().max_rect(input_r));
+        let _ = child_ui.add(
+            TextEdit::singleline(&mut state.search_query)
+                .hint_text(RichText::new("Find...").color(theme::TEXT_TERTIARY).font(theme::font_small()))
+                .font(theme::font_small())
+                .text_color(Color32::WHITE)
+                .frame(egui::Frame::NONE),
+        );
     }
 }
 
@@ -2459,23 +3977,24 @@ pub fn vt100_color_to_egui(c: vt100::Color, is_fg: bool) -> Color32 {
 }
 
 fn ansi_256_to_color32(idx: u8) -> Color32 {
+    // Orca `Ghostty Default Style Dark` (`src/shared/terminal-themes/defaults.ts`)
     const ANSI_16: [(u8, u8, u8); 16] = [
-        (0x18, 0x18, 0x1B), // 0 Black
-        (0xEF, 0x44, 0x44), // 1 Red
-        (0x10, 0xB9, 0x81), // 2 Green
-        (0xF5, 0x9E, 0x0B), // 3 Yellow
-        (0x3B, 0x82, 0xF6), // 4 Blue
-        (0xA8, 0x55, 0xF7), // 5 Magenta
-        (0x06, 0xB6, 0xD4), // 6 Cyan
-        (0xE4, 0xE4, 0xE7), // 7 White
-        (0x71, 0x71, 0x7A), // 8 Bright Black (Zinc-500)
-        (0xF8, 0x71, 0x71), // 9 Bright Red
-        (0x34, 0xD3, 0x99), // 10 Bright Green
-        (0xFB, 0xBF, 0x24), // 11 Bright Yellow
-        (0x60, 0xA5, 0xFA), // 12 Bright Blue
-        (0xC0, 0x84, 0xFC), // 13 Bright Magenta
-        (0x22, 0xD3, 0xEE), // 14 Bright Cyan
-        (0xFA, 0xFA, 0xFA), // 15 Bright White
+        (0x1D, 0x1F, 0x21), // 0 Black
+        (0xCC, 0x66, 0x66), // 1 Red
+        (0xB5, 0xBD, 0x68), // 2 Green
+        (0xF0, 0xC6, 0x74), // 3 Yellow
+        (0x81, 0xA2, 0xBE), // 4 Blue
+        (0xB2, 0x94, 0xBB), // 5 Magenta
+        (0x8A, 0xBE, 0xB7), // 6 Cyan
+        (0xC5, 0xC8, 0xC6), // 7 White
+        (0x66, 0x66, 0x66), // 8 Bright Black
+        (0xD5, 0x4E, 0x53), // 9 Bright Red
+        (0xB9, 0xCA, 0x4A), // 10 Bright Green
+        (0xE7, 0xC5, 0x47), // 11 Bright Yellow
+        (0x7A, 0xA6, 0xDA), // 12 Bright Blue
+        (0xC3, 0x97, 0xD8), // 13 Bright Magenta
+        (0x70, 0xC0, 0xB1), // 14 Bright Cyan
+        (0xEA, 0xEA, 0xEA), // 15 Bright White
     ];
     match idx {
         0..=15 => {
@@ -2584,8 +4103,30 @@ Done!
         crate::theme::install_fonts(&ctx);
         crate::theme::apply(&ctx);
         let mut st = TerminalState::default();
+        assert!(st.side_panel_pty_open, "Default Agents panel must open directly into live PTY Shell");
+        assert_eq!(st.active_runtime, AgentCliPreset::Shell);
         let panel_rect = Rect::from_min_size(Pos2::new(48.0, 0.0), Vec2::new(240.0, 800.0));
 
+        // 1. Verify default pure PTY shell + `+` dropdown menu renders cleanly
+        st.runtime_dropdown_open = true;
+        crate::lint::take_icons();
+        let raw_pty = egui::RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1600.0, 900.0))), ..Default::default() };
+        let out_pty = ctx.run_ui(raw_pty, |ui| {
+            let _ = show_left(&mut st, ui, panel_rect, None);
+        });
+        let (pty_texts, _pty_boxes) = crate::lint::scan_shapes(&out_pty.shapes);
+        let pty_all_text: Vec<&str> = pty_texts.iter().map(|t| t.text.as_str()).collect();
+        assert!(pty_all_text.iter().any(|t| t.contains("Shell")), "Default Shell tab must be painted: {pty_all_text:?}");
+        assert!(pty_all_text.iter().any(|t| t.contains("Claude")), "Dropdown 'Claude' must be painted: {pty_all_text:?}");
+        assert!(pty_all_text.iter().any(|t| t.contains("Codex")), "Dropdown 'Codex' must be painted: {pty_all_text:?}");
+        assert!(pty_all_text.iter().any(|t| t.contains("Grok")), "Dropdown 'Grok' must be painted: {pty_all_text:?}");
+        assert!(pty_all_text.iter().any(|t| t.contains("Antigravity")), "Dropdown 'Antigravity' must be painted: {pty_all_text:?}");
+        assert!(!pty_all_text.contains(&"Learn more"), "AI credits banner must be removed");
+        st.runtime_dropdown_open = false;
+
+        // 2. Also verify chat/categories view when side_panel_pty_open is false
+        st.side_panel_pty_open = false;
+        st.chat_mode = false;
         crate::lint::take_icons();
         let raw = egui::RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1600.0, 900.0))), ..Default::default() };
         let out = ctx.run_ui(raw, |ui| {
@@ -2600,7 +4141,7 @@ Done!
         assert!(all_text.contains(&"Tidy and polish"), "Category 'Tidy and polish' must be painted: {all_text:?}");
         assert!(all_text.contains(&"Generate designs"), "Category 'Generate designs' must be painted: {all_text:?}");
         assert!(all_text.contains(&"Create plugins and shaders"), "Category 'Create plugins and shaders' must be painted: {all_text:?}");
-        assert!(all_text.contains(&"Learn more"), "Banner 'Learn more' link must be painted: {all_text:?}");
+        assert!(!all_text.contains(&"Learn more"), "Credits banner 'Learn more' must NOT be painted: {all_text:?}");
 
         let text_findings = crate::lint::check_text(&texts, &boxes);
         let icon_findings = crate::lint::check_icons(&crate::lint::take_icons());
@@ -2618,7 +4159,6 @@ Done!
             assert!(crate::lint::check_text(&t2, &b2).is_empty());
         }
 
-        st.credits_banner_dismissed = true;
         st.side_panel_pty_open = true;
         let raw3 = egui::RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1600.0, 900.0))), ..Default::default() };
         let _ = ctx.run_ui(raw3, |ui| {
@@ -2635,7 +4175,9 @@ Done!
         assert_eq!(stripped.trim(), "Hello World");
 
         let mut st = TerminalState::default();
-        assert_eq!(st.active_runtime, AgentCliPreset::Claude);
+        assert_eq!(st.active_runtime, AgentCliPreset::Shell);
+        st.side_panel_pty_open = false;
+        st.chat_mode = true;
         st.set_active_runtime(AgentCliPreset::Codex, None);
         assert_eq!(st.active_runtime, AgentCliPreset::Codex);
         st.set_active_runtime(AgentCliPreset::Antigravity, None);
@@ -2763,23 +4305,58 @@ Done!
     }
 
     #[test]
+    fn agent_runtime_env_is_set_at_spawn_and_per_command_never_typed_into_live_tabs() {
+        let mut cmd = CommandBuilder::new("sh");
+        configure_pty_env(&mut cmd, AgentCliPreset::Codex, None);
+        assert_eq!(cmd.get_env("DESIGNOS_AGENT_RUNTIME"), Some(std::ffi::OsStr::new("codex")));
+
+        let live_spec = std::path::Path::new("/tmp/designos-live-agent-out.spec.json");
+        let sel_json = std::path::Path::new("/tmp/designos-selection.json");
+        let grok_cmd = build_real_cli_command(AgentCliPreset::Grok, "Build card", live_spec, sel_json);
+        assert!(grok_cmd.contains("DESIGNOS_AGENT_RUNTIME='grok'"));
+    }
+
+    #[test]
     fn real_cli_command_builder_and_figma_ai_dispatch_execute_real_commands() {
         assert!(runtime_binary_available("sh"));
         assert!(!runtime_binary_available("nonexistent_designos_binary_xyz_999"));
 
+        assert!(
+            AgentCliPreset::Claude
+                .cli_launch_command()
+                .starts_with("claude --dangerously-skip-permissions --mcp-config \"$DESIGNOS_MCP_CONFIG\"")
+        );
+        assert!(
+            AgentCliPreset::Codex
+                .cli_launch_command()
+                .starts_with("codex --dangerously-bypass-approvals-and-sandbox")
+        );
+        assert!(
+            AgentCliPreset::Grok
+                .cli_launch_command()
+                .starts_with("grok --always-approve")
+        );
+        assert!(
+            AgentCliPreset::Antigravity
+                .cli_launch_command()
+                .starts_with("agy --dangerously-skip-permissions")
+        );
+        assert_eq!(AgentCliPreset::Shell.cli_launch_command(), "");
+
         let live_spec = std::path::Path::new("/tmp/designos-live-agent-out.spec.json");
         let sel_json = std::path::Path::new("/tmp/designos-selection.json");
         let claude_cmd = build_real_cli_command(AgentCliPreset::Claude, "Create a SaaS hero frame", live_spec, sel_json);
-        assert!(claude_cmd.contains("claude -p"));
+        assert!(claude_cmd.contains("claude --dangerously-skip-permissions -p"));
+        assert!(claude_cmd.contains("--mcp-config"));
         assert!(claude_cmd.contains("DESIGNOS_LIVE_SPEC"));
         assert!(claude_cmd.contains("DESIGNOS_SELECTION_JSON"));
 
         let codex_cmd = build_real_cli_command(AgentCliPreset::Codex, "Audit layout", live_spec, sel_json);
-        assert!(codex_cmd.contains("codex exec"));
+        assert!(codex_cmd.contains("codex --dangerously-bypass-approvals-and-sandbox exec"));
         let agy_cmd = build_real_cli_command(AgentCliPreset::Antigravity, "Check parity", live_spec, sel_json);
-        assert!(agy_cmd.contains("agy -p"));
+        assert!(agy_cmd.contains("agy --dangerously-skip-permissions") && agy_cmd.contains("-p"));
         let grok_cmd = build_real_cli_command(AgentCliPreset::Grok, "Build card", live_spec, sel_json);
-        assert!(grok_cmd.contains("grok -p"));
+        assert!(grok_cmd.contains("grok --always-approve") && grok_cmd.contains("-p"));
 
         let mut st = TerminalState::default();
         st.dispatch_figma_ai_prompt(
@@ -2813,6 +4390,8 @@ Done!
         crate::theme::install_fonts(&ctx);
         crate::theme::apply(&ctx);
         let mut st = TerminalState::default();
+        st.side_panel_pty_open = false;
+        st.chat_mode = true;
         let panel_rect = Rect::from_min_size(Pos2::new(48.0, 0.0), Vec2::new(240.0, 800.0));
 
         // First pass to record widget rects
@@ -2854,6 +4433,15 @@ Done!
         assert!(!st.chat_mode);
         assert!(st.side_panel_pty_open);
 
+        // Switch back to chat view to test composer buttons
+        st.side_panel_pty_open = false;
+        let _ = ctx.run_ui(
+            egui::RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1600.0, 900.0))), ..Default::default() },
+            |ui| {
+                let _ = show_left(&mut st, ui, panel_rect, None);
+            },
+        );
+
         // Click `+` attach button -> prepends @selection @prd and emits ExportSelectionToTerminal
         let acts = click_at(&ctx, &mut st, plus_rect.center());
         assert!(st.input_line.contains("@selection"));
@@ -2871,5 +4459,114 @@ Done!
             let _ = tab.child.kill();
         }
     }
+
+    #[test]
+    fn per_file_session_isolation_auto_provisions_mcp_hooks_skills_and_syncs_live_doc() {
+        let mut st1 = TerminalState::for_tab(701);
+        let mut st2 = TerminalState::for_tab(702);
+        assert_ne!(st1.session_dir, st2.session_dir);
+        assert_ne!(st1.live_spec_path, st2.live_spec_path);
+        assert_ne!(st1.live_doc_sync_path, st2.live_doc_sync_path);
+        assert_eq!(st1.dock_height, 400.0);
+
+        let mut doc1 = Document::new("File Alpha");
+        let _page1 = doc1.add_page("Page 1");
+        let page2 = doc1.add_page("Page 2 — Agent Target");
+        let mut doc2 = Document::new("File Beta");
+        let beta_page = doc2.add_page("Page 1");
+
+        st1.sync_live_file_context(&doc1, page2, &[], None);
+        st2.sync_live_file_context(&doc2, beta_page, &[], None);
+
+        assert_eq!(st1.current_page_id, page2.0);
+        assert_eq!(st1.current_page_name, "Page 2 — Agent Target");
+        assert_eq!(st1.doc_name, "File Alpha");
+        assert!(st1.context_json_path.exists());
+        assert!(st1.live_canvas_path.exists());
+        assert!(st1.session_dir.join("mcp-config.json").exists());
+        assert!(st1.session_dir.join("hooks.json").exists());
+        assert!(st1.session_dir.join("SKILL.md").exists());
+
+        let ctx_val: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&st1.context_json_path).expect("read context.json")).expect("parse context.json");
+        assert_eq!(ctx_val["current_page_id"].as_u64(), Some(page2.0));
+        assert_eq!(ctx_val["current_page_name"].as_str(), Some("Page 2 — Agent Target"));
+
+        // Simulate MCP server writing doc-sync.designos into session 1
+        let mut mutated = doc1.clone();
+        let _ = mutated.apply_spec(
+            page2,
+            &NodeSpec {
+                kind: "frame".into(),
+                name: "MCP Synced Frame".into(),
+                preset: Some("easeui-card".into()),
+                ..Default::default()
+            },
+        );
+        std::fs::write(&st1.live_doc_sync_path, mutated.to_json().expect("json")).expect("save doc-sync.designos");
+
+        let actions1 = st1.poll_live_agent_bridge();
+        assert_eq!(actions1, vec![TerminalAction::SyncLiveDoc(st1.live_doc_sync_path.clone())]);
+        // Session 2 must remain completely unaffected
+        assert!(st2.poll_live_agent_bridge().is_empty());
+
+        st1.shutdown();
+        st2.shutdown();
+        let _ = std::fs::remove_dir_all(&st1.session_dir);
+        let _ = std::fs::remove_dir_all(&st2.session_dir);
+    }
+
+    #[test]
+    fn orca_terminal_features_bracketed_paste_custom_glyphs_gutter_and_osc_status_work() {
+        // 1. Bracketed paste sanitizes raw ESC, normalizes newlines to \r, and wraps in \x1b[200~...\x1b[201~
+        let pasted = format_paste_bytes("line1\x1b[31m\r\nline2\nline3", false);
+        assert_eq!(pasted, b"\x1b[200~line1\xE2\x90\x9B[31m\rline2\rline3\x1b[201~");
+        let single_bracketed = format_paste_bytes("echo hello", true);
+        assert_eq!(single_bracketed, b"\x1b[200~echo hello\x1b[201~");
+        let single_unbracketed = format_paste_bytes("echo hello", false);
+        assert_eq!(single_unbracketed, b"echo hello");
+
+        // 2. strip_selection_gutter strips shared 2-space TUI margin while preserving relative code indentation
+        let raw_tui_sel = "  fn main() {   \n      println!(\"orca\");  \n  }   ";
+        assert_eq!(strip_selection_gutter(raw_tui_sel), "fn main() {\n    println!(\"orca\");\n}");
+
+        // 3. paint_custom_terminal_glyph procedurally paints box-drawing, block elements, shades, and Braille spinners
+        let ctx = egui::Context::default();
+        let _ = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(400.0, 200.0))),
+                ..Default::default()
+            },
+            |ui| {
+                let p = ui.painter();
+                let cell_rect = Rect::from_min_size(Pos2::new(10.0, 10.0), Vec2::new(CHAR_W, ROW_H));
+                for ch in ['╭', '─', '╮', '│', '╰', '╯', '═', '║', '┄', '█', '░', '▒', '▓', '▙', '⠋', '⠙', '⠹'] {
+                    assert!(
+                        paint_custom_terminal_glyph(p, cell_rect, ch, TERM_FG_DEFAULT),
+                        "Custom glyph renderer must handle '{ch}'"
+                    );
+                }
+                assert!(!paint_custom_terminal_glyph(p, cell_rect, 'A', TERM_FG_DEFAULT));
+            },
+        );
+
+        // 4. parse_osc_agent_status_and_strip parses and strips OSC 9999 without polluting VT100 output
+        let osc_chunk = "Before\x1b]9999;{\"state\":\"working\",\"tool\":\"designos_apply_spec\"}\x07After";
+        let (cleaned, status) = parse_osc_agent_status_and_strip(osc_chunk);
+        assert_eq!(cleaned, "BeforeAfter");
+        assert_eq!(status, Some(AgentTabStatus::Working(Some("designos_apply_spec".to_string()))));
+
+        let (_, wait_status) = parse_osc_agent_status_and_strip("\x1b]9999;waiting:bash\x07");
+        assert_eq!(wait_status, Some(AgentTabStatus::WaitingForInput(Some("bash".to_string()))));
+
+        let (_, done_status) = parse_osc_agent_status_and_strip("\x1b]9999;{\"state\":\"done\"}\x1b\\");
+        assert_eq!(done_status, Some(AgentTabStatus::Done));
+
+        // 5. Ghostty Default Style Dark palette
+        assert_eq!(vt100_color_to_egui(vt100::Color::Idx(0), true), Color32::from_rgb(0x1D, 0x1F, 0x21));
+        assert_eq!(vt100_color_to_egui(vt100::Color::Idx(1), true), Color32::from_rgb(0xCC, 0x66, 0x66));
+        assert_eq!(vt100_color_to_egui(vt100::Color::Idx(15), true), Color32::from_rgb(0xEA, 0xEA, 0xEA));
+    }
 }
+
 

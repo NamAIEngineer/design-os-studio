@@ -60,8 +60,16 @@ fn push_paints(out: &mut Vec<ColorEntry>, paints: &[Paint], role: &'static str, 
 /// Distinct colours of the layer and its descendants (fills, strokes, text).
 pub fn collect_colors(doc: &Document, root: NodeId) -> Vec<ColorEntry> {
     let mut all = Vec::new();
-    doc.walk(root, |n, _| {
-        let n = resolve_node(doc, n);
+    let max_visit = if doc.nodes.len() > 5_000 { 512 } else { usize::MAX };
+    let mut stack = vec![root];
+    let mut visited = 0usize;
+    while let Some(id) = stack.pop() {
+        if visited >= max_visit {
+            break;
+        }
+        let Some(raw) = doc.get(id) else { continue };
+        visited += 1;
+        let n = resolve_node(doc, raw);
         let var_token = |prop: &str| -> Option<String> {
             n.variables.bindings.get(prop).and_then(|vid| doc.variables.get(vid)).map(|v| format!("--{}", v.name.replace(['/', ' '], "-").to_lowercase()))
         };
@@ -80,7 +88,10 @@ pub fn collect_colors(doc: &Document, root: NodeId) -> Vec<ColorEntry> {
         if n.stroke.weight > 0.0 || n.stroke.side_weights.is_some() {
             push_paints(&mut all, &n.stroke.paints, "Stroke", stroke_style.as_ref());
         }
-    });
+        for &cid in raw.children.iter().rev() {
+            stack.push(cid);
+        }
+    }
     let mut out: Vec<ColorEntry> = Vec::new();
     for e in all {
         let dup = out.iter().any(|o| o.color.to_hex() == e.color.to_hex() && (o.opacity - e.opacity).abs() < 0.000001);
@@ -163,19 +174,32 @@ pub enum Asset {
 /// itself as SVG and PNG.
 pub fn collect_assets(doc: &Document, root: NodeId) -> Vec<Asset> {
     let mut refs: Vec<String> = Vec::new();
-    doc.walk(root, |n, _| {
-        let mut visit = |paints: &[Paint]| {
-            for p in paints {
-                if let PaintKind::Image { image_ref, .. } = &p.kind {
-                    if doc.images.contains_key(image_ref) && !refs.contains(image_ref) {
-                        refs.push(image_ref.clone());
+    if !doc.images.is_empty() {
+        let max_visit = if doc.nodes.len() > 5_000 { 512 } else { usize::MAX };
+        let mut stack = vec![root];
+        let mut visited = 0usize;
+        while let Some(id) = stack.pop() {
+            if visited >= max_visit {
+                break;
+            }
+            let Some(n) = doc.get(id) else { continue };
+            visited += 1;
+            let mut visit = |paints: &[Paint]| {
+                for p in paints {
+                    if let PaintKind::Image { image_ref, .. } = &p.kind {
+                        if doc.images.contains_key(image_ref) && !refs.contains(image_ref) {
+                            refs.push(image_ref.clone());
+                        }
                     }
                 }
+            };
+            visit(&n.fills);
+            visit(&n.stroke.paints);
+            for &cid in n.children.iter().rev() {
+                stack.push(cid);
             }
-        };
-        visit(&n.fills);
-        visit(&n.stroke.paints);
-    });
+        }
+    }
     let mut out: Vec<Asset> = refs.into_iter().map(Asset::Image).collect();
     out.push(Asset::Svg);
     out.push(Asset::Png2x);
@@ -218,6 +242,21 @@ pub(crate) fn section_title(ui: &Ui, c: &mut Cur, label: &str) {
     c.y += theme::SECTION_TITLE_HEIGHT - 8.0;
 }
 
+fn is_numeric_or_technical_value(value: &str) -> bool {
+    let v = value.trim();
+    matches!(v.chars().next(), Some('0'..='9' | '-' | '#'))
+        || v.starts_with("rgb")
+        || v.starts_with("rgba")
+        || v.starts_with("hsl")
+        || v.starts_with("var(")
+        || v.ends_with("px")
+        || v.ends_with('%')
+        || v.ends_with("pt")
+        || v.ends_with("rem")
+        || v.ends_with("deg")
+        || v.ends_with('°')
+}
+
 pub(crate) fn kv(ui: &mut Ui, app: &mut App, c: &mut Cur, label: &str, value: &str) {
     let r = c.rect(PAD, 0.0, c.w - 2.0 * PAD, ROW_H);
     let resp = ui.interact(r, ui.id().with(("insp-kv", label)), Sense::click());
@@ -225,8 +264,13 @@ pub(crate) fn kv(ui: &mut Ui, app: &mut App, c: &mut Cur, label: &str, value: &s
         ui.painter().rect_filled(r.expand2(Vec2::new(8.0, 0.0)), theme::cr(theme::RADIUS_MEDIUM), theme::BG_SECONDARY);
     }
     ui.painter().text(Pos2::new(r.left(), r.center().y), Align2::LEFT_CENTER, label, theme::font_body(), theme::TEXT_SECONDARY);
-    let val = elide(ui.painter(), value, &theme::font_body(), r.width() - 100.0);
-    ui.painter().text(Pos2::new(r.left() + 100.0, r.center().y), Align2::LEFT_CENTER, val, theme::font_body(), theme::TEXT);
+    let val_font = if is_numeric_or_technical_value(value) {
+        theme::font_mono()
+    } else {
+        theme::font_body()
+    };
+    let val = elide(ui.painter(), value, &val_font, r.width() - 100.0);
+    ui.painter().text(Pos2::new(r.left() + 100.0, r.center().y), Align2::LEFT_CENTER, val, val_font, theme::TEXT);
     if resp.clicked() {
         copy(app, ui, value.to_string(), label);
     }
@@ -395,21 +439,47 @@ fn body(app: &mut App, ui: &mut Ui, c: &mut Cur, id: NodeId, count: usize) {
     );
     c.y += 22.0;
 
-    let mut subtree_count = 0usize;
-    app.doc.walk(id, |_, _| subtree_count += 1);
+    thread_local! {
+        static INSPECT_SUBTREE_CACHE: std::cell::RefCell<Option<((u64, NodeId, u64), (usize, Vec<ColorEntry>))>> = const { std::cell::RefCell::new(None) };
+    }
+    let inspect_key = (app.doc.runtime_id(), id, app.doc.mutation_epoch());
+    let (subtree_count, cached_colors) = INSPECT_SUBTREE_CACHE.with(|cache| {
+        if let Some((k, v)) = cache.borrow().as_ref() {
+            if *k == inspect_key {
+                return v.clone();
+            }
+        }
+        let mut count = 0usize;
+        let max_count = if app.doc.nodes.len() > 5_000 { 1024 } else { usize::MAX };
+        let mut stack = vec![id];
+        while let Some(cur_id) = stack.pop() {
+            if count >= max_count {
+                break;
+            }
+            if let Some(cn) = app.doc.get(cur_id) {
+                count += 1;
+                for &cid in cn.children.iter().rev() {
+                    stack.push(cid);
+                }
+            }
+        }
+        let cols = collect_colors(&app.doc, id);
+        *cache.borrow_mut() = Some((inspect_key, (count, cols.clone())));
+        (count, cols)
+    });
     let est_tokens = if subtree_count <= 2 { 39.4 } else { ((subtree_count * 140) as f32 / 1000.0).max(0.2) };
     kv(ui, app, c, "Session activity", "Not sent");
     kv(ui, app, c, "Estimated tokens", &format!("{est_tokens:.1}k"));
     c.y += 4.0;
-    let prompt_uri = format!("@https://www.figma.com/design/{}/{}", id.0, n.name.replace(' ', "-"));
-    let prompt_text = format!("Implement this design from Figma.\n{prompt_uri}");
+    let prompt_uri = format!("@designos://design/{}/{}", id.0, n.name.replace(' ', "-"));
+    let prompt_text = format!("Implement this design from design:os.\n{prompt_uri}");
     let box_r = c.rect(PAD, 0.0, c.w - 2.0 * PAD, 48.0);
     ui.painter().rect_filled(box_r, theme::cr(6), Color32::from_rgb(0x1E, 0x1E, 0x1E));
     ui.painter().rect_stroke(box_r, theme::cr(6), Stroke::new(1.0, Color32::from_rgb(0x38, 0x38, 0x38)), egui::StrokeKind::Inside);
     ui.painter().text(
         Pos2::new(box_r.left() + 8.0, box_r.top() + 15.0),
         Align2::LEFT_CENTER,
-        "Implement this design from Figma.",
+        "Implement this design from design:os.",
         theme::font_mono(),
         Color32::from_rgb(0xD4, 0xD4, 0xD4),
     );
@@ -423,13 +493,13 @@ fn body(app: &mut App, ui: &mut Ui, c: &mut Cur, id: NodeId, count: usize) {
     );
     c.y += 54.0;
     let copy_mcp_r = c.rect(PAD, 0.0, c.w - 2.0 * PAD, 28.0);
-    if small_button(ui, copy_mcp_r, "mcp-copy-prompt", "Copy example prompt") {
+    if small_button(ui, copy_mcp_r, "mcp-copy-prompt", "Copy design:os MCP link") {
         copy(app, ui, prompt_text.clone(), "MCP prompt");
         app.terminal.send_copy_for_ai(&prompt_text);
     }
     c.y += 34.0;
 
-    // Section B: `Code Connect` (Figma UI3 1:1 section with status pill + snippet action).
+    // Section B: `Code Connect` (Dev Mode section with status pill + snippet action).
     widgets::hline(ui.painter(), c.x0, c.x0 + c.w, c.oy + c.y, theme::BORDER);
     c.y += 1.0;
     let cc_hdr = c.rect(PAD, 0.0, c.w - 2.0 * PAD, theme::SECTION_TITLE_HEIGHT);
@@ -454,7 +524,7 @@ fn body(app: &mut App, ui: &mut Ui, c: &mut Cur, id: NodeId, count: usize) {
         theme::font_small(),
         if is_connected { Color32::from_rgb(0x4A, 0xDE, 0x80) } else { Color32::from_rgb(0xB3, 0xB3, 0xB3) },
     );
-    if cc_resp.on_hover_text("Click to generate & copy @figma/code-connect snippet").clicked() {
+    if cc_resp.on_hover_text("Click to generate & copy design:os Code Connect snippet").clicked() {
         let comp_ident: String = n
             .name
             .chars()
@@ -462,7 +532,7 @@ fn body(app: &mut App, ui: &mut Ui, c: &mut Cur, id: NodeId, count: usize) {
             .collect::<String>();
         let comp_ident = if comp_ident.is_empty() { format!("Node{}", id.0) } else { comp_ident };
         let snippet = format!(
-            "import figma from \"@figma/code-connect\";\nimport {{ {comp_ident} }} from \"./{comp_ident}\";\n\nfigma.connect({comp_ident}, \"designos://node/{}\", {{\n  example: () => <{comp_ident} />,\n}});\n",
+            "import designos from \"@designos/code-connect\";\nimport {{ {comp_ident} }} from \"./{comp_ident}\";\n\ndesignos.connect({comp_ident}, \"designos://node/{}\", {{\n  example: () => <{comp_ident} />,\n}});\n",
             id.0
         );
         ui.ctx().copy_text(snippet);
@@ -476,7 +546,7 @@ fn body(app: &mut App, ui: &mut Ui, c: &mut Cur, id: NodeId, count: usize) {
                 });
             }
         });
-        app.show_toast("Copied @figma/code-connect snippet & attached mapping", false);
+        app.show_toast("Copied design:os Code Connect snippet & attached mapping", false);
     }
     c.y += theme::SECTION_TITLE_HEIGHT - 6.0;
 
@@ -493,7 +563,7 @@ fn body(app: &mut App, ui: &mut Ui, c: &mut Cur, id: NodeId, count: usize) {
     c.y += cc_h + 8.0;
 
     let cc_r = c.rect(PAD, 0.0, c.w - 2.0 * PAD, 26.0);
-    if small_button(ui, cc_r, "code-connect-terminal", "Send to Agent Terminal (Claude / Codex)") {
+    if small_button(ui, cc_r, "code-connect-terminal", "Send to Agent Terminal") {
         match crate::terminal::export_selection_and_comments_to_pty(&mut app.terminal, &app.doc, app.page, &app.selection, app.file_path.as_deref()) {
             Ok(p) => app.show_toast(format!("Sent selection to Agent Terminal ({})", p.display()), false),
             Err(e) => app.show_toast(e, true),
@@ -547,7 +617,7 @@ fn body(app: &mut App, ui: &mut Ui, c: &mut Cur, id: NodeId, count: usize) {
     crate::dev::sections::variables_section(app, ui, c, id);
 
     // Colors (with Background colors, Border colors, Selection colors sub-headers & Hex v dropdown).
-    let colors = collect_colors(&app.doc, id);
+    let colors = cached_colors;
     if !colors.is_empty() {
         section_title(ui, c, "Colors");
         let dd = c.rect(c.w - PAD - 80.0, -24.0, 80.0, 24.0);

@@ -45,6 +45,13 @@ impl App {
         self.set_selection_from(ids, "");
     }
 
+    /// Tab / Shift+Tab: the next or previous sibling layer in the same parent.
+    pub fn select_sibling(&mut self, forward: bool) {
+        let ids = find::select_sibling(&self.doc, self.page, &self.selection, forward);
+        self.set_selection_from(ids, "");
+    }
+
+
     /// Selects every layer on the page matching the selected ones on `criteria`.
     pub fn select_matching(&mut self, criteria: MatchCriteria) {
         if self.selection.is_empty() {

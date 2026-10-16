@@ -95,6 +95,14 @@ fn main() {
     }
     if screenshot_mode {
         viewport = viewport.with_min_inner_size([200.0, 200.0]).with_resizable(true).with_active(false);
+    } else {
+        #[cfg(target_os = "macos")]
+        {
+            viewport = viewport
+                .with_fullsize_content_view(true)
+                .with_titlebar_shown(false)
+                .with_title_shown(false);
+        }
     }
     let native = eframe::NativeOptions { viewport, ..Default::default() };
     let result = eframe::run_native("design:os studio", native, Box::new(move |cc| Ok(Box::new(shell::Shell::new(cc, opts)))));

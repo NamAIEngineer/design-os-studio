@@ -40,11 +40,6 @@ pub fn show(app: &mut App, ui: &mut Ui, rect: Rect) {
     y += theme::LEFT_HEADER_HEIGHT;
     widgets::hline(&p, x0, inner.right(), y - 1.0, theme::BORDER);
 
-    if app.ui.rail == Some(crate::app::RailItem::Specs) {
-        crate::specs::show_left(app, ui, Rect::from_min_max(Pos2::new(x0, y), inner.max));
-        return;
-    }
-
     // ---- pages
     section_title(ui, Rect::from_min_size(Pos2::new(x0, y), Vec2::new(inner.width(), theme::PANEL_TITLE_ROW_HEIGHT)), "Pages");
     let tr = Rect::from_min_size(Pos2::new(x0, y), Vec2::new(inner.width(), theme::PANEL_TITLE_ROW_HEIGHT));
@@ -98,7 +93,7 @@ pub fn show(app: &mut App, ui: &mut Ui, rect: Rect) {
         );
 
         let markable_ids: Vec<NodeId> = app.selection.iter().copied().filter(|id| crate::dev::markable(app, *id)).collect();
-        let btn_r = Rect::from_min_size(Pos2::new(x0 + 10.0, y + 25.0), Vec2::new(inner.width() - 20.0, 22.0));
+        let btn_r = Rect::from_min_size(Pos2::new(x0 + 10.0, y + 25.0), Vec2::new(inner.width() - 20.0, 24.0));
         widgets::record(ui, "left-dev-mark-ready", btn_r);
         let btn_resp = ui.interact(btn_r, ui.id().with("left-dev-mark-ready"), Sense::click());
         let can_mark = !markable_ids.is_empty();
@@ -118,7 +113,7 @@ pub fn show(app: &mut App, ui: &mut Ui, rect: Rect) {
                 app.dev.left_tab = crate::dev::LeftTab::ReadyForDev;
             }
         }
-        y += 52.0;
+        y += 54.0;
         widgets::hline(&p, x0, inner.right(), y - 1.0, theme::BORDER);
     }
 

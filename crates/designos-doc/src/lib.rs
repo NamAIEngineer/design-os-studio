@@ -14,6 +14,7 @@ mod history;
 mod library;
 mod library_ops;
 mod node;
+pub mod openpencil;
 mod paint;
 mod prototype;
 mod settings;
@@ -34,6 +35,7 @@ pub use history::*;
 pub use library::*;
 pub use library_ops::*;
 pub use node::*;
+pub use openpencil::*;
 pub use paint::*;
 pub use prototype::*;
 pub use settings::*;
@@ -61,6 +63,42 @@ pub enum DocError {
     Cycle(NodeId),
     #[error("node {0:?} cannot have children")]
     NotAContainer(NodeId),
+}
+
+const DIRTY_RING_CAP: usize = 512;
+const REMOVED_RING_CAP: usize = 64;
+
+static NEXT_DOC_RUNTIME_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+#[derive(Clone, Debug)]
+struct DirtyLog {
+    runtime_id: u64,
+    epoch: u64,
+    geom_full_epoch: u64,
+    tree_full_epoch: u64,
+    evicted_epoch: u64,
+    write_pos: u64,
+    ring: [(u64, NodeId); DIRTY_RING_CAP],
+    removed_evicted_epoch: u64,
+    removed_write_pos: u64,
+    removed_ring: [(u64, NodeId); REMOVED_RING_CAP],
+}
+
+impl Default for DirtyLog {
+    fn default() -> Self {
+        Self {
+            runtime_id: NEXT_DOC_RUNTIME_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+            epoch: 1,
+            geom_full_epoch: 1,
+            tree_full_epoch: 1,
+            evicted_epoch: 0,
+            write_pos: 0,
+            ring: [(0, NodeId(0)); DIRTY_RING_CAP],
+            removed_evicted_epoch: 0,
+            removed_write_pos: 0,
+            removed_ring: [(0, NodeId(0)); REMOVED_RING_CAP],
+        }
+    }
 }
 
 /// A whole file: pages at the root, each page a tree of nodes.
@@ -105,6 +143,8 @@ pub struct Document {
     #[serde(default, with = "serde_images", skip_serializing_if = "BTreeMap::is_empty")]
     pub images: BTreeMap<String, Vec<u8>>,
     next_id: u64,
+    #[serde(skip)]
+    dirty: DirtyLog,
 }
 
 mod serde_images {
@@ -242,12 +282,135 @@ impl Document {
         self.style_meta.get(key).map(|m| m.name.as_str()).filter(|n| !n.is_empty()).unwrap_or(key)
     }
 
+    #[inline]
+    pub fn runtime_id(&self) -> u64 {
+        self.dirty.runtime_id
+    }
+
+    #[inline]
+    pub fn mutation_epoch(&self) -> u64 {
+        self.dirty.epoch
+    }
+
+    #[inline]
+    pub fn mark_full_dirty(&mut self) {
+        self.dirty.epoch += 1;
+        self.dirty.geom_full_epoch = self.dirty.epoch;
+        self.dirty.tree_full_epoch = self.dirty.epoch;
+    }
+
+    #[inline]
+    pub fn mark_tree_full_dirty(&mut self) {
+        self.dirty.epoch += 1;
+        self.dirty.tree_full_epoch = self.dirty.epoch;
+    }
+
+    #[inline]
+    pub fn mark_node_dirty(&mut self, id: NodeId) {
+        self.dirty.epoch += 1;
+        let ep = self.dirty.epoch;
+        let full = self.dirty.geom_full_epoch.max(self.dirty.tree_full_epoch);
+        if self.dirty.write_pos > 0 {
+            let last = ((self.dirty.write_pos - 1) as usize) % DIRTY_RING_CAP;
+            if self.dirty.ring[last].1 == id && self.dirty.ring[last].0 > full {
+                self.dirty.ring[last].0 = ep;
+                return;
+            }
+        }
+        let idx = (self.dirty.write_pos as usize) % DIRTY_RING_CAP;
+        self.dirty.evicted_epoch = self.dirty.evicted_epoch.max(self.dirty.ring[idx].0);
+        self.dirty.ring[idx] = (ep, id);
+        self.dirty.write_pos += 1;
+    }
+
+    #[inline]
+    pub fn mark_node_removed(&mut self, id: NodeId) {
+        self.dirty.epoch += 1;
+        let ep = self.dirty.epoch;
+        let idx = (self.dirty.removed_write_pos as usize) % REMOVED_RING_CAP;
+        self.dirty.removed_evicted_epoch =
+            self.dirty.removed_evicted_epoch.max(self.dirty.removed_ring[idx].0);
+        self.dirty.removed_ring[idx] = (ep, id);
+        self.dirty.removed_write_pos += 1;
+    }
+
+    /// Appends the unique [`NodeId`]s modified or inserted into `dirty_out` and
+    /// removed [`NodeId`]s into `removed_out` since `since_epoch`, returning `true`
+    /// if no full-tree/full-geom invalidation or ring eviction occurred since `since_epoch`.
+    pub fn dirty_changes_since(
+        &self,
+        since_epoch: u64,
+        dirty_out: &mut Vec<NodeId>,
+        removed_out: &mut Vec<NodeId>,
+    ) -> bool {
+        dirty_out.clear();
+        removed_out.clear();
+        if since_epoch > self.dirty.epoch
+            || since_epoch < self.dirty.geom_full_epoch
+            || since_epoch < self.dirty.tree_full_epoch
+            || since_epoch < self.dirty.evicted_epoch
+            || since_epoch < self.dirty.removed_evicted_epoch
+        {
+            return false;
+        }
+        if since_epoch == self.dirty.epoch {
+            return true;
+        }
+        let r_count = (self.dirty.removed_write_pos as usize).min(REMOVED_RING_CAP);
+        for i in 0..r_count {
+            let (ep, id) = self.dirty.removed_ring[i];
+            if ep > since_epoch && !removed_out.contains(&id) {
+                removed_out.push(id);
+            }
+        }
+        let count = (self.dirty.write_pos as usize).min(DIRTY_RING_CAP);
+        for i in 0..count {
+            let (ep, id) = self.dirty.ring[i];
+            if ep > since_epoch && !dirty_out.contains(&id) {
+                dirty_out.push(id);
+            }
+        }
+        true
+    }
+
+    /// Appends the unique [`NodeId`]s modified via [`Self::get_mut`] since
+    /// `since_epoch` into `out` and returns `true` if no removals or
+    /// ring-evicted mutations occurred since `since_epoch`.
+    pub fn dirty_nodes_since(&self, since_epoch: u64, out: &mut Vec<NodeId>) -> bool {
+        let mut removed = Vec::new();
+        self.dirty_changes_since(since_epoch, out, &mut removed) && removed.is_empty()
+    }
+
+    /// Returns `true` if `id` is guaranteed not to have had its geometry or
+    /// global styles/variables mutated since `since_epoch`.
+    #[inline]
+    pub fn is_node_clean_since(&self, id: NodeId, since_epoch: u64) -> bool {
+        if since_epoch == self.dirty.epoch {
+            return true;
+        }
+        if since_epoch > self.dirty.epoch
+            || since_epoch < self.dirty.geom_full_epoch
+            || since_epoch < self.dirty.evicted_epoch
+        {
+            return false;
+        }
+        let count = (self.dirty.write_pos as usize).min(DIRTY_RING_CAP);
+        for i in 0..count {
+            let (ep, dirty_id) = self.dirty.ring[i];
+            if ep > since_epoch && dirty_id == id {
+                return false;
+            }
+        }
+        true
+    }
+
     pub fn add_page(&mut self, name: impl Into<String>) -> NodeId {
         let id = self.alloc_id();
-        let mut page = Node::new(id, NodeKind::Page { background: Color::rgb(0xF5, 0xF5, 0xF5) });
+        let mut page = Node::new(id, NodeKind::Page { background: Color::rgb(0x5A, 0x5A, 0x5A) });
         page.name = name.into();
         self.nodes.insert(id, page);
         self.pages.push(id);
+        self.mark_tree_full_dirty();
         id
     }
 
@@ -262,6 +425,8 @@ impl Document {
         node.parent = Some(parent);
         self.next_id = self.next_id.max(id.0);
         self.nodes.insert(id, node);
+        self.mark_node_dirty(parent);
+        self.mark_node_dirty(id);
         Ok(id)
     }
 
@@ -270,6 +435,9 @@ impl Document {
     }
 
     pub fn get_mut(&mut self, id: NodeId) -> Option<&mut Node> {
+        if self.nodes.contains_key(&id) {
+            self.mark_node_dirty(id);
+        }
         self.nodes.get_mut(&id)
     }
 
@@ -287,6 +455,16 @@ impl Document {
                 stack.extend(node.children.iter().rev().copied());
                 out.push(node);
             }
+        }
+        if out.len() <= REMOVED_RING_CAP && parent.is_some() {
+            if let Some(p) = parent {
+                self.mark_node_dirty(p);
+            }
+            for r in &out {
+                self.mark_node_removed(r.id);
+            }
+        } else {
+            self.mark_tree_full_dirty();
         }
         Ok(out)
     }
@@ -307,6 +485,13 @@ impl Document {
         let index = index.min(p.children.len());
         p.children.insert(index, id);
         self.nodes.get_mut(&id).unwrap().parent = Some(new_parent);
+        if let Some(old_p) = old {
+            self.mark_node_dirty(old_p);
+        }
+        if old != Some(new_parent) {
+            self.mark_node_dirty(new_parent);
+        }
+        self.mark_node_dirty(id);
         Ok(())
     }
 
@@ -403,7 +588,11 @@ impl Document {
         }
         let before = self.nodes.len();
         self.nodes.retain(|id, _| reachable.contains(id));
-        before - self.nodes.len()
+        let removed = before - self.nodes.len();
+        if removed > 0 {
+            self.mark_tree_full_dirty();
+        }
+        removed
     }
 
     pub fn to_json(&self) -> serde_json::Result<String> {
@@ -425,6 +614,7 @@ impl Document {
                 migrate_literal_lists(t);
             }
         }
+        self.mark_full_dirty();
     }
 }
 

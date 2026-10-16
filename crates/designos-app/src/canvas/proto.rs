@@ -7,7 +7,7 @@ use super::interact;
 use crate::app::{App, RightTab};
 use crate::proto::{self, geom};
 use crate::theme;
-use crate::util::{v2, world_aabb};
+use crate::util::v2;
 use crate::widgets;
 use designos_doc::{NodeId, NodeKind};
 use egui::{Align2, Color32, Pos2, Rect as ERect, Response, Shape, Stroke, StrokeKind, Ui};
@@ -19,7 +19,7 @@ pub fn active(app: &App) -> bool {
 
 /// Screen rect of a layer's bounding box.
 pub fn screen_rect(app: &App, rect: ERect, id: NodeId) -> ERect {
-    let bb = world_aabb(&app.doc, id);
+    let bb = super::fast_world_aabb(&app.doc, interact::active_index(app), id);
     ERect::from_min_max(app.view.to_screen(rect.min, v2(bb.x, bb.y)), app.view.to_screen(rect.min, v2(bb.x + bb.w, bb.y + bb.h)))
 }
 
@@ -30,7 +30,7 @@ fn can_connect(app: &App, id: NodeId) -> bool {
 /// Layers that show a hotspot: the one under the pointer and the selection.
 pub fn hotspot_layers(app: &App) -> Vec<NodeId> {
     let mut v: Vec<NodeId> = Vec::new();
-    for id in app.proto.hover.iter().chain(app.selection.iter()) {
+    for id in app.proto.hover.iter().chain(app.selection.iter().take(64)) {
         if can_connect(app, *id) && !v.contains(id) {
             v.push(*id);
         }
@@ -45,7 +45,40 @@ pub fn hotspot_pos(app: &App, rect: ERect, id: NodeId) -> Pos2 {
 
 /// The hotspot under `pos`, if any (selected layers win over hovered).
 pub fn hotspot_at(app: &App, rect: ERect, pos: Pos2) -> Option<NodeId> {
-    hotspot_layers(app).into_iter().rev().find(|id| (hotspot_pos(app, rect, *id) - pos).length() <= theme::PROTO_HOTSPOT_HIT)
+    hotspot_layers(app).into_iter().rev().find(|id| {
+        geom::hotspot_magnets(screen_rect(app, rect, *id))
+            .iter()
+            .any(|&mp| (mp - pos).length() <= theme::PROTO_HOTSPOT_HIT)
+    })
+}
+
+/// Hit-tests existing prototype noodles on the canvas, returning `(src, reaction_index)` when within 6px.
+pub fn hit_noodle(app: &App, rect: ERect, pos: Pos2) -> Option<(NodeId, usize)> {
+    for src in noodle_sources(app) {
+        let Some(n) = app.doc.get(src) else { continue };
+        let s = screen_rect(app, rect, src);
+        for (ri, r) in n.prototype.reactions.iter().enumerate() {
+            let mut hit_dest = None;
+            proto::walk_actions(&r.actions, &mut |a| {
+                if hit_dest.is_some() {
+                    return;
+                }
+                if let Some(dest) = proto::action_dest(a).and_then(|d| proto::top_frame(&app.doc, d)) {
+                    if app.doc.page_of(dest) == app.doc.page_of(src) {
+                        let d_rect = screen_rect(app, rect, dest);
+                        let ndl = geom::noodle(s, d_rect);
+                        if ndl.distance_to(pos) <= 6.0 {
+                            hit_dest = Some(dest);
+                        }
+                    }
+                }
+            });
+            if hit_dest.is_some() {
+                return Some((src, ri));
+            }
+        }
+    }
+    None
 }
 
 /// Top-level frame under a page point that may be a connection target.
@@ -101,6 +134,17 @@ pub fn process(app: &mut App, ui: &mut Ui, rect: ERect, resp: &Response) -> bool
             app.proto.connect = Some((h, pos.unwrap_or(rect.center())));
             return true;
         }
+    } else if idle {
+        if let Some(p) = inside {
+            if let Some((src, ri)) = hit_noodle(app, rect, p) {
+                ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                if pressed {
+                    app.select_only(src);
+                    app.proto.editing = Some((src, ri));
+                    return true;
+                }
+            }
+        }
     }
     false
 }
@@ -119,17 +163,29 @@ fn hotspot(p: &egui::Painter, c: Pos2, big: bool) {
     let r = theme::PROTO_HOTSPOT_RADIUS * if big { 1.25 } else { 1.0 };
     p.circle_filled(c, r + theme::PROTO_HOTSPOT_RING, Color32::WHITE);
     p.circle_filled(c, r, theme::PROTO_BLUE);
+    let arm = (r * 0.55).max(2.0);
+    let plus_stroke = Stroke::new(1.3, Color32::WHITE);
+    p.line_segment([Pos2::new(c.x - arm, c.y), Pos2::new(c.x + arm, c.y)], plus_stroke);
+    p.line_segment([Pos2::new(c.x, c.y - arm), Pos2::new(c.x, c.y + arm)], plus_stroke);
 }
 
 /// Layers whose interactions draw noodles: the selection and everything below it.
 fn noodle_sources(app: &App) -> Vec<NodeId> {
     let mut out: Vec<NodeId> = Vec::new();
-    for s in &app.selection {
-        app.doc.walk(*s, |n, _| {
-            if out.len() < 400 && !n.prototype.reactions.is_empty() && !out.contains(&n.id) {
-                out.push(n.id);
-            }
-        });
+    let mut stack: Vec<NodeId> = app.selection.iter().take(64).rev().copied().collect();
+    let mut visited = 0usize;
+    while let Some(id) = stack.pop() {
+        if visited >= 512 || out.len() >= 400 {
+            break;
+        }
+        let Some(n) = app.doc.get(id) else { continue };
+        visited += 1;
+        if !n.prototype.reactions.is_empty() && !out.contains(&n.id) {
+            out.push(n.id);
+        }
+        for &cid in n.children.iter().rev() {
+            stack.push(cid);
+        }
     }
     if let Some(h) = app.proto.hover {
         if proto::has_interactions(&app.doc, h) && !out.contains(&h) {
@@ -166,12 +222,16 @@ pub fn overlays(app: &App, ui: &Ui, rect: ERect) {
         }
     }
 
-    // Hotspots.
+    // Hotspots (4-edge magnets on selected/hovered layers).
     for id in hotspot_layers(app) {
         if app.proto.connect.is_some_and(|(s, _)| s == id) {
             continue;
         }
-        hotspot(&p, hotspot_pos(app, rect, id), app.proto.hot == Some(id));
+        let s_rect = screen_rect(app, rect, id);
+        let magnets = geom::hotspot_magnets(s_rect);
+        for mp in magnets {
+            hotspot(&p, mp, app.proto.hot == Some(id));
+        }
     }
 
     // Connection being dragged.

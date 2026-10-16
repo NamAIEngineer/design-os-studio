@@ -7,13 +7,13 @@ use crate::widgets;
 use egui::{Align2, Pos2, Rect, Sense, Ui, Vec2};
 
 /// Rail entries in order; the flag marks the item that starts a new group (separator above it).
-pub const ITEMS: [(RailItem, Icon, &str, bool); 7] = [
+/// (`RailItem::Specs` temporarily hidden from the UI rail).
+pub const ITEMS: [(RailItem, Icon, &str, bool); 6] = [
     (RailItem::File, Icon::File, "File", false),
     (RailItem::Agents, Icon::Sparkle, "Agents", false),
     (RailItem::Assets, Icon::Assets, "Assets", false),
     (RailItem::Tools, Icon::Tools, "Tools", false),
     (RailItem::Variables, Icon::Variables, "Variables", true),
-    (RailItem::Specs, Icon::Specs, "Specs", false),
     (RailItem::Plugins, Icon::Component, "Plugins", false),
 ];
 
@@ -46,8 +46,10 @@ pub fn show(app: &mut App, ui: &mut Ui, rect: Rect) {
     );
     let r = ui.interact(mb, ui.id().with("rail-menu"), Sense::click());
     widgets::record(ui, "rail-menu", mb);
-    widgets::button_bg(&p, mb, &r, app.ui.menu == Some(MenuKind::Main), theme::cr(theme::RADIUS_MEDIUM));
-    icons::paint(&p, Icon::Logo, mb.center(), 20.0, theme::ICON);
+    let menu_open = app.ui.menu == Some(MenuKind::Main);
+    widgets::button_bg(&p, mb, &r, menu_open, theme::cr(theme::RADIUS_MEDIUM));
+    let menu_fg = if r.hovered() || menu_open { theme::ICON } else { theme::ICON_SECONDARY };
+    icons::paint(&p, Icon::ListView, mb.center(), 18.0, menu_fg);
     if r.clicked() {
         toggle(app, MenuKind::Main, mb);
     }
@@ -70,15 +72,13 @@ pub fn show(app: &mut App, ui: &mut Ui, rect: Rect) {
                 || (*item == RailItem::File && (app.ui.menu == Some(MenuKind::FileMenu) || (app.ui.rail.is_none() && !app.ui.left_collapsed)))
         };
         // Active item: 32x32 rounded tile behind the icon.
-        // Figma Desktop 126.9.13: selected `Agents` uses slate-blue `#313A4B` tile + `#6EA8FE` 4-point sparkle icon.
         let ic = Pos2::new(ir.center().x, ir.top() + theme::RAIL_ICON_CENTER_Y);
         if selected {
-            let tile_bg = if *item == RailItem::Agents { egui::Color32::from_rgb(0x31, 0x3A, 0x4B) } else { theme::BG_SELECTED };
-            p.rect_filled(Rect::from_center_size(ic, Vec2::splat(theme::RAIL_TILE)), theme::cr(theme::RADIUS_MEDIUM), tile_bg);
+            p.rect_filled(Rect::from_center_size(ic, Vec2::splat(theme::RAIL_TILE)), theme::cr(theme::RADIUS_MEDIUM), theme::BG_SELECTED);
         } else if resp.hovered() {
             p.rect_filled(Rect::from_center_size(ic, Vec2::splat(theme::RAIL_TILE)), theme::cr(theme::RADIUS_MEDIUM), theme::BG_HOVER);
         }
-        let icon_col = if selected && *item == RailItem::Agents { egui::Color32::from_rgb(0x6E, 0xA8, 0xFE) } else { theme::ICON };
+        let icon_col = if selected && *item == RailItem::Agents { theme::ICON_SELECTED } else { theme::ICON };
         match *item {
             RailItem::Agents => paint_agents_rail_star(&p, ic, icon_col),
             RailItem::Assets => paint_assets_rail_circle_plus(&p, ic, icon_col),
@@ -217,13 +217,14 @@ mod tests {
 
     #[test]
     fn cells_follow_the_measured_rail_layout() {
-        // File, Agents, Assets, Tools every 56px, then a 16px gap before Variables, Specs, and Plugins.
-        assert_eq!(cell_tops(), vec![56.0, 112.0, 168.0, 224.0, 296.0, 352.0, 408.0]);
+        // File, Agents, Assets, Tools every 56px, then a 16px gap before Variables and Plugins.
+        assert_eq!(cell_tops(), vec![56.0, 112.0, 168.0, 224.0, 296.0, 352.0]);
         assert_eq!(ITEMS[0].0, RailItem::File);
         assert_eq!(ITEMS[1].0, RailItem::Agents);
         assert_eq!(ITEMS[2].0, RailItem::Assets);
         assert_eq!(ITEMS[3].0, RailItem::Tools);
         assert_eq!(ITEMS[4].0, RailItem::Variables);
+        assert_eq!(ITEMS[5].0, RailItem::Plugins);
         // separators sit at y=48 (under the logo) and 288 (middle of the group gap)
         assert_eq!(theme::RAIL_SEPARATOR_Y, 48.0);
         assert_eq!(cell_tops()[4] - theme::RAIL_GROUP_GAP / 2.0, 288.0);

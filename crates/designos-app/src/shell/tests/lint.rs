@@ -57,3 +57,157 @@ fn nothing_overflows_and_icons_are_centered() {
     }
     assert!(all.is_empty(), "{} layout findings", all.len());
 }
+
+fn audit_sim(label: &str, s: &mut Sim, check_canvas_purple: bool) -> Vec<lint::Finding> {
+    lint::take_icons();
+    s.frame(vec![]);
+    lint::take_icons();
+    s.frame(vec![]);
+    let (texts, boxes) = lint::scan_shapes(&s.shapes);
+    assert!(
+        texts.len() > 8 && boxes.len() > 8,
+        "[{label}] only {} texts / {} boxes painted",
+        texts.len(),
+        boxes.len()
+    );
+    let icons = lint::take_icons();
+    let mut out = lint::check_text(&texts, &boxes);
+    out.extend(lint::check_icons(&icons));
+    out.extend(lint::check_pointer_targets(&icons));
+    let exclude = if check_canvas_purple || s.app().home.is_some() {
+        None
+    } else {
+        Some(s.app().canvas_rect)
+    };
+    out.extend(lint::check_no_purple_chrome(&s.shapes, exclude));
+    out.extend(lint::check_contrast(&s.shapes, exclude));
+    for f in &mut out {
+        f.what = format!("[{label}] {}", f.what);
+    }
+    out
+}
+
+#[test]
+fn design_os_gates_audit_all_studio_screens_zero_overflow_zero_purple_and_valid_contrast() {
+    let mut all = Vec::new();
+
+    // Seed a temporary showcase library so Home sections render real project cards, folders, and thumbnails.
+    let lib_dir = std::env::temp_dir().join(format!("designos-gate-lint-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&lib_dir);
+    crate::showcase::seed_library(&lib_dir).expect("seed showcase library");
+
+    // 1. Audit Home sections (Recents, Templates, AllProjects, Resources, Drafts)
+    for (label, section) in [
+        ("home recents", crate::home::Section::Recents),
+        ("home templates", crate::home::Section::Templates),
+        ("home all_folders", crate::home::Section::AllProjects),
+        ("home resources", crate::home::Section::Resources),
+        ("home drafts", crate::home::Section::Drafts),
+    ] {
+        let mut s = Sim::with(Options {
+            home: true,
+            library: Some(lib_dir.clone()),
+            ..Options::default()
+        });
+        s.shell.app.tabs.always_visible = true;
+        if let Some(h) = s.shell.app.home.as_mut() {
+            h.section = section;
+        }
+        all.extend(audit_sim(label, &mut s, true));
+
+        // Verify Home Header & Sidebar primary interactive controls meet >= 24x24px pointer target floor
+        for key in ["home-search", "home-new-project", "tab-bar-home", "tab-bar-new"] {
+            let r = s.rect_of(key);
+            if r.width() < 24.0 || r.height() < 24.0 {
+                all.push(lint::Finding {
+                    what: format!("[{label}] primary button {key} below 24x24px floor"),
+                    detail: format!("rect {:?} ({}x{})", r, r.width(), r.height()),
+                });
+            }
+        }
+    }
+
+    // 2. Audit Dev Mode, Assets Panel, Variables Modal, Plugins Modal, Specs Reader, Agents Panel, Libraries Modal, Cmd+K Modal
+    for (label, opts) in [
+        (
+            "dev mode",
+            Options {
+                select: Some("Welcome".into()),
+                dev: Some("css".into()),
+                dev_demo: true,
+                ..Options::default()
+            },
+        ),
+        ("assets panel", Options { panel: Some("assets".into()), ..Options::default() }),
+        ("variables modal", Options { panel: Some("variables".into()), ..Options::default() }),
+        ("plugins modal", Options { panel: Some("plugins".into()), ..Options::default() }),
+        ("specs reader", Options { panel: Some("specs".into()), ..Options::default() }),
+        ("libraries modal", Options { panel: Some("libraries".into()), ..Options::default() }),
+        ("cmdk modal", Options { panel: Some("cmdk".into()), ..Options::default() }),
+    ] {
+        let mut s = Sim::with(opts);
+        s.shell.app.tabs.always_visible = true;
+        all.extend(audit_sim(label, &mut s, false));
+    }
+
+    // Also audit Agents panel UI (without spawning external PTY subprocesses during unit tests)
+    {
+        let mut s = Sim::with(Options { select: Some("Welcome".into()), ..Options::default() });
+        s.shell.app.tabs.always_visible = true;
+        s.shell.app.ui.rail = Some(crate::app::RailItem::Agents);
+        s.shell.app.ui.left_collapsed = false;
+        all.extend(audit_sim("agents panel", &mut s, false));
+    }
+
+    // 3. Verify Editor primary interactive buttons on Top Tab Bar, Left Rail/Panel, Right Panel, Bottom Toolbar meet >= 24x24px floor
+    {
+        let mut s = Sim::with(Options { select: Some("Welcome".into()), ..Options::default() });
+        s.shell.app.tabs.always_visible = true;
+        s.frame(vec![]);
+        for key in [
+            "tab-bar-home",
+            "tab-bar-new",
+            "rail-menu",
+            "rail-File",
+            "rail-Assets",
+            "file-header",
+            "layers-search",
+            "present-button",
+            "share-button",
+            "right-tab-Design",
+            "right-tab-Prototype",
+        ] {
+            let r = s.rect_of(key);
+            if r.width() < 24.0 || r.height() < 24.0 {
+                all.push(lint::Finding {
+                    what: format!("[editor chrome] primary button {key} below 24x24px floor"),
+                    detail: format!("rect {:?} ({}x{})", r, r.width(), r.height()),
+                });
+            }
+        }
+        let bar = crate::panels::toolbar::toolbar_rect(s.ctx.content_rect());
+        if bar.height() < 24.0 {
+            all.push(lint::Finding {
+                what: "[editor chrome] bottom toolbar below 24px height floor".into(),
+                detail: format!("rect {:?}", bar),
+            });
+        }
+        for gi in 0..crate::canvas::tools::GROUPS.len() {
+            let gb = crate::panels::toolbar::group_button_rect(s.ctx.content_rect(), gi);
+            if gb.width() < 24.0 || gb.height() < 24.0 {
+                all.push(lint::Finding {
+                    what: format!("[editor chrome] toolbar group button {gi} below 24x24px floor"),
+                    detail: format!("rect {:?}", gb),
+                });
+            }
+        }
+    }
+
+    let _ = std::fs::remove_dir_all(&lib_dir);
+
+    for f in &all {
+        eprintln!("STUDIO_GATE_LINT {} :: {}", f.what, f.detail);
+    }
+    assert!(all.is_empty(), "{} studio screen gate findings", all.len());
+}
+

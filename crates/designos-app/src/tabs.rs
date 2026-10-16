@@ -18,14 +18,14 @@ use std::path::{Path, PathBuf};
 /// Exact height of the 1:1 Figma UI3 Top Window Tab Bar (`32px`).
 pub const TOP_TAB_BAR_HEIGHT: f32 = 32.0;
 
-// Figma UI3 Top Tab Strip palette tokens
-const TAB_BAR_BG: Color32 = Color32::from_rgb(0x1E, 0x1E, 0x1E);
-const TAB_BAR_BORDER: Color32 = Color32::from_rgb(0x2C, 0x2C, 0x2C);
-const TAB_ACTIVE_BG: Color32 = Color32::from_rgb(0x2C, 0x2C, 0x2C);
-const TAB_ACTIVE_BORDER: Color32 = Color32::from_rgb(0x38, 0x38, 0x38);
-const TAB_HOVER_BG: Color32 = Color32::from_rgb(0x25, 0x25, 0x28);
+// Top Tab Strip palette tokens (unified with theme.rs Zinc dark palette)
+const TAB_BAR_BG: Color32 = theme::BG_PRIMARY;
+const TAB_BAR_BORDER: Color32 = theme::BORDER;
+const TAB_ACTIVE_BG: Color32 = theme::BG_SECONDARY;
+const TAB_ACTIVE_BORDER: Color32 = theme::BORDER_STRONG;
+const TAB_HOVER_BG: Color32 = theme::BG_HOVER;
 const BADGE_DESIGN_BLUE: Color32 = Color32::from_rgb(0x0D, 0x99, 0xFF);
-const BADGE_BOARD_PURPLE: Color32 = Color32::from_rgb(0x97, 0x47, 0xFF);
+const BADGE_BOARD_PURPLE: Color32 = Color32::from_rgb(0xF5, 0x9E, 0x0B);
 const BADGE_DECK_ORANGE: Color32 = Color32::from_rgb(0xFF, 0x6A, 0x3D);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -69,6 +69,7 @@ pub struct ProjectTab {
     pub kind: ProjectTabKind,
     pub doc: Document,
     pub hist: History,
+    pub terminal: crate::terminal::TerminalState,
     pub page: NodeId,
     pub selection: Vec<NodeId>,
     pub view: View,
@@ -95,6 +96,7 @@ impl ProjectTab {
             kind,
             doc: app.doc.clone(),
             hist: History::default(),
+            terminal: crate::terminal::TerminalState::for_tab(id),
             page: app.page,
             selection: app.selection.clone(),
             view: app.view,
@@ -196,12 +198,14 @@ impl TabsState {
         tab.dirty = app.hist.can_undo() || tab.hist.can_undo() || app.autosave.pending();
     }
 
-    /// Parks the active tab's state (including `app.doc`) AND moves `app.hist` into `entries[active_idx].hist`.
+    /// Parks the active tab's state (including `app.doc`) AND moves `app.hist` + `app.terminal` into `entries[active_idx]`.
     fn park_active_from_app(&mut self, app: &mut App) {
         if self.entries.is_empty() {
             let id = self.alloc_id();
             let mut tab = ProjectTab::from_app(id, app, None);
             tab.hist = std::mem::take(&mut app.hist);
+            app.terminal.bind_session(&format!("tab-{id}"));
+            tab.terminal = std::mem::take(&mut app.terminal);
             tab.dirty = tab.hist.can_undo() || app.autosave.pending();
             self.entries.push(tab);
             self.active_idx = 0;
@@ -216,7 +220,10 @@ impl TabsState {
             self.entries[self.active_idx].doc = app.doc.clone();
         }
         if self.hist_in_app && self.active_idx < self.entries.len() {
+            let active_id = self.entries[self.active_idx].id;
+            app.terminal.bind_session(&format!("tab-{active_id}"));
             self.entries[self.active_idx].hist = std::mem::take(&mut app.hist);
+            self.entries[self.active_idx].terminal = std::mem::take(&mut app.terminal);
             self.entries[self.active_idx].dirty =
                 self.entries[self.active_idx].hist.can_undo() || app.autosave.pending();
             self.hist_in_app = false;
@@ -267,7 +274,7 @@ impl TabsState {
         app.changed();
     }
 
-    /// Switches from the current tab (or `Home`) to `entries[idx]`, preserving `History` and view state.
+    /// Switches from the current tab (or `Home`) to `entries[idx]`, preserving `History`, `TerminalState`, and view state.
     pub fn switch_to(&mut self, idx: usize, app: &mut App) {
         if self.entries.is_empty() {
             self.sync_from_app(app);
@@ -279,7 +286,11 @@ impl TabsState {
         self.active_idx = idx;
         self.parked_in_home = false;
         self.apply_to_app(idx, app);
+        let tab_id = self.entries[idx].id;
         app.hist = std::mem::take(&mut self.entries[idx].hist);
+        app.terminal = std::mem::take(&mut self.entries[idx].terminal);
+        app.terminal.bind_session(&format!("tab-{tab_id}"));
+        app.terminal.sync_live_file_context(&app.doc, app.page, &app.selection, app.file_path.as_deref());
         self.entries[idx].dirty = app.hist.can_undo() || app.autosave.pending();
         self.hist_in_app = true;
     }
@@ -307,6 +318,10 @@ impl TabsState {
         }
         if self.entries.is_empty() {
             self.sync_from_app(app);
+            if let Some(tab) = self.entries.get(self.active_idx) {
+                app.terminal.bind_session(&format!("tab-{}", tab.id));
+                app.terminal.sync_live_file_context(&app.doc, app.page, &app.selection, app.file_path.as_deref());
+            }
             return;
         }
         if self.parked_in_home {
@@ -318,7 +333,11 @@ impl TabsState {
                     .iter()
                     .position(|t| t.lib_file.as_ref().is_some_and(|tlf| tlf.id == lf.id))
                 {
+                    let tab_id = self.entries[existing].id;
                     self.active_idx = existing;
+                    app.terminal = std::mem::take(&mut self.entries[existing].terminal);
+                    app.terminal.bind_session(&format!("tab-{tab_id}"));
+                    app.terminal.sync_live_file_context(&app.doc, app.page, &app.selection, app.file_path.as_deref());
                     self.hist_in_app = true;
                     self.sync_from_app(app);
                     return;
@@ -329,7 +348,11 @@ impl TabsState {
                     .iter()
                     .position(|t| t.file_path.as_ref() == Some(path))
                 {
+                    let tab_id = self.entries[existing].id;
                     self.active_idx = existing;
+                    app.terminal = std::mem::take(&mut self.entries[existing].terminal);
+                    app.terminal.bind_session(&format!("tab-{tab_id}"));
+                    app.terminal.sync_live_file_context(&app.doc, app.page, &app.selection, app.file_path.as_deref());
                     self.hist_in_app = true;
                     self.sync_from_app(app);
                     return;
@@ -344,11 +367,24 @@ impl TabsState {
                 let tab = ProjectTab::from_app(id, app, None);
                 self.entries.push(tab);
                 self.active_idx = self.entries.len() - 1;
+                app.terminal = crate::terminal::TerminalState::for_tab(id);
+                app.terminal.sync_live_file_context(&app.doc, app.page, &app.selection, app.file_path.as_deref());
                 self.hist_in_app = true;
                 return;
             }
+            if let Some(tab) = self.entries.get_mut(self.active_idx) {
+                let tab_id = tab.id;
+                if !self.hist_in_app {
+                    app.terminal = std::mem::take(&mut tab.terminal);
+                }
+                app.terminal.bind_session(&format!("tab-{tab_id}"));
+            }
         }
         self.sync_from_app(app);
+        if let Some(tab) = self.entries.get(self.active_idx) {
+            app.terminal.bind_session(&format!("tab-{}", tab.id));
+            app.terminal.sync_live_file_context(&app.doc, app.page, &app.selection, app.file_path.as_deref());
+        }
     }
 
     /// Saves the current tab, pushes a new `ProjectTab`, switches to it, and closes `Home`.
@@ -373,6 +409,7 @@ impl TabsState {
             kind,
             doc,
             hist: History::default(),
+            terminal: crate::terminal::TerminalState::for_tab(id),
             page,
             selection: Vec::new(),
             view: View::default(),
@@ -388,6 +425,9 @@ impl TabsState {
         self.parked_in_home = false;
         self.apply_to_app(new_idx, app);
         app.hist = History::default();
+        app.terminal = std::mem::take(&mut self.entries[new_idx].terminal);
+        app.terminal.bind_session(&format!("tab-{id}"));
+        app.terminal.sync_live_file_context(&app.doc, app.page, &app.selection, app.file_path.as_deref());
         self.hist_in_app = true;
         app.fit_all();
         self.entries[new_idx].view = app.view;
@@ -448,6 +488,7 @@ impl TabsState {
             let pb = path.to_path_buf();
             self.entries[idx].file_path = Some(pb.clone());
             app.file_path = Some(pb);
+            app.terminal.sync_live_file_context(&app.doc, app.page, &app.selection, app.file_path.as_deref());
         }
         Some(idx)
     }
@@ -475,6 +516,8 @@ impl TabsState {
             self.active_idx = idx;
             self.parked_in_home = false;
             self.hist_in_app = true;
+            app.terminal = crate::terminal::TerminalState::for_tab(id);
+            app.terminal.sync_live_file_context(&app.doc, app.page, &app.selection, app.file_path.as_deref());
             Some(idx)
         } else {
             None
@@ -487,30 +530,49 @@ impl TabsState {
         if idx >= self.entries.len() || self.entries[idx].pinned {
             return false;
         }
-        if app.home.is_none() && self.active_idx < self.entries.len() {
-            self.park_active_from_app(app);
+        let was_home = app.home.is_some();
+        let old_active = self.active_idx;
+        if !was_home && idx == old_active {
+            app.terminal.shutdown();
         }
-        self.entries.remove(idx);
+        let mut removed = self.entries.remove(idx);
+        removed.terminal.shutdown();
         if self.entries.is_empty() {
             self.active_idx = 0;
             self.hist_in_app = false;
             self.parked_in_home = true;
-            if app.lib.is_some() {
-                app.go_home();
-            } else {
-                app.home = Some(crate::home::Home::new());
+            if !was_home {
+                if app.lib.is_some() {
+                    app.go_home();
+                } else {
+                    app.home = Some(crate::home::Home::new());
+                }
             }
             return true;
         }
-        let next_idx = if idx < self.active_idx {
-            self.active_idx - 1
-        } else {
-            self.active_idx.min(self.entries.len() - 1)
-        };
+        if was_home {
+            if idx < self.active_idx {
+                self.active_idx -= 1;
+            } else if self.active_idx >= self.entries.len() {
+                self.active_idx = self.entries.len() - 1;
+            }
+            return true;
+        }
+        if idx != old_active {
+            if idx < old_active {
+                self.active_idx = old_active - 1;
+            }
+            return true;
+        }
+        let next_idx = idx.min(self.entries.len() - 1);
         self.active_idx = next_idx;
         self.parked_in_home = false;
         self.apply_to_app(next_idx, app);
+        let tab_id = self.entries[next_idx].id;
         app.hist = std::mem::take(&mut self.entries[next_idx].hist);
+        app.terminal = std::mem::take(&mut self.entries[next_idx].terminal);
+        app.terminal.bind_session(&format!("tab-{tab_id}"));
+        app.terminal.sync_live_file_context(&app.doc, app.page, &app.selection, app.file_path.as_deref());
         self.hist_in_app = true;
         true
     }
@@ -524,12 +586,21 @@ impl TabsState {
             self.park_active_from_app(app);
         }
         let keep_id = self.entries[keep_idx].id;
+        for t in &mut self.entries {
+            if t.id != keep_id && !t.pinned {
+                t.terminal.shutdown();
+            }
+        }
         self.entries.retain(|t| t.id == keep_id || t.pinned);
         if let Some(new_idx) = self.entries.iter().position(|t| t.id == keep_id) {
+            let tab_id = self.entries[new_idx].id;
             self.active_idx = new_idx;
             self.parked_in_home = false;
             self.apply_to_app(new_idx, app);
             app.hist = std::mem::take(&mut self.entries[new_idx].hist);
+            app.terminal = std::mem::take(&mut self.entries[new_idx].terminal);
+            app.terminal.bind_session(&format!("tab-{tab_id}"));
+            app.terminal.sync_live_file_context(&app.doc, app.page, &app.selection, app.file_path.as_deref());
             self.hist_in_app = true;
         }
     }
@@ -559,6 +630,7 @@ impl TabsState {
             kind: copy_kind,
             doc: copy_doc,
             hist: History::default(),
+            terminal: crate::terminal::TerminalState::for_tab(new_id),
             page: copy_page,
             selection: copy_selection,
             view: copy_view,
@@ -574,6 +646,9 @@ impl TabsState {
         self.parked_in_home = false;
         self.apply_to_app(insert_idx, app);
         app.hist = History::default();
+        app.terminal = std::mem::take(&mut self.entries[insert_idx].terminal);
+        app.terminal.bind_session(&format!("tab-{new_id}"));
+        app.terminal.sync_live_file_context(&app.doc, app.page, &app.selection, app.file_path.as_deref());
         self.hist_in_app = true;
         Some(insert_idx)
     }
@@ -649,38 +724,11 @@ pub fn show_top_tab_bar_ui(ui: &mut Ui, bar_rect: Rect, app: &mut App) {
     let cy = bar_rect.center().y;
     let mut x = bar_rect.left() + 8.0;
 
-    // 1. Leftmost Brand Wordmark Pill: `**design**:os studio` (all lowercase, "design" bold per DIR-12)
-    {
-        let font_bold = theme::font_body_strong();
-        let font_reg = theme::font_body();
-        let w_design = widgets::text_width(&p, "design", &font_bold);
-        let w_rest = widgets::text_width(&p, ":os studio", &font_reg);
-        let pill_w = (22.0 + w_design + w_rest + 10.0).round();
-        let brand_rect = Rect::from_min_size(
-            Pos2::new(x, bar_rect.top() + 4.0),
-            Vec2::new(pill_w, 24.0),
-        );
-        widgets::record(ui, "tab-bar-brand", brand_rect);
-        icons::paint(&p, Icon::Logo, Pos2::new(brand_rect.left() + 11.0, cy), 13.0, theme::BG_BRAND);
-        let text_x = brand_rect.left() + 21.0;
-        p.text(
-            Pos2::new(text_x, cy),
-            Align2::LEFT_CENTER,
-            "design",
-            font_bold,
-            theme::TEXT,
-        );
-        p.text(
-            Pos2::new(text_x + w_design, cy),
-            Align2::LEFT_CENTER,
-            ":os studio",
-            font_reg,
-            theme::TEXT_SECONDARY,
-        );
-        x = brand_rect.right() + 4.0;
-    }
+    // Brand wordmark is rendered in the top window title bar (`window-title-brand`);
+    // keep a zero-size anchor so existing widget-id queries stay satisfied.
+    widgets::record(ui, "tab-bar-brand", Rect::from_min_size(Pos2::new(bar_rect.left(), bar_rect.top()), Vec2::ZERO));
 
-    // 2. Home Tab Button (`id: "tab-bar-home"`)
+    // 1. Home Tab Button (`id: "tab-bar-home"`)
     {
         let is_home = app.home.is_some();
         let home_rect = Rect::from_min_size(Pos2::new(x, bar_rect.top() + 4.0), Vec2::new(72.0, 24.0));
@@ -733,7 +781,7 @@ pub fn show_top_tab_bar_ui(ui: &mut Ui, bar_rect: Rect, app: &mut App) {
     let active_dirty_live = app.hist.can_undo() || app.autosave.pending();
     let avail_for_tabs = (bar_rect.right() - x - 118.0).max(120.0);
     let tab_count = app.tabs.entries.len().max(1);
-    let ideal_w = (avail_for_tabs / tab_count as f32).clamp(112.0, 188.0);
+    let ideal_w = (avail_for_tabs / tab_count as f32).clamp(112.0, 240.0);
 
     for idx in 0..app.tabs.entries.len() {
         let tab = &app.tabs.entries[idx];
@@ -754,10 +802,22 @@ pub fn show_top_tab_bar_ui(ui: &mut Ui, bar_rect: Rect, app: &mut App) {
 
         let close_rect = Rect::from_center_size(
             Pos2::new(tab_rect.right() - 13.0, tab_rect.center().y),
-            Vec2::splat(16.0),
+            Vec2::splat(18.0),
         );
         widgets::record(ui, &format!("tab-close-{tab_id}"), close_rect);
 
+        // Exclude close_rect from tab_hit_rect so clicking `×` never triggers tab switch instead of close
+        let tab_hit_right = if tab.pinned {
+            tab_rect.right()
+        } else {
+            (close_rect.left() - 2.0).max(tab_rect.left() + 24.0)
+        };
+        let tab_hit_rect = Rect::from_min_max(tab_rect.min, Pos2::new(tab_hit_right, tab_rect.bottom()));
+        let tab_resp = ui.interact(
+            tab_hit_rect,
+            ui.id().with(("project-tab", tab_id)),
+            Sense::click(),
+        );
         let close_resp = if !tab.pinned {
             Some(ui.interact(
                 close_rect,
@@ -767,11 +827,6 @@ pub fn show_top_tab_bar_ui(ui: &mut Ui, bar_rect: Rect, app: &mut App) {
         } else {
             None
         };
-        let tab_resp = ui.interact(
-            tab_rect,
-            ui.id().with(("project-tab", tab_id)),
-            Sense::click(),
-        );
 
         let hovered = tab_resp.hovered() || close_resp.as_ref().is_some_and(|r| r.hovered());
         if hovered {
@@ -863,20 +918,25 @@ pub fn show_top_tab_bar_ui(ui: &mut Ui, bar_rect: Rect, app: &mut App) {
             p.circle_filled(Pos2::new(dot_x, tab_rect.center().y), 3.0, BADGE_DESIGN_BLUE);
         }
 
-        // Close `×` button
+        // Close `×` button — always visible on unpinned tabs so user can close in 1 click
         if let Some(cr) = &close_resp {
             if cr.hovered() {
-                p.rect_filled(close_rect, theme::cr(4), TAB_ACTIVE_BORDER);
+                p.rect_filled(close_rect, theme::cr(4), Color32::from_rgb(0xE1, 0x1D, 0x48));
             }
-            if is_active || hovered {
-                icons::paint(
-                    &p,
-                    Icon::Close,
-                    close_rect.center(),
-                    10.0,
-                    if cr.hovered() { theme::TEXT } else { theme::TEXT_SECONDARY },
-                );
-            }
+            let close_fg = if cr.hovered() {
+                Color32::WHITE
+            } else if is_active || hovered {
+                theme::TEXT
+            } else {
+                theme::TEXT_SECONDARY
+            };
+            icons::paint(
+                &p,
+                Icon::Close,
+                close_rect.center(),
+                10.0,
+                close_fg,
+            );
         }
 
         let close_clicked = close_resp.as_ref().is_some_and(|r| r.clicked());
@@ -928,7 +988,7 @@ pub fn show_top_tab_bar_ui(ui: &mut Ui, bar_rect: Rect, app: &mut App) {
 
     // 4c. Right-aligned compact Update check button ("top-tab-update-btn")
     {
-        let upd_rect = Rect::from_min_size(Pos2::new(bar_rect.right() - 64.0, bar_rect.top() + 5.0), Vec2::new(56.0, 22.0));
+        let upd_rect = Rect::from_min_size(Pos2::new(bar_rect.right() - 68.0, bar_rect.top() + 4.0), Vec2::new(60.0, 24.0));
         widgets::record(ui, "top-tab-update-btn", upd_rect);
         let upd_resp = ui.interact(upd_rect, ui.id().with("top-tab-update-btn"), Sense::click());
         if upd_resp.hovered() {
@@ -1301,5 +1361,34 @@ mod tests {
         assert!(app.close_tab(0));
         assert!(app.tabs.entries.is_empty());
         assert!(app.home.is_some(), "closing the last tab returns to Home");
+    }
+
+    #[test]
+    fn closing_background_tab_and_per_tab_terminal_isolation() {
+        let mut app = make_app_with_doc("File One");
+        app.terminal.input_line = "claude --file-one".to_string();
+
+        let doc2 = Document::new("File Two");
+        let idx2 = app.open_new_tab("File Two", doc2, ProjectTabKind::Design);
+        assert_eq!(idx2, 1);
+        assert_eq!(app.terminal.input_line, "", "New file tab gets its own clean TerminalState");
+        app.terminal.input_line = "codex --file-two".to_string();
+
+        // Switch back to File One and verify its terminal state was isolated & preserved
+        app.switch_tab(0);
+        assert_eq!(app.doc.name, "File One");
+        assert_eq!(app.terminal.input_line, "claude --file-one");
+
+        // Switch to File Two and verify its terminal state was isolated & preserved
+        app.switch_tab(1);
+        assert_eq!(app.doc.name, "File Two");
+        assert_eq!(app.terminal.input_line, "codex --file-two");
+
+        // Close background tab 0 (File One) while editing active tab 1 (File Two)
+        assert!(app.close_tab(0));
+        assert_eq!(app.tabs.entries.len(), 1);
+        assert_eq!(app.tabs.active_idx, 0);
+        assert_eq!(app.doc.name, "File Two");
+        assert_eq!(app.terminal.input_line, "codex --file-two");
     }
 }

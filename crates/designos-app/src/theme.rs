@@ -20,10 +20,11 @@ pub const fn rgba(c: u32, a: u8) -> Color32 {
 
 // ---------------------------------------------------------------- colors (EaseUI BrainWave 2.0 Dark + DESIGN:OS)
 pub const BG: Color32 = rgb(0x121215);
+pub const BG_PRIMARY: Color32 = rgb(0x18181B);
 pub const BG_SECONDARY: Color32 = rgb(0x1E1E22);
 pub const BG_TERTIARY: Color32 = rgb(0x27272A);
-pub const BG_HOVER: Color32 = rgb(0x202024);
-pub const BG_PRESSED: Color32 = rgb(0x27272A);
+pub const BG_HOVER: Color32 = rgb(0x232329);
+pub const BG_PRESSED: Color32 = rgb(0x2E2E36);
 pub const BG_MENU: Color32 = rgb(0x18181B);
 pub const BG_SELECTED: Color32 = rgb(0x2B1D16);
 pub const BG_SELECTED_HOVER: Color32 = rgb(0x38251C);
@@ -37,6 +38,8 @@ pub const BG_TOOLBAR_SELECTED: Color32 = rgb(0xE36323);
 pub const BG_TOOLBAR_MODE_SWITCHER: Color32 = rgb(0x27272A);
 pub const BG_SELECTED_AREA: Color32 = rgba(0x3582FF, 0x33);
 pub const BORDER: Color32 = rgb(0x27272A);
+#[allow(dead_code)]
+pub const BORDER_SUBTLE: Color32 = rgb(0x222226);
 pub const BORDER_MENU: Color32 = rgb(0x2E2E34);
 pub const BORDER_SELECTED: Color32 = rgb(0xE36323);
 pub const BORDER_TRANSLUCENT: Color32 = rgba(0xFFFFFF, 0x16);
@@ -45,7 +48,7 @@ pub const TEXT_SECONDARY: Color32 = rgba(0xF4F4F5, 0xB2);
 pub const TEXT_TERTIARY: Color32 = rgba(0xF4F4F5, 0x66);
 pub const TEXT_DISABLED: Color32 = rgba(0xF4F4F5, 0x55);
 pub const TEXT_BRAND: Color32 = rgb(0xFF9E66);
-pub const TEXT_COMPONENT: Color32 = rgb(0xC4A1FF);
+pub const TEXT_COMPONENT: Color32 = rgb(0x22D3EE);
 pub const ICON: Color32 = rgb(0xF4F4F5);
 pub const ICON_SECONDARY: Color32 = rgba(0xF4F4F5, 0xB2);
 pub const ICON_TERTIARY: Color32 = rgba(0xF4F4F5, 0x66);
@@ -60,9 +63,9 @@ pub const BG_DISABLED: Color32 = rgb(0x71717A);
 #[allow(dead_code)] // spec colour, kept for parity with ui-spec.json
 pub const BG_TRANSPARENT_HOVER: Color32 = rgba(0xFFFFFF, 0x0D);
 #[allow(dead_code)] // spec colour, kept for parity with ui-spec.json
-pub const BORDER_STRONG: Color32 = rgba(0xFFFFFF, 0xE5);
+pub const BORDER_STRONG: Color32 = rgb(0x3F3F46);
 #[allow(dead_code)] // spec colour, kept for parity with ui-spec.json
-pub const COMPONENT: Color32 = rgb(0x8755E9);
+pub const COMPONENT: Color32 = rgb(0x06B6D4);
 #[allow(dead_code)] // spec colour, kept for parity with ui-spec.json
 pub const TEXT_ON_LIGHT_CANVAS: Color32 = rgba(0x000000, 0xE5);
 #[allow(dead_code)] // spec colour, kept for parity with ui-spec.json
@@ -81,9 +84,9 @@ pub const LOGO_GRADIENT_A: Color32 = rgb(0xE36323);
 pub const CHECKER_A: Color32 = rgb(0xFFFFFF);
 pub const CHECKER_B: Color32 = rgb(0xCCCCCC);
 
-// canvas overlays (EaseUI BrainWave Primary Blue #3582FF & Purple #8755E9)
+// canvas overlays (EaseUI BrainWave Primary Blue #3582FF & Cyan #06B6D4)
 pub const CANVAS_SELECTION: Color32 = rgb(0x3582FF);
-pub const CANVAS_COMPONENT: Color32 = rgb(0x8755E9);
+pub const CANVAS_COMPONENT: Color32 = rgb(0x06B6D4);
 pub const CANVAS_HANDLE_FILL: Color32 = rgb(0xFFFFFF);
 pub const CANVAS_SIZE_BADGE_TEXT: Color32 = rgb(0xFFFFFF);
 pub const CANVAS_LABEL: Color32 = rgba(0x000000, 0x80);
@@ -378,7 +381,7 @@ pub const COMMENT_PIN_HIT_PAD: f32 = 2.0;
 /// Resolved pins are greyed out.
 pub const COMMENT_PIN_RESOLVED: Color32 = rgb(0x757575);
 /// Avatar colours picked from the author's name.
-pub const AVATAR_COLORS: [Color32; 6] = [rgb(0xF24822), rgb(0xFFA629), rgb(0x14AE5C), rgb(0x0C8CE9), rgb(0x9747FF), rgb(0xEE46BC)];
+pub const AVATAR_COLORS: [Color32; 6] = [rgb(0xF24822), rgb(0xFFA629), rgb(0x14AE5C), rgb(0x0C8CE9), rgb(0x06B6D4), rgb(0xEE46BC)];
 pub const COMMENT_AVATAR: f32 = 24.0;
 /// Thread popover: width, gap to its pin, inner padding, header height.
 pub const COMMENT_POP_W: f32 = 300.0;
@@ -472,7 +475,7 @@ pub const SYNTAX_COMMENT: Color32 = rgb(0x8A8A8A);
 pub const SYNTAX_PUNCT: Color32 = rgb(0xB3B3B3);
 /// Dev status pills: Ready for dev, Completed, Changed.
 pub const DEV_READY: Color32 = rgb(0x14AE5C);
-pub const DEV_COMPLETED: Color32 = rgb(0x9747FF);
+pub const DEV_COMPLETED: Color32 = rgb(0x06B6D4);
 pub const DEV_CHANGED: Color32 = rgb(0xFFA629);
 /// Box model diagram: margin, padding and content tints (as in Figma's Inspect).
 pub const BOX_MARGIN: Color32 = rgb(0xF9CB9C);
@@ -511,7 +514,7 @@ pub const MIN_WINDOW: (f32, f32) = (900.0, 600.0);
 pub const APP_TITLE: &str = "design:os studio";
 pub const DEFAULT_SHAPE_SIZE: f32 = 100.0;
 pub const DEFAULT_TEXT_SIZE: f32 = 16.0;
-pub const DEFAULT_PAGE_BG: u32 = 0xF5F5F5;
+pub const DEFAULT_PAGE_BG: u32 = 0x5A5A5A;
 pub const DEFAULT_STROKE: u32 = 0x000000;
 pub const DEFAULT_FRAME_FILL: u32 = 0xFFFFFF;
 pub const DEFAULT_SHAPE_FILL: u32 = 0xD9D9D9;
@@ -644,7 +647,7 @@ pub const VAR_POPOVER_W: f32 = 264.0;
 /// Sticky note and section palette: eight pastel colours (`0xRRGGBB`), the first is the default.
 pub const BOARD_PALETTE: [u32; 8] = [0xFFE58F, 0xFFC48A, 0xFFB3B3, 0xF2B8E6, 0xD5C3FF, 0xB6D4FF, 0xA8E6DD, 0xC4EBA6];
 /// Ink colours for connectors, markers and text on a board (dark first).
-pub const BOARD_INK: [u32; 8] = [0x1E1E1E, 0x757575, 0xF24822, 0xFFA629, 0x14AE5C, 0x0C8CE9, 0x9747FF, 0xEE46BC];
+pub const BOARD_INK: [u32; 8] = [0x1E1E1E, 0x757575, 0xF24822, 0xFFA629, 0x14AE5C, 0x0C8CE9, 0x06B6D4, 0xEE46BC];
 /// Canvas colour of a board and the dots drawn on it.
 pub const BOARD_BG: u32 = 0xF4F4F4;
 pub const BOARD_DOT: Color32 = rgba(0x000000, 0x2E);

@@ -74,23 +74,43 @@ pub fn snap_values(mine: &[f32], targets: &[f32], threshold: f32) -> Option<(f32
     best
 }
 
+fn snap_axis_rects(
+    mine: &[f32],
+    others: &[Rect],
+    coords: fn(&Rect) -> [f32; 3],
+    threshold: f32,
+) -> Option<(f32, f32)> {
+    if mine.is_empty() {
+        return None;
+    }
+    let mut best: Option<(f32, f32)> = None;
+    for o in others {
+        let ts = coords(o);
+        for m in mine {
+            for t in &ts {
+                let d = *t - *m;
+                if d.abs() <= threshold && best.map(|(bd, _)| d.abs() < bd.abs()).unwrap_or(true) {
+                    best = Some((d, *t));
+                }
+            }
+        }
+    }
+    best
+}
+
 /// Snaps `moving` (all of left/center/right and top/middle/bottom) to `others`.
 /// `threshold` is in page units (callers divide the pixel threshold by zoom).
 pub fn snap_rect(moving: &Rect, others: &[Rect], threshold: f32) -> SnapResult {
-    let ox: Vec<f32> = others.iter().flat_map(xs).collect();
-    let oy: Vec<f32> = others.iter().flat_map(ys).collect();
-    let sx = snap_values(&xs(moving), &ox, threshold);
-    let sy = snap_values(&ys(moving), &oy, threshold);
+    let sx = snap_axis_rects(&xs(moving), others, xs, threshold);
+    let sy = snap_axis_rects(&ys(moving), others, ys, threshold);
     finish(moving, others, sx, sy)
 }
 
 /// Snaps only specific edge coordinates (used while resizing: only the dragged
 /// edges move). `x_edges`/`y_edges` are the coordinates currently dragged.
 pub fn snap_edges(moving: &Rect, x_edges: &[f32], y_edges: &[f32], others: &[Rect], threshold: f32) -> SnapResult {
-    let ox: Vec<f32> = others.iter().flat_map(xs).collect();
-    let oy: Vec<f32> = others.iter().flat_map(ys).collect();
-    let sx = if x_edges.is_empty() { None } else { snap_values(x_edges, &ox, threshold) };
-    let sy = if y_edges.is_empty() { None } else { snap_values(y_edges, &oy, threshold) };
+    let sx = snap_axis_rects(x_edges, others, xs, threshold);
+    let sy = snap_axis_rects(y_edges, others, ys, threshold);
     finish(moving, others, sx, sy)
 }
 
@@ -162,6 +182,88 @@ pub fn measurements(r: &Rect, others: &[Rect]) -> Vec<Measure> {
     }
     if let Some(l) = down {
         out.push(Measure { a: (cx, r.y + r.h), b: (cx, l), value: l - (r.y + r.h) });
+    }
+    out
+}
+
+/// Computes `Alt`/`Option` distance measurements from selection bounds `a` to either
+/// a hovered `target` rect or `a`'s parent `container` rect (as in Figma).
+pub fn compute_alt_measures(a: Rect, target: Option<Rect>, container: Option<Rect>) -> Vec<Measure> {
+    let mut out = Vec::new();
+    let cx = a.x + a.w * 0.5;
+    let cy = a.y + a.h * 0.5;
+
+    if let Some(b) = target {
+        let x_disjoint_right = a.x + a.w <= b.x;
+        let x_disjoint_left = b.x + b.w <= a.x;
+        let y_disjoint_down = a.y + a.h <= b.y;
+        let y_disjoint_up = b.y + b.h <= a.y;
+
+        if x_disjoint_right || x_disjoint_left || y_disjoint_down || y_disjoint_up {
+            let oy_min = a.y.max(b.y);
+            let oy_max = (a.y + a.h).min(b.y + b.h);
+            let my = if oy_min <= oy_max { (oy_min + oy_max) * 0.5 } else { cy };
+            if x_disjoint_right {
+                let gap = b.x - (a.x + a.w);
+                if gap > 0.0 {
+                    out.push(Measure { a: (a.x + a.w, my), b: (b.x, my), value: gap });
+                }
+            } else if x_disjoint_left {
+                let gap = a.x - (b.x + b.w);
+                if gap > 0.0 {
+                    out.push(Measure { a: (b.x + b.w, my), b: (a.x, my), value: gap });
+                }
+            }
+
+            let ox_min = a.x.max(b.x);
+            let ox_max = (a.x + a.w).min(b.x + b.w);
+            let mx = if ox_min <= ox_max { (ox_min + ox_max) * 0.5 } else { cx };
+            if y_disjoint_down {
+                let gap = b.y - (a.y + a.h);
+                if gap > 0.0 {
+                    out.push(Measure { a: (mx, a.y + a.h), b: (mx, b.y), value: gap });
+                }
+            } else if y_disjoint_up {
+                let gap = a.y - (b.y + b.h);
+                if gap > 0.0 {
+                    out.push(Measure { a: (mx, b.y + b.h), b: (mx, a.y), value: gap });
+                }
+            }
+        } else {
+            // Overlapping / containing rects: measure distances between corresponding edges.
+            let dl = (a.x - b.x).abs();
+            if dl > 0.01 {
+                out.push(Measure { a: (b.x.min(a.x), cy), b: (b.x.max(a.x), cy), value: dl });
+            }
+            let dr = ((b.x + b.w) - (a.x + a.w)).abs();
+            if dr > 0.01 {
+                out.push(Measure { a: ((a.x + a.w).min(b.x + b.w), cy), b: ((a.x + a.w).max(b.x + b.w), cy), value: dr });
+            }
+            let dt = (a.y - b.y).abs();
+            if dt > 0.01 {
+                out.push(Measure { a: (cx, b.y.min(a.y)), b: (cx, b.y.max(a.y)), value: dt });
+            }
+            let db = ((b.y + b.h) - (a.y + a.h)).abs();
+            if db > 0.01 {
+                out.push(Measure { a: (cx, (a.y + a.h).min(b.y + b.h)), b: (cx, (a.y + a.h).max(b.y + b.h)), value: db });
+            }
+        }
+        return out;
+    }
+
+    if let Some(c) = container {
+        if a.x > c.x {
+            out.push(Measure { a: (c.x, cy), b: (a.x, cy), value: a.x - c.x });
+        }
+        if c.x + c.w > a.x + a.w {
+            out.push(Measure { a: (a.x + a.w, cy), b: (c.x + c.w, cy), value: (c.x + c.w) - (a.x + a.w) });
+        }
+        if a.y > c.y {
+            out.push(Measure { a: (cx, c.y), b: (cx, a.y), value: a.y - c.y });
+        }
+        if c.y + c.h > a.y + a.h {
+            out.push(Measure { a: (cx, a.y + a.h), b: (cx, c.y + c.h), value: (c.y + c.h) - (a.y + a.h) });
+        }
     }
     out
 }
@@ -239,4 +341,20 @@ mod tests {
         let r = snap_edges(&moving, &[], &[moving.y], &[other], 4.0);
         assert_eq!((r.dx, r.dy), (0.0, -3.0));
     }
+
+    #[test]
+    fn alt_measures_disjoint_and_container() {
+        let a = Rect::new(20.0, 30.0, 50.0, 40.0);
+        let b = Rect::new(110.0, 30.0, 50.0, 40.0);
+        let m = compute_alt_measures(a, Some(b), None);
+        assert_eq!(m.len(), 1);
+        assert_eq!(m[0].value, 40.0);
+
+        let container = Rect::new(0.0, 0.0, 200.0, 100.0);
+        let mc = compute_alt_measures(a, None, Some(container));
+        assert_eq!(mc.len(), 4);
+        let vals: Vec<f32> = mc.iter().map(|x| x.value).collect();
+        assert_eq!(vals, vec![20.0, 130.0, 30.0, 30.0]);
+    }
 }
+

@@ -501,14 +501,44 @@ pub fn show(app: &mut App, ui: &mut Ui, region: Rect) {
         Color32::WHITE,
     );
 
-    let local_comps = app.local_components();
-    let real_count = local_comps.len().max(
-        app.doc
-            .nodes
-            .values()
-            .filter(|n| matches!(n.kind, NodeKind::Component(_) | NodeKind::ComponentSet(_)))
-            .count(),
-    );
+    type AssetsDocCacheVal = (Vec<AssetEntry>, Vec<AssetEntry>, usize, std::collections::HashSet<NodeId>);
+    thread_local! {
+        static ASSETS_DOC_CACHE: std::cell::RefCell<Option<((u64, u64, usize, u8), AssetsDocCacheVal)>> = const { std::cell::RefCell::new(None) };
+    }
+    let assets_key = (app.doc.runtime_id(), app.doc.mutation_epoch(), app.doc.nodes.len(), cat);
+    let (local_comps, unavail_comps, real_count, used_components) = ASSETS_DOC_CACHE.with(|cache| {
+        if let Some((k, v)) = cache.borrow().as_ref() {
+            if *k == assets_key {
+                return v.clone();
+            }
+        }
+        let local_comps = app.local_components();
+        let real_count = local_comps.len().max(
+            app.doc
+                .nodes
+                .values()
+                .filter(|n| matches!(n.kind, NodeKind::Component(_) | NodeKind::ComponentSet(_)))
+                .count(),
+        );
+        let unavail_comps = app.unavailable_library_components();
+        let used_components: std::collections::HashSet<NodeId> = if cat == 2 {
+            let mut set = std::collections::HashSet::new();
+            for n in app.doc.nodes.values() {
+                if let NodeKind::Instance { component: Some(cid), .. } = n.kind {
+                    set.insert(cid);
+                    if let Some(parent_id) = app.doc.get(cid).and_then(|cn| cn.parent) {
+                        set.insert(parent_id);
+                    }
+                }
+            }
+            set
+        } else {
+            std::collections::HashSet::new()
+        };
+        let val = (local_comps, unavail_comps, real_count, used_components);
+        *cache.borrow_mut() = Some((assets_key, val.clone()));
+        val
+    });
     let card_r = Rect::from_min_size(
         Pos2::new(region.left() + 12.0, sec_top + 22.0),
         Vec2::new((region.width() - 24.0).max(80.0), 86.0),
@@ -570,7 +600,7 @@ pub fn show(app: &mut App, ui: &mut Ui, region: Rect) {
     // Local components, then imported ones whose library is unavailable, then one
     // section per enabled library (entries with a `Some` source index).
     let mut entries = local_comps;
-    entries.extend(app.unavailable_library_components());
+    entries.extend(unavail_comps);
     let lib_entries = app.library_entries();
     let mut srcs: Vec<Option<usize>> = vec![None; entries.len()];
     if cat != 1 {
@@ -579,20 +609,6 @@ pub fn show(app: &mut App, ui: &mut Ui, region: Rect) {
             srcs.push(Some(k));
         }
     }
-    let used_components: std::collections::HashSet<NodeId> = if cat == 2 {
-        let mut set = std::collections::HashSet::new();
-        for n in app.doc.nodes.values() {
-            if let NodeKind::Instance { component: Some(cid), .. } = n.kind {
-                set.insert(cid);
-                if let Some(parent_id) = app.doc.get(cid).and_then(|cn| cn.parent) {
-                    set.insert(parent_id);
-                }
-            }
-        }
-        set
-    } else {
-        std::collections::HashSet::new()
-    };
     let mut lib_docs: HashMap<String, std::sync::Arc<Document>> = HashMap::new();
     for le in lib_entries.iter() {
         if !lib_docs.contains_key(&le.library_id) {

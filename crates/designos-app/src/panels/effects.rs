@@ -226,7 +226,7 @@ fn color_row(app: &mut App, ui: &mut Ui, r: Rect, key: (usize, u8), c: Color, ta
         let c32 = Color32::from_rgb((c.r * 255.0).round() as u8, (c.g * 255.0).round() as u8, (c.b * 255.0).round() as u8);
         open_picker(app, target, c32, sw, ids.to_vec());
     }
-    if let Some(s) = field::edit_text(ui, hex_r, id.with("hex"), &c.to_hex(), theme::font_body(), theme::TEXT, 0.0) {
+    if let Some(s) = field::edit_hex_text(ui, hex_r, id.with("hex"), &c.to_hex(), theme::font_body(), theme::TEXT, 0.0) {
         if let Some(nc) = Color::from_hex(&s) {
             out = Some(Color { a: c.a, ..nc });
         }

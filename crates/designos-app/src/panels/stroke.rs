@@ -20,7 +20,7 @@ const WEIGHT_W: f32 = 72.0;
 const SETTINGS_X: f32 = 184.0;
 
 fn common<T: PartialEq>(app: &App, sel: &[NodeId], f: impl Fn(&Node) -> T) -> Option<T> {
-    let mut it = sel.iter().filter_map(|id| app.doc.get(*id)).map(f);
+    let mut it = sel.iter().take(128).filter_map(|id| app.doc.get(*id)).map(f);
     let first = it.next()?;
     it.all(|v| v == first).then_some(first)
 }
@@ -78,7 +78,7 @@ pub(super) fn section(app: &mut App, ui: &mut Ui, pane: &mut Pane, sel: &[NodeId
     if widgets::icon_button(ui, set_r, "stroke-settings", Icon::StrokeSettings, open, "Stroke settings").clicked() {
         app.props.pop = (!open).then(|| PopState { kind: PopKind::Stroke, anchor: set_r, ids: sel.to_vec() });
     }
-    if sel.iter().filter_map(|id| app.doc.get(*id)).all(supports_sides) {
+    if sel.iter().take(128).filter_map(|id| app.doc.get(*id)).all(supports_sides) {
         let sides_r = pane.rect(theme::SECTION_TRAILING_X, 0.0, theme::PANEL_ACTION_BUTTON, theme::PANEL_ACTION_BUTTON);
         if widgets::icon_button(ui, sides_r, "stroke-sides", Icon::StrokeSides, sides_on, "Individual strokes").clicked() {
             app.edit_nodes(sel, |n| {

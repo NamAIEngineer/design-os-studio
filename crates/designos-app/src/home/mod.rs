@@ -265,64 +265,43 @@ impl Home {
         } else {
             match &self.section {
                 Section::Recents => self.snap.files.clone(),
-                Section::AllProjects => {
-                    let foldered: Vec<FileEntry> = self
-                        .snap
-                        .files
-                        .iter()
-                        .filter(|f| f.folder.is_some())
-                        .cloned()
-                        .collect();
-                    if foldered.is_empty() {
-                        self.snap.files.clone()
-                    } else {
-                        foldered
-                    }
-                }
-                Section::Templates => {
-                    let matched: Vec<FileEntry> = self
-                        .snap
-                        .files
-                        .iter()
-                        .filter(|f| {
-                            let low = f.name.to_ascii_lowercase();
-                            low.contains("template")
-                                || low.contains("spec")
-                                || low.contains("kit")
-                                || low.contains("starter")
-                                || low.contains("bundle")
-                        })
-                        .cloned()
-                        .collect();
-                    if matched.is_empty() {
-                        self.snap.files.clone()
-                    } else {
-                        matched
-                    }
-                }
-                Section::Resources => {
-                    let matched: Vec<FileEntry> = self
-                        .snap
-                        .files
-                        .iter()
-                        .filter(|f| {
-                            let low = f.name.to_ascii_lowercase();
-                            low.contains("token")
-                                || low.contains("system")
-                                || low.contains("library")
-                                || low.contains("component")
-                                || low.contains("resource")
-                                || low.contains("icon")
-                                || low.contains("ui")
-                        })
-                        .cloned()
-                        .collect();
-                    if matched.is_empty() {
-                        self.snap.files.clone()
-                    } else {
-                        matched
-                    }
-                }
+                Section::AllProjects => self
+                    .snap
+                    .files
+                    .iter()
+                    .filter(|f| f.folder.is_some())
+                    .cloned()
+                    .collect(),
+                Section::Templates => self
+                    .snap
+                    .files
+                    .iter()
+                    .filter(|f| {
+                        let low = f.name.to_ascii_lowercase();
+                        low.contains("template")
+                            || low.contains("spec")
+                            || low.contains("kit")
+                            || low.contains("starter")
+                            || low.contains("bundle")
+                    })
+                    .cloned()
+                    .collect(),
+                Section::Resources => self
+                    .snap
+                    .files
+                    .iter()
+                    .filter(|f| {
+                        let low = f.name.to_ascii_lowercase();
+                        low.contains("token")
+                            || low.contains("system")
+                            || low.contains("library")
+                            || low.contains("component")
+                            || low.contains("resource")
+                            || low.contains("icon")
+                            || low.contains("ui")
+                    })
+                    .cloned()
+                    .collect(),
                 Section::Drafts => self
                     .snap
                     .files
@@ -456,6 +435,16 @@ impl Home {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TemplateKind {
+    MobileBanking,
+    WebDashboard,
+    DesignSystem,
+    FigJamBoard,
+    SlideDeck,
+    VariablesKit,
+}
+
 /// Something the user asked for on the home screen.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Act {
@@ -464,7 +453,13 @@ pub enum Act {
     OpenWindow(String),
     NewFile,
     NewBoard,
+    NewDeck,
+    CreateFromTemplate(TemplateKind),
     OpenSpecs,
+    OpenLibrariesModal,
+    OpenVariables,
+    OpenPlugins,
+    OpenAgents,
     Import,
     NewProject,
     RenameProject(String),
@@ -737,11 +732,79 @@ pub fn apply(app: &mut App, act: Act) {
             };
             app.new_library_board(target);
         }
+        Act::NewDeck => {
+            let target = match app.home_target() {
+                Some(t) => Some(t),
+                None => app
+                    .home
+                    .as_ref()
+                    .and_then(|h| h.snap.projects.first().map(|p| (p.id.clone(), None))),
+            };
+            app.new_library_deck(target);
+        }
+        Act::CreateFromTemplate(kind) => {
+            let (title, mut doc) = match kind {
+                TemplateKind::MobileBanking => ("Marlow \u{2014} Mobile Banking Kit", crate::showcase::document()),
+                TemplateKind::WebDashboard => {
+                    let mut s = crate::showcase::library_samples();
+                    let doc = s.remove(1);
+                    ("Marlow \u{2014} SaaS Web Dashboard", doc)
+                }
+                TemplateKind::DesignSystem => {
+                    let mut s = crate::showcase::library_samples();
+                    let doc = s.remove(2);
+                    ("Marlow \u{2014} Design System & Tokens", doc)
+                }
+                TemplateKind::FigJamBoard => ("Launch Brainstorm Board", crate::board::demo::document()),
+                TemplateKind::SlideDeck => ("Product Exploration Deck", crate::decks::demo::document()),
+                TemplateKind::VariablesKit => ("Design Token Sheet", crate::demo::variables_document()),
+            };
+            let target = app
+                .home_target()
+                .or_else(|| app.home.as_ref().and_then(|h| h.snap.projects.first().map(|p| (p.id.clone(), None))))
+                .or_else(|| lib.list_projects().first().map(|p| (p.id.clone(), None)))
+                .or_else(|| ok(app, lib.create_project("My project")).map(|p| (p.id, None)));
+            if let Some((proj_id, folder_id)) = target {
+                doc.name = title.to_string();
+                if let Some(entry) = ok(app, lib.create_file(&proj_id, folder_id.as_deref(), title, &doc)) {
+                    thumb::refresh(&lib, &entry.id, &doc);
+                    app.open_library_file(&entry.id);
+                }
+            }
+        }
         Act::OpenSpecs => {
             app.home = None;
             app.ui.rail = Some(crate::app::RailItem::Specs);
             app.specs.open = true;
             app.specs.ensure_loaded();
+            changed = false;
+        }
+        Act::OpenLibrariesModal => {
+            app.home = None;
+            app.ui.rail = Some(crate::app::RailItem::Assets);
+            app.ui.left_collapsed = false;
+            app.libs.open = true;
+            changed = false;
+        }
+        Act::OpenVariables => {
+            app.home = None;
+            app.ui.rail = Some(crate::app::RailItem::Variables);
+            app.ui.left_collapsed = false;
+            app.vars.open = true;
+            app.vars.full = true;
+            changed = false;
+        }
+        Act::OpenPlugins => {
+            app.home = None;
+            app.ui.rail = Some(crate::app::RailItem::Plugins);
+            app.open_plugins();
+            changed = false;
+        }
+        Act::OpenAgents => {
+            app.home = None;
+            app.ui.rail = Some(crate::app::RailItem::Agents);
+            app.ui.left_collapsed = false;
+            app.terminal.ensure_default_tab(app.file_path.as_deref());
             changed = false;
         }
         Act::Import => {
@@ -944,7 +1007,7 @@ pub fn open_link(url: &str) -> Result<(), String> {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Inline Left Sidebar (`240px`, `#1E1E1E` background, `#2C2C2C` active pill — `figma_ui3_home.png`)
+// Inline Left Sidebar (`264px`, `#18181B` Zinc-900 background, `#27272A` active pill)
 // ─────────────────────────────────────────────────────────────────────────────
 mod sidebar {
     use super::{Act, DropTo, Home, Section, Target};
@@ -956,12 +1019,15 @@ mod sidebar {
     const ROW_H: f32 = 28.0;
     const INDENT: f32 = 16.0;
 
-    // Figma UI3 Dark Palette tokens (`US-04` / `BR-07`)
-    const UI3_SIDEBAR_BG: Color32 = Color32::from_rgb(0x1E, 0x1E, 0x1E);
-    const UI3_PILL_ACTIVE: Color32 = Color32::from_rgb(0x2C, 0x2C, 0x2C);
-    const UI3_PILL_HOVER: Color32 = Color32::from_rgb(0x26, 0x26, 0x26);
-    const UI3_SEARCH_BG: Color32 = Color32::from_rgb(0x2C, 0x2C, 0x2C);
-    const UI3_BORDER: Color32 = Color32::from_rgb(0x38, 0x38, 0x38);
+    // Unified Zinc Dark Palette tokens (`V1.2` / `V2.1`)
+    const UI3_SIDEBAR_BG: Color32 = Color32::from_rgb(0x18, 0x18, 0x1B);
+    const UI3_SURFACE: Color32 = Color32::from_rgb(0x1E, 0x1E, 0x22);
+    const UI3_PILL_ACTIVE: Color32 = Color32::from_rgb(0x27, 0x27, 0x2A);
+    const UI3_PILL_HOVER: Color32 = Color32::from_rgb(0x23, 0x23, 0x29);
+    const UI3_SEARCH_BG: Color32 = UI3_SURFACE;
+    const UI3_BORDER: Color32 = Color32::from_rgb(0x27, 0x27, 0x2A);
+    const UI3_TEXT_PRI: Color32 = theme::TEXT;
+    const UI3_TEXT_SEC: Color32 = theme::TEXT_SECONDARY;
     const UI3_BLUE: Color32 = Color32::from_rgb(0x0D, 0x99, 0xFF);
 
     pub fn show(h: &mut Home, ui: &mut Ui, rect: Rect, acts: &mut Vec<Act>) {
@@ -972,29 +1038,40 @@ mod sidebar {
         let w = rect.width() - theme::BORDER_WIDTH;
         let mut y = rect.top();
 
-        // 1. Top Workspace / User Header Row (`figma_ui3_home.png`: Avatar + Workspace + Chevron + Bell/Status)
+        // 1. Top Workspace Switcher Header Row (`V1.1`: Workspace Avatar + "Personal Workspace" + Version Pill)
         let ws_rect = Rect::from_min_size(Pos2::new(x0 + 8.0, y + 10.0), Vec2::new(w - 44.0, 32.0));
         let ws_resp = ui.interact(ws_rect, Id::new("home-workspace-header"), Sense::click());
+        widgets::record(ui, "home-workspace-header", ws_rect);
         if ws_resp.hovered() {
             p.rect_filled(ws_rect, CornerRadius::same(6), UI3_PILL_HOVER);
         }
-        let avatar_c = Pos2::new(x0 + 24.0, y + 26.0);
-        p.circle_filled(avatar_c, 11.0, UI3_BLUE);
-        icons::paint(&p, Icon::Logo, avatar_c, 14.0, Color32::WHITE);
-        let title_w = super::updater::paint_brand_wordmark(
-            &p,
-            Pos2::new(x0 + 42.0, y + 26.0),
-            12.0,
-            theme::TEXT,
-            theme::TEXT_SECONDARY,
+        let avatar_r = Rect::from_center_size(Pos2::new(x0 + 22.0, ws_rect.center().y), Vec2::splat(20.0));
+        p.rect_filled(avatar_r, CornerRadius::same(5), Color32::from_rgb(0x27, 0x27, 0x2A));
+        p.rect_stroke(
+            avatar_r,
+            CornerRadius::same(5),
+            Stroke::new(1.0, Color32::from_rgb(0x3F, 0x3F, 0x46)),
+            StrokeKind::Inside,
         );
-        icons::paint(
-            &p,
-            Icon::ChevronDown,
-            Pos2::new((x0 + 48.0 + title_w).min(ws_rect.right() - 8.0), y + 26.0),
-            11.0,
-            theme::ICON_SECONDARY,
+        icons::paint(&p, Icon::Folder, avatar_r.center(), 12.0, theme::BG_BRAND);
+        let ws_font = egui::FontId::new(12.0, egui::FontFamily::Name(theme::FAMILY_MEDIUM.into()));
+        p.text(
+            Pos2::new(x0 + 38.0, ws_rect.center().y),
+            Align2::LEFT_CENTER,
+            "Personal Workspace",
+            ws_font,
+            UI3_TEXT_PRI,
         );
+        let ver = format!("v{}", env!("CARGO_PKG_VERSION"));
+        let mut ver_font = theme::font_mono();
+        ver_font.size = 10.0;
+        let ver_w = widgets::text_width(&p, &ver, &ver_font) + 10.0;
+        let ver_r = Rect::from_center_size(
+            Pos2::new(ws_rect.right() - ver_w * 0.5 - 4.0, ws_rect.center().y),
+            Vec2::new(ver_w, 16.0),
+        );
+        p.rect_filled(ver_r, CornerRadius::same(4), UI3_PILL_ACTIVE);
+        p.text(ver_r.center(), Align2::CENTER_CENTER, ver, ver_font, UI3_TEXT_SEC);
         if ws_resp.clicked() {
             acts.push(Act::Go(Section::Recents));
         }
@@ -1247,24 +1324,33 @@ mod sidebar {
         );
         super::updater::show_sidebar_card_in_rect(ui, updater_r, &mut h.updater);
 
-        // 8. Bottom `Trash` Row
+        // 8. Bottom `Trash` Row (`V3.3` / `D85`: separate count pill badge instead of parenthetical string)
         widgets::hline(&p, x0, x0 + w, rect.bottom() - trash_h, UI3_BORDER);
         let tr = Rect::from_min_size(Pos2::new(x0 + 8.0, rect.bottom() - trash_h + 9.0), Vec2::new(w - 16.0, ROW_H));
         let n = h.snap.trash.len();
-        let label = if n > 0 { format!("Trash ({n})") } else { "Trash".to_string() };
-        if row(
+        let trash_resp = row(
             ui,
             tr,
             Id::new("home-trash"),
             Icon::Trash,
-            &label,
+            "Trash",
             0.0,
             h.section == Section::Trash && !h.searching(),
             false,
             "trash",
-        )
-        .clicked()
-        {
+        );
+        if n > 0 {
+            let badge_r = Rect::from_center_size(Pos2::new(tr.right() - 22.0, tr.center().y), Vec2::new(22.0, 16.0));
+            p.rect_filled(badge_r, CornerRadius::same(8), Color32::from_rgb(0x27, 0x27, 0x2A));
+            p.text(
+                badge_r.center(),
+                Align2::CENTER_CENTER,
+                n.to_string(),
+                theme::font_mono(),
+                UI3_TEXT_SEC,
+            );
+        }
+        if trash_resp.clicked() {
             acts.push(Act::Go(Section::Trash));
         }
     }
@@ -1317,7 +1403,7 @@ mod sidebar {
         out
     }
 
-    /// One sidebar row: icon, label, hover / `#2C2C2C` selected / drop-target highlight.
+    /// One sidebar row: icon, label, hover / `#27272A` selected / drop-target highlight.
     #[allow(clippy::too_many_arguments)]
     fn row(
         ui: &mut Ui,
@@ -1366,24 +1452,25 @@ mod sidebar {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Inline Main Area (`figma_ui3_home.png`: Top Header, Creation Strip, Filter/Sort Bar, Grid/List Cards)
+// Inline Main Area (Top Header, Creation Strip, Filter/Sort Bar, Grid/List Cards)
 // ─────────────────────────────────────────────────────────────────────────────
 mod main_view {
     use super::time::{edited, relative, wall_ms};
-    use super::{Act, DropTo, Home, Section, Target, ViewMode};
+    use super::{Act, DropTo, Home, Section, Target, TemplateKind, ViewMode};
     use crate::icons::{self, Icon};
     use crate::theme;
     use crate::widgets;
     use designos_library::{FileEntry, Library};
     use egui::{Align2, Color32, CornerRadius, Id, Pos2, Rect, Response, Sense, Stroke, StrokeKind, Ui, Vec2};
 
-    // Figma UI3 Dark Mode tokens (`US-04` / `BR-07`)
-    const UI3_MAIN_BG: Color32 = Color32::from_rgb(0x1E, 0x1E, 0x1E);
-    const UI3_SURFACE: Color32 = Color32::from_rgb(0x2C, 0x2C, 0x2C);
-    const UI3_BORDER: Color32 = Color32::from_rgb(0x38, 0x38, 0x38);
+    // Unified Zinc Dark Mode tokens (`V1.2` / `V2.1`)
+    const UI3_MAIN_BG: Color32 = Color32::from_rgb(0x12, 0x12, 0x15);
+    const UI3_SURFACE: Color32 = Color32::from_rgb(0x1E, 0x1E, 0x22);
+    const UI3_BORDER: Color32 = Color32::from_rgb(0x27, 0x27, 0x2A);
     const UI3_BLUE: Color32 = Color32::from_rgb(0x0D, 0x99, 0xFF);
     const UI3_BLUE_HOVER: Color32 = Color32::from_rgb(0x0B, 0x84, 0xE0);
-    const UI3_PURPLE: Color32 = Color32::from_rgb(0x97, 0x47, 0xFF);
+    const UI3_TEAL: Color32 = Color32::from_rgb(0x14, 0xAE, 0x5C);
+    const UI3_AMBER: Color32 = Color32::from_rgb(0xF5, 0x9E, 0x0B);
     const UI3_ORANGE: Color32 = Color32::from_rgb(0xFF, 0x6A, 0x3D);
 
     #[derive(Clone, Copy, PartialEq)]
@@ -1399,7 +1486,7 @@ mod main_view {
         let pad = theme::HOME_PAD;
         let trash = h.section == Section::Trash && !h.searching();
 
-        // 1. Top Header & Creation Strip (`+ Design file`, `+ FigJam board`, `+ Spec bundle`, `Import`)
+        // 1. Top Header & Creation Strip (`+ Design file`, `+ FigJam board`, `+ Spec bundle`, `Import`, context `+ New folder`)
         let head = Rect::from_min_size(rect.min, Vec2::new(rect.width(), theme::HOME_HEADER_H));
         breadcrumb(h, ui, &p, Pos2::new(rect.left() + pad, head.center().y), acts);
         let mut right = rect.right() - pad;
@@ -1429,6 +1516,20 @@ mod main_view {
             let r = button(ui, &p, &mut right, head.center().y, "Import", Kind::Secondary, "home-import");
             if r.clicked() {
                 acts.push(Act::Import);
+            }
+            if !h.searching() {
+                let folder_target = match &h.section {
+                    Section::Project(pid, folder) => Some((pid.clone(), folder.clone())),
+                    Section::AllProjects => h.snap.projects.first().map(|pr| (pr.id.clone(), None)),
+                    _ => None,
+                };
+                if let Some((pid, parent_folder)) = folder_target {
+                    right -= 8.0;
+                    let r = button(ui, &p, &mut right, head.center().y, "+ New folder", Kind::Secondary, "home-new-folder");
+                    if r.clicked() {
+                        acts.push(Act::NewFolder(pid, parent_folder));
+                    }
+                }
             }
         }
         let mut top = head.bottom();
@@ -1524,6 +1625,12 @@ mod main_view {
         let content = Rect::from_min_max(Pos2::new(rect.left(), top), rect.max);
         if trash {
             trash_view(h, ui, content, acts);
+        } else if !h.searching() && h.section == Section::Templates {
+            templates_view(lib, h, ui, content, acts);
+        } else if !h.searching() && h.section == Section::AllProjects {
+            all_projects_view(lib, h, ui, content, acts);
+        } else if !h.searching() && h.section == Section::Resources {
+            resources_view(lib, h, ui, content, acts);
         } else {
             files_view(lib, h, ui, content, acts);
         }
@@ -1610,6 +1717,904 @@ mod main_view {
         resp
     }
 
+    fn section_heading(p: &egui::Painter, x: f32, y: f32, title: &str, subtitle: Option<&str>) -> f32 {
+        p.text(
+            Pos2::new(x, y + 10.0),
+            Align2::LEFT_CENTER,
+            title,
+            theme::font_body_strong(),
+            theme::TEXT,
+        );
+        if let Some(sub) = subtitle {
+            let tw = widgets::text_width(p, title, &theme::font_body_strong());
+            p.text(
+                Pos2::new(x + tw + 10.0, y + 10.0),
+                Align2::LEFT_CENTER,
+                sub,
+                theme::font_small(),
+                theme::TEXT_SECONDARY,
+            );
+        }
+        28.0
+    }
+
+    /// Dedicated view for `Section::Templates` (`"Templates & Specs"`):
+    /// 6 starter template & spec cards + user's matching template/spec files below.
+    fn templates_view(lib: &Library, h: &mut Home, ui: &mut Ui, content: Rect, acts: &mut Vec<Act>) {
+        let files = h.files();
+        let now = wall_ms();
+        let pad = theme::HOME_PAD;
+        let list = h.view == ViewMode::List;
+        let inner_w = (content.width() - pad * 2.0).max(240.0);
+        let (tcw, tch, tgap_x, tgap_y) = (240.0_f32, 188.0_f32, 16.0_f32, 16.0_f32);
+        let tcols = (((inner_w + tgap_x) / (tcw + tgap_x)).floor() as usize).max(1);
+        let template_rows = 6usize.div_ceil(tcols) as f32 * (tch + tgap_y);
+
+        let (cw, ch, gap_x, gap_y) = (theme::HOME_CARD_W, theme::HOME_CARD_H, theme::HOME_CARD_GAP, 24.0);
+        let cols = (((inner_w + gap_x) / (cw + gap_x)).floor() as usize).max(1);
+        let file_rows = if files.is_empty() {
+            0.0
+        } else if list {
+            28.0 + files.len() as f32 * theme::HOME_LIST_ROW_H + 28.0
+        } else {
+            28.0 + files.len().div_ceil(cols) as f32 * (ch + gap_y)
+        };
+
+        let content_h = pad + 28.0 + template_rows + 12.0 + file_rows + pad;
+        crate::panels::wheel_scroll(ui, content, &mut h.scroll, content_h);
+        let scroll = h.scroll;
+        let dragging = h.drag.is_some();
+        let mut budget = 4u32;
+        let selected = h.selected.clone();
+        let mut new_selected = None;
+        let mut menu = None;
+        let mut drag = None;
+        let ctx = ui.ctx().clone();
+
+        let cards: [(&str, &str, Color32, Icon, &str, &str, Act, &str); 6] = [
+            (
+                "Marlow \u{2014} Mobile Banking Kit",
+                "Design Kit",
+                UI3_BLUE,
+                Icon::Pen,
+                "iOS finance screens, components & prototype flows",
+                "Use template",
+                Act::CreateFromTemplate(TemplateKind::MobileBanking),
+                "home-template-mobile",
+            ),
+            (
+                "Marlow \u{2014} SaaS Web Dashboard",
+                "Web App",
+                UI3_TEAL,
+                Icon::Frame,
+                "Analytics overview, tables, sidebar & dark/light cards",
+                "Use template",
+                Act::CreateFromTemplate(TemplateKind::WebDashboard),
+                "home-template-web",
+            ),
+            (
+                "Marlow \u{2014} Design System & Tokens",
+                "Component Library",
+                UI3_AMBER,
+                Icon::Component,
+                "Reusable buttons, inputs, badges & semantic variables",
+                "Use template",
+                Act::CreateFromTemplate(TemplateKind::DesignSystem),
+                "home-template-system",
+            ),
+            (
+                "Launch Brainstorm Board",
+                "FigJam Board",
+                UI3_ORANGE,
+                Icon::Sticky,
+                "Sticky notes, connectors, sections & retro grid",
+                "Use template",
+                Act::CreateFromTemplate(TemplateKind::FigJamBoard),
+                "home-template-board",
+            ),
+            (
+                "Product Exploration Deck",
+                "Slide Deck",
+                UI3_BLUE,
+                Icon::Play,
+                "16:9 presentation slides with speaker notes & transitions",
+                "Use template",
+                Act::CreateFromTemplate(TemplateKind::SlideDeck),
+                "home-template-deck",
+            ),
+            (
+                "PRODUCT:OS Spec Bundle v2",
+                "Spec Driven",
+                UI3_TEAL,
+                Icon::Specs,
+                "Interactive PRD, User Stories, Architecture & Gates G1\u{2013}G5",
+                "Open Spec Hub",
+                Act::OpenSpecs,
+                "home-template-specs",
+            ),
+        ];
+
+        crate::panels::clipped(ui, content, |ui| {
+            let p = ui.painter().clone();
+            let x0 = content.left() + pad;
+            let mut y = content.top() + pad - scroll;
+
+            y += section_heading(
+                &p,
+                x0,
+                y,
+                "Starter Templates & UI Kits",
+                Some("Click any kit to create an editable file in your workspace"),
+            );
+
+            for (i, (title, badge, accent, icon, desc, btn_lbl, act, record)) in cards.iter().enumerate() {
+                let r = Rect::from_min_size(
+                    Pos2::new(x0 + (i % tcols) as f32 * (tcw + tgap_x), y + (i / tcols) as f32 * (tch + tgap_y)),
+                    Vec2::new(tcw, tch),
+                );
+                if r.bottom() < content.top() || r.top() > content.bottom() {
+                    continue;
+                }
+                let resp = ui.interact(r, Id::new(("home-tpl-card", *record)), Sense::click());
+                let hot = resp.hovered();
+                p.rect_filled(r, CornerRadius::same(8), UI3_SURFACE);
+                p.rect_stroke(
+                    r,
+                    CornerRadius::same(8),
+                    Stroke::new(if hot { 1.5 } else { 1.0 }, if hot { *accent } else { UI3_BORDER }),
+                    StrokeKind::Inside,
+                );
+
+                // Top preview banner (72px)
+                let banner = Rect::from_min_size(r.min + Vec2::new(1.0, 1.0), Vec2::new(r.width() - 2.0, 72.0));
+                p.rect_filled(banner, CornerRadius { nw: 7, ne: 7, sw: 0, se: 0 }, accent.gamma_multiply(0.14));
+                let icon_box = Rect::from_min_size(Pos2::new(r.left() + 12.0, r.top() + 14.0), Vec2::splat(28.0));
+                p.rect_filled(icon_box, CornerRadius::same(6), *accent);
+                icons::paint(&p, *icon, icon_box.center(), 15.0, Color32::WHITE);
+
+                // Category pill on top-right of banner
+                let bw = widgets::text_width(&p, badge, &theme::font_small_strong()) + 14.0;
+                let pill_r = Rect::from_min_size(Pos2::new(r.right() - bw - 12.0, r.top() + 16.0), Vec2::new(bw, 20.0));
+                p.rect_filled(pill_r, CornerRadius::same(10), accent.gamma_multiply(0.24));
+                p.text(pill_r.center(), Align2::CENTER_CENTER, *badge, theme::font_small_strong(), *accent);
+
+                // Subtle decorative wireframe bars inside banner
+                let bar_y = banner.bottom() - 14.0;
+                p.rect_filled(
+                    Rect::from_min_size(Pos2::new(r.left() + 12.0, bar_y), Vec2::new(64.0, 4.0)),
+                    CornerRadius::same(2),
+                    accent.gamma_multiply(0.45),
+                );
+                p.rect_filled(
+                    Rect::from_min_size(Pos2::new(r.left() + 82.0, bar_y), Vec2::new(40.0, 4.0)),
+                    CornerRadius::same(2),
+                    accent.gamma_multiply(0.25),
+                );
+
+                // Title & description
+                p.text(
+                    Pos2::new(r.left() + 12.0, banner.bottom() + 16.0),
+                    Align2::LEFT_CENTER,
+                    widgets::elide(&p, title, &theme::font_body_strong(), r.width() - 24.0),
+                    theme::font_body_strong(),
+                    theme::TEXT,
+                );
+                let galley = p.layout(
+                    (*desc).to_string(),
+                    theme::font_small(),
+                    theme::TEXT_SECONDARY,
+                    r.width() - 24.0,
+                );
+                p.galley(Pos2::new(r.left() + 12.0, banner.bottom() + 28.0), galley, theme::TEXT_SECONDARY);
+
+                // Bottom CTA button
+                let btn_r = Rect::from_min_size(Pos2::new(r.left() + 12.0, r.bottom() - 36.0), Vec2::new(r.width() - 24.0, 26.0));
+                let btn_bg = if hot { *accent } else { UI3_MAIN_BG };
+                p.rect_filled(btn_r, CornerRadius::same(5), btn_bg);
+                p.rect_stroke(btn_r, CornerRadius::same(5), Stroke::new(1.0, if hot { *accent } else { UI3_BORDER }), StrokeKind::Inside);
+                p.text(
+                    btn_r.center(),
+                    Align2::CENTER_CENTER,
+                    *btn_lbl,
+                    theme::font_small_strong(),
+                    if hot { Color32::WHITE } else { theme::TEXT },
+                );
+
+                widgets::record(ui, record, r);
+                if resp.clicked() {
+                    acts.push(act.clone());
+                }
+            }
+            y += template_rows + 12.0;
+
+            if !files.is_empty() {
+                y += section_heading(&p, x0, y, "Your Template & Spec Files", None);
+                render_file_items(
+                    lib,
+                    h,
+                    ui,
+                    &p,
+                    content,
+                    &files,
+                    x0,
+                    y,
+                    inner_w,
+                    cols,
+                    list,
+                    now,
+                    dragging,
+                    &selected,
+                    &ctx,
+                    &mut budget,
+                    &mut new_selected,
+                    &mut menu,
+                    &mut drag,
+                    acts,
+                );
+            }
+        });
+        crate::panels::scrollbar(ui, content, scroll, content_h);
+        if let Some(s) = new_selected {
+            h.selected = Some(s);
+        }
+        if menu.is_some() {
+            h.menu = menu;
+        }
+        if drag.is_some() {
+            h.drag = drag;
+        }
+    }
+
+    /// Dedicated view for `Section::AllProjects` (`"All folders"`):
+    /// Section 1: Projects grid with 2x2 thumbnail previews + `+ Folder` mini button + `+ New project` card.
+    /// Section 2: Folders across all projects with `{project_name} / {folder_name}` + `+ New folder` tile.
+    /// Section 3: Files in Folders.
+    fn all_projects_view(lib: &Library, h: &mut Home, ui: &mut Ui, content: Rect, acts: &mut Vec<Act>) {
+        let files = h.files();
+        let now = wall_ms();
+        let pad = theme::HOME_PAD;
+        let list = h.view == ViewMode::List;
+        let inner_w = (content.width() - pad * 2.0).max(260.0);
+
+        let (pcw, pch, pgap_x, pgap_y) = (260.0_f32, 168.0_f32, 16.0_f32, 16.0_f32);
+        let pcols = (((inner_w + pgap_x) / (pcw + pgap_x)).floor() as usize).max(1);
+        let proj_total = h.snap.projects.len() + 1; // +1 for `+ New project` card
+        let proj_rows_h = proj_total.div_ceil(pcols) as f32 * (pch + pgap_y);
+
+        let all_folders: Vec<(String, String, String, String)> = h
+            .snap
+            .projects
+            .iter()
+            .flat_map(|pr| {
+                pr.folders
+                    .iter()
+                    .map(move |fl| (pr.id.clone(), pr.name.clone(), fl.id.clone(), fl.name.clone()))
+            })
+            .collect();
+        let (cw, ch, gap_x, gap_y) = (theme::HOME_CARD_W, theme::HOME_CARD_H, theme::HOME_CARD_GAP, 24.0);
+        let cols = (((inner_w + gap_x) / (cw + gap_x)).floor() as usize).max(1);
+        let folder_total = all_folders.len() + 1; // +1 for `+ New folder` tile
+        let folder_rows_h = folder_total.div_ceil(cols) as f32 * (theme::HOME_FOLDER_H + 12.0);
+
+        let file_rows_h = if files.is_empty() {
+            0.0
+        } else if list {
+            28.0 + files.len() as f32 * theme::HOME_LIST_ROW_H + 28.0
+        } else {
+            28.0 + files.len().div_ceil(cols) as f32 * (ch + gap_y)
+        };
+
+        let content_h = pad + 28.0 + proj_rows_h + 12.0 + 28.0 + folder_rows_h + 12.0 + file_rows_h + pad;
+        crate::panels::wheel_scroll(ui, content, &mut h.scroll, content_h);
+        let scroll = h.scroll;
+        let ptr = ui.input(|i| i.pointer.hover_pos());
+        let dragging = h.drag.is_some();
+        let mut budget = 6u32;
+        let selected = h.selected.clone();
+        let mut new_selected = None;
+        let mut menu = None;
+        let mut drag = None;
+        let mut zones: Vec<(Rect, DropTo)> = vec![];
+        let ctx = ui.ctx().clone();
+        let projects = h.snap.projects.clone();
+        let all_snap_files = h.snap.files.clone();
+
+        crate::panels::clipped(ui, content, |ui| {
+            let p = ui.painter().clone();
+            let x0 = content.left() + pad;
+            let mut y = content.top() + pad - scroll;
+
+            // Section 1: Projects
+            y += section_heading(
+                &p,
+                x0,
+                y,
+                "Projects",
+                Some(&format!("{} workspace project{}", projects.len(), if projects.len() == 1 { "" } else { "s" })),
+            );
+
+            for (i, pr) in projects.iter().enumerate() {
+                let r = Rect::from_min_size(
+                    Pos2::new(x0 + (i % pcols) as f32 * (pcw + pgap_x), y + (i / pcols) as f32 * (pch + pgap_y)),
+                    Vec2::new(pcw, pch),
+                );
+                if r.bottom() < content.top() || r.top() > content.bottom() {
+                    continue;
+                }
+                let plus_r = Rect::from_min_size(Pos2::new(r.right() - 74.0, r.top() + 8.0), Vec2::new(66.0, 22.0));
+                let plus_resp = ui.interact(plus_r, Id::new(("home-proj-new-folder", &pr.id)), Sense::click());
+                let card_resp = ui.interact(r, Id::new(("home-proj-card", &pr.id)), Sense::click());
+                let over = dragging && ptr.is_some_and(|q| r.contains(q));
+                let hot = card_resp.hovered() || plus_resp.hovered();
+
+                p.rect_filled(r, CornerRadius::same(8), if over { theme::BG_SELECTED_HOVER } else { UI3_SURFACE });
+                p.rect_stroke(
+                    r,
+                    CornerRadius::same(8),
+                    Stroke::new(if hot { 1.5 } else { 1.0 }, if hot { UI3_BLUE } else { UI3_BORDER }),
+                    StrokeKind::Inside,
+                );
+
+                // Top 2x2 preview grid (96px tall)
+                let preview = Rect::from_min_size(r.min + Vec2::new(8.0, 8.0), Vec2::new(r.width() - 16.0, 92.0));
+                p.rect_filled(preview, CornerRadius::same(6), UI3_MAIN_BG);
+                let proj_files: Vec<&FileEntry> = all_snap_files.iter().filter(|f| f.project == pr.id).collect();
+                let cell_w = (preview.width() - 12.0) / 2.0;
+                let cell_h = (preview.height() - 12.0) / 2.0;
+                for slot in 0..4 {
+                    let cx = preview.left() + 4.0 + (slot % 2) as f32 * (cell_w + 4.0);
+                    let cy = preview.top() + 4.0 + (slot / 2) as f32 * (cell_h + 4.0);
+                    let cell = Rect::from_min_size(Pos2::new(cx, cy), Vec2::new(cell_w, cell_h));
+                    if let Some(fe) = proj_files.get(slot) {
+                        let tex = h.thumbs.get(&ctx, lib, fe, &mut budget);
+                        let board = h.kinds.get(lib, fe, &mut budget) == designos_doc::DocumentKind::Board;
+                        thumb_area(&p, cell, tex, board, 4);
+                    } else {
+                        p.rect_filled(cell, CornerRadius::same(4), UI3_SURFACE.gamma_multiply(0.55));
+                    }
+                }
+
+                // Top-right `+ Folder` mini button
+                p.rect_filled(
+                    plus_r,
+                    CornerRadius::same(5),
+                    if plus_resp.hovered() { UI3_BLUE } else { Color32::from_black_alpha(170) },
+                );
+                p.text(
+                    plus_r.center(),
+                    Align2::CENTER_CENTER,
+                    "+ Folder",
+                    theme::font_small_strong(),
+                    Color32::WHITE,
+                );
+                widgets::record(ui, &format!("home-project-new-folder-{}", pr.name), plus_r);
+
+                // Bottom metadata
+                let icon_c = Pos2::new(r.left() + 18.0, preview.bottom() + 24.0);
+                p.rect_filled(Rect::from_center_size(icon_c, Vec2::splat(22.0)), CornerRadius::same(5), UI3_BLUE.gamma_multiply(0.22));
+                icons::paint(&p, Icon::Frame, icon_c, 13.0, UI3_BLUE);
+
+                p.text(
+                    Pos2::new(r.left() + 36.0, preview.bottom() + 16.0),
+                    Align2::LEFT_CENTER,
+                    widgets::elide(&p, &pr.name, &theme::font_body_strong(), r.width() - 48.0),
+                    theme::font_body_strong(),
+                    theme::TEXT,
+                );
+                let sub = format!(
+                    "{} file{} \u{b7} {} folder{}",
+                    proj_files.len(),
+                    if proj_files.len() == 1 { "" } else { "s" },
+                    pr.folders.len(),
+                    if pr.folders.len() == 1 { "" } else { "s" },
+                );
+                p.text(
+                    Pos2::new(r.left() + 36.0, preview.bottom() + 33.0),
+                    Align2::LEFT_CENTER,
+                    sub,
+                    theme::font_small(),
+                    theme::TEXT_SECONDARY,
+                );
+
+                widgets::record(ui, &format!("home-project-card-{}", pr.name), r);
+                if plus_resp.clicked() {
+                    acts.push(Act::NewFolder(pr.id.clone(), None));
+                } else if card_resp.clicked() {
+                    acts.push(Act::Go(Section::Project(pr.id.clone(), None)));
+                }
+                if card_resp.secondary_clicked() {
+                    menu = ui.input(|i| i.pointer.interact_pos()).map(|at| (Target::Project(pr.id.clone()), at));
+                }
+                zones.push((r.intersect(content), DropTo::Project(pr.id.clone())));
+            }
+
+            // `+ New project` card
+            let np_idx = projects.len();
+            let np_r = Rect::from_min_size(
+                Pos2::new(x0 + (np_idx % pcols) as f32 * (pcw + pgap_x), y + (np_idx / pcols) as f32 * (pch + pgap_y)),
+                Vec2::new(pcw, pch),
+            );
+            if np_r.bottom() >= content.top() && np_r.top() <= content.bottom() {
+                let np_resp = ui.interact(np_r, Id::new("home-card-new-project"), Sense::click());
+                let hot = np_resp.hovered();
+                p.rect_filled(np_r, CornerRadius::same(8), if hot { UI3_SURFACE } else { UI3_MAIN_BG });
+                p.rect_stroke(
+                    np_r,
+                    CornerRadius::same(8),
+                    Stroke::new(1.0, if hot { UI3_BLUE } else { UI3_BORDER }),
+                    StrokeKind::Inside,
+                );
+                let c = np_r.center();
+                p.circle_filled(Pos2::new(c.x, c.y - 14.0), 18.0, UI3_BLUE.gamma_multiply(0.18));
+                icons::paint(&p, Icon::Plus, Pos2::new(c.x, c.y - 14.0), 16.0, UI3_BLUE);
+                p.text(Pos2::new(c.x, c.y + 14.0), Align2::CENTER_CENTER, "+ New project", theme::font_body_strong(), theme::TEXT);
+                p.text(
+                    Pos2::new(c.x, c.y + 31.0),
+                    Align2::CENTER_CENTER,
+                    "Organize files and nested folders",
+                    theme::font_small(),
+                    theme::TEXT_SECONDARY,
+                );
+                widgets::record(ui, "home-card-new-project", np_r);
+                if np_resp.clicked() {
+                    acts.push(Act::NewProject);
+                }
+            }
+            y += proj_rows_h + 12.0;
+
+            // Section 2: Folders
+            y += section_heading(
+                &p,
+                x0,
+                y,
+                "Folders",
+                Some("Subfolders across your projects"),
+            );
+            for (i, (pid, pname, fid, fname)) in all_folders.iter().enumerate() {
+                let r = Rect::from_min_size(
+                    Pos2::new(
+                        x0 + (i % cols) as f32 * (cw + gap_x),
+                        y + (i / cols) as f32 * (theme::HOME_FOLDER_H + 12.0),
+                    ),
+                    Vec2::new(cw, theme::HOME_FOLDER_H),
+                );
+                if r.bottom() < content.top() || r.top() > content.bottom() {
+                    continue;
+                }
+                let resp = ui.interact(r, Id::new(("home-all-folder", fid)), Sense::click());
+                let over = dragging && ptr.is_some_and(|q| r.contains(q));
+                let fill = if over {
+                    theme::BG_SELECTED_HOVER
+                } else if resp.hovered() {
+                    UI3_BORDER
+                } else {
+                    UI3_SURFACE
+                };
+                p.rect_filled(r, CornerRadius::same(8), fill);
+                icons::paint(&p, Icon::Folder, Pos2::new(r.left() + 22.0, r.center().y), 18.0, UI3_TEAL);
+                let label = format!("{pname} / {fname}");
+                p.text(
+                    Pos2::new(r.left() + 42.0, r.center().y),
+                    Align2::LEFT_CENTER,
+                    widgets::elide(&p, &label, &theme::font_body_strong(), r.width() - 54.0),
+                    theme::font_body_strong(),
+                    theme::TEXT,
+                );
+                widgets::record(ui, &format!("home-folder-{fname}"), r);
+                if resp.clicked() || resp.double_clicked() {
+                    acts.push(Act::Go(Section::Project(pid.clone(), Some(fid.clone()))));
+                }
+                if resp.secondary_clicked() {
+                    menu = ui.input(|i| i.pointer.interact_pos()).map(|at| (Target::Folder(pid.clone(), fid.clone()), at));
+                }
+                zones.push((r.intersect(content), DropTo::Folder(pid.clone(), fid.clone())));
+            }
+
+            // `+ New folder` tile
+            let nf_idx = all_folders.len();
+            let nf_r = Rect::from_min_size(
+                Pos2::new(
+                    x0 + (nf_idx % cols) as f32 * (cw + gap_x),
+                    y + (nf_idx / cols) as f32 * (theme::HOME_FOLDER_H + 12.0),
+                ),
+                Vec2::new(cw, theme::HOME_FOLDER_H),
+            );
+            if nf_r.bottom() >= content.top() && nf_r.top() <= content.bottom() {
+                let nf_resp = ui.interact(nf_r, Id::new("home-tile-new-folder"), Sense::click());
+                let hot = nf_resp.hovered();
+                p.rect_filled(nf_r, CornerRadius::same(8), if hot { UI3_BORDER } else { UI3_SURFACE });
+                p.rect_stroke(nf_r, CornerRadius::same(8), Stroke::new(1.0, if hot { UI3_TEAL } else { UI3_BORDER }), StrokeKind::Inside);
+                icons::paint(&p, Icon::Plus, Pos2::new(nf_r.left() + 22.0, nf_r.center().y), 16.0, UI3_TEAL);
+                p.text(
+                    Pos2::new(nf_r.left() + 42.0, nf_r.center().y),
+                    Align2::LEFT_CENTER,
+                    "+ New folder",
+                    theme::font_body_strong(),
+                    theme::TEXT,
+                );
+                widgets::record(ui, "home-tile-new-folder", nf_r);
+                if nf_resp.clicked() {
+                    if let Some(first_p) = projects.first() {
+                        acts.push(Act::NewFolder(first_p.id.clone(), None));
+                    }
+                }
+            }
+            y += folder_rows_h + 12.0;
+
+            // Section 3: Files in Folders
+            if !files.is_empty() {
+                y += section_heading(&p, x0, y, "Files in Folders", None);
+                render_file_items(
+                    lib,
+                    h,
+                    ui,
+                    &p,
+                    content,
+                    &files,
+                    x0,
+                    y,
+                    inner_w,
+                    cols,
+                    list,
+                    now,
+                    dragging,
+                    &selected,
+                    &ctx,
+                    &mut budget,
+                    &mut new_selected,
+                    &mut menu,
+                    &mut drag,
+                    acts,
+                );
+            }
+        });
+        crate::panels::scrollbar(ui, content, scroll, content_h);
+        h.drop_rects.extend(zones);
+        if let Some(s) = new_selected {
+            h.selected = Some(s);
+        }
+        if menu.is_some() {
+            h.menu = menu;
+        }
+        if drag.is_some() {
+            h.drag = drag;
+        }
+    }
+
+    /// Dedicated view for `Section::Resources` (`"Resources & Libraries"`):
+    /// Section 1: 4 interactive Workspace Libraries, Tokens & Extensions cards.
+    /// Section 2: Published Libraries & Resource Files.
+    fn resources_view(lib: &Library, h: &mut Home, ui: &mut Ui, content: Rect, acts: &mut Vec<Act>) {
+        let files = h.files();
+        let published_libs = lib.list_libraries().unwrap_or_default();
+        let now = wall_ms();
+        let pad = theme::HOME_PAD;
+        let list = h.view == ViewMode::List;
+        let inner_w = (content.width() - pad * 2.0).max(260.0);
+
+        let (rcw, rch, rgap_x, rgap_y) = (260.0_f32, 172.0_f32, 16.0_f32, 16.0_f32);
+        let rcols = (((inner_w + rgap_x) / (rcw + rgap_x)).floor() as usize).max(1);
+        let hub_rows_h = 4usize.div_ceil(rcols) as f32 * (rch + rgap_y);
+
+        let (cw, ch, gap_x, gap_y) = (theme::HOME_CARD_W, theme::HOME_CARD_H, theme::HOME_CARD_GAP, 24.0);
+        let cols = (((inner_w + gap_x) / (cw + gap_x)).floor() as usize).max(1);
+        let pub_rows_h = if published_libs.is_empty() {
+            0.0
+        } else {
+            28.0 + published_libs.len() as f32 * 56.0 + 12.0
+        };
+        let file_rows_h = if files.is_empty() {
+            0.0
+        } else if list {
+            28.0 + files.len() as f32 * theme::HOME_LIST_ROW_H + 28.0
+        } else {
+            28.0 + files.len().div_ceil(cols) as f32 * (ch + gap_y)
+        };
+
+        let content_h = pad + 28.0 + hub_rows_h + 12.0 + pub_rows_h + file_rows_h + pad;
+        crate::panels::wheel_scroll(ui, content, &mut h.scroll, content_h);
+        let scroll = h.scroll;
+        let dragging = h.drag.is_some();
+        let mut budget = 4u32;
+        let selected = h.selected.clone();
+        let mut new_selected = None;
+        let mut menu = None;
+        let mut drag = None;
+        let ctx = ui.ctx().clone();
+
+        let lib_sub = format!(
+            "{} published librar{} \u{b7} Shared components & styles",
+            published_libs.len(),
+            if published_libs.len() == 1 { "y" } else { "ies" }
+        );
+        let hub_cards: [(&str, Icon, Color32, &str, (&str, Act, &str), Option<(&str, Act, &str)>); 4] = [
+            (
+                "Shared Component Libraries",
+                Icon::Assets,
+                UI3_BLUE,
+                &lib_sub,
+                ("Manage Libraries", Act::OpenLibrariesModal, "home-resource-libraries"),
+                Some(("Create Library Kit", Act::CreateFromTemplate(TemplateKind::DesignSystem), "home-resource-create-kit")),
+            ),
+            (
+                "Design Tokens & Variables",
+                Icon::Variables,
+                UI3_TEAL,
+                "Color, Number, String & Boolean collections \u{b7} Light/Dark modes",
+                ("Open Variables", Act::OpenVariables, "home-resource-variables"),
+                Some(("New Token Sheet", Act::CreateFromTemplate(TemplateKind::VariablesKit), "home-resource-token-sheet")),
+            ),
+            (
+                "Plugins & Automation",
+                Icon::Component,
+                UI3_AMBER,
+                "Installed studio plugins, XPath query & 17-rule Design Linter",
+                ("Open Plugins", Act::OpenPlugins, "home-resource-plugins"),
+                None,
+            ),
+            (
+                "Agent CLI & MCP Server",
+                Icon::Terminal,
+                UI3_ORANGE,
+                "Per-file Claude Code, Codex, Grok & Antigravity + 24 MCP tools",
+                ("Open Agent Terminal", Act::OpenAgents, "home-resource-agents"),
+                None,
+            ),
+        ];
+
+        crate::panels::clipped(ui, content, |ui| {
+            let p = ui.painter().clone();
+            let x0 = content.left() + pad;
+            let mut y = content.top() + pad - scroll;
+
+            y += section_heading(
+                &p,
+                x0,
+                y,
+                "Workspace Libraries, Tokens & Extensions",
+                Some("Manage shared design systems, variable modes, plugins and AI runtimes"),
+            );
+
+            for (i, (title, icon, accent, desc, (btn1_lbl, btn1_act, btn1_key), btn2_opt)) in hub_cards.iter().enumerate() {
+                let r = Rect::from_min_size(
+                    Pos2::new(x0 + (i % rcols) as f32 * (rcw + rgap_x), y + (i / rcols) as f32 * (rch + rgap_y)),
+                    Vec2::new(rcw, rch),
+                );
+                if r.bottom() < content.top() || r.top() > content.bottom() {
+                    continue;
+                }
+                p.rect_filled(r, CornerRadius::same(8), UI3_SURFACE);
+                p.rect_stroke(r, CornerRadius::same(8), Stroke::new(1.0, UI3_BORDER), StrokeKind::Inside);
+
+                let icon_box = Rect::from_min_size(Pos2::new(r.left() + 14.0, r.top() + 14.0), Vec2::splat(32.0));
+                p.rect_filled(icon_box, CornerRadius::same(7), accent.gamma_multiply(0.2));
+                icons::paint(&p, *icon, icon_box.center(), 17.0, *accent);
+
+                p.text(
+                    Pos2::new(r.left() + 14.0, r.top() + 62.0),
+                    Align2::LEFT_CENTER,
+                    widgets::elide(&p, title, &theme::font_body_strong(), r.width() - 28.0),
+                    theme::font_body_strong(),
+                    theme::TEXT,
+                );
+                let galley = p.layout((*desc).to_string(), theme::font_small(), theme::TEXT_SECONDARY, r.width() - 28.0);
+                p.galley(Pos2::new(r.left() + 14.0, r.top() + 76.0), galley, theme::TEXT_SECONDARY);
+
+                if let Some((btn2_lbl, btn2_act, btn2_key)) = btn2_opt {
+                    let bw = (r.width() - 34.0) / 2.0;
+                    let b1 = Rect::from_min_size(Pos2::new(r.left() + 14.0, r.bottom() - 38.0), Vec2::new(bw, 26.0));
+                    let b2 = Rect::from_min_size(Pos2::new(b1.right() + 6.0, r.bottom() - 38.0), Vec2::new(bw, 26.0));
+                    let r1 = ui.interact(b1, Id::new(("home-res-b1", *btn1_key)), Sense::click());
+                    let r2 = ui.interact(b2, Id::new(("home-res-b2", *btn2_key)), Sense::click());
+                    p.rect_filled(b1, CornerRadius::same(5), if r1.hovered() { *accent } else { UI3_MAIN_BG });
+                    p.rect_stroke(b1, CornerRadius::same(5), Stroke::new(1.0, *accent), StrokeKind::Inside);
+                    p.text(b1.center(), Align2::CENTER_CENTER, *btn1_lbl, theme::font_small_strong(), Color32::WHITE);
+                    widgets::record(ui, btn1_key, b1);
+                    if r1.clicked() {
+                        acts.push(btn1_act.clone());
+                    }
+
+                    p.rect_filled(b2, CornerRadius::same(5), if r2.hovered() { UI3_BORDER } else { UI3_MAIN_BG });
+                    p.rect_stroke(b2, CornerRadius::same(5), Stroke::new(1.0, UI3_BORDER), StrokeKind::Inside);
+                    p.text(b2.center(), Align2::CENTER_CENTER, *btn2_lbl, theme::font_small_strong(), theme::TEXT);
+                    widgets::record(ui, btn2_key, b2);
+                    if r2.clicked() {
+                        acts.push(btn2_act.clone());
+                    }
+                } else {
+                    let b1 = Rect::from_min_size(Pos2::new(r.left() + 14.0, r.bottom() - 38.0), Vec2::new(r.width() - 28.0, 26.0));
+                    let r1 = ui.interact(b1, Id::new(("home-res-b1", *btn1_key)), Sense::click());
+                    p.rect_filled(b1, CornerRadius::same(5), if r1.hovered() { *accent } else { UI3_MAIN_BG });
+                    p.rect_stroke(b1, CornerRadius::same(5), Stroke::new(1.0, *accent), StrokeKind::Inside);
+                    p.text(b1.center(), Align2::CENTER_CENTER, *btn1_lbl, theme::font_small_strong(), Color32::WHITE);
+                    widgets::record(ui, btn1_key, b1);
+                    if r1.clicked() {
+                        acts.push(btn1_act.clone());
+                    }
+                }
+            }
+            y += hub_rows_h + 12.0;
+
+            if !published_libs.is_empty() {
+                y += section_heading(&p, x0, y, "Published Libraries", None);
+                for lib_idx in &published_libs {
+                    let row_r = Rect::from_min_size(Pos2::new(x0, y), Vec2::new(inner_w, 48.0));
+                    y += 56.0;
+                    if row_r.bottom() < content.top() || row_r.top() > content.bottom() {
+                        continue;
+                    }
+                    let resp = ui.interact(row_r, Id::new(("home-pub-lib", &lib_idx.id)), Sense::click());
+                    p.rect_filled(row_r, CornerRadius::same(8), if resp.hovered() { UI3_BORDER } else { UI3_SURFACE });
+                    icons::paint(&p, Icon::Book, Pos2::new(row_r.left() + 22.0, row_r.center().y), 18.0, UI3_BLUE);
+                    p.text(
+                        Pos2::new(row_r.left() + 44.0, row_r.center().y - 8.0),
+                        Align2::LEFT_CENTER,
+                        &lib_idx.name,
+                        theme::font_body_strong(),
+                        theme::TEXT,
+                    );
+                    let meta = format!(
+                        "v{} \u{b7} {} components \u{b7} {} styles \u{b7} {} variables",
+                        lib_idx.latest_version(),
+                        lib_idx.components,
+                        lib_idx.styles,
+                        lib_idx.variables,
+                    );
+                    p.text(
+                        Pos2::new(row_r.left() + 44.0, row_r.center().y + 9.0),
+                        Align2::LEFT_CENTER,
+                        meta,
+                        theme::font_small(),
+                        theme::TEXT_SECONDARY,
+                    );
+                    widgets::record(ui, &format!("home-published-library-{}", lib_idx.name), row_r);
+                    if resp.clicked() {
+                        if let Some(fid) = &lib_idx.source_file {
+                            acts.push(Act::Open(fid.clone()));
+                        } else {
+                            acts.push(Act::OpenLibrariesModal);
+                        }
+                    }
+                }
+                y += 12.0;
+            }
+
+            if !files.is_empty() {
+                y += section_heading(&p, x0, y, "Published Libraries & Resource Files", None);
+                render_file_items(
+                    lib,
+                    h,
+                    ui,
+                    &p,
+                    content,
+                    &files,
+                    x0,
+                    y,
+                    inner_w,
+                    cols,
+                    list,
+                    now,
+                    dragging,
+                    &selected,
+                    &ctx,
+                    &mut budget,
+                    &mut new_selected,
+                    &mut menu,
+                    &mut drag,
+                    acts,
+                );
+            }
+        });
+        crate::panels::scrollbar(ui, content, scroll, content_h);
+        if let Some(s) = new_selected {
+            h.selected = Some(s);
+        }
+        if menu.is_some() {
+            h.menu = menu;
+        }
+        if drag.is_some() {
+            h.drag = drag;
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn render_file_items(
+        lib: &Library,
+        h: &mut Home,
+        ui: &mut Ui,
+        p: &egui::Painter,
+        content: Rect,
+        files: &[FileEntry],
+        x0: f32,
+        mut y: f32,
+        inner_w: f32,
+        cols: usize,
+        list: bool,
+        now: u64,
+        dragging: bool,
+        selected: &Option<String>,
+        ctx: &egui::Context,
+        budget: &mut u32,
+        new_selected: &mut Option<String>,
+        menu: &mut Option<(Target, Pos2)>,
+        drag: &mut Option<(String, String)>,
+        acts: &mut Vec<Act>,
+    ) {
+        let (cw, ch, gap_x, gap_y) = (theme::HOME_CARD_W, theme::HOME_CARD_H, theme::HOME_CARD_GAP, 24.0);
+        if list {
+            let hr = Rect::from_min_size(Pos2::new(x0, y), Vec2::new(inner_w, 28.0));
+            let cols_x = list_columns(hr.right());
+            for (x, label) in [
+                (hr.left() + 60.0, "Name"),
+                (cols_x.0, "Location"),
+                (cols_x.1, "Last modified"),
+                (cols_x.2, "Last viewed"),
+            ] {
+                p.text(Pos2::new(x, hr.center().y), Align2::LEFT_CENTER, label, theme::font_small_medium(), theme::TEXT_TERTIARY);
+            }
+            y += 28.0;
+        }
+        for (i, f) in files.iter().enumerate() {
+            let r = if list {
+                Rect::from_min_size(Pos2::new(x0, y + i as f32 * theme::HOME_LIST_ROW_H), Vec2::new(inner_w, theme::HOME_LIST_ROW_H))
+            } else {
+                Rect::from_min_size(
+                    Pos2::new(x0 + (i % cols) as f32 * (cw + gap_x), y + (i / cols) as f32 * (ch + gap_y)),
+                    Vec2::new(cw, ch),
+                )
+            };
+            if r.bottom() < content.top() || r.top() > content.bottom() {
+                continue;
+            }
+            let is_sel = selected.as_deref() == Some(f.id.as_str());
+            let resp = ui.interact(r, Id::new(("home-card", &f.id)), Sense::click_and_drag());
+            if resp.double_clicked() {
+                acts.push(Act::Open(f.id.clone()));
+            } else if resp.clicked() {
+                *new_selected = Some(f.id.clone());
+            }
+            if resp.secondary_clicked() {
+                *new_selected = Some(f.id.clone());
+                *menu = ui.input(|i| i.pointer.interact_pos()).map(|at| (Target::File(f.id.clone()), at));
+            }
+            if resp.drag_started() {
+                *drag = Some((f.id.clone(), f.name.clone()));
+            }
+            let tex = h.thumbs.get(ctx, lib, f, budget);
+            let board = h.kinds.get(lib, f, budget) == designos_doc::DocumentKind::Board;
+            let project = h.snap.project_name(&f.project).to_string();
+            let star_r = if list {
+                Rect::from_min_size(Pos2::new(r.right() - 40.0, r.center().y - 12.0), Vec2::splat(24.0))
+            } else {
+                Rect::from_min_size(Pos2::new(r.left() + cw - 32.0, r.top() + 8.0), Vec2::splat(24.0))
+            };
+            let star = ui.interact(star_r, Id::new(("home-star", &f.id)), Sense::click());
+            if star.clicked() {
+                acts.push(Act::Star(f.id.clone(), !f.starred));
+            }
+            if list {
+                list_row(p, r, f, &project, tex, board, resp.hovered(), is_sel, now);
+            } else {
+                card(p, r, f, &project, tex, board, resp.hovered(), is_sel, now);
+            }
+            widgets::record(ui, &format!("home-kind-{}", if board { "board" } else { "design" }), r);
+            if resp.hovered() || star.hovered() || f.starred {
+                if star.hovered() || (!list && resp.hovered()) {
+                    p.circle_filled(
+                        star_r.center(),
+                        12.0,
+                        Color32::from_black_alpha(if f.starred && !star.hovered() { 80 } else { 150 }),
+                    );
+                }
+                paint_star(p, star_r.center(), f.starred, star.hovered());
+            }
+            widgets::record(ui, &format!("home-card-{}", f.name), r);
+            if dragging && selected.as_deref() == Some(f.id.as_str()) {
+                p.rect_filled(r, theme::cr(theme::RADIUS_LARGE), Color32::from_black_alpha(90));
+            }
+        }
+    }
+
     fn empty_state(h: &Home, ui: &Ui, area: Rect) {
         let (title, body) = if h.searching() {
             (
@@ -1648,7 +2653,10 @@ mod main_view {
     fn files_view(lib: &Library, h: &mut Home, ui: &mut Ui, content: Rect, acts: &mut Vec<Act>) {
         let files = h.files();
         let folders = h.folders();
-        if files.is_empty() && folders.is_empty() {
+        let is_drafts = h.section == Section::Drafts && !h.searching();
+        let is_getting_started =
+            matches!(&h.section, Section::Project(pid, None) if h.snap.project_name(pid) == "Getting started") && !h.searching();
+        if files.is_empty() && folders.is_empty() && !is_drafts && !is_getting_started {
             empty_state(h, ui, content);
             return;
         }
@@ -1658,17 +2666,27 @@ mod main_view {
         let inner_w = content.width() - pad * 2.0;
         let (cw, ch, gap_x, gap_y) = (theme::HOME_CARD_W, theme::HOME_CARD_H, theme::HOME_CARD_GAP, 24.0);
         let cols = (((inner_w + gap_x) / (cw + gap_x)).floor() as usize).max(1);
+        let drafts_strip_h = if is_drafts { 64.0 } else { 0.0 };
         let folder_rows = if list {
             folders.len() as f32 * theme::HOME_LIST_ROW_H
         } else {
             folders.len().div_ceil(cols) as f32 * (theme::HOME_FOLDER_H + 12.0)
         };
-        let file_rows = if list {
+        let file_rows = if files.is_empty() {
+            0.0
+        } else if list {
             files.len() as f32 * theme::HOME_LIST_ROW_H + 28.0
         } else {
             files.len().div_ceil(cols) as f32 * (ch + gap_y)
         };
-        let content_h = pad + folder_rows + if folder_rows > 0.0 { 12.0 } else { 0.0 } + file_rows + pad;
+        let starter_kits_h = if is_getting_started { 164.0 } else { 0.0 };
+        let content_h = pad
+            + drafts_strip_h
+            + folder_rows
+            + if folder_rows > 0.0 { 12.0 } else { 0.0 }
+            + file_rows
+            + starter_kits_h
+            + pad;
         crate::panels::wheel_scroll(ui, content, &mut h.scroll, content_h);
         let scroll = h.scroll;
         let ptr = ui.input(|i| i.pointer.hover_pos());
@@ -1691,6 +2709,72 @@ mod main_view {
             let p = ui.painter().clone();
             let mut y = content.top() + pad - scroll;
             let x0 = content.left() + pad;
+
+            // ---- Drafts Quick-Create Strip (`+ New Design File`, `+ New FigJam Board`, `+ New Slide Deck`)
+            if is_drafts {
+                let quick_items: [(&str, &str, Icon, Color32, Act, &str); 3] = [
+                    (
+                        "+ New Design File",
+                        "Blank vector & auto-layout canvas",
+                        Icon::Pen,
+                        UI3_BLUE,
+                        Act::NewFile,
+                        "home-drafts-new-file",
+                    ),
+                    (
+                        "+ New FigJam Board",
+                        "Infinite whiteboard, stickies & flows",
+                        Icon::Sticky,
+                        UI3_AMBER,
+                        Act::NewBoard,
+                        "home-drafts-new-board",
+                    ),
+                    (
+                        "+ New Slide Deck",
+                        "16:9 presentation deck with speaker notes",
+                        Icon::Play,
+                        UI3_TEAL,
+                        Act::NewDeck,
+                        "home-drafts-new-deck",
+                    ),
+                ];
+                let qw = ((inner_w - 24.0) / 3.0).max(180.0);
+                for (qi, (qtitle, qsub, qicon, qcol, qact, qkey)) in quick_items.iter().enumerate() {
+                    let qr = Rect::from_min_size(Pos2::new(x0 + qi as f32 * (qw + 12.0), y), Vec2::new(qw, 48.0));
+                    let qresp = ui.interact(qr, Id::new(("home-draft-quick", *qkey)), Sense::click());
+                    let hot = qresp.hovered();
+                    p.rect_filled(qr, CornerRadius::same(8), if hot { UI3_BORDER } else { UI3_SURFACE });
+                    p.rect_stroke(
+                        qr,
+                        CornerRadius::same(8),
+                        Stroke::new(1.0, if hot { *qcol } else { UI3_BORDER }),
+                        StrokeKind::Inside,
+                    );
+                    let ib = Rect::from_min_size(Pos2::new(qr.left() + 10.0, qr.center().y - 13.0), Vec2::splat(26.0));
+                    p.rect_filled(ib, CornerRadius::same(6), qcol.gamma_multiply(0.22));
+                    icons::paint(&p, *qicon, ib.center(), 14.0, *qcol);
+                    p.text(
+                        Pos2::new(ib.right() + 10.0, qr.center().y - 7.0),
+                        Align2::LEFT_CENTER,
+                        widgets::elide(&p, qtitle, &theme::font_body_strong(), qr.width() - 52.0),
+                        theme::font_body_strong(),
+                        theme::TEXT,
+                    );
+                    p.text(
+                        Pos2::new(ib.right() + 10.0, qr.center().y + 8.0),
+                        Align2::LEFT_CENTER,
+                        widgets::elide(&p, qsub, &theme::font_small(), qr.width() - 52.0),
+                        theme::font_small(),
+                        theme::TEXT_SECONDARY,
+                    );
+                    widgets::record(ui, qkey, qr);
+                    if qresp.clicked() {
+                        acts.push(qact.clone());
+                    }
+                }
+                y += drafts_strip_h;
+            }
+
             // ---- folder tiles
             for (i, (fid, name)) in folders.iter().enumerate() {
                 let r = if list {
@@ -1756,7 +2840,7 @@ mod main_view {
             }
             y += folder_rows + if folder_rows > 0.0 { 12.0 } else { 0.0 };
 
-            if list {
+            if list && !files.is_empty() {
                 let hr = Rect::from_min_size(Pos2::new(x0, y), Vec2::new(inner_w, 28.0));
                 let cols_x = list_columns(hr.right());
                 let col_defs: [(f32, &str, Option<(super::Sort, bool)>); 4] = [
@@ -1840,6 +2924,93 @@ mod main_view {
                     p.rect_filled(r, theme::cr(theme::RADIUS_LARGE), Color32::from_black_alpha(90));
                 }
             }
+            if !files.is_empty() {
+                y += if list {
+                    files.len() as f32 * theme::HOME_LIST_ROW_H
+                } else {
+                    files.len().div_ceil(cols) as f32 * (ch + gap_y)
+                };
+            }
+
+            // ---- Starter Kits row inside `Getting started`
+            if is_getting_started {
+                y += 12.0;
+                y += section_heading(
+                    &p,
+                    x0,
+                    y,
+                    "Starter Kits \u{2014} Click to add to Getting started",
+                    Some("Populate this project with full multi-screen samples"),
+                );
+                let starters: [(&str, &str, Icon, Color32, TemplateKind, &str); 4] = [
+                    (
+                        "Mobile Banking Kit",
+                        "4 iOS screens & prototype",
+                        Icon::Pen,
+                        UI3_BLUE,
+                        TemplateKind::MobileBanking,
+                        "home-starter-mobile",
+                    ),
+                    (
+                        "SaaS Web Dashboard",
+                        "1440px analytics UI & table",
+                        Icon::Frame,
+                        UI3_TEAL,
+                        TemplateKind::WebDashboard,
+                        "home-starter-web",
+                    ),
+                    (
+                        "Design System & Tokens",
+                        "Component sets & variables",
+                        Icon::Component,
+                        UI3_AMBER,
+                        TemplateKind::DesignSystem,
+                        "home-starter-system",
+                    ),
+                    (
+                        "Launch Brainstorm Board",
+                        "FigJam stickies & connectors",
+                        Icon::Sticky,
+                        UI3_ORANGE,
+                        TemplateKind::FigJamBoard,
+                        "home-starter-board",
+                    ),
+                ];
+                let sw = ((inner_w - 36.0) / 4.0).max(170.0);
+                for (si, (stitle, ssub, sicon, scol, skind, skey)) in starters.iter().enumerate() {
+                    let sr = Rect::from_min_size(Pos2::new(x0 + si as f32 * (sw + 12.0), y), Vec2::new(sw, 96.0));
+                    let sresp = ui.interact(sr, Id::new(("home-starter-kit", *skey)), Sense::click());
+                    let hot = sresp.hovered();
+                    p.rect_filled(sr, CornerRadius::same(8), UI3_SURFACE);
+                    p.rect_stroke(
+                        sr,
+                        CornerRadius::same(8),
+                        Stroke::new(1.0, if hot { *scol } else { UI3_BORDER }),
+                        StrokeKind::Inside,
+                    );
+                    let ib = Rect::from_min_size(Pos2::new(sr.left() + 12.0, sr.top() + 12.0), Vec2::splat(24.0));
+                    p.rect_filled(ib, CornerRadius::same(6), scol.gamma_multiply(0.22));
+                    icons::paint(&p, *sicon, ib.center(), 13.0, *scol);
+                    p.text(
+                        Pos2::new(sr.left() + 12.0, sr.top() + 50.0),
+                        Align2::LEFT_CENTER,
+                        widgets::elide(&p, stitle, &theme::font_body_strong(), sr.width() - 24.0),
+                        theme::font_body_strong(),
+                        theme::TEXT,
+                    );
+                    p.text(
+                        Pos2::new(sr.left() + 12.0, sr.top() + 68.0),
+                        Align2::LEFT_CENTER,
+                        widgets::elide(&p, ssub, &theme::font_small(), sr.width() - 24.0),
+                        theme::font_small(),
+                        theme::TEXT_SECONDARY,
+                    );
+                    widgets::record(ui, skey, sr);
+                    if sresp.clicked() {
+                        acts.push(Act::CreateFromTemplate(*skind));
+                    }
+                }
+            }
         });
         crate::panels::scrollbar(ui, content, scroll, content_h);
         h.drop_rects.extend(zones);
@@ -1902,15 +3073,20 @@ mod main_view {
             }
             return;
         }
-        p.rect_filled(area, theme::cr(radius), theme::HOME_THUMB_BG);
+        let _ = theme::HOME_THUMB_BG;
+        p.rect_filled(area, theme::cr(radius), Color32::from_rgb(0x18, 0x18, 0x1B));
         match tex {
             Some((t, size)) => {
-                let inner = area.shrink(if area.width() > 80.0 { 12.0 } else { 3.0 });
+                let pad = if area.width() > 80.0 { 6.0 } else { 3.0 };
+                let inner = area.shrink(pad);
                 let k = (inner.width() / size.x.max(1.0))
                     .min(inner.height() / size.y.max(1.0))
                     .min(2.0);
                 let fit = Rect::from_center_size(inner.center(), size * k);
-                p.image(t, fit, Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)), Color32::WHITE);
+                let inner_cr = CornerRadius::same(if area.width() > 80.0 { 4 } else { 2 });
+                let uv = Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0));
+                p.add(egui::epaint::RectShape::filled(fit, inner_cr, Color32::WHITE).with_texture(t, uv));
+                p.rect_stroke(fit, inner_cr, Stroke::new(1.0, Color32::from_white_alpha(18)), StrokeKind::Inside);
             }
             None => icons::paint(p, Icon::File, area.center(), 24.0, theme::ICON_TERTIARY),
         }
@@ -1926,13 +3102,15 @@ mod main_view {
     }
 
     /// Draws the Figma UI3 File-Type Badge icon (`20x20` rounded badge: `#0D99FF` Design,
-    /// `#9747FF` Board/Component, `#FF6A3D` Spec bundle).
+    /// `#F59E0B` Board, `#14AE5C` Deck, `#FF6A3D` Spec bundle).
     fn draw_file_type_badge(p: &egui::Painter, center: Pos2, name: &str, board: bool) {
         let low = name.to_ascii_lowercase();
         let (bg, icon) = if board {
-            (UI3_PURPLE, Icon::Sticky)
+            (UI3_AMBER, Icon::Sticky)
         } else if low.contains("spec") || low.contains("v2") {
             (UI3_ORANGE, Icon::Specs)
+        } else if low.contains("deck") || low.contains("slide") {
+            (UI3_TEAL, Icon::Play)
         } else {
             (UI3_BLUE, Icon::Pen)
         };
@@ -1941,16 +3119,18 @@ mod main_view {
         icons::paint(p, icon, center, 12.0, Color32::WHITE);
     }
 
-    /// A Figma UI3 grid card (`figma_ui3_home.png`): `16:10` thumbnail with `#383838` border
-    /// (`#0D99FF` `2px` when selected), bottom metadata row with left File-Type Badge icon +
-    /// Title + Subtitle (`Edited Xm ago · In <Project>`).
+    /// A grid file card (`P1.3` / `V5.2` / `D92`): `8px` outer card radius with `UI3_SURFACE` body,
+    /// `#18181B` thumbnail stage (`pad = 6.0`, `4px` inner preview radius + `1px` subtle frame),
+    /// `UI3_BORDER` stroke (`#0D99FF` `2px` when selected), and bottom metadata row.
     #[allow(clippy::too_many_arguments)]
     fn card(p: &egui::Painter, r: Rect, f: &FileEntry, project: &str, tex: Tex, board: bool, hover: bool, selected: bool, now: u64) {
+        p.rect_filled(r, CornerRadius::same(8), UI3_SURFACE);
         let thumb = Rect::from_min_size(r.min, Vec2::new(r.width(), theme::HOME_THUMB_H));
-        thumb_area(p, thumb, tex, board, theme::RADIUS_LARGE);
+        thumb_area(p, thumb, tex, board, 8);
         if board {
             board_badge(p, thumb);
         }
+        widgets::hline(p, thumb.left() + 1.0, thumb.right() - 1.0, thumb.bottom(), UI3_BORDER);
         let stroke = if selected {
             Stroke::new(2.0, UI3_BLUE)
         } else if hover {
@@ -1958,14 +3138,14 @@ mod main_view {
         } else {
             Stroke::new(1.0, UI3_BORDER)
         };
-        p.rect_stroke(thumb, theme::cr(theme::RADIUS_LARGE), stroke, StrokeKind::Inside);
+        p.rect_stroke(r, CornerRadius::same(8), stroke, StrokeKind::Inside);
 
-        let badge_c = Pos2::new(r.left() + 12.0, thumb.bottom() + 20.0);
+        let badge_c = Pos2::new(r.left() + 18.0, thumb.bottom() + 24.0);
         draw_file_type_badge(p, badge_c, &f.name, board);
 
-        let tx = r.left() + 28.0;
-        let w = (r.width() - 32.0).max(40.0);
-        let y_title = thumb.bottom() + 13.0;
+        let tx = r.left() + 34.0;
+        let w = (r.width() - 42.0).max(40.0);
+        let y_title = thumb.bottom() + 17.0;
         p.text(
             Pos2::new(tx, y_title),
             Align2::LEFT_CENTER,
@@ -1976,7 +3156,7 @@ mod main_view {
         let loc = if project.is_empty() { "Drafts" } else { project };
         let subtitle = format!("{} \u{b7} In {loc}", edited(now, f.modified));
         p.text(
-            Pos2::new(tx, y_title + 17.0),
+            Pos2::new(tx, y_title + 16.0),
             Align2::LEFT_CENTER,
             widgets::elide(p, &subtitle, &theme::font_small(), w),
             theme::font_small(),
@@ -2214,6 +3394,51 @@ mod tests {
         assert_eq!(alpha[1].id, "f-design");
         assert_eq!(alpha[2].id, "f-spec");
     }
+
+    #[test]
+    fn home_sections_do_not_fallback_to_recents_and_templates_create_real_files() {
+        let mut home = Home::new();
+        home.snap.files = vec![
+            entry("f-welcome", "Welcome", "p1", None, false, 200, 200),
+            entry("f-untitled", "Untitled", "p1", None, false, 300, 300),
+        ];
+
+        home.section = Section::Recents;
+        assert_eq!(home.visible_files().len(), 2);
+
+        home.section = Section::Drafts;
+        assert_eq!(home.visible_files().len(), 2);
+
+        home.section = Section::AllProjects;
+        assert!(home.visible_files().is_empty(), "AllProjects must not fall back to un-foldered Recents files");
+
+        home.section = Section::Templates;
+        assert!(home.visible_files().is_empty(), "Templates must not fall back to non-template Recents files");
+
+        home.section = Section::Resources;
+        assert!(home.visible_files().is_empty(), "Resources must not fall back to non-resource Recents files");
+
+        // Verify Act::CreateFromTemplate and Act::NewDeck against a temporary Library
+        let tmp = std::env::temp_dir().join(format!("designos_home_tpl_test_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let mut app = App::new(designos_doc::Document::new("Init"));
+        app.attach_library(tmp.clone());
+        app.go_home();
+        assert!(app.home.is_some());
+
+        apply(&mut app, Act::CreateFromTemplate(TemplateKind::FigJamBoard));
+        assert!(app.home.is_none(), "creating from template opens the file in the editor");
+        assert_eq!(app.doc.name, "Launch Brainstorm Board");
+        assert_eq!(app.doc.kind, designos_doc::DocumentKind::Board);
+
+        app.go_home();
+        apply(&mut app, Act::NewDeck);
+        assert!(app.home.is_none(), "NewDeck opens the new slide deck in the editor");
+        assert_eq!(app.doc.kind, designos_doc::DocumentKind::Deck);
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
 }
+
 
 

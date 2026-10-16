@@ -100,6 +100,9 @@ pub fn with_sync(doc: &mut Document, cmd: Command) -> Command {
     let mut ids = Vec::new();
     ids_of(doc, &cmd, &mut ids);
     let mut queue: Vec<NodeId> = ids.iter().filter_map(|i| owner_of(doc, *i)).collect();
+    if queue.is_empty() {
+        return cmd;
+    }
     let Ok(inv) = cmd.clone().apply(doc) else { return cmd };
     queue.extend(ids.iter().filter_map(|i| owner_of(doc, *i)));
     queue.sort();
@@ -141,6 +144,7 @@ pub fn with_sync(doc: &mut Document, cmd: Command) -> Command {
 }
 
 /// One row of the Assets panel.
+#[derive(Clone, Debug)]
 pub struct AssetEntry {
     pub page: String,
     /// Frame or section the component sits in (empty when directly on the page).

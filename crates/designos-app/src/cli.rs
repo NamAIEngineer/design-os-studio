@@ -101,7 +101,7 @@ impl Options {
 
 /// Values of `--panel`: `agents`, `agents-chat`, `specs`, `assets`, `variables` / `variables-floating` open the local views,
 /// `libraries` the Libraries modal; the others are inspector popups opened on the selection for screenshots.
-pub const PANELS: [&str; 26] = [
+pub const PANELS: [&str; 34] = [
     "agents",
     "agents-chat",
     "specs",
@@ -128,6 +128,14 @@ pub const PANELS: [&str; 26] = [
     "version-history",
     "dev-annotate",
     "dev-compare",
+    "micro-autolayout",
+    "micro-css-grid",
+    "micro-smart-selection",
+    "micro-shape-controls",
+    "micro-vector-edit",
+    "micro-layer-picker",
+    "micro-dev-boxmodel",
+    "micro-scale-tool",
 ];
 
 pub fn parse_size(s: &str) -> Option<(u32, u32)> {

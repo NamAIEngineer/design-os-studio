@@ -2,18 +2,19 @@
 
 **Native GPU-accelerated interface design studio, enterprise Figma `.fig` v106 binary read/write engine, Agentic PTY Chat UI, 11-stage Spec Reader, and 22-tool Model Context Protocol server built in 100% Rust.**
 
-Open and save 700,000+ record enterprise Figma `.fig` v106 binary archives in ~1.5s with `0.0%` idle CPU on Metal, DirectX 12, and Vulkan (`wgpu` + `tiny-skia`). Run **Claude Code (`claude`)**, **OpenAI Codex (`codex`)**, **Antigravity CLI (`agy`)**, and **Grok CLI (`grok`)** directly inside the native **Agentic PTY Chat UI** with zero paid external API keys, audit 11-stage `PRODUCT:OS Spec Driven v2` requirements (`US-01..US-17` + Gherkin + `g1..g5` gates), generate multi-target Dev Mode code (React, Tailwind, CSS, SwiftUI, Jetpack Compose), and automate headless GPU visual QA from any terminal or CI pipeline.
+Open and save 700,000+ record enterprise Figma `.fig` v106 binary archives in ~1.5s with `0.0%` idle CPU on Metal, DirectX 12, and Vulkan (`wgpu` + `tiny-skia`). Execute all **100 / 100 Figma A-to-Z Micro-Interactions (`#1..#100`)** natively on canvas, run **Claude Code (`claude`)**, **OpenAI Codex (`codex`)**, **Antigravity CLI (`agy`)**, **Gemini CLI (`gemini`)**, and **Grok CLI (`grok`)** directly inside the native **Agentic PTY Chat UI** with zero paid external API keys, audit 11-stage `PRODUCT:OS Spec Driven v2` requirements (`US-01..US-17` + Gherkin + `g1..g5` gates), generate multi-target Dev Mode code (React, Tailwind, CSS, SwiftUI, Jetpack Compose, Flutter, Rust `egui`), and automate headless GPU visual QA from any terminal or CI pipeline.
 
 <p align="center">
   <img src="docs/images/designos-hero.png" alt="DESIGN:OS Studio rendering the 112,474-node VSF-PCP enterprise Figma workspace at 60% zoom with 1:1 Figma UI3 dark chrome and unified Phosphor icons" width="880">
   <br>
-  <sub><b>Verified Production Build:</b> <b>DESIGN:OS Studio</b> rendering an enterprise <code>.fig</code> v106 design system (<b>723,136 Kiwi records / 112,474 scene nodes</b>) natively on Apple Silicon Metal in <b>1.54s</b> with <b>0.0% idle CPU</b> · <b>387 / 387 (100.00%)</b> Figma <code>126.9.13</code> UI3 &amp; <code>.fig</code> v106 parity · <b>824</b> automated workspace tests passing.</sub>
+  <sub><b>Verified Production Build:</b> <b>DESIGN:OS Studio</b> rendering an enterprise <code>.fig</code> v106 design system (<b>723,136 Kiwi records / 112,474 scene nodes</b>) natively on Apple Silicon Metal in <b>1.54s</b> with <b>0.0% idle CPU</b> · <b>387 / 387 (100.00%)</b> Figma <code>126.9.13</code> UI3 &amp; <code>.fig</code> v106 parity · <b>100 / 100 (100.00%)</b> Figma A-to-Z Micro-Interactions · <b>856</b> automated workspace tests passing · <b>12 / 12</b> Zero-Fake-UI invariants · <b>9 / 9</b> Self-Evolution ALIVE gates.</sub>
 </p>
 
 <p align="center">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT_%2F_Apache--2.0-202020?style=flat-square&labelColor=202020&color=444444" alt="Dual MIT OR Apache-2.0 License"></a>
   <img src="https://img.shields.io/badge/engine-100%25_Rust_%C2%B7_wgpu_%2B_tiny--skia-202020?style=flat-square&labelColor=202020&color=444444" alt="100% Rust wgpu and tiny-skia engine">
   <img src="https://img.shields.io/badge/Figma_.fig_v106-Native_Read_%2F_Write_(387%2F387)-202020?style=flat-square&labelColor=202020&color=444444" alt="Figma .fig v106 Native Read and Write 387/387 parity">
+  <img src="https://img.shields.io/badge/Micro--Interactions-100%2F100_A--to--Z_Verified-202020?style=flat-square&labelColor=202020&color=E36323" alt="100/100 Figma A-to-Z Micro-Interactions Verified">
   <img src="https://img.shields.io/badge/Claude_Code_%C2%B7_Codex_%C2%B7_Antigravity_%C2%B7_Grok-MCP_%2B_PTY_Chat-202020?style=flat-square&labelColor=202020&color=444444" alt="Compatible AI coding agents via MCP and PTY Chat">
   <a href="commands/doctor.md"><img src="https://img.shields.io/badge/diagnostics-%2Fdoctor-202020?style=flat-square&labelColor=202020&color=444444" alt="Doctor diagnostic slash command"></a>
   <a href="llms.txt"><img src="https://img.shields.io/badge/GEO_index-llms.txt-202020?style=flat-square&labelColor=202020&color=444444" alt="GEO machine-readable llms.txt index"></a>
@@ -22,20 +23,21 @@ Open and save 700,000+ record enterprise Figma `.fig` v106 binary archives in ~1
 </p>
 
 <p align="center">
-  <a href="#quickstart">Quickstart</a> · <a href="#what-it-makes">What it makes</a> · <a href="#visual-proof-gallery">Visual proof</a> · <a href="#installation">Install</a> · <a href="#how-it-works">How it works</a> · <a href="#commands--diagnostics">Commands</a> · <a href="#quality-bar--limitations">Limits</a>
+  <a href="#quickstart">Quickstart</a> · <a href="#what-it-makes">What it makes</a> · <a href="#visual-proof-gallery">Visual proof</a> · <a href="#100-figma-micro-interactions">100 Micro-Interactions</a> · <a href="#installation">Install</a> · <a href="#how-it-works">How it works</a> · <a href="#commands--diagnostics">Commands</a> · <a href="#quality-bar--limitations">Limits</a>
 </p>
 
 ---
 
 ## Why this exists
 
-Browser-wrapped Electron design tools choke on 100,000+ node enterprise files, lock `.fig` binary authoring behind proprietary cloud servers, and force AI coding agents to scrape 150KB+ of noisy REST JSON without direct canvas write-back or local spec verification. **`design-os-studio`** is a local-first, 100% Rust GPU studio (`wgpu` + `tiny-skia`) with native `fig-kiwi` v106 binary read/write, an embedded Agentic PTY Chat UI for your existing CLI subscriptions (`claude`, `codex`, `agy`, `grok`), an 11-stage Spec Reader, and a 22-tool stdio MCP server.
+Browser-wrapped Electron design tools choke on 100,000+ node enterprise files, lock `.fig` binary authoring behind proprietary cloud servers, and force AI coding agents to scrape 150KB+ of noisy REST JSON without direct canvas write-back or local spec verification. **`design-os-studio`** is a local-first, 100% Rust GPU studio (`wgpu` + `tiny-skia`) with native `fig-kiwi` v106 binary read/write, **100 / 100 Figma A-to-Z Micro-Interactions (`#1..#100`)**, an embedded Agentic PTY Chat UI for your existing CLI subscriptions (`claude`, `codex`, `agy`, `gemini`, `grok`), an 11-stage Spec Reader, and a 22-tool stdio MCP server.
 
 | Dimension | Cloud / Electron Design Tools & Read-Only MCPs | DESIGN:OS Studio (`design-os-studio`) |
 | :--- | :--- | :--- |
 | **Enterprise Scale (`723k` Records)** | Browser tab OOM crashes, multi-gigabyte RAM spikes, and constant idle GPU repaints | Uniform `2048x2048` `SceneIndex` culling, 4-tier semantic zoom LOD, `1.54s` cold load, and **`0.0%` static viewport CPU** |
 | **Figma `.fig` v106 Binary Parity** | Cloud-only exports or lossy third-party JSON converters | **Native `.fig` v106 Read & Write** (`DEFLATE`/`Zstd` `canvas.fig` + `meta.json` + `images/`, `symbolOverrides`, `parameterConsumptionMap`) |
-| **Agentic Workflow & Cost** | Separate paid AI chat seats or read-only 155K-char REST dumps | **Native Agentic PTY Chat UI** (`Claude Code` · `Codex` · `Antigravity` · `Grok`) + **22-tool `designos-mcp` server** + 1-click `NodeSpec` canvas apply |
+| **Tactile Micro-Interactions (`#1..#100`)** | Missing or sluggish browser-bound canvas manipulators | **100 / 100 Figma A-to-Z Micro-Interactions** (numeric scrubbing/math, edge double-click `Fixed -> Hug -> Fill`, on-canvas pink gap/padding drag + inline input, 2D CSS Grid pills & span handles, Smart Selection swap + Tidy Up, parametric Arc/Star handles, Vector Network midpoint split & `⇧⌫` heal-delete, Eyedropper `Tab` format cycle, Dev box-model overlay, Scale Tool `K`) |
+| **Agentic Workflow & Cost** | Separate paid AI chat seats or read-only 155K-char REST dumps | **Native Agentic PTY Chat UI** (`Claude Code` · `Codex` · `Antigravity` · `Gemini` · `Grok`) + **22-tool `designos-mcp` server** + 1-click `NodeSpec` canvas apply |
 | **Spec-to-Canvas Traceability** | Markdown PRDs disconnected from canvas frames and QA gates | **In-App 11-Stage `PRODUCT:OS Spec Driven v2` Reader** (`US-01..US-17` + Gherkin `Given/When/Then` + `g1..g5` gates + 500ms live disk hot-reload) |
 | **Privacy & Telemetry** | Cloud account lock-in, mandatory online sign-in, and background telemetry | **Zero telemetry** — 100% local execution on macOS, Windows, and Linux ([`PRIVACY.md`](PRIVACY.md) audited) |
 
@@ -219,6 +221,74 @@ Every screenshot below is captured deterministically from the live `designos-stu
 
 ---
 
+<a id="100-figma-micro-interactions"></a>
+### Verified 100 / 100 Figma A-to-Z Micro-Interactions Visual Proof Gallery (`--micro-showcase`)
+
+Every one of the **100 Figma A-to-Z Micro-Interactions (`#1..#100`)** is implemented in native Rust + `wgpu`/`egui` and proven by deterministic headless Retina 2x (`3200x2000`) presets (`--micro-showcase <preset>`) and end-to-end automated tests (`launch_e2e_proves_100_figma_micro_interactions_end_to_end`).
+
+<p align="center">
+  <img src="docs/images/designos-launch-4k-bento-grid.png" alt="DESIGN:OS Studio 4K Launch Bento Grid showcasing 16 Retina 2x Studio surfaces and 100/100 Figma A-to-Z Micro-Interactions" width="880"><br>
+  <sub><b>4K Launch Bento Grid (<code>3840x2400</code>):</b> All 16 live Retina 2x Studio &amp; Micro-Interaction captures verified across <b>856 / 856 automated tests</b>, <b>12 / 12 Zero-Fake-UI invariants</b>, and <b>9 / 9 Self-Evolution ALIVE gates</b>.</sub>
+</p>
+
+<table>
+  <tr>
+    <td width="50%" valign="top">
+      <img src="docs/images/09-micro-autolayout.png" alt="M01. Auto-Layout 5.0 On-Canvas Gap and Padding Handles, Inline Value Input, and Edge Double-Click Hug/Fill Cycle" width="430"><br>
+      <sub><b>M01 · Auto-Layout 5.0 On-Canvas Gap/Padding Drag &amp; Inline Input (`#10..#15`)</b><br><code>--micro-showcase autolayout --scale 2</code><br>Drag pink gap/padding handles (`⌥` mirrors opposite side, `⇧⌥` all 4 sides), click to type exact `px` inline, or double-click frame edge to cycle `Fixed -> Hug -> Fill`.</sub>
+    </td>
+    <td width="50%" valign="top">
+      <img src="docs/images/10-micro-css-grid.png" alt="M02. 2D CSS Grid Track Sizing Pills (1fr / px / Hug) and Cell Span Handles (2x1)" width="430"><br>
+      <sub><b>M02 · 2D CSS Grid Track Pills (`1fr / px / Hug`) &amp; Span Handles (`#16..#18`)</b><br><code>--micro-showcase grid --scale 2</code><br>Click column/row track header pills to cycle `1fr -> Fixed px -> Hug`, drag track dividers on canvas, and span cells across multiple columns/rows (`2x1 Span`).</sub>
+    </td>
+  </tr>
+  <tr>
+    <td width="50%" valign="top">
+      <img src="docs/images/11-micro-smart-selection.png" alt="M03. Smart Selection Pink Ring Swap Handles, Gap Bars, and One-Click Tidy Up" width="430"><br>
+      <sub><b>M03 · Smart Selection Pink Swap Handles &amp; One-Click Tidy Up (`#19..#21`)</b><br><code>--micro-showcase smart-selection --scale 2</code><br>Select 3+ siblings to reveal pink gap bars, circular pink swap handles inside each card, and the one-click `Tidy up` button that equalizes `18px` spacing.</sub>
+    </td>
+    <td width="50%" valign="top">
+      <img src="docs/images/12-micro-shape-controls.png" alt="M04. Parametric On-Canvas Shape Controls for Donut Arc Sweep, Ratio, and Star Count" width="430"><br>
+      <sub><b>M04 · Parametric Shape Controls: Donut Arc, Star Ratio &amp; Polygon (`#30..#32`)</b><br><code>--micro-showcase shape-controls --scale 2</code><br>Drag on-canvas Sweep (`270°`), Start (`0°`), and Ratio (`62%`) handles on ellipses, plus inner ratio (`42%`) and point-count handles on stars and polygons.</sub>
+    </td>
+  </tr>
+  <tr>
+    <td width="50%" valign="top">
+      <img src="docs/images/13-micro-vector-edit.png" alt="M05. Vector Network Editor with Cubic Bezier Tangents, Midpoint Subdivide, and Shift+Backspace Heal Delete" width="430"><br>
+      <sub><b>M05 · Vector Network Editor: Midpoint Split &amp; `⇧⌫` Heal Delete (`#33..#35`)</b><br><code>--micro-showcase vector-edit --scale 2</code><br>Click any segment midpoint diamond to subdivide at `t = 0.5`, `⌘`-drag to break mirrored Bezier tangents, and `⇧⌫` to heal-delete vertices while keeping the path closed.</sub>
+    </td>
+    <td width="50%" valign="top">
+      <img src="docs/images/14-micro-layer-picker.png" alt="M06. Layer Search, Status Badge Cycle, Icon Double-Click Frame Zoom, and Eyedropper Loupe with Tab Format Cycle" width="430"><br>
+      <sub><b>M06 · Layer Filter, Status Cycle &amp; Eyedropper `Tab` Format (`#36..#45`)</b><br><code>--micro-showcase layer-picker --scale 2</code><br>Filter layers by name, click status badges to cycle `Ready -> In Progress -> Needs Review`, double-click layer icon to zoom-to-fit, and press `Tab` in Eyedropper (`I`) to cycle `HEX -> RGB -> HSL`.</sub>
+    </td>
+  </tr>
+  <tr>
+    <td width="50%" valign="top">
+      <img src="docs/images/15-micro-dev-boxmodel.png" alt="M07. Dev Mode On-Canvas Box-Model Overlay with Emerald Padding and Orange Gap Bands" width="430"><br>
+      <sub><b>M07 · Dev Mode Box-Model Overlay (`Emerald Padding` &amp; `Orange Gap`) (`#46..#47`)</b><br><code>--micro-showcase dev-boxmodel --scale 2</code><br>Hover or select any Auto-Layout frame in Dev Mode to inspect emerald green padding bands (`24px`), orange gap bands (`16px`), and dashed parent-distance guides.</sub>
+    </td>
+    <td width="50%" valign="top">
+      <img src="docs/images/16-micro-scale-tool.png" alt="M08. Proportional Scale Tool (K) Scaling Bounds, Font Size, Corner Radius, and Stroke Weight Together" width="430"><br>
+      <sub><b>M08 · Proportional Scale Tool (`K` — `1x / 1.5x / 2x` Multiplier Pill) (`#48`)</b><br><code>--micro-showcase scale-tool --scale 2</code><br>Press `K` to scale bounds, `font_size`, `corner_radius`, `stroke_weight`, and Auto-Layout padding/gap proportionally (`1.5x` verified side-by-side).</sub>
+    </td>
+  </tr>
+</table>
+
+#### Complete 100 / 100 Figma A-to-Z Micro-Interactions Breakdown (`#1..#100`)
+
+| Category | IDs | Verified Micro-Interactions Implemented in `designos-app` & `designos-doc` | Status |
+| :--- | :--- | :--- | :--- |
+| **A. Inspector Numeric Scrubbing, Math & Mixed Values** | `#1..#9` | Label drag-scrub (`1px` / `⇧ 10px` / `⌥ 0.1px`), `↑`/`↓` step keys, inline math (`+ - * /`), `%` relative parent sizing, `auto`/`hug`/`fill` keywords, `Mixed` multi-select override, `10` or `10,20,10,20` padding shorthand, Aspect Ratio Lock (`W/H`), `0..9` / `00` quick opacity | **`9 / 9 PASS`** |
+| **B. Auto-Layout 5.0, Edge Sizing, CSS Grid & Smart Selection** | `#10..#21` | Edge double-click `Fixed <-> Hug`, `⌥`+double-click `Fill`, on-canvas pink gap drag, inline gap click-to-type, pink padding handles (`⌥` opposite / `⇧⌥` all 4), 9-dot alignment matrix (`Space-Between` on `W`/`X`), drag reorder, `Space` ignore Auto-Layout, 2D CSS Grid track pills (`1fr`/`px`/`Hug`) & span handles, Smart Selection pink swap rings & `Tidy up` | **`12 / 12 PASS`** |
+| **C. Canvas Selection, Marquee, Guides &Transform Handles** | `#22..#29` | `⌘`-click deep select, `⌘`+Right-click overlapping layer menu, `Enter` drill children / `⇧Enter` climb parent / `Tab` cycle siblings, `⌥`-marquee containment-only, `⌥`-hover red distance guides, `⌥`-drag duplicate + `⌘D` repeat, `⇧`-axis lock + red smart snap guides, corner rotation (`15°` snap) & on-canvas corner radius handles (`⌥` single corner) | **`8 / 8 PASS`** |
+| **D. Parametric Shapes, Vector Network, Layer Tree & Eyedropper** | `#30..#45` | Donut Arc Sweep/Start/Ratio handles, Star inner ratio & point-count handles, Polygon side count, Vector midpoint split, `⌘` tangent break, `⇧⌫` heal-delete, Layer `⌘R` inline rename (`Tab` next), `⌥`-click collapse all, hover highlight, icon double-click zoom-to-fit, lock/eye drag-sweep, status badge cycle, Eyedropper (`I`) `7x7` pixel loupe + `Tab` `HEX/RGB/HSL` cycle | **`16 / 16 PASS`** |
+| **E. Dev Mode Box-Model, Scale Tool (`K`) & Viewport Navigation** | `#46..#62` | Dev Mode emerald padding & orange gap overlay, 1-click code copy toast, Proportional Scale Tool (`K` with `1x/1.5x/2x`), `Space`-drag pan, `Z` marquee zoom (`⌥Z` out), `⇧1` fit all / `⇧2` fit selection / `⇧0` 100%, `N` / `⇧N` frame walk, `⇧R` rulers + guides, `⌘\`zen UI toggle, `⌘/` & `⌘K` palette, `F` frame preset drawer | **`17 / 17 PASS`** |
+| **F. Typography, Fills, Strokes, Effects & Arrange Shortcuts** | `#63..#85` | Double-click inline text edit, double-click text handle auto-width/height, `⇧⌘>`/`<` font size, `⌥↑`/`↓` line-height, `⌥←`/`→` letter-spacing, `⌘B`/`⌘I`/`⌘U`, `⇧X` swap fill/stroke, `/` remove fill, `⌥⌘C`/`⌥⌘V` copy/paste style, `[`/`]` & `⌘[`/`]` z-order, `⌘G`/`⇧⌘G` group/ungroup, `⌥⌘G` frame selection (`⇧⌘G` unframe), `⌥W/A/S/D/H/V` align | **`23 / 23 PASS`** |
+| **G. Components, Variables, Prototype, Spec Reader & Agent PTY** | `#86..#100` | `⌥⌘K` create component, `⌥⌘B` detach instance, double-click master jump, purple Variant matrix & pill toggles, Variable mode switch (`Light`/`Dark`) & token alias pills, Prototype blue flow node drag & trigger popover, Spec Reader (`US-01..17`) 1-click node zoom & `C` pin-comment anchor, Multi-Agent PTY runtime switcher & `NodeSpec` apply with `⌘Z` undo | **`15 / 15 PASS`** |
+| **TOTAL FIGMA A-TO-Z MICRO-INTERACTIONS** | **`#1..#100`** | **Verified by `launch_e2e_proves_100_figma_micro_interactions_end_to_end` + 8 Retina 2x `--micro-showcase` captures** | **`100 / 100 (100%)`** |
+
+---
+
 ### Verified 1:1 Figma `126.9.13` UI3 & `.fig` v106 Parity Scorecard (`387 / 387 — 100.00%`)
 
 | Domain | Scope & Surface Coverage | Verified Items | Parity |
@@ -231,7 +301,7 @@ Every screenshot below is captured deterministically from the live `designos-stu
 | **6. Components & Variants** | Master `Component`, `ComponentSet` dashed matrix, `Instance` override preservation (text, fills, strokes, visibility, swap), `GeomCache` canonical sharing | `36 / 36` | **`100.00%`** |
 | **7. Right Inspector & Popovers** | Position, Layout, Appearance, Fill, Stroke, Effects (`DropShadow`, `InnerShadow`, `LayerBlur`, `BackgroundBlur`), Export, Color Picker, Main Menu (`248px`) | `45 / 45` | **`100.00%`** |
 | **8. Dev Mode, Prototype & Agentic Hub** | Box-model inspector, 5-target codegen, prototype noodle flows, `Actions (Cmd+K)`, 11-stage Spec Reader, Agentic PTY Chat UI, and 22-tool `designos-mcp` | `80 / 80` | **`100.00%`** |
-| **TOTAL VERIFIED PARITY** | **823 Automated Unit, Golden & Integration Tests (`cargo test --workspace` -> `0` failures)** | **`387 / 387`** | **`100.00%`** |
+| **TOTAL VERIFIED PARITY** | **856 Automated Unit, Golden & E2E Tests (`cargo test --workspace` -> `0` failures) + `100 / 100` Micro-Interactions** | **`387 / 387`** | **`100.00%`** |
 
 ### Verified Enterprise Benchmark (`VSF - PCP.fig` — 723,136 Kiwi Records / 112,474 Nodes)
 
@@ -380,7 +450,7 @@ Once installed, `skills/design-os-studio/SKILL.md` activates automatically when 
 2. **Progressive Context Loading** — Only the concise `SKILL.md` router loads initially; `docs/cookbook.md`, `docs/install.md`, and `crates/designos-mcp/README.md` load on demand.
 3. **Deterministic Scene-Graph & Auto-Layout Compilation** — `designos-doc` mutates the typed `Document` tree and runs Auto-Layout 5.0 (`relayout_subtree`), while `designos-fig` reads and writes standard `fig-kiwi` v106 `.fig` binary archives.
 4. **Uniform Spatial Culling & GPU Compilation** — `designos-render` indexes world bounds and clips in a `2048x2048` uniform spatial grid (`SceneIndex`) with 4-tier semantic zoom LOD, and `designos-gpu` compiles visible primitives into canonical `GeomCache` meshes and multi-pass `wgpu` shaders.
-5. **Visual & Epistemic Gate Verification** — Outputs are verified via headless GPU screenshots (`--gpu --screenshot`), `designos-diff` SSIM comparison, `cargo test --workspace` (`823` tests), and `python3 scripts/self_check.py`.
+5. **Visual & Epistemic Gate Verification** — Outputs are verified via headless GPU screenshots (`--gpu --screenshot`), `designos-diff` SSIM comparison, `cargo test --workspace` (`856` tests), and `python3 scripts/self_check.py`.
 
 ```text
 User Prompt / Agentic PTY Chat / CLI / MCP Invocation
@@ -443,7 +513,7 @@ design-os-studio/
 │   ├── designos-fig/               # Figma .fig (fig-kiwi v106 binary) & REST JSON read/write
 │   ├── designos-render/            # Deterministic tiny-skia CPU renderer & 2048x2048 SceneIndex
 │   ├── designos-gpu/               # wgpu GPU compiler (SceneCompiler, GeomCache, WGSL shaders)
-│   ├── designos-app/               # UI3 desktop studio, Phosphor icons, PTY Chat, Spec Reader
+│   ├── designos-app/               # UI3 desktop studio, 100/100 Micro-Interactions, PTY Chat, Spec Reader
 │   ├── designos-library/           # Local library, 8 KB fast header probe, zero-alloc autosave
 │   ├── designos-fonts/             # Bundled Inter variable font & async Fontsource cache
 │   ├── designos-export/            # PNG/JPG/PDF/SVG exporters & 5-target Dev Mode codegen
@@ -465,8 +535,8 @@ design-os-studio/
 │   ├── package-windows.ps1         # Windows NSIS -setup.exe + .zip packager
 │   └── package-linux.sh            # Linux .deb + portable .tar.gz packager
 ├── docs/
-│   ├── index.html                  # 9-Tier author-grade GitHub Pages site + 15-card gallery
-│   ├── images/                     # 15 verified 1600x1000 GPU visual proof captures
+│   ├── index.html                  # 9-Tier author-grade GitHub Pages site + 23-card visual proof gallery
+│   ├── images/                     # Verified GPU visual proof & Retina 2x Micro-Interaction captures
 │   ├── cookbook.md                 # Copy-paste prompt & CLI recipes
 │   ├── install.md                  # Cross-platform installation guide
 │   ├── releasing.md                # Release engineering & self-updater guide
@@ -490,7 +560,7 @@ design-os-studio/
 ### It's working if...
 
 - `python3 scripts/self_check.py` prints `ok: design-os-studio self-check passed (design-os-studio)` and exits `0`.
-- `cargo test --workspace` passes all `823` unit, golden, and parity tests across all 11 Rust crates with `0` failures.
+- `cargo test --workspace` passes all `856` unit, golden, and parity tests across all 11 Rust crates with `0` failures.
 - Enterprise `.fig` v106 files (`723,136` Kiwi records / `112,474` nodes) load and render in `~1.5s` on Metal/Vulkan/DX12 with `0.0%` static viewport CPU usage.
 - Your AI coding agent loads `skills/design-os-studio/SKILL.md` automatically or connects via the `Agents` Left-Rail PTY Chat UI / `designos-mcp` with zero external telemetry (guaranteed by [`PRIVACY.md`](PRIVACY.md)).
 

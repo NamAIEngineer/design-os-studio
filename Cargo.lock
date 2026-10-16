@@ -1003,6 +1003,7 @@ dependencies = [
  "bytemuck",
  "designos-diff",
  "designos-doc",
+ "designos-fig",
  "designos-render",
  "image",
  "lyon_tessellation",

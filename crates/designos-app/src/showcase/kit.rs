@@ -21,7 +21,7 @@ fn combine(s: &mut S, set_name: &'static str, items: &[(String, String, NodeId)]
     n.name = set_name.into();
     n.fills = vec![Paint::solid(Color::WHITE)];
     n.corner_radii = [10.0; 4];
-    n.stroke.paints = vec![Paint::solid(hex(0x9747FF))];
+    n.stroke.paints = vec![Paint::solid(hex(0x06B6D4))];
     n.stroke.weight = 1.0;
     n.stroke.dashes = vec![6.0, 4.0];
     s.sets.insert(set_name, set);

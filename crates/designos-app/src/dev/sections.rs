@@ -409,6 +409,12 @@ pub fn code_block(ui: &mut Ui, c: &mut Cur, lang: Language, code: &str) {
     c.y += h + 8.0;
 }
 
+type DevCodeCacheKey = (u64, NodeId, u64, Language, bool);
+thread_local! {
+    static DEV_CODE_CACHE: std::cell::RefCell<Option<(DevCodeCacheKey, String)>> = const { std::cell::RefCell::new(None) };
+    static DEV_ASSETS_CACHE: std::cell::RefCell<Option<((u64, NodeId, u64, usize), Vec<(String, NodeId, Asset)>)>> = const { std::cell::RefCell::new(None) };
+}
+
 /// Code section: language dropdown, copy button and the generated code.
 pub fn code_section(app: &mut App, ui: &mut Ui, c: &mut Cur, id: NodeId) {
     let lang = app.dev.lang;
@@ -422,7 +428,27 @@ pub fn code_section(app: &mut App, ui: &mut Ui, c: &mut Cur, id: NodeId) {
         app.dev.lang = Language::ALL[i];
     }
     let lang = app.dev.lang;
-    let code = lang.generate(&app.export_doc(), id, app.dev.react_tailwind);
+    let key: DevCodeCacheKey = (
+        app.doc.runtime_id(),
+        id,
+        app.doc.mutation_epoch(),
+        lang,
+        app.dev.react_tailwind,
+    );
+    let code = DEV_CODE_CACHE.with(|cache| {
+        if let Some((k, v)) = cache.borrow().as_ref() {
+            if *k == key {
+                return v.clone();
+            }
+        }
+        let generated = if app.doc.nodes.len() <= 2_000 && !app.doc.variables.is_empty() {
+            lang.generate(&app.export_doc(), id, app.dev.react_tailwind)
+        } else {
+            lang.generate(&app.doc, id, app.dev.react_tailwind)
+        };
+        *cache.borrow_mut() = Some((key, generated.clone()));
+        generated
+    });
     if small_button(ui, copy_r, "copy-code", "Copy") {
         copy(app, ui, code.clone(), lang.label());
     }
@@ -608,25 +634,41 @@ fn token_copy_row(app: &mut App, ui: &mut Ui, c: &mut Cur, key: &str, label: &st
 /// Icon and vector subtrees (plus embedded images) with an SVG export for each.
 pub fn assets_section(app: &mut App, ui: &mut Ui, c: &mut Cur, id: NodeId) {
     section_title(ui, c, "Assets");
-    let base = app.doc.get(id).map(|n| designos_export::sanitize_file_name(&n.name)).unwrap_or_default();
-    let icons = designos_export::vector_assets(&app.doc, id);
-    let mut rows: Vec<(String, NodeId, Asset)> = Vec::new();
-    for i in icons {
-        let name = app.doc.get(i).map(|n| designos_export::sanitize_file_name(&n.name)).unwrap_or_default();
-        rows.push((format!("{name}.svg"), i, Asset::Svg));
-    }
-    for a in crate::panels::inspect::collect_assets(&app.doc, id) {
-        let label = match &a {
-            Asset::Image(r) => format!("Image {}", r.chars().take(6).collect::<String>()),
-            Asset::Svg => format!("{base}.svg"),
-            Asset::Png2x => format!("{base}@2x.png"),
-        };
-        // the layer's own SVG is listed once even when it is an icon itself
-        if matches!(a, Asset::Svg) && rows.iter().any(|(_, n, _)| *n == id) {
-            continue;
+    let key = (app.doc.runtime_id(), id, app.doc.mutation_epoch(), app.doc.images.len());
+    let rows = DEV_ASSETS_CACHE.with(|cache| {
+        if let Some((k, v)) = cache.borrow().as_ref() {
+            if *k == key {
+                return v.clone();
+            }
         }
-        rows.push((label, id, a));
-    }
+        let base = app.doc.get(id).map(|n| designos_export::sanitize_file_name(&n.name)).unwrap_or_default();
+        let icons = if app.doc.nodes.len() > 10_000
+            && app.doc.get(id).is_some_and(|n| n.children.len() > 64 || matches!(n.kind, NodeKind::Section))
+        {
+            Vec::new()
+        } else {
+            designos_export::vector_assets(&app.doc, id)
+        };
+        let mut rows: Vec<(String, NodeId, Asset)> = Vec::new();
+        for i in icons {
+            let name = app.doc.get(i).map(|n| designos_export::sanitize_file_name(&n.name)).unwrap_or_default();
+            rows.push((format!("{name}.svg"), i, Asset::Svg));
+        }
+        for a in crate::panels::inspect::collect_assets(&app.doc, id) {
+            let label = match &a {
+                Asset::Image(r) => format!("Image {}", r.chars().take(6).collect::<String>()),
+                Asset::Svg => format!("{base}.svg"),
+                Asset::Png2x => format!("{base}@2x.png"),
+            };
+            // the layer's own SVG is listed once even when it is an icon itself
+            if matches!(a, Asset::Svg) && rows.iter().any(|(_, n, _)| *n == id) {
+                continue;
+            }
+            rows.push((label, id, a));
+        }
+        *cache.borrow_mut() = Some((key, rows.clone()));
+        rows
+    });
     for (i, (label, node, a)) in rows.iter().enumerate() {
         let r = c.rect(PAD, 0.0, c.w - 2.0 * PAD, 28.0);
         let label = elide(ui.painter(), label, &theme::font_body(), r.width() - 84.0);

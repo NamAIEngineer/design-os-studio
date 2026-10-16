@@ -89,7 +89,7 @@ impl Default for Viewport {
 pub fn render_page(doc: &Document, page: NodeId, vp: &Viewport, target: &mut tiny_skia::Pixmap) {
     let bg = match doc.get(page).map(|n| &n.kind) {
         Some(NodeKind::Page { background }) => paint::sk_color(background, 1.0),
-        _ => sk::Color::from_rgba8(0xF5, 0xF5, 0xF5, 0xFF),
+        _ => sk::Color::from_rgba8(0x5A, 0x5A, 0x5A, 0xFF),
     };
     target.fill(bg);
     let Some(p) = doc.get(page) else { return };
@@ -118,7 +118,7 @@ pub fn render_page_indexed(doc: &Document, page: NodeId, vp: &Viewport, target: 
 pub(crate) fn render_with_transform(doc: &Document, page: NodeId, ts: sk::Transform, target: &mut sk::Pixmap, index: Option<&SceneIndex>) {
     let bg = match doc.get(page).map(|n| &n.kind) {
         Some(NodeKind::Page { background }) => paint::sk_color(background, 1.0),
-        _ => sk::Color::from_rgba8(0xF5, 0xF5, 0xF5, 0xFF),
+        _ => sk::Color::from_rgba8(0x5A, 0x5A, 0x5A, 0xFF),
     };
     target.fill(bg);
     let Some(p) = doc.get(page) else { return };

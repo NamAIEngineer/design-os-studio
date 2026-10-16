@@ -51,6 +51,9 @@ pub fn script_of(c: char) -> Option<Script> {
 
 /// Every supported complex script used by `text`.
 pub fn scripts_in(text: &str) -> BTreeSet<Script> {
+    if text.is_ascii() {
+        return BTreeSet::new();
+    }
     text.chars().filter_map(script_of).collect()
 }
 
@@ -62,8 +65,12 @@ fn text_scripts(t: &TextProps) -> BTreeSet<Script> {
 /// weights of the text that uses it.
 pub fn script_requests_for(doc: &Document) -> BTreeSet<FontRequest> {
     let mut out = BTreeSet::new();
-    for node in doc.nodes.values() {
+    let limit = if doc.nodes.len() > 25_000 { 8_192 } else { usize::MAX };
+    for node in doc.nodes.values().take(limit) {
         let Some(t) = node.kind.any_text() else { continue };
+        if t.content.is_ascii() {
+            continue;
+        }
         for script in text_scripts(t) {
             let mut weights = BTreeSet::from([t.style.font_weight]);
             weights.extend(t.runs.iter().map(|r| r.style.font_weight));

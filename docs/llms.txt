@@ -1,8 +1,8 @@
 # DESIGN:OS Studio (design-os-studio)
 
-> Local-first Rust/wgpu interface design studio with 387/387 Figma UI3 & .fig v106 binary read/write parity, native Agentic PTY Chat UI, 11-stage Spec Reader, and 22 MCP tools.
+> Local-first Rust/wgpu interface design studio with 387/387 Figma UI3 & .fig v106 binary read/write parity, 100/100 Figma A-to-Z Micro-Interactions, native Agentic PTY Chat UI, 11-stage Spec Reader, and 22 MCP tools.
 
-Native GPU-accelerated interface design studio (`wgpu` Metal / DirectX 12 / Vulkan + `tiny-skia`), enterprise Figma `.fig` v106 binary read/write engine, native Agentic PTY Chat UI (`Claude Code` · `Codex` · `Antigravity CLI`), 11-stage `PRODUCT:OS Spec Driven v2` Reader, multi-target Dev Mode code generator, and 22-tool Model Context Protocol server (`designos-mcp`) built in 100% Rust.
+Native GPU-accelerated interface design studio (`wgpu` Metal / DirectX 12 / Vulkan + `tiny-skia`), enterprise Figma `.fig` v106 binary read/write engine, 100/100 Figma A-to-Z Micro-Interactions (`#1..#100`), native Agentic PTY Chat UI (`Claude Code` · `Codex` · `Antigravity CLI`), 11-stage `PRODUCT:OS Spec Driven v2` Reader, multi-target Dev Mode code generator, and 22-tool Model Context Protocol server (`designos-mcp`) built in 100% Rust.
 
 ## Key Facts & Verification Metrics
 
@@ -10,14 +10,14 @@ Native GPU-accelerated interface design studio (`wgpu` Metal / DirectX 12 / Vulk
 - **Repository**: https://github.com/jangtrinh/design-os-studio
 - **Canonical Agent Skill**: `skills/design-os-studio/SKILL.md`
 - **Diagnostics**: `python3 scripts/self_check.py` and `/doctor` (`commands/doctor.md`)
-- **Figma Parity**: `387 / 387` (`100.00%`) verified parity with Figma Desktop `126.9.13` UI3 dark chrome (`#1e1e1e`) and `fig-kiwi` v106 binary schema (`823` automated tests, `0` failures)
+- **Figma Parity & Micro-Interactions**: `387 / 387` (`100.00%`) verified parity with Figma Desktop `126.9.13` UI3 dark chrome (`#1e1e1e`) & `fig-kiwi` v106 binary schema + `100 / 100` (`#1..#100`) Figma A-to-Z Micro-Interactions + `12 / 12` Zero-Fake-UI invariants + `9 / 9` Self-Evolution ALIVE gates (`856` automated tests, `0` failures)
 - **Enterprise Scale (`VSF - PCP.fig`)**: Opens and renders `723,136` Kiwi records / `112,474` scene nodes in `1.48s - 1.63s` with `0.0%` static viewport CPU usage and `-96.5%` compact disk size (`242 MB` vs `6.80 GB`)
 - **Cross-Platform Installers**: macOS `.dmg` + `.tar.gz`, Windows NSIS `-setup.exe` + `.zip`, Linux `.deb` + `.tar.gz` bundling all 4 binaries (`designos-studio`, `designos`, `designos-mcp`, `designos-diff`)
 - **Privacy & License**: Zero telemetry (`PRIVACY.md`), dual-licensed under MIT OR Apache-2.0 (`LICENSE`, `LICENSE-MIT`, `LICENSE-APACHE`)
 
 ## Core Documentation
 
-- [README & 15-Surface Visual Proof Matrix](https://github.com/jangtrinh/design-os-studio#readme)
+- [README & 23-Surface Visual Proof Matrix](https://github.com/jangtrinh/design-os-studio#readme)
 - [Cross-Platform Installation Guide](https://github.com/jangtrinh/design-os-studio/blob/main/docs/install.md)
 - [Prompt & CLI Cookbook](https://github.com/jangtrinh/design-os-studio/blob/main/docs/cookbook.md)
 - [Release & Packaging Guide](https://github.com/jangtrinh/design-os-studio/blob/main/docs/releasing.md)

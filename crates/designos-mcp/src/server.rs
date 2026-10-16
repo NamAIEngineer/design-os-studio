@@ -14,10 +14,82 @@ pub struct DesignOSServer {
     session: Mutex<Session>,
 }
 
+#[derive(Clone, Debug, Default)]
+pub struct LiveSessionBridge {
+    pub session_dir: Option<PathBuf>,
+    pub live_canvas_path: Option<PathBuf>,
+    pub live_doc_sync_path: Option<PathBuf>,
+    pub live_spec_path: Option<PathBuf>,
+    pub context_json_path: Option<PathBuf>,
+    pub last_canvas_mtime: Option<std::time::SystemTime>,
+}
+
+impl LiveSessionBridge {
+    /// Resolves live session bridge paths from `DESIGNOS_SESSION_DIR`, `DESIGNOS_LIVE_CANVAS`,
+    /// `DESIGNOS_LIVE_DOC_SYNC`, `DESIGNOS_LIVE_SPEC`, and `DESIGNOS_CONTEXT_JSON` environment variables.
+    pub fn from_env() -> Self {
+        let session_dir = std::env::var_os("DESIGNOS_SESSION_DIR").map(PathBuf::from).filter(|p| !p.as_os_str().is_empty());
+        let env_canvas = std::env::var_os("DESIGNOS_LIVE_CANVAS").map(PathBuf::from).filter(|p| !p.as_os_str().is_empty());
+        let env_doc_sync = std::env::var_os("DESIGNOS_LIVE_DOC_SYNC").map(PathBuf::from).filter(|p| !p.as_os_str().is_empty());
+        let env_spec = std::env::var_os("DESIGNOS_LIVE_SPEC").map(PathBuf::from).filter(|p| !p.as_os_str().is_empty());
+        let env_ctx = std::env::var_os("DESIGNOS_CONTEXT_JSON").map(PathBuf::from).filter(|p| !p.as_os_str().is_empty());
+
+        let any_env = session_dir.is_some() || env_canvas.is_some() || env_doc_sync.is_some() || env_spec.is_some() || env_ctx.is_some();
+        if !any_env {
+            return Self::default();
+        }
+
+        let live_canvas_path = env_canvas
+            .or_else(|| session_dir.as_ref().map(|d| d.join("canvas.designos")))
+            .or_else(|| Some(PathBuf::from("/tmp/designos-live-canvas.designos")));
+        let live_doc_sync_path = env_doc_sync
+            .or_else(|| session_dir.as_ref().map(|d| d.join("doc-sync.designos")))
+            .or_else(|| Some(PathBuf::from("/tmp/designos-live-doc-sync.designos")));
+        let live_spec_path = env_spec
+            .or_else(|| session_dir.as_ref().map(|d| d.join("live-spec.json")))
+            .or_else(|| Some(PathBuf::from("/tmp/designos-live-agent-out.spec.json")));
+        let context_json_path = env_ctx
+            .or_else(|| session_dir.as_ref().map(|d| d.join("context.json")))
+            .or_else(|| Some(PathBuf::from("/tmp/designos-live-context.json")));
+
+        Self {
+            session_dir,
+            live_canvas_path,
+            live_doc_sync_path,
+            live_spec_path,
+            context_json_path,
+            last_canvas_mtime: None,
+        }
+    }
+
+    /// Creates a `LiveSessionBridge` bound to a specific per-file `session_dir` (`/tmp/designos-sessions/<session_id>`).
+    pub fn for_session_dir(session_dir: &Path) -> Self {
+        let dir = session_dir.to_path_buf();
+        Self {
+            live_canvas_path: Some(dir.join("canvas.designos")),
+            live_doc_sync_path: Some(dir.join("doc-sync.designos")),
+            live_spec_path: Some(dir.join("live-spec.json")),
+            context_json_path: Some(dir.join("context.json")),
+            session_dir: Some(dir),
+            last_canvas_mtime: None,
+        }
+    }
+}
+
+fn atomic_write_file(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    let tmp_path = path.with_extension(format!("tmp-{}", std::process::id()));
+    fs::write(&tmp_path, bytes).map_err(|e| format!("write {}: {e}", tmp_path.display()))?;
+    fs::rename(&tmp_path, path).map_err(|e| format!("rename {} -> {}: {e}", tmp_path.display(), path.display()))
+}
+
 pub struct Session {
     pub engine: Engine,
     root: PathBuf,
     dirty: bool,
+    pub bridge: LiveSessionBridge,
 }
 
 #[derive(Deserialize)]
@@ -63,7 +135,97 @@ impl Session {
         if !root.is_dir() {
             return Err("Workspace must be a directory".into());
         }
-        Ok(Self { engine: Engine::default(), root, dirty: false })
+        let mut s = Self {
+            engine: Engine::default(),
+            root,
+            dirty: false,
+            bridge: LiveSessionBridge::from_env(),
+        };
+        s.sync_from_live_canvas_if_newer();
+        Ok(s)
+    }
+
+    /// Creates a `Session` explicitly bound to a per-file `session_dir` (`/tmp/designos-sessions/<session_id>`).
+    pub fn with_session_dir(root: &Path, session_dir: &Path) -> Result<Self, String> {
+        let root = root.canonicalize().map_err(|e| format!("Cannot open workspace: {e}"))?;
+        if !root.is_dir() {
+            return Err("Workspace must be a directory".into());
+        }
+        let mut s = Self {
+            engine: Engine::default(),
+            root,
+            dirty: false,
+            bridge: LiveSessionBridge::for_session_dir(session_dir),
+        };
+        s.sync_from_live_canvas_if_newer();
+        Ok(s)
+    }
+
+    /// Reloads `self.engine.doc` from `live_canvas_path` if `design:os studio` wrote a newer canvas
+    /// snapshot, and updates `self.engine.active_page_id` from `context.json` (`current_page_id`).
+    pub fn sync_from_live_canvas_if_newer(&mut self) {
+        if let Some(canvas_path) = self.bridge.live_canvas_path.clone() {
+            if let Ok(meta) = fs::metadata(&canvas_path) {
+                if let Ok(mtime) = meta.modified() {
+                    let is_newer = match self.bridge.last_canvas_mtime {
+                        Some(prev) => mtime > prev,
+                        None => true,
+                    };
+                    if is_newer {
+                        if let Ok(raw) = fs::read_to_string(&canvas_path) {
+                            if let Ok(doc) = designos_doc::Document::from_json(&raw) {
+                                if validate_document(&doc).is_ok() {
+                                    self.engine.doc = doc;
+                                    self.bridge.last_canvas_mtime = Some(mtime);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        let mut loaded_page_id: Option<u64> = None;
+        if let Some(ctx_path) = &self.bridge.context_json_path {
+            if let Ok(raw) = fs::read_to_string(ctx_path) {
+                if let Ok(val) = serde_json::from_str::<Value>(&raw) {
+                    loaded_page_id = val.get("current_page_id").and_then(Value::as_u64);
+                }
+            }
+        }
+        if loaded_page_id.is_none() {
+            if let Ok(env_pid) = std::env::var("DESIGNOS_TARGET_PAGE_ID") {
+                loaded_page_id = env_pid.trim().parse::<u64>().ok();
+            }
+        }
+        if let Some(pid) = loaded_page_id.filter(|&id| id > 0) {
+            self.engine.active_page_id = Some(designos_doc::NodeId(pid));
+        } else if self.engine.active_page_id.is_none() {
+            self.engine.active_page_id = self.engine.doc.pages.first().copied();
+        }
+    }
+
+    /// Atomically publishes the updated `self.engine.doc` to `live_doc_sync_path` (`doc-sync.designos`)
+    /// and `live_canvas_path` (`canvas.designos`) so `design:os studio` hot-syncs within `<50ms`.
+    pub fn publish_live_doc_sync(&mut self) {
+        if self.bridge.live_doc_sync_path.is_none() && self.bridge.live_canvas_path.is_none() {
+            return;
+        }
+        let Ok(json_str) = self.engine.doc.to_json() else {
+            return;
+        };
+        let bytes = json_str.as_bytes();
+        if let Some(canvas_path) = &self.bridge.live_canvas_path {
+            let _ = atomic_write_file(canvas_path, bytes);
+            self.bridge.last_canvas_mtime = fs::metadata(canvas_path).and_then(|m| m.modified()).ok();
+        }
+        if let Some(sync_path) = &self.bridge.live_doc_sync_path {
+            let _ = atomic_write_file(sync_path, bytes);
+        }
+        if !cfg!(test) {
+            let _ = atomic_write_file(Path::new("/tmp/designos-live-doc-sync.designos"), bytes);
+            let _ = atomic_write_file(Path::new("/tmp/designos-live-canvas.designos"), bytes);
+        }
     }
 
     fn input_path(&self, path: &str) -> Result<PathBuf, String> {
@@ -128,6 +290,7 @@ impl Session {
     }
 
     pub fn call(&mut self, name: &str, args: Value) -> Result<Value, String> {
+        self.sync_from_live_canvas_if_newer();
         match name {
             "designos_open_file" => {
                 let a: OpenArgs = parse(args)?;
@@ -141,8 +304,10 @@ impl Session {
                 let doc = designos_library::load_external(&path).map_err(|e| format!("Cannot import design: {e}"))?;
                 validate_document(&doc)?;
                 self.engine = Engine::default();
+                self.engine.active_page_id = doc.pages.first().copied();
                 self.engine.doc = doc;
                 self.dirty = false;
+                self.publish_live_doc_sync();
                 self.engine.call("designos_get_document", json!({}))
             }
             "designos_new_document" => {
@@ -156,6 +321,7 @@ impl Session {
                 self.engine = Engine::default();
                 self.engine.doc.name = a.name;
                 self.dirty = true;
+                self.publish_live_doc_sync();
                 self.engine.call("designos_get_document", json!({}))
             }
             "designos_save_file" => {
@@ -243,6 +409,7 @@ impl Session {
                 ) && result.get("changed").and_then(Value::as_bool) != Some(false)
                 {
                     self.dirty = true;
+                    self.publish_live_doc_sync();
                 }
                 Ok(result)
             }
@@ -291,6 +458,17 @@ impl DesignOSServer {
     pub fn new(root: &Path) -> Result<Self, String> {
         Ok(Self { session: Mutex::new(Session::new(root)?) })
     }
+
+    pub fn with_session_dir(root: &Path, session_dir: &Path) -> Result<Self, String> {
+        Ok(Self { session: Mutex::new(Session::with_session_dir(root, session_dir)?) })
+    }
+
+    pub fn call(&self, name: &str, args: Value) -> Result<Value, String> {
+        self.session
+            .lock()
+            .map_err(|_| "Session unavailable; restart the MCP server".to_string())?
+            .call(name, args)
+    }
 }
 
 pub fn tools() -> Vec<Tool> {
@@ -334,3 +512,87 @@ impl ServerHandler for DesignOSServer {
         .into())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use designos_doc::Document;
+
+    #[test]
+    fn scoped_session_syncs_current_page_and_writes_doc_sync() {
+        let nonce = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+        let ws_dir = std::env::temp_dir().join(format!("designos-mcp-ws-{}-{nonce}", std::process::id()));
+        let sess_dir = std::env::temp_dir().join(format!("designos-mcp-sess-{}-{nonce}", std::process::id()));
+        fs::create_dir_all(&ws_dir).unwrap();
+        fs::create_dir_all(&sess_dir).unwrap();
+
+        let mut doc = Document::new("CheckoutFlow.designos");
+        let p1 = doc.add_page("Page 1 · Overview");
+        let p2 = doc.add_page("Page 2 · Checkout");
+        assert_ne!(p1, p2);
+
+        fs::write(sess_dir.join("canvas.designos"), doc.to_json().unwrap()).unwrap();
+        fs::write(
+            sess_dir.join("context.json"),
+            json!({
+                "session_id": "tab-2",
+                "doc_name": "CheckoutFlow.designos",
+                "current_page_id": p2.0,
+                "current_page_name": "Page 2 · Checkout",
+                "selected_node_ids": []
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let server = DesignOSServer::with_session_dir(&ws_dir, &sess_dir).unwrap();
+        let doc_summary = server.call("designos_get_document", json!({})).unwrap();
+        assert_eq!(doc_summary["name"], "CheckoutFlow.designos");
+        assert_eq!(doc_summary["active_page_id"], p2.0);
+
+        // Apply spec WITHOUT parent_id -> must target Page 2 (current_page_id)!
+        let applied = server
+            .call(
+                "designos_apply_spec",
+                json!({
+                    "spec": {
+                        "name": "Payment Card",
+                        "preset": "easeui-card",
+                        "children": [
+                            { "kind": "text", "name": "Header", "text": "Pay $49" }
+                        ]
+                    }
+                }),
+            )
+            .unwrap();
+        assert_eq!(applied["parent_id"], p2.0);
+        let card_id = applied["root_node_id"].as_u64().unwrap();
+
+        // Create node WITHOUT parent_id -> must also target Page 2!
+        let created = server
+            .call(
+                "designos_create_node",
+                json!({
+                    "kind": "frame",
+                    "name": "Order Summary Frame",
+                    "width": 320.0,
+                    "height": 200.0
+                }),
+            )
+            .unwrap();
+        assert_eq!(created["parent_id"], p2.0);
+
+        // Verify doc-sync.designos was atomically written and contains both nodes under Page 2
+        let sync_path = sess_dir.join("doc-sync.designos");
+        assert!(sync_path.exists(), "doc-sync.designos must be written after mutating tool calls");
+        let synced_doc = Document::from_json(&fs::read_to_string(&sync_path).unwrap()).unwrap();
+        let p2_children = &synced_doc.get(p2).unwrap().children;
+        assert!(p2_children.contains(&designos_doc::NodeId(card_id)));
+        assert_eq!(p2_children.len(), 2);
+        assert!(synced_doc.get(p1).unwrap().children.is_empty(), "Page 1 must remain untouched");
+
+        let _ = fs::remove_dir_all(&ws_dir);
+        let _ = fs::remove_dir_all(&sess_dir);
+    }
+}
+

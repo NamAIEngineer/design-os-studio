@@ -87,6 +87,24 @@ pub struct Def {
     pub name: String,
     pub kind: DefKind,
     pub fields: Vec<Field>,
+    pub field_by_value: Vec<Option<usize>>,
+}
+
+fn build_field_by_value(fields: &[Field]) -> Vec<Option<usize>> {
+    let Some(max_val) = fields.iter().map(|f| f.value).max() else {
+        return Vec::new();
+    };
+    if max_val > 4096 {
+        return Vec::new();
+    }
+    let mut lookup = vec![None; (max_val as usize) + 1];
+    for (i, f) in fields.iter().enumerate() {
+        let idx = f.value as usize;
+        if lookup[idx].is_none() {
+            lookup[idx] = Some(i);
+        }
+    }
+    lookup
 }
 
 #[derive(Debug, Clone, Default)]
@@ -249,7 +267,8 @@ impl Schema {
                 };
                 fields.push(Field { name: fname.into(), ty, is_array, value });
             }
-            defs.push(Def { name, kind, fields });
+            let field_by_value = build_field_by_value(&fields);
+            defs.push(Def { name, kind, fields, field_by_value });
         }
         let schema = Schema { defs };
         for d in &schema.defs {
@@ -311,7 +330,13 @@ impl Schema {
         match def.kind {
             DefKind::Enum => {
                 let v = r.var_u32()?;
-                Ok(match def.fields.iter().find(|f| f.value == v) {
+                let found = def
+                    .field_by_value
+                    .get(v as usize)
+                    .and_then(|&x| x)
+                    .map(|i| &def.fields[i])
+                    .or_else(|| def.fields.iter().find(|f| f.value == v));
+                Ok(match found {
                     Some(f) => KiwiValue::Enum(f.name.clone()),
                     None => KiwiValue::EnumRaw(v),
                 })
@@ -330,7 +355,13 @@ impl Schema {
                     if id == 0 {
                         break;
                     }
-                    let f = def.fields.iter().find(|f| f.value == id).ok_or_else(|| KiwiError::Bad(format!("unknown field id {id} in {}", def.name)))?;
+                    let f = def
+                        .field_by_value
+                        .get(id as usize)
+                        .and_then(|&x| x)
+                        .map(|i| &def.fields[i])
+                        .or_else(|| def.fields.iter().find(|f| f.value == id))
+                        .ok_or_else(|| KiwiError::Bad(format!("unknown field id {id} in {}", def.name)))?;
                     out.push((f.name.clone(), self.decode_field(f, r, depth)?));
                 }
                 Ok(KiwiValue::Message(out))
@@ -526,10 +557,57 @@ pub fn to_json(v: &KiwiValue) -> serde_json::Value {
     }
 }
 
+/// Fast conversion of a decoded value to JSON for internal `.fig` import,
+/// converting `f32` directly to `f64` without string round-tripping.
+pub fn to_json_fast(v: &KiwiValue) -> serde_json::Value {
+    use serde_json::{Number, Value};
+    match v {
+        KiwiValue::Bool(b) => Value::Bool(*b),
+        KiwiValue::Byte(b) => Value::from(*b),
+        KiwiValue::Int(i) => Value::from(*i),
+        KiwiValue::Uint(u) => Value::from(*u),
+        KiwiValue::Float(f) => Number::from_f64(*f as f64).map(Value::Number).unwrap_or(Value::Null),
+        KiwiValue::String(s) => Value::String(s.clone()),
+        KiwiValue::Int64(i) => {
+            if i.unsigned_abs() < (1 << 53) {
+                Value::from(*i)
+            } else {
+                Value::String(i.to_string())
+            }
+        }
+        KiwiValue::Uint64(u) => {
+            if *u < (1 << 53) {
+                Value::from(*u)
+            } else {
+                Value::String(u.to_string())
+            }
+        }
+        KiwiValue::Bytes(b) => Value::String(hex(b)),
+        KiwiValue::Enum(n) => Value::String(n.to_string()),
+        KiwiValue::EnumRaw(u) => Value::Number(Number::from(*u)),
+        KiwiValue::Array(a) => Value::Array(a.iter().map(to_json_fast).collect()),
+        KiwiValue::Struct(f) | KiwiValue::Message(f) => {
+            let mut m = serde_json::Map::with_capacity(f.len());
+            for (k, v) in f {
+                if matches!(&**k, "editInfo" | "derivedTextData" | "derivedImmutableFrameData" | "derivedSymbolData") {
+                    continue;
+                }
+                m.insert(k.to_string(), to_json_fast(v));
+            }
+            Value::Object(m)
+        }
+    }
+}
+
 /// f32 -> JSON number without f32->f64 widening noise (0.1f32 -> 0.1).
 pub fn clean_f32(f: f32) -> serde_json::Value {
     if !f.is_finite() {
         return serde_json::Value::Null;
+    }
+    if f.fract() == 0.0 && f.abs() < 1e15 {
+        if let Some(n) = serde_json::Number::from_f64(f as f64) {
+            return serde_json::Value::Number(n);
+        }
     }
     let s = format!("{f}");
     s.parse::<f64>().ok().and_then(serde_json::Number::from_f64).map(serde_json::Value::Number).unwrap_or(serde_json::Value::Null)
@@ -559,7 +637,7 @@ impl SchemaBuilder {
     }
     pub fn define(&mut self, name: &str, kind: DefKind) -> usize {
         let i = self.schema.defs.len();
-        self.schema.defs.push(Def { name: name.into(), kind, fields: Vec::new() });
+        self.schema.defs.push(Def { name: name.into(), kind, fields: Vec::new(), field_by_value: Vec::new() });
         self.names.insert(name.into(), i);
         i
     }
@@ -572,7 +650,10 @@ impl SchemaBuilder {
     pub fn variant(&mut self, def: usize, name: &str, value: u32) {
         self.field(def, name, FieldType::Def(0), false, value);
     }
-    pub fn build(self) -> Schema {
+    pub fn build(mut self) -> Schema {
+        for d in &mut self.schema.defs {
+            d.field_by_value = build_field_by_value(&d.fields);
+        }
         self.schema
     }
 }

@@ -329,20 +329,66 @@ fn pixel_grid(app: &App, p: &Painter, rect: ERect) {
 }
 
 fn layout_grids(app: &App, p: &Painter, rect: ERect) {
-    let z = app.view.zoom;
+    let z = app.view.zoom.max(1e-3);
     let view = Rect::new(app.view.offset.x, app.view.offset.y, rect.width() / z, rect.height() / z);
-    let mut stack: Vec<NodeId> = app.doc.get(app.page).map(|n| n.children.clone()).unwrap_or_default();
-    while let Some(id) = stack.pop() {
+    let win = (view.x, view.y, view.x + view.w, view.y + view.h);
+    let overlaps_win = |(x0, y0, x1, y1): (f32, f32, f32, f32)| {
+        x0 <= win.2 && win.0 <= x1 && y0 <= win.3 && win.1 <= y1
+    };
+    let Some(page) = app.doc.get(app.page) else { return };
+    let idx = super::interact::active_index(app);
+
+    let mut stack: Vec<(NodeId, Affine)> = Vec::new();
+    if let Some(index) = idx {
+        if page.children.len() > 32 {
+            let mut roots = Vec::new();
+            index.query_top_level(win, &mut roots);
+            for cid in roots {
+                stack.push((cid, Affine::IDENTITY));
+            }
+        } else {
+            for &cid in &page.children {
+                if index.bounds_of(cid).map_or(true, overlaps_win) {
+                    stack.push((cid, Affine::IDENTITY));
+                }
+            }
+        }
+    } else {
+        for &cid in &page.children {
+            stack.push((cid, Affine::IDENTITY));
+        }
+    }
+
+    while let Some((id, parent_world)) = stack.pop() {
         let Some(n) = app.doc.get(id) else { continue };
         if !n.visible {
             continue;
         }
-        stack.extend(n.children.iter().copied());
+        if let Some(b) = idx.and_then(|i| i.bounds_of(id)) {
+            if !overlaps_win(b) {
+                continue;
+            }
+        }
+        let w = parent_world * n.transform;
+        let own_bb = super::affine_rect_aabb(&w, n.size);
+        if !n.children.is_empty() {
+            let descend = if idx.is_none() && n.kind.frame_props().is_some_and(|f| f.clips_content) {
+                own_bb.intersects(&view)
+            } else {
+                true
+            };
+            if descend {
+                for &cid in &n.children {
+                    if idx.and_then(|i| i.bounds_of(cid)).map_or(true, overlaps_win) {
+                        stack.push((cid, w));
+                    }
+                }
+            }
+        }
         let Some(fp) = n.kind.frame_props() else { continue };
-        if fp.grids.is_empty() || !world_aabb(&app.doc, id).intersects(&view) {
+        if fp.grids.is_empty() || !own_bb.intersects(&view) {
             continue;
         }
-        let w = app.doc.world_transform(id);
         let to_s = |x: f32, y: f32| app.view.to_screen(rect.min, w.apply(v2(x, y)));
         let quad = |x0: f32, y0: f32, x1: f32, y1: f32, col: Color32| {
             p.add(Shape::convex_polygon(vec![to_s(x0, y0), to_s(x1, y0), to_s(x1, y1), to_s(x0, y1)], col, Stroke::NONE));

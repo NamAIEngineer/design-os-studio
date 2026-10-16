@@ -1,6 +1,5 @@
 //! Canvas hit testing and marquee selection.
 
-use crate::util::world_aabb;
 use designos_doc::{Affine, Document, NodeId, NodeKind, Rect, Vec2};
 
 fn local_hit(kind: &NodeKind, size: Vec2, local: Vec2, tol: f32) -> bool {
@@ -95,7 +94,27 @@ fn hit_in(
     index: Option<&designos_render::SceneIndex>,
 ) -> Option<NodeId> {
     let pn = doc.get(parent)?;
-    for &cid in pn.children.iter().rev() {
+    let mut top_cands = Vec::new();
+    let iter_slice: &[NodeId] = if let Some(idx) = index.filter(|i| {
+        pn.children.len() > 64
+            && matches!(pn.kind, NodeKind::Page { .. })
+            && pn
+                .children
+                .iter()
+                .find(|&&c| doc.get(c).is_some_and(|n| n.visible))
+                .is_some_and(|&c| i.bounds_of(c).is_some())
+            && !pn
+                .children
+                .iter()
+                .any(|&c| matches!(doc.get(c).map(|n| &n.kind), Some(NodeKind::Connector(_))))
+    }) {
+        let m = tol + 4.0;
+        idx.query_top_level((p.x - m, p.y - m, p.x + m, p.y + m), &mut top_cands);
+        &top_cands
+    } else {
+        &pn.children
+    };
+    for &cid in iter_slice.iter().rev() {
         let Some(n) = doc.get(cid) else { continue };
         if !n.visible || n.locked || exclude.contains(&cid) {
             continue;
@@ -119,7 +138,16 @@ fn hit_in(
         if n.kind.is_container() {
             let descend = deep || selects_through(&n.kind) || entered.contains(&cid);
             let clips = n.kind.frame_props().map(|f| f.clips_content).unwrap_or(false);
-            if descend && (!clips || inside) {
+            let near_unindexed = index.is_some()
+                || inside
+                || n.size.x <= 0.0
+                || n.size.y <= 0.0
+                || matches!(n.kind, NodeKind::Group | NodeKind::BooleanOp(_))
+                || {
+                    let pad = if doc.nodes.len() > 5_000 { 512.0 } else { n.size.x.max(n.size.y) + 2000.0 };
+                    local.x >= -pad && local.y >= -pad && local.x <= n.size.x + pad && local.y <= n.size.y + pad
+                };
+            if descend && (!clips || inside) && near_unindexed {
                 if let Some(h) = hit_in(doc, cid, world, p, tol, deep, entered, exclude, index) {
                     return Some(h);
                 }
@@ -134,6 +162,69 @@ fn hit_in(
     None
 }
 
+/// Collects all visible, unlocked nodes on `page` under `p` (page space),
+/// ordered from top-most leaf down to container/frame (capped at 32 items).
+pub fn hit_all_under(
+    doc: &Document,
+    page: NodeId,
+    p: Vec2,
+    index: Option<&designos_render::SceneIndex>,
+) -> Vec<NodeId> {
+    let mut out = Vec::new();
+    hit_all_in(doc, page, Affine::IDENTITY, p, 2.0, index, &mut out);
+    out
+}
+
+fn hit_all_in(
+    doc: &Document,
+    parent: NodeId,
+    parent_world: Affine,
+    p: Vec2,
+    tol: f32,
+    index: Option<&designos_render::SceneIndex>,
+    out: &mut Vec<NodeId>,
+) {
+    if out.len() >= 32 {
+        return;
+    }
+    let Some(pn) = doc.get(parent) else { return };
+    for &cid in pn.children.iter().rev() {
+        if out.len() >= 32 {
+            return;
+        }
+        let Some(n) = doc.get(cid) else { continue };
+        if !n.visible || n.locked {
+            continue;
+        }
+        if !matches!(n.kind, NodeKind::Connector(_)) {
+            if let Some(bb) = indexed_bounds(index, cid) {
+                let m = tol + 2.0;
+                if !Rect::new(bb.x - m, bb.y - m, bb.w + 2.0 * m, bb.h + 2.0 * m).contains(p) {
+                    continue;
+                }
+            }
+        }
+        let world = parent_world * n.transform;
+        let Some(inv) = world.invert() else { continue };
+        let local = inv.apply(p);
+        let inside = match &n.kind {
+            NodeKind::Connector(_) => parent_world.invert().is_some_and(|pi| connector_hit(doc, cid, pi.apply(p), tol)),
+            k => local_hit(k, n.size, local, tol),
+        };
+        if n.kind.is_container() {
+            let clips = n.kind.frame_props().map(|f| f.clips_content).unwrap_or(false);
+            if !clips || inside {
+                hit_all_in(doc, cid, world, p, tol, index, out);
+            }
+            if inside && out.len() < 32 {
+                out.push(cid);
+            }
+        } else if inside && out.len() < 32 {
+            out.push(cid);
+        }
+    }
+}
+
 /// Nodes selected by a marquee (page space). Fully-enclosed top-level objects
 /// are selected as a whole; frames only partly covered are entered.
 #[allow(dead_code)]
@@ -141,57 +232,85 @@ pub fn marquee_select(doc: &Document, root: NodeId, r: &Rect) -> Vec<NodeId> {
     marquee_select_with_index(doc, root, r, None)
 }
 
+const MAX_MARQUEE_NODES: usize = 512;
+
 /// Like [`marquee_select`], using `index` bounds when available instead of
 /// recomputing `world_aabb` recursively for every child.
 pub fn marquee_select_with_index(doc: &Document, root: NodeId, r: &Rect, index: Option<&designos_render::SceneIndex>) -> Vec<NodeId> {
     let mut out = Vec::new();
+    let large_doc = doc.nodes.len() > 2_000;
     if let (Some(idx), Some(page)) = (index, doc.get(root).filter(|n| matches!(n.kind, NodeKind::Page { .. }))) {
-        for &cid in &page.children {
+        let mut cands = Vec::new();
+        let slice: &[NodeId] = if page.children.len() > 32 {
+            idx.query_top_level((r.x, r.y, r.x + r.w, r.y + r.h), &mut cands);
+            &cands
+        } else {
+            &page.children
+        };
+        for &cid in slice {
+            if out.len() >= MAX_MARQUEE_NODES {
+                break;
+            }
             let Some(n) = doc.get(cid) else { continue };
             if !n.visible || n.locked {
                 continue;
             }
-            if let Some((x0, y0, x1, y1)) = idx.bounds_of(cid) {
-                if !r.intersects(&Rect::new(x0, y0, x1 - x0, y1 - y0)) {
-                    continue;
-                }
-            }
-            let bb = world_aabb(doc, cid);
+            let bb = if let Some((x0, y0, x1, y1)) = idx.bounds_of(cid) {
+                Rect::new(x0, y0, x1 - x0, y1 - y0)
+            } else {
+                super::fast_world_aabb(doc, None, cid)
+            };
             if !r.intersects(&bb) {
                 continue;
             }
             let contained = bb.x >= r.x && bb.y >= r.y && bb.x + bb.w <= r.x + r.w && bb.y + bb.h <= r.y + r.h;
             if n.kind.is_container() && selects_through(&n.kind) && !contained && !n.children.is_empty() {
-                marquee_in(doc, cid, r, index, &mut out);
+                marquee_in(doc, cid, r, index, 1, large_doc, &mut out);
             } else {
                 out.push(cid);
             }
         }
         return out;
     }
-    marquee_in(doc, root, r, index, &mut out);
+    marquee_in(doc, root, r, index, 0, large_doc, &mut out);
     out
 }
 
-fn marquee_in(doc: &Document, parent: NodeId, r: &Rect, index: Option<&designos_render::SceneIndex>, out: &mut Vec<NodeId>) {
+fn marquee_in(
+    doc: &Document,
+    parent: NodeId,
+    r: &Rect,
+    index: Option<&designos_render::SceneIndex>,
+    depth: usize,
+    large_doc: bool,
+    out: &mut Vec<NodeId>,
+) {
     let Some(pn) = doc.get(parent) else { return };
     for &cid in &pn.children {
+        if out.len() >= MAX_MARQUEE_NODES {
+            break;
+        }
         let Some(n) = doc.get(cid) else { continue };
         if !n.visible || n.locked {
             continue;
         }
-        if let Some(ibb) = indexed_bounds(index, cid) {
-            if !r.intersects(&ibb) {
-                continue;
-            }
-        }
-        let bb = world_aabb(doc, cid);
+        let bb = if let Some(ibb) = indexed_bounds(index, cid) {
+            ibb
+        } else {
+            super::fast_world_aabb(doc, None, cid)
+        };
         if !r.intersects(&bb) {
             continue;
         }
         let contained = bb.x >= r.x && bb.y >= r.y && bb.x + bb.w <= r.x + r.w && bb.y + bb.h <= r.y + r.h;
-        if n.kind.is_container() && selects_through(&n.kind) && !contained && !n.children.is_empty() {
-            marquee_in(doc, cid, r, index, out);
+        let can_descend = if large_doc {
+            matches!(n.kind, NodeKind::Section)
+                || (depth < 2 && r.x >= bb.x - 4.0 && r.y >= bb.y - 4.0 && r.x + r.w <= bb.x + bb.w + 4.0 && r.y + r.h <= bb.y + bb.h + 4.0)
+        } else {
+            true
+        };
+        if n.kind.is_container() && selects_through(&n.kind) && !contained && !n.children.is_empty() && can_descend {
+            marquee_in(doc, cid, r, index, depth + 1, large_doc, out);
         } else {
             out.push(cid);
         }
@@ -302,5 +421,16 @@ mod tests {
         assert_eq!(hit_test_excluding_with_index(&d, page, v2(20.0, 20.0), 0.0, false, &[], &[rect], Some(&idx)), Some(frame));
         assert_eq!(marquee_select_with_index(&d, page, &Rect::new(0.0, 0.0, 60.0, 60.0), Some(&idx)), vec![rect]);
         assert_eq!(marquee_select_with_index(&d, page, &Rect::new(-10.0, -10.0, 400.0, 400.0), Some(&idx)), vec![frame]);
+    }
+
+    #[test]
+    fn hit_all_under_returns_overlapping_layers_top_to_bottom() {
+        let (mut d, page, frame, group, rg, rect) = sample();
+        let top_id = d.alloc_id();
+        let top_rect = d.insert(frame, Node::rectangle(top_id, Rect::new(15.0, 15.0, 40.0, 40.0))).unwrap();
+        let hits = hit_all_under(&d, page, v2(20.0, 20.0), None);
+        assert_eq!(hits, vec![top_rect, rect, frame]);
+        let group_hits = hit_all_under(&d, page, v2(120.0, 120.0), None);
+        assert_eq!(group_hits, vec![rg, group, frame]);
     }
 }

@@ -1,16 +1,16 @@
 ---
 id: us-index
 type: us-index
-title: "US Spec Index — design:os studio v2 (US-01..US-15)"
+title: "US Spec Index — design:os studio v2 (US-01..US-18)"
 status: Verified
-updated: 2026-10-15
+updated: 2026-10-16
 label: Story index
 order: 0
 ---
 
 Mỗi file định nghĩa một User Story độc lập. Các mã `REQ` đối chiếu trực tiếp tới [PRD](../prd/PRD.md#4-yeu-cau-va-quy-tac) và tổng hợp tại [Master Backlog](../../../BACKLOG.md).
 
-### E1 Figma 1:1, Multi-Tab Projects, Spec Reader v2, REA, Auto-Update, AI Agent Suite, Parity Scorecard, Unified Phosphor Icons & Pure PTY Chat Wrapper (`US-01..US-15`)
+### E1 Figma 1:1, Multi-Tab Projects, Spec Reader v2, REA, Auto-Update, AI Agent Suite, Parity Scorecard, Unified Phosphor Icons, Pure PTY Chat Wrapper, 1M-Node Performance & Micro-Interactions (`US-01..US-18`)
 
 | File | Story | Epic | REQ | Screens | Scenarios |
 |---|---|---|---|---|---|
@@ -29,4 +29,6 @@ Mỗi file định nghĩa một User Story độc lập. Các mã `REQ` đối c
 | [US-13.md](US-13.md) | 1:1 Figma UI3 `Agents` Left Side Panel (`DIR-17`), 9 Visual Deltas & 5 End-to-End Userflows Audit (`UF-01..UF-05` · `DIR-18`) | `EP-13` | `REQ-15, REQ-16` | `S13, S01, S03, S04, S06, S07, S10, S11` | `SCN-13-01..03` |
 | [US-14.md](US-14.md) | Unified Phosphor Icons System Across Entire Studio (`@phosphor-icons/core` SVG Asset Pipeline & DPR-Aware Raster Cache · `DIR-19`) | `EP-14` | `REQ-17, REQ-07` | `S01..S13` | `SCN-14-01..03` |
 | [US-15.md](US-15.md) | Pure Chat UI Wrapper Over Native PTY Terminal Shell (`Claude Code`, `Codex`, `Antigravity CLI` · `DIR-21`) | `EP-15` | `REQ-18, REQ-15, REQ-05` | `S13, S03, S01` | `SCN-15-01..03` |
-
+| [US-16.md](US-16.md) | 1:1 Figma C++/WASM 1M-Node Performance Engine (`6.25s` Load, Sub-ms Hit-Test/Drag/Layout · `DIR-25`) | `EP-16` | `REQ-01, REQ-08, REQ-09` | `S01, S02, S12` | `SCN-16-01..03` |
+| [US-17.md](US-17.md) | 1:1 Figma Micro-Interactions, Keyboard Stepping, Scrubbing & Direct Manipulation (`MI-01..MI-20`) | `EP-03` | `REQ-21, REQ-08` | `S01, S02, S03, S04` | `SCN-17.1..17.6` |
+| [US-18.md](US-18.md) | Deep Figma Feature & Micro-Interaction Parity Wave 3 (On-Canvas Direct Manipulation Handles, Multi-Edit, Variable Expressions & Conditional Prototyping · `DIR-30`) | `EP-18` | `REQ-01, REQ-07, REQ-08, REQ-09` | `S01, S05, S07, S08` | `SCN-18-01..03` |

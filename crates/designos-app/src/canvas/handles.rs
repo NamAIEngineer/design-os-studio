@@ -166,10 +166,15 @@ pub fn shape_control_handles(kind: &NodeKind, corners: &[Vec2; 4], zoom: f32) ->
 
     match kind {
         NodeKind::Ellipse(arc) => {
-            let mut pts = vec![at_norm(0.84, 0.5)];
-            if arc.inner_radius > 0.0 || (arc.end - arc.start - std::f32::consts::TAU).abs() > 1e-2 {
-                let r_norm = (arc.inner_radius.clamp(0.15, 0.85)) * 0.5;
-                pts.push(at_norm(0.5 - r_norm, 0.5));
+            let r_outer = 0.34;
+            let mut pts = vec![at_norm(0.5 + r_outer * arc.end.cos(), 0.5 + r_outer * arc.end.sin())];
+            let is_open_arc = (arc.end - arc.start - std::f32::consts::TAU).abs() > 1e-2;
+            if arc.inner_radius > 0.0 || is_open_arc {
+                let mid_ang = (arc.start + arc.end) * 0.5;
+                let r_norm = arc.inner_radius.clamp(0.15, 0.85) * 0.5;
+                pts.push(at_norm(0.5 + r_norm * mid_ang.cos(), 0.5 + r_norm * mid_ang.sin()));
+                let r_start = if is_open_arc { r_outer } else { 0.44 };
+                pts.push(at_norm(0.5 + r_start * arc.start.cos(), 0.5 + r_start * arc.start.sin()));
             }
             pts
         }
@@ -192,6 +197,42 @@ pub fn shape_control_handles(kind: &NodeKind, corners: &[Vec2; 4], zoom: f32) ->
         }
         _ => Vec::new(),
     }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ShapeControlKind {
+    EllipseSweep,
+    EllipseInnerRadius,
+    EllipseStartAngle,
+    PolygonCount,
+    StarCount,
+    StarInnerRatio,
+}
+
+/// Hit-tests on-canvas shape control handles (`Ellipse` sweep/inner-radius/start-angle,
+/// `Polygon` count, `Star` count/inner-ratio) in screen space.
+pub fn hit_shape_control_handle(
+    kind: &NodeKind,
+    corners: &[Vec2; 4],
+    zoom: f32,
+    p: Vec2,
+    hit_radius: f32,
+) -> Option<ShapeControlKind> {
+    let pts = shape_control_handles(kind, corners, zoom);
+    for (idx, &pt) in pts.iter().enumerate() {
+        if dist(p, pt) <= hit_radius {
+            return match (kind, idx) {
+                (NodeKind::Ellipse(_), 0) => Some(ShapeControlKind::EllipseSweep),
+                (NodeKind::Ellipse(_), 1) => Some(ShapeControlKind::EllipseInnerRadius),
+                (NodeKind::Ellipse(_), 2) => Some(ShapeControlKind::EllipseStartAngle),
+                (NodeKind::Polygon { .. }, 0 | 1) => Some(ShapeControlKind::PolygonCount),
+                (NodeKind::Star { .. }, 0) => Some(ShapeControlKind::StarCount),
+                (NodeKind::Star { .. }, 1) => Some(ShapeControlKind::StarInnerRatio),
+                _ => None,
+            };
+        }
+    }
+    None
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -256,15 +297,136 @@ pub fn handle_pos(corners: &[Vec2; 4], h: Handle) -> Vec2 {
     add(corners[0], add(scale(ex, nx), scale(ey, ny)))
 }
 
-/// Hit-tests handles (resize first, then rotation zones just outside corners).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SmartSelectionHandleKind {
+    /// Drag to adjust uniform gap along `horiz` axis (`true` = X, `false` = Y).
+    Gap { horiz: bool, index: usize },
+    /// Drag center ring of `NodeId` onto another selected node to swap positions.
+    Swap(designos_doc::NodeId),
+}
+
+/// Computes Figma Smart Selection handles (`Swap` center rings and `Gap` spacing bars)
+/// when 2 or more nodes are selected.
+/// Returns `(kind, center_in_rect_space, screen_size_px)`.
+pub fn smart_selection_handles(
+    items: &[(designos_doc::NodeId, Rect)],
+) -> Vec<(SmartSelectionHandleKind, Vec2, Vec2)> {
+    if items.len() < 2 {
+        return Vec::new();
+    }
+    let mut min_cx = f32::MAX;
+    let mut max_cx = f32::MIN;
+    let mut min_cy = f32::MAX;
+    let mut max_cy = f32::MIN;
+    for (_, r) in items {
+        let cx = r.x + r.w * 0.5;
+        let cy = r.y + r.h * 0.5;
+        min_cx = min_cx.min(cx);
+        max_cx = max_cx.max(cx);
+        min_cy = min_cy.min(cy);
+        max_cy = max_cy.max(cy);
+    }
+    let horiz = (max_cx - min_cx) >= (max_cy - min_cy);
+    let mut sorted = items.to_vec();
+    if horiz {
+        sorted.sort_by(|a, b| a.1.x.total_cmp(&b.1.x).then_with(|| a.1.y.total_cmp(&b.1.y)));
+    } else {
+        sorted.sort_by(|a, b| a.1.y.total_cmp(&b.1.y).then_with(|| a.1.x.total_cmp(&b.1.x)));
+    }
+
+    let mut out = Vec::with_capacity(sorted.len() * 2 - 1);
+    for &(id, ref r) in &sorted {
+        out.push((
+            SmartSelectionHandleKind::Swap(id),
+            v2(r.x + r.w * 0.5, r.y + r.h * 0.5),
+            v2(10.0, 10.0),
+        ));
+    }
+    for i in 0..(sorted.len() - 1) {
+        let a = &sorted[i].1;
+        let b = &sorted[i + 1].1;
+        let (center, size) = if horiz {
+            let gx = (a.x + a.w + b.x) * 0.5;
+            let gy = (a.y + a.h * 0.5 + b.y + b.h * 0.5) * 0.5;
+            (v2(gx, gy), v2(4.0, 14.0))
+        } else {
+            let gx = (a.x + a.w * 0.5 + b.x + b.w * 0.5) * 0.5;
+            let gy = (a.y + a.h + b.y) * 0.5;
+            (v2(gx, gy), v2(14.0, 4.0))
+        };
+        out.push((SmartSelectionHandleKind::Gap { horiz, index: i }, center, size));
+    }
+    out
+}
+
+/// Hit-tests Smart Selection `Gap` bars and `Swap` rings in screen space.
+pub fn hit_smart_selection_handle(
+    handles: &[(SmartSelectionHandleKind, Vec2, Vec2)],
+    to_screen: impl Fn(Vec2) -> Vec2,
+    p: Vec2,
+    hit_pad: f32,
+) -> Option<SmartSelectionHandleKind> {
+    // Check Gap bars first so tight gaps between small items are easy to grab, then Swap rings.
+    for &(kind, center, size) in handles {
+        if matches!(kind, SmartSelectionHandleKind::Gap { .. }) {
+            let sc = to_screen(center);
+            let hx = size.x * 0.5 + hit_pad;
+            let hy = size.y * 0.5 + hit_pad;
+            if (p.x - sc.x).abs() <= hx && (p.y - sc.y).abs() <= hy {
+                return Some(kind);
+            }
+        }
+    }
+    for &(kind, center, size) in handles {
+        if matches!(kind, SmartSelectionHandleKind::Swap(_)) {
+            let sc = to_screen(center);
+            let r = size.x.max(size.y) * 0.5 + hit_pad;
+            if dist(p, sc) <= r {
+                return Some(kind);
+            }
+        }
+    }
+    None
+}
+
+/// Minimum Euclidean distance from point `p` to line segment `a..=b`.
+pub fn point_to_segment_dist(p: Vec2, a: Vec2, b: Vec2) -> f32 {
+    let ab = sub(b, a);
+    let len_sq = ab.x * ab.x + ab.y * ab.y;
+    if len_sq <= 1e-6 {
+        return dist(p, a);
+    }
+    let ap = sub(p, a);
+    let t = ((ap.x * ab.x + ap.y * ab.y) / len_sq).clamp(0.0, 1.0);
+    let proj = add(a, scale(ab, t));
+    dist(p, proj)
+}
+
+/// Hit-tests handles (corner resize first, then midpoint/edge-segment resize when `allow_mid`,
+/// then rotation zones just outside corners).
 /// All values are in the same space as `corners` (screen pixels).
 pub fn hit_handle(corners: &[Vec2; 4], p: Vec2, hit_radius: f32, rotate_zone: f32, allow_mid: bool) -> Option<HandleHit> {
-    for h in Handle::ALL {
-        if !allow_mid && !h.is_corner() {
-            continue;
-        }
+    for h in [Handle::TL, Handle::TR, Handle::BR, Handle::BL] {
         if dist(handle_pos(corners, h), p) <= hit_radius {
             return Some(HandleHit::Resize(h));
+        }
+    }
+    if allow_mid {
+        for h in [Handle::T, Handle::R, Handle::B, Handle::L] {
+            if dist(handle_pos(corners, h), p) <= hit_radius {
+                return Some(HandleHit::Resize(h));
+            }
+        }
+        let edges = [
+            (corners[0], corners[1], Handle::T),
+            (corners[1], corners[2], Handle::R),
+            (corners[2], corners[3], Handle::B),
+            (corners[3], corners[0], Handle::L),
+        ];
+        for (a, b, h) in edges {
+            if point_to_segment_dist(p, a, b) <= hit_radius {
+                return Some(HandleHit::Resize(h));
+            }
         }
     }
     for (i, c) in corners.iter().enumerate() {

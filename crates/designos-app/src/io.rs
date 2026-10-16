@@ -14,11 +14,24 @@ pub fn load_path(path: &Path) -> Result<Document, String> {
             let bytes = std::fs::read(path).map_err(|e| format!("Cannot read {}: {e}", path.display()))?;
             designos_fig::import_fig(&bytes).map_err(|e| format!("Cannot import .fig: {e}"))?
         }
+        "pen" => {
+            let text = std::fs::read_to_string(path).map_err(|e| format!("Cannot read {}: {e}", path.display()))?;
+            let mut d = designos_fig::import_pen_json(&text).map_err(|e| format!("Cannot import .pen: {e}"))?;
+            if d.name.is_empty() || d.name == "Pencil Document" {
+                if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
+                    d.name = stem.to_string();
+                }
+            }
+            d
+        }
         "json" => {
             let text = std::fs::read_to_string(path).map_err(|e| format!("Cannot read {}: {e}", path.display()))?;
             match designos_fig::import_rest_json(&text) {
                 Ok(d) => d,
-                Err(fig_err) => Document::from_json(&text).map_err(|e| format!("Not a Figma REST file ({fig_err}) nor a designos file ({e})"))?,
+                Err(fig_err) => match designos_fig::import_pen_json(&text) {
+                    Ok(d) => d,
+                    Err(_) => Document::from_json(&text).map_err(|e| format!("Not a Figma REST file ({fig_err}) nor a designos file ({e})"))?,
+                },
             }
         }
         "svg" => {
@@ -48,7 +61,7 @@ pub fn ensure_page(doc: &mut Document) {
     }
 }
 
-/// Writes the native format (or `.fig` binary when the extension is `.fig`); returns the final path.
+/// Writes the native format (or `.fig` binary / `.pen` JSON when the extension matches); returns the final path.
 pub fn save_path(doc: &Document, path: &Path) -> Result<PathBuf, String> {
     let mut p = path.to_path_buf();
     if p.extension().is_none() {
@@ -59,6 +72,11 @@ pub fn save_path(doc: &Document, path: &Path) -> Result<PathBuf, String> {
         std::fs::write(&p, bytes).map_err(|e| format!("Cannot write {}: {e}", p.display()))?;
         return Ok(p);
     }
+    if p.extension().and_then(|e| e.to_str()).is_some_and(|e| e.eq_ignore_ascii_case("pen")) {
+        let pen_json = designos_fig::export_pen_json(doc).map_err(|e| format!("Cannot export .pen: {e}"))?;
+        std::fs::write(&p, pen_json).map_err(|e| format!("Cannot write {}: {e}", p.display()))?;
+        return Ok(p);
+    }
     let json = doc.to_json().map_err(|e| format!("Cannot serialize: {e}"))?;
     std::fs::write(&p, json).map_err(|e| format!("Cannot write {}: {e}", p.display()))?;
     Ok(p)
@@ -66,9 +84,10 @@ pub fn save_path(doc: &Document, path: &Path) -> Result<PathBuf, String> {
 
 pub fn pick_open() -> Option<PathBuf> {
     rfd::FileDialog::new()
-        .add_filter("Design files", &[NATIVE_EXT, LEGACY_EXT, "fig", "json", "svg"])
+        .add_filter("Design files", &[NATIVE_EXT, LEGACY_EXT, "fig", "pen", "json", "svg"])
         .add_filter("design:os studio", &[NATIVE_EXT, LEGACY_EXT])
         .add_filter("Figma file", &["fig"])
+        .add_filter("Pencil file", &["pen"])
         .add_filter("SVG", &["svg"])
         .add_filter("JSON", &["json"])
         .pick_file()
@@ -78,6 +97,7 @@ pub fn pick_save(default_name: &str) -> Option<PathBuf> {
     rfd::FileDialog::new()
         .add_filter("design:os studio", &[NATIVE_EXT, LEGACY_EXT])
         .add_filter("Figma file", &["fig"])
+        .add_filter("Pencil file", &["pen"])
         .set_file_name(format!("{default_name}.{NATIVE_EXT}"))
         .save_file()
 }

@@ -85,11 +85,15 @@ pub struct UiState {
     pub menu: Option<MenuKind>,
     pub menu_anchor: Option<egui::Rect>,
     pub left_collapsed: bool,
+    pub left_panel_width: f32,
+    pub ai_panel_width: f32,
     pub rail: Option<RailItem>,
     pub right_tab: Option<RightTab>,
     pub dev_mode: bool,
     /// Selection context menu position (canvas or layers right-click).
     pub ctx_menu: Option<egui::Pos2>,
+    /// Overlapping layer picker menu position and hit list (`Cmd/Ctrl + Right-Click` on canvas).
+    pub layer_picker: Option<(egui::Pos2, Vec<NodeId>)>,
     /// Anchor of the instance "more" menu and of the add-property menu in the inspector.
     pub inst_menu: Option<egui::Rect>,
     pub prop_menu: Option<egui::Rect>,
@@ -103,6 +107,18 @@ pub struct UiState {
     pub hide_layout_grids: bool,
     /// Snap to pixel grid is off (it is on by default, as in Figma).
     pub no_pixel_snap: bool,
+}
+
+#[derive(Clone, Debug)]
+pub struct CopiedStyle {
+    pub fills: Vec<designos_doc::Paint>,
+    pub stroke: designos_doc::Stroke,
+    pub effects: Vec<designos_doc::Effect>,
+    pub opacity: f32,
+    pub blend_mode: designos_doc::BlendMode,
+    pub corner_radii: [f32; 4],
+    pub corner_smoothing: f32,
+    pub text_style: Option<designos_doc::TextStyle>,
 }
 
 pub struct Toast {
@@ -136,6 +152,7 @@ pub struct App {
     pub find: crate::find::FindState,
     pub ui: UiState,
     pub clip: Option<Clip>,
+    pub copied_style: Option<CopiedStyle>,
     pub paste_count: u32,
     pub toast: Option<Toast>,
     pub file_path: Option<PathBuf>,
@@ -175,6 +192,8 @@ pub struct App {
     pub cmdk: crate::cmdk::CmdKState,
     /// 1:1 Figma UI3 Multi-Tab Project Workspace state (`US-10`).
     pub tabs: crate::tabs::TabsState,
+    /// Two-digit rapid opacity keystroke buffer (`(digit, timestamp)` within 400ms).
+    pub opacity_buffer: Option<(u8, f64)>,
 }
 
 impl App {
@@ -200,8 +219,14 @@ impl App {
             plugins: Default::default(),
             proto: Default::default(),
             find: Default::default(),
-            ui: UiState { pixel_grid: true, ..UiState::default() },
+            ui: UiState {
+                pixel_grid: true,
+                left_panel_width: theme::LEFT_PANEL_WIDTH,
+                ai_panel_width: 400.0,
+                ..UiState::default()
+            },
             clip: None,
+            copied_style: None,
             paste_count: 0,
             toast: None,
             file_path: None,
@@ -226,6 +251,7 @@ impl App {
             terminal: Default::default(),
             cmdk: Default::default(),
             tabs: Default::default(),
+            opacity_buffer: None,
         }
     }
 
@@ -276,9 +302,9 @@ impl App {
         }
     }
 
+    #[allow(dead_code)]
     pub fn title(&self) -> String {
-        let name = if self.doc.name.is_empty() { "Untitled" } else { &self.doc.name };
-        format!("{name} - {}", theme::APP_TITLE)
+        theme::APP_TITLE.to_string()
     }
 }
 

@@ -10,8 +10,9 @@ clipboard/filesystem I/O, or real CLI subprocess execution.
 Verifies 12 hard Zero-Fake-UI invariants (`Z01..Z12`):
   - Z01: `terminal.rs` has `runtime_binary_available` and real CLI invocation
          (`claude -p`, `codex exec`, `agy -p`, `grok -p`) in `submit_chat_prompt`.
-  - Z02: `terminal.rs` `set_active_runtime` mutates `tab.preset` and exports
-         `DESIGNOS_AGENT_RUNTIME` (not just renaming `tab.title`).
+  - Z02: `terminal.rs` `set_active_runtime` mutates `tab.preset` (not just renaming `tab.title`)
+         without typing into the live PTY; `DESIGNOS_AGENT_RUNTIME` is set in `configure_pty_env`
+         and `build_real_cli_command`.
   - Z03: `terminal.rs` `dispatch_figma_ai_prompt` does NOT prefix PTY commands with a `#` shell comment.
   - Z04: `terminal.rs` header & composer buttons (`agents-header-ai`, `agents-header-popout`,
          `agents-header-more`, `agents-composer-attach`, `agents-composer-context`,
@@ -98,12 +99,17 @@ def check_z01(terminal_rs: str) -> Tuple[bool, str]:
     submit_body = extract_fn_body(terminal_rs, "submit_chat_prompt")
     helper_body = extract_fn_body(terminal_rs, "build_real_cli_command")
     combined = submit_body + "\n" + helper_body
-    cli_tokens = ["claude -p", "codex exec", "agy -p", "grok -p"]
-    missing = [tok for tok in cli_tokens if tok not in combined and tok not in terminal_rs]
+    cli_checks = {
+        "claude": ("claude --dangerously-skip-permissions -p" in combined or "claude -p" in combined),
+        "codex": ("codex --dangerously-bypass-approvals-and-sandbox exec" in combined or "codex exec" in combined),
+        "agy": ("agy --dangerously-skip-permissions -p" in combined or "agy -p" in combined),
+        "grok": ("grok --always-approve -p" in combined or "grok -p" in combined),
+    }
+    missing = [name for name, present in cli_checks.items() if not present]
     calls_avail = "runtime_binary_available" in submit_body
     ok = has_avail and calls_avail and not missing
     if ok:
-        return True, "runtime_binary_available + real CLI invocations (`claude -p`, `codex exec`, `agy -p`, `grok -p`) verified in submit_chat_prompt"
+        return True, "runtime_binary_available + real CLI invocations (claude, codex, agy, grok with skip-permissions) verified in submit_chat_prompt"
     reasons = []
     if not has_avail:
         reasons.append("missing `fn runtime_binary_available`")
@@ -117,11 +123,17 @@ def check_z01(terminal_rs: str) -> Tuple[bool, str]:
 def check_z02(terminal_rs: str) -> Tuple[bool, str]:
     body = extract_fn_body(terminal_rs, "set_active_runtime")
     has_preset = bool(re.search(r"tab\.preset\s*=\s*runtime", body))
-    has_env = "DESIGNOS_AGENT_RUNTIME" in body
-    ok = bool(body) and has_preset and has_env
+    # Typing into the tab lands as a chat prompt when the tab hosts an agent TUI.
+    no_pty_write = "send_line" not in body and "write_all" not in body
+    spawn_env = "DESIGNOS_AGENT_RUNTIME" in extract_fn_body(terminal_rs, "configure_pty_env")
+    cmd_env = "DESIGNOS_AGENT_RUNTIME" in extract_fn_body(terminal_rs, "build_real_cli_command")
+    ok = bool(body) and has_preset and no_pty_write and spawn_env and cmd_env
     if ok:
-        return True, "`set_active_runtime` mutates `tab.preset = runtime` and exports `DESIGNOS_AGENT_RUNTIME`"
-    return False, f"set_active_runtime missing tab.preset mutation ({has_preset}) or DESIGNOS_AGENT_RUNTIME export ({has_env})"
+        return True, "`set_active_runtime` mutates `tab.preset = runtime` without PTY writes; `DESIGNOS_AGENT_RUNTIME` set at spawn + per CLI command"
+    return False, (
+        f"tab.preset mutation={has_preset}, no PTY write in set_active_runtime={no_pty_write}, "
+        f"env in configure_pty_env={spawn_env}, env in build_real_cli_command={cmd_env}"
+    )
 
 
 def check_z03(terminal_rs: str) -> Tuple[bool, str]:
@@ -334,7 +346,7 @@ def run_all_checks() -> List[Dict[str, Any]]:
 
     specs = [
         ("Z01", "terminal.rs", "Real CLI binary detection & invocation in submit_chat_prompt", lambda: check_z01(terminal_rs)),
-        ("Z02", "terminal.rs", "set_active_runtime mutates tab.preset & exports DESIGNOS_AGENT_RUNTIME", lambda: check_z02(terminal_rs)),
+        ("Z02", "terminal.rs", "set_active_runtime mutates tab.preset; DESIGNOS_AGENT_RUNTIME set at spawn, never typed", lambda: check_z02(terminal_rs)),
         ("Z03", "terminal.rs", "dispatch_figma_ai_prompt sends executable command without # comment prefix", lambda: check_z03(terminal_rs)),
         ("Z04", "terminal.rs", "All 6 Agents header & composer buttons have Sense::click() handlers", lambda: check_z04(terminal_rs)),
         ("Z05", "specs.rs", "specs-ask-agent-bar hosts editable TextEdit::singleline(ask_input)", lambda: check_z05(specs_rs)),

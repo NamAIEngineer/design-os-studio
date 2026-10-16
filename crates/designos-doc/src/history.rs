@@ -73,12 +73,13 @@ impl Command {
         Ok(match self {
             Command::Insert { parent, index, nodes } => {
                 let root = nodes.first().map(|n| n.id).ok_or(DocError::NotFound(parent))?;
-                let p = doc.get_mut(parent).ok_or(DocError::NotFound(parent))?;
+                let p = doc.nodes.get_mut(&parent).ok_or(DocError::NotFound(parent))?;
                 if !p.kind.is_container() {
                     return Err(DocError::NotAContainer(parent));
                 }
                 let index = index.min(p.children.len());
                 p.children.insert(index, root);
+                let many = nodes.len() > 64;
                 for mut n in nodes {
                     if n.id == root {
                         n.parent = Some(parent);
@@ -86,6 +87,12 @@ impl Command {
                     doc.nodes.insert(n.id, n);
                 }
                 doc.bump_ids();
+                if many {
+                    doc.mark_tree_full_dirty();
+                } else {
+                    doc.mark_node_dirty(parent);
+                    doc.mark_node_dirty(root);
+                }
                 Command::Remove { id: root }
             }
             Command::Remove { id } => {
@@ -123,6 +130,7 @@ impl Command {
                 let index = index.min(doc.pages.len());
                 doc.pages.insert(index, root);
                 doc.bump_ids();
+                doc.mark_tree_full_dirty();
                 Command::RemovePage { id: root }
             }
             Command::RemovePage { id } => {
@@ -132,6 +140,7 @@ impl Command {
             }
             Command::SetFlows { flows } => Command::SetFlows { flows: std::mem::replace(&mut doc.flows, flows) },
             Command::SetStyles { styles, style_meta } => {
+                doc.mark_full_dirty();
                 Command::SetStyles { styles: std::mem::replace(&mut doc.styles, styles), style_meta: std::mem::replace(&mut doc.style_meta, style_meta) }
             }
             Command::SetComments { comments } => Command::SetComments { comments: std::mem::replace(&mut doc.comments, comments) },
@@ -144,10 +153,13 @@ impl Command {
                 Command::SetGuides { page, guides: old.unwrap_or_default() }
             }
             Command::SetPrototypeDevice { device } => Command::SetPrototypeDevice { device: std::mem::replace(&mut doc.prototype_device, device) },
-            Command::SetVariables { variables, collections } => Command::SetVariables {
-                variables: std::mem::replace(&mut doc.variables, variables),
-                collections: std::mem::replace(&mut doc.variable_collections, collections),
-            },
+            Command::SetVariables { variables, collections } => {
+                doc.mark_full_dirty();
+                Command::SetVariables {
+                    variables: std::mem::replace(&mut doc.variables, variables),
+                    collections: std::mem::replace(&mut doc.variable_collections, collections),
+                }
+            }
             Command::Batch(cmds) => {
                 let mut inv = Vec::with_capacity(cmds.len());
                 for c in cmds {

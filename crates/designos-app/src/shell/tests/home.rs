@@ -429,18 +429,21 @@ fn userflows_uf01_to_uf08_end_to_end_figma_parity() {
     assert_eq!(s.app().ui.rail, Some(RailItem::Agents));
     assert!(!s.app().ui.left_collapsed);
 
-    // Wave 7 (DIR-21): Switch CLI Runtimes (Claude / Codex / Antigravity) & submit Chat-over-PTY prompt
-    assert_eq!(s.app().terminal.active_runtime, crate::terminal::AgentCliPreset::Claude);
-    click_rect(&mut s, "agents-runtime-codex");
+    // Default Interactive Shell + Top `+` Runtime Dropdown (Claude / Codex / Grok / Antigravity)
+    assert_eq!(s.app().terminal.active_runtime, crate::terminal::AgentCliPreset::Shell);
+    assert!(s.app().terminal.side_panel_pty_open);
+    click_rect(&mut s, "agents-runtime-add-btn");
+    assert!(s.app().terminal.runtime_dropdown_open);
+    click_rect(&mut s, "agents-dropdown-codex");
     assert_eq!(s.app().terminal.active_runtime, crate::terminal::AgentCliPreset::Codex);
-    click_rect(&mut s, "agents-runtime-agy");
+    click_rect(&mut s, "agents-runtime-add-btn");
+    click_rect(&mut s, "agents-dropdown-antigravity");
     assert_eq!(s.app().terminal.active_runtime, crate::terminal::AgentCliPreset::Antigravity);
-    click_rect(&mut s, "agents-runtime-claude");
+    click_rect(&mut s, "agents-runtime-add-btn");
+    click_rect(&mut s, "agents-dropdown-claude");
     assert_eq!(s.app().terminal.active_runtime, crate::terminal::AgentCliPreset::Claude);
 
-    s.shell.app.terminal.input_line = "Create a SaaS analytics card in Claude Code".to_string();
-    s.frame(vec![]);
-    click_rect(&mut s, "agents-composer-send");
+    s.shell.app.terminal.submit_chat_prompt("Create a SaaS analytics card in Claude Code", None);
     assert_eq!(s.app().terminal.chat_turns.len(), 2);
     assert_eq!(s.app().terminal.chat_turns[0].text, "Create a SaaS analytics card in Claude Code");
 

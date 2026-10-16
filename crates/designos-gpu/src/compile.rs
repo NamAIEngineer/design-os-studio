@@ -95,22 +95,23 @@ impl SceneCompiler {
             cull: !single,
             ss,
         };
-        let node = doc.get(root_node).map(|n| resolve_node(doc, n).into_owned());
-        let bg = match node.as_ref().map(|n| &n.kind) {
+        let node = doc.get(root_node).map(|n| resolve_node(doc, n));
+        let bg = match node.as_deref().map(|n| &n.kind) {
             Some(NodeKind::Page { background }) => [background.r, background.g, background.b, background.a],
             _ if single => [0.0; 4],
-            _ => [0xF5 as f32 / 255.0, 0xF5 as f32 / 255.0, 0xF5 as f32 / 255.0, 1.0],
+            _ => [0x5A as f32 / 255.0, 0x5A as f32 / 255.0, 0x5A as f32 / 255.0, 1.0],
         };
         let mut root = Program::new(root_rect);
         root.clear = [bg[0].clamp(0.0, 1.0) * bg[3], bg[1].clamp(0.0, 1.0) * bg[3], bg[2].clamp(0.0, 1.0) * bg[3], bg[3].clamp(0.0, 1.0)];
         cx.progs.push(root);
         cx.stack.push(0);
         let full = cx.clip_for(ClipDesc { scissor: root_rect, mask: None });
-        if let Some(n) = node {
+        if let Some(n) = node.as_deref() {
             if single && !matches!(n.kind, NodeKind::Page { .. }) {
-                cx.draw_node(&n, root_ts, full);
+                cx.draw_node(n, root_ts, full);
             } else if cx.cull
-                && n.children.len() > 64
+                && n.children.len() > 8
+                && !cx.index.has_top_mask()
                 && root_ts.kx == 0.0
                 && root_ts.ky == 0.0
                 && root_ts.sx > 0.0
@@ -124,8 +125,7 @@ impl SceneCompiler {
                 cx.index.query_top_level((wx0, wy0, wx1, wy1), &mut children);
                 cx.draw_children(&children, root_ts, full);
             } else {
-                let children = n.children.clone();
-                cx.draw_children(&children, root_ts, full);
+                cx.draw_children(&n.children, root_ts, full);
             }
         }
         Frame { size, out_size, ss, root: 0, programs: cx.progs, clips: cx.clips }
@@ -170,18 +170,30 @@ fn special_blend(b: d::BlendMode) -> bool {
     !matches!(b, d::BlendMode::Normal | d::BlendMode::PassThrough)
 }
 
-fn visible_fills(n: &Node) -> Vec<&d::Paint> {
-    match &n.kind {
-        NodeKind::Text(t) => t.style.fills.iter().filter(|p| p.visible).collect(),
-        _ => n.fills.iter().filter(|p| p.visible).collect(),
-    }
+#[inline]
+fn visible_fills(n: &Node) -> impl Iterator<Item = &d::Paint> + Clone {
+    let slice = match &n.kind {
+        NodeKind::Text(t) => t.style.fills.as_slice(),
+        _ => n.fills.as_slice(),
+    };
+    slice.iter().filter(|p| p.visible)
 }
 
-fn visible_strokes(n: &Node) -> Vec<&d::Paint> {
-    if n.stroke.weight <= 0.0 && n.stroke.side_weights.is_none() {
-        return Vec::new();
-    }
-    n.stroke.paints.iter().filter(|p| p.visible).collect()
+#[inline]
+fn visible_strokes(n: &Node) -> impl Iterator<Item = &d::Paint> + Clone {
+    let active = n.stroke.weight > 0.0 || n.stroke.side_weights.is_some();
+    let slice = if active { n.stroke.paints.as_slice() } else { &[] };
+    slice.iter().filter(|p| p.visible)
+}
+
+#[inline]
+fn has_visible_fills(n: &Node) -> bool {
+    visible_fills(n).next().is_some()
+}
+
+#[inline]
+fn has_visible_strokes(n: &Node) -> bool {
+    visible_strokes(n).next().is_some()
 }
 
 fn identity_like(ts: &sk::Transform) -> bool {
@@ -315,7 +327,11 @@ impl Ctx<'_> {
     // ----- tree -------------------------------------------------------------
 
     fn interactive(&self) -> bool {
-        self.cull && self.geom.budget.is_some()
+        self.cull && (self.geom.budget.is_some() || self.doc.nodes.len() > 2_000)
+    }
+
+    fn zoom_lod(&self) -> bool {
+        self.interactive() && ts_scale(&self.root_ts) < 0.45
     }
 
     fn draw_children(&mut self, children: &[NodeId], parent_ts: sk::Transform, clip: ClipId) {
@@ -324,41 +340,24 @@ impl Ctx<'_> {
         if vis.is_empty() {
             return;
         }
-        let interactive = self.interactive();
+        let zoom_lod = self.zoom_lod();
         for (i, cid) in children.iter().enumerate() {
             if self.cull && !board::is_synthetic(*cid) {
-                if let Some(raw) = doc.get(*cid) {
-                    if !raw.visible {
+                let Some((b, is_mask)) = self.index.cull_info(*cid) else {
+                    continue;
+                };
+                if !is_mask {
+                    let bb = xform_bounds(&self.root_ts, b.0, b.1, b.2 - b.0, b.3 - b.1);
+                    let bw = bb.2 - bb.0;
+                    let bh = bb.3 - bb.1;
+                    if !hits(bb, vis) || (zoom_lod && ((bw < 1.25 && bh < 1.25) || (bw.max(bh) < 4.0 && bw.min(bh) < 0.35))) {
                         continue;
-                    }
-                    if !raw.is_mask {
-                        match self.index.bounds_of(*cid) {
-                            Some(b) => {
-                                let bb = xform_bounds(&self.root_ts, b.0, b.1, b.2 - b.0, b.3 - b.1);
-                                if !hits(bb, vis) || (interactive && (bb.2 - bb.0) < 0.75 && (bb.3 - bb.1) < 0.75) {
-                                    continue;
-                                }
-                            }
-                            None => continue,
-                        }
                     }
                 }
             }
             let Some(child) = board::get(doc, *cid) else { continue };
             let child = resolve_node(doc, &child);
             let child: &Node = &child;
-            // lowered board children are not in the scene index
-            if self.cull && !child.is_mask && !board::is_synthetic(*cid) {
-                match self.index.bounds_of(*cid) {
-                    Some(b) => {
-                        let bb = xform_bounds(&self.root_ts, b.0, b.1, b.2 - b.0, b.3 - b.1);
-                        if !hits(bb, vis) {
-                            continue;
-                        }
-                    }
-                    None => continue,
-                }
-            }
             let ts = parent_ts.pre_concat(to_sk(&child.transform));
             if child.is_mask {
                 if !child.visible {
@@ -476,10 +475,12 @@ impl Ctx<'_> {
         if (!has_kids || clips_content) && !hits(bb, vis) {
             return;
         }
-        if self.interactive() && !has_kids && (bb.2 - bb.0) < 0.75 && (bb.3 - bb.1) < 0.75 {
+        let bw = bb.2 - bb.0;
+        let bh = bb.3 - bb.1;
+        if self.zoom_lod() && !has_kids && ((bw < 1.25 && bh < 1.25) || (bw.max(bh) < 4.0 && bw.min(bh) < 0.35)) {
             return;
         }
-        let paints = visible_fills(n).len() + visible_strokes(n).len();
+        let paints = visible_fills(n).count() + visible_strokes(n).count();
         let has_effects = n.effects.iter().any(|e| {
             matches!(e, Effect::DropShadow { visible: true, .. } | Effect::InnerShadow { visible: true, .. } | Effect::BackgroundBlur { visible: true, .. })
                 || matches!(e, Effect::Glass(g) if g.visible)
@@ -589,16 +590,80 @@ impl Ctx<'_> {
         let bb = self.bbox(n, &ts);
         let inner_bb = xform_bounds(&ts, 0.0, 0.0, n.size.x, n.size.y);
         let interactive = self.interactive();
+        let zoom_lod = self.zoom_lod();
+        let sh = (inner_bb.3 - inner_bb.1).abs();
+        let sw = (inner_bb.2 - inner_bb.0).abs();
 
-        if interactive && matches!(n.kind, NodeKind::Text(_)) {
-            let sh = (inner_bb.3 - inner_bb.1).abs();
-            let sw = (inner_bb.2 - inner_bb.0).abs();
-            if sh < 3.5 || sw < 2.0 {
-                if sh >= 1.25 && sw >= 2.0 {
-                    if let Some(p) = visible_fills(n).first() {
-                        let unit = self.unit.clone();
-                        let qts = ts.pre_scale(n.size.x.max(1.0), (n.size.y * 0.55).max(1.0));
-                        self.fill_with(&unit, qts, n.size, p, alpha * 0.35, clip);
+        if zoom_lod {
+            let leaf_lod_px = if scale < 0.35 { 5.0 } else { 2.5 };
+            if let NodeKind::Text(t) = &n.kind {
+                let font_px = t.style.font_size * scale;
+                if font_px < 3.0 || sh < 3.5 || sw < 2.0 {
+                    if font_px >= 1.0 && sh >= 1.25 && sw >= 2.0 {
+                        if let Some(p) = visible_fills(n).next() {
+                            let unit = self.unit.clone();
+                            let h_bar = n.size.y.min(t.style.font_size * 0.7).max(1.0);
+                            let qts = ts.pre_scale(n.size.x.max(1.0), h_bar);
+                            self.fill_with(&unit, qts, n.size, p, alpha * 0.65, clip);
+                        }
+                    }
+                    return;
+                }
+            } else if !draws_children(n) && sw.max(sh) < leaf_lod_px && n.size.x > 0.0 && n.size.y > 0.0 {
+                if let Some(p) = visible_fills(n).next().or_else(|| visible_strokes(n).next()) {
+                    let unit = self.unit.clone();
+                    let qts = ts.pre_scale(n.size.x, n.size.y);
+                    self.fill_with(&unit, qts, n.size, p, alpha, clip);
+                }
+                return;
+            }
+        }
+
+        // Exact zero-tessellation unit-quad fast-path for sharp axis-aligned rectangles & frames at all zoom levels
+        // (plus sub-pixel corner-radius / stroke approximation when zoomed out in `zoom_lod`).
+        if matches!(
+            n.kind,
+            NodeKind::Rectangle
+                | NodeKind::Section
+                | NodeKind::Frame(_)
+                | NodeKind::Component(_)
+                | NodeKind::ComponentSet(_)
+                | NodeKind::Instance { .. }
+        ) && n.fill_geometry.is_none()
+            && n.stroke_geometry.is_none()
+            && (n.effects.is_empty() || (zoom_lod && scale < 0.25))
+            && (!has_visible_strokes(n) || (zoom_lod && scale < 0.25 && n.stroke.weight * scale < 0.75))
+            && n.size.x > 0.0
+            && n.size.y > 0.0
+        {
+            let radii = if matches!(n.kind, NodeKind::Section) { [0.0; 4] } else { n.corner_radii };
+            let max_r = radii.iter().copied().fold(0.0f32, f32::max);
+            let max_r_px = max_r * scale;
+            let rect_r_px = if scale < 0.35 { 2.0 } else { 0.75 };
+            let clips = n.kind.frame_props().map(|f| f.clips_content).unwrap_or(false);
+            if (max_r <= 0.0 || (zoom_lod && max_r_px <= rect_r_px))
+                && (!clips || identity_like(&ts))
+                && visible_fills(n).all(|p| matches!(p.kind, d::PaintKind::Solid(_)))
+            {
+                let unit = self.unit.clone();
+                let qts = ts.pre_scale(n.size.x, n.size.y);
+                for p in visible_fills(n) {
+                    self.fill_with(&unit, qts, n.size, p, alpha, clip);
+                }
+                if draws_children(n) {
+                    if zoom_lod && (sw.max(sh) < 6.0 || sw.min(sh) < 2.0) {
+                        return;
+                    }
+                    if clips {
+                        let (x0, y0) = (ts.tx, ts.ty);
+                        let (x1, y1) = (ts.tx + n.size.x * ts.sx, ts.ty + n.size.y * ts.sy);
+                        let r = IRect::new(x0.round() as i32, y0.round() as i32, x1.round() as i32, y1.round() as i32);
+                        let cc = self.narrow_clip(clip, r);
+                        if !self.visible(cc).is_empty() {
+                            self.draw_children(&n.children, ts, cc);
+                        }
+                    } else {
+                        self.draw_children(&n.children, ts, clip);
                     }
                 }
                 return;
@@ -665,17 +730,14 @@ impl Ctx<'_> {
         // 5. children
         if draws_children(n) {
             let clips = n.kind.frame_props().map(|f| f.clips_content).unwrap_or(false);
-            if interactive && (clips || !visible_fills(n).is_empty()) {
-                let max_dim = (inner_bb.2 - inner_bb.0).abs().max((inner_bb.3 - inner_bb.1).abs());
-                if max_dim < 6.0 {
-                    return;
-                }
+            if zoom_lod && (sw.max(sh) < 6.0 || ((clips || has_visible_fills(n)) && sw.min(sh) < 2.0)) {
+                return;
             }
             if clips {
                 let Some(sh) = &g.shape else { return };
                 let radii = if matches!(n.kind, NodeKind::Section) { [0.0; 4] } else { n.corner_radii };
                 let max_r_px = radii.iter().copied().fold(0.0f32, f32::max) * scale;
-                let rect_like = sh.is_rect && identity_like(&ts) && (max_r_px <= 0.0 || (interactive && (max_r_px <= 2.5 || self.progs.len() >= 32)));
+                let rect_like = sh.is_rect && identity_like(&ts) && (max_r_px <= 0.0 || (zoom_lod && (max_r_px <= 2.5 || self.progs.len() >= 32)));
                 let child_clip = if rect_like {
                     // axis-aligned rectangle: a scissor is exact up to the edge pixels
                     let (x0, y0) = (ts.tx, ts.ty);
@@ -731,14 +793,14 @@ impl Ctx<'_> {
     }
 
     fn draw_text(&mut self, n: &Node, g: &Rc<NodeGeom>, ts: sk::Transform, clip: ClipId, alpha: f32) {
-        let strokes = visible_strokes(n);
+        let has_strokes = has_visible_strokes(n);
         for (i, t) in g.text.iter().enumerate() {
             for p in &t.fills {
                 self.fill_with(&t.mesh, ts, n.size, p, alpha, clip);
             }
-            if !strokes.is_empty() {
+            if has_strokes {
                 if let Some(sm) = g.text_stroke(i, n) {
-                    for p in &strokes {
+                    for p in visible_strokes(n) {
                         self.fill_with(&sm, ts, n.size, p, alpha, clip);
                     }
                 }
@@ -747,15 +809,15 @@ impl Ctx<'_> {
     }
 
     fn draw_strokes(&mut self, n: &Node, g: &Rc<NodeGeom>, ts: sk::Transform, clip: ClipId, alpha: f32) {
-        let paints = visible_strokes(n);
-        if paints.is_empty() {
+        if !has_visible_strokes(n) {
             return;
         }
         let Some((mesh, how)) = g.stroke_mesh(n) else { return };
         let interactive = self.interactive();
+        let zoom_lod = self.zoom_lod();
         let sclip = match how {
             StrokeClip::None => clip,
-            StrokeClip::Inside | StrokeClip::Outside if interactive && (n.stroke.weight * ts_scale(&ts) <= 1.5 || self.progs.len() >= 32) => clip,
+            StrokeClip::Inside | StrokeClip::Outside if (zoom_lod && n.stroke.weight * ts_scale(&ts) <= 1.25) || (interactive && self.progs.len() >= 48) => clip,
             StrokeClip::Inside | StrokeClip::Outside => {
                 let Some(shape) = &g.fill else { return };
                 let b = mesh.bounds;
@@ -764,7 +826,7 @@ impl Ctx<'_> {
                 c
             }
         };
-        for p in paints {
+        for p in visible_strokes(n) {
             self.fill_with(&mesh, ts, n.size, p, alpha, sclip);
         }
     }
@@ -785,8 +847,8 @@ impl Ctx<'_> {
     #[allow(clippy::too_many_arguments)]
     fn silhouette(&mut self, n: &Node, g: &Rc<NodeGeom>, ts: sk::Transform, dx: f32, dy: f32, grow: f32, opaque: bool, clip: ClipId) {
         let ts2 = ts.post_translate(dx, dy);
-        let fills = visible_fills(n);
-        let strokes = visible_strokes(n);
+        let has_fills = has_visible_fills(n);
+        let has_strokes = has_visible_strokes(n);
         let black = |a: f32| solid_inst([0.0, 0.0, 0.0, a.clamp(0.0, 1.0)]);
         if matches!(n.kind, NodeKind::Text(_)) {
             for (i, t) in g.text.iter().enumerate() {
@@ -797,12 +859,12 @@ impl Ctx<'_> {
             return;
         }
         if let Some(sh) = &g.shape {
-            if (sh.fillable && !fills.is_empty()) || !strokes.is_empty() || (opaque && sh.fillable) {
+            if (sh.fillable && has_fills) || has_strokes || (opaque && sh.fillable) {
                 if let Some(fill) = &g.fill {
-                    if sh.fillable && opaque && fills.is_empty() {
+                    if sh.fillable && opaque && !has_fills {
                         self.draw_mesh(fill, ts2, black(1.0), DrawBlend::Over, clip);
                     } else if sh.fillable {
-                        for p in &fills {
+                        for p in visible_fills(n) {
                             let a = if opaque {
                                 1.0
                             } else {
@@ -818,15 +880,15 @@ impl Ctx<'_> {
                 }
                 // stroke footprint outside the fill
                 let outset = match n.stroke.align {
-                    d::StrokeAlign::Inside if sh.closed && sh.fillable && !fills.is_empty() => 0.0,
+                    d::StrokeAlign::Inside if sh.closed && sh.fillable && has_fills => 0.0,
                     d::StrokeAlign::Outside if sh.closed => n.stroke.weight * 2.0,
                     _ => n.stroke.weight,
                 };
-                if let (Some(_), false) = (&sh.stroke_paths, strokes.is_empty()) {
+                if let (Some(_), true) = (&sh.stroke_paths, has_strokes) {
                     if let Some(m) = g.stroke_paths_mesh() {
                         self.draw_mesh(&m, ts2, black(1.0), DrawBlend::Over, clip);
                     }
-                } else if !strokes.is_empty() && outset > 0.0 {
+                } else if has_strokes && outset > 0.0 {
                     if let Some(m) = g.grow_outline(outset) {
                         self.draw_mesh(&m, ts2, black(1.0), DrawBlend::Over, clip);
                     }
@@ -843,8 +905,7 @@ impl Ctx<'_> {
         if draws_children(n) {
             // silhouettes are drawn offset from the page grid: no index culling
             let was = std::mem::replace(&mut self.cull, false);
-            let children = n.children.clone();
-            self.draw_children(&children, ts2, clip);
+            self.draw_children(&n.children, ts2, clip);
             self.cull = was;
         }
     }
@@ -872,14 +933,14 @@ impl Ctx<'_> {
         if !sh.is_rect
             || !sh.fillable
             || n.fill_geometry.is_some()
-            || !visible_strokes(n).is_empty()
+            || has_visible_strokes(n)
             || !identity_like(&ts)
             || (ts.sx - ts.sy).abs() > 1e-4 * ts.sx
         {
             return false;
         }
-        let fills = visible_fills(n);
-        let [fill] = fills[..] else { return false };
+        let mut fills = visible_fills(n);
+        let (Some(fill), None) = (fills.next(), fills.next()) else { return false };
         let d::PaintKind::Solid(c) = &fill.kind else { return false };
         let radii = if matches!(n.kind, NodeKind::Section) { [0.0; 4] } else { n.corner_radii };
         if radii.iter().any(|r| (r - radii[0]).abs() > 1e-4) || (radii[0] > 0.0 && n.corner_smoothing > 0.0) {
@@ -1069,7 +1130,7 @@ impl Ctx<'_> {
             }
             return;
         }
-        if normal && g.shape.as_ref().is_some_and(|s| s.fillable) && visible_strokes(n).is_empty() {
+        if normal && g.shape.as_ref().is_some_and(|s| s.fillable) && !has_visible_strokes(n) {
             if let Some(m) = &g.fill {
                 // opaque silhouette == fill geometry when the node has a fillable shape
                 self.draw_mesh(m, ts, pi, DrawBlend::Over, clip);

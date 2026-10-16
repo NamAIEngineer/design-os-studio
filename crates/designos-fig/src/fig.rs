@@ -40,13 +40,143 @@ pub fn decode_fig_to_json(bytes: &[u8]) -> Result<Value, FigError> {
     Ok(Value::Object(out))
 }
 
+/// Pre-decoded `derivedSymbolData` entry for fast `.fig` import without JSON intermediate.
+pub(crate) struct FastDerivedEntry {
+    pub path: Vec<String>,
+    pub size: Option<Vec2>,
+    pub transform: Option<Affine>,
+    pub fill_geometry: Option<Vec<(usize, bool)>>,
+    pub stroke_geometry: Option<Vec<(usize, bool)>>,
+}
+
+fn kiwi_guid_str(g: &KiwiValue) -> Option<String> {
+    let u64_of = |v: &KiwiValue| match v {
+        KiwiValue::Uint(u) => Some(*u as u64),
+        KiwiValue::Uint64(u) => Some(*u),
+        KiwiValue::Int(i) => Some(*i as u64),
+        KiwiValue::Int64(i) => Some(*i as u64),
+        _ => None,
+    };
+    Some(format!("{}:{}", u64_of(g.get("sessionID")?)?, u64_of(g.get("localID")?)?))
+}
+
+fn kiwi_f32(v: &KiwiValue, k: &str) -> Option<f32> {
+    match v.get(k)? {
+        KiwiValue::Float(f) => Some(*f),
+        KiwiValue::Uint(u) => Some(*u as f32),
+        KiwiValue::Int(i) => Some(*i as f32),
+        _ => None,
+    }
+}
+
+fn kiwi_str(v: &KiwiValue) -> Option<&str> {
+    match v {
+        KiwiValue::String(s) => Some(s.as_str()),
+        KiwiValue::Enum(s) => Some(s),
+        _ => None,
+    }
+}
+
+fn extract_fast_derived(raw_changes: &[KiwiValue], num_blobs: usize) -> HashMap<String, Vec<FastDerivedEntry>> {
+    let mut map = HashMap::new();
+    for nc in raw_changes {
+        if nc.get("type").and_then(kiwi_str) != Some("INSTANCE") {
+            continue;
+        }
+        let Some(arr) = nc
+            .get("derivedSymbolData")
+            .or_else(|| nc.get("symbolData").and_then(|s| s.get("derivedSymbolData")))
+            .and_then(KiwiValue::as_array)
+            .filter(|a| !a.is_empty())
+        else {
+            continue;
+        };
+        let Some(id) = nc.get("guid").and_then(kiwi_guid_str) else { continue };
+        let mut entries = Vec::with_capacity(arr.len());
+        for o in arr {
+            let p = o.get("guidPath");
+            let list = p.and_then(|p| p.get("guids")).or(p).and_then(KiwiValue::as_array);
+            let path: Vec<String> = list.map(|a| a.iter().filter_map(kiwi_guid_str).collect()).unwrap_or_default();
+            let size = o.get("size").and_then(|s| Some(Vec2::new(kiwi_f32(s, "x")?, kiwi_f32(s, "y")?)));
+            let transform = o.get("transform").map(|t| {
+                let g = |k: &str, d: f32| kiwi_f32(t, k).unwrap_or(d);
+                Affine {
+                    a: g("m00", 1.0),
+                    c: g("m01", 0.0),
+                    tx: g("m02", 0.0),
+                    b: g("m10", 0.0),
+                    d: g("m11", 1.0),
+                    ty: g("m12", 0.0),
+                }
+            });
+            let parse_geo = |k: &str| -> Option<Vec<(usize, bool)>> {
+                let g_arr = o.get(k).and_then(KiwiValue::as_array)?;
+                if g_arr.is_empty() {
+                    return None;
+                }
+                let mut geo = Vec::with_capacity(g_arr.len());
+                for g in g_arr {
+                    let idx = match g.get("commandsBlob") {
+                        Some(KiwiValue::Uint(u)) => *u as usize,
+                        Some(KiwiValue::Uint64(u)) => *u as usize,
+                        Some(KiwiValue::Int(i)) => *i as usize,
+                        _ => continue,
+                    };
+                    if idx >= num_blobs {
+                        continue;
+                    }
+                    let odd = matches!(g.get("windingRule").and_then(kiwi_str), Some("ODD" | "EVENODD"));
+                    geo.push((idx, odd));
+                }
+                (!geo.is_empty()).then_some(geo)
+            };
+            let fill_geometry = parse_geo("fillGeometry");
+            let stroke_geometry = parse_geo("strokeGeometry");
+            if size.is_none() && transform.is_none() && fill_geometry.is_none() && stroke_geometry.is_none() {
+                continue;
+            }
+            entries.push(FastDerivedEntry {
+                path,
+                size,
+                transform,
+                fill_geometry,
+                stroke_geometry,
+            });
+        }
+        if !entries.is_empty() {
+            map.insert(id, entries);
+        }
+    }
+    map
+}
+
 /// Imports a `.fig` file (raw fig-kiwi or zip-wrapped) from bytes.
 pub fn import_fig(bytes: &[u8]) -> Result<Document, FigError> {
     let d = decode(bytes)?;
     let name = d.archive.meta.as_ref().and_then(|m| fstr(m, "file_name").or_else(|| fstr(m, "name"))).unwrap_or("Untitled").to_string();
-    let rest = message_to_rest(&d.message, &name);
-    let mut doc = rest_import::import_rest_value(&rest, true)?;
+    let blobs: Vec<&[u8]> = d
+        .message
+        .get("blobs")
+        .and_then(KiwiValue::as_array)
+        .map(|a| a.iter().map(|b| b.get("bytes").and_then(KiwiValue::as_bytes).unwrap_or(&[])).collect())
+        .unwrap_or_default();
+    let raw_changes = d.message.get("nodeChanges").and_then(KiwiValue::as_array).unwrap_or(&[]);
+    let large = raw_changes.len() > 5_000;
+    let fast_derived = large.then(|| extract_fast_derived(raw_changes, blobs.len()));
+    let to_j = if large { kiwi::to_json_fast } else { kiwi::to_json };
+    let changes: Vec<Value> = raw_changes.iter().map(to_j).collect();
+    let rest = nodes_to_rest(changes, &blobs, &name);
+    let mut doc = rest_import::import_rest_value_with_blobs(&rest, true, &blobs, fast_derived.as_ref())?;
+    drop(blobs);
     doc.images = d.archive.images;
+    if large {
+        let msg = d.message;
+        std::thread::spawn(move || {
+            drop(fast_derived);
+            drop(rest);
+            drop(msg);
+        });
+    }
     Ok(doc)
 }
 
@@ -74,6 +204,8 @@ pub(crate) fn asset_key(v: &Value) -> Option<&str> {
 /// plain `{guid}` instead.
 struct Lk<'a> {
     blobs: &'a [&'a [u8]],
+    large_file: bool,
+    geo_cache: std::cell::RefCell<HashMap<(usize, bool), Value>>,
     /// Variable key -> `VariableID:s:l`.
     var_by_key: HashMap<&'a str, String>,
     /// Variable-set key -> `VariableCollectionId:s:l`.
@@ -96,6 +228,8 @@ impl<'a> Lk<'a> {
     fn new(entries: &'a [Entry], blobs: &'a [&'a [u8]]) -> Self {
         let mut lk = Lk {
             blobs,
+            large_file: entries.len() > 5_000,
+            geo_cache: std::cell::RefCell::new(HashMap::with_capacity(blobs.len())),
             var_by_key: HashMap::new(),
             set_by_key: HashMap::new(),
             style_by_key: HashMap::new(),
@@ -204,16 +338,48 @@ impl<'a> Lk<'a> {
     fn prop_def(&self, r: &Value) -> Option<&(String, &'static str)> {
         self.prop_defs.get(&r.get("defID").and_then(guid_str)?)
     }
+
+    fn convert_geometry_cached(&self, nc: &Value, key: &str) -> Option<Value> {
+        let arr = rest_import::farr(nc, key);
+        if arr.is_empty() {
+            return None;
+        }
+        let mut geo = Vec::with_capacity(arr.len());
+        for g in arr {
+            let Some(idx) = g.get("commandsBlob").and_then(Value::as_u64).map(|x| x as usize) else { continue };
+            if idx >= self.blobs.len() {
+                continue;
+            }
+            let odd = matches!(fstr(g, "windingRule"), Some("ODD" | "EVENODD"));
+            if self.large_file {
+                geo.push(json!({"_blob": idx, "windingRule": if odd { "EVENODD" } else { "NONZERO" }}));
+                continue;
+            }
+            if let Some(cached) = self.geo_cache.borrow().get(&(idx, odd)).cloned() {
+                geo.push(cached);
+                continue;
+            }
+            let Some(blob) = self.blobs.get(idx) else { continue };
+            let path = commands_blob_to_path(blob, odd);
+            let val = json!({"path": write_path(&path), "windingRule": if odd { "EVENODD" } else { "NONZERO" }});
+            self.geo_cache.borrow_mut().insert((idx, odd), val.clone());
+            geo.push(val);
+        }
+        (!geo.is_empty()).then_some(Value::Array(geo))
+    }
 }
 
 /// Builds the REST-shaped `{name, document, ...}` value from a decoded message.
+#[allow(dead_code)]
 pub(crate) fn message_to_rest(msg: &KiwiValue, name: &str) -> Value {
     let blobs: Vec<&[u8]> = msg
         .get("blobs")
         .and_then(KiwiValue::as_array)
         .map(|a| a.iter().map(|b| b.get("bytes").and_then(KiwiValue::as_bytes).unwrap_or(&[])).collect())
         .unwrap_or_default();
-    let changes: Vec<Value> = msg.get("nodeChanges").and_then(KiwiValue::as_array).unwrap_or(&[]).iter().map(kiwi::to_json).collect();
+    let raw_changes = msg.get("nodeChanges").and_then(KiwiValue::as_array).unwrap_or(&[]);
+    let to_j = if raw_changes.len() > 5_000 { kiwi::to_json_fast } else { kiwi::to_json };
+    let changes: Vec<Value> = raw_changes.iter().map(to_j).collect();
     nodes_to_rest(changes, &blobs, name)
 }
 
@@ -246,7 +412,7 @@ pub fn import_fig_node_changes(changes: &Value, name: &str) -> Result<Document, 
 }
 
 fn nodes_to_rest(changes: Vec<Value>, blobs: &[&[u8]], name: &str) -> Value {
-    let mut entries: Vec<Entry> = Vec::new();
+    let mut entries: Vec<Entry> = Vec::with_capacity(changes.len());
     for j in changes {
         if fstr(&j, "phase") == Some("REMOVED") || rest_import::fbool(&j, "isSoftDeleted") == Some(true) {
             continue;
@@ -311,6 +477,13 @@ fn nodes_to_rest(changes: Vec<Value>, blobs: &[&[u8]], name: &str) -> Value {
     if !library_pages.is_empty() {
         out["libraryPages"] = Value::Array(library_pages);
     }
+    let large_file = lk.large_file;
+    drop(var_entries);
+    drop(lk);
+    drop(index);
+    if large_file {
+        std::thread::spawn(move || drop(entries));
+    }
     out
 }
 
@@ -359,122 +532,135 @@ fn symbol_id_str(v: &Value) -> Option<String> {
     None
 }
 
-fn extract_fig_metadata(nc: &Value, orig_ty: &str) -> Option<Value> {
+fn extract_fig_metadata(nc: &Value, orig_ty: &str, large_file: bool) -> Option<Value> {
+    let obj = nc.as_object()?;
     let mut meta = Map::new();
-    if let Some(existing) = nc.get("figMetadata").and_then(Value::as_object) {
-        for (k, v) in existing {
-            if let Some(s) = v.as_str() {
-                meta.insert(k.clone(), Value::String(s.to_string()));
+    let mut has_brush_type = false;
+    let mut has_swt = false;
+    for (k, val) in obj {
+        match k.as_str() {
+            "figMetadata" => {
+                if let Some(existing) = val.as_object() {
+                    for (ek, ev) in existing {
+                        if let Some(s) = ev.as_str() {
+                            meta.insert(ek.clone(), Value::String(s.to_string()));
+                        }
+                    }
+                }
             }
-        }
-    }
-    if orig_ty == "BRUSH" {
-        let bt = fstr(nc, "brushType").unwrap_or("STRETCH");
-        meta.insert("brushType".into(), Value::String(bt.to_string()));
-    } else if let Some(bt) = fstr(nc, "brushType").filter(|s| !s.is_empty()) {
-        meta.insert("brushType".into(), Value::String(bt.to_string()));
-    }
-    if let Some(swt) = fstr(nc, "shapeWithTextType").or_else(|| (orig_ty == "SHAPE_WITH_TEXT").then(|| fstr(nc, "shapeType")).flatten()) {
-        if !swt.is_empty() {
-            meta.insert("shapeWithTextType".into(), Value::String(swt.to_string()));
-        }
-    }
-    for k in [
-        "userFacingVersion",
-        "sharedSymbolVersion",
-        "publishedVersion",
-        "version",
-        "maskType",
-        "scrollDirection",
-        "lockMode",
-        "gridChildVerticalAlign",
-        "codeExportName",
-        "documentColorProfile",
-        "codeObjectType",
-        "connectorStartCap",
-        "connectorEndCap",
-    ] {
-        if let Some(s) = fstr(nc, k).filter(|s| !s.is_empty()) {
-            meta.insert(k.into(), Value::String(s.to_string()));
-        }
-    }
-    for k in [
-        "isSymbolPublishable",
-        "isPublishable",
-        "resizeToFit",
-        "shapeTruncates",
-        "isPageDivider",
-        "backgroundEnabled",
-        "gridReflowEnabled",
-        "isCollectionExtendable",
-        "shouldHideCursorsOnWidgetHover",
-        "isWidgetStickable",
-    ] {
-        if let Some(b) = nc.get(k).and_then(Value::as_bool) {
-            meta.insert(k.into(), Value::String(if b { "true".into() } else { "false".into() }));
-        }
-    }
-    for k in [
-        "shapeUserHeight",
-        "backgroundOpacity",
-        "connectorVersion",
-        "vectorOperationVersion",
-    ] {
-        if let Some(n) = fnum(nc, k) {
-            meta.insert(k.into(), Value::String(n.to_string()));
-        }
-    }
-    if let Some(g) = nc.get("publishID").and_then(guid_str) {
-        meta.insert("publishID".into(), Value::String(g));
-    }
-    if let Some(ei) = nc.get("editInfo").filter(|v| v.is_object()) {
-        if let Ok(s) = serde_json::to_string(ei) {
-            meta.insert("editInfo".into(), Value::String(s));
-        }
-    }
-    if let Some(wca) = nc.get("widgetCachedAncestor") {
-        if let Some(g) = wca.get("nodeId").and_then(guid_str).or_else(|| guid_str(wca)) {
-            meta.insert("widgetCachedAncestor".into(), Value::String(g));
-        }
-    }
-    if let Some(prd) = nc.get("pluginRelaunchData").and_then(Value::as_array).filter(|a| !a.is_empty()) {
-        if let Ok(s) = serde_json::to_string(prd) {
-            meta.insert("pluginRelaunchData".into(), Value::String(s));
-        }
-    }
-    if let Some(ngd) = nc.get("nodeGenerationData").filter(|v| v.is_object()) {
-        if let Ok(s) = serde_json::to_string(ngd) {
-            meta.insert("nodeGenerationData".into(), Value::String(s));
-        }
-    }
-    for k in [
-        "derivedTextData",
-        "derivedImmutableFrameData",
-        "symbolLinks",
-        "widgetEvents",
-        "widgetHoverStyle",
-        "connectorTextMidpoint",
-        "ancestorPathBeforeDeletion",
-        "connectorControlPoints",
-        "scatterStrokeSettings",
-        "gridAutoTracks",
-        "prototypeStartingPoint",
-        "codeSourceInfo",
-        "widgetInputBehavior",
-        "sourceControlConfig",
-        "widgetMetadata",
-        "timelineDefinitions",
-        "renderedSyncedState",
-        "annotationCategories",
-        "makeContentState",
-        "widgetSyncedState",
-        "widgetPropertyMenuItems",
-    ] {
-        if let Some(val) = nc.get(k).filter(|v| !v.is_null()) {
-            if let Ok(s) = serde_json::to_string(val) {
-                meta.insert(k.into(), Value::String(s));
+            "brushType" => {
+                if let Some(bt) = val.as_str().filter(|s| !s.is_empty() || orig_ty == "BRUSH") {
+                    meta.insert("brushType".into(), Value::String(bt.to_string()));
+                    has_brush_type = true;
+                }
             }
+            "shapeWithTextType" => {
+                if let Some(swt) = val.as_str().filter(|s| !s.is_empty()) {
+                    meta.insert("shapeWithTextType".into(), Value::String(swt.to_string()));
+                    has_swt = true;
+                }
+            }
+            "shapeType" if orig_ty == "SHAPE_WITH_TEXT" && !has_swt => {
+                if let Some(swt) = val.as_str().filter(|s| !s.is_empty()) {
+                    meta.insert("shapeWithTextType".into(), Value::String(swt.to_string()));
+                }
+            }
+            "userFacingVersion"
+            | "sharedSymbolVersion"
+            | "publishedVersion"
+            | "version"
+            | "maskType"
+            | "scrollDirection"
+            | "lockMode"
+            | "gridChildVerticalAlign"
+            | "codeExportName"
+            | "documentColorProfile"
+            | "codeObjectType"
+            | "connectorStartCap"
+            | "connectorEndCap" => {
+                if let Some(s) = val.as_str().filter(|s| !s.is_empty()) {
+                    meta.insert(k.clone(), Value::String(s.to_string()));
+                }
+            }
+            "isSymbolPublishable"
+            | "isPublishable"
+            | "resizeToFit"
+            | "shapeTruncates"
+            | "isPageDivider"
+            | "backgroundEnabled"
+            | "gridReflowEnabled"
+            | "isCollectionExtendable"
+            | "shouldHideCursorsOnWidgetHover"
+            | "isWidgetStickable" => {
+                if let Some(b) = val.as_bool() {
+                    meta.insert(k.clone(), Value::String(if b { "true".into() } else { "false".into() }));
+                }
+            }
+            "shapeUserHeight" | "backgroundOpacity" | "connectorVersion" | "vectorOperationVersion" => {
+                if let Some(n) = rest_import::num(val) {
+                    meta.insert(k.clone(), Value::String(n.to_string()));
+                }
+            }
+            "publishID" => {
+                if let Some(g) = guid_str(val) {
+                    meta.insert("publishID".into(), Value::String(g));
+                }
+            }
+            "editInfo" if !large_file && val.is_object() => {
+                if let Ok(s) = serde_json::to_string(val) {
+                    meta.insert("editInfo".into(), Value::String(s));
+                }
+            }
+            "widgetCachedAncestor" => {
+                if let Some(g) = val.get("nodeId").and_then(guid_str).or_else(|| guid_str(val)) {
+                    meta.insert("widgetCachedAncestor".into(), Value::String(g));
+                }
+            }
+            "pluginRelaunchData" => {
+                if val.as_array().is_some_and(|a| !a.is_empty()) {
+                    if let Ok(s) = serde_json::to_string(val) {
+                        meta.insert("pluginRelaunchData".into(), Value::String(s));
+                    }
+                }
+            }
+            "nodeGenerationData" if val.is_object() => {
+                if let Ok(s) = serde_json::to_string(val) {
+                    meta.insert("nodeGenerationData".into(), Value::String(s));
+                }
+            }
+            "derivedTextData" | "derivedImmutableFrameData" if !large_file && !val.is_null() => {
+                if let Ok(s) = serde_json::to_string(val) {
+                    meta.insert(k.clone(), Value::String(s));
+                }
+            }
+            "symbolLinks"
+            | "widgetEvents"
+            | "widgetHoverStyle"
+            | "connectorTextMidpoint"
+            | "ancestorPathBeforeDeletion"
+            | "connectorControlPoints"
+            | "scatterStrokeSettings"
+            | "gridAutoTracks"
+            | "prototypeStartingPoint"
+            | "codeSourceInfo"
+            | "widgetInputBehavior"
+            | "sourceControlConfig"
+            | "widgetMetadata"
+            | "timelineDefinitions"
+            | "renderedSyncedState"
+            | "annotationCategories"
+            | "makeContentState"
+            | "widgetSyncedState"
+            | "widgetPropertyMenuItems" if !val.is_null() => {
+                if let Ok(s) = serde_json::to_string(val) {
+                    meta.insert(k.clone(), Value::String(s));
+                }
+            }
+            _ => {}
         }
+    }
+    if orig_ty == "BRUSH" && !has_brush_type {
+        meta.insert("brushType".into(), Value::String("STRETCH".into()));
     }
     (!meta.is_empty()).then_some(Value::Object(meta))
 }
@@ -580,7 +766,7 @@ fn convert_node(nc: &Value, id: &str, lk: &Lk) -> Option<Map<String, Value>> {
     if let Some(ds) = nc.get("detachedSymbolId").and_then(symbol_id_str) {
         m.insert("detachedSymbolId".into(), Value::String(ds));
     }
-    if let Some(fm) = extract_fig_metadata(nc, orig_ty) {
+    if let Some(fm) = extract_fig_metadata(nc, orig_ty, lk.large_file) {
         m.insert("figMetadata".into(), fm);
     }
     copy(&mut m, nc, "visible", "visible");
@@ -646,14 +832,20 @@ fn convert_node(nc: &Value, id: &str, lk: &Lk) -> Option<Map<String, Value>> {
     // Paint.
     // A style the file defines wins over the node's own (possibly stale) copy of its values,
     // unless a variable is bound to one of the paints.
-    let paints = |k: &str, style_key: &str| -> Value {
+    let paints = |k: &str, style_key: &str| -> Vec<Value> {
         let own = rest_import::farr(nc, k);
         let from_style = nc.get(style_key).and_then(|r| lk.style_node(r)).filter(|_| !own.iter().any(|p| p.get("colorVar").is_some()));
         let list = from_style.map(|s| rest_import::farr(s, "fillPaints")).unwrap_or(own);
-        Value::Array(list.iter().filter_map(convert_paint).collect())
+        list.iter().filter_map(convert_paint).collect()
     };
-    m.insert("fills".into(), paints("fillPaints", "styleIdForFill"));
-    m.insert("strokes".into(), paints("strokePaints", "styleIdForStrokeFill"));
+    let fills = paints("fillPaints", "styleIdForFill");
+    if !fills.is_empty() {
+        m.insert("fills".into(), Value::Array(fills));
+    }
+    let strokes = paints("strokePaints", "styleIdForStrokeFill");
+    if !strokes.is_empty() {
+        m.insert("strokes".into(), Value::Array(strokes));
+    }
     copy(&mut m, nc, "strokeWeight", "strokeWeight");
     copy(&mut m, nc, "strokeAlign", "strokeAlign");
     enum_map(&mut m, nc, "strokeCap", "strokeCap", &[("ARROW_LINES", "NONE"), ("ARROW_EQUILATERAL", "NONE")]);
@@ -675,7 +867,9 @@ fn convert_node(nc: &Value, id: &str, lk: &Lk) -> Option<Map<String, Value>> {
         );
     }
     let effects: Vec<Value> = rest_import::farr(nc, "effects").iter().filter_map(convert_effect).collect();
-    m.insert("effects".into(), Value::Array(effects));
+    if !effects.is_empty() {
+        m.insert("effects".into(), Value::Array(effects));
+    }
 
     // Corners.
     copy(&mut m, nc, "cornerRadius", "cornerRadius");
@@ -713,7 +907,9 @@ fn convert_node(nc: &Value, id: &str, lk: &Lk) -> Option<Map<String, Value>> {
         Some("SCALE") => "SCALE",
         _ => "TOP",
     };
-    m.insert("constraints".into(), json!({"horizontal": h, "vertical": v}));
+    if h != "LEFT" || v != "TOP" {
+        m.insert("constraints".into(), json!({"horizontal": h, "vertical": v}));
+    }
 
     // Frames / auto layout.
     if matches!(ty, "FRAME" | "COMPONENT" | "COMPONENT_SET" | "INSTANCE") {
@@ -865,7 +1061,7 @@ fn convert_node(nc: &Value, id: &str, lk: &Lk) -> Option<Map<String, Value>> {
     // Precomputed outlines (text and lowered board items keep none: the renderer lays them out itself).
     if !matches!(ty, "TEXT" | "STICKY" | "SHAPE_WITH_TEXT" | "CONNECTOR" | "STAMP") {
         for k in ["fillGeometry", "strokeGeometry"] {
-            if let Some(g) = convert_geometry(nc, k, blobs) {
+            if let Some(g) = lk.convert_geometry_cached(nc, k) {
                 m.insert(k.into(), g);
             }
         }
@@ -1075,21 +1271,6 @@ fn matrix_json(t: &Value) -> Value {
     json!([[g("m00", 1.0), g("m01", 0.0), g("m02", 0.0)], [g("m10", 0.0), g("m11", 1.0), g("m12", 0.0)]])
 }
 
-/// REST geometry list from `fillGeometry` / `strokeGeometry` blob commands.
-/// Winding rule: kiwi `WindingRule` is NONZERO / ODD.
-fn convert_geometry(nc: &Value, key: &str, blobs: &[&[u8]]) -> Option<Value> {
-    let geo: Vec<Value> = rest_import::farr(nc, key)
-        .iter()
-        .filter_map(|g| {
-            let idx = g.get("commandsBlob")?.as_u64()? as usize;
-            let odd = matches!(fstr(g, "windingRule"), Some("ODD" | "EVENODD"));
-            let path = commands_blob_to_path(blobs.get(idx)?, odd);
-            Some(json!({"path": write_path(&path), "windingRule": if odd { "EVENODD" } else { "NONZERO" }}))
-        })
-        .collect();
-    (!geo.is_empty()).then_some(Value::Array(geo))
-}
-
 /// REST `layoutGrids` from kiwi grids: `pattern` (GRID/COLUMNS/ROWS; else `type`,
 /// else `axis` X = columns / Y = rows), `sectionSize`, `gutterSize`, `offset`,
 /// `count` (or `numSections`), `color`, `visible`.
@@ -1147,34 +1328,165 @@ fn stack_sizing(s: Option<&str>) -> &'static str {
 /// Partial REST node fields from an override / derived-data entry: only keys
 /// present in the entry are emitted.
 fn convert_override(o: &Value, lk: &Lk) -> Map<String, Value> {
-    let blobs = lk.blobs;
     let mut m = Map::new();
-    for k in ["name", "visible", "locked", "opacity", "blendMode", "size", "strokeWeight", "strokeAlign", "cornerRadius"] {
-        copy(&mut m, o, k, k);
-    }
-    copy(&mut m, o, "mask", "isMask");
-    if let Some(lvl) = o.get("overrideLevel").and_then(Value::as_i64) {
-        m.insert("overrideLevel".into(), json!(lvl));
-    }
-    if let Some(ds) = o.get("detachedSymbolId").and_then(symbol_id_str) {
-        m.insert("detachedSymbolId".into(), Value::String(ds));
-    }
-    if let Some(d) = rest_import::fbool(o, "frameMaskDisabled") {
-        m.insert("clipsContent".into(), (!d).into());
-    }
-    if let Some(t) = o.get("transform") {
-        m.insert("relativeTransform".into(), matrix_json(t));
+    let Some(obj) = o.as_object() else { return m };
+    let mut has_borders = false;
+    let mut has_corners = false;
+    let mut has_vars = false;
+    let mut has_comp_props = false;
+    let mut has_layout = false;
+    let mut has_text = false;
+    for (k, val) in obj {
+        match k.as_str() {
+            "name" | "visible" | "locked" | "opacity" | "blendMode" | "size" | "strokeWeight" | "strokeAlign" | "cornerRadius" => {
+                m.insert(k.clone(), val.clone());
+            }
+            "mask" => {
+                m.insert("isMask".into(), val.clone());
+            }
+            "overrideLevel" => {
+                if let Some(lvl) = val.as_i64() {
+                    m.insert("overrideLevel".into(), json!(lvl));
+                }
+            }
+            "detachedSymbolId" => {
+                if let Some(ds) = symbol_id_str(val) {
+                    m.insert("detachedSymbolId".into(), Value::String(ds));
+                }
+            }
+            "frameMaskDisabled" => {
+                if let Some(d) = val.as_bool() {
+                    m.insert("clipsContent".into(), (!d).into());
+                }
+            }
+            "transform" => {
+                m.insert("relativeTransform".into(), matrix_json(val));
+            }
+            "effects" => {
+                m.insert(
+                    "effects".into(),
+                    Value::Array(val.as_array().map(Vec::as_slice).unwrap_or(&[]).iter().filter_map(convert_effect).collect()),
+                );
+                has_vars = true;
+            }
+            "fillGeometry" | "strokeGeometry" => {
+                if let Some(g) = lk.convert_geometry_cached(o, k) {
+                    m.insert(k.clone(), g);
+                }
+            }
+            "overriddenSymbolID" => {
+                if let Some(cid) = guid_str(val) {
+                    m.insert("componentId".into(), cid.into());
+                }
+            }
+            "symbolData" => {
+                if !m.contains_key("componentId") {
+                    if let Some(cid) = val.get("symbolID").and_then(guid_str) {
+                        m.insert("componentId".into(), cid.into());
+                    }
+                }
+            }
+            "fillPaints" | "strokePaints" => {
+                has_vars = true;
+            }
+            "variableConsumptionMap" | "parameterConsumptionMap" | "variableModeBySetMap" => {
+                has_vars = true;
+            }
+            "borderStrokeWeightsIndependent" | "borderTopWeight" | "borderRightWeight" | "borderBottomWeight" | "borderLeftWeight" => {
+                has_borders = true;
+            }
+            "rectangleCornerRadiiIndependent"
+            | "rectangleTopLeftCornerRadius"
+            | "rectangleTopRightCornerRadius"
+            | "rectangleBottomRightCornerRadius"
+            | "rectangleBottomLeftCornerRadius" => {
+                has_corners = true;
+            }
+            "componentPropDefs" | "componentPropAssignments" | "componentPropRefs" | "variantPropSpecs" => {
+                has_comp_props = true;
+            }
+            "stackMode"
+            | "gridColumnGap"
+            | "gridColumnsGap"
+            | "stackSpacing"
+            | "gridRowGap"
+            | "gridRowsGap"
+            | "stackCounterSpacing"
+            | "stackPadding"
+            | "stackHorizontalPadding"
+            | "stackVerticalPadding"
+            | "stackPaddingLeft"
+            | "stackPaddingTop"
+            | "stackPaddingRight"
+            | "stackPaddingBottom"
+            | "stackPrimaryAlignItems"
+            | "stackCounterAlignItems"
+            | "stackPrimarySizing"
+            | "stackCounterSizing"
+            | "stackWrap"
+            | "bordersTakeSpace"
+            | "stackReverseZIndex"
+            | "stackChildPrimaryGrow"
+            | "stackChildAlignSelf"
+            | "stackPositioning"
+            | "layoutSizingHorizontal"
+            | "layoutSizingVertical"
+            | "gridColumns"
+            | "gridRows"
+            | "gridColumnsSizing"
+            | "gridRowsSizing"
+            | "gridColumnSpan"
+            | "gridRowSpan"
+            | "gridColumnAnchor"
+            | "gridColumnAnchorIndex"
+            | "gridRowAnchor"
+            | "gridRowAnchorIndex" => {
+                has_layout = true;
+            }
+            "fontName"
+            | "fontSize"
+            | "textAlignHorizontal"
+            | "textAlignVertical"
+            | "textCase"
+            | "textDecoration"
+            | "paragraphSpacing"
+            | "paragraphIndent"
+            | "listSpacing"
+            | "hangingPunctuation"
+            | "hangingList"
+            | "leadingTrim"
+            | "autoRename"
+            | "textDecorationSkipInk"
+            | "toggledOnOTFeatures"
+            | "toggledOffOTFeatures"
+            | "numericFigure"
+            | "numericSpacing"
+            | "numericFraction"
+            | "fontVariantCaps"
+            | "fontVariantPosition"
+            | "fontVariations"
+            | "letterSpacing"
+            | "textTracking"
+            | "lineHeight"
+            | "textAutoResize"
+            | "textTruncation"
+            | "maxLines"
+            | "textData" => {
+                has_text = true;
+            }
+            _ => {}
+        }
     }
     for (src, dst, style) in [("fillPaints", "fills", "styleIdForFill"), ("strokePaints", "strokes", "styleIdForStrokeFill")] {
-        if o.get(src).is_some() {
+        if obj.contains_key(src) {
             m.insert(dst.into(), Value::Array(rest_import::farr(o, src).iter().filter_map(convert_paint).collect()));
-        } else if let Some(sn) = o.get(style).and_then(|r| lk.style_node(r)) {
+        } else if let Some(sn) = obj.get(style).and_then(|r| lk.style_node(r)) {
             // An override that only names a library style: the style supplies the paints.
             m.insert(dst.into(), Value::Array(rest_import::farr(sn, "fillPaints").iter().filter_map(convert_paint).collect()));
         }
     }
-    let indep_borders = o.get("borderStrokeWeightsIndependent").and_then(Value::as_bool) == Some(true);
-    if indep_borders || ["borderTopWeight", "borderRightWeight", "borderBottomWeight", "borderLeftWeight"].iter().any(|k| o.get(*k).is_some()) {
+    if has_borders {
+        let indep_borders = obj.get("borderStrokeWeightsIndependent").and_then(Value::as_bool) == Some(true);
         let w = if indep_borders {
             fnum(o, "strokeWeight").unwrap_or(1.0)
         } else {
@@ -1186,11 +1498,7 @@ fn convert_override(o: &Value, lk: &Lk) -> Map<String, Value> {
             json!({"top": g("borderTopWeight"), "right": g("borderRightWeight"), "bottom": g("borderBottomWeight"), "left": g("borderLeftWeight")}),
         );
     }
-    if o.get("rectangleCornerRadiiIndependent").and_then(Value::as_bool) == Some(true)
-        || ["rectangleTopLeftCornerRadius", "rectangleTopRightCornerRadius", "rectangleBottomRightCornerRadius", "rectangleBottomLeftCornerRadius"]
-            .iter()
-            .any(|k| o.get(*k).is_some())
-    {
+    if has_corners {
         let base = fnum(o, "cornerRadius").unwrap_or(0.0);
         let g = |k: &str| fnum(o, k).unwrap_or(base);
         m.insert(
@@ -1203,123 +1511,129 @@ fn convert_override(o: &Value, lk: &Lk) -> Map<String, Value> {
             ]),
         );
     }
-    if o.get("effects").is_some() {
-        m.insert("effects".into(), Value::Array(rest_import::farr(o, "effects").iter().filter_map(convert_effect).collect()));
-    }
-    for k in ["fillGeometry", "strokeGeometry"] {
-        if let Some(g) = convert_geometry(o, k, blobs) {
-            m.insert(k.into(), g);
+    if has_vars {
+        if let Some(bv) = bound_variables(o, lk) {
+            m.insert("boundVariables".into(), bv);
+        }
+        if let Some(modes) = explicit_modes(o, lk) {
+            m.insert("explicitVariableModes".into(), modes);
         }
     }
-    if let Some(bv) = bound_variables(o, lk) {
-        m.insert("boundVariables".into(), bv);
+    if has_comp_props {
+        component_props(&mut m, o, lk);
     }
-    if let Some(modes) = explicit_modes(o, lk) {
-        m.insert("explicitVariableModes".into(), modes);
-    }
-    if let Some(cid) = o
-        .get("overriddenSymbolID")
-        .and_then(guid_str)
-        .or_else(|| o.get("symbolData").and_then(|s| s.get("symbolID")).and_then(guid_str))
-    {
-        m.insert("componentId".into(), cid.into());
-    }
-    component_props(&mut m, o, lk);
     // Auto-layout overrides: full stack when `stackMode` is present, plus individual
     // overridden stack / child-layout fields when `stackMode` is inherited from the master.
-    if o.get("stackMode").is_some() {
-        convert_stack(&mut m, o);
-    }
-    if let Some(x) = fnum(o, "gridColumnGap").or_else(|| fnum(o, "gridColumnsGap")).or_else(|| fnum(o, "stackSpacing")) {
-        m.insert("itemSpacing".into(), x.into());
-    }
-    if let Some(x) = fnum(o, "gridRowGap").or_else(|| fnum(o, "gridRowsGap")).or_else(|| fnum(o, "stackCounterSpacing")) {
-        m.insert("counterAxisSpacing".into(), x.into());
-    }
-    let p = fnum(o, "stackPadding");
-    let h = fnum(o, "stackHorizontalPadding").or(p);
-    let v = fnum(o, "stackVerticalPadding").or(p);
-    for (k, val) in [
-        ("paddingLeft", fnum(o, "stackPaddingLeft").or(h)),
-        ("paddingTop", fnum(o, "stackPaddingTop").or(v)),
-        ("paddingRight", fnum(o, "stackPaddingRight").or(h)),
-        ("paddingBottom", fnum(o, "stackPaddingBottom").or(v)),
-    ] {
-        if let Some(x) = val {
-            m.insert(k.into(), x.into());
+    if has_layout {
+        if obj.contains_key("stackMode") {
+            convert_stack(&mut m, o);
         }
-    }
-    if let Some(s) = fstr(o, "stackPrimaryAlignItems") {
-        m.insert("primaryAxisAlignItems".into(), stack_align(Some(s)).into());
-    }
-    if let Some(s) = fstr(o, "stackCounterAlignItems") {
-        m.insert("counterAxisAlignItems".into(), stack_align(Some(s)).into());
-    }
-    if let Some(s) = fstr(o, "stackPrimarySizing") {
-        m.insert("primaryAxisSizingMode".into(), stack_sizing(Some(s)).into());
-    }
-    if let Some(s) = fstr(o, "stackCounterSizing") {
-        m.insert("counterAxisSizingMode".into(), stack_sizing(Some(s)).into());
-    }
-    if let Some(w) = fstr(o, "stackWrap") {
-        m.insert("layoutWrap".into(), (if w == "WRAP" { "WRAP" } else { "NO_WRAP" }).into());
-    } else if let Some(b) = rest_import::fbool(o, "stackWrap") {
-        m.insert("layoutWrap".into(), (if b { "WRAP" } else { "NO_WRAP" }).into());
-    }
-    if let Some(b) = rest_import::fbool(o, "bordersTakeSpace") {
-        m.insert("strokesIncludedInLayout".into(), b.into());
-    }
-    if let Some(b) = rest_import::fbool(o, "stackReverseZIndex") {
-        m.insert("itemReverseZIndex".into(), b.into());
-    }
-    if let Some(g) = fnum(o, "stackChildPrimaryGrow") {
-        m.insert("layoutGrow".into(), g.into());
-    }
-    if let Some(a) = fstr(o, "stackChildAlignSelf") {
-        m.insert("layoutAlign".into(), a.into());
-    }
-    if let Some(pos) = fstr(o, "stackPositioning") {
-        m.insert("layoutPositioning".into(), pos.into());
-    }
-    copy(&mut m, o, "layoutSizingHorizontal", "layoutSizingHorizontal");
-    copy(&mut m, o, "layoutSizingVertical", "layoutSizingVertical");
-    for k in ["gridColumns", "gridRows", "gridColumnsSizing", "gridRowsSizing", "gridColumnSpan", "gridRowSpan"] {
-        copy(&mut m, o, k, k);
-    }
-    if let Some(c) = o.get("gridColumnAnchor").or_else(|| o.get("gridColumnAnchorIndex")) {
-        m.insert("gridColumnAnchorIndex".into(), c.clone());
-    }
-    if let Some(r) = o.get("gridRowAnchor").or_else(|| o.get("gridRowAnchorIndex")) {
-        m.insert("gridRowAnchorIndex".into(), r.clone());
-    }
-    // Text.
-    let mut st = convert_type_style(o, None);
-    st.remove("fills");
-    if let Some(ls) = o.get("letterSpacing") {
-        if fstr(ls, "units") == Some("PERCENT") && fnum(o, "fontSize").is_none() {
-            // Resolved against the target node's own font size when applied.
-            st.remove("letterSpacing");
-            st.insert("letterSpacingPercent".into(), kiwi::clean_f32(fnum(ls, "value").unwrap_or(0.0)));
+        if let Some(x) = fnum(o, "gridColumnGap").or_else(|| fnum(o, "gridColumnsGap")).or_else(|| fnum(o, "stackSpacing")) {
+            m.insert("itemSpacing".into(), x.into());
         }
-    }
-    for k in ["textAutoResize", "textTruncation", "maxLines"] {
-        copy(&mut st, o, k, k);
-    }
-    if !st.is_empty() {
-        m.insert("style".into(), Value::Object(st));
-    }
-    if let Some(td) = o.get("textData") {
-        if let Some(c) = fstr(td, "characters") {
-            m.insert("characters".into(), c.into());
+        if let Some(x) = fnum(o, "gridRowGap").or_else(|| fnum(o, "gridRowsGap")).or_else(|| fnum(o, "stackCounterSpacing")) {
+            m.insert("counterAxisSpacing".into(), x.into());
         }
-        if let Some(lines) = td.get("lines").and_then(Value::as_array) {
-            let mut st = m.get("style").and_then(Value::as_object).cloned().unwrap_or_default();
-            crate::textfmt::lines_from_kiwi(lines, &mut m, &mut st);
-            if !st.is_empty() {
-                m.insert("style".into(), Value::Object(st));
+        let p = fnum(o, "stackPadding");
+        let h = fnum(o, "stackHorizontalPadding").or(p);
+        let v = fnum(o, "stackVerticalPadding").or(p);
+        for (k, val) in [
+            ("paddingLeft", fnum(o, "stackPaddingLeft").or(h)),
+            ("paddingTop", fnum(o, "stackPaddingTop").or(v)),
+            ("paddingRight", fnum(o, "stackPaddingRight").or(h)),
+            ("paddingBottom", fnum(o, "stackPaddingBottom").or(v)),
+        ] {
+            if let Some(x) = val {
+                m.insert(k.into(), x.into());
             }
         }
-        text_overrides(&mut m, td, fnum(o, "fontSize"));
+        if let Some(s) = fstr(o, "stackPrimaryAlignItems") {
+            m.insert("primaryAxisAlignItems".into(), stack_align(Some(s)).into());
+        }
+        if let Some(s) = fstr(o, "stackCounterAlignItems") {
+            m.insert("counterAxisAlignItems".into(), stack_align(Some(s)).into());
+        }
+        if let Some(s) = fstr(o, "stackPrimarySizing") {
+            m.insert("primaryAxisSizingMode".into(), stack_sizing(Some(s)).into());
+        }
+        if let Some(s) = fstr(o, "stackCounterSizing") {
+            m.insert("counterAxisSizingMode".into(), stack_sizing(Some(s)).into());
+        }
+        if let Some(w) = fstr(o, "stackWrap") {
+            m.insert("layoutWrap".into(), (if w == "WRAP" { "WRAP" } else { "NO_WRAP" }).into());
+        } else if let Some(b) = rest_import::fbool(o, "stackWrap") {
+            m.insert("layoutWrap".into(), (if b { "WRAP" } else { "NO_WRAP" }).into());
+        }
+        if let Some(b) = rest_import::fbool(o, "bordersTakeSpace") {
+            m.insert("strokesIncludedInLayout".into(), b.into());
+        }
+        if let Some(b) = rest_import::fbool(o, "stackReverseZIndex") {
+            m.insert("itemReverseZIndex".into(), b.into());
+        }
+        if let Some(g) = fnum(o, "stackChildPrimaryGrow") {
+            m.insert("layoutGrow".into(), g.into());
+        }
+        if let Some(a) = fstr(o, "stackChildAlignSelf") {
+            m.insert("layoutAlign".into(), a.into());
+        }
+        if let Some(pos) = fstr(o, "stackPositioning") {
+            m.insert("layoutPositioning".into(), pos.into());
+        }
+        copy(&mut m, o, "layoutSizingHorizontal", "layoutSizingHorizontal");
+        copy(&mut m, o, "layoutSizingVertical", "layoutSizingVertical");
+        for k in ["gridColumns", "gridRows", "gridColumnsSizing", "gridRowsSizing", "gridColumnSpan", "gridRowSpan"] {
+            copy(&mut m, o, k, k);
+        }
+        if let Some(c) = obj.get("gridColumnAnchor").or_else(|| obj.get("gridColumnAnchorIndex")) {
+            m.insert("gridColumnAnchorIndex".into(), c.clone());
+        }
+        if let Some(r) = obj.get("gridRowAnchor").or_else(|| obj.get("gridRowAnchorIndex")) {
+            m.insert("gridRowAnchorIndex".into(), r.clone());
+        }
+    }
+    if has_text {
+        let mut st = convert_type_style(o, None);
+        st.remove("fills");
+        if let Some(ls) = obj.get("letterSpacing") {
+            if fstr(ls, "units") == Some("PERCENT") && fnum(o, "fontSize").is_none() {
+                // Resolved against the target node's own font size when applied.
+                st.remove("letterSpacing");
+                st.insert("letterSpacingPercent".into(), kiwi::clean_f32(fnum(ls, "value").unwrap_or(0.0)));
+            }
+        }
+        for k in ["textAutoResize", "textTruncation", "maxLines"] {
+            copy(&mut st, o, k, k);
+        }
+        if !st.is_empty() {
+            m.insert("style".into(), Value::Object(st));
+        }
+        if let Some(td) = obj.get("textData") {
+            if let Some(c) = fstr(td, "characters") {
+                m.insert("characters".into(), c.into());
+            }
+            if let Some(lines) = td.get("lines").and_then(Value::as_array) {
+                let mut st = m.get("style").and_then(Value::as_object).cloned().unwrap_or_default();
+                crate::textfmt::lines_from_kiwi(lines, &mut m, &mut st);
+                if !st.is_empty() {
+                    m.insert("style".into(), Value::Object(st));
+                }
+            }
+            text_overrides(&mut m, td, fnum(o, "fontSize"));
+        }
+    }
+    m
+}
+
+fn convert_derived_override(o: &Value, lk: &Lk) -> Map<String, Value> {
+    let mut m = Map::new();
+    copy(&mut m, o, "size", "size");
+    if let Some(t) = o.get("transform") {
+        m.insert("relativeTransform".into(), matrix_json(t));
+    }
+    for k in ["fillGeometry", "strokeGeometry"] {
+        if let Some(g) = lk.convert_geometry_cached(o, k) {
+            m.insert(k.into(), g);
+        }
     }
     m
 }
@@ -1327,12 +1641,16 @@ fn convert_override(o: &Value, lk: &Lk) -> Map<String, Value> {
 fn override_entries(list: Option<&Value>, lk: &Lk, derived: bool) -> Vec<Value> {
     let Some(a) = list.and_then(Value::as_array) else { return Vec::new() };
     a.iter()
-        .map(|o| {
-            let mut set = convert_override(o, lk);
-            if derived {
-                set.retain(|k, _| matches!(k.as_str(), "size" | "relativeTransform" | "fillGeometry" | "strokeGeometry"));
+        .filter_map(|o| {
+            let set = if derived {
+                convert_derived_override(o, lk)
+            } else {
+                convert_override(o, lk)
+            };
+            if set.is_empty() {
+                return None;
             }
-            json!({"path": guid_path(o), "set": Value::Object(set)})
+            Some(json!({"path": guid_path(o), "set": Value::Object(set)}))
         })
         .collect()
 }

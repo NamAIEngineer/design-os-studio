@@ -46,38 +46,27 @@ fn nothing() -> Command {
 // multi-node operation see the effect of earlier ones.
 // ---------------------------------------------------------------------------
 
-struct Ctx {
-    s: Document,
+struct Ctx<'a> {
+    s: &'a mut Document,
     cmds: Vec<Command>,
+    invs: Vec<Command>,
+    saved_dirty: crate::DirtyLog,
 }
 
-impl Ctx {
-    fn new(doc: &Document) -> Self {
+impl<'a> Ctx<'a> {
+    fn new(doc: &'a mut Document) -> Self {
+        let saved_dirty = doc.dirty.clone();
         Ctx {
-            s: Document {
-                name: String::new(),
-                kind: doc.kind,
-                nodes: doc.nodes.clone(),
-                pages: doc.pages.clone(),
-                styles: Default::default(),
-                style_meta: Default::default(),
-                flows: Default::default(),
-                variables: Default::default(),
-                variable_collections: Default::default(),
-                guides: Default::default(),
-                prototype_device: Default::default(),
-                comments: Default::default(),
-                library: Default::default(),
-                library_page: None,
-                images: Default::default(),
-                next_id: doc.next_id,
-            },
+            s: doc,
             cmds: Vec::new(),
+            invs: Vec::new(),
+            saved_dirty,
         }
     }
     fn push(&mut self, c: Command) {
-        if c.clone().apply(&mut self.s).is_ok() {
+        if let Ok(inv) = c.clone().apply(self.s) {
             self.cmds.push(c);
+            self.invs.push(inv);
         }
     }
     fn update(&mut self, n: Node) {
@@ -85,8 +74,11 @@ impl Ctx {
             self.push(Command::Update { node: Box::new(n) });
         }
     }
-    fn finish(self, doc: &mut Document) -> Command {
-        doc.reserve_ids(NodeId(self.s.next_id));
+    fn finish(self) -> Command {
+        for inv in self.invs.into_iter().rev() {
+            let _ = inv.apply(self.s);
+        }
+        self.s.dirty = self.saved_dirty;
         Command::Batch(self.cmds)
     }
 }
@@ -147,6 +139,22 @@ pub fn instance_component(n: &Node) -> Option<NodeId> {
 /// All instance nodes whose main component is `comp` (nested ones included).
 pub fn instances_of(doc: &Document, comp: NodeId) -> Vec<NodeId> {
     doc.nodes.values().filter(|n| instance_component(n) == Some(comp)).map(|n| n.id).collect()
+}
+
+/// All instance nodes whose main component is in `comps` (nested ones included).
+pub fn instances_of_any(doc: &Document, comps: &[NodeId]) -> Vec<NodeId> {
+    if comps.is_empty() {
+        return Vec::new();
+    }
+    if comps.len() == 1 {
+        let c0 = comps[0];
+        return doc.nodes.values().filter(|n| instance_component(n) == Some(c0)).map(|n| n.id).collect();
+    }
+    doc.nodes
+        .values()
+        .filter(|n| instance_component(n).is_some_and(|c| comps.contains(&c)))
+        .map(|n| n.id)
+        .collect()
 }
 
 /// Components defined by `owner`: itself for a component, its variants for a set.
@@ -219,27 +227,31 @@ pub fn is_slot_container(doc: &Document, id: NodeId) -> bool {
             {
                 return true;
             }
-            if let Some(comp) = enclosing_component(doc, src_id) {
-                let defs = prop_defs(doc, comp);
-                if src
-                    .component
-                    .bindings
-                    .values()
-                    .any(|pname| defs.iter().any(|d| d.name == *pname && matches!(d.kind, PropKind::Slot)))
-                {
-                    return true;
+            if !src.component.bindings.is_empty() {
+                if let Some(comp) = enclosing_component(doc, src_id) {
+                    let defs = prop_defs(doc, comp);
+                    if src
+                        .component
+                        .bindings
+                        .values()
+                        .any(|pname| defs.iter().any(|d| d.name == *pname && matches!(d.kind, PropKind::Slot)))
+                    {
+                        return true;
+                    }
                 }
             }
         }
     }
-    if let Some(comp) = enclosing_component(doc, id) {
-        let defs = prop_defs(doc, comp);
-        if n.component
-            .bindings
-            .values()
-            .any(|pname| defs.iter().any(|d| d.name == *pname && matches!(d.kind, PropKind::Slot)))
-        {
-            return true;
+    if !n.component.bindings.is_empty() {
+        if let Some(comp) = enclosing_component(doc, id) {
+            let defs = prop_defs(doc, comp);
+            if n.component
+                .bindings
+                .values()
+                .any(|pname| defs.iter().any(|d| d.name == *pname && matches!(d.kind, PropKind::Slot)))
+            {
+                return true;
+            }
         }
     }
     false
@@ -357,7 +369,7 @@ pub fn create_component(doc: &mut Document, node: NodeId) -> Command {
         NodeKind::Instance { .. } => {
             let mut c = Ctx::new(doc);
             detach_into(&mut c, node, true);
-            c.finish(doc)
+            c.finish()
         }
         _ => {
             let Some(parent) = n.parent else { return nothing() };
@@ -463,16 +475,16 @@ fn detach_into(c: &mut Ctx, id: NodeId, as_component: bool) {
 pub fn detach_instance(doc: &mut Document, instance: NodeId) -> Command {
     let mut c = Ctx::new(doc);
     detach_into(&mut c, instance, false);
-    c.finish(doc)
+    c.finish()
 }
 
 /// Clears the given overrides on `node` and its subtree and re-applies the
 /// main component's values. Instance root `values` are left alone (see
 /// [`reset_instance`]).
 pub fn reset_overrides(doc: &mut Document, node: NodeId, fields: &[OverrideField]) -> Command {
-    let mut c = Ctx::new(doc);
     let mut ids = Vec::new();
     doc.walk(node, |n, _| ids.push(n.id));
+    let mut c = Ctx::new(doc);
     for id in ids {
         let Some(mut n) = c.s.get(id).cloned() else { continue };
         let before = n.component.overrides.len();
@@ -484,18 +496,18 @@ pub fn reset_overrides(doc: &mut Document, node: NodeId, fields: &[OverrideField
         }
     }
     sync_one(&mut c, node);
-    c.finish(doc)
+    c.finish()
 }
 
 /// "Reset all changes": every override and property value of an instance.
 pub fn reset_instance(doc: &mut Document, instance: NodeId) -> Command {
+    let mut ids = Vec::new();
+    doc.walk(instance, |n, _| ids.push(n.id));
     let mut c = Ctx::new(doc);
     if let Some(mut n) = c.s.get(instance).cloned() {
         n.component.values.clear();
         c.update(n);
     }
-    let mut ids = Vec::new();
-    doc.walk(instance, |n, _| ids.push(n.id));
     for id in ids {
         let Some(mut n) = c.s.get(id).cloned() else { continue };
         if !n.component.overrides.is_empty() {
@@ -504,7 +516,7 @@ pub fn reset_instance(doc: &mut Document, instance: NodeId) -> Command {
         }
     }
     sync_one(&mut c, instance);
-    c.finish(doc)
+    c.finish()
 }
 
 // ---------------------------------------------------------------------------
@@ -517,14 +529,12 @@ pub fn reset_instance(doc: &mut Document, instance: NodeId) -> Command {
 pub fn sync_instances(doc: &mut Document, component: NodeId) -> Command {
     let mut c = Ctx::new(doc);
     sync_component(&mut c, component);
-    c.finish(doc)
+    c.finish()
 }
 
 fn sync_component(c: &mut Ctx, owner: NodeId) {
-    let mut targets: Vec<NodeId> = Vec::new();
-    for comp in components_of(&c.s, owner) {
-        targets.extend(instances_of(&c.s, comp));
-    }
+    let comps = components_of(c.s, owner);
+    let mut targets: Vec<NodeId> = instances_of_any(c.s, &comps);
     // Outer instances first so nested ones compare against up-to-date nodes.
     let depth = |d: &Document, id: NodeId| {
         let mut n = 0;
@@ -538,7 +548,7 @@ fn sync_component(c: &mut Ctx, owner: NodeId) {
         }
         n
     };
-    targets.sort_by_key(|t| (depth(&c.s, *t), t.0));
+    targets.sort_by_key(|t| (depth(c.s, *t), t.0));
     for t in targets {
         sync_one(c, t);
     }
@@ -919,7 +929,7 @@ pub fn swap_instance(doc: &mut Document, instance: NodeId, new_comp: NodeId) -> 
         n.component.overrides.insert(OverrideField::MainComponent);
         c.update(n);
     }
-    c.finish(doc)
+    c.finish()
 }
 
 /// Sets (or with `None` clears) a component property value on an instance
@@ -938,7 +948,7 @@ pub fn set_instance_prop(doc: &mut Document, instance: NodeId, name: &str, value
         c.update(n);
     }
     sync_one(&mut c, instance);
-    c.finish(doc)
+    c.finish()
 }
 
 /// Adds a property definition to a component or component set.
@@ -973,7 +983,7 @@ pub fn rename_prop(doc: &mut Document, owner: NodeId, old: &str, new: &str) -> C
         }
     }
     c.update(o);
-    for id in subtree_ids(&c.s, owner) {
+    for id in subtree_ids(c.s, owner) {
         let Some(mut n) = c.s.get(id).cloned() else { continue };
         for v in n.component.bindings.values_mut() {
             if v == old {
@@ -982,16 +992,15 @@ pub fn rename_prop(doc: &mut Document, owner: NodeId, old: &str, new: &str) -> C
         }
         c.update(n);
     }
-    for comp in components_of(&c.s, owner) {
-        for inst in instances_of(&c.s, comp) {
-            let Some(mut n) = c.s.get(inst).cloned() else { continue };
-            if let Some(v) = n.component.values.remove(old) {
-                n.component.values.insert(new.to_string(), v);
-            }
-            c.update(n);
+    let comps = components_of(c.s, owner);
+    for inst in instances_of_any(c.s, &comps) {
+        let Some(mut n) = c.s.get(inst).cloned() else { continue };
+        if let Some(v) = n.component.values.remove(old) {
+            n.component.values.insert(new.to_string(), v);
         }
+        c.update(n);
     }
-    c.finish(doc)
+    c.finish()
 }
 
 /// Deletes a property definition, its bindings and instance values.
@@ -1000,20 +1009,19 @@ pub fn delete_prop(doc: &mut Document, owner: NodeId, name: &str) -> Command {
     let Some(mut o) = c.s.get(owner).cloned() else { return nothing() };
     o.component.props.retain(|p| p.name != name);
     c.update(o);
-    for id in subtree_ids(&c.s, owner) {
+    for id in subtree_ids(c.s, owner) {
         let Some(mut n) = c.s.get(id).cloned() else { continue };
         n.component.bindings.retain(|_, v| v != name);
         c.update(n);
     }
-    for comp in components_of(&c.s, owner) {
-        for inst in instances_of(&c.s, comp) {
-            let Some(mut n) = c.s.get(inst).cloned() else { continue };
-            n.component.values.remove(name);
-            c.update(n);
-        }
+    let comps = components_of(c.s, owner);
+    for inst in instances_of_any(c.s, &comps) {
+        let Some(mut n) = c.s.get(inst).cloned() else { continue };
+        n.component.values.remove(name);
+        c.update(n);
     }
     sync_component(&mut c, owner);
-    c.finish(doc)
+    c.finish()
 }
 
 /// Binds (or with `None` unbinds) `field` of a layer inside a main component
@@ -1030,11 +1038,11 @@ pub fn bind_prop(doc: &mut Document, node: NodeId, field: OverrideField, prop: O
         }
     }
     c.update(n);
-    if let Some(comp) = enclosing_component(&c.s, node) {
+    if let Some(comp) = enclosing_component(c.s, node) {
         let owner = c.s.get(comp).and_then(|x| x.parent).filter(|p| matches!(c.s.get(*p).map(|n| &n.kind), Some(NodeKind::ComponentSet(_)))).unwrap_or(comp);
         sync_component(&mut c, owner);
     }
-    c.finish(doc)
+    c.finish()
 }
 
 // ---------------------------------------------------------------------------

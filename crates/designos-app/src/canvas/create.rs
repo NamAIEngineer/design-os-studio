@@ -48,33 +48,68 @@ pub fn draw_geom(tool: Tool, start: Vec2, cur: Vec2, shift: bool, alt: bool) -> 
 
 /// Deepest frame-like container containing `p` (page space), skipping `exclude`.
 pub fn container_at(doc: &Document, page: NodeId, p: Vec2, exclude: &[NodeId]) -> NodeId {
-    fn rec(doc: &Document, parent: NodeId, parent_world: Affine, p: Vec2, exclude: &[NodeId]) -> Option<NodeId> {
+    container_at_with_index(doc, None, page, p, exclude)
+}
+
+/// Deepest frame-like container containing `p` (page space), skipping `exclude`,
+/// accelerated with `SceneIndex` bounds pruning when available.
+pub fn container_at_with_index(
+    doc: &Document,
+    index: Option<&designos_render::SceneIndex>,
+    page: NodeId,
+    p: Vec2,
+    exclude: &[NodeId],
+) -> NodeId {
+    fn rec(
+        doc: &Document,
+        index: Option<&designos_render::SceneIndex>,
+        parent: NodeId,
+        parent_world: Affine,
+        p: Vec2,
+        exclude: &[NodeId],
+    ) -> Option<NodeId> {
         let pn = doc.get(parent)?;
         for &c in pn.children.iter().rev() {
             if exclude.contains(&c) {
                 continue;
             }
             let Some(n) = doc.get(c) else { continue };
-            if !n.visible || n.locked {
+            if !n.visible || n.locked || !n.kind.is_container() {
+                continue;
+            }
+            if let Some(idx) = index {
+                if let Some((bx0, by0, bx1, by1)) = idx.bounds_of(c) {
+                    if p.x < bx0 || p.x > bx1 || p.y < by0 || p.y > by1 {
+                        continue;
+                    }
+                }
+            }
+            let frame_like = matches!(
+                n.kind,
+                NodeKind::Frame(_) | NodeKind::Section | NodeKind::Component(_) | NodeKind::ComponentSet(_)
+            );
+            if !frame_like && n.children.is_empty() {
                 continue;
             }
             let world = parent_world * n.transform;
             let Some(inv) = world.invert() else { continue };
             let l = inv.apply(p);
             let inside = l.x >= 0.0 && l.y >= 0.0 && l.x <= n.size.x && l.y <= n.size.y;
-            let frame_like = matches!(n.kind, NodeKind::Frame(_) | NodeKind::Section | NodeKind::Component(_) | NodeKind::ComponentSet(_));
             if frame_like && inside {
-                return rec(doc, c, world, p, exclude).or(Some(c));
+                return rec(doc, index, c, world, p, exclude).or(Some(c));
             }
-            if n.kind.is_container() && !frame_like {
-                if let Some(h) = rec(doc, c, world, p, exclude) {
+            if !frame_like {
+                if index.is_none() && n.size.x > 0.0 && n.size.y > 0.0 && !inside {
+                    continue;
+                }
+                if let Some(h) = rec(doc, index, c, world, p, exclude) {
                     return Some(h);
                 }
             }
         }
         None
     }
-    rec(doc, page, Affine::IDENTITY, p, exclude).unwrap_or(page)
+    rec(doc, index, page, Affine::IDENTITY, p, exclude).unwrap_or(page)
 }
 
 fn grey() -> Paint {
@@ -250,7 +285,7 @@ pub fn commit_pen(app: &mut App, tx: &mut Tx, pts: &[PenPoint], closed: bool) ->
     if pts.len() < 2 {
         return None;
     }
-    let parent = container_at(&app.doc, app.page, pts[0].pos, &[]);
+    let parent = container_at_with_index(&app.doc, super::interact::active_index(app), app.page, pts[0].pos, &[]);
     let inv = app.doc.world_transform(parent).invert()?;
     let local_pts: Vec<PenPoint> =
         pts.iter().map(|p| PenPoint { pos: inv.apply(p.pos), hin: p.hin.map(|h| inv.apply(h)), hout: p.hout.map(|h| inv.apply(h)) }).collect();
@@ -362,6 +397,62 @@ mod tests {
         assert_eq!(container_at(&d, page, v2(10.0, 10.0), &[]), outer);
         assert_eq!(container_at(&d, page, v2(500.0, 10.0), &[]), page);
         assert_eq!(container_at(&d, page, v2(60.0, 60.0), &[inner]), outer);
+    }
+
+    #[test]
+    fn container_at_with_index_and_unique_name_fast_on_large_page() {
+        let mut doc = Document::new("t");
+        let _ = doc.add_page("p");
+        let mut app = App::new(doc);
+        let page = app.page;
+        let mut target_frame = page;
+        // Build 2,600+ nodes: 52 top-level groups each containing a frame and 50 child rectangles
+        for g_idx in 0..52 {
+            let gid = app.doc.alloc_id();
+            let gx = (g_idx as f32) * 300.0;
+            let mut g = Node::new(gid, NodeKind::Group);
+            g.transform = Affine::translate(gx, 0.0);
+            g.size = v2(200.0, 200.0);
+            app.doc.insert(page, g).unwrap();
+
+            let fid = app.doc.alloc_id();
+            let mut f = Node::frame(fid, Rect::new(10.0, 10.0, 180.0, 180.0));
+            f.name = format!("Frame {}", g_idx + 1);
+            app.doc.insert(gid, f).unwrap();
+            if g_idx == 25 {
+                target_frame = fid;
+            }
+            for r_idx in 0..50 {
+                let rid = app.doc.alloc_id();
+                let mut r = Node::rectangle(rid, Rect::new((r_idx % 10) as f32 * 15.0, (r_idx / 10) as f32 * 15.0, 10.0, 10.0));
+                r.name = format!("Rectangle {}", g_idx * 50 + r_idx + 1);
+                app.doc.insert(fid, r).unwrap();
+            }
+        }
+        assert!(app.doc.nodes.len() > 2_500);
+        let mut idx = designos_render::SceneIndex::new();
+        idx.ensure(&app.doc, page, 1);
+
+        let t0 = std::time::Instant::now();
+        let found = container_at_with_index(&app.doc, Some(&idx), page, v2(25.0 * 300.0 + 50.0, 50.0), &[]);
+        let container_elapsed = t0.elapsed();
+        assert_eq!(found, target_frame);
+        assert!(
+            container_elapsed.as_micros() < 1_000,
+            "container_at_with_index took {:?} (>= 1ms)",
+            container_elapsed
+        );
+
+        app.selection = vec![target_frame];
+        let t1 = std::time::Instant::now();
+        let name = app.unique_name("Rectangle");
+        let name_elapsed = t1.elapsed();
+        assert_eq!(name, "Rectangle 51");
+        assert!(
+            name_elapsed.as_micros() < 1_000,
+            "unique_name took {:?} (>= 1ms)",
+            name_elapsed
+        );
     }
 
     #[test]

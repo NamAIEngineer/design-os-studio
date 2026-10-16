@@ -63,11 +63,19 @@ pub struct Row {
     pub has_children: bool,
 }
 
+const MAX_FLATTENED_ROWS: usize = 20_000;
+
 /// Visible rows, top-most layer first (reverse z-order), honoring expansion.
 pub fn flatten(doc: &Document, page: NodeId, expanded: &HashSet<NodeId>) -> Vec<Row> {
     fn rec(doc: &Document, id: NodeId, depth: usize, expanded: &HashSet<NodeId>, out: &mut Vec<Row>) {
+        if out.len() >= MAX_FLATTENED_ROWS {
+            return;
+        }
         let Some(n) = doc.get(id) else { return };
         for c in n.children.iter().rev() {
+            if out.len() >= MAX_FLATTENED_ROWS {
+                return;
+            }
             let Some(cn) = doc.get(*c) else { continue };
             let has = !cn.children.is_empty();
             out.push(Row { id: *c, depth, has_children: has });
@@ -182,52 +190,99 @@ fn compute_visible_rows(app: &App) -> Vec<Row> {
     }
 }
 
+fn structural_hash(app: &App) -> u64 {
+    let mut h = (app.doc.pages.len() as u64)
+        .wrapping_mul(0x9E37_79B9_7F4A_7C15)
+        ^ (app.doc.nodes.len() as u64).wrapping_mul(0xBF58_476D_1CE4_E5B9)
+        ^ (app.layers.expanded.len() as u64).wrapping_mul(0x94D0_49BB_1331_11EB);
+    if let Some(page) = app.doc.get(app.page) {
+        h ^= (page.children.len() as u64).wrapping_mul(0x94D0_49BB_1331_11EB);
+        for (i, &cid) in page.children.iter().take(64).enumerate() {
+            let child_kids = app.doc.get(cid).map_or(0, |n| n.children.len()) as u64;
+            h = h.rotate_left(7) ^ cid.0.wrapping_add((i as u64) << 32) ^ (child_kids << 16);
+        }
+        if let Some(&last_cid) = page.children.last() {
+            h ^= last_cid.0.rotate_left(19);
+        }
+    }
+    if app.layers.expanded.len() <= 64 {
+        let mut exp_acc = 0u64;
+        for &eid in &app.layers.expanded {
+            if let Some(en) = app.doc.get(eid) {
+                let first = en.children.first().map_or(0, |c| c.0);
+                let last = en.children.last().map_or(0, |c| c.0);
+                let item = eid
+                    .0
+                    .wrapping_mul(0x517C_C1B7_2722_0A95)
+                    ^ (en.children.len() as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15)
+                    ^ first.rotate_left(13)
+                    ^ last.rotate_left(29);
+                exp_acc = exp_acc.wrapping_add(item);
+            }
+        }
+        h ^= exp_acc;
+    }
+    if app.layers.filter_open && !app.layers.filter.is_empty() {
+        h ^= app.canvas.tiles.rev().wrapping_mul(0x94D0_49BB_1331_11EB);
+    }
+    h
+}
+
 fn current_cache_key(app: &App) -> (NodeId, u64, u64, bool, String) {
-    (app.page, app.canvas.tiles.rev(), app.layers.expanded_gen, app.layers.filter_open, app.layers.filter.clone())
+    (
+        app.page,
+        structural_hash(app),
+        app.layers.expanded_gen,
+        app.layers.filter_open,
+        app.layers.filter.clone(),
+    )
 }
 
 /// The rows to show: the whole tree, or only what matches the name filter.
 #[allow(dead_code)]
 pub(crate) fn visible_rows(app: &App) -> Vec<Row> {
-    if !app.canvas.dirty {
-        let key = current_cache_key(app);
-        if app.layers.cache_key.as_ref() == Some(&key) {
-            return app.layers.rows_cache.clone();
-        }
+    let key = current_cache_key(app);
+    if app.layers.cache_key.as_ref() == Some(&key) {
+        return app.layers.rows_cache.clone();
     }
     compute_visible_rows(app)
 }
 
-fn visible_rows_cached(app: &mut App) -> Vec<Row> {
-    if app.canvas.dirty {
-        app.layers.cache_key = None;
-        let rows = compute_visible_rows(app);
-        app.layers.rows_cache = rows.clone();
-        return rows;
-    }
+fn ensure_rows_cache(app: &mut App) {
     let key = current_cache_key(app);
     if app.layers.cache_key.as_ref() != Some(&key) {
         app.layers.rows_cache = compute_visible_rows(app);
         app.layers.cache_key = Some(key);
     }
+}
+
+#[allow(dead_code)]
+fn visible_rows_cached(app: &mut App) -> Vec<Row> {
+    ensure_rows_cache(app);
     app.layers.rows_cache.clone()
 }
 
 pub fn show(app: &mut App, ui: &mut Ui, region: Rect) {
-    // Reveal newly selected layers.
-    if app.selection != app.layers.last_sel {
+    // Reveal newly selected layers once marquee interaction settles.
+    let in_marquee = matches!(app.canvas.inter, crate::canvas::Interaction::Marquee { .. });
+    if !in_marquee && app.selection != app.layers.last_sel {
         let sel = app.selection.clone();
-        for id in &sel {
-            let mut cur = app.doc.get(*id).and_then(|n| n.parent);
-            while let Some(p) = cur {
-                if app.layers.expanded.insert(p) {
-                    app.layers.expanded_gen = app.layers.expanded_gen.wrapping_add(1);
+        let huge_doc = app.doc.nodes.len() > 10_000;
+        if !huge_doc || sel.len() <= 4 {
+            for id in sel.iter().take(8) {
+                let mut cur = app.doc.get(*id).and_then(|n| n.parent);
+                while let Some(p) = cur {
+                    if !huge_doc || app.doc.get(p).is_some_and(|n| n.children.len() <= 500) {
+                        if app.layers.expanded.insert(p) {
+                            app.layers.expanded_gen = app.layers.expanded_gen.wrapping_add(1);
+                        }
+                    }
+                    cur = app.doc.get(p).and_then(|n| n.parent);
                 }
-                cur = app.doc.get(p).and_then(|n| n.parent);
             }
         }
-        let rows = visible_rows_cached(app);
-        if let Some(i) = sel.first().and_then(|s| rows.iter().position(|r| r.id == *s)) {
+        ensure_rows_cache(app);
+        if let Some(i) = sel.first().and_then(|s| app.layers.rows_cache.iter().position(|r| r.id == *s)) {
             let top = i as f32 * theme::LAYER_ROW_HEIGHT;
             if top < app.layers.scroll {
                 app.layers.scroll = top;
@@ -237,27 +292,38 @@ pub fn show(app: &mut App, ui: &mut Ui, region: Rect) {
         }
         app.layers.last_sel = sel;
     }
-    let rows = visible_rows_cached(app);
+    ensure_rows_cache(app);
+    let total_rows = app.layers.rows_cache.len();
     let filter = crate::find::filter::matcher(&app.layers.filter).filter(|_| app.layers.filter_open);
-    let content_h = rows.len() as f32 * theme::LAYER_ROW_HEIGHT + 8.0;
+    let content_h = total_rows as f32 * theme::LAYER_ROW_HEIGHT + 8.0;
     let mut scroll = app.layers.scroll;
     wheel_scroll(ui, region, &mut scroll, content_h);
     app.layers.scroll = scroll;
     app.hover_layer = None;
 
     let first = (scroll / theme::LAYER_ROW_HEIGHT).floor().max(0.0) as usize;
-    let last = (((scroll + region.height()) / theme::LAYER_ROW_HEIGHT).ceil() as usize + 1).min(rows.len());
+    let last = (((scroll + region.height()) / theme::LAYER_ROW_HEIGHT).ceil() as usize + 1).min(total_rows);
+    let visible_slice: Vec<Row> = if first < last {
+        app.layers.rows_cache[first..last].to_vec()
+    } else {
+        Vec::new()
+    };
     let selected: HashSet<NodeId> = app.selection.iter().copied().collect();
 
     // Drag bookkeeping.
     let pointer = ui.input(|i| i.pointer.interact_pos());
     if let (Some(ids), Some(pos)) = (app.layers.drag.clone(), pointer) {
-        app.layers.drop = if region.contains(pos) { drop_for(pos.y - region.top() + scroll, &rows, &app.doc, &ids) } else { None };
+        app.layers.drop = if region.contains(pos) {
+            drop_for(pos.y - region.top() + scroll, &app.layers.rows_cache, &app.doc, &ids)
+        } else {
+            None
+        };
     }
 
     clipped(ui, region, |ui| {
         let p = ui.painter().clone();
-        for (i, row) in rows.iter().enumerate().take(last).skip(first) {
+        for (offset, row) in visible_slice.iter().copied().enumerate() {
+            let i = first + offset;
             let Some(node) = app.doc.get(row.id) else { continue };
             let (node_parent, comp, icon, node_name, node_visible, node_locked) = (
                 node.parent,
@@ -272,12 +338,17 @@ pub fn show(app: &mut App, ui: &mut Ui, region: Rect) {
                 Vec2::new(region.width(), theme::LAYER_ROW_HEIGHT),
             );
             let is_sel = selected.contains(&row.id);
-            let under_sel = !is_sel && {
+            let under_sel = !is_sel && !selected.is_empty() && {
                 let mut c = node_parent;
                 let mut f = false;
+                let mut steps = 0usize;
                 while let Some(pp) = c {
                     if selected.contains(&pp) {
                         f = true;
+                        break;
+                    }
+                    steps += 1;
+                    if steps >= 16 {
                         break;
                     }
                     c = app.doc.get(pp).and_then(|n| n.parent);
@@ -286,13 +357,19 @@ pub fn show(app: &mut App, ui: &mut Ui, region: Rect) {
             };
             let resp = ui.interact(rr, ui.id().with(("layer", row.id.0)), Sense::click_and_drag());
             let row_hot = ui.rect_contains_pointer(rr);
+            let canvas_hov = app.hover == Some(row.id);
             if resp.hovered() {
                 app.hover_layer = Some(row.id);
             }
             if is_sel {
-                p.rect_filled(rr, 0.0, if resp.hovered() { theme::BG_SELECTED_HOVER } else { theme::BG_SELECTED });
+                p.rect_filled(rr, 0.0, if resp.hovered() || canvas_hov { theme::BG_SELECTED_HOVER } else { theme::BG_SELECTED });
             } else if under_sel {
                 p.rect_filled(rr, 0.0, theme::BG_SELECTED_SECONDARY);
+                if canvas_hov {
+                    p.rect_stroke(rr.shrink2(Vec2::new(8.0, 0.0)), theme::cr(theme::RADIUS_MEDIUM), Stroke::new(1.0, theme::BORDER_SELECTED), StrokeKind::Inside);
+                }
+            } else if canvas_hov {
+                p.rect_stroke(rr.shrink2(Vec2::new(8.0, 0.0)), theme::cr(theme::RADIUS_MEDIUM), Stroke::new(1.0, theme::BORDER_SELECTED), StrokeKind::Inside);
             } else if resp.hovered() && app.layers.drag.is_none() {
                 p.rect_stroke(rr.shrink2(Vec2::new(8.0, 0.0)), theme::cr(theme::RADIUS_MEDIUM), Stroke::new(1.0, theme::BORDER), StrokeKind::Inside);
             }
@@ -311,7 +388,33 @@ pub fn show(app: &mut App, ui: &mut Ui, region: Rect) {
                 };
                 icons::paint(&p, if open { Icon::ChevronDown } else { Icon::ChevronRight }, chev.center(), 12.0, col);
                 if cr.clicked() {
-                    if open {
+                    let alt = ui.input(|i| i.modifiers.alt);
+                    if alt {
+                        let mut descendants = Vec::new();
+                        let mut stack = vec![row.id];
+                        while let Some(cur) = stack.pop() {
+                            if descendants.len() >= 2000 {
+                                break;
+                            }
+                            if let Some(n) = app.doc.get(cur) {
+                                if !n.children.is_empty() {
+                                    descendants.push(cur);
+                                    for &ch in &n.children {
+                                        stack.push(ch);
+                                    }
+                                }
+                            }
+                        }
+                        if open {
+                            for d in descendants {
+                                app.layers.expanded.remove(&d);
+                            }
+                        } else {
+                            for d in descendants {
+                                app.layers.expanded.insert(d);
+                            }
+                        }
+                    } else if open {
                         app.layers.expanded.remove(&row.id);
                     } else {
                         app.layers.expanded.insert(row.id);
@@ -349,18 +452,58 @@ pub fn show(app: &mut App, ui: &mut Ui, region: Rect) {
                     app.layers.rename_started = true;
                     app.layers.rename_seen = false;
                 }
-                let res = field::edit_text(ui, tr, id, &node_name, theme::font_body(), theme::TEXT, 4.0);
-                let focused = ui.memory(|m| m.has_focus(id));
-                if focused {
-                    app.layers.rename_seen = true;
-                }
-                if let Some(s) = res {
-                    app.rename(row.id, &s);
-                }
-                if !focused && app.layers.rename_seen {
-                    app.layers.renaming = None;
-                    app.layers.rename_started = false;
-                    app.layers.rename_seen = false;
+                let mut tab_dir: Option<bool> = None;
+                ui.input_mut(|i| {
+                    if let Some(idx) = i.events.iter().position(|ev| {
+                        matches!(
+                            ev,
+                            egui::Event::Key {
+                                key: egui::Key::Tab,
+                                pressed: true,
+                                ..
+                            }
+                        )
+                    }) {
+                        if let egui::Event::Key { modifiers, .. } = i.events.remove(idx) {
+                            tab_dir = Some(!modifiers.shift);
+                        }
+                    }
+                });
+                if let Some(forward) = tab_dir {
+                    let cur_buf = ui.data(|d| d.get_temp::<String>(id)).unwrap_or_else(|| node_name.clone());
+                    ui.data_mut(|d| d.remove_temp::<String>(id));
+                    if cur_buf != node_name {
+                        app.rename(row.id, &cur_buf);
+                    }
+                    let next_idx = if forward {
+                        (i + 1 < app.layers.rows_cache.len()).then_some(i + 1)
+                    } else {
+                        i.checked_sub(1)
+                    };
+                    if let Some(ni) = next_idx.and_then(|idx| app.layers.rows_cache.get(idx).map(|r| r.id)) {
+                        app.layers.renaming = Some(ni);
+                        app.layers.rename_started = false;
+                        app.layers.rename_seen = false;
+                        app.select_only(ni);
+                    } else {
+                        app.layers.renaming = None;
+                        app.layers.rename_started = false;
+                        app.layers.rename_seen = false;
+                    }
+                } else {
+                    let res = field::edit_text(ui, tr, id, &node_name, theme::font_body(), theme::TEXT, 4.0);
+                    let focused = ui.memory(|m| m.has_focus(id));
+                    if focused {
+                        app.layers.rename_seen = true;
+                    }
+                    if let Some(s) = res {
+                        app.rename(row.id, &s);
+                    }
+                    if !focused && app.layers.rename_seen {
+                        app.layers.renaming = None;
+                        app.layers.rename_started = false;
+                        app.layers.rename_seen = false;
+                    }
                 }
             } else {
                 let shown = widgets::elide(&p, &node_name, &theme::font_body(), (text_right - text_left).max(10.0));
@@ -402,7 +545,7 @@ pub fn show(app: &mut App, ui: &mut Ui, region: Rect) {
             }
 
             if resp.secondary_clicked() {
-                if !app.is_selected(row.id) {
+                if !is_sel {
                     app.select_only(row.id);
                 }
                 app.ui.ctx_menu = ui.input(|i| i.pointer.interact_pos());
@@ -411,13 +554,24 @@ pub fn show(app: &mut App, ui: &mut Ui, region: Rect) {
             // Selection clicks.
             let mods = ui.input(|i| i.modifiers);
             if resp.double_clicked() {
-                app.layers.renaming = Some(row.id);
-                app.layers.rename_started = false;
+                let over_icon = ui
+                    .input(|i| i.pointer.interact_pos())
+                    .is_some_and(|pos| pos.x >= chev.right() && pos.x < text_left);
+                if over_icon {
+                    app.select_only(row.id);
+                    app.layers.anchor = Some(row.id);
+                    app.fit_selection();
+                } else {
+                    app.layers.renaming = Some(row.id);
+                    app.layers.rename_started = false;
+                }
             } else if resp.clicked() && app.layers.renaming != Some(row.id) {
                 if mods.shift {
-                    let anchor = app.layers.anchor.and_then(|a| rows.iter().position(|r| r.id == a)).unwrap_or(i);
+                    let anchor = app.layers.anchor.and_then(|a| app.layers.rows_cache.iter().position(|r| r.id == a)).unwrap_or(i);
                     let (a, b) = (anchor.min(i), anchor.max(i));
-                    app.selection = rows[a..=b].iter().map(|r| r.id).collect();
+                    if b < app.layers.rows_cache.len() {
+                        app.selection = app.layers.rows_cache[a..=b].iter().map(|r| r.id).collect();
+                    }
                 } else if mods.command {
                     if let Some(pos) = app.selection.iter().position(|s| *s == row.id) {
                         app.selection.remove(pos);
@@ -431,7 +585,7 @@ pub fn show(app: &mut App, ui: &mut Ui, region: Rect) {
                 }
             }
             if resp.drag_started() && app.layers.renaming.is_none() && filter.is_none() {
-                if !app.is_selected(row.id) {
+                if !is_sel {
                     app.select_only(row.id);
                 }
                 app.layers.drag = Some(app.top_selection());
@@ -440,7 +594,7 @@ pub fn show(app: &mut App, ui: &mut Ui, region: Rect) {
 
         // Drop indicator.
         if let (Some(d), Some(_)) = (app.layers.drop, app.layers.drag.as_ref()) {
-            if let Some(row) = rows.get(d.row) {
+            if let Some(row) = app.layers.rows_cache.get(d.row) {
                 let top = region.top() + d.row as f32 * theme::LAYER_ROW_HEIGHT - scroll;
                 let indent = row.depth as f32 * theme::LAYER_INDENT + theme::LAYER_CHEVRON_PAD;
                 match d.kind {
@@ -463,7 +617,7 @@ pub fn show(app: &mut App, ui: &mut Ui, region: Rect) {
     if app.layers.drag.is_some() && ui.input(|i| i.pointer.primary_released()) {
         let ids = app.layers.drag.take().unwrap_or_default();
         if let Some(d) = app.layers.drop.take() {
-            if let Some((parent, index)) = resolve_drop(&app.doc, &rows, d, &ids) {
+            if let Some((parent, index)) = resolve_drop(&app.doc, &app.layers.rows_cache, d, &ids) {
                 app.move_to_parent(&ids, parent, index);
                 if app.layers.expanded.insert(parent) {
                     app.layers.expanded_gen = app.layers.expanded_gen.wrapping_add(1);
@@ -548,5 +702,26 @@ mod tests {
 
         assert_eq!(kind_icon(&NodeKind::Component(FrameProps::default())), Icon::Component);
         assert_eq!(kind_icon(&NodeKind::ComponentSet(FrameProps::default())), Icon::ComponentSet);
+    }
+
+    #[test]
+    fn rows_cache_not_invalidated_by_canvas_dirty_or_transform_drag() {
+        let (d, _page, frame, a, b) = sample();
+        let mut app = App::new(d);
+        app.layers.expanded.insert(frame);
+        app.layers.expanded_gen = 1;
+
+        let rows1 = visible_rows_cached(&mut app);
+        assert_eq!(rows1.iter().map(|r| r.id).collect::<Vec<_>>(), vec![b, frame, a]);
+        let key1 = app.layers.cache_key.clone();
+        assert!(key1.is_some());
+
+        // Simulate dragging a node on canvas: canvas.dirty becomes true and transform changes,
+        // but hierarchy is unchanged.
+        app.doc.get_mut(a).unwrap().transform.tx += 42.0;
+        app.canvas.dirty = true;
+        let rows2 = visible_rows_cached(&mut app);
+        assert_eq!(rows2.len(), 3);
+        assert_eq!(app.layers.cache_key, key1, "cache_key must remain valid during transform drags");
     }
 }

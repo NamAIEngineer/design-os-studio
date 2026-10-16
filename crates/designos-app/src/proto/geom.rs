@@ -26,6 +26,16 @@ pub fn hotspot_center(src: egui::Rect) -> Pos2 {
     Pos2::new(src.right(), src.center().y)
 }
 
+/// Where a layer's 4 edge hotspot magnets sit: Right, Bottom, Left, Top.
+pub fn hotspot_magnets(src: egui::Rect) -> [Pos2; 4] {
+    [
+        Pos2::new(src.right(), src.center().y),
+        Pos2::new(src.center().x, src.bottom()),
+        Pos2::new(src.left(), src.center().y),
+        Pos2::new(src.center().x, src.top()),
+    ]
+}
+
 /// Connector from `src` (screen rect of the interactive layer) to `dst`
 /// (screen rect of the destination frame).
 pub fn noodle(src: egui::Rect, dst: egui::Rect) -> Noodle {
@@ -43,7 +53,6 @@ pub fn noodle(src: egui::Rect, dst: egui::Rect) -> Noodle {
 }
 
 impl Noodle {
-    #[cfg(test)]
     pub fn point(&self, t: f32) -> Pos2 {
         let u = 1.0 - t;
         let w = [u * u * u, 3.0 * u * u * t, 3.0 * u * t * t, t * t * t];
@@ -68,7 +77,6 @@ impl Noodle {
     }
 
     /// Distance from `p` to the curve (sampled), for hit testing.
-    #[cfg(test)]
     pub fn distance_to(&self, p: Pos2) -> f32 {
         let mut best = f32::MAX;
         let mut prev = self.p0;
@@ -81,7 +89,6 @@ impl Noodle {
     }
 }
 
-#[cfg(test)]
 fn dist_to_segment(p: Pos2, a: Pos2, b: Pos2) -> f32 {
     let ab = b - a;
     let len2 = ab.length_sq();

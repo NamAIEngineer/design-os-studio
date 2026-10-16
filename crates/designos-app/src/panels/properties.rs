@@ -31,6 +31,90 @@ pub enum PickTarget {
     NoiseColor(usize, bool),
 }
 
+pub type EyedropTarget = PickTarget;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[allow(dead_code)]
+pub enum SelectedProperty {
+    Fill(usize),
+    Stroke(usize),
+    Effect(usize),
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum EyedropperFormat {
+    #[default]
+    Hex,
+    Rgb,
+    Hsl,
+    Hsb,
+}
+
+impl EyedropperFormat {
+    pub fn next(self) -> Self {
+        match self {
+            Self::Hex => Self::Rgb,
+            Self::Rgb => Self::Hsl,
+            Self::Hsl => Self::Hsb,
+            Self::Hsb => Self::Hex,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Hex => "HEX",
+            Self::Rgb => "RGB",
+            Self::Hsl => "HSL",
+            Self::Hsb => "HSB",
+        }
+    }
+
+    pub fn format_rgb(self, r: u8, g: u8, b: u8) -> String {
+        match self {
+            Self::Hex => format!("#{r:02X}{g:02X}{b:02X}"),
+            Self::Rgb => format!("rgb({r}, {g}, {b})"),
+            Self::Hsl => {
+                let (rf, gf, bf) = (r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0);
+                let max = rf.max(gf).max(bf);
+                let min = rf.min(gf).min(bf);
+                let l = (max + min) * 0.5;
+                let d = max - min;
+                let (h, s) = if d.abs() < 1e-5 {
+                    (0.0, 0.0)
+                } else {
+                    let s = d / (1.0 - (2.0 * l - 1.0).abs()).max(1e-5);
+                    let h = if (max - rf).abs() < 1e-5 {
+                        60.0 * (((gf - bf) / d).rem_euclid(6.0))
+                    } else if (max - gf).abs() < 1e-5 {
+                        60.0 * (((bf - rf) / d) + 2.0)
+                    } else {
+                        60.0 * (((rf - gf) / d) + 4.0)
+                    };
+                    (h, s)
+                };
+                format!("hsl({}°, {}%, {}%)", h.round() as i32, (s * 100.0).round() as i32, (l * 100.0).round() as i32)
+            }
+            Self::Hsb => {
+                let (rf, gf, bf) = (r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0);
+                let max = rf.max(gf).max(bf);
+                let min = rf.min(gf).min(bf);
+                let d = max - min;
+                let s = if max < 1e-5 { 0.0 } else { d / max };
+                let h = if d.abs() < 1e-5 {
+                    0.0
+                } else if (max - rf).abs() < 1e-5 {
+                    60.0 * (((gf - bf) / d).rem_euclid(6.0))
+                } else if (max - gf).abs() < 1e-5 {
+                    60.0 * (((bf - rf) / d) + 2.0)
+                } else {
+                    60.0 * (((rf - gf) / d) + 4.0)
+                };
+                format!("{} format · {}° {}% {}%", self.label(), h.round() as i32, (s * 100.0).round() as i32, (max * 100.0).round() as i32)
+            }
+        }
+    }
+}
+
 pub struct Picker {
     pub target: PickTarget,
     pub tx: Tx,
@@ -50,6 +134,14 @@ pub struct PropsState {
     pub scroll: f32,
     pub content_h: f32,
     pub picker: Option<Picker>,
+    /// Active standalone or picker-linked canvas eyedropper target (`I` shortcut).
+    pub eyedropper: Option<PickTarget>,
+    /// Active eyedropper HUD color readout format (`Tab` cycles Hex -> Rgb -> Hsl -> Hsb).
+    pub eyedropper_format: EyedropperFormat,
+    /// Focused Fill / Stroke / Effect row in the right-hand Inspector (`Delete` removes, `Cmd+V` pastes fill).
+    pub selected_property: Option<SelectedProperty>,
+    /// Fill / Stroke / Effect row currently being dragged vertically to reorder.
+    pub drag_property: Option<SelectedProperty>,
     /// Collapsed style folders in the Styles section.
     pub folded: std::collections::HashSet<String>,
     /// Page background opacity before the visibility toggle hid it.
@@ -60,6 +152,10 @@ pub struct PropsState {
     pub fx_menu: bool,
     /// The paint styles menu (4-dots button) is open: Some(for_stroke).
     pub styles_menu: Option<bool>,
+    /// Cached `(selection_hash, tile_rev, unique_colors, usage_counts)` for Selection colors.
+    pub sel_colors_cache: Option<(u64, u64, Vec<Color>, Vec<usize>)>,
+    /// Cached `(doc_node_count_and_epoch, sorted_component_ids)` for instance swap menus.
+    pub all_components_cache: Option<(u64, Vec<NodeId>)>,
 }
 
 pub(super) struct Pane {
@@ -219,7 +315,7 @@ pub(super) fn checkbox(ui: &mut Ui, pane: &mut Pane, key: &str, label: &str, val
 
 /// Common value of `f` over all selected nodes, or None if they differ.
 fn common<T: PartialEq>(app: &App, sel: &[NodeId], f: impl Fn(&Node) -> T) -> Option<T> {
-    let mut it = sel.iter().filter_map(|id| app.doc.get(*id)).map(f);
+    let mut it = sel.iter().take(128).filter_map(|id| app.doc.get(*id)).map(f);
     let first = it.next()?;
     it.all(|v| v == first).then_some(first)
 }
@@ -277,7 +373,7 @@ fn page_section(app: &mut App, ui: &mut Ui, pane: &mut Pane) {
         open_picker(app, PickTarget::PageBg, to_c32(bg, 1.0), sw, vec![app.page]);
     }
     let hex_r = Rect::from_min_max(Pos2::new(g.left() + theme::PAGE_HEX_X, g.top()), Pos2::new(g.left() + theme::PAGE_DIVIDER_X, g.bottom()));
-    if let Some(s) = field::edit_text(ui, hex_r, hex_id, &bg.to_hex(), theme::font_body(), theme::TEXT, 0.0) {
+    if let Some(s) = field::edit_hex_text(ui, hex_r, hex_id, &bg.to_hex(), theme::font_body(), theme::TEXT, 0.0) {
         if let Some(c) = Color::from_hex(&s) {
             let page = app.page;
             app.edit_nodes(&[page], |n| n.kind = NodeKind::Page { background: Color { a: bg.a, ..c } });
@@ -285,13 +381,11 @@ fn page_section(app: &mut App, ui: &mut Ui, pane: &mut Pane) {
     }
     widgets::vline(ui.painter(), g.left() + theme::PAGE_DIVIDER_X, g.top(), g.bottom(), theme::BG);
     let op_r = Rect::from_min_max(Pos2::new(g.left() + theme::PAGE_DIVIDER_X + 1.0, g.top()), Pos2::new(g.right() - theme::PAGE_PERCENT_W, g.bottom()));
-    let op_txt = fmt_num((bg.a * 100.0).round());
-    if let Some(s) = field::edit_text(ui, op_r, op_id, &op_txt, theme::font_body(), theme::TEXT, theme::PAGE_OPACITY_PAD) {
-        if let Ok(v) = s.trim().trim_end_matches('%').trim().parse::<f32>() {
-            let page = app.page;
-            let a = (v / 100.0).clamp(0.0, 1.0);
-            app.edit_nodes(&[page], |n| n.kind = NodeKind::Page { background: Color { a, ..bg } });
-        }
+    let op_val = (bg.a * 100.0).round();
+    if let Some(v) = field::edit_num_text(ui, op_r, op_id, Some(op_val), true, theme::font_body(), theme::TEXT, theme::PAGE_OPACITY_PAD, None) {
+        let page = app.page;
+        let a = (v / 100.0).clamp(0.0, 1.0);
+        app.edit_nodes(&[page], |n| n.kind = NodeKind::Page { background: Color { a, ..bg } });
     }
     ui.painter().text(Pos2::new(g.right() - theme::PAGE_PERCENT_RIGHT, g.center().y), Align2::RIGHT_CENTER, "%", theme::font_body(), theme::TEXT);
     // Visibility toggle: hiding sets the background opacity to 0 and remembers the old value.
@@ -487,33 +581,27 @@ fn library_styles_list(app: &mut App, ui: &mut Ui, pane: &mut Pane, target: &[No
 
 /// Unique colours of the selection subtree; editing one replaces it everywhere.
 fn selection_colors_section(app: &mut App, ui: &mut Ui, pane: &mut Pane, sel: &[NodeId]) {
-    let cols = crate::styles::selection_colors(&app.doc, sel);
-    let nested = sel.iter().any(|s| app.doc.get(*s).map(|n| !n.children.is_empty()).unwrap_or(false));
-    if cols.is_empty() || !(cols.len() >= 2 || sel.len() > 1 || nested) {
+    if matches!(app.canvas.inter, crate::canvas::Interaction::Marquee { .. }) && sel.len() > 8 {
         return;
     }
-    let mut usage_counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
-    let cap_walk = app.doc.nodes.len() > 20_000;
-    let mut visited = 0usize;
-    for &root in sel {
-        app.doc.walk(root, |n, _| {
-            if cap_walk && visited > 512 {
-                return;
-            }
-            visited += 1;
-            for p in n.fills.iter().chain(n.stroke.paints.iter()).filter(|p| p.visible) {
-                if let PaintKind::Solid(col) = &p.kind {
-                    *usage_counts.entry(col.to_hex()).or_insert(0) += 1;
-                }
-            }
-            if let NodeKind::Text(t) = &n.kind {
-                for p in t.style.fills.iter().filter(|p| p.visible) {
-                    if let PaintKind::Solid(col) = &p.kind {
-                        *usage_counts.entry(col.to_hex()).or_insert(0) += 1;
-                    }
-                }
-            }
-        });
+    let sel_hash = {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        sel.hash(&mut h);
+        h.finish()
+    };
+    let rev = app.canvas.tiles.rev();
+    let (cols, counts) = match &app.props.sel_colors_cache {
+        Some((sh, r, cols, counts)) if *sh == sel_hash && *r == rev && !app.canvas.dirty => (cols.clone(), counts.clone()),
+        _ => {
+            let (cols, counts) = crate::styles::selection_colors_with_counts(&app.doc, sel, crate::styles::MAX_COLOR_WALK_NODES);
+            app.props.sel_colors_cache = Some((sel_hash, rev, cols.clone(), counts.clone()));
+            (cols, counts)
+        }
+    };
+    let nested = sel.iter().take(64).any(|s| app.doc.get(*s).map(|n| !n.children.is_empty()).unwrap_or(false));
+    if cols.is_empty() || !(cols.len() >= 2 || sel.len() > 1 || nested) {
+        return;
     }
     section_sep(ui, pane, false);
     title(ui, pane, "Selection colors", None, false);
@@ -525,17 +613,19 @@ fn selection_colors_section(app: &mut App, ui: &mut Ui, pane: &mut Pane, sel: &[
         widgets::record(ui, &format!("selhex:{i}"), hex_r);
         let swr = ui.interact(sw, ui.id().with(("selsw", i)), Sense::click());
         widgets::swatch(ui.painter(), sw, to_c32(*c, 1.0));
+        let hex_str = c.to_hex();
         if swr.clicked() {
-            let rgb = u32::from_str_radix(&c.to_hex(), 16).unwrap_or(0);
+            let rgb = crate::styles::rgb_key(c);
             open_picker(app, PickTarget::SelColor(rgb), to_c32(*c, 1.0), sw, sel.to_vec());
         }
-        if let Some(s) = field::text_input(ui, hex_r, ("selhex", i), &c.to_hex()) {
+        if let Some(s) = field::text_input(ui, hex_r, ("selhex", i), &hex_str) {
             if let Some(nc) = Color::from_hex(&s) {
                 app.replace_selection_color(sel, *c, nc);
+                app.props.sel_colors_cache = None;
             }
         }
         ui.painter().rect_filled(op_r, theme::cr(theme::RADIUS_MEDIUM), theme::BG_SECONDARY);
-        let cnt = usage_counts.get(&c.to_hex()).copied().unwrap_or(1);
+        let cnt = counts.get(i).copied().unwrap_or(1).max(1);
         let badge_txt = if cnt > 1 { format!("100% · {cnt}") } else { "100 %".to_string() };
         ui.painter().text(op_r.center(), Align2::CENTER_CENTER, badge_txt, theme::font_small(), theme::TEXT_SECONDARY);
         pane.y += theme::FIELD_HEIGHT + 8.0;
@@ -616,15 +706,15 @@ fn selection_ui(app: &mut App, ui: &mut Ui, pane: &mut Pane, sel: &[NodeId]) {
         ui.painter().text(
             slides_r.center(),
             Align2::CENTER_CENTER,
-            "Copy to Figma Slides",
+            "Copy to Slide Deck",
             theme::font_small(),
             theme::TEXT,
         );
-        if slides_resp.on_hover_text("Copy selected frame to Figma Slides").clicked() {
+        if slides_resp.on_hover_text("Copy selected frame to Slide Deck").clicked() {
             if let Some(s) = app.copy_selection() {
                 ui.ctx().copy_text(s);
             }
-            app.show_toast("Copied frame to Figma Slides clipboard", false);
+            app.show_toast("Copied selection to Slide Deck", false);
         }
         pane.y += 32.0;
     }
@@ -642,11 +732,22 @@ fn selection_ui(app: &mut App, ui: &mut Ui, pane: &mut Pane, sel: &[NodeId]) {
     sublabel(ui, pane, "Alignment");
     let h = [Icon::AlignLeft, Icon::AlignHCenter, Icon::AlignRight];
     let v = [Icon::AlignTop, Icon::AlignVCenter, Icon::AlignBottom];
+    let shift_align = ui.input(|i| i.modifiers.shift) && app.selection.len() >= 2;
     if let Some(i) = segmented(ui, pane, theme::SECTION_CONTENT_X, "alignh", &h, None) {
-        app.align([Align::Left, Align::HCenter, Align::Right][i]);
+        let kind = [Align::Left, Align::HCenter, Align::Right][i];
+        if shift_align {
+            app.align_selection_as_group(kind);
+        } else {
+            app.align(kind);
+        }
     }
     if let Some(i) = segmented(ui, pane, theme::SECTION_CONTENT_X + 3.0 * theme::SEGMENT_W + theme::SEGMENT_GROUP_GAP, "alignv", &v, None) {
-        app.align([Align::Top, Align::VCenter, Align::Bottom][i]);
+        let kind = [Align::Top, Align::VCenter, Align::Bottom][i];
+        if shift_align {
+            app.align_selection_as_group(kind);
+        } else {
+            app.align(kind);
+        }
     }
     let dist_r = pane.rect(theme::DISTRIBUTE_BTN_X, 0.0, theme::PANEL_ACTION_BUTTON, theme::PANEL_ACTION_BUTTON);
     widgets::record(ui, "distribute", dist_r);
@@ -1028,14 +1129,27 @@ fn auto_layout_ui(app: &mut App, ui: &mut Ui, pane: &mut Pane, sel: &[NodeId], a
         LayoutAlign::End => 2,
         _ => 0,
     };
+    let align_row_r = pane.full(0.0);
     let al_icons = [Icon::AlignLeft, Icon::AlignHCenter, Icon::AlignRight];
     if let Some(i) = segmented(ui, pane, theme::SECTION_CONTENT_X, "al-main", &al_icons, Some(pi.min(2))) {
         update_al(app, sel, |al| al.primary_align = [LayoutAlign::Start, LayoutAlign::Center, LayoutAlign::End][i]);
     }
     let sb = pane.rect(theme::SECTION_CONTENT_X + 3.0 * theme::SEGMENT_W + 4.0, 0.0, 24.0, theme::FIELD_HEIGHT);
-    let sbr = widgets::icon_button(ui, sb, "al-space", Icon::Spacing, pi == 3, "Space between");
-    if sbr.clicked() {
-        update_al(app, sel, |al| al.primary_align = if pi == 3 { LayoutAlign::Start } else { LayoutAlign::SpaceBetween });
+    let sbr = widgets::icon_button(ui, sb, "al-space", Icon::Spacing, pi == 3, "Space between (double-click or X)");
+    let hover_align = ui.rect_contains_pointer(align_row_r);
+    let dbl_or_x = (hover_align && ui.input(|i| i.pointer.button_double_clicked(egui::PointerButton::Primary)))
+        || (hover_align && !ui.ctx().egui_wants_keyboard_input() && ui.input(|i| i.key_pressed(egui::Key::X)));
+    if sbr.clicked() || dbl_or_x {
+        let next = if pi == 3 { LayoutAlign::Start } else { LayoutAlign::SpaceBetween };
+        update_al(app, sel, |al| al.primary_align = next);
+        app.show_toast(
+            if next == LayoutAlign::SpaceBetween {
+                "Align: Space between (Auto)"
+            } else {
+                "Align: Packed"
+            },
+            false,
+        );
     }
     let v_icons = [Icon::AlignTop, Icon::AlignVCenter, Icon::AlignBottom];
     if let Some(i) = segmented(ui, pane, theme::FIELD_COL_X[1] + 16.0, "al-cross", &v_icons, Some(ci)) {
@@ -1103,8 +1217,20 @@ pub(super) fn paint_rows(app: &mut App, ui: &mut Ui, pane: &mut Pane, sel: &[Nod
         // Figma sits the first row 4px under the title row.
         pane.y += 4.0;
     }
+    let mut reorder_pair: Option<(usize, usize)> = None;
     for (i, p) in paints.iter().enumerate() {
         let key = (stroke, i);
+        let prop = if stroke { SelectedProperty::Stroke(i) } else { SelectedProperty::Fill(i) };
+        let row_r = pane.rect(2.0, -2.0, theme::RIGHT_PANEL_WIDTH - 5.0, theme::FIELD_HEIGHT + 4.0);
+        let gutter_r = pane.rect(0.0, 0.0, theme::SWATCH_ROW_X, theme::FIELD_HEIGHT);
+        let gutter_resp = ui.interact(gutter_r, ui.id().with(("prop-gutter", key)), Sense::click_and_drag());
+        if gutter_resp.clicked() {
+            app.props.selected_property = Some(prop);
+        }
+        if gutter_resp.drag_started() {
+            app.props.selected_property = Some(prop);
+            app.props.drag_property = Some(prop);
+        }
         let g = pane.rect(theme::SWATCH_ROW_X, 0.0, PAINT_GROUP_W, theme::FIELD_HEIGHT);
         let sw = Rect::from_min_size(Pos2::new(g.left() + 4.0, g.center().y - theme::SWATCH_SIZE / 2.0), Vec2::splat(theme::SWATCH_SIZE));
         let hex_r = Rect::from_min_max(
@@ -1119,13 +1245,36 @@ pub(super) fn paint_rows(app: &mut App, ui: &mut Ui, pane: &mut Pane, sel: &[Nod
         let hex_id = ui.id().with(("txt", ("hex", key)));
         let op_id = ui.id().with(("num", ("op", key)));
         let focused = ui.memory(|m| m.has_focus(hex_id) || m.has_focus(op_id));
+        if focused {
+            app.props.selected_property = Some(prop);
+        }
         {
             let pt = ui.painter();
+            if app.props.selected_property == Some(prop) {
+                pt.rect_stroke(row_r, theme::cr(4), Stroke::new(1.0, theme::BORDER_SELECTED), StrokeKind::Inside);
+            }
             pt.rect_filled(g, theme::cr(theme::RADIUS_MEDIUM), theme::BG_SECONDARY);
             if focused {
                 pt.rect_stroke(g, theme::cr(theme::RADIUS_MEDIUM), Stroke::new(1.0, theme::BORDER_SELECTED), StrokeKind::Inside);
             } else if ui.rect_contains_pointer(g) {
                 pt.rect_stroke(g, theme::cr(theme::RADIUS_MEDIUM), Stroke::new(1.0, theme::BORDER), StrokeKind::Inside);
+            }
+        }
+        if let Some(drag_prop) = app.props.drag_property {
+            let drag_src = match (stroke, drag_prop) {
+                (false, SelectedProperty::Fill(s)) => Some(s),
+                (true, SelectedProperty::Stroke(s)) => Some(s),
+                _ => None,
+            };
+            if let Some(src_i) = drag_src {
+                let (ptr, released) = ui.ctx().input(|inp| (inp.pointer.interact_pos(), inp.pointer.any_released()));
+                if let Some(pos) = ptr.filter(|pos| row_r.contains(*pos)) {
+                    let line_y = if pos.y < row_r.center().y { row_r.top() } else { row_r.bottom() };
+                    ui.painter().hline(row_r.left()..=row_r.right(), line_y, Stroke::new(2.0, theme::BORDER_SELECTED));
+                    if released && src_i != i {
+                        reorder_pair = Some((src_i, i));
+                    }
+                }
             }
         }
         let swr = ui.interact(sw.expand(2.0), ui.id().with(("sw", key)), Sense::click());
@@ -1136,6 +1285,7 @@ pub(super) fn paint_rows(app: &mut App, ui: &mut Ui, pane: &mut Pane, sel: &[Nod
             widgets::vline(ui.painter(), g.left() + PAINT_DIVIDER_X, g.top(), g.bottom(), theme::BG);
         }
         if swr.clicked() && !bound {
+            app.props.selected_property = Some(prop);
             let target = if stroke { PickTarget::Stroke(i) } else { PickTarget::Fill(i) };
             open_picker(app, target, paint_preview(p), sw, sel.to_vec());
         }
@@ -1146,7 +1296,7 @@ pub(super) fn paint_rows(app: &mut App, ui: &mut Ui, pane: &mut Pane, sel: &[Nod
                 widgets::field_text(ui.painter(), hex_r, 0.0, 4.0, linked.as_deref().unwrap_or(""), font.clone(), theme::TEXT);
             }
             PaintKind::Solid(c) => {
-                if let Some(s) = field::edit_text(ui, hex_r, hex_id, &c.to_hex(), font.clone(), theme::TEXT, 0.0) {
+                if let Some(s) = field::edit_hex_text(ui, hex_r, hex_id, &c.to_hex(), font.clone(), theme::TEXT, 0.0) {
                     if let Some(nc) = Color::from_hex(&s) {
                         edit_paint_list(app, sel, stroke, |ps| {
                             if let Some(p) = ps.get_mut(i) {
@@ -1165,16 +1315,14 @@ pub(super) fn paint_rows(app: &mut App, ui: &mut Ui, pane: &mut Pane, sel: &[Nod
         }
         if !bound {
             // Opacity: "100" then a separate "%" in text_secondary.
-            let pct = fmt_num((p.opacity * 100.0).round());
-            if let Some(s) = field::edit_text(ui, op_r, op_id, &pct, font.clone(), theme::TEXT, 8.0) {
-                if let Some(v) = field::parse_number(&s) {
-                    let o = (v / 100.0).clamp(0.0, 1.0);
-                    edit_paint_list(app, sel, stroke, |ps| {
-                        if let Some(p) = ps.get_mut(i) {
-                            p.opacity = o;
-                        }
-                    });
-                }
+            let pct_val = (p.opacity * 100.0).round();
+            if let Some(v) = field::edit_num_text(ui, op_r, op_id, Some(pct_val), true, font.clone(), theme::TEXT, 8.0, None) {
+                let o = (v / 100.0).clamp(0.0, 1.0);
+                edit_paint_list(app, sel, stroke, |ps| {
+                    if let Some(p) = ps.get_mut(i) {
+                        p.opacity = o;
+                    }
+                });
             }
             let pct_x = g.right() - 8.0 - widgets::text_width(ui.painter(), "%", &font);
             widgets::text_on_baseline(ui.painter(), pct_x, widgets::centered_baseline(g, &font), "%", font, theme::TEXT_SECONDARY);
@@ -1195,6 +1343,24 @@ pub(super) fn paint_rows(app: &mut App, ui: &mut Ui, pane: &mut Pane, sel: &[Nod
         }
         pane.y += theme::FIELD_HEIGHT + 8.0;
     }
+    if let Some((src_i, dst_i)) = reorder_pair {
+        edit_paint_list(app, sel, stroke, |ps| {
+            if src_i < ps.len() {
+                let item = ps.remove(src_i);
+                let target_idx = dst_i.min(ps.len());
+                ps.insert(target_idx, item);
+            }
+        });
+        app.props.selected_property = Some(if stroke { SelectedProperty::Stroke(dst_i) } else { SelectedProperty::Fill(dst_i) });
+        app.props.drag_property = None;
+    } else if ui.ctx().input(|inp| inp.pointer.any_released())
+        && matches!(
+            (stroke, app.props.drag_property),
+            (false, Some(SelectedProperty::Fill(_))) | (true, Some(SelectedProperty::Stroke(_)))
+        )
+    {
+        app.props.drag_property = None;
+    }
 }
 
 // ---------------------------------------------------------------- color picker
@@ -1209,6 +1375,21 @@ fn node_paint(app: &App, target: PickTarget, ids: &[NodeId]) -> Option<Paint> {
 
 /// Colours for the picker's swatch grid: this page, the whole document, colour styles, and colour variables.
 fn swatch_sources(app: &App) -> Vec<(String, Vec<Color32>)> {
+    thread_local! {
+        static SWATCH_CACHE: std::cell::RefCell<Option<((u64, NodeId, u64, usize, usize), Vec<(String, Vec<Color32>)>)>> = const { std::cell::RefCell::new(None) };
+    }
+    let key = (
+        app.doc.runtime_id(),
+        app.page,
+        app.doc.mutation_epoch(),
+        app.doc.styles.len(),
+        app.doc.variables.len(),
+    );
+    if let Some(cached) = SWATCH_CACHE.with(|c| {
+        c.borrow().as_ref().filter(|(k, _)| *k == key).map(|(_, v)| v.clone())
+    }) {
+        return cached;
+    }
     let conv = |cs: Vec<Color>| cs.into_iter().map(|c| to_c32(c, 1.0)).collect::<Vec<_>>();
     let page = conv(crate::styles::selection_colors(&app.doc, &[app.page]));
     let doc = if app.doc.nodes.len() > 20_000 {
@@ -1223,13 +1404,15 @@ fn swatch_sources(app: &App) -> Vec<(String, Vec<Color32>)> {
             _ => None,
         })
         .collect();
-    let store = VariableStore::from_doc(&app.doc);
     let mut vars: Vec<Color32> = Vec::new();
-    for coll in app.doc.variable_collections.values() {
-        for vid in &coll.variables {
-            if let Some(v) = app.doc.variables.get(vid).filter(|v| v.kind == VariableKind::Color) {
-                if let Some(VariableValue::Color(c)) = store.resolve(&v.id, &coll.default_mode) {
-                    vars.push(to_c32(c, c.a));
+    if !app.doc.variable_collections.is_empty() {
+        let store = VariableStore::from_doc(&app.doc);
+        for coll in app.doc.variable_collections.values() {
+            for vid in &coll.variables {
+                if let Some(v) = app.doc.variables.get(vid).filter(|v| v.kind == VariableKind::Color) {
+                    if let Some(VariableValue::Color(c)) = store.resolve(&v.id, &coll.default_mode) {
+                        vars.push(to_c32(c, c.a));
+                    }
                 }
             }
         }
@@ -1241,6 +1424,9 @@ fn swatch_sources(app: &App) -> Vec<(String, Vec<Color32>)> {
     if !vars.is_empty() {
         out.push(("Color variables".to_string(), vars));
     }
+    SWATCH_CACHE.with(|c| {
+        *c.borrow_mut() = Some((key, out.clone()));
+    });
     out
 }
 
@@ -1314,7 +1500,7 @@ fn apply_picker(doc: &mut Document, p: &mut Picker) {
 }
 
 /// Reads the page colour under `pos` (screen space) by rendering a 1x1 pixel of the page.
-fn sample_canvas(app: &App, pos: Pos2) -> Option<[u8; 3]> {
+pub fn sample_canvas(app: &App, pos: Pos2) -> Option<[u8; 3]> {
     use designos_render::tiny_skia::Pixmap;
     let p = app.view.to_page(app.canvas_rect.min, pos);
     let vp = designos_render::Viewport { offset: DVec2::new(p.x - 0.5, p.y - 0.5), zoom: 1.0, dpr: 1.0 };
@@ -1352,10 +1538,89 @@ fn create_style(app: &mut App, pk: &mut Picker) {
     app.show_toast(format!("Created \"{key}\""), false);
 }
 
+fn try_sample_color_token(app: &mut App, p: Pos2, target: PickTarget, ids: &[NodeId]) -> bool {
+    let hit = app
+        .hover
+        .or_else(|| crate::canvas::interact::hit_under(app, app.view.to_page(app.canvas_rect.min, p), true));
+    let Some(hid) = hit else { return false };
+    let (style_key, var_id) = match app.doc.get(hid) {
+        Some(n) => (
+            n.style_refs.get("fill").cloned(),
+            n.variables.bindings.get("fills/0").cloned(),
+        ),
+        None => return false,
+    };
+    if let Some(key) = style_key {
+        app.apply_style(ids, &key);
+        app.show_toast("Sampled color token", false);
+        return true;
+    }
+    if let Some(vid) = var_id {
+        let prop_key = match target {
+            PickTarget::Stroke(i) => format!("strokes/{i}"),
+            PickTarget::Fill(i) => format!("fills/{i}"),
+            _ => "fills/0".to_string(),
+        };
+        app.bind_variable(ids, &[prop_key.as_str()], &vid);
+        app.show_toast("Sampled color token", false);
+        return true;
+    }
+    false
+}
+
 pub(super) fn picker_popup(app: &mut App, ui: &mut Ui, region: Rect) {
     use widgets::picker;
-    let Some(mut pk) = app.props.picker.take() else { return };
     let ctx = ui.ctx().clone();
+    let Some(mut pk) = app.props.picker.take() else {
+        if let Some(target) = app.props.eyedropper {
+            ctx.set_cursor_icon(egui::CursorIcon::Crosshair);
+            let (clicked, ptr, esc, shift) = ctx.input(|i| {
+                (
+                    i.pointer.primary_pressed(),
+                    i.pointer.interact_pos(),
+                    i.key_pressed(egui::Key::Escape),
+                    i.modifiers.shift,
+                )
+            });
+            if esc {
+                app.props.eyedropper = None;
+            } else if let (true, Some(p)) = (clicked, ptr) {
+                if app.canvas_rect.contains(p) && !region.contains(p) {
+                    let sel = app.selection.clone();
+                    if !(shift && try_sample_color_token(app, p, target, &sel)) {
+                        if let Some([r, g, b]) = sample_canvas(app, p) {
+                            let col = Color::rgb(r, g, b);
+                            app.edit_nodes(&sel, |n| match target {
+                                PickTarget::Fill(i) => {
+                                    if let Some(pt) = n.fills.get_mut(i) {
+                                        pt.kind = PaintKind::Solid(col);
+                                    } else {
+                                        n.fills.push(Paint::solid(col));
+                                    }
+                                }
+                                PickTarget::Stroke(i) => {
+                                    if let Some(pt) = n.stroke.paints.get_mut(i) {
+                                        pt.kind = PaintKind::Solid(col);
+                                    } else {
+                                        n.stroke.paints.push(Paint::solid(col));
+                                    }
+                                }
+                                _ => {
+                                    if let Some(pt) = n.fills.first_mut() {
+                                        pt.kind = PaintKind::Solid(col);
+                                    } else {
+                                        n.fills.push(Paint::solid(col));
+                                    }
+                                }
+                            });
+                        }
+                    }
+                    app.props.eyedropper = None;
+                }
+            }
+        }
+        return;
+    };
     let paint_types = matches!(pk.target, PickTarget::Fill(_) | PickTarget::Stroke(_));
     let mut styles: Vec<picker::StyleItem> = if paint_types {
         crate::styles::style_entries(&app.doc, false)
@@ -1417,8 +1682,9 @@ pub(super) fn picker_popup(app: &mut App, ui: &mut Ui, region: Rect) {
         app.doc.images.insert(key, bytes);
         changed = true;
     }
-    if out.eyedrop {
+    if out.eyedrop || app.props.eyedropper.is_some() {
         pk.eyedrop = true;
+        app.props.eyedropper = Some(pk.target);
     }
     if out.want_image {
         if let Some(path) = rfd::FileDialog::new().add_filter("Images", &crate::canvas::interact::IMAGE_EXTENSIONS[..4]).pick_file() {
@@ -1437,17 +1703,32 @@ pub(super) fn picker_popup(app: &mut App, ui: &mut Ui, region: Rect) {
     // Eyedropper: the next canvas click samples the colour under the pointer.
     if pk.eyedrop {
         ctx.set_cursor_icon(egui::CursorIcon::Crosshair);
-        let (clicked, ptr, esc) = ctx.input(|i| (i.pointer.primary_pressed(), i.pointer.interact_pos(), i.key_pressed(egui::Key::Escape)));
+        let (clicked, ptr, esc, shift) = ctx.input(|i| {
+            (
+                i.pointer.primary_pressed(),
+                i.pointer.interact_pos(),
+                i.key_pressed(egui::Key::Escape),
+                i.modifiers.shift,
+            )
+        });
         if esc {
             pk.eyedrop = false;
+            app.props.eyedropper = None;
         } else if let (true, Some(p)) = (clicked, ptr) {
             if app.canvas_rect.contains(p) && !panel.contains(p) {
-                if let Some([r, g, b]) = sample_canvas(app, p) {
-                    let a = widgets::picker::active_rgba(&pk.paint, pk.state.sel)[3];
-                    widgets::picker::set_active(&mut pk.paint, pk.state.sel, [r, g, b, a]);
-                    changed = true;
+                let ids = pk.ids.clone();
+                if shift && try_sample_color_token(app, p, pk.target, &ids) {
+                    pk.eyedrop = false;
+                    app.props.eyedropper = None;
+                } else {
+                    if let Some([r, g, b]) = sample_canvas(app, p) {
+                        let a = widgets::picker::active_rgba(&pk.paint, pk.state.sel)[3];
+                        widgets::picker::set_active(&mut pk.paint, pk.state.sel, [r, g, b, a]);
+                        changed = true;
+                    }
+                    pk.eyedrop = false;
+                    app.props.eyedropper = None;
                 }
-                pk.eyedrop = false;
             }
         }
     }
@@ -1495,6 +1776,7 @@ pub(super) fn picker_popup(app: &mut App, ui: &mut Ui, region: Rect) {
         return;
     }
     if outside || esc || out.close || out.apply_style.is_some() || remove {
+        app.props.eyedropper = None;
         let ids = pk.ids.clone();
         let target = pk.target;
         let tx = pk.tx;
@@ -1528,7 +1810,24 @@ pub(super) fn picker_popup(app: &mut App, ui: &mut Ui, region: Rect) {
 
 /// Handles of the gradient on the canvas are in screen space; clicks on them must not close the picker.
 fn handle_hit(pk: &Picker, app: &App, p: Pos2) -> bool {
-    handle_points(pk, app).iter().any(|(_, c)| c.distance(p) < 12.0)
+    let pts = handle_points(pk, app);
+    if pts.iter().any(|(_, c)| c.distance(p) < 12.0) {
+        return true;
+    }
+    if pts.len() >= 2 {
+        let a = pts[0].1;
+        let b = pts[1].1;
+        let ab = b - a;
+        let len_sq = ab.length_sq();
+        if len_sq > 1.0 {
+            let t = ((p - a).dot(ab) / len_sq).clamp(0.0, 1.0);
+            let proj = a + ab * t;
+            if proj.distance(p) < 12.0 {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 /// Screen positions of the three gradient handles of the edited node.
@@ -1546,7 +1845,7 @@ fn handle_points(pk: &Picker, app: &App) -> Vec<(usize, Pos2)> {
         .collect()
 }
 
-/// On-canvas gradient editing: the start/end/width handles of the edited paint.
+/// On-canvas gradient editing: the start/end/width handles and interactive stops of the edited paint.
 fn gradient_handles(app: &mut App, ctx: &egui::Context, pk: &mut Picker, changed: &mut bool) {
     let pts = handle_points(pk, app);
     if pts.len() != 3 || !matches!(pk.target, PickTarget::Fill(_) | PickTarget::Stroke(_)) {
@@ -1558,57 +1857,163 @@ fn gradient_handles(app: &mut App, ctx: &egui::Context, pk: &mut Picker, changed
     let origin = app.canvas_rect.min;
     let view = app.view;
     let canvas = app.canvas_rect;
-    let mode = widgets::picker::mode_of(&pk.paint.kind);
-    let mut moved: Option<(usize, DVec2)> = None;
-    egui::Area::new(egui::Id::new("gradient-handles")).order(egui::Order::Foreground).fixed_pos(canvas.min).interactable(true).show(ctx, |ui| {
-        let p = ui.painter().with_clip_rect(canvas);
-        let stroke = |w: f32, c: Color32| Stroke::new(w, c);
-        p.line_segment([pts[0].1, pts[1].1], stroke(3.0, Color32::from_black_alpha(0x66)));
-        p.line_segment([pts[0].1, pts[1].1], stroke(1.5, Color32::WHITE));
-        p.line_segment([pts[0].1, pts[2].1], stroke(1.0, Color32::from_white_alpha(0xB2)));
-        let stops = widgets::picker::stops_of(&pk.paint.kind).cloned().unwrap_or_default();
-        for (i, c) in &pts {
-            let r = Rect::from_center_size(*c, Vec2::splat(16.0));
-            let resp = ui.interact(r, ui.id().with(("gh", *i)), Sense::drag());
-            if resp.dragged() {
-                if let Some(pt) = resp.interact_pointer_pos() {
-                    let local = inv.apply(view.to_page(origin, pt));
-                    moved = Some((*i, DVec2::new(local.x / size.x.max(1e-3), local.y / size.y.max(1e-3))));
+    let mut moved: Option<(usize, DVec2, bool)> = None;
+    let mut stop_selected: Option<usize> = None;
+    let mut stop_moved: Option<(usize, f32)> = None;
+    let mut stop_duplicated: Option<(usize, f32)> = None;
+    let mut line_inserted: Option<f32> = None;
+    let mut any_handle_or_stop_interacted = false;
+
+    egui::Area::new(egui::Id::new("gradient-handles"))
+        .order(egui::Order::Foreground)
+        .fixed_pos(canvas.min)
+        .interactable(true)
+        .show(ctx, |ui| {
+            let p = ui.painter().with_clip_rect(canvas);
+            let stroke = |w: f32, c: Color32| Stroke::new(w, c);
+            p.line_segment([pts[0].1, pts[1].1], stroke(3.0, Color32::from_black_alpha(0x66)));
+            p.line_segment([pts[0].1, pts[1].1], stroke(1.5, Color32::WHITE));
+            p.line_segment([pts[0].1, pts[2].1], stroke(1.0, Color32::from_white_alpha(0xB2)));
+            let stops = widgets::picker::stops_of(&pk.paint.kind).cloned().unwrap_or_default();
+            let shift = ui.input(|inp| inp.modifiers.shift);
+            let alt = ui.input(|inp| inp.modifiers.alt);
+
+            for (i, c) in &pts {
+                let r = Rect::from_center_size(*c, Vec2::splat(16.0));
+                let resp = ui.interact(r, ui.id().with(("gh", *i)), Sense::click_and_drag());
+                if resp.clicked() || resp.dragged() || resp.drag_started() {
+                    any_handle_or_stop_interacted = true;
+                }
+                if resp.dragged() {
+                    if let Some(mut pt) = resp.interact_pointer_pos() {
+                        if shift && (*i == 0 || *i == 1) {
+                            let anchor = if *i == 0 { pts[1].1 } else { pts[0].1 };
+                            let d = pt - anchor;
+                            let len = d.length();
+                            if len > 1.0 {
+                                let step = 15.0_f32.to_radians();
+                                let snapped = (d.y.atan2(d.x) / step).round() * step;
+                                pt = anchor + egui::vec2(snapped.cos() * len, snapped.sin() * len);
+                            }
+                        }
+                        let local = inv.apply(view.to_page(origin, pt));
+                        moved = Some((
+                            *i,
+                            DVec2::new(local.x / size.x.max(1e-3), local.y / size.y.max(1e-3)),
+                            shift,
+                        ));
+                    }
+                }
+                let fill = if *i == 0 {
+                    stops.first().map(|s| to_c32(s.color, 1.0))
+                } else if *i == 1 {
+                    stops.last().map(|s| to_c32(s.color, 1.0))
+                } else {
+                    None
+                };
+                let rad = if *i == 2 { 4.0 } else { 6.5 };
+                p.circle_filled(*c, rad + 1.5, Color32::from_black_alpha(0x4D));
+                p.circle_filled(*c, rad, Color32::WHITE);
+                if let Some(f) = fill {
+                    p.circle_filled(*c, rad - 2.0, f);
                 }
             }
-            let fill = if *i == 0 {
-                stops.first().map(|s| to_c32(s.color, 1.0))
-            } else if *i == 1 {
-                stops.last().map(|s| to_c32(s.color, 1.0))
-            } else {
-                None
-            };
-            let rad = if *i == 2 { 4.0 } else { 6.5 };
-            p.circle_filled(*c, rad + 1.5, Color32::from_black_alpha(0x4D));
-            p.circle_filled(*c, rad, Color32::WHITE);
-            if let Some(f) = fill {
-                p.circle_filled(*c, rad - 2.0, f);
-            }
-        }
-        // Stop markers along the axis of a linear gradient.
-        if mode == widgets::picker::Mode::Linear {
+
+            // Interactive stop squares along the gradient axis.
+            let ab = pts[1].1 - pts[0].1;
+            let ab_len_sq = ab.length_sq().max(1.0);
             for (si, s) in stops.iter().enumerate() {
-                let c = pts[0].1 + (pts[1].1 - pts[0].1) * s.pos.clamp(0.0, 1.0);
+                let c = pts[0].1 + ab * s.pos.clamp(0.0, 1.0);
+                let sr = Rect::from_center_size(c, Vec2::splat(12.0));
+                let sresp = ui.interact(sr, ui.id().with(("gh-stop", si)), Sense::click_and_drag());
+                if sresp.clicked() || sresp.drag_started() || sresp.dragged() {
+                    any_handle_or_stop_interacted = true;
+                    stop_selected = Some(si);
+                }
+                if sresp.drag_started() && alt {
+                    if let Some(pt) = sresp.interact_pointer_pos() {
+                        let t = ((pt - pts[0].1).dot(ab) / ab_len_sq).clamp(0.0, 1.0);
+                        stop_duplicated = Some((si, t));
+                    }
+                } else if sresp.dragged() {
+                    if let Some(pt) = sresp.interact_pointer_pos() {
+                        let t = ((pt - pts[0].1).dot(ab) / ab_len_sq).clamp(0.0, 1.0);
+                        stop_moved = Some((si, t));
+                    }
+                }
                 let sel = pk.state.sel == si;
-                p.rect_filled(Rect::from_center_size(c, Vec2::splat(10.0)), theme::cr(3), if sel { Color32::WHITE } else { Color32::from_white_alpha(0xCC) });
+                p.rect_filled(
+                    Rect::from_center_size(c, Vec2::splat(10.0)),
+                    theme::cr(3),
+                    if sel { Color32::WHITE } else { Color32::from_white_alpha(0xCC) },
+                );
+                if sel {
+                    p.rect_stroke(
+                        Rect::from_center_size(c, Vec2::splat(12.0)),
+                        theme::cr(3),
+                        Stroke::new(1.5, theme::BORDER_SELECTED),
+                        StrokeKind::Outside,
+                    );
+                }
                 p.rect_filled(Rect::from_center_size(c, Vec2::splat(6.0)), theme::cr(2), to_c32(s.color, 1.0));
             }
+
+            // Click on the gradient line between stops to insert a new interpolated stop.
+            if !any_handle_or_stop_interacted {
+                let (clicked, ptr) = ui.input(|inp| (inp.pointer.primary_clicked(), inp.pointer.interact_pos()));
+                if let (true, Some(pt)) = (clicked, ptr) {
+                    let t = ((pt - pts[0].1).dot(ab) / ab_len_sq).clamp(0.0, 1.0);
+                    let proj = pts[0].1 + ab * t;
+                    let near_endpoint = pts.iter().any(|(_, ep)| ep.distance(pt) < 12.0);
+                    let near_stop = stops
+                        .iter()
+                        .any(|s| (pts[0].1 + ab * s.pos.clamp(0.0, 1.0)).distance(pt) < 10.0);
+                    if proj.distance(pt) < 8.0 && (0.02..=0.98).contains(&t) && !near_endpoint && !near_stop {
+                        line_inserted = Some(t);
+                    }
+                }
+            }
+        });
+
+    if let Some(si) = stop_selected {
+        pk.state.sel = si;
+    }
+    if let Some((si, t)) = stop_duplicated {
+        if let Some(stops) = widgets::picker::stops_mut(&mut pk.paint.kind) {
+            if let Some(src) = stops.get(si).cloned() {
+                stops.push(GradientStop { pos: t, color: src.color });
+                pk.state.sel = stops.len() - 1;
+                *changed = true;
+            }
         }
-    });
-    if let Some((i, v)) = moved {
+    } else if let Some((si, t)) = stop_moved {
+        if let Some(stops) = widgets::picker::stops_mut(&mut pk.paint.kind) {
+            let idx = pk.state.sel.min(stops.len().saturating_sub(1)).max(si.min(stops.len().saturating_sub(1)));
+            if let Some(s) = stops.get_mut(idx) {
+                s.pos = t;
+                *changed = true;
+            }
+        }
+    } else if let Some(t) = line_inserted {
+        if let Some(stops) = widgets::picker::stops_mut(&mut pk.paint.kind) {
+            let color = widgets::picker::stop_color_at(stops, t);
+            stops.push(GradientStop { pos: t, color });
+            stops.sort_by(|a, b| a.pos.partial_cmp(&b.pos).unwrap_or(std::cmp::Ordering::Equal));
+            if let Some(idx) = stops.iter().position(|s| (s.pos - t).abs() < 1e-4) {
+                pk.state.sel = idx;
+            }
+            *changed = true;
+        }
+    }
+    if let Some((i, v, shift_snapped)) = moved {
         let v = DVec2::new(v.x, v.y);
         match &mut pk.paint.kind {
             PaintKind::LinearGradient { handles, .. }
             | PaintKind::RadialGradient { handles, .. }
             | PaintKind::AngularGradient { handles, .. }
             | PaintKind::DiamondGradient { handles, .. } => {
-                if i == 0 {
-                    // Moving the start/centre drags the whole gradient.
+                if i == 0 && !shift_snapped {
+                    // Moving the start/centre without Shift drags the whole gradient.
                     let d = DVec2::new(v.x - handles[0].x, v.y - handles[0].y);
                     for h in handles.iter_mut() {
                         *h = DVec2::new(h.x + d.x, h.y + d.y);

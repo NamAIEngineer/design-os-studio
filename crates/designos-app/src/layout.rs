@@ -364,8 +364,24 @@ fn child_in(doc: &Document, id: NodeId, horiz: bool) -> ChildIn {
 pub fn layout_node(doc: &mut Document, ed: &mut Edit, id: NodeId) {
     let Some(n) = doc.get(id) else { return };
     let children = n.children.clone();
+    let large_doc = doc.nodes.len() > 5_000;
     for c in &children {
-        if doc.get(*c).map(|k| k.kind.is_container()).unwrap_or(false) {
+        let should_recurse = doc.get(*c).is_some_and(|k| {
+            if !k.kind.is_container() {
+                return false;
+            }
+            if !large_doc {
+                return true;
+            }
+            matches!(k.kind, NodeKind::Group)
+                || k.layout_child.horizontal == Sizing::Hug
+                || k.layout_child.vertical == Sizing::Hug
+                || k.kind
+                    .frame_props()
+                    .and_then(|f| f.auto_layout.as_ref())
+                    .is_some_and(|al| al.primary_sizing == Sizing::Hug || al.counter_sizing == Sizing::Hug)
+        });
+        if should_recurse {
             layout_node(doc, ed, *c);
         }
     }
@@ -373,8 +389,19 @@ pub fn layout_node(doc: &mut Document, ed: &mut Edit, id: NodeId) {
         fit_group(doc, ed, id);
         return;
     }
+    layout_self(doc, ed, id);
+}
+
+/// Solves auto-layout for `id` using its direct children's current sizes,
+/// recursing into a child container only if `id` changed that child's size (e.g. `Sizing::Fill`).
+/// Returns `true` if `id`'s own outer `size` changed.
+fn layout_self(doc: &mut Document, ed: &mut Edit, id: NodeId) -> bool {
+    let Some(n) = doc.get(id) else { return false };
+    let children = n.children.clone();
     // gap / padding bound to variables count with the value of the mode in effect
-    let Some(al) = doc.get(id).map(|n| resolve_node(doc, n)).and_then(|n| n.kind.frame_props().and_then(|f| f.auto_layout)) else { return };
+    let Some(al) = doc.get(id).map(|n| resolve_node(doc, n)).and_then(|n| n.kind.frame_props().and_then(|f| f.auto_layout)) else {
+        return false;
+    };
     let horiz = al.direction != LayoutDirection::Vertical;
     let ids: Vec<NodeId> =
         children.iter().copied().filter(|c| doc.get(*c).map(|k| resolve_node(doc, k).visible && !k.layout_child.absolute).unwrap_or(false)).collect();
@@ -392,7 +419,8 @@ pub fn layout_node(doc: &mut Document, ed: &mut Edit, id: NodeId) {
     } else {
         compute(&al, frame_size, &kids)
     };
-    if out.frame != frame_size {
+    let frame_changed = (out.frame.x - frame_size.x).abs() > 1e-3 || (out.frame.y - frame_size.y).abs() > 1e-3;
+    if frame_changed {
         if let Some(n) = ed.node(doc, id) {
             n.size = out.frame;
         }
@@ -413,11 +441,13 @@ pub fn layout_node(doc: &mut Document, ed: &mut Edit, id: NodeId) {
             layout_node(doc, ed, *cid);
         }
     }
+    frame_changed
 }
 
 /// Re-fits a group's box to its children (group transform follows the content).
-pub fn fit_group(doc: &mut Document, ed: &mut Edit, id: NodeId) {
-    let Some(g) = doc.get(id) else { return };
+/// Returns `true` if the group's outer transform or size changed.
+pub fn fit_group(doc: &mut Document, ed: &mut Edit, id: NodeId) -> bool {
+    let Some(g) = doc.get(id) else { return false };
     let mut pts = Vec::new();
     for c in &g.children {
         if let Some(k) = doc.get(*c) {
@@ -426,12 +456,12 @@ pub fn fit_group(doc: &mut Document, ed: &mut Edit, id: NodeId) {
         }
     }
     if pts.is_empty() {
-        return;
+        return false;
     }
     let bb = aabb_of(&pts);
     let size = v2(bb.w, bb.h);
     if bb.x.abs() < 1e-3 && bb.y.abs() < 1e-3 && (g.size.x - size.x).abs() < 1e-3 && (g.size.y - size.y).abs() < 1e-3 {
-        return;
+        return false;
     }
     let children = g.children.clone();
     let shift = designos_doc::Affine::translate(bb.x, bb.y);
@@ -445,9 +475,12 @@ pub fn fit_group(doc: &mut Document, ed: &mut Edit, id: NodeId) {
             k.transform.ty -= bb.y;
         }
     }
+    true
 }
 
-/// After any edit on `start`, re-run layout/fit on its ancestors.
+/// After any edit on `start`, re-run layout/fit on its ancestors using Figma's
+/// `GroupsAndStacksObserver` (`apply_groups_and_stacks_layout`) bottom-up frontier
+/// propagation with Fixed-box boundary cutoff.
 pub fn relayout_up(doc: &mut Document, ed: &mut Edit, start: NodeId) {
     // on a board, connectors follow the moved node live (every move, resize and rotate comes through here)
     crate::board::connect::reroute_touched(doc, ed);
@@ -455,10 +488,15 @@ pub fn relayout_up(doc: &mut Document, ed: &mut Edit, start: NodeId) {
     while let Some(p) = cur {
         let is_group = matches!(doc.get(p).map(|n| &n.kind), Some(NodeKind::Group));
         let is_al = doc.get(p).and_then(|n| n.kind.frame_props()).map(|f| f.auto_layout.is_some()).unwrap_or(false);
-        if is_group {
-            fit_group(doc, ed, p);
+        let box_changed = if is_group {
+            fit_group(doc, ed, p)
         } else if is_al {
-            layout_node(doc, ed, p);
+            layout_self(doc, ed, p)
+        } else {
+            false
+        };
+        if !box_changed {
+            break;
         }
         cur = doc.get(p).and_then(|n| n.parent);
     }

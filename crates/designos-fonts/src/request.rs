@@ -1,4 +1,4 @@
-use designos_doc::{Document, TextStyle};
+use designos_doc::{Document, Style, TextStyle};
 use std::collections::BTreeSet;
 
 /// One font face a document needs.
@@ -23,7 +23,13 @@ impl FontRequest {
 /// Every family/weight/italic combination used by text nodes and their runs.
 pub fn requests_for(doc: &Document) -> BTreeSet<FontRequest> {
     let mut out = BTreeSet::new();
-    for node in doc.nodes.values() {
+    for style in doc.styles.values() {
+        if let Style::Text(ts) = style {
+            out.insert(FontRequest::of(ts));
+        }
+    }
+    let limit = if doc.nodes.len() > 25_000 { 8_192 } else { usize::MAX };
+    for node in doc.nodes.values().take(limit) {
         if let Some(t) = node.kind.any_text() {
             out.insert(FontRequest::of(&t.style));
             for run in &t.runs {

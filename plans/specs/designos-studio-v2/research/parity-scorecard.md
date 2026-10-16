@@ -1,6 +1,6 @@
 # `design`:os studio vs Figma Desktop (`126.9.13`) — 1:1 Parity Scorecard
 
-- **Generated At:** `2026-10-15T12:13:14Z`
+- **Generated At:** `2026-10-15T17:14:29Z`
 - **Target Figma Desktop Version:** `126.9.13` (`app.asar` + UI3 Reference Corpus)
 - **Target `.fig` Kiwi Schema Version:** `v106` (`VSF - PCP.fig`: `155,297` nodes, `165,671` overrides, `653` definitions)
 - **Overall Weighted 1:1 Parity Score:** **`100.00%`** (**`0.00%` remaining to `100.00%`**)

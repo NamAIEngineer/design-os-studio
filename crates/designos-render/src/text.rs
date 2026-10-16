@@ -34,6 +34,7 @@ thread_local! {
 /// font system replays this list, so tile workers see the same fonts as the
 /// thread that called [`register_font`].
 static EXTRA_FONTS: Mutex<Vec<Arc<Vec<u8>>>> = Mutex::new(Vec::new());
+static FONT_GEN: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
 /// The system + bundled font database, built once and cloned per thread (so
 /// scanning system fonts does not repeat for every worker).
@@ -41,8 +42,9 @@ static BASE_DB: OnceLock<(fontdb::Database, HashSet<fontdb::ID>)> = OnceLock::ne
 
 /// Number of fonts registered through [`register_font`]; changes whenever the
 /// set of available fonts changes (tile caches use it to invalidate).
+#[inline]
 pub fn font_generation() -> usize {
-    EXTRA_FONTS.lock().map(|v| v.len()).unwrap_or(0)
+    FONT_GEN.load(std::sync::atomic::Ordering::Acquire)
 }
 
 /// Outlines of laid out text, one path per style (index 0 = base style,
@@ -100,18 +102,20 @@ fn with_fonts<R>(f: impl FnOnce(&mut Fonts) -> R) -> R {
         }
         let fonts = slot.as_mut().unwrap();
         // Load fonts registered (possibly on another thread) since last use.
-        let pending: Vec<Arc<Vec<u8>>> = {
-            let all = EXTRA_FONTS.lock().unwrap_or_else(|e| e.into_inner());
-            let done = REPLAYED.with(|r| r.get());
-            all[done.min(all.len())..].to_vec()
-        };
-        if !pending.is_empty() {
-            for blob in &pending {
-                fonts.fs.db_mut().load_font_source(fontdb::Source::Binary(blob.clone()));
+        let done = REPLAYED.with(|r| r.get());
+        if done < font_generation() {
+            let pending: Vec<Arc<Vec<u8>>> = {
+                let all = EXTRA_FONTS.lock().unwrap_or_else(|e| e.into_inner());
+                all[done.min(all.len())..].to_vec()
+            };
+            if !pending.is_empty() {
+                for blob in &pending {
+                    fonts.fs.db_mut().load_font_source(fontdb::Source::Binary(blob.clone()));
+                }
+                fonts.families = family_names(&fonts.fs);
+                REPLAYED.with(|r| r.set(done + pending.len()));
+                LAYOUTS.with(|l| l.borrow_mut().clear());
             }
-            fonts.families = family_names(&fonts.fs);
-            REPLAYED.with(|r| r.set(r.get() + pending.len()));
-            LAYOUTS.with(|l| l.borrow_mut().clear());
         }
         f(fonts)
     })
@@ -121,7 +125,11 @@ fn with_fonts<R>(f: impl FnOnce(&mut Fonts) -> R) -> R {
 /// shared font system. Every thread (including tile-render workers) loads it
 /// the next time it lays out text. Cached layouts are discarded.
 pub fn register_font(data: Vec<u8>) {
-    EXTRA_FONTS.lock().unwrap_or_else(|e| e.into_inner()).push(Arc::new(data));
+    {
+        let mut all = EXTRA_FONTS.lock().unwrap_or_else(|e| e.into_inner());
+        all.push(Arc::new(data));
+        FONT_GEN.store(all.len(), std::sync::atomic::Ordering::Release);
+    }
     with_fonts(|_| ());
 }
 
@@ -309,10 +317,20 @@ fn truncated_segments(segs: &[Segment], mut cut: usize) -> Vec<Segment> {
 }
 
 fn style_hash(props: &TextProps, size: Vec2) -> u64 {
+    use std::fmt::Write;
     use std::hash::{Hash, Hasher};
-    let mut h = std::collections::hash_map::DefaultHasher::new();
-    format!("{:?}|{}|{}", props, size.x, size.y).hash(&mut h);
-    h.finish()
+    struct HashWriter(std::collections::hash_map::DefaultHasher);
+    impl Write for HashWriter {
+        fn write_str(&mut self, s: &str) -> std::fmt::Result {
+            self.0.write(s.as_bytes());
+            Ok(())
+        }
+    }
+    let mut hw = HashWriter(std::collections::hash_map::DefaultHasher::new());
+    let _ = write!(&mut hw, "{:?}", props);
+    size.x.to_bits().hash(&mut hw.0);
+    size.y.to_bits().hash(&mut hw.0);
+    hw.0.finish()
 }
 
 /// Lays out `props` inside a box of `size`; cached per content/style/size.
@@ -324,7 +342,7 @@ pub fn layout(props: &TextProps, size: Vec2) -> Rc<TextLayout> {
     let lay = Rc::new(with_fonts(|f| compute_layout(f, props, size)));
     LAYOUTS.with(|l| {
         let mut l = l.borrow_mut();
-        if l.len() > 1024 {
+        if l.len() > 8192 {
             l.clear();
         }
         l.insert(key, lay.clone());

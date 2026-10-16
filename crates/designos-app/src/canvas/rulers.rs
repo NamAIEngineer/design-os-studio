@@ -71,11 +71,12 @@ pub fn store(doc: &designos_doc::Document, axis: GuideAxis, pos: f32, frame: Opt
 
 /// The selected frame under a page point (the smallest one), if any.
 fn selected_frame_at(app: &App, p: DV) -> Option<NodeId> {
+    let idx = super::interact::active_index(app);
     app.selection
         .iter()
         .copied()
         .filter(|id| app.doc.get(*id).is_some_and(|n| n.kind.frame_props().is_some()))
-        .map(|id| (id, world_aabb(&app.doc, id)))
+        .map(|id| (id, super::fast_world_aabb(&app.doc, idx, id)))
         .filter(|(_, bb)| p.x >= bb.x && p.x <= bb.x + bb.w && p.y >= bb.y && p.y <= bb.y + bb.h)
         .min_by(|a, b| (a.1.w * a.1.h).total_cmp(&(b.1.w * b.1.h)))
         .map(|(id, _)| id)
@@ -108,7 +109,7 @@ pub fn strips(rect: ERect) -> (ERect, ERect) {
 /// frame holding the selection (when it is a single frame), otherwise (0, 0).
 pub fn origin(app: &App) -> DV {
     let mut frame = None;
-    for id in &app.selection {
+    for id in app.selection.iter().take(64) {
         let mut cur = *id;
         let mut top = cur;
         while let Some(p) = app.doc.get(cur).and_then(|n| n.parent) {
@@ -225,6 +226,11 @@ fn page_pos(app: &App, rect: ERect, pos: Pos2, axis: GuideAxis) -> f32 {
 /// Starts a guide drag when the press hits a ruler (new guide) or, with the move
 /// tool, an existing guide. Returns true when the press was consumed.
 pub fn press(app: &mut App, rect: ERect, pos: Pos2) -> bool {
+    press_with_alt(app, rect, pos, false)
+}
+
+/// Starts a guide drag, duplicating an existing guide when `alt` is held (`#71`).
+pub fn press_with_alt(app: &mut App, rect: ERect, pos: Pos2, alt: bool) -> bool {
     if !app.ui.rulers || app.canvas.text.is_some() {
         return false;
     }
@@ -245,10 +251,41 @@ pub fn press(app: &mut App, rect: ERect, pos: Pos2) -> bool {
         return false;
     }
     if let Some((i, g)) = hit_guide(app, rect, pos) {
-        app.canvas.inter = Interaction::Guide(GuideDrag { axis: g.axis, index: Some(i), pos: g.pos, frame: g.frame, on_ruler: false });
+        let index = if alt {
+            let dup = store(&app.doc, g.axis, g.pos, g.frame);
+            let list = app.doc.guides.entry(app.page).or_default();
+            list.push(dup);
+            Some(list.len() - 1)
+        } else {
+            Some(i)
+        };
+        app.canvas.inter = Interaction::Guide(GuideDrag { axis: g.axis, index, pos: g.pos, frame: g.frame, on_ruler: false });
         return true;
     }
     false
+}
+
+/// Clears all guides on the active page when right-clicking inside the top or left `20px` ruler bar (`#72`).
+pub fn secondary_click(app: &mut App, rect: ERect, pos: Pos2) -> bool {
+    if !app.ui.rulers || app.canvas.text.is_some() {
+        return false;
+    }
+    let (top, left) = strips(rect);
+    let corner = ERect::from_min_size(rect.min, EV::splat(theme::RULER_SIZE));
+    if !top.contains(pos) && !left.contains(pos) && !corner.contains(pos) {
+        return false;
+    }
+    let page = app.page;
+    let has_guides = app.doc.guides.get(&page).is_some_and(|g| !g.is_empty());
+    if has_guides {
+        if let Err(e) = app.hist.exec(&mut app.doc, designos_doc::Command::SetGuides { page, guides: Vec::new() }) {
+            app.show_toast(format!("Guide edit failed: {e}"), true);
+            return true;
+        }
+        app.changed();
+    }
+    app.show_toast("Cleared all guides", false);
+    true
 }
 
 /// The guide under a screen point (within 4px), if any.
@@ -273,7 +310,7 @@ pub fn hit_guide(app: &App, rect: ERect, pos: Pos2) -> Option<(usize, RulerGuide
 /// Whether the page point lies along a frame guide's extent (always true for page guides).
 fn frame_covers(app: &App, g: &RulerGuide, p: DV) -> bool {
     let Some(f) = g.frame else { return true };
-    let bb = world_aabb(&app.doc, f);
+    let bb = super::fast_world_aabb(&app.doc, super::interact::active_index(app), f);
     match g.axis {
         GuideAxis::X => p.y >= bb.y && p.y <= bb.y + bb.h,
         GuideAxis::Y => p.x >= bb.x && p.x <= bb.x + bb.w,
@@ -321,6 +358,22 @@ pub fn release(app: &mut App, g: GuideDrag) {
     app.changed();
 }
 
+/// Removes the guide at `index` on the active page (used on double-click `S3-08`).
+pub fn remove_guide(app: &mut App, index: usize) -> bool {
+    let page = app.page;
+    let mut list = app.doc.guides.get(&page).cloned().unwrap_or_default();
+    if index >= list.len() {
+        return false;
+    }
+    list.remove(index);
+    if let Err(e) = app.hist.exec(&mut app.doc, designos_doc::Command::SetGuides { page, guides: list }) {
+        app.show_toast(format!("Guide edit failed: {e}"), true);
+        return false;
+    }
+    app.changed();
+    true
+}
+
 /// Draws the guides (under the strips) and the rulers.
 pub fn overlay(app: &App, ui: &Ui, rect: ERect) {
     if !app.ui.rulers {
@@ -333,9 +386,10 @@ pub fn overlay(app: &App, ui: &Ui, rect: ERect) {
         _ => None,
     };
     let to_s = |v: DV| app.view.to_screen(rect.min, v);
+    let idx = super::interact::active_index(app);
     // Page guides span the canvas; frame guides only the frame they belong to.
     let line = |axis: GuideAxis, pos: f32, frame: Option<NodeId>| {
-        let ext = frame.map(|f| world_aabb(&app.doc, f));
+        let ext = frame.map(|f| super::fast_world_aabb(&app.doc, idx, f));
         match axis {
             GuideAxis::X => {
                 let x = crisp(to_s(v2(pos, 0.0)).x);
@@ -361,7 +415,11 @@ pub fn overlay(app: &App, ui: &Ui, rect: ERect) {
         if let Some(ptr) = ui.input(|i| i.pointer.latest_pos()) {
             let o = d.frame.and_then(|f| frame_origin(&app.doc, f)).unwrap_or_else(|| origin(app));
             let v = d.pos - axis_of(o, d.axis);
-            let text = fmt_value(v);
+            let axis_lbl = match d.axis {
+                GuideAxis::X => "X",
+                GuideAxis::Y => "Y",
+            };
+            let text = format!("{axis_lbl}: {}", fmt_value(v));
             let font = theme::font_small_strong();
             let w = crate::widgets::text_width(&p, &text, &font) + theme::CANVAS_BADGE_PAD_X * 2.0;
             let r = ERect::from_min_size(ptr + EV::new(12.0, 12.0), EV::new(w, theme::CANVAS_BADGE_HEIGHT));
@@ -412,7 +470,7 @@ pub fn overlay(app: &App, ui: &Ui, rect: ERect) {
     }
 
     // ---- selection extent
-    let sel_box = union_all(app.selection.iter().map(|i| world_aabb(&app.doc, *i)));
+    let sel_box = union_all(app.selection.iter().take(256).map(|i| super::fast_world_aabb(&app.doc, idx, *i)));
     if let Some(bb) = sel_box {
         let (x0, x1) = (to_s(v2(bb.x, 0.0)).x, to_s(v2(bb.x + bb.w, 0.0)).x);
         let (y0, y1) = (to_s(v2(0.0, bb.y)).y, to_s(v2(0.0, bb.y + bb.h)).y);

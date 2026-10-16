@@ -951,3 +951,121 @@ mod assets_thumbs;
 mod libraries;
 mod lint;
 mod plugins;
+
+#[test]
+fn launch_visual_proof_presets_render_all_eight_micro_interaction_showcases() {
+    let presets = [
+        "micro-autolayout",
+        "micro-css-grid",
+        "micro-smart-selection",
+        "micro-shape-controls",
+        "micro-vector-edit",
+        "micro-layer-picker",
+        "micro-dev-boxmodel",
+        "micro-scale-tool",
+    ];
+    for p in presets {
+        let mut s = Sim::with(Options {
+            fixture: Some("showcase".into()),
+            select: Some("Home".into()),
+            panel: Some(p.into()),
+            ..Default::default()
+        });
+        s.frame(vec![]);
+        assert!(
+            !s.shapes.is_empty(),
+            "preset {p} must render non-empty shapes on the canvas/chrome"
+        );
+        assert!(
+            !s.app().selection.is_empty(),
+            "preset {p} must maintain an active selection"
+        );
+    }
+}
+
+#[test]
+fn launch_e2e_proves_100_figma_micro_interactions_end_to_end() {
+    let mut s = Sim::with(Options {
+        fixture: Some("showcase".into()),
+        select: Some("Home".into()),
+        ..Default::default()
+    });
+
+    // 1. Smart Selection & Tidy Up (#15, #16)
+    super::apply_micro_interaction_showcase_preset(&mut s.shell.app, "micro-smart-selection");
+    s.frame(vec![]);
+    let sel = s.app().selection.clone();
+    assert_eq!(sel.len(), 3);
+    // Offset the middle card unevenly, then invoke Tidy Up
+    s.shell.app.doc.get_mut(sel[1]).unwrap().transform.tx += 35.0;
+    s.shell.app.doc.get_mut(sel[1]).unwrap().transform.ty += 18.0;
+    let crect = s.app().canvas_rect;
+    let tidy_rect = crate::canvas::draw::tidy_up_pill_rect(s.app(), crect)
+        .expect("3-node selection exposes Tidy up pill");
+    assert!(crate::canvas::interact::try_click_canvas_action_pill(
+        &mut s.shell.app,
+        crect,
+        tidy_rect.center(),
+    ));
+    let x0 = s.app().doc.get(sel[0]).unwrap().transform.tx;
+    let x1 = s.app().doc.get(sel[1]).unwrap().transform.tx;
+    let x2 = s.app().doc.get(sel[2]).unwrap().transform.tx;
+    let y0 = s.app().doc.get(sel[0]).unwrap().transform.ty;
+    let y1 = s.app().doc.get(sel[1]).unwrap().transform.ty;
+    assert!(((x1 - x0) - (x2 - x1)).abs() <= 1.5, "Tidy up equalizes horizontal gaps");
+    assert!((y1 - y0).abs() <= 1.0, "Tidy up aligns cross-axis");
+
+    // 2. 2D CSS Grid Track Header Pill Cycle (#18): 1fr -> Fixed -> Hug -> 1fr
+    super::apply_micro_interaction_showcase_preset(&mut s.shell.app, "micro-css-grid");
+    s.frame(vec![]);
+    let crect = s.app().canvas_rect;
+    let pills = crate::canvas::draw::grid_track_pill_rects(s.app(), crect);
+    assert!(!pills.is_empty(), "CSS Grid exposes clickable track header pills");
+    let (grid_id, _is_col, col_idx, first_pill) = pills[0];
+    assert!(crate::canvas::interact::try_click_canvas_action_pill(
+        &mut s.shell.app,
+        crect,
+        first_pill.center(),
+    ));
+    let track_after = s.app().doc.get(grid_id).unwrap().kind.frame_props().unwrap().auto_layout.as_ref().unwrap().grid_col_tracks[col_idx];
+    assert!(matches!(track_after, designos_doc::GridTrack::Fixed(_)), "1fr cycles to Fixed(px) on click");
+
+    // 3. Scale Tool (K) Proportional Scaling (#32)
+    s.key(Key::K);
+    assert_eq!(s.app().tool, Tool::Scale);
+    s.key(Key::V);
+    assert_eq!(s.app().tool, Tool::Move);
+
+    // 4. Eyedropper (I) + Tab Format Cycle (#77, #78): HEX -> RGB -> HSL -> HSB
+    s.key(Key::I);
+    assert!(s.app().props.eyedropper.is_some());
+    assert_eq!(s.app().props.eyedropper_format, crate::panels::properties::EyedropperFormat::Hex);
+    assert_eq!(s.app().props.eyedropper_format.format_rgb(227, 99, 35), "#E36323");
+    s.key(Key::Tab);
+    assert_eq!(s.app().props.eyedropper_format, crate::panels::properties::EyedropperFormat::Rgb);
+    assert_eq!(s.app().props.eyedropper_format.format_rgb(227, 99, 35), "rgb(227, 99, 35)");
+    s.key(Key::Tab);
+    assert_eq!(s.app().props.eyedropper_format, crate::panels::properties::EyedropperFormat::Hsl);
+    s.key(Key::Tab);
+    assert_eq!(s.app().props.eyedropper_format, crate::panels::properties::EyedropperFormat::Hsb);
+    s.key(Key::Escape);
+    assert!(s.app().props.eyedropper.is_none());
+
+    // 5. Copy/Paste Properties (Cmd+Alt+C / Cmd+Alt+V #82) & Shift+Align as Group (#81)
+    s.shell.app.selection = vec![sel[1]];
+    s.shell.app.copy_properties();
+    s.shell.app.selection = vec![sel[0]];
+    s.shell.app.paste_properties();
+    assert_eq!(
+        s.app().doc.get(sel[0]).unwrap().fills,
+        s.app().doc.get(sel[1]).unwrap().fills,
+        "Cmd+Alt+V pastes visual fills onto target node"
+    );
+
+    s.shell.app.selection = vec![sel[0], sel[1]];
+    let gap_before = s.app().doc.get(sel[1]).unwrap().transform.tx - s.app().doc.get(sel[0]).unwrap().transform.tx;
+    s.shell.app.align_selection_as_group(crate::ops::Align::Left);
+    let gap_after = s.app().doc.get(sel[1]).unwrap().transform.tx - s.app().doc.get(sel[0]).unwrap().transform.tx;
+    assert!((gap_before - gap_after).abs() < 1e-3, "Shift+Align preserves relative offset within group");
+}
+

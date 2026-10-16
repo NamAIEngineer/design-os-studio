@@ -39,11 +39,23 @@ pub fn rows(doc: &Document) -> Vec<Row> {
 /// Tab switcher replacing the "Layers" title in Dev mode.
 pub fn tabs(app: &mut App, ui: &mut Ui, row: Rect) {
     let font = theme::font_body_strong();
+    let mono_font = theme::font_mono();
     let mut x = row.left() + theme::PANEL_PADDING_X;
     let total: usize = rows(&app.doc).iter().filter(|r| matches!(r, Row::Item { .. })).count();
     for (i, (tab, label)) in [(LeftTab::ReadyForDev, "Ready for dev"), (LeftTab::Layers, "Layers")].into_iter().enumerate() {
-        let text = if tab == LeftTab::ReadyForDev && total > 0 { format!("{label} {total}") } else { label.to_string() };
-        let w = widgets::text_width(ui.painter(), &text, &font) + 14.0;
+        let show_badge = tab == LeftTab::ReadyForDev && total > 0;
+        let label_w = widgets::text_width(ui.painter(), label, &font);
+        let badge_str = total.to_string();
+        let badge_w = if show_badge {
+            (widgets::text_width(ui.painter(), &badge_str, &mono_font) + 10.0).max(18.0)
+        } else {
+            0.0
+        };
+        let w = if show_badge {
+            label_w + 6.0 + badge_w + 14.0
+        } else {
+            label_w + 14.0
+        };
         let r = Rect::from_min_size(Pos2::new(x, row.center().y - 12.0), Vec2::new(w, 24.0));
         let resp = ui.interact(r, ui.id().with(("dev-left-tab", i)), Sense::click());
         let active = app.dev.left_tab == tab;
@@ -52,7 +64,31 @@ pub fn tabs(app: &mut App, ui: &mut Ui, row: Rect) {
         } else if resp.hovered() {
             ui.painter().rect_filled(r, theme::cr(theme::RADIUS_MEDIUM), theme::BG_HOVER);
         }
-        ui.painter().text(r.center(), Align2::CENTER_CENTER, text, font.clone(), if active { theme::TEXT } else { theme::TEXT_SECONDARY });
+        ui.painter().text(
+            Pos2::new(r.left() + 7.0, r.center().y),
+            Align2::LEFT_CENTER,
+            label,
+            font.clone(),
+            if active { theme::TEXT } else { theme::TEXT_SECONDARY },
+        );
+        if show_badge {
+            let badge_r = Rect::from_min_size(
+                Pos2::new(r.left() + 7.0 + label_w + 6.0, r.center().y - 8.0),
+                Vec2::new(badge_w, 16.0),
+            );
+            ui.painter().rect_filled(
+                badge_r,
+                egui::CornerRadius::same(7),
+                egui::Color32::from_rgba_unmultiplied(0x14, 0xAE, 0x5C, 38),
+            );
+            ui.painter().text(
+                badge_r.center(),
+                Align2::CENTER_CENTER,
+                badge_str,
+                mono_font.clone(),
+                egui::Color32::from_rgb(0x34, 0xD3, 0x99),
+            );
+        }
         if resp.clicked() {
             app.dev.left_tab = tab;
         }

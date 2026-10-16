@@ -611,10 +611,11 @@ pub fn ensure_library_page(doc: &mut Document) -> NodeId {
         return p;
     }
     let id = doc.alloc_id();
-    let mut n = Node::new(id, NodeKind::Page { background: Color::rgb(0xF5, 0xF5, 0xF5) });
+    let mut n = Node::new(id, NodeKind::Page { background: Color::rgb(0x5A, 0x5A, 0x5A) });
     n.name = "Library".into();
     doc.nodes.insert(id, n);
     doc.library_page = Some(id);
+    doc.mark_node_dirty(id);
     id
 }
 

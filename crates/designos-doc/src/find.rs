@@ -461,6 +461,33 @@ pub fn select_parent(doc: &Document, selection: &[NodeId]) -> Vec<NodeId> {
         .collect()
 }
 
+/// `Tab` (`forward = true`) / `Shift+Tab` (`forward = false`): selects the next or
+/// previous visible, unlocked sibling of `selection[0]` in Layers panel order, wrapping around.
+pub fn select_sibling(doc: &Document, page: NodeId, selection: &[NodeId], forward: bool) -> Vec<NodeId> {
+    let Some(&first) = selection.first() else {
+        let siblings = selectable_children(doc, page);
+        let pick = if forward { siblings.last().copied() } else { siblings.first().copied() };
+        return pick.into_iter().collect();
+    };
+    let parent = doc.get(first).and_then(|n| n.parent).unwrap_or(page);
+    let siblings = selectable_children(doc, parent);
+    if siblings.is_empty() {
+        return Vec::new();
+    }
+    let len = siblings.len();
+    match siblings.iter().position(|&id| id == first) {
+        Some(idx) => {
+            let next_idx = if forward { (idx + len - 1) % len } else { (idx + 1) % len };
+            vec![siblings[next_idx]]
+        }
+        None => {
+            let pick = if forward { siblings.last().copied() } else { siblings.first().copied() };
+            pick.into_iter().collect()
+        }
+    }
+}
+
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -983,4 +1010,27 @@ mod tests {
         let e = Matcher::new("(", o(false, false, true)).unwrap_err();
         assert!(!e.is_empty() && !e.contains('\n'), "{e}");
     }
+
+    #[test]
+    fn select_sibling_wraps_in_layer_order() {
+        let (mut f, [a, b, _c, _t, e, fr]) = sample();
+        // Top-level children of page in z-order: [a, b, fr, e].
+        // Layers panel order (top to bottom) is .rev(): [e, fr, b, a].
+        assert_eq!(select_sibling(&f.doc, f.page, &[], true), vec![e]);
+        assert_eq!(select_sibling(&f.doc, f.page, &[e], true), vec![fr]);
+        assert_eq!(select_sibling(&f.doc, f.page, &[fr], true), vec![b]);
+        assert_eq!(select_sibling(&f.doc, f.page, &[b], true), vec![a]);
+        assert_eq!(select_sibling(&f.doc, f.page, &[a], true), vec![e]);
+
+        // Shift+Tab (forward = false) steps upward in Layers panel order: [a -> b -> fr -> e -> a].
+        assert_eq!(select_sibling(&f.doc, f.page, &[a], false), vec![b]);
+        assert_eq!(select_sibling(&f.doc, f.page, &[b], false), vec![fr]);
+        assert_eq!(select_sibling(&f.doc, f.page, &[fr], false), vec![e]);
+        assert_eq!(select_sibling(&f.doc, f.page, &[e], false), vec![a]);
+
+        // Locked or hidden siblings are skipped.
+        f.doc.get_mut(fr).unwrap().locked = true;
+        assert_eq!(select_sibling(&f.doc, f.page, &[e], true), vec![b]);
+    }
 }
+

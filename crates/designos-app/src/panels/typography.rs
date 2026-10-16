@@ -54,6 +54,7 @@ pub fn combine(a: &Summary, b: &Summary) -> Summary {
 /// Summary over whole text layers (not editing).
 pub fn nodes_summary(app: &App, sel: &[NodeId]) -> Option<Summary> {
     sel.iter()
+        .take(64)
         .filter_map(|id| match app.doc.get(*id).map(|n| &n.kind) {
             Some(NodeKind::Text(t)) => Some(richtext::summary(t, 0..t.content.len())),
             _ => None,

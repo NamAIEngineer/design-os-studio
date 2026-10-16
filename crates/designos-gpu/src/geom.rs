@@ -298,6 +298,8 @@ struct Entry {
     src: Rc<GeomSrc>,
     bucket: i32,
     rev: u64,
+    doc_id: u64,
+    doc_epoch: u64,
     geom: Rc<NodeGeom>,
 }
 
@@ -365,6 +367,8 @@ impl GeomCache {
     /// within the same revision.
     pub fn get(&mut self, doc: &Document, n: &Node, bucket: i32, rev: u64) -> Rc<NodeGeom> {
         let over = self.over_budget();
+        let doc_id = doc.runtime_id();
+        let doc_epoch = doc.mutation_epoch();
         if let Some(e) = self.entries.get_mut(&n.id) {
             if e.bucket == bucket && e.rev == rev {
                 return e.geom.clone();
@@ -374,13 +378,23 @@ impl GeomCache {
                 self.stale_hits += 1;
                 return e.geom.clone();
             }
-            if e.src.same(doc, n, false) {
+            let clean = e.doc_id == doc_id
+                && !feeds_boolean(n)
+                && !designos_render::board::is_synthetic(n.id)
+                && n.variables.bindings.is_empty()
+                && (!matches!(n.kind, NodeKind::Text(_)) || e.src.font_gen == font_generation())
+                && doc.is_node_clean_since(n.id, e.doc_epoch);
+            if clean || e.src.same(doc, n, false) {
                 if e.bucket == bucket {
                     e.rev = rev;
+                    e.doc_id = doc_id;
+                    e.doc_epoch = doc_epoch;
                     return e.geom.clone();
                 }
                 if over {
                     e.rev = rev;
+                    e.doc_id = doc_id;
+                    e.doc_epoch = doc_epoch;
                     self.stale_hits += 1;
                     return e.geom.clone();
                 }
@@ -393,7 +407,7 @@ impl GeomCache {
                     let src = src.clone();
                     let geom = geom.clone();
                     self.shared_hits += 1;
-                    self.entries.insert(n.id, Entry { src, bucket, rev, geom: geom.clone() });
+                    self.entries.insert(n.id, Entry { src, bucket, rev, doc_id, doc_epoch, geom: geom.clone() });
                     return geom;
                 }
             }
@@ -415,17 +429,19 @@ impl GeomCache {
                 bucket_vec.push((src.clone(), geom.clone()));
             }
         }
-        self.entries.insert(n.id, Entry { src, bucket, rev, geom: geom.clone() });
+        self.entries.insert(n.id, Entry { src, bucket, rev, doc_id, doc_epoch, geom: geom.clone() });
         geom
     }
 
     /// Drops entries not touched since `rev - keep` revisions (nodes deleted from
     /// the document, or far from the viewport for a long time).
     pub fn trim(&mut self, rev: u64) {
-        if self.entries.len() > 20_000 && rev != self.last_trim {
+        if self.entries.len() > 120_000 && rev.saturating_sub(self.last_trim) >= 256 {
             self.last_trim = rev;
-            self.entries.retain(|_, e| e.rev + 64 >= rev);
-            self.shared.clear();
+            self.entries.retain(|_, e| e.rev + 1024 >= rev);
+            if self.shared.len() > 60_000 {
+                self.shared.clear();
+            }
         }
     }
 }

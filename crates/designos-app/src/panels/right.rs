@@ -23,9 +23,10 @@ pub fn show(app: &mut App, ui: &mut Ui, rect: Rect) {
     let right = rect.right();
     let left = rect.left();
 
-    // User avatar pill + chevron on top-left of right inspector header (Figma UI3 #F59E0B).
-    let av_center = Pos2::new(left + 21.0, rect.top() + theme::RIGHT_BTN_Y + theme::RIGHT_BTN_SIZE * 0.5);
-    let av_r = Rect::from_min_size(Pos2::new(left + 8.0, rect.top() + theme::RIGHT_BTN_Y), Vec2::new(38.0, theme::RIGHT_BTN_SIZE));
+    // User avatar pill + chevron on top-left of right inspector header.
+    let top_btn_h = theme::RIGHT_BTN_SIZE.min(24.0);
+    let av_r = Rect::from_min_size(Pos2::new(left + 8.0, rect.top() + theme::RIGHT_BTN_Y), Vec2::new(38.0, top_btn_h));
+    let av_center = Pos2::new(left + 21.0, av_r.center().y);
     crate::widgets::record(ui, "right-top-avatar", av_r);
     let av_resp = ui.interact(av_r, ui.id().with("right-top-avatar"), Sense::click());
     if av_resp.hovered() {
@@ -33,7 +34,7 @@ pub fn show(app: &mut App, ui: &mut Ui, rect: Rect) {
     }
     let active_user = std::env::var("USER").unwrap_or_else(|_| "jangtrinh".into());
     let initial = active_user.chars().next().map(|c| c.to_ascii_uppercase().to_string()).unwrap_or_else(|| "J".to_string());
-    p.circle_filled(av_center, 11.0, egui::Color32::from_rgb(0xF5, 0x9E, 0x0B));
+    p.circle_filled(av_center, 10.0, egui::Color32::from_rgb(0xF5, 0x9E, 0x0B));
     p.text(av_center, Align2::CENTER_CENTER, initial, theme::font_small_strong(), egui::Color32::WHITE);
     icons::paint(&p, Icon::ChevronDown, Pos2::new(av_center.x + 17.0, av_center.y), theme::CHEVRON_SMALL, theme::ICON_SECONDARY);
     if av_resp.on_hover_text(format!("Active user: {active_user}")).clicked() {
@@ -49,24 +50,28 @@ pub fn show(app: &mut App, ui: &mut Ui, rect: Rect) {
         app.show_toast(stats, false);
     }
 
-    // Present button + chevron (to the LEFT of Share button, matching Figma UI3).
-    let pb = Rect::from_min_size(Pos2::new(right - theme::RIGHT_PRESENT_FROM_RIGHT - 46.0, rect.top() + theme::RIGHT_BTN_Y), Vec2::splat(theme::RIGHT_BTN_SIZE));
+    // Present button + chevron (24px height, aligned with Share button).
+    let pb = Rect::from_min_size(
+        Pos2::new(right - theme::RIGHT_PRESENT_FROM_RIGHT - 46.0, rect.top() + theme::RIGHT_BTN_Y),
+        Vec2::splat(top_btn_h),
+    );
     let pr = ui.interact(pb, ui.id().with("present"), Sense::click());
     widgets::button_bg(&p, pb, &pr, false, theme::cr_each(theme::RADIUS_MEDIUM, 0, 0, theme::RADIUS_MEDIUM));
-    icons::paint(&p, Icon::Play, pb.center(), 15.0, theme::ICON);
-    let cb = Rect::from_min_size(pb.right_top(), Vec2::new(theme::RIGHT_PRESENT_CHEVRON_W, theme::RIGHT_BTN_SIZE));
+    icons::paint(&p, Icon::Play, pb.center(), 14.0, theme::ICON);
+    let cb = Rect::from_min_size(pb.right_top(), Vec2::new(theme::RIGHT_PRESENT_CHEVRON_W, top_btn_h));
     let cr = ui.interact(cb, ui.id().with("present-chev"), Sense::click());
     widgets::button_bg(&p, cb, &cr, false, theme::cr_each(0, theme::RADIUS_MEDIUM, theme::RADIUS_MEDIUM, 0));
     icons::paint(&p, Icon::ChevronDown, cb.center(), theme::CHEVRON_SMALL, theme::ICON_SECONDARY);
     crate::widgets::record(ui, "present-button", pb);
+    crate::widgets::record(ui, "present-chevron", cb);
     if pr.clicked() || cr.clicked() {
         app.start_present();
     }
 
-    // Share button at far right (Figma UI3 #0D99FF in Design mode, #1BC47D in Dev mode).
+    // Share button at far right (aligned on the same y = RIGHT_BTN_Y and 24px height as Present).
     let share_r = Rect::from_min_size(
-        Pos2::new(right - theme::RIGHT_PRESENT_FROM_RIGHT, rect.top() + theme::RIGHT_BTN_Y + 2.0),
-        Vec2::new(48.0, 24.0),
+        Pos2::new(right - theme::RIGHT_PRESENT_FROM_RIGHT, rect.top() + theme::RIGHT_BTN_Y),
+        Vec2::new(48.0, top_btn_h),
     );
     let share_resp = ui.interact(share_r, ui.id().with("share-btn"), Sense::click());
     let share_col = if app.ui.dev_mode {
@@ -74,7 +79,7 @@ pub fn show(app: &mut App, ui: &mut Ui, rect: Rect) {
     } else {
         egui::Color32::from_rgb(0x0D, 0x99, 0xFF)
     };
-    p.rect_filled(share_r, theme::cr(6), if share_resp.hovered() { share_col.gamma_multiply(1.1) } else { share_col });
+    p.rect_filled(share_r, egui::CornerRadius::same(6), if share_resp.hovered() { share_col.gamma_multiply(1.1) } else { share_col });
     p.text(share_r.center(), Align2::CENTER_CENTER, "Share", theme::font_body_strong(), egui::Color32::WHITE);
     crate::widgets::record(ui, "share-button", share_r);
     crate::widgets::record(ui, "right-top-share", share_r);
@@ -110,7 +115,7 @@ pub fn show(app: &mut App, ui: &mut Ui, rect: Rect) {
         app.show_toast(format!("Share link copied to clipboard ({payload})"), false);
     }
 
-    // Tabs: Design | Prototype (or Inspect | Plugins when Dev Mode is active, matching Figma UI3).
+    // Tabs: Design | Prototype (or Inspect | Plugins when Dev Mode is active).
     let mut x = left + theme::RIGHT_TABS_X;
     let ty = rect.top() + theme::RIGHT_TABS_Y;
     let active = app.ui.right_tab.unwrap_or(RightTab::Design);
@@ -151,8 +156,9 @@ pub fn show(app: &mut App, ui: &mut Ui, rect: Rect) {
     }
 
     let content_top = rect.top() + theme::RIGHT_CONTENT_TOP - 1.0;
+    let footer_top = (rect.bottom() - 36.0).max(content_top + 1.0);
     widgets::hline(&p, rect.left() + 1.0, right, content_top, theme::BORDER);
-    let region = Rect::from_min_max(Pos2::new(rect.left() + 1.0, content_top + 1.0), rect.max);
+    let region = Rect::from_min_max(Pos2::new(rect.left() + 1.0, content_top + 1.0), Pos2::new(right, footer_top));
     if active == RightTab::Prototype {
         if app.ui.dev_mode {
             show_dev_plugins_inspector(app, ui, region);
@@ -165,8 +171,12 @@ pub fn show(app: &mut App, ui: &mut Ui, rect: Rect) {
         properties::show(app, ui, region);
     }
 
-    // Bottom-right floating 28x28 circular `?` Help button (Figma UI3).
-    let help_center = Pos2::new(rect.right() - 22.0, rect.bottom() - 22.0);
+    // Dedicated 36px footer bar with 1px top border so inspector content never collides with `?` Help button.
+    let footer_r = Rect::from_min_max(Pos2::new(rect.left() + 1.0, footer_top), rect.max);
+    let hp = ui.painter();
+    hp.rect_filled(footer_r, 0.0, theme::BG);
+    widgets::hline(hp, rect.left() + 1.0, right, footer_top, theme::BORDER);
+    let help_center = Pos2::new(rect.right() - 20.0, footer_r.center().y);
     let help_r = Rect::from_center_size(help_center, Vec2::splat(28.0));
     let help_resp = ui.interact(help_r, ui.id().with("right-help-btn"), Sense::click());
     let hp = ui.painter();
@@ -204,7 +214,7 @@ fn show_dev_plugins_inspector(app: &mut App, ui: &mut Ui, region: Rect) {
 
     let builtins = [
         ("designos-mcp (22 Tools)", "JSON-RPC MCP server bridge"),
-        ("Figma Code Connect", "@figma/code-connect mapping"),
+        ("design:os Code Connect", "@designos/code-connect mapping"),
         ("Tailwind v4 Token Exporter", "CSS @theme variable tokens"),
         ("Design Gate A11y Auditor", "WCAG contrast & tap target check"),
     ];
@@ -231,12 +241,12 @@ fn show_dev_plugins_inspector(app: &mut App, ui: &mut Ui, region: Rect) {
                     let target = app.selection.first().copied().unwrap_or(app.page);
                     let nm = app.doc.get(target).map(|n| n.name.as_str()).unwrap_or("Component");
                     let snippet = format!(
-                        "import figma from \"@figma/code-connect\";\nfigma.connect({}, \"designos://node/{}\", {{}});",
+                        "import designos from \"@designos/code-connect\";\ndesignos.connect({}, \"designos://node/{}\", {{}});",
                         nm.chars().filter(|c| c.is_alphanumeric()).collect::<String>(),
                         target.0
                     );
                     ui.ctx().copy_text(snippet);
-                    app.show_toast("Copied Figma Code Connect snippet to clipboard", false);
+                    app.show_toast("Copied design:os Code Connect snippet to clipboard", false);
                 }
                 2 => {
                     let mut css = String::from("@theme {\n");

@@ -1029,7 +1029,7 @@ pub fn auto_fix_design_gate(doc: &mut Document, page: NodeId, selection: &[NodeI
     let mut relayout_roots = Vec::new();
 
     for &nid in &visited {
-        let Some(node) = doc.nodes.get_mut(&nid) else {
+        let Some(node) = doc.get_mut(nid) else {
             continue;
         };
         let mut changed = false;
@@ -1113,7 +1113,7 @@ pub fn auto_wire_prototype_flows(doc: &mut Document, page: NodeId, selection: &[
         collect_subtree(doc, src_frame, &mut sub);
         let source_node = sub.into_iter().find(|&nid| nid != src_frame && doc.get(nid).is_some_and(is_interactive_candidate)).unwrap_or(src_frame);
 
-        if let Some(node) = doc.nodes.get_mut(&source_node) {
+        if let Some(node) = doc.get_mut(source_node) {
             let already_wired = node
                 .prototype
                 .reactions
@@ -1157,7 +1157,7 @@ pub fn auto_rename_layers_semantically(doc: &mut Document, page: NodeId, selecti
         }
 
         let new_name = infer_semantic_layer_name(doc, nid);
-        if let Some(n) = doc.nodes.get_mut(&nid) {
+        if let Some(n) = doc.get_mut(nid) {
             if n.name != new_name {
                 n.name = new_name;
                 renamed += 1;
@@ -1253,7 +1253,7 @@ pub fn rewrite_selected_text(doc: &mut Document, page: NodeId, selection: &[Node
     let mut relayout_roots = Vec::new();
 
     for nid in visited {
-        let Some(node) = doc.nodes.get_mut(&nid) else { continue };
+        let Some(node) = doc.get_mut(nid) else { continue };
         let Some(tp) = node.kind.any_text_mut() else { continue };
         let orig = tp.content.trim();
         if orig.is_empty() {
@@ -1371,7 +1371,7 @@ pub fn populate_realistic_content(doc: &mut Document, page: NodeId, selection: &
     let mut relayout_roots = Vec::new();
 
     for (idx, nid) in visited.into_iter().enumerate() {
-        let Some(node) = doc.nodes.get_mut(&nid) else { continue };
+        let Some(node) = doc.get_mut(nid) else { continue };
         let Some(tp) = node.kind.any_text_mut() else { continue };
         let trimmed = tp.content.trim();
         let lower = trimmed.to_ascii_lowercase();
@@ -1421,7 +1421,7 @@ pub fn remove_background_on_selection(doc: &mut Document, page: NodeId, selectio
     let mut modified = 0usize;
     for nid in targets {
         let mut removed_direct = false;
-        let first_child = if let Some(node) = doc.nodes.get_mut(&nid) {
+        let first_child = if let Some(node) = doc.get_mut(nid) {
             if let Some(pos) = node.fills.iter().position(|p| matches!(p.kind, PaintKind::Solid(_))) {
                 node.fills.remove(pos);
                 removed_direct = true;
@@ -1437,7 +1437,7 @@ pub fn remove_background_on_selection(doc: &mut Document, page: NodeId, selectio
         if removed_direct {
             modified += 1;
         } else if let Some(cid) = first_child {
-            if let Some(cnode) = doc.nodes.get_mut(&cid) {
+            if let Some(cnode) = doc.get_mut(cid) {
                 if let Some(pos) = cnode.fills.iter().position(|p| matches!(p.kind, PaintKind::Solid(_))) {
                     cnode.fills.remove(pos);
                     modified += 1;
@@ -1468,7 +1468,7 @@ pub fn boost_resolution_on_selection(doc: &mut Document, page: NodeId, selection
 
     let mut boosted = 0usize;
     for nid in visited {
-        let Some(node) = doc.nodes.get_mut(&nid) else { continue };
+        let Some(node) = doc.get_mut(nid) else { continue };
         let mut changed = false;
 
         for fill in &mut node.fills {
@@ -1560,7 +1560,7 @@ fn is_interactive_candidate(node: &designos_doc::Node) -> bool {
 fn uses_easeui_standard_palette(node: &designos_doc::Node) -> bool {
     const EASEUI_HEXES: &[&str] = &[
         "121215", "0E0E12", "16171B", "18181B", "18181C", "1F2024", "202024", "26272C", "27272A", "27272D", "2A2B31", "303036", "3F3F46", "F4F4F5", "A1A1AA",
-        "71717A", "E36323", "FF6A3D", "3582FF", "2563EB", "8755E9", "A855F7", "18B368", "10B981", "4CC58B", "F59E0B", "E0A53C", "EF4444", "FF7A8C", "8FB0FF",
+        "71717A", "E36323", "FF6A3D", "3582FF", "2563EB", "06B6D4", "22D3EE", "18B368", "10B981", "4CC58B", "F59E0B", "E0A53C", "EF4444", "FF7A8C", "8FB0FF",
         "FFFFFF", "FAFAFA", "E4E4E7",
     ];
     node.fills.iter().all(|p| match &p.kind {

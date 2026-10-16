@@ -8,22 +8,34 @@ use serde_json::{json, Value};
 pub struct Engine {
     pub doc: Document,
     pub history: History,
+    pub active_page_id: Option<NodeId>,
 }
 
 impl Default for Engine {
     fn default() -> Self {
         let mut doc = Document::new("Untitled");
-        doc.add_page("Page 1");
-        Self { doc, history: History::default() }
+        let page = doc.add_page("Page 1");
+        Self { doc, history: History::default(), active_page_id: Some(page) }
     }
 }
 
 impl Engine {
+    /// Resolves the target page when a tool call omits `parent_id` / `page_id`:
+    /// prefers `self.active_page_id` (the user's currently selected page in `design:os studio`)
+    /// if valid in `self.doc.pages`, falling back to `self.doc.pages.first()`.
+    pub fn resolve_default_page(&self) -> Result<NodeId, String> {
+        self.active_page_id
+            .filter(|p| self.doc.pages.contains(p))
+            .or_else(|| self.doc.pages.first().copied())
+            .ok_or_else(|| "Document has no pages".to_string())
+    }
+
     pub fn call(&mut self, name: &str, args: Value) -> Result<Value, String> {
         match name {
             "designos_get_document" => {
                 let _: Empty = parse(args)?;
                 Ok(json!({"name":self.doc.name,"kind":self.doc.kind,
+                    "active_page_id":self.resolve_default_page().ok().map(|p| p.0),
                     "pages":self.doc.pages.iter().filter_map(|id|self.doc.get(*id)).map(summary).collect::<Vec<_>>(),
                     "node_count":self.doc.nodes.len(),"variable_count":self.doc.variables.len(),
                     "comment_count":self.doc.comments.len(),
@@ -140,7 +152,7 @@ impl Engine {
                     }
                     p
                 } else {
-                    self.doc.pages.first().copied().ok_or("Document has no pages")?
+                    self.resolve_default_page()?
                 };
                 let anchor = CommentAnchor {
                     page,
@@ -235,8 +247,9 @@ impl Engine {
                 let a: ApplySpecArgs = parse(args)?;
                 let parent = a
                     .parent_id
+                    .filter(|&id| id != 0)
                     .map(NodeId)
-                    .or_else(|| self.doc.pages.first().copied())
+                    .or_else(|| self.resolve_default_page().ok())
                     .ok_or_else(|| "Document has no pages".to_string())?;
                 if !self.node(parent.0)?.kind.is_container() {
                     return Err("parent_id must identify a container".into());
@@ -248,7 +261,7 @@ impl Engine {
                 let index = self.doc.get(parent).ok_or("parent not found")?.children.len();
                 self.exec(Command::Insert { parent, index, nodes })?;
                 self.doc.relayout_subtree(parent);
-                Ok(json!({"root_node_id": root_id, "node": self.doc.get(root_id), "changed": true}))
+                Ok(json!({"root_node_id": root_id, "parent_id": parent.0, "node": self.doc.get(root_id), "changed": true}))
             }
             "designos_export_spec" => {
                 let a: NodeArgs = parse(args)?;
@@ -290,6 +303,75 @@ impl Engine {
                 std::fs::write(path, &bytes).map_err(|e| format!("Cannot write .fig file: {e}"))?;
                 Ok(json!({"output_path": a.output_path, "path": a.output_path, "bytes": bytes.len(), "saved": true}))
             }
+            "designos_query_xpath" | "query_nodes" => {
+                let a: QueryXpathArgs = parse(args)?;
+                let root = a.page_id.map(NodeId).or_else(|| self.resolve_default_page().ok());
+                let selector = a.selector.trim();
+                let mut matches = Vec::new();
+                let mut visit = |n: &Node| {
+                    let kind_upper = n.kind.default_name().to_ascii_uppercase();
+                    let matched = if selector.is_empty() || selector == "//*" || selector == "*" {
+                        true
+                    } else if let Some(tag) = selector.strip_prefix("//") {
+                        if let Some((tag_part, pred)) = tag.split_once('[') {
+                            let tag_ok = tag_part.is_empty() || tag_part == "*" || kind_upper == tag_part.to_ascii_uppercase();
+                            let pred_clean = pred.trim_end_matches(']');
+                            let name_ok = if let Some(val) = pred_clean.strip_prefix("@name=") {
+                                let unquoted = val.trim().trim_matches('\'').trim_matches('"');
+                                n.name == unquoted
+                            } else if pred_clean.contains("contains(@name") {
+                                let parts: Vec<&str> = pred_clean.split(['\'', '"']).collect();
+                                parts.get(1).is_some_and(|needle| n.name.to_lowercase().contains(&needle.to_lowercase()))
+                            } else {
+                                true
+                            };
+                            tag_ok && name_ok
+                        } else {
+                            kind_upper == tag.to_ascii_uppercase() || n.name.to_lowercase().contains(&tag.to_lowercase())
+                        }
+                    } else {
+                        n.name.to_lowercase().contains(&selector.to_lowercase()) || kind_upper == selector.to_ascii_uppercase()
+                    };
+                    if matched {
+                        matches.push(summary(n));
+                    }
+                };
+                if let Some(r) = root {
+                    self.doc.walk(r, |n, _| visit(n));
+                } else {
+                    for n in self.doc.nodes.values() {
+                        visit(n);
+                    }
+                }
+                let total = matches.len();
+                Ok(json!({"selector": a.selector, "page_id": root.map(|r| r.0), "nodes": matches, "total": total}))
+            }
+            "designos_lint" | "check_design" => {
+                let a: LintArgs = parse(args)?;
+                let root = a.page_id.map(NodeId).or_else(|| self.resolve_default_page().ok());
+                let mut findings = Vec::new();
+                let mut check_node = |n: &Node| {
+                    if matches!(n.kind, NodeKind::Page { .. }) {
+                        return;
+                    }
+                    if n.size.x <= 0.0 || n.size.y <= 0.0 {
+                        findings.push(json!({"rule": "zero-bounds", "severity": "error", "node_id": n.id.0, "name": n.name, "message": "Layer has zero or negative width/height"}));
+                    }
+                    let trimmed = n.name.trim();
+                    if matches!(trimmed, "Frame" | "Rectangle" | "Ellipse" | "Text" | "Group") {
+                        findings.push(json!({"rule": "default-layer-name", "severity": "warning", "node_id": n.id.0, "name": n.name, "message": "Give layer a semantic name"}));
+                    }
+                };
+                if let Some(r) = root {
+                    self.doc.walk(r, |n, _| check_node(n));
+                } else {
+                    for n in self.doc.nodes.values() {
+                        check_node(n);
+                    }
+                }
+                let count = findings.len();
+                Ok(json!({"page_id": root.map(|r| r.0), "findings": findings, "total": count, "passed": count == 0}))
+            }
             "designos_undo" | "designos_redo" => {
                 let _: Empty = parse(args)?;
                 let changed =
@@ -312,7 +394,14 @@ impl Engine {
     }
 
     fn create(&mut self, a: CreateArgs) -> Result<Value, String> {
-        let parent = self.node(a.parent_id)?;
+        let parent_id = match a.parent_id {
+            Some(id) => {
+                self.node(id)?;
+                NodeId(id)
+            }
+            None => self.resolve_default_page()?,
+        };
+        let parent = self.node(parent_id.0)?;
         if !parent.kind.is_container() {
             return Err("parent_id must identify a container".into());
         }
@@ -346,11 +435,11 @@ impl Engine {
         if let (Some(text), NodeKind::Text(props)) = (a.text, &mut node.kind) {
             props.content = text;
         }
-        self.exec(Command::Insert { parent: NodeId(a.parent_id), index, nodes: vec![node] })?;
+        self.exec(Command::Insert { parent: parent_id, index, nodes: vec![node] })?;
         if let Some(page_id) = self.doc.page_of(id) {
             self.doc.relayout_subtree(page_id);
         }
-        Ok(json!({"node":self.doc.get(id),"changed":true}))
+        Ok(json!({"node":self.doc.get(id),"parent_id":parent_id.0,"changed":true}))
     }
 
     fn update(&mut self, a: UpdateArgs) -> Result<Value, String> {
@@ -474,7 +563,8 @@ struct CodeArgs {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct CreateArgs {
-    parent_id: u64,
+    #[serde(default)]
+    parent_id: Option<u64>,
     kind: String,
     name: Option<String>,
     text: Option<String>,
@@ -552,6 +642,20 @@ struct SetDevStatusArgs {
 pub(crate) struct ExportFigArgs {
     #[serde(alias = "path")]
     pub output_path: String,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct QueryXpathArgs {
+    #[serde(default, alias = "query")]
+    selector: String,
+    #[serde(default)]
+    page_id: Option<u64>,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LintArgs {
+    #[serde(default)]
+    page_id: Option<u64>,
 }
 
 /// JSON tool descriptors kept beside the argument validators.

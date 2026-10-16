@@ -1,7 +1,7 @@
 //! Document-level editing operations (selection commands, z-order, grouping,
 //! alignment, clipboard, pages, file IO). Everything goes through `Tx`.
 
-use crate::app::{App, View};
+use crate::app::{App, CopiedStyle, View};
 use crate::canvas::tools::Tool;
 use crate::clipboard;
 use crate::edit::{Edit, Tx};
@@ -20,22 +20,6 @@ pub enum Align {
     Top,
     VCenter,
     Bottom,
-}
-
-#[derive(Clone, Debug)]
-struct CopiedNodeProperties {
-    fills: Vec<Paint>,
-    stroke: Stroke,
-    effects: Vec<Effect>,
-    opacity: f32,
-    blend: BlendMode,
-    corner_radii: [f32; 4],
-    corner_smoothing: f32,
-    text_style: Option<TextStyle>,
-}
-
-thread_local! {
-    static COPIED_PROPS: std::cell::RefCell<Option<CopiedNodeProperties>> = const { std::cell::RefCell::new(None) };
 }
 
 /// Sets size + transform of a node, applying constraints/auto-layout to its
@@ -98,7 +82,8 @@ impl App {
     /// Mirrors the selection across the centre of its bounding box.
     pub fn flip_selection(&mut self, horizontal: bool) {
         let tops = self.top_selection();
-        let Some(bb) = union_all(tops.iter().map(|i| world_aabb(&self.doc, *i))) else { return };
+        let idx = crate::canvas::interact::active_index(self);
+        let Some(bb) = union_all(tops.iter().map(|i| crate::canvas::fast_world_aabb(&self.doc, idx, *i))) else { return };
         let nodes: Vec<(NodeId, Affine)> = tops.iter().map(|i| (*i, self.doc.world_transform(*i))).collect();
         let mut tx = Tx::new();
         flip_nodes_about(&mut self.doc, &mut tx.ed, &nodes, rect_center(&bb), horizontal);
@@ -112,7 +97,8 @@ impl App {
             self.show_toast("Select three or more layers to distribute", false);
             return false;
         }
-        let mut items: Vec<(NodeId, Rect)> = tops.iter().map(|i| (*i, world_aabb(&self.doc, *i))).collect();
+        let idx = crate::canvas::interact::active_index(self);
+        let mut items: Vec<(NodeId, Rect)> = tops.iter().map(|i| (*i, crate::canvas::fast_world_aabb(&self.doc, idx, *i))).collect();
         let bb = union_all(items.iter().map(|i| i.1)).unwrap_or_default();
         let horizontal = bb.w >= bb.h;
         #[allow(clippy::type_complexity)] // pair of fn-pointer axis accessors
@@ -144,7 +130,8 @@ impl App {
     /// Rotates the selection by `delta` radians around the centre of its bounding box.
     pub fn rotate_selection(&mut self, delta: f32) {
         let tops = self.top_selection();
-        let Some(bb) = union_all(tops.iter().map(|i| world_aabb(&self.doc, *i))) else { return };
+        let idx = crate::canvas::interact::active_index(self);
+        let Some(bb) = union_all(tops.iter().map(|i| crate::canvas::fast_world_aabb(&self.doc, idx, *i))) else { return };
         let nodes: Vec<(NodeId, Affine)> = tops.iter().map(|i| (*i, self.doc.world_transform(*i))).collect();
         let mut tx = Tx::new();
         rotate_nodes_about(&mut self.doc, &mut tx.ed, &nodes, rect_center(&bb), delta);
@@ -181,11 +168,26 @@ impl App {
     /// Applies `f` to each node and commits one undo step.
     pub fn edit_nodes(&mut self, ids: &[NodeId], mut f: impl FnMut(&mut Node)) {
         let mut tx = Tx::new();
+        let mut relayout_roots = Vec::new();
+        let mut seen_parents = Vec::new();
         for id in ids {
             if let Some(n) = tx.ed.node(&mut self.doc, *id) {
                 f(n);
             }
-            layout::relayout_around(&mut self.doc, &mut tx.ed, *id);
+            if ids.len() <= 4 {
+                layout::relayout_around(&mut self.doc, &mut tx.ed, *id);
+            } else {
+                layout::layout_node(&mut self.doc, &mut tx.ed, *id);
+                if let Some(p) = self.doc.get(*id).and_then(|n| n.parent) {
+                    if !seen_parents.contains(&p) {
+                        seen_parents.push(p);
+                        relayout_roots.push(*id);
+                    }
+                }
+            }
+        }
+        for id in relayout_roots {
+            layout::relayout_up(&mut self.doc, &mut tx.ed, id);
         }
         self.run_tx(tx);
     }
@@ -199,7 +201,47 @@ impl App {
             ctx.data_mut(|d| d.insert_temp(id, false));
         }
         match (active, self.scrub.is_some()) {
-            (true, false) => self.scrub = Some(self.doc.nodes.clone()),
+            (true, false) => {
+                if self.doc.nodes.len() <= 5_000 {
+                    self.scrub = Some(self.doc.nodes.clone());
+                } else {
+                    let mut snap = std::collections::BTreeMap::new();
+                    if let Some(pn) = self.doc.get(self.page) {
+                        snap.insert(self.page, pn.clone());
+                    }
+                    let mut stack: Vec<NodeId> = Vec::new();
+                    for &sid in &self.selection {
+                        stack.push(sid);
+                        let mut cur = self.doc.get(sid).and_then(|n| n.parent);
+                        while let Some(p) = cur {
+                            if p == self.page {
+                                break;
+                            }
+                            if let Some(pn) = self.doc.get(p) {
+                                snap.entry(p).or_insert_with(|| pn.clone());
+                                for &sib in pn.children.iter().take(256) {
+                                    if let Some(sn) = self.doc.get(sib) {
+                                        snap.entry(sib).or_insert_with(|| sn.clone());
+                                    }
+                                }
+                                cur = pn.parent;
+                            } else {
+                                break;
+                            }
+                        }
+                    }
+                    while let Some(nid) = stack.pop() {
+                        if snap.len() >= 4_096 {
+                            break;
+                        }
+                        if let Some(n) = self.doc.get(nid) {
+                            snap.entry(nid).or_insert_with(|| n.clone());
+                            stack.extend(n.children.iter().copied());
+                        }
+                    }
+                    self.scrub = Some(snap);
+                }
+            }
             (false, true) => self.scrub_end(),
             _ => {}
         }
@@ -258,16 +300,58 @@ impl App {
 
     /// Selected nodes that have no selected ancestor, in z/document order.
     pub fn top_selection(&self) -> Vec<NodeId> {
-        self.selection.iter().copied().filter(|id| !self.selection.iter().any(|o| o != id && self.doc.is_ancestor(*o, *id))).collect()
+        if self.selection.len() <= 1 {
+            return self.selection.clone();
+        }
+        if self.selection.len() <= 8 {
+            return self.selection.iter().copied().filter(|id| !self.selection.iter().any(|o| o != id && self.doc.is_ancestor(*o, *id))).collect();
+        }
+        let set: std::collections::HashSet<NodeId> = self.selection.iter().copied().collect();
+        self.selection
+            .iter()
+            .copied()
+            .filter(|&id| {
+                let mut cur = self.doc.get(id).and_then(|n| n.parent);
+                while let Some(p) = cur {
+                    if set.contains(&p) {
+                        return false;
+                    }
+                    cur = self.doc.get(p).and_then(|n| n.parent);
+                }
+                true
+            })
+            .collect()
     }
 
     pub fn selection_bounds(&self) -> Option<Rect> {
-        union_all(self.selection.iter().map(|id| world_aabb(&self.doc, *id)))
+        let idx = crate::canvas::interact::active_index(self);
+        union_all(self.selection.iter().take(512).map(|id| crate::canvas::fast_world_aabb(&self.doc, idx, *id)))
     }
 
     pub fn unique_name(&self, base: &str) -> String {
-        let n = self.doc.nodes.values().filter(|n| n.name.starts_with(base)).count();
-        format!("{base} {}", n + 1)
+        if self.doc.nodes.len() <= 2_048 {
+            let n = self.doc.nodes.values().filter(|n| n.name.starts_with(base)).count();
+            return format!("{base} {}", n + 1);
+        }
+        let container = self.container_for_insert();
+        let mut count = 0usize;
+        if let Some(cn) = self.doc.get(container) {
+            for &cid in cn.children.iter().rev().take(512) {
+                if self.doc.get(cid).is_some_and(|c| c.name.starts_with(base)) {
+                    count += 1;
+                }
+            }
+        }
+        if container != self.page {
+            if let Some(pn) = self.doc.get(self.page) {
+                for &cid in pn.children.iter().rev().take(512) {
+                    if self.doc.get(cid).is_some_and(|c| c.name.starts_with(base)) {
+                        count += 1;
+                    }
+                }
+            }
+        }
+        format!("{base} {}", count + 1)
     }
 
     pub(crate) fn container_for_insert(&self) -> NodeId {
@@ -395,16 +479,21 @@ impl App {
     pub fn paste_over_selection(&mut self) {
         let Some(clip) = self.clip.clone() else { return };
         let parent = self.container_for_insert();
-        let target_local = if let Some(&sel_id) = self.selection.first() {
+        let (target_local, base_idx) = if let Some(&sel_id) = self.selection.first() {
             if sel_id == parent {
-                v2(0.0, 0.0)
+                (v2(0.0, 0.0), self.doc.get(parent).map(|p| p.children.len()).unwrap_or(0))
             } else if let Some(n) = self.doc.get(sel_id) {
-                v2(n.transform.tx, n.transform.ty)
+                let idx = self
+                    .doc
+                    .get(parent)
+                    .and_then(|p| p.children.iter().position(|&c| c == sel_id).map(|i| i + 1))
+                    .unwrap_or_else(|| self.doc.get(parent).map(|p| p.children.len()).unwrap_or(0));
+                (v2(n.transform.tx, n.transform.ty), idx)
             } else {
-                v2(0.0, 0.0)
+                (v2(0.0, 0.0), self.doc.get(parent).map(|p| p.children.len()).unwrap_or(0))
             }
         } else {
-            v2(0.0, 0.0)
+            (v2(0.0, 0.0), self.doc.get(parent).map(|p| p.children.len()).unwrap_or(0))
         };
         let lists = clipboard::instantiate(&mut self.doc, &clip);
         let first_orig = lists
@@ -415,21 +504,22 @@ impl App {
         let delta = v2(target_local.x - first_orig.x, target_local.y - first_orig.y);
         let mut tx = Tx::new();
         let mut new_sel = Vec::new();
-        for mut nodes in lists {
+        for (k, mut nodes) in lists.into_iter().enumerate() {
             if let Some(root) = nodes.first_mut() {
                 root.transform.tx += delta.x;
                 root.transform.ty += delta.y;
                 new_sel.push(root.id);
             }
-            let index = self.doc.get(parent).map(|p| p.children.len()).unwrap_or(0);
+            let index = (base_idx + k).min(self.doc.get(parent).map(|p| p.children.len()).unwrap_or(0));
             let _ = tx.cmd(&mut self.doc, Command::Insert { parent, index, nodes });
         }
         layout::relayout_around(&mut self.doc, &mut tx.ed, parent);
         self.run_tx(tx);
         self.selection = new_sel;
+        self.show_toast("Pasted over selection", false);
     }
 
-    /// `Cmd+Alt+Shift+R` (`PasteToReplace`): replaces each selected node in-place with the
+    /// `Cmd+Shift+R` / `Cmd+Alt+Shift+R` (`PasteToReplace`): replaces each selected node in-place with the
     /// clipboard contents, preserving the target's parent, child index, and `(tx, ty)` position.
     pub fn paste_to_replace(&mut self) {
         let Some(clip) = self.clip.clone() else { return };
@@ -477,6 +567,7 @@ impl App {
         self.run_tx(tx);
         if !new_sel.is_empty() {
             self.selection = new_sel;
+            self.show_toast("Pasted to replace", false);
         }
     }
 
@@ -485,45 +576,99 @@ impl App {
     pub fn copy_properties(&mut self) {
         let Some(&id) = self.selection.first() else { return };
         let Some(n) = self.doc.get(id) else { return };
-        let snap = CopiedNodeProperties {
+        self.copied_style = Some(CopiedStyle {
             fills: n.fills.clone(),
             stroke: n.stroke.clone(),
             effects: n.effects.clone(),
             opacity: n.opacity,
-            blend: n.blend,
+            blend_mode: n.blend,
             corner_radii: n.corner_radii,
             corner_smoothing: n.corner_smoothing,
             text_style: n.kind.any_text().map(|t| t.style.clone()),
-        };
-        COPIED_PROPS.with(|slot| *slot.borrow_mut() = Some(snap));
-        self.show_toast("Copied layer properties", false);
+        });
+        self.show_toast("Copied properties", false);
     }
 
     /// `Cmd+Alt+V` (`PasteProperties`): pastes previously copied visual properties onto all
     /// currently selected layers in a single undoable transaction.
     pub fn paste_properties(&mut self) {
-        let snap = COPIED_PROPS.with(|slot| slot.borrow().clone());
-        let Some(snap) = snap else { return };
+        let Some(snap) = self.copied_style.clone() else { return };
         if self.selection.is_empty() {
             return;
         }
         let ids = self.selection.clone();
         let mut tx = Tx::new();
         for id in ids {
+            let mut relayout_text = false;
             if let Some(n) = tx.ed.node(&mut self.doc, id) {
                 n.fills = snap.fills.clone();
                 n.stroke = snap.stroke.clone();
                 n.effects = snap.effects.clone();
                 n.opacity = snap.opacity;
-                n.blend = snap.blend;
+                n.blend = snap.blend_mode;
                 n.corner_radii = snap.corner_radii;
                 n.corner_smoothing = snap.corner_smoothing;
+                let is_text = matches!(n.kind, NodeKind::Text(_));
                 if let (Some(style), Some(tp)) = (&snap.text_style, n.kind.any_text_mut()) {
-                    tp.style = style.clone();
+                    crate::richtext::apply_all(tp, |st| *st = style.clone());
+                    if is_text {
+                        n.size = layout::fit_text(tp, n.size);
+                        relayout_text = true;
+                    }
                 }
+            }
+            if relayout_text {
+                layout::relayout_around(&mut self.doc, &mut tx.ed, id);
             }
         }
         self.run_tx(tx);
+        self.show_toast("Pasted properties", false);
+    }
+
+    /// `Q` or `Cmd/Ctrl + Alt + A`: Multi-Edit / Select Matching Layers across top-level frames
+    /// and component variants on the active page (matching `name` and `NodeKind` variant).
+    pub fn select_matching_layers(&mut self) -> usize {
+        if self.selection.is_empty() {
+            return 0;
+        }
+        let targets: Vec<(String, std::mem::Discriminant<NodeKind>)> = self
+            .selection
+            .iter()
+            .filter_map(|&id| self.doc.get(id).map(|n| (n.name.clone(), std::mem::discriminant(&n.kind))))
+            .collect();
+        if targets.is_empty() {
+            return 0;
+        }
+        let mut matched: Vec<NodeId> = Vec::new();
+        let doc = &self.doc;
+        doc.walk(self.page, |n, depth| {
+            if depth == 0 || !n.visible {
+                return;
+            }
+            let disc = std::mem::discriminant(&n.kind);
+            if targets.iter().any(|(name, d)| *name == n.name && *d == disc) {
+                let mut cur = n.parent;
+                let mut all_vis = true;
+                while let Some(p) = cur {
+                    if p == self.page {
+                        break;
+                    }
+                    if !doc.get(p).is_some_and(|pn| pn.visible) {
+                        all_vis = false;
+                        break;
+                    }
+                    cur = doc.get(p).and_then(|pn| pn.parent);
+                }
+                if all_vis && !matched.contains(&n.id) {
+                    matched.push(n.id);
+                }
+            }
+        });
+        if !matched.is_empty() {
+            self.selection = matched;
+            self.show_toast(format!("Selected {} matching layers", self.selection.len()), false);
+        }
+        self.selection.len()
     }
 
     fn resolve_selected_grid_frame(&self) -> Option<NodeId> {
@@ -713,7 +858,7 @@ impl App {
             tops[0]
         } else {
             // Order children by position along the dominant axis.
-            let rects: Vec<(NodeId, Rect)> = tops.iter().map(|t| (*t, world_aabb(&self.doc, *t))).collect();
+            let rects: Vec<(NodeId, Rect)> = tops.iter().map(|t| (*t, crate::canvas::fast_world_aabb(&self.doc, None, *t))).collect();
             let bb = union_all(rects.iter().map(|r| r.1)).unwrap_or_default();
             let horizontal = {
                 let xs = rects.iter().map(|r| r.1.x + r.1.w / 2.0);
@@ -766,19 +911,165 @@ impl App {
         self.run_tx(tx);
     }
 
+    /// Alt+Shift+A: removes auto-layout from selected frames while preserving children positions.
+    pub fn remove_auto_layout(&mut self) {
+        let ids = self.selection.clone();
+        if ids.is_empty() {
+            return;
+        }
+        let mut tx = Tx::new();
+        for id in ids {
+            let has_al = self
+                .doc
+                .get(id)
+                .and_then(|n| n.kind.frame_props())
+                .is_some_and(|fp| fp.auto_layout.is_some());
+            if has_al {
+                if let Some(n) = tx.ed.node(&mut self.doc, id) {
+                    if let Some(fp) = n.kind.frame_props_mut() {
+                        fp.auto_layout = None;
+                    }
+                }
+                layout::relayout_around(&mut self.doc, &mut tx.ed, id);
+            }
+        }
+        self.run_tx(tx);
+    }
+
     // ------------------------------------------------------------ transforms
     pub fn nudge(&mut self, dx: f32, dy: f32) {
         let tops = self.top_selection();
         let mut tx = Tx::new();
-        for id in &tops {
+        let mut relayout_roots = Vec::new();
+        let mut seen_parents = Vec::new();
+        let mut al_parents = Vec::new();
+        let forward_dir = dx > 0.0 || dy > 0.0;
+        let ordered_tops: Vec<NodeId> = if forward_dir {
+            tops.iter().rev().copied().collect()
+        } else {
+            tops
+        };
+        for id in &ordered_tops {
+            let flow_al = self.doc.get(*id).and_then(|n| {
+                if n.layout_child.absolute {
+                    return None;
+                }
+                let pid = n.parent?;
+                let al = self.doc.get(pid)?.kind.frame_props()?.auto_layout.as_ref()?;
+                Some((pid, al.direction))
+            });
+            if let Some((parent_id, dir)) = flow_al {
+                let delta_idx: isize = match dir {
+                    LayoutDirection::Horizontal | LayoutDirection::Grid if dx != 0.0 => {
+                        if dx > 0.0 { 1 } else { -1 }
+                    }
+                    LayoutDirection::Vertical | LayoutDirection::Grid if dy != 0.0 => {
+                        if dy > 0.0 { 1 } else { -1 }
+                    }
+                    _ => 0,
+                };
+                if delta_idx != 0 {
+                    let len = self.doc.get(parent_id).map(|p| p.children.len()).unwrap_or(0);
+                    if let Some(cur) = self.doc.get(parent_id).and_then(|p| p.children.iter().position(|c| c == id)) {
+                        let target = (cur as isize + delta_idx).clamp(0, len.saturating_sub(1) as isize) as usize;
+                        if target != cur {
+                            let _ = tx.cmd(&mut self.doc, Command::Reparent { id: *id, parent: parent_id, index: target });
+                            if !al_parents.contains(&parent_id) {
+                                al_parents.push(parent_id);
+                            }
+                        }
+                    }
+                }
+                continue;
+            }
             let d = delta_to_parent(&self.doc, *id, v2(dx, dy));
             if let Some(n) = tx.ed.node(&mut self.doc, *id) {
                 n.transform.tx += d.x;
                 n.transform.ty += d.y;
+                if let Some(p) = n.parent {
+                    if !seen_parents.contains(&p) {
+                        seen_parents.push(p);
+                        relayout_roots.push(*id);
+                    }
+                }
             }
-            layout::relayout_up(&mut self.doc, &mut tx.ed, *id);
+        }
+        for pid in al_parents {
+            layout::relayout_around(&mut self.doc, &mut tx.ed, pid);
+        }
+        for id in relayout_roots {
+            layout::relayout_up(&mut self.doc, &mut tx.ed, id);
         }
         self.run_tx(tx);
+    }
+
+    /// Cmd/Ctrl + Arrow (`±1px`) or Cmd/Ctrl + Shift + Arrow (`±10px`) resizes the selection.
+    pub fn resize_selection_by(&mut self, dw: f32, dh: f32) {
+        let tops = self.top_selection();
+        if tops.is_empty() {
+            return;
+        }
+        let mut tx = Tx::new();
+        for id in tops {
+            let Some((old_size, transform, locked)) = self.doc.get(id).map(|n| (n.size, n.transform, n.locked)) else {
+                continue;
+            };
+            if locked {
+                continue;
+            }
+            let new_size = Vec2::new((old_size.x + dw).max(1.0), (old_size.y + dh).max(1.0));
+            if let Some(n) = tx.ed.node(&mut self.doc, id) {
+                if dw.abs() > 1e-4 {
+                    n.layout_child.horizontal = Sizing::Fixed;
+                    if let Some(al) = n.kind.frame_props_mut().and_then(|fp| fp.auto_layout.as_mut()) {
+                        if matches!(al.direction, LayoutDirection::Horizontal | LayoutDirection::Grid) {
+                            if al.primary_sizing == Sizing::Hug {
+                                al.primary_sizing = Sizing::Fixed;
+                            }
+                        } else if al.counter_sizing == Sizing::Hug {
+                            al.counter_sizing = Sizing::Fixed;
+                        }
+                    }
+                }
+                if dh.abs() > 1e-4 {
+                    n.layout_child.vertical = Sizing::Fixed;
+                    if let Some(al) = n.kind.frame_props_mut().and_then(|fp| fp.auto_layout.as_mut()) {
+                        if al.direction == LayoutDirection::Vertical {
+                            if al.primary_sizing == Sizing::Hug {
+                                al.primary_sizing = Sizing::Fixed;
+                            }
+                        } else if al.counter_sizing == Sizing::Hug {
+                            al.counter_sizing = Sizing::Fixed;
+                        }
+                    }
+                }
+            }
+            apply_resize(&mut self.doc, &mut tx.ed, id, new_size, transform, true);
+        }
+        self.run_tx(tx);
+    }
+
+    /// Rapid `0`..`9` opacity shortcut (`5` -> 50%, `4` then `5` within 400ms -> 45%, `0` -> 100%, `00` -> 0%).
+    pub fn apply_opacity_digit(&mut self, digit: u8) {
+        if digit > 9 || self.selection.is_empty() {
+            return;
+        }
+        let opacity = match self.opacity_buffer {
+            Some((prev, prev_time)) if (self.now - prev_time) >= 0.0 && (self.now - prev_time) <= 0.4 => {
+                self.opacity_buffer = None;
+                if prev == 0 && digit == 0 {
+                    0.0
+                } else {
+                    ((prev as u16 * 10 + digit as u16) as f32 / 100.0).clamp(0.0, 1.0)
+                }
+            }
+            _ => {
+                self.opacity_buffer = Some((digit, self.now));
+                if digit == 0 { 1.0 } else { (digit as f32) / 10.0 }
+            }
+        };
+        let ids = self.selection.clone();
+        self.edit_nodes(&ids, |n| n.opacity = opacity);
     }
 
     pub fn align(&mut self, a: Align) {
@@ -786,17 +1077,23 @@ impl App {
         if tops.is_empty() {
             return;
         }
-        let target = if tops.len() == 1 {
-            match self.doc.get(tops[0]).and_then(|n| n.parent) {
-                Some(p) if !matches!(self.doc.get(p).map(|n| &n.kind), Some(NodeKind::Page { .. })) => world_aabb(&self.doc, p),
-                _ => world_aabb(&self.doc, tops[0]),
+        let idx = crate::canvas::interact::active_index(self);
+        let top_aabbs: Vec<(NodeId, Rect)> = tops
+            .iter()
+            .map(|&t| (t, crate::canvas::fast_world_aabb(&self.doc, idx, t)))
+            .collect();
+        let target = if top_aabbs.len() == 1 {
+            match self.doc.get(top_aabbs[0].0).and_then(|n| n.parent) {
+                Some(p) if !matches!(self.doc.get(p).map(|n| &n.kind), Some(NodeKind::Page { .. })) => crate::canvas::fast_world_aabb(&self.doc, idx, p),
+                _ => top_aabbs[0].1,
             }
         } else {
-            union_all(tops.iter().map(|t| world_aabb(&self.doc, *t))).unwrap_or_default()
+            union_all(top_aabbs.iter().map(|(_, r)| *r)).unwrap_or_default()
         };
         let mut tx = Tx::new();
-        for id in &tops {
-            let r = world_aabb(&self.doc, *id);
+        let mut relayout_roots = Vec::new();
+        let mut seen_parents = Vec::new();
+        for (id, r) in top_aabbs {
             let d = match a {
                 Align::Left => v2(target.x - r.x, 0.0),
                 Align::HCenter => v2(target.x + target.w / 2.0 - (r.x + r.w / 2.0), 0.0),
@@ -805,14 +1102,129 @@ impl App {
                 Align::VCenter => v2(0.0, target.y + target.h / 2.0 - (r.y + r.h / 2.0)),
                 Align::Bottom => v2(0.0, target.y + target.h - (r.y + r.h)),
             };
-            let d = delta_to_parent(&self.doc, *id, d);
-            if let Some(n) = tx.ed.node(&mut self.doc, *id) {
+            let d = delta_to_parent(&self.doc, id, d);
+            if let Some(n) = tx.ed.node(&mut self.doc, id) {
+                n.transform.tx += d.x;
+                n.transform.ty += d.y;
+                if let Some(p) = n.parent {
+                    if !seen_parents.contains(&p) {
+                        seen_parents.push(p);
+                        relayout_roots.push(id);
+                    }
+                }
+            }
+        }
+        for id in relayout_roots {
+            layout::relayout_up(&mut self.doc, &mut tx.ed, id);
+        }
+        self.run_tx(tx);
+    }
+
+    /// `Shift + Click` on any alignment button (`#81` / `REA 4I`): aligns the entire multi-selection
+    /// as a single rigid group relative to its shared parent container (or page viewport if top-level),
+    /// preserving the relative offsets between selected layers.
+    pub fn align_selection_as_group(&mut self, a: Align) {
+        let tops = self.top_selection();
+        if tops.is_empty() {
+            return;
+        }
+        if tops.len() == 1 {
+            self.align(a);
+            return;
+        }
+        let idx = crate::canvas::interact::active_index(self);
+        let top_aabbs: Vec<(NodeId, Rect)> = tops
+            .iter()
+            .map(|&t| (t, crate::canvas::fast_world_aabb(&self.doc, idx, t)))
+            .collect();
+        let Some(group_bb) = union_all(top_aabbs.iter().map(|(_, r)| *r)) else {
+            return;
+        };
+        let parent_target = self
+            .doc
+            .get(tops[0])
+            .and_then(|n| n.parent)
+            .filter(|&p| !matches!(self.doc.get(p).map(|n| &n.kind), Some(NodeKind::Page { .. })))
+            .map(|p| crate::canvas::fast_world_aabb(&self.doc, idx, p))
+            .unwrap_or(group_bb);
+        let world_delta = match a {
+            Align::Left => v2(parent_target.x - group_bb.x, 0.0),
+            Align::HCenter => v2(parent_target.x + parent_target.w * 0.5 - (group_bb.x + group_bb.w * 0.5), 0.0),
+            Align::Right => v2(parent_target.x + parent_target.w - (group_bb.x + group_bb.w), 0.0),
+            Align::Top => v2(0.0, parent_target.y - group_bb.y),
+            Align::VCenter => v2(0.0, parent_target.y + parent_target.h * 0.5 - (group_bb.y + group_bb.h * 0.5)),
+            Align::Bottom => v2(0.0, parent_target.y + parent_target.h - (group_bb.y + group_bb.h)),
+        };
+        if world_delta.x.abs() < 1e-4 && world_delta.y.abs() < 1e-4 {
+            return;
+        }
+        let mut tx = Tx::new();
+        let mut relayout_roots = Vec::new();
+        let mut seen_parents = Vec::new();
+        for (id, _) in top_aabbs {
+            let d = delta_to_parent(&self.doc, id, world_delta);
+            if let Some(n) = tx.ed.node(&mut self.doc, id) {
+                n.transform.tx += d.x;
+                n.transform.ty += d.y;
+                if let Some(p) = n.parent {
+                    if !seen_parents.contains(&p) {
+                        seen_parents.push(p);
+                        relayout_roots.push(id);
+                    }
+                }
+            }
+        }
+        for id in relayout_roots {
+            layout::relayout_up(&mut self.doc, &mut tx.ed, id);
+        }
+        self.run_tx(tx);
+    }
+
+    /// Equalizes spacing and aligns cross-axis for 2+ selected sibling layers (`#16` Tidy up).
+    pub fn tidy_up(&mut self) {
+        let Some((_, mut sorted)) = crate::canvas::interact::smart_selection_items(self) else {
+            return;
+        };
+        if sorted.len() < 2 {
+            return;
+        }
+        let min_x = sorted.iter().map(|(_, r)| r.x).fold(f32::MAX, f32::min);
+        let max_x = sorted.iter().map(|(_, r)| r.x + r.w).fold(f32::MIN, f32::max);
+        let min_y = sorted.iter().map(|(_, r)| r.y).fold(f32::MAX, f32::min);
+        let max_y = sorted.iter().map(|(_, r)| r.y + r.h).fold(f32::MIN, f32::max);
+        let horiz = (max_x - min_x) >= (max_y - min_y);
+        sorted.sort_by(|a, b| {
+            let ka = if horiz { a.1.x } else { a.1.y };
+            let kb = if horiz { b.1.x } else { b.1.y };
+            ka.partial_cmp(&kb).unwrap_or(std::cmp::Ordering::Equal)
+        });
+        let n_items = sorted.len();
+        let total_span = if horiz {
+            (sorted[n_items - 1].1.x + sorted[n_items - 1].1.w) - sorted[0].1.x
+        } else {
+            (sorted[n_items - 1].1.y + sorted[n_items - 1].1.h) - sorted[0].1.y
+        };
+        let sum_sizes: f32 = sorted.iter().map(|(_, r)| if horiz { r.w } else { r.h }).sum();
+        let gap = ((total_span - sum_sizes) / ((n_items - 1) as f32)).max(0.0).round();
+        let mut cursor = if horiz { sorted[0].1.x } else { sorted[0].1.y };
+        let cross_origin = if horiz { sorted[0].1.y } else { sorted[0].1.x };
+        let mut tx = Tx::new();
+        for (id, bb) in sorted {
+            let world_delta = if horiz {
+                v2(cursor - bb.x, cross_origin - bb.y)
+            } else {
+                v2(cross_origin - bb.x, cursor - bb.y)
+            };
+            cursor += (if horiz { bb.w } else { bb.h }) + gap;
+            let d = delta_to_parent(&self.doc, id, world_delta);
+            if let Some(n) = tx.ed.node(&mut self.doc, id) {
                 n.transform.tx += d.x;
                 n.transform.ty += d.y;
             }
-            layout::relayout_up(&mut self.doc, &mut tx.ed, *id);
         }
-        self.run_tx(tx);
+        if self.run_tx(tx) {
+            self.show_toast(format!("Tidied up (gap {gap}px)"), false);
+        }
     }
 
     /// Moves the selection one step (or to the extreme) in z-order.
@@ -878,12 +1290,57 @@ impl App {
         self.edit_nodes(&[id], |n| n.name = name.clone());
     }
 
+    /// Cmd+R: opens the left Layers panel, expands ancestors of `selection[0]`, and begins inline rename.
+    pub fn rename_selection(&mut self) {
+        let Some(&id) = self.selection.first() else { return };
+        self.ui.left_collapsed = false;
+        let mut cur = self.doc.get(id).and_then(|n| n.parent);
+        let mut expanded_any = false;
+        while let Some(p) = cur {
+            if p == self.page {
+                break;
+            }
+            if self.layers.expanded.insert(p) {
+                expanded_any = true;
+            }
+            cur = self.doc.get(p).and_then(|n| n.parent);
+        }
+        if expanded_any {
+            self.layers.expanded_gen = self.layers.expanded_gen.wrapping_add(1);
+        }
+        self.layers.renaming = Some(id);
+        self.layers.rename_started = false;
+        self.layers.rename_seen = false;
+    }
+
     pub fn toggle_visible(&mut self, id: NodeId) {
         self.edit_nodes(&[id], |n| n.visible = !n.visible);
     }
 
+    /// Cmd+Shift+H: toggles visibility across the current selection.
+    pub fn toggle_selection_visible(&mut self) {
+        if self.selection.is_empty() {
+            return;
+        }
+        let ids = self.selection.clone();
+        let any_visible = ids.iter().any(|&id| self.doc.get(id).is_some_and(|n| n.visible));
+        let new_vis = !any_visible;
+        self.edit_nodes(&ids, |n| n.visible = new_vis);
+    }
+
     pub fn toggle_lock(&mut self, id: NodeId) {
         self.edit_nodes(&[id], |n| n.locked = !n.locked);
+    }
+
+    /// Cmd+Shift+L: toggles lock state across the current selection.
+    pub fn toggle_selection_locked(&mut self) {
+        if self.selection.is_empty() {
+            return;
+        }
+        let ids = self.selection.clone();
+        let any_locked = ids.iter().any(|&id| self.doc.get(id).is_some_and(|n| n.locked));
+        let new_locked = !any_locked;
+        self.edit_nodes(&ids, |n| n.locked = new_locked);
     }
 
     // ------------------------------------------------------------ pages
@@ -977,10 +1434,95 @@ impl App {
         }
     }
 
+    /// PageUp (`forward = false`) / PageDown (`forward = true`): steps to the previous or next page.
+    pub fn step_page(&mut self, forward: bool) {
+        let Some(idx) = self.doc.pages.iter().position(|&p| p == self.page) else {
+            return;
+        };
+        let next = if forward {
+            idx.checked_add(1).filter(|&i| i < self.doc.pages.len())
+        } else {
+            idx.checked_sub(1)
+        };
+        if let Some(i) = next {
+            let target = self.doc.pages[i];
+            self.switch_page(target);
+        }
+    }
+
+    /// `N` / `Shift+N` (`fit_zoom = true`) and `Home` / `End` (`fit_zoom = false`):
+    /// steps to the next or previous top-level frame on the current page.
+    pub fn step_frame(&mut self, forward: bool, fit_zoom: bool) {
+        let Some(page_node) = self.doc.get(self.page) else {
+            return;
+        };
+        let is_frame_like = |n: &Node| {
+            n.visible && matches!(n.kind, NodeKind::Frame(_) | NodeKind::Component(_) | NodeKind::ComponentSet(_))
+        };
+        let mut frames = Vec::new();
+        for &cid in &page_node.children {
+            let Some(cn) = self.doc.get(cid) else { continue };
+            if !cn.visible {
+                continue;
+            }
+            if is_frame_like(cn) {
+                frames.push(cid);
+            } else if matches!(cn.kind, NodeKind::Section) {
+                for &scid in &cn.children {
+                    if self.doc.get(scid).is_some_and(is_frame_like) {
+                        frames.push(scid);
+                    }
+                }
+            }
+        }
+        if frames.is_empty() {
+            return;
+        }
+        let idx = crate::canvas::interact::active_index(self);
+        let mut items: Vec<(NodeId, Rect)> = frames
+            .into_iter()
+            .map(|id| (id, crate::canvas::fast_world_aabb(&self.doc, idx, id)))
+            .collect();
+        items.sort_by(|a, b| a.1.x.total_cmp(&b.1.x).then_with(|| a.1.y.total_cmp(&b.1.y)));
+        let len = items.len();
+        let cur_idx = self.selection.first().and_then(|&sel| {
+            items.iter().position(|&(fid, _)| fid == sel || self.doc.is_ancestor(fid, sel))
+        });
+        let target_idx = match cur_idx {
+            Some(i) => {
+                if forward {
+                    (i + 1) % len
+                } else {
+                    (i + len - 1) % len
+                }
+            }
+            None => {
+                if forward {
+                    0
+                } else {
+                    len - 1
+                }
+            }
+        };
+        let (target, b) = items[target_idx];
+        self.selection = vec![target];
+        if fit_zoom {
+            self.zoom_to_selection();
+        } else {
+            let z = self.view.zoom.clamp(theme::ZOOM_MIN, theme::ZOOM_MAX);
+            let size = self.canvas_rect.size();
+            self.view = View {
+                zoom: z,
+                offset: Vec2::new(b.x + b.w / 2.0 - size.x / 2.0 / z, b.y + b.h / 2.0 - size.y / 2.0 / z),
+            };
+        }
+    }
+
     // ------------------------------------------------------------ view
     pub fn page_bounds(&self) -> Option<Rect> {
         let kids = &self.doc.get(self.page)?.children;
-        union_all(kids.iter().filter(|c| self.doc.get(**c).map(|n| n.visible).unwrap_or(false)).map(|c| world_aabb(&self.doc, *c)))
+        let idx = crate::canvas::interact::active_index(self);
+        union_all(kids.iter().filter(|c| self.doc.get(**c).map(|n| n.visible).unwrap_or(false)).map(|c| crate::canvas::fast_world_aabb(&self.doc, idx, *c)))
     }
 
     pub fn fit_all(&mut self) {
@@ -995,6 +1537,10 @@ impl App {
             }
             None => self.fit_all(),
         }
+    }
+
+    pub fn zoom_to_selection(&mut self) {
+        self.fit_selection();
     }
 
     /// Zooms to `zoom` (a factor) centred on the selection, else on the page content.
@@ -1387,13 +1933,55 @@ mod tests {
         assert_eq!(app.doc.get(pasted_id).unwrap().transform.ty, 40.0);
         app.undo();
 
-        // 3. Paste to replace ids[1] (at x=100, y=20)
+        // 3. Paste to replace ids[1] (at x=100, y=20) preserves child index in parent
+        let orig_idx = app
+            .doc
+            .get(app.page)
+            .unwrap()
+            .children
+            .iter()
+            .position(|&c| c == ids[1])
+            .unwrap();
         app.selection = vec![ids[1]];
         app.paste_to_replace();
         let replaced_id = app.selection[0];
         assert!(app.doc.get(ids[1]).is_none());
         assert_eq!(app.doc.get(replaced_id).unwrap().transform.tx, 100.0);
         assert_eq!(app.doc.get(replaced_id).unwrap().transform.ty, 20.0);
+        assert_eq!(app.doc.get(app.page).unwrap().children[orig_idx], replaced_id);
+    }
+
+    #[test]
+    fn select_matching_layers_across_sibling_frames() {
+        let mut d = Document::new("multi-edit-q");
+        let page = d.add_page("p");
+        let f1 = d.alloc_id();
+        let f2 = d.alloc_id();
+        d.insert(page, Node::frame(f1, Rect::new(0.0, 0.0, 200.0, 200.0))).unwrap();
+        d.insert(page, Node::frame(f2, Rect::new(240.0, 0.0, 200.0, 200.0))).unwrap();
+
+        let r1 = d.alloc_id();
+        let mut nr1 = Node::rectangle(r1, Rect::new(10.0, 10.0, 80.0, 40.0));
+        nr1.name = "CTA Button".into();
+        d.insert(f1, nr1).unwrap();
+
+        let r2 = d.alloc_id();
+        let mut nr2 = Node::rectangle(r2, Rect::new(10.0, 10.0, 80.0, 40.0));
+        nr2.name = "CTA Button".into();
+        d.insert(f2, nr2).unwrap();
+
+        let other = d.alloc_id();
+        let mut nother = Node::rectangle(other, Rect::new(10.0, 60.0, 80.0, 40.0));
+        nother.name = "Other".into();
+        d.insert(f2, nother).unwrap();
+
+        let mut app = App::new(d);
+        app.selection = vec![r1];
+        let matched = app.select_matching_layers();
+        assert_eq!(matched, 2);
+        assert!(app.selection.contains(&r1));
+        assert!(app.selection.contains(&r2));
+        assert!(!app.selection.contains(&other));
     }
 
     #[test]

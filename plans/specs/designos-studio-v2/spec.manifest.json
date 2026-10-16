@@ -59,7 +59,8 @@
     "REQ-17",
     "REQ-18",
     "REQ-19",
-    "REQ-20"
+    "REQ-20",
+    "REQ-21"
   ],
   "stories": [
     {
@@ -166,6 +167,27 @@
       "priority": "MVP",
       "status": "Verified",
       "file": "us/US-15.md"
+    },
+    {
+      "id": "US-16",
+      "title": "1:1 Figma C++/WASM 1M-Node Performance Engine (6.25s Load, Sub-ms Hit-Test/Drag/Layout · DIR-25)",
+      "priority": "MVP",
+      "status": "Verified",
+      "file": "us/US-16.md"
+    },
+    {
+      "id": "US-17",
+      "title": "1:1 Figma Micro-Interactions, Keyboard Stepping, Scrubbing & Direct Manipulation",
+      "priority": "MVP",
+      "status": "Verified",
+      "file": "us/US-17.md"
+    },
+    {
+      "id": "US-18",
+      "title": "Deep Figma Feature & Micro-Interaction Parity Wave 3 (On-Canvas Direct Manipulation Handles, Multi-Edit, Variable Expressions & Conditional Prototyping · DIR-30)",
+      "priority": "MVP",
+      "status": "Verified",
+      "file": "us/US-18.md"
     }
   ],
   "gates": {
@@ -204,6 +226,7 @@
     "tdd": "tdd/test-plan.md",
     "screen_inventory": "ux/screen-inventory.md",
     "ui_contract": "ux/ui-contract.md",
+    "micro_interactions": "ux/figma-micro-interactions-spec.md",
     "handoff": "handoff/READY.md"
   }
 }

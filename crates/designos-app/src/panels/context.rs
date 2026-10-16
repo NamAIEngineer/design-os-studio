@@ -119,6 +119,7 @@ fn resolve(entries: &[Entry], path: &[usize]) -> Option<Action> {
 }
 
 pub fn show(app: &mut App, ctx: &Context) {
+    show_layer_picker(app, ctx);
     let Some(at) = app.ui.ctx_menu else { return };
     let entries = entries(app);
     let list: Vec<MenuItem> = entries
@@ -138,6 +139,112 @@ pub fn show(app: &mut App, ctx: &Context) {
         }
         TreeResult::Closed => app.ui.ctx_menu = None,
         TreeResult::Open => {}
+    }
+}
+
+fn show_layer_picker(app: &mut App, ctx: &Context) {
+    let Some((at, ids)) = app.ui.layer_picker.clone() else { return };
+    if ids.is_empty() {
+        app.ui.layer_picker = None;
+        return;
+    }
+    let w = 220.0;
+    let row_h = 26.0;
+    let header_h = 26.0;
+    let h = header_h + ids.len() as f32 * row_h + 6.0;
+    let screen = ctx.content_rect();
+    let x = at.x.clamp(screen.left() + 4.0, (screen.right() - w - 4.0).max(screen.left() + 4.0));
+    let y = at.y.clamp(screen.top() + 4.0, (screen.bottom() - h - 4.0).max(screen.top() + 4.0));
+    let r = egui::Rect::from_min_size(egui::Pos2::new(x, y), egui::Vec2::new(w, h));
+
+    let mut picked: Option<designos_doc::NodeId> = None;
+    let mut hovered_any = None;
+
+    egui::Area::new(Id::new("layer-picker-menu"))
+        .order(egui::Order::Tooltip)
+        .fixed_pos(r.min)
+        .show(ctx, |ui| {
+            let (_, _) = ui.allocate_exact_size(r.size(), egui::Sense::hover());
+            let p = ui.painter();
+            crate::widgets::elevation_shadow(p, r, crate::theme::MENU_RADIUS);
+            p.rect_filled(r, crate::theme::cr(crate::theme::MENU_RADIUS), crate::theme::BG_MENU);
+            p.rect_stroke(
+                r,
+                crate::theme::cr(crate::theme::MENU_RADIUS),
+                egui::Stroke::new(1.0, crate::theme::BORDER_MENU),
+                egui::StrokeKind::Inside,
+            );
+            p.text(
+                egui::Pos2::new(r.left() + 12.0, r.top() + header_h * 0.5),
+                egui::Align2::LEFT_CENTER,
+                "Select layer",
+                crate::theme::font_small(),
+                crate::theme::TEXT_SECONDARY,
+            );
+            p.hline(r.left() + 1.0..=r.right() - 1.0, r.top() + header_h, egui::Stroke::new(1.0, crate::theme::BORDER_MENU));
+
+            for (idx, &id) in ids.iter().enumerate() {
+                let Some(node) = app.doc.get(id) else { continue };
+                let rr = egui::Rect::from_min_size(
+                    egui::Pos2::new(r.left() + 4.0, r.top() + header_h + 3.0 + idx as f32 * row_h),
+                    egui::Vec2::new(w - 8.0, row_h - 2.0),
+                );
+                let resp = ui.interact(rr, Id::new(("layer-picker-row", id)), egui::Sense::click());
+                let hov = resp.hovered();
+                let sel = app.is_selected(id);
+                if hov {
+                    hovered_any = Some(id);
+                    p.rect_filled(rr, crate::theme::cr(4), crate::theme::BG_BRAND);
+                } else if sel {
+                    p.rect_filled(rr, crate::theme::cr(4), crate::theme::BG_SELECTED);
+                }
+                let icon = super::layers::kind_icon(&node.kind);
+                let is_comp = matches!(
+                    node.kind,
+                    NodeKind::Component(_) | NodeKind::ComponentSet(_) | NodeKind::Instance { .. }
+                );
+                let icon_col = if hov {
+                    egui::Color32::WHITE
+                } else if is_comp {
+                    crate::theme::COMPONENT
+                } else {
+                    crate::theme::TEXT_SECONDARY
+                };
+                crate::icons::paint(
+                    p,
+                    icon,
+                    egui::Pos2::new(rr.left() + 12.0, rr.center().y),
+                    crate::theme::LAYER_ICON_SIZE,
+                    icon_col,
+                );
+                let text_col = if hov { egui::Color32::WHITE } else { crate::theme::TEXT };
+                p.text(
+                    egui::Pos2::new(rr.left() + 26.0, rr.center().y),
+                    egui::Align2::LEFT_CENTER,
+                    &node.name,
+                    crate::theme::font_body(),
+                    text_col,
+                );
+                if resp.clicked() {
+                    picked = Some(id);
+                }
+            }
+        });
+
+    app.hover_layer = hovered_any;
+    if let Some(id) = picked {
+        app.select_only(id);
+        app.hover_layer = None;
+        app.ui.layer_picker = None;
+    } else {
+        let close = ctx.input(|i| {
+            i.key_pressed(egui::Key::Escape)
+                || (i.pointer.any_pressed() && i.pointer.interact_pos().is_some_and(|p| !r.contains(p)))
+        });
+        if close {
+            app.hover_layer = None;
+            app.ui.layer_picker = None;
+        }
     }
 }
 
