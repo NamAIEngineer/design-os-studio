@@ -34,6 +34,9 @@ pub struct Archive {
     /// `images/<hash>` entries keyed by file name.
     pub images: BTreeMap<String, Vec<u8>>,
     pub meta: Option<serde_json::Value>,
+    /// Inflate allowance left after opening the zip, so [`read_archive_chunks`] continues the same budget.
+    /// `None` for a bare container (nothing was inflated yet).
+    inflate_left: Option<u64>,
 }
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
@@ -65,7 +68,10 @@ fn read_limited(r: impl Read, budget: &mut Budget) -> Result<Vec<u8>, FigError> 
 }
 
 fn open_zip(bytes: &[u8]) -> Result<Archive, FigError> {
-    open_zip_with(bytes, &mut Budget::new(MAX_INFLATED, MAX_INFLATED_TOTAL), MAX_ZIP_ENTRIES)
+    let mut budget = Budget::new(MAX_INFLATED, MAX_INFLATED_TOTAL);
+    let mut archive = open_zip_with(bytes, &mut budget, MAX_ZIP_ENTRIES)?;
+    archive.inflate_left = Some(budget.left);
+    Ok(archive)
 }
 
 fn open_zip_with(bytes: &[u8], budget: &mut Budget, max_entries: usize) -> Result<Archive, FigError> {
@@ -103,7 +109,19 @@ fn open_zip_with(bytes: &[u8], budget: &mut Budget, max_entries: usize) -> Resul
 }
 
 /// Splits a fig-kiwi container into decompressed `(schema, message)` chunks.
+///
+/// Starts from a fresh inflate allowance; use [`read_archive_chunks`] for an opened [`Archive`] so the zip
+/// entries and the chunks of one file draw on a single budget.
 pub fn read_chunks(canvas: &[u8]) -> Result<(Vec<u8>, Vec<u8>), FigError> {
+    read_chunks_with(canvas, &mut Budget::new(MAX_INFLATED, MAX_INFLATED_TOTAL))
+}
+
+/// Splits the canvas of an opened archive, continuing the inflate budget that opening it already drew on.
+pub fn read_archive_chunks(archive: &Archive) -> Result<(Vec<u8>, Vec<u8>), FigError> {
+    read_chunks_with(&archive.canvas, &mut Budget::new(MAX_INFLATED, archive.inflate_left.unwrap_or(MAX_INFLATED_TOTAL)))
+}
+
+fn read_chunks_with(canvas: &[u8], budget: &mut Budget) -> Result<(Vec<u8>, Vec<u8>), FigError> {
     if canvas.len() < 12 || !(canvas.starts_with(MAGIC_KIWI) || canvas.starts_with(MAGIC_JAM)) {
         return Err(FigError::Format("not a fig-kiwi container".into()));
     }
@@ -122,8 +140,7 @@ pub fn read_chunks(canvas: &[u8]) -> Result<(Vec<u8>, Vec<u8>), FigError> {
     if chunks.len() < 2 {
         return Err(FigError::Format("container has fewer than two chunks".into()));
     }
-    let mut budget = Budget::new(MAX_INFLATED, MAX_INFLATED_TOTAL);
-    Ok((decompress_with(chunks[0], &mut budget)?, decompress_with(chunks[1], &mut budget)?))
+    Ok((decompress_with(chunks[0], budget)?, decompress_with(chunks[1], budget)?))
 }
 
 pub fn container_version(canvas: &[u8]) -> Option<u32> {
@@ -244,6 +261,38 @@ mod tests {
         assert!(a.images.len() < 3, "images past the shared budget must be dropped, got {}", a.images.len());
         let mut tiny = Budget::new(4096, 10);
         assert!(open_zip_with(&z, &mut tiny, 16).is_err(), "canvas over budget is an error");
+    }
+
+    #[test]
+    fn chunk_inflation_shares_the_archive_budget() {
+        // The container's two chunks each fit the per-read cap, but together with the zip entry they exceed
+        // the one budget the whole file is allowed.
+        let zero = vec![0u8; 3000];
+        let canvas = write_container(&zero, &zero, Compression::Deflate, 1);
+        let z = zip_of(&[("canvas.fig", canvas)]);
+
+        let mut shared = Budget::new(4096, 5000);
+        let archive = open_zip_with(&z, &mut shared, 16).unwrap();
+        assert!(read_chunks_with(&archive.canvas, &mut shared).is_err(), "chunks must draw on what the archive left");
+        // A fresh allowance (the old behaviour) would have accepted the same file.
+        assert!(read_chunks(&archive.canvas).is_ok());
+        let mut roomy = Budget::new(4096, 1 << 20);
+        let archive = open_zip_with(&z, &mut roomy, 16).unwrap();
+        assert!(read_chunks_with(&archive.canvas, &mut roomy).is_ok());
+    }
+
+    #[test]
+    fn archive_records_what_opening_it_inflated() {
+        let c = write_container(b"schema", b"message", Compression::Deflate, 15);
+        let z = write_zip(&c, &BTreeMap::new(), None);
+        let a = open(&z).unwrap();
+        assert!(a.inflate_left.is_some_and(|left| left < MAX_INFLATED_TOTAL), "{:?}", a.inflate_left);
+        let (s, m) = read_archive_chunks(&a).unwrap();
+        assert_eq!((s.as_slice(), m.as_slice()), (&b"schema"[..], &b"message"[..]));
+        // A bare container has no archive budget to continue from and starts with the full allowance.
+        let bare = open(&c).unwrap();
+        assert_eq!(bare.inflate_left, None);
+        assert!(read_archive_chunks(&bare).is_ok());
     }
 
     #[test]
