@@ -11,6 +11,10 @@ use std::collections::{BTreeMap, BTreeSet, HashSet};
 /// Deepest nesting kept below a root; deeper subtrees are detached (recursive walkers stay bounded).
 pub const MAX_TREE_DEPTH: usize = 512;
 
+/// Node ids must stay at least this far below `u64::MAX`, so a document always has room to
+/// allocate new ids above them; a file that leaves less is treated as damaged.
+pub const MIN_ID_HEADROOM: u64 = 1 << 32;
+
 /// What [`Document::validate_and_repair`] changed; all zero for a well-formed document.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct RepairReport {
@@ -26,6 +30,8 @@ pub struct RepairReport {
     pub ids_realigned: usize,
     /// The id counter was behind the largest node id.
     pub next_id_raised: bool,
+    /// A node id sits within [`MIN_ID_HEADROOM`] of `u64::MAX`, so ids cannot keep being allocated above it.
+    pub id_space_exhausted: bool,
 }
 
 impl RepairReport {
@@ -37,7 +43,7 @@ impl RepairReport {
     /// over-deep nesting, wrong parent links, mismatched node ids), or `None` when there were none.
     /// A merely stale id counter is not a graph defect: the repair raises it and nothing is lost.
     pub fn structural_summary(&self) -> Option<String> {
-        let parts: Vec<String> = [
+        let mut parts: Vec<String> = [
             ("dangling ids", self.dangling_ids),
             ("duplicate or cyclic child claims", self.duplicate_claims),
             ("subtrees nested too deep", self.depth_detached),
@@ -48,6 +54,9 @@ impl RepairReport {
         .filter(|(_, n)| *n > 0)
         .map(|(what, n)| format!("{n} {what}"))
         .collect();
+        if self.id_space_exhausted {
+            parts.push("node ids too close to the maximum to allocate new ones".to_string());
+        }
         (!parts.is_empty()).then(|| parts.join(", "))
     }
 }
@@ -76,9 +85,13 @@ impl Document {
             report.dangling_ids += 1;
         }
 
+        // Every page and the library page is a root. Mark all of them claimed before walking any
+        // subtree, so a page listed under another page's node is dropped as a duplicate claim
+        // instead of becoming that node's child.
         let mut visited = HashSet::new();
         let mut roots: Vec<NodeId> = self.pages.clone();
         roots.extend(self.library_page);
+        roots.retain(|root| visited.insert(*root));
         for root in roots {
             self.claim_subtree(root, &mut visited, &mut report);
         }
@@ -89,7 +102,7 @@ impl Document {
         };
         for orphans in [true, false] {
             for id in unvisited(&visited, &self.nodes, orphans) {
-                if !visited.contains(&id) {
+                if visited.insert(id) {
                     self.claim_subtree(id, &mut visited, &mut report);
                 }
             }
@@ -100,18 +113,17 @@ impl Document {
             self.next_id = largest;
             report.next_id_raised = true;
         }
+        report.id_space_exhausted = largest > u64::MAX - MIN_ID_HEADROOM;
         if !report.is_clean() {
             self.mark_full_dirty();
         }
         report
     }
 
-    /// Claims `root` and everything below it, depth-first and without recursion. A child already
-    /// claimed elsewhere is dropped from its list; the first claim wins.
+    /// Claims everything below `root` (already marked in `visited` by the caller), depth-first and
+    /// without recursion. A child already claimed elsewhere is dropped from its list; the first
+    /// claim wins.
     fn claim_subtree(&mut self, root: NodeId, visited: &mut HashSet<NodeId>, report: &mut RepairReport) {
-        if !visited.insert(root) {
-            return;
-        }
         if let Some(n) = self.nodes.get_mut(&root) {
             if n.parent.take().is_some() {
                 report.parents_rebuilt += 1;
