@@ -213,6 +213,11 @@ enum Tok {
     RParen,
 }
 
+/// Byte-wise ASCII prefix check; unlike slicing `s[..n]` it cannot split a multi-byte character.
+fn starts_with_ignore_ascii_case(s: &str, prefix: &str) -> bool {
+    s.as_bytes().get(..prefix.len()).is_some_and(|head| head.eq_ignore_ascii_case(prefix.as_bytes()))
+}
+
 fn tokenize_expr(s: &str, current: Option<f32>) -> Option<Vec<Tok>> {
     let mut tokens = Vec::new();
     let bytes = s.as_bytes();
@@ -253,7 +258,7 @@ fn tokenize_expr(s: &str, current: Option<f32>) -> Option<Vec<Tok>> {
                 tokens.push(Tok::Caret);
                 i += 1;
             }
-            _ if rest.len() >= 5 && rest[..5].eq_ignore_ascii_case("mixed") => {
+            _ if starts_with_ignore_ascii_case(rest, "mixed") => {
                 let cur = current?;
                 tokens.push(Tok::Num(cur, NumSuffix::None));
                 i += 5;
@@ -306,11 +311,10 @@ fn tokenize_expr(s: &str, current: Option<f32>) -> Option<Vec<Tok>> {
                 } else if tail.starts_with('°') {
                     i += '°'.len_utf8();
                     NumSuffix::Unit
-                } else if tail.len() >= 3 && tail[..3].eq_ignore_ascii_case("deg") && !tail[3..].chars().next().is_some_and(|c| c.is_ascii_alphabetic()) {
+                } else if starts_with_ignore_ascii_case(tail, "deg") && !tail[3..].chars().next().is_some_and(|c| c.is_ascii_alphabetic()) {
                     i += 3;
                     NumSuffix::Unit
-                } else if tail.len() >= 2
-                    && (tail[..2].eq_ignore_ascii_case("px") || tail[..2].eq_ignore_ascii_case("ms"))
+                } else if (starts_with_ignore_ascii_case(tail, "px") || starts_with_ignore_ascii_case(tail, "ms"))
                     && !tail[2..].chars().next().is_some_and(|c| c.is_ascii_alphabetic())
                 {
                     i += 2;
@@ -654,6 +658,16 @@ mod tests {
         assert_eq!(parse_number("-4"), Some(-4.0));
         assert_eq!(parse_number("abc"), None);
         assert_eq!(parse_number("1/0"), None);
+    }
+
+    #[test]
+    fn non_ascii_input_never_panics() {
+        for input in ["5€", "100 ₫", "日本", "10 độ", "日本語テキスト", "5 日本", "1e€", "€", "10 pxé", "mixé€"] {
+            assert_eq!(eval_number_expr(input, Some(3.0), false), None, "{input}");
+        }
+        assert_eq!(eval_number_expr("Mixed+2", Some(3.0), false), Some(5.0));
+        assert_eq!(eval_number_expr("45 deg", None, false), Some(45.0));
+        assert_eq!(eval_number_expr("12 px", None, false), Some(12.0));
     }
 
     #[test]
