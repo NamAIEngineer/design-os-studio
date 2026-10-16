@@ -21,7 +21,7 @@ struct Decoded {
 
 fn decode(bytes: &[u8]) -> Result<Decoded, FigError> {
     let archive = container::open(bytes)?;
-    let (schema_bin, msg_bin) = container::read_chunks(&archive.canvas)?;
+    let (schema_bin, msg_bin) = container::read_archive_chunks(&archive)?;
     let schema = Schema::decode(&schema_bin).map_err(|e| FigError::Format(format!("kiwi schema: {e}")))?;
     let root = schema.root_message().ok_or_else(|| FigError::Format("schema has no message definition".into()))?;
     let message = schema.decode_message(root, &msg_bin).map_err(|e| FigError::Format(format!("kiwi message: {e}")))?;
