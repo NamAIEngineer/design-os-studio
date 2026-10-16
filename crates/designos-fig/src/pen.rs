@@ -15,6 +15,10 @@ use designos_doc::*;
 use serde_json::{json, Map, Value};
 use std::collections::BTreeMap;
 
+/// A `ref` instance waiting for its component: instance node, referenced component key, and the
+/// per-descendant overrides to apply once the component subtree is cloned.
+type PendingRef = (NodeId, String, Option<Map<String, Value>>);
+
 const PEN_COLLECTION_ID: &str = "pen:tokens";
 
 /// Parses a `.pen` (Pencil.dev) JSON string into a [`Document`].
@@ -30,7 +34,7 @@ pub fn import_pen_json(raw: &str) -> Result<Document, String> {
 
     // 2. Parse pages or top-level children
     let mut id_map: BTreeMap<String, NodeId> = BTreeMap::new();
-    let mut pending_refs: Vec<(NodeId, String, Option<Map<String, Value>>)> = Vec::new();
+    let mut pending_refs: Vec<PendingRef> = Vec::new();
 
     if let Some(pages) = obj.get("pages").and_then(Value::as_array) {
         if pages.is_empty() {
@@ -628,7 +632,7 @@ fn import_pen_node(
     parent: NodeId,
     val: &Value,
     id_map: &mut BTreeMap<String, NodeId>,
-    pending_refs: &mut Vec<(NodeId, String, Option<Map<String, Value>>)>,
+    pending_refs: &mut Vec<PendingRef>,
 ) -> Result<NodeId, String> {
     let obj = val.as_object().ok_or_else(|| "expected node object in .pen".to_string())?;
     let id = doc.alloc_id();
@@ -854,7 +858,7 @@ const MAX_PEN_REF_CLONES: usize = 50_000;
 fn resolve_pen_refs(
     doc: &mut Document,
     id_map: &BTreeMap<String, NodeId>,
-    pending_refs: Vec<(NodeId, String, Option<Map<String, Value>>)>,
+    pending_refs: Vec<PendingRef>,
 ) -> Result<(), String> {
     let mut clone_budget = MAX_PEN_REF_CLONES;
     for (inst_id, ref_key, descendants) in pending_refs {
