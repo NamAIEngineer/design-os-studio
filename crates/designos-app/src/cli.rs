@@ -195,7 +195,8 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Options, String> 
             }
             "--panel" => {
                 let t = it.next().ok_or("--panel needs a name (see --help)")?;
-                if !PANELS.contains(&t.as_str()) {
+                let base = t.split_once(':').map(|(b, _)| b).unwrap_or(t.as_str());
+                if !PANELS.contains(&base) {
                     return Err(format!("unknown panel '{t}' (expected {})", PANELS.join(", ")));
                 }
                 o.panel = Some(t);

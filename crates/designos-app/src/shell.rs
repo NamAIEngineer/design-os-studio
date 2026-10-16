@@ -260,16 +260,7 @@ impl Shell {
                 app.vars.full = panel == "variables";
                 app.open_variables();
             }
-            Some(
-                p @ ("micro-autolayout"
-                | "micro-css-grid"
-                | "micro-smart-selection"
-                | "micro-shape-controls"
-                | "micro-vector-edit"
-                | "micro-layer-picker"
-                | "micro-dev-boxmodel"
-                | "micro-scale-tool"),
-            ) => {
+            Some(p) if p.starts_with("micro-") => {
                 apply_micro_interaction_showcase_preset(&mut app, p);
             }
             Some(spec) => {
@@ -1216,69 +1207,264 @@ pub fn execute_cmdk_action(app: &mut App, action: crate::cmdk::CmdKAction) {
 /// Configures `app` with a rich, deterministic visual showcase scene for each of the 8
 /// Figma A-to-Z Micro-Interaction & Feature categories (`--panel micro-*`).
 pub fn apply_micro_interaction_showcase_preset(app: &mut App, preset: &str) {
+    use designos_doc::vector::End as VEnd;
     use designos_doc::{
-        Affine, AutoLayout, Color, DevStatus, GridTrack, LayoutDirection, Node, NodeKind, Paint, Rect as DRect, Sizing, Stroke as DStroke, Vec2 as DV,
+        Affine, AutoLayout, Color, DevStatus, GridTrack, HandleMirror, LayoutAlign, LayoutDirection, Node, NodeKind, Paint, Rect as DRect, Sizing,
+        Stroke as DStroke, Vec2 as DV,
     };
     app.ui.rulers = true;
     let page = app.page;
-    match preset {
+    let (base, step) = match preset.split_once(':') {
+        Some((b, s)) => (b, s.parse::<usize>().unwrap_or(0)),
+        None => (preset, 0),
+    };
+    match base {
         "micro-autolayout" => {
+            let (gap, pad, primary_sz, width, align_p, cards): (f32, [f32; 4], Sizing, f32, LayoutAlign, Vec<(&str, Color, Sizing)>) = match step {
+                1 => (
+                    12.0,
+                    [16.0, 16.0, 16.0, 16.0],
+                    Sizing::Hug,
+                    420.0,
+                    LayoutAlign::Start,
+                    vec![
+                        ("Badge · Hug", Color::rgb(0xE3, 0x63, 0x23), Sizing::Fixed),
+                        ("Metric · Hug", Color::rgb(0x0D, 0x99, 0xFF), Sizing::Fixed),
+                        ("Status · Ready", Color::rgb(0x14, 0xAE, 0x5C), Sizing::Fixed),
+                    ],
+                ),
+                2 => (
+                    28.0,
+                    [18.0, 18.0, 18.0, 18.0],
+                    Sizing::Hug,
+                    460.0,
+                    LayoutAlign::Start,
+                    vec![
+                        ("Badge · Hug", Color::rgb(0xE3, 0x63, 0x23), Sizing::Fixed),
+                        ("Metric · Gap 28", Color::rgb(0x0D, 0x99, 0xFF), Sizing::Fixed),
+                        ("Status · Ready", Color::rgb(0x14, 0xAE, 0x5C), Sizing::Fixed),
+                    ],
+                ),
+                3 => (
+                    36.0,
+                    [20.0, 20.0, 20.0, 20.0],
+                    Sizing::Hug,
+                    480.0,
+                    LayoutAlign::Start,
+                    vec![
+                        ("Badge · Hug", Color::rgb(0xE3, 0x63, 0x23), Sizing::Fixed),
+                        ("Metric · Inline 36", Color::rgb(0x0D, 0x99, 0xFF), Sizing::Fixed),
+                        ("Status · Ready", Color::rgb(0x14, 0xAE, 0x5C), Sizing::Fixed),
+                    ],
+                ),
+                4 => (
+                    24.0,
+                    [36.0, 44.0, 36.0, 44.0],
+                    Sizing::Hug,
+                    510.0,
+                    LayoutAlign::Start,
+                    vec![
+                        ("Badge · Pad 44", Color::rgb(0xE3, 0x63, 0x23), Sizing::Fixed),
+                        ("Metric · Fill", Color::rgb(0x0D, 0x99, 0xFF), Sizing::Fill),
+                        ("Status · Ready", Color::rgb(0x14, 0xAE, 0x5C), Sizing::Fixed),
+                    ],
+                ),
+                5 => (
+                    20.0,
+                    [28.0, 32.0, 28.0, 32.0],
+                    Sizing::Fixed,
+                    560.0,
+                    LayoutAlign::SpaceBetween,
+                    vec![
+                        ("Badge · Hug", Color::rgb(0xE3, 0x63, 0x23), Sizing::Fixed),
+                        ("Metric · Fill Stretch", Color::rgb(0x0D, 0x99, 0xFF), Sizing::Fill),
+                        ("Status · Ready", Color::rgb(0x14, 0xAE, 0x5C), Sizing::Fixed),
+                    ],
+                ),
+                6 => (
+                    -18.0,
+                    [28.0, 28.0, 28.0, 28.0],
+                    Sizing::Hug,
+                    420.0,
+                    LayoutAlign::Start,
+                    vec![
+                        ("Stack · 01", Color::rgb(0xE3, 0x63, 0x23), Sizing::Fixed),
+                        ("Stack · 02", Color::rgb(0x0D, 0x99, 0xFF), Sizing::Fixed),
+                        ("Stack · 03", Color::rgb(0x14, 0xAE, 0x5C), Sizing::Fixed),
+                        ("Stack · 04", Color::rgb(0x97, 0x47, 0xFF), Sizing::Fixed),
+                    ],
+                ),
+                _ => (
+                    20.0,
+                    [28.0, 28.0, 28.0, 28.0],
+                    Sizing::Hug,
+                    440.0,
+                    LayoutAlign::Start,
+                    vec![
+                        ("Badge · Hug", Color::rgb(0xE3, 0x63, 0x23), Sizing::Fixed),
+                        ("Metric · Fill", Color::rgb(0x0D, 0x99, 0xFF), Sizing::Fill),
+                        ("Status · Ready", Color::rgb(0x14, 0xAE, 0x5C), Sizing::Fixed),
+                    ],
+                ),
+            };
             let fid = app.doc.alloc_id();
-            let mut frame = Node::frame(fid, DRect::new(2400.0, 200.0, 440.0, 220.0));
+            let mut frame = Node::frame(fid, DRect::new(2400.0, 200.0, width, 220.0));
             frame.name = "Auto-Layout 5.0 · Padding & Negative Gap".into();
             frame.fills = vec![Paint::solid(Color::rgb(0x1E, 0x1E, 0x24))];
             frame.corner_radii = [16.0; 4];
             if let Some(fp) = frame.kind.frame_props_mut() {
                 fp.auto_layout = Some(AutoLayout {
                     direction: LayoutDirection::Horizontal,
-                    item_spacing: 20.0,
-                    padding: [28.0, 28.0, 28.0, 28.0],
-                    primary_sizing: Sizing::Hug,
+                    item_spacing: gap,
+                    padding: pad,
+                    primary_sizing: primary_sz,
                     counter_sizing: Sizing::Hug,
+                    primary_align: align_p,
                     ..Default::default()
                 });
             }
             let fid = app.doc.insert(page, frame).unwrap();
-            for (i, (label, col)) in [
-                ("Badge · Hug", Color::rgb(0xE3, 0x63, 0x23)),
-                ("Metric · Fill", Color::rgb(0x0D, 0x99, 0xFF)),
-                ("Status · Ready", Color::rgb(0x14, 0xAE, 0x5C)),
-            ]
-            .into_iter()
-            .enumerate()
-            {
+            for (label, col, h_sz) in cards {
                 let cid = app.doc.alloc_id();
                 let mut card = Node::rectangle(cid, DRect::new(0.0, 0.0, 116.0, 124.0));
                 card.name = label.into();
                 card.fills = vec![Paint::solid(col)];
                 card.corner_radii = [10.0; 4];
-                if i == 1 {
-                    card.layout_child.horizontal = Sizing::Fill;
-                }
+                card.layout_child.horizontal = h_sz;
                 let _ = app.doc.insert(fid, card);
             }
             let mut ed = crate::edit::Edit::default();
             crate::layout::relayout_around(&mut app.doc, &mut ed, fid);
             app.selection = vec![fid];
             app.startup_zoom = Some(1.45);
-            app.canvas.al_inline = Some(crate::canvas::AutoLayoutInlineEdit {
-                id: fid,
-                kind: crate::canvas::handles::AutoLayoutHandleKind::Gap(0),
-                anchor_page: DV::new(2544.0, 290.0),
-                text: "20".into(),
-                request_focus: false,
-            });
+            if matches!(step, 0 | 2 | 3) {
+                let val_str = if step == 2 {
+                    "28"
+                } else if step == 3 {
+                    "36"
+                } else {
+                    "20"
+                };
+                app.canvas.al_inline = Some(crate::canvas::AutoLayoutInlineEdit {
+                    id: fid,
+                    kind: crate::canvas::handles::AutoLayoutHandleKind::Gap(0),
+                    anchor_page: DV::new(2544.0, 290.0),
+                    text: val_str.into(),
+                    request_focus: false,
+                });
+            } else if step == 4 {
+                app.canvas.al_inline = Some(crate::canvas::AutoLayoutInlineEdit {
+                    id: fid,
+                    kind: crate::canvas::handles::AutoLayoutHandleKind::Padding(1),
+                    anchor_page: DV::new(2422.0, 290.0),
+                    text: "44".into(),
+                    request_focus: false,
+                });
+            }
         }
         "micro-css-grid" => {
+            let (col1, col2, gap, pad, fw, fh, specs): (GridTrack, GridTrack, f32, f32, f32, f32, Vec<(&str, Color, u16, u16, f32, f32)>) = match step {
+                1 => (
+                    GridTrack::Flex(1.0),
+                    GridTrack::Flex(1.0),
+                    12.0,
+                    20.0,
+                    540.0,
+                    320.0,
+                    vec![
+                        ("Hero 1×1", Color::rgb(0x0D, 0x99, 0xFF), 1, 1, 150.0, 120.0),
+                        ("KPI Card", Color::rgb(0xE3, 0x63, 0x23), 1, 1, 150.0, 120.0),
+                        ("Users Cell", Color::rgb(0x97, 0x47, 0xFF), 1, 1, 150.0, 120.0),
+                        ("Revenue Cell", Color::rgb(0x14, 0xAE, 0x5C), 1, 1, 150.0, 120.0),
+                        ("Retention", Color::rgb(0x27, 0x27, 0x2A), 1, 1, 150.0, 120.0),
+                        ("Latency", Color::rgb(0x3F, 0x3F, 0x46), 1, 1, 150.0, 120.0),
+                    ],
+                ),
+                2 => (
+                    GridTrack::Fixed(160.0),
+                    GridTrack::Flex(1.0),
+                    14.0,
+                    22.0,
+                    550.0,
+                    330.0,
+                    vec![
+                        ("Hero 1×1", Color::rgb(0x0D, 0x99, 0xFF), 1, 1, 160.0, 120.0),
+                        ("KPI Fixed 160", Color::rgb(0xE3, 0x63, 0x23), 1, 1, 160.0, 120.0),
+                        ("Users Flex", Color::rgb(0x97, 0x47, 0xFF), 1, 1, 150.0, 120.0),
+                        ("Revenue Cell", Color::rgb(0x14, 0xAE, 0x5C), 1, 1, 150.0, 120.0),
+                        ("Retention", Color::rgb(0x27, 0x27, 0x2A), 1, 1, 160.0, 120.0),
+                        ("Latency", Color::rgb(0x3F, 0x3F, 0x46), 1, 1, 150.0, 120.0),
+                    ],
+                ),
+                3 => (
+                    GridTrack::Fixed(160.0),
+                    GridTrack::Hug,
+                    16.0,
+                    24.0,
+                    560.0,
+                    340.0,
+                    vec![
+                        ("Hero Flex 1fr", Color::rgb(0x0D, 0x99, 0xFF), 1, 1, 180.0, 120.0),
+                        ("KPI Fixed 160", Color::rgb(0xE3, 0x63, 0x23), 1, 1, 160.0, 120.0),
+                        ("Users Hug", Color::rgb(0x97, 0x47, 0xFF), 1, 1, 118.0, 120.0),
+                        ("Revenue Cell", Color::rgb(0x14, 0xAE, 0x5C), 1, 1, 180.0, 120.0),
+                        ("Retention", Color::rgb(0x27, 0x27, 0x2A), 1, 1, 160.0, 120.0),
+                        ("Latency Hug", Color::rgb(0x3F, 0x3F, 0x46), 1, 1, 118.0, 120.0),
+                    ],
+                ),
+                4 => (
+                    GridTrack::Fixed(160.0),
+                    GridTrack::Hug,
+                    16.0,
+                    24.0,
+                    560.0,
+                    340.0,
+                    vec![
+                        ("Hero Span 2×1", Color::rgb(0x0D, 0x99, 0xFF), 2, 1, 260.0, 120.0),
+                        ("KPI Card", Color::rgb(0xE3, 0x63, 0x23), 1, 1, 130.0, 120.0),
+                        ("Revenue Cell", Color::rgb(0x14, 0xAE, 0x5C), 1, 1, 150.0, 120.0),
+                        ("Retention", Color::rgb(0x27, 0x27, 0x2A), 1, 1, 160.0, 120.0),
+                        ("Latency", Color::rgb(0x97, 0x47, 0xFF), 1, 1, 130.0, 120.0),
+                    ],
+                ),
+                6 => (
+                    GridTrack::Fixed(172.0),
+                    GridTrack::Hug,
+                    24.0,
+                    32.0,
+                    600.0,
+                    368.0,
+                    vec![
+                        ("Hero Span 2×1", Color::rgb(0x0D, 0x99, 0xFF), 2, 1, 280.0, 132.0),
+                        ("KPI Card", Color::rgb(0xE3, 0x63, 0x23), 1, 1, 140.0, 132.0),
+                        ("Revenue Cell", Color::rgb(0x14, 0xAE, 0x5C), 1, 1, 160.0, 132.0),
+                        ("Retention Span 2×1", Color::rgb(0x97, 0x47, 0xFF), 2, 1, 300.0, 132.0),
+                    ],
+                ),
+                _ => (
+                    GridTrack::Fixed(160.0),
+                    GridTrack::Hug,
+                    16.0,
+                    24.0,
+                    560.0,
+                    340.0,
+                    vec![
+                        ("Hero Span 2×1", Color::rgb(0x0D, 0x99, 0xFF), 2, 1, 260.0, 120.0),
+                        ("KPI Card", Color::rgb(0xE3, 0x63, 0x23), 1, 1, 130.0, 120.0),
+                        ("Revenue Cell", Color::rgb(0x14, 0xAE, 0x5C), 1, 1, 150.0, 120.0),
+                        ("Retention Cell", Color::rgb(0x27, 0x27, 0x2A), 2, 1, 280.0, 120.0),
+                    ],
+                ),
+            };
             let fid = app.doc.alloc_id();
-            let mut grid_frame = Node::frame(fid, DRect::new(2400.0, 600.0, 560.0, 340.0));
+            let mut grid_frame = Node::frame(fid, DRect::new(2400.0, 600.0, fw, fh));
             grid_frame.name = "2D CSS Grid · Track Pills & Span 2×1".into();
             grid_frame.fills = vec![Paint::solid(Color::rgb(0x18, 0x18, 0x1B))];
             grid_frame.corner_radii = [16.0; 4];
             let mut col_tracks = [GridTrack::Flex(1.0); 8];
             col_tracks[0] = GridTrack::Flex(1.0);
-            col_tracks[1] = GridTrack::Fixed(160.0);
-            col_tracks[2] = GridTrack::Hug;
+            col_tracks[1] = col1;
+            col_tracks[2] = col2;
             let mut row_tracks = [GridTrack::Hug; 8];
             row_tracks[0] = GridTrack::Fixed(130.0);
             row_tracks[1] = GridTrack::Flex(1.0);
@@ -1287,9 +1473,9 @@ pub fn apply_micro_interaction_showcase_preset(app: &mut App, preset: &str) {
                     direction: LayoutDirection::Grid,
                     grid_columns: 3,
                     grid_rows: 2,
-                    item_spacing: 16.0,
-                    counter_spacing: 16.0,
-                    padding: [24.0, 24.0, 24.0, 24.0],
+                    item_spacing: gap,
+                    counter_spacing: gap,
+                    padding: [pad, pad, pad, pad],
                     grid_col_tracks: col_tracks,
                     grid_row_tracks: row_tracks,
                     primary_sizing: Sizing::Fixed,
@@ -1298,13 +1484,7 @@ pub fn apply_micro_interaction_showcase_preset(app: &mut App, preset: &str) {
                 });
             }
             let fid = app.doc.insert(page, grid_frame).unwrap();
-            let specs = [
-                ("Hero Span 2×1", Color::rgb(0x0D, 0x99, 0xFF), 2u16, 1u16, 260.0, 120.0),
-                ("KPI Card", Color::rgb(0xE3, 0x63, 0x23), 1, 1, 130.0, 120.0),
-                ("Revenue Cell", Color::rgb(0x14, 0xAE, 0x5C), 1, 1, 150.0, 120.0),
-                ("Retention Cell", Color::rgb(0x27, 0x27, 0x2A), 2, 1, 280.0, 120.0),
-            ];
-            let mut first_child = None;
+            let mut child_ids = Vec::new();
             for (name, col, cs, rs, w, h) in specs {
                 let cid = app.doc.alloc_id();
                 let mut c = Node::rectangle(cid, DRect::new(0.0, 0.0, w, h));
@@ -1313,31 +1493,60 @@ pub fn apply_micro_interaction_showcase_preset(app: &mut App, preset: &str) {
                 c.corner_radii = [10.0; 4];
                 c.layout_child.col_span = cs;
                 c.layout_child.row_span = rs;
-                let cid = app.doc.insert(fid, c).unwrap();
-                if first_child.is_none() {
-                    first_child = Some(cid);
-                }
+                child_ids.push(app.doc.insert(fid, c).unwrap());
             }
             let mut ed = crate::edit::Edit::default();
             crate::layout::relayout_around(&mut app.doc, &mut ed, fid);
-            app.selection = match first_child {
-                Some(c0) => vec![fid, c0],
-                None => vec![fid],
+            app.selection = match (step, child_ids.first().copied(), child_ids.last().copied()) {
+                (5, _, Some(last)) => vec![fid, last],
+                (6, _, _) => vec![fid],
+                (_, Some(c0), _) => vec![fid, c0],
+                _ => vec![fid],
             };
             app.startup_zoom = Some(1.30);
         }
         "micro-smart-selection" => {
+            let cards: Vec<(&str, Color, f32, f32, f32)> = match step {
+                1 => vec![
+                    ("Plan · Starter", Color::rgb(0x27, 0x27, 0x2A), 2394.0, 1122.0, 190.0),
+                    ("Plan · Pro", Color::rgb(0xE3, 0x63, 0x23), 2562.0, 1084.0, 190.0),
+                    ("Plan · Enterprise", Color::rgb(0x0D, 0x99, 0xFF), 2786.0, 1112.0, 190.0),
+                ],
+                2 => vec![
+                    ("Plan · Starter", Color::rgb(0x27, 0x27, 0x2A), 2400.0, 1100.0, 190.0),
+                    ("Plan · Pro", Color::rgb(0xE3, 0x63, 0x23), 2572.0, 1100.0, 190.0),
+                    ("Plan · Enterprise", Color::rgb(0x0D, 0x99, 0xFF), 2744.0, 1100.0, 190.0),
+                ],
+                3 => vec![
+                    ("Plan · Starter", Color::rgb(0x27, 0x27, 0x2A), 2376.0, 1100.0, 190.0),
+                    ("Plan · Pro", Color::rgb(0xE3, 0x63, 0x23), 2572.0, 1100.0, 190.0),
+                    ("Plan · Enterprise", Color::rgb(0x0D, 0x99, 0xFF), 2768.0, 1100.0, 190.0),
+                ],
+                4 => vec![
+                    ("Plan · Pro", Color::rgb(0xE3, 0x63, 0x23), 2400.0, 1100.0, 190.0),
+                    ("Plan · Starter", Color::rgb(0x27, 0x27, 0x2A), 2580.0, 1100.0, 190.0),
+                    ("Plan · Enterprise", Color::rgb(0x0D, 0x99, 0xFF), 2760.0, 1100.0, 190.0),
+                ],
+                5 => vec![
+                    ("Plan · Pro", Color::rgb(0xE3, 0x63, 0x23), 2400.0, 1100.0, 190.0),
+                    ("Plan · Enterprise", Color::rgb(0x0D, 0x99, 0xFF), 2580.0, 1100.0, 190.0),
+                    ("Plan · Starter", Color::rgb(0x27, 0x27, 0x2A), 2760.0, 1100.0, 190.0),
+                ],
+                6 => vec![
+                    ("Plan · Pro", Color::rgb(0xE3, 0x63, 0x23), 2412.0, 1094.0, 204.0),
+                    ("Plan · Enterprise", Color::rgb(0x0D, 0x99, 0xFF), 2576.0, 1094.0, 204.0),
+                    ("Plan · Starter", Color::rgb(0x14, 0xAE, 0x5C), 2740.0, 1094.0, 204.0),
+                ],
+                _ => vec![
+                    ("Plan · Starter", Color::rgb(0x27, 0x27, 0x2A), 2400.0, 1100.0, 190.0),
+                    ("Plan · Pro", Color::rgb(0xE3, 0x63, 0x23), 2584.0, 1100.0, 190.0),
+                    ("Plan · Enterprise", Color::rgb(0x0D, 0x99, 0xFF), 2768.0, 1100.0, 190.0),
+                ],
+            };
             let mut ids = Vec::new();
-            for (i, (name, col)) in [
-                ("Plan · Starter", Color::rgb(0x27, 0x27, 0x2A)),
-                ("Plan · Pro", Color::rgb(0xE3, 0x63, 0x23)),
-                ("Plan · Enterprise", Color::rgb(0x0D, 0x99, 0xFF)),
-            ]
-            .into_iter()
-            .enumerate()
-            {
+            for (name, col, x, y, h) in cards {
                 let cid = app.doc.alloc_id();
-                let mut card = Node::rectangle(cid, DRect::new(2400.0 + (i as f32) * 184.0, 1100.0, 148.0, 190.0));
+                let mut card = Node::rectangle(cid, DRect::new(x, y, 148.0, h));
                 card.name = name.into();
                 card.fills = vec![Paint::solid(col)];
                 card.corner_radii = [14.0; 4];
@@ -1347,36 +1556,65 @@ pub fn apply_micro_interaction_showcase_preset(app: &mut App, preset: &str) {
             app.startup_zoom = Some(1.30);
         }
         "micro-shape-controls" => {
+            let (arc_start, arc_end, arc_ratio, star_cnt, star_ratio, select_star, add_poly) = match step {
+                1 => (0.0, std::f32::consts::TAU, 0.0, 5u32, 0.38, false, false),
+                2 => (-0.45, 4.15, 0.0, 5, 0.38, false, false),
+                3 => (-0.45, 4.35, 0.58, 5, 0.38, false, false),
+                4 => (-0.45, 4.35, 0.58, 7, 0.42, true, false),
+                5 => (-0.45, 4.35, 0.58, 8, 0.62, true, false),
+                6 => (-0.35, 4.65, 0.62, 8, 0.56, false, true),
+                _ => (-0.45, 4.15, 0.52, 7, 0.44, false, false),
+            };
             let eid = app.doc.alloc_id();
             let mut ell = Node::ellipse(eid, DRect::new(2420.0, 1450.0, 220.0, 220.0));
             if let NodeKind::Ellipse(arc) = &mut ell.kind {
-                arc.start = -0.45;
-                arc.end = 4.15;
-                arc.inner_radius = 0.52;
+                arc.start = arc_start;
+                arc.end = arc_end;
+                arc.inner_radius = arc_ratio;
             }
             ell.name = "Donut Arc · Sweep & Ratio".into();
             ell.fills = vec![Paint::solid(Color::rgb(0x0D, 0x99, 0xFF))];
             let eid = app.doc.insert(page, ell).unwrap();
 
             let sid = app.doc.alloc_id();
-            let mut star = Node::new(sid, NodeKind::Star { count: 7, inner_ratio: 0.44 });
-            star.name = "Star · 7 pts · 44%".into();
+            let mut star = Node::new(sid, NodeKind::Star { count: star_cnt, inner_ratio: star_ratio });
+            star.name = format!("Star · {star_cnt} pts · {:.0}%", star_ratio * 100.0);
             star.transform = Affine::translate(2680.0, 1450.0);
             star.size = DV::new(220.0, 220.0);
             star.fills = vec![Paint::solid(Color::rgb(0xE3, 0x63, 0x23))];
-            let _ = app.doc.insert(page, star);
+            let sid = app.doc.insert(page, star).unwrap();
 
-            app.selection = vec![eid];
-            app.canvas.inter = crate::canvas::Interaction::ShapeControl(crate::canvas::ShapeControlDragState {
-                tx: crate::edit::Tx::new(),
-                id: eid,
-                kind: crate::canvas::handles::ShapeControlKind::EllipseSweep,
-                start_page: DV::new(2530.0, 1560.0),
-                start_count: 0,
-                start_ratio: 0.52,
-                start_end_angle: 4.15,
-            });
-            app.startup_zoom = Some(1.50);
+            if add_poly {
+                let pid = app.doc.alloc_id();
+                let mut poly = Node::new(pid, NodeKind::Polygon { count: 6 });
+                poly.name = "Polygon · 6 Sides".into();
+                poly.transform = Affine::translate(2930.0, 1465.0);
+                poly.size = DV::new(190.0, 190.0);
+                poly.corner_radii = [14.0; 4];
+                poly.fills = vec![Paint::solid(Color::rgb(0x14, 0xAE, 0x5C))];
+                let pid = app.doc.insert(page, poly).unwrap();
+                app.selection = vec![eid, sid, pid];
+                app.startup_zoom = Some(1.22);
+            } else {
+                let active_id = if select_star { sid } else { eid };
+                let kind = match step {
+                    3 => crate::canvas::handles::ShapeControlKind::EllipseInnerRadius,
+                    4 => crate::canvas::handles::ShapeControlKind::StarCount,
+                    5 => crate::canvas::handles::ShapeControlKind::StarInnerRatio,
+                    _ => crate::canvas::handles::ShapeControlKind::EllipseSweep,
+                };
+                app.selection = vec![active_id];
+                app.canvas.inter = crate::canvas::Interaction::ShapeControl(crate::canvas::ShapeControlDragState {
+                    tx: crate::edit::Tx::new(),
+                    id: active_id,
+                    kind,
+                    start_page: DV::new(2530.0, 1560.0),
+                    start_count: star_cnt,
+                    start_ratio: if select_star { star_ratio } else { arc_ratio },
+                    start_end_angle: arc_end,
+                });
+                app.startup_zoom = Some(1.50);
+            }
         }
         "micro-vector-edit" => {
             let vid = app.doc.alloc_id();
@@ -1389,8 +1627,76 @@ pub fn apply_micro_interaction_showcase_preset(app: &mut App, preset: &str) {
             let vid = app.doc.insert(page, vec_node).unwrap();
             app.selection = vec![vid];
             crate::canvas::vector::enter(app, vid);
-            if let Some(v) = app.canvas.vedit.as_mut() {
-                v.sel = [0usize, 1usize, 2usize].into_iter().collect();
+            match step {
+                1 => {
+                    if let Some(v) = app.canvas.vedit.as_mut() {
+                        v.sel = [0usize, 1usize].into_iter().collect();
+                    }
+                }
+                2 => {
+                    crate::canvas::vector::edit(app, |net, sel| {
+                        let nv = net.split_segment(0, 0.5);
+                        net.vertices[nv].pos.y -= 42.0;
+                        *sel = [nv].into_iter().collect();
+                        true
+                    });
+                }
+                3 => {
+                    crate::canvas::vector::edit(app, |net, sel| {
+                        let nv = net.split_segment(0, 0.5);
+                        net.vertices[nv].pos.y -= 48.0;
+                        net.set_tangent(0, VEnd::End, DV::new(-46.0, -18.0));
+                        let last_seg = net.segments.len() - 1;
+                        net.set_tangent(last_seg, VEnd::Start, DV::new(46.0, -18.0));
+                        net.vertices[nv].mirror = HandleMirror::AngleAndLength;
+                        *sel = [nv, 1usize].into_iter().collect();
+                        true
+                    });
+                }
+                4 => {
+                    crate::canvas::vector::edit(app, |net, sel| {
+                        let nv = net.split_segment(0, 0.5);
+                        net.vertices[nv].pos.y -= 48.0;
+                        net.vertices[nv].mirror = HandleMirror::None;
+                        net.set_tangent(0, VEnd::End, DV::new(-64.0, -34.0));
+                        let last_seg = net.segments.len() - 1;
+                        net.set_tangent(last_seg, VEnd::Start, DV::new(52.0, 26.0));
+                        net.set_tangent(1, VEnd::Start, DV::new(36.0, -30.0));
+                        *sel = [nv, 1usize, 2usize].into_iter().collect();
+                        true
+                    });
+                }
+                5 => {
+                    crate::canvas::vector::edit(app, |net, sel| {
+                        let nv = net.split_segment(0, 0.5);
+                        net.vertices[nv].pos.y -= 44.0;
+                        net.set_tangent(0, VEnd::End, DV::new(-48.0, -18.0));
+                        if net.vertices.len() > 4 {
+                            net.delete_vertex(3);
+                        }
+                        *sel = [0usize, 1usize, 2usize].into_iter().collect();
+                        true
+                    });
+                }
+                6 => {
+                    crate::canvas::vector::edit(app, |net, sel| {
+                        let nv = net.split_segment(0, 0.5);
+                        net.vertices[nv].pos.y -= 44.0;
+                        net.set_tangent(0, VEnd::End, DV::new(-48.0, -18.0));
+                        *sel = [0usize, 1usize].into_iter().collect();
+                        true
+                    });
+                    crate::canvas::vector::exit(app);
+                    if let Some(n) = app.doc.get_mut(vid) {
+                        n.fills = vec![Paint::solid(Color::rgba(20, 174, 92, 92))];
+                        n.stroke = DStroke { paints: vec![Paint::solid(Color::rgb(0x14, 0xAE, 0x5C))], weight: 3.5, ..Default::default() };
+                    }
+                }
+                _ => {
+                    if let Some(v) = app.canvas.vedit.as_mut() {
+                        v.sel = [0usize, 1usize, 2usize].into_iter().collect();
+                    }
+                }
             }
             app.startup_zoom = Some(1.60);
         }
@@ -1402,41 +1708,127 @@ pub fn apply_micro_interaction_showcase_preset(app: &mut App, preset: &str) {
                 if cands.is_empty() {
                     cands.push(sel);
                 }
-                if let Some(first) = cands.first().copied() {
-                    app.hover_layer = Some(first);
+                match step {
+                    2 => {
+                        let target = cands.get(1).copied().or_else(|| cands.first().copied()).unwrap_or(sel);
+                        app.selection = vec![target];
+                        app.hover_layer = Some(target);
+                        app.startup_zoom = Some(1.18);
+                    }
+                    3 => {
+                        if let Some(n) = app.doc.get_mut(sel) {
+                            n.dev.status = Some(DevStatus::ReadyForDev);
+                        }
+                        app.hover = Some(sel);
+                        app.startup_zoom = Some(1.15);
+                    }
+                    4 => {
+                        app.props.eyedropper = Some(crate::panels::properties::PickTarget::Fill(0));
+                        app.props.eyedropper_format = crate::panels::properties::EyedropperFormat::Hex;
+                        app.hover = cands.first().copied();
+                        app.startup_zoom = Some(1.22);
+                    }
+                    5 => {
+                        app.props.eyedropper = Some(crate::panels::properties::PickTarget::Fill(0));
+                        app.props.eyedropper_format = crate::panels::properties::EyedropperFormat::Rgb;
+                        app.hover = cands.get(1).copied().or_else(|| cands.first().copied());
+                        app.startup_zoom = Some(1.22);
+                    }
+                    6 => {
+                        app.props.eyedropper = Some(crate::panels::properties::PickTarget::Fill(0));
+                        app.props.eyedropper_format = crate::panels::properties::EyedropperFormat::Hsl;
+                        app.hover = cands.first().copied();
+                        app.startup_zoom = Some(1.12);
+                    }
+                    _ => {
+                        if let Some(first) = cands.first().copied() {
+                            app.hover_layer = Some(first);
+                        }
+                        app.ui.layer_picker = Some((Pos2::new(680.0, 410.0), cands));
+                        app.startup_zoom = Some(1.05);
+                    }
                 }
-                app.ui.layer_picker = Some((Pos2::new(680.0, 410.0), cands));
+            } else {
+                app.startup_zoom = Some(1.05);
             }
-            app.startup_zoom = Some(1.05);
         }
         "micro-dev-boxmodel" => {
             app.ui.dev_mode = true;
             app.ui.right_tab = Some(crate::app::RightTab::Design);
-            app.dev.lang = crate::dev::Language::React;
+            app.dev.lang = match step {
+                3 => crate::dev::Language::Tailwind,
+                4 => crate::dev::Language::Css,
+                5 => crate::dev::Language::SwiftUi,
+                6 => crate::dev::Language::Compose,
+                _ => crate::dev::Language::React,
+            };
             crate::dev::preset::apply(app);
-            // Ensure an Auto-Layout frame with generous padding is selected so the emerald Box-Model padding tint is visible.
+            let mut al_frames = Vec::new();
             for (&id, n) in &mut app.doc.nodes {
                 if n.parent == Some(page) && n.kind.frame_props().is_some() {
                     n.dev.status = Some(DevStatus::ReadyForDev);
                 }
                 if let Some(al) = n.kind.frame_props_mut().and_then(|fp| fp.auto_layout.as_mut()) {
                     if al.padding.iter().all(|&p| p >= 12.0) {
-                        app.selection = vec![id];
-                        app.hover = Some(id);
+                        al_frames.push(id);
                     }
                 }
             }
-            app.startup_zoom = Some(1.40);
+            if let Some(&chosen) = al_frames.get(step.saturating_sub(1) % al_frames.len().max(1)).or_else(|| al_frames.first()) {
+                app.selection = vec![chosen];
+                app.hover = Some(chosen);
+            }
+            app.startup_zoom = match step {
+                1 => Some(1.18),
+                6 => Some(1.08),
+                _ => Some(1.40),
+            };
         }
         "micro-scale-tool" => {
             app.tool = crate::canvas::tools::Tool::Scale;
+            let mult: f32 = match step {
+                1 => 1.00,
+                2 => 1.25,
+                3 => 1.50,
+                4 => 1.75,
+                5 => 2.00,
+                6 => 1.50,
+                _ => 1.25,
+            };
+            if step >= 3 {
+                let ref_id = app.doc.alloc_id();
+                let mut ref_card = Node::frame(ref_id, DRect::new(2130.0, 2200.0, 256.0, 160.0));
+                ref_card.name = "Baseline · 1.00× (256×160)".into();
+                ref_card.fills = vec![Paint::solid(Color::rgb(0x27, 0x27, 0x2A))];
+                ref_card.stroke = DStroke { paints: vec![Paint::solid(Color::rgb(0x71, 0x71, 0x7A))], weight: 2.0, ..Default::default() };
+                ref_card.corner_radii = [14.0; 4];
+                let _ = app.doc.insert(page, ref_card);
+            }
             let sid = app.doc.alloc_id();
-            let mut card = Node::frame(sid, DRect::new(2420.0, 2200.0, 320.0, 200.0));
-            card.name = "Scale Tool (K) · 1.25× Proportional".into();
+            let w = (256.0 * mult).round();
+            let h = (160.0 * mult).round();
+            let mut card = Node::frame(sid, DRect::new(2420.0, 2200.0, w, h));
+            card.name = format!("Scale Tool (K) · {mult:.2}× Proportional");
             card.fills = vec![Paint::solid(Color::rgb(0x1E, 0x1E, 0x24))];
-            card.stroke = DStroke { paints: vec![Paint::solid(Color::rgb(0x0D, 0x99, 0xFF))], weight: 2.5, ..Default::default() };
-            card.corner_radii = [18.0; 4];
+            let stroke_col = if step == 6 { Color::rgb(0x14, 0xAE, 0x5C) } else { Color::rgb(0x0D, 0x99, 0xFF) };
+            card.stroke = DStroke { paints: vec![Paint::solid(stroke_col)], weight: 2.0 * mult, ..Default::default() };
+            card.corner_radii = [14.0 * mult; 4];
             let sid = app.doc.insert(page, card).unwrap();
+
+            let badge_id = app.doc.alloc_id();
+            let mut badge_node = Node::rectangle(badge_id, DRect::new(24.0 * mult, 24.0 * mult, 112.0 * mult, 44.0 * mult));
+            badge_node.name = format!("Badge · {mult:.2}×");
+            badge_node.fills = vec![Paint::solid(Color::rgb(0x0D, 0x99, 0xFF))];
+            badge_node.corner_radii = [8.0 * mult; 4];
+            let _ = app.doc.insert(sid, badge_node);
+
+            let pill_id = app.doc.alloc_id();
+            let mut pill_node = Node::rectangle(pill_id, DRect::new(24.0 * mult, 84.0 * mult, 188.0 * mult, 48.0 * mult));
+            pill_node.name = format!("Metric · {w:.0}×{h:.0}");
+            pill_node.fills = vec![Paint::solid(Color::rgb(0xE3, 0x63, 0x23))];
+            pill_node.corner_radii = [10.0 * mult; 4];
+            let _ = app.doc.insert(sid, pill_node);
+
             app.selection = vec![sid];
             app.canvas.inter = crate::canvas::Interaction::Resize(crate::canvas::ResizeState {
                 tx: crate::edit::Tx::new(),
@@ -1449,7 +1841,7 @@ pub fn apply_micro_interaction_showcase_preset(app: &mut App, preset: &str) {
                 },
                 targets: vec![],
             });
-            app.startup_zoom = Some(1.45);
+            app.startup_zoom = if step >= 3 { Some(1.18) } else { Some(1.45) };
         }
         _ => {}
     }
