@@ -18,6 +18,9 @@ pub enum KiwiError {
 type Result<T> = std::result::Result<T, KiwiError>;
 
 const MAX_DEPTH: usize = 96;
+/// Decoded-definition budget: a floor plus a per-input-byte allowance. Every value a real file encodes costs at least one byte.
+const MIN_DECODE_NODES: usize = 1 << 20;
+const DECODE_NODES_PER_BYTE: usize = 8;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DefKind {
@@ -158,11 +161,13 @@ impl KiwiValue {
 pub struct Reader<'a> {
     data: &'a [u8],
     pos: usize,
+    /// Definitions the decoder may still materialise; zero-byte structs make value count independent of input size.
+    nodes_left: usize,
 }
 
 impl<'a> Reader<'a> {
     pub fn new(data: &'a [u8]) -> Self {
-        Self { data, pos: 0 }
+        Self { data, pos: 0, nodes_left: usize::MAX }
     }
     pub fn remaining(&self) -> usize {
         self.data.len() - self.pos
@@ -314,6 +319,7 @@ impl Schema {
     /// Decodes a root message of definition `root`.
     pub fn decode_message(&self, root: usize, data: &[u8]) -> Result<KiwiValue> {
         let mut r = Reader::new(data);
+        r.nodes_left = MIN_DECODE_NODES.saturating_add(data.len().saturating_mul(DECODE_NODES_PER_BYTE));
         self.decode_def(root, &mut r, 0)
     }
 
@@ -326,6 +332,7 @@ impl Schema {
         if depth > MAX_DEPTH {
             return Err(KiwiError::Bad("nesting too deep".into()));
         }
+        r.nodes_left = r.nodes_left.checked_sub(1).ok_or_else(|| KiwiError::Bad("decoded value count exceeds budget".into()))?;
         let def = &self.defs[idx];
         match def.kind {
             DefKind::Enum => {
@@ -685,6 +692,21 @@ mod tests {
         w.var_f32(1.0);
         assert_eq!(w.buf.len(), 4);
         assert_eq!(w.buf[0], 127);
+    }
+
+    #[test]
+    fn zero_byte_struct_fanout_fails_cleanly() {
+        // 40 levels of structs with two fields each and no wire bytes: 2^40 values from a 2-byte message.
+        let mut b = SchemaBuilder::new();
+        let m = b.define("Message", DefKind::Message);
+        let levels: Vec<usize> = (0..40).map(|i| b.define(&format!("L{i}"), DefKind::Struct)).collect();
+        b.field(m, "root", FieldType::Def(levels[0]), false, 1);
+        for w in levels.windows(2) {
+            b.field(w[0], "a", FieldType::Def(w[1]), false, 1);
+            b.field(w[0], "b", FieldType::Def(w[1]), false, 2);
+        }
+        let s = b.build();
+        assert!(s.decode_message(m, &[1, 0]).is_err());
     }
 
     #[test]
