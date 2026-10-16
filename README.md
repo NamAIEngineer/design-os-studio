@@ -1,8 +1,8 @@
 # DESIGN:OS Studio (`design-os-studio`)
 
-**Native GPU-accelerated interface design studio, enterprise Figma `.fig` v106 binary read/write engine, Agentic PTY Chat UI, 11-stage Spec Reader, and 22-tool Model Context Protocol server built in 100% Rust.**
+**Native GPU-accelerated interface design studio, enterprise Figma `.fig` v106 binary read/write engine, Agentic PTY Chat UI, Live Variables & Multi-Edit (`Q`), and 22-tool Model Context Protocol server built in 100% Rust.**
 
-Open and save 723,136-record enterprise Figma `.fig` v106 binary archives in ~1.5s with `0.0%` idle CPU on Metal, DirectX 12, and Vulkan (`wgpu` + `tiny-skia`). Execute all **100 / 100 Figma A-to-Z Micro-Interactions (`#1..#100`)** natively on canvas, run **Claude Code (`claude`)**, **OpenAI Codex (`codex`)**, **Antigravity CLI (`agy`)**, **Gemini CLI (`gemini`)**, and **Grok CLI (`grok`)** directly inside the native **Agentic PTY Chat UI** with zero paid external API keys, audit 11-stage `PRODUCT:OS Spec Driven v2` requirements (`US-01..US-17` + Gherkin + `g1..g5` gates), generate multi-target Dev Mode code (React, Tailwind, CSS, SwiftUI, Jetpack Compose, Flutter, Rust `egui`), and automate headless GPU visual QA from any terminal or CI pipeline.
+Open and save 723,136-record enterprise Figma `.fig` v106 binary archives in ~1.5s with `0.0%` idle CPU on Metal, DirectX 12, and Vulkan (`wgpu` + `tiny-skia`). Execute all **100 / 100 Figma A-to-Z Micro-Interactions (`#1..#100`)** natively on canvas, run **Claude Code (`claude`)**, **OpenAI Codex (`codex`)**, **Antigravity CLI (`agy`)**, **Gemini CLI (`gemini`)**, and **Grok CLI (`grok`)** directly inside the native **Agentic PTY Chat UI** with zero paid external API keys, switch live Design Variables across `Light` and `Dark` modes with Multi-Edit (`Q`) and Suggest Auto-Layout (`⇧A`), generate multi-target Dev Mode code (React, Tailwind, CSS, SwiftUI, Jetpack Compose, Flutter, Rust `egui`), and automate headless GPU visual QA from any terminal or CI pipeline.
 
 <p align="center">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT_%2F_Apache--2.0-202020?style=flat-square&labelColor=202020&color=444444" alt="Dual MIT OR Apache-2.0 License" height="28"></a>
@@ -40,7 +40,7 @@ Open and save 723,136-record enterprise Figma `.fig` v106 binary archives in ~1.
 
 ### Why DESIGN:OS Studio? (Honest Comparison vs Figma Desktop, Penpot & Pencil/OpenPencil)
 
-Browser-wrapped Electron design tools choke on 100,000+ node enterprise files, lock `.fig` binary authoring behind proprietary cloud servers, and force AI coding agents to scrape 150KB+ of noisy REST JSON without direct canvas write-back or local spec verification. **`design-os-studio`** is a local-first, 100% Rust GPU studio (`wgpu` + `tiny-skia`) with native `fig-kiwi` v106 binary read/write, **100 / 100 Figma A-to-Z Micro-Interactions (`#1..#100`)**, an embedded Agentic PTY Chat UI for your existing CLI subscriptions (`claude`, `codex`, `agy`, `gemini`, `grok`), an 11-stage Spec Reader, and a 22-tool stdio MCP server.
+Browser-wrapped Electron design tools choke on 100,000+ node enterprise files, lock `.fig` binary authoring behind proprietary cloud servers, and force AI coding agents to scrape 150KB+ of noisy REST JSON without direct canvas write-back. **`design-os-studio`** is a local-first, 100% Rust GPU studio (`wgpu` + `tiny-skia`) with native `fig-kiwi` v106 binary read/write, **100 / 100 Figma A-to-Z Micro-Interactions (`#1..#100`)**, an embedded Agentic PTY Chat UI for your existing CLI subscriptions (`claude`, `codex`, `agy`, `gemini`, `grok`), Live Variables Mode Switching & Multi-Edit (`Q`), and a 22-tool stdio MCP server.
 
 | Dimension | Figma Desktop (Cloud / Electron) | Penpot / Pencil / OpenPencil | DESIGN:OS Studio (`design-os-studio`) |
 | :--- | :--- | :--- | :--- |
@@ -49,7 +49,7 @@ Browser-wrapped Electron design tools choke on 100,000+ node enterprise files, l
 | **Figma `.fig` v106 Binary Read/Write** | Proprietary cloud lock-in; `.fig` saves require online servers | Read-only or lossy third-party converters; no native `.fig` v106 write-back | **Native bidirectional `fig-kiwi` v106 Read & Write** (`DEFLATE`/`Zstd` `canvas.fig` + `meta.json` + `images/`, `symbolOverrides`, `parameterConsumptionMap`) |
 | **Tactile Micro-Interactions (`#1..#100`)** | Reference UI3 standard (`126.9.13`), browser-bound latency on huge files | Partial subset; missing CSS Grid track pills, Smart Selection ring swaps, or Scale Tool (`K`) | **100 / 100 Figma A-to-Z Micro-Interactions (`#1..#100`)** verified end-to-end (`launch_e2e_proves_100_figma_micro_interactions_end_to_end`) |
 | **Agentic Workflow & API Cost** | Paid per-seat AI credits or read-only `155K`-char REST JSON dumps | External MCP plugins or paid API key wrappers (`ANTHROPIC_API_KEY` / `OPENAI_API_KEY`) | **Native Agentic PTY Chat UI** (`Claude Code` · `Codex` · `Antigravity` · `Gemini` · `Grok` — zero extra API cost) + **22-tool `designos-mcp`** + 1-click `NodeSpec` apply |
-| **Spec-to-Canvas Traceability** | External Markdown PRDs disconnected from canvas frames and QA gates | No built-in spec or Gherkin acceptance lifecycle verifier | **In-App 11-Stage `PRODUCT:OS Spec Driven v2` Reader** (`US-01..US-17` + Gherkin `Given/When/Then` + `g1..g5` gates + `500ms` live disk hot-reload) |
+| **Variables, Multi-Edit (`Q`) & Auto-Layout** | Cloud-bound variable collections & manual frame nesting | Partial variable support; no `Q` Multi-Edit or `⇧A` heuristic inference | **Live Variables Mode Switching (`Light` / `Dark`), Multi-Edit (`Q` / `⌘E`) & Suggest Auto-Layout (`⇧A`)** (`COLOR`, `FLOAT`, `STRING`, `BOOLEAN` + `=` alias picker) |
 | **Dev Mode Codegen & Visual QA** | Paid Dev Mode seats required; cloud-only inspection | Basic CSS/HTML export; no headless GPU diffing CLI | **Free built-in Dev Mode (`Shift+D`)** (React, Tailwind v4, CSS, SwiftUI, Jetpack Compose) + headless `--gpu --screenshot` & `designos-diff` SSIM CLI |
 | **Privacy, Offline & Licensing** | Mandatory cloud sign-in, proprietary license, background telemetry | Self-hosted Docker stack or Electron runtime telemetry | **Zero telemetry — 100% local offline execution** ([`PRIVACY.md`](PRIVACY.md) audited), dual **`MIT OR Apache-2.0`** |
 
@@ -113,7 +113,7 @@ cargo run --release -p designos-app --bin designos-studio
 
 | Lifecycle Verb / Flag | Role in the Loop |
 | :--- | :--- |
-| **`--panel specs`** | Inspects the 11-stage `PRODUCT:OS Spec Driven v2` package (`US-01..US-17`, Gherkin scenarios, and `g1..g5` gates) beside the canvas. |
+| **`--panel variables`** | Inspects and switches multi-mode Design Variables (`Light` / `Dark` token collections, `=` alias bindings, and semantic tokens) beside the canvas. |
 | **`--rail agents`** | Opens the native Agentic PTY Chat UI wrapping Claude Code, Codex, Antigravity, or Grok with live selection context and inline `NodeSpec` apply. |
 | **`--apply-spec / --export-fig`** | Compiles declarative JSON specs through Auto-Layout 5.0 and writes standard Figma `.fig` v106 binary archives. |
 | **`--screenshot / designos-diff`** | Renders headless Metal/Vulkan/DX12 frames at `1600x1000` and verifies perceptual SSIM parity in CI. |
@@ -124,14 +124,14 @@ Open your project in your AI coding agent (or inside the Studio's `Agents` left-
 
 > "Apply `examples/specs/easeui-agent-console.spec.json` onto the DESIGN:OS Studio canvas, export a verified Figma `.fig` v106 binary archive to `out.fig`, and capture a 1600x1000 GPU screenshot."
 
-> "Open the 11-stage PRODUCT:OS Spec Driven v2 Reader (`--panel specs`), audit all User Stories (`US-01..US-17`) and `g1..g5` gates, and resolve all open canvas pin-comments."
+> "Open the Design Variables modal (`--panel variables`), switch the active token collection from `Light` to `Dark` mode, batch-edit matching layers with Multi-Edit (`Q`), and resolve all open canvas pin-comments."
 
 > "Inspect the `API Docs` frame in Dev Mode, generate production React + Tailwind + SwiftUI code, and run `designos-diff` to verify 0.00% visual regression."
 
 ---
 
 <a id="video-showcase"></a>
-## Video Showcase (`1440×1440 @ 60fps` Master Launch Films + 8-Part A-to-Z Micro-Interactions Deep-Dive)
+## Video Showcase (`1440×1440 @ 60fps` Master Launch Films + 12-Part A-to-Z Micro-Interactions Deep-Dive)
 
 ### Part A — 3 Master Launch Motion Films (`1440×1440 @ 60fps` · One-Shape UI Motion + Real Studio Assets)
 
@@ -139,13 +139,13 @@ Built with the `design-os-svg-animation` HyperFrames v2 deterministic frame-seek
 
 | Film | MP4 (`1440×1440 @ 60fps`, `4× tmix`) | 28-Beat Contact Sheet (`100.60 BPM`) | Highlights |
 | :--- | :--- | :--- | :--- |
-| **01 · Launch Hero** | [`docs/videos/01-designos-studio-launch-hero.mp4`](docs/videos/01-designos-studio-launch-hero.mp4) (`7.1 MB`) | [`01-beat-contact-sheet.png`](docs/videos/01-designos-studio-launch-hero-beat-contact-sheet.png) | `723,136` Kiwi records load in `1.54s` on Metal, UI3 Dark Chrome, Agentic PTY Chat, 11-Stage Spec Reader, `⌘K` AI Synth, Variables, Components & Dev Mode |
+| **01 · Launch Hero** | [`docs/videos/01-designos-studio-launch-hero.mp4`](docs/videos/01-designos-studio-launch-hero.mp4) (`7.1 MB`) | [`01-beat-contact-sheet.png`](docs/videos/01-designos-studio-launch-hero-beat-contact-sheet.png) | `723,136` Kiwi records load in `1.54s` on Metal, UI3 Dark Chrome, Agentic PTY Chat, Live Variables Mode Switching (`Light / Dark`), `⌘K` AI Synth, Components & Dev Mode |
 | **02 · 100/100 Micro-Interactions** | [`docs/videos/02-figma-100-micro-interactions.mp4`](docs/videos/02-figma-100-micro-interactions.mp4) (`6.8 MB`) | [`02-beat-contact-sheet.png`](docs/videos/02-figma-100-micro-interactions-beat-contact-sheet.png) | Auto-Layout 5.0 edge double-click `Fixed -> Hug -> Fill`, CSS Grid track pills, Smart Selection ring swaps, Corner/Arc/Star handles, Vector Network tangents & Scale Tool (`K`) |
-| **03 · Agent-First & Dev Mode** | [`docs/videos/03-agent-first-specs-and-devmode.mp4`](docs/videos/03-agent-first-specs-and-devmode.mp4) (`5.8 MB`) | [`03-beat-contact-sheet.png`](docs/videos/03-agent-first-specs-and-devmode-beat-contact-sheet.png) | 22-tool `designos-mcp` server, Claude/Codex/Antigravity PTY Chat, Spec Reader `g1..g5` gates, Variables Light/Dark scrub, 5-target Dev Mode codegen & Prototype flows |
+| **03 · Agent-First & Dev Mode** | [`docs/videos/03-agent-first-specs-and-devmode.mp4`](docs/videos/03-agent-first-specs-and-devmode.mp4) (`5.8 MB`) | [`03-beat-contact-sheet.png`](docs/videos/03-agent-first-specs-and-devmode-beat-contact-sheet.png) | 22-tool `designos-mcp` server, Claude/Codex/Antigravity PTY Chat, Variables & Mode Switching (`Light / Dark`), Multi-Edit (`Q`), 5-target Dev Mode codegen & Prototype flows |
 
-### Part B — 8 × 30s Real-Canvas A-to-Z Micro-Interactions Deep-Dive Videos (`16:9` `1920×1080` & `9:16` `1080×1920` @ `60fps`)
+### Part B — 12 × 30s Real-Canvas A-to-Z Micro-Interactions Deep-Dive Videos (`16:9` `1920×1080` & `9:16` `1080×1920` @ `60fps`)
 
-Every one of the **100 Figma A-to-Z Micro-Interactions (`#1..#100`)** is implemented in native Rust + `wgpu`/`egui` and proven by **8 × 30-second (`29.82s` = 50 beats @ `100.60 BPM`) Real-Canvas motion films** rendered in both **16:9 Widescreen (`1920×1080`)** and **9:16 Vertical (`1080×1920`)** from **48 real sequential `designos-studio` captures** (`Design/marketing/screenshots/micro/m01..m08-step1..6.png`, zero fake mockups), bookended by an Apple Keynote `SF Pro Rounded` Intro Card and GitHub Repo Outro Card (`github.com/jangtrinh/design-os-studio`).
+Every one of the **100 Figma A-to-Z Micro-Interactions (`#1..#100`)** is implemented in native Rust + `wgpu`/`egui` and proven by **12 × 30-second (`29.82s` = 50 beats @ `100.60 BPM`) Real-Canvas motion films** rendered in both **16:9 Widescreen (`1920×1080`)** and **9:16 Vertical (`1080×1920`)** from **72 real sequential `designos-studio` captures** (`Design/marketing/screenshots/micro/m01..m12-step1..6.png`, zero fake mockups), bookended by an Apple Keynote `SF Pro Rounded` Intro Card and GitHub Repo Outro Card (`github.com/jangtrinh/design-os-studio`).
 
 | Suite | Feature Title | 16:9 Widescreen (`1920×1080 @ 60fps`) | 9:16 Vertical (`1080×1920 @ 60fps`) | 6 Real Studio States (`--panel micro-<slug>:1..6`) |
 | :--- | :--- | :--- | :--- | :--- |
@@ -157,6 +157,10 @@ Every one of the **100 Figma A-to-Z Micro-Interactions (`#1..#100`)** is impleme
 | **M06** | **Deep-Hit Layer Picker & Eyedropper Loupe** | [`micro-06-layer-eyedropper-16x9.mp4`](docs/videos/micro-06-layer-eyedropper-16x9.mp4) (`5.0 MB`) | [`micro-06-layer-eyedropper-9x16.mp4`](docs/videos/micro-06-layer-eyedropper-9x16.mp4) (`4.1 MB`) | `⌘`-Right-Click overlapping stack, filter layer tree, cycle status badge (`Ready -> In Progress -> Needs Review`), Eyedropper `Tab` (`HEX -> RGB -> HSL`) |
 | **M07** | **Dev Mode Box-Model & 5-Target Codegen** | [`micro-07-devmode-boxmodel-16x9.mp4`](docs/videos/micro-07-devmode-boxmodel-16x9.mp4) (`5.3 MB`) | [`micro-07-devmode-boxmodel-9x16.mp4`](docs/videos/micro-07-devmode-boxmodel-9x16.mp4) (`4.0 MB`) | `⇧D` emerald padding (`24px`) & orange gap (`16px`) overlay, plus live switching across `React`, `Tailwind v4`, `CSS`, `SwiftUI`, and `Compose` |
 | **M08** | **Proportional Scale Tool (`K`) & Navigation** | [`micro-08-scale-navigation-16x9.mp4`](docs/videos/micro-08-scale-navigation-16x9.mp4) (`4.1 MB`) | [`micro-08-scale-navigation-9x16.mp4`](docs/videos/micro-08-scale-navigation-9x16.mp4) (`3.2 MB`) | Activate Scale Tool (`K`), click `1.25x` / `1.5x` / `2.0x` proportional multiplier pills, `1.0x` reset, and `⇧1` Zoom-to-Fit |
+| **M09** | **Inspector Scrubbing, Math (`100+24`) & Hex Shorthand (`#1..#9`)** | [`micro-09-inspector-math-16x9.mp4`](docs/videos/micro-09-inspector-math-16x9.mp4) | [`micro-09-inspector-math-9x16.mp4`](docs/videos/micro-09-inspector-math-9x16.mp4) | `micro-09-inspector-math` · Label drag-scrub (`1px` / `⇧ 10px` / `⌥ 0.1px`), inline math (`100+24`), `10,20,10,20` padding shorthand, Aspect Ratio Lock, `#1..#9` hex & `0..9` opacity (`images/05-variables-modes.png`) |
+| **M10** | **Selection Traversal, `Cmd+D` Offset Memory & 4-Corner Radius (`#19..#36`)** | [`micro-10-selection-corner-16x9.mp4`](docs/videos/micro-10-selection-corner-16x9.mp4) | [`micro-10-selection-corner-9x16.mp4`](docs/videos/micro-10-selection-corner-9x16.mp4) | `micro-10-selection-corner` · `Enter` / `⇧Enter` / `Tab` selection traversal, `⌥`-drag + `⌘D` offset memory, `⌥`-hover red distance guides, and 4-corner independent radius (`images/11-micro-smart-selection.png`) |
+| **M11** | **Typography Auto-Height Fit, Tracking & Multi-Edit (`Q`) (`#55..#70`)** | [`micro-11-typography-multiedit-16x9.mp4`](docs/videos/micro-11-typography-multiedit-16x9.mp4) | [`micro-11-typography-multiedit-9x16.mp4`](docs/videos/micro-11-typography-multiedit-9x16.mp4) | `micro-11-typography-multiedit` · Double-click text handle auto-height fit, `⌥←`/`→` tracking & `⌥↑`/`↓` leading nudges, `Q` Multi-Edit across matching layers (`images/04-cmdk-ai-synth.png`) |
+| **M12** | **Components, Variables (`=`) Live Mode Switch & Prototype (`#71..#100`)** | [`micro-12-components-variables-16x9.mp4`](docs/videos/micro-12-components-variables-16x9.mp4) | [`micro-12-components-variables-9x16.mp4`](docs/videos/micro-12-components-variables-9x16.mp4) | `micro-12-components-variables` · `⌥⌘K` component & variant set matrix, `=` variable alias binding, live `Light` / `Dark` mode switch, and Prototype noodle triggers (`images/06-components-assets.png`) |
 
 <table>
   <tr>
@@ -216,14 +220,14 @@ Every artifact produced by `design-os-studio` is backed by deterministic scene-g
 
 Inside the Figma UI3 **Agents** Left Rail (`RailItem::Agents`), `design-os-studio` wraps your own local CLI subscription (`claude`, `codex`, `agy`, `grok`, or `$SHELL`) inside a real `portable-pty` + `vt100` pseudo-terminal (`crates/designos-app/src/terminal.rs`). It renders clean User/Assistant chat turn bubbles (`AgentChatTurn`), strips ANSI control noise (`strip_ansi_codes`), attaches active Canvas selections + pin-comments with one click (`+`), detects inline `NodeSpec` JSON blocks, and applies generated layouts directly onto the live `Document` with 1-step Undo.
 
-### Pillar 2 — 11-Stage `PRODUCT:OS Spec Driven v2` In-App Reader & Live Hot-Reload
+### Pillar 2 — Live Variables Mode Switching, Multi-Edit (`Q`) & Suggest Auto-Layout (`⇧A`)
 
 <p align="center">
-  <img src="docs/images/designos-spec-reader.png" alt="DESIGN:OS Studio 11-Stage PRODUCT:OS Spec Driven v2 Reader displaying User Stories US-01 through US-17, Gherkin scenarios, and g1 to g5 verification gates" width="880"><br>
-  <sub>Command: <code>designos-studio --fixture showcase --panel specs --size 1600x1000 --scale 2 --screenshot docs/images/designos-spec-reader.png</code></sub>
+  <img src="docs/images/designos-variables.png" alt="DESIGN:OS Studio Live Variables Mode Switching across Light and Dark token collections with Multi-Edit and Suggest Auto-Layout" width="880"><br>
+  <sub>Command: <code>designos-studio --fixture showcase --panel variables --size 1440x900 --scale 2 --screenshot docs/images/designos-variables.png</code></sub>
 </p>
 
-Browse `plans/specs/{feature}/` packages (`brainstorm.md`, `usecases.md`, `plan.md`, `spec-manifest.yaml`, `gates.yaml`, `design/*.spec.json`) directly beside the GPU Canvas. Filter across all **11 `PRODUCT:OS` stages**, inspect MoSCoW badges, User Story cards (`US-01..US-17`), syntax-highlighted Gherkin `Given / When / Then` acceptance criteria, and `g1..g5` gate checklists, and trigger **Apply Spec to Canvas** or **Save `.fig`** in one click.
+Inspect and switch primitive, semantic, and component token collections (`COLOR`, `FLOAT`, `STRING`, `BOOLEAN`) across **`Light`** and **`Dark`** modes in real time (`=` / `Variables` modal), press **`Q` (`⌘E`)** to enter **Multi-Edit** across matching sibling layers across frames, and press **`⇧A` (`Ctrl+Shift+A`)** to run **Suggest Auto-Layout** heuristic row/column/wrap inference with instant relayout.
 
 ### Pillar 3 — Dev Mode (`Shift+D` / `</>`) Multi-Target Codegen & Box-Model Inspector
 
@@ -271,8 +275,8 @@ Every screenshot below is an individual, uncropped capture rendered deterministi
   </tr>
   <tr>
     <td width="50%" valign="top">
-      <img src="docs/images/designos-spec-reader.png" alt="03. DESIGN:OS Studio 11-Stage PRODUCT:OS Spec Driven v2 Reader with User Stories and Gherkin scenarios" width="430"><br>
-      <sub><b>03 · 11-Stage `PRODUCT:OS Spec Driven v2` Reader</b><br><code>--fixture showcase --panel specs --scale 2</code><br>Full lifecycle reader for `US-01..US-17` User Stories, Gherkin `Given/When/Then` criteria, and `g1..g5` verification gates with 1-click Canvas apply.</sub>
+      <img src="docs/images/09-micro-autolayout.png" alt="03. DESIGN:OS Studio Auto-Layout 5.0 and Suggest Auto-Layout with on-canvas pink gap and padding handles" width="430"><br>
+      <sub><b>03 · Auto-Layout 5.0 &amp; Suggest Auto-Layout</b><br><code>--micro-showcase autolayout --scale 2</code><br>On-canvas pink gap/padding drag handles, inline value input, edge double-click `Fixed -> Hug -> Fill` cycle, and `⇧A` heuristic Suggest Auto-Layout.</sub>
     </td>
     <td width="50%" valign="top">
       <img src="docs/images/designos-assets-panel.png" alt="04. DESIGN:OS Studio Assets and Libraries left-rail panel with Created in this file card and library search" width="430"><br>
@@ -350,21 +354,21 @@ Every screenshot below is an individual, uncropped capture rendered deterministi
 | **D. Parametric Shapes, Vector Network, Layer Tree & Eyedropper** | `#30..#45` | Donut Arc Sweep/Start/Ratio handles, Star inner ratio & point-count handles, Polygon side count, Vector midpoint split, `⌘` tangent break, `⇧⌫` heal-delete, Layer `⌘R` inline rename (`Tab` next), `⌥`-click collapse all, hover highlight, icon double-click zoom-to-fit, lock/eye drag-sweep, status badge cycle, Eyedropper (`I`) `7x7` pixel loupe + `Tab` `HEX/RGB/HSL` cycle | **`16 / 16 PASS`** |
 | **E. Dev Mode Box-Model, Scale Tool (`K`) & Viewport Navigation** | `#46..#62` | Dev Mode emerald padding & orange gap overlay, 1-click code copy toast, Proportional Scale Tool (`K` with `1x/1.5x/2x`), `Space`-drag pan, `Z` marquee zoom (`⌥Z` out), `⇧1` fit all / `⇧2` fit selection / `⇧0` 100%, `N` / `⇧N` frame walk, `⇧R` rulers + guides, `⌘\` zen UI toggle, `⌘/` & `⌘K` palette, `F` frame preset drawer | **`17 / 17 PASS`** |
 | **F. Typography, Fills, Strokes, Effects & Arrange Shortcuts** | `#63..#85` | Double-click inline text edit, double-click text handle auto-width/height, `⇧⌘>`/`<` font size, `⌥↑`/`↓` line-height, `⌥←`/`→` letter-spacing, `⌘B`/`⌘I`/`⌘U`, `⇧X` swap fill/stroke, `/` remove fill, `⌥⌘C`/`⌥⌘V` copy/paste style, `[`/`]` & `⌘[`/`]` z-order, `⌘G`/`⇧⌘G` group/ungroup, `⌥⌘G` frame selection (`⇧⌘G` unframe), `⌥W/A/S/D/H/V` align | **`23 / 23 PASS`** |
-| **G. Components, Variables, Prototype, Spec Reader & Agent PTY** | `#86..#100` | `⌥⌘K` create component, `⌥⌘B` detach instance, double-click master jump, purple Variant matrix & pill toggles, Variable mode switch (`Light`/`Dark`) & token alias pills, Prototype blue flow node drag & trigger popover, Spec Reader (`US-01..US-17`) 1-click node zoom & `C` pin-comment anchor, Multi-Agent PTY runtime switcher & `NodeSpec` apply with `⌘Z` undo | **`15 / 15 PASS`** |
-| **TOTAL FIGMA A-TO-Z MICRO-INTERACTIONS** | **`#1..#100`** | **Verified by `launch_e2e_proves_100_figma_micro_interactions_end_to_end` + 8 Retina 2x `--micro-showcase` captures** | **`100 / 100 (100%)`** |
+| **G. Components, Variables, Prototype, Multi-Edit & Agent PTY** | `#86..#100` | `⌥⌘K` create component, `⌥⌘B` detach instance, double-click master jump, purple Variant matrix & pill toggles, Variable mode switch (`Light`/`Dark`) & token alias pills, Prototype blue flow node drag & trigger popover, Multi-Edit (`Q`) batch text/style override & `C` pin-comment anchor, Multi-Agent PTY runtime switcher & `NodeSpec` apply with `⌘Z` undo | **`15 / 15 PASS`** |
+| **TOTAL FIGMA A-TO-Z MICRO-INTERACTIONS** | **`#1..#100`** | **Verified by `launch_e2e_proves_100_figma_micro_interactions_end_to_end` + 12 Real-Canvas `M01..M12` Micro-Interaction Videos** | **`100 / 100 (100%)`** |
 
 ### Verified 1:1 Figma `126.9.13` UI3, `.fig` v106 & A-to-Z Micro-Interactions Scorecard (`487 / 487 — 100.00%`)
 
 | Domain | Scope & Surface Coverage | Verified Items | Parity |
 | :--- | :--- | :--- | :--- |
 | **1. UI3 Chrome & Dark Palette** | `#1e1e1e` panel surface, `#2c2c2c` controls, `#0d99ff` selection, `#9747ff` component purple, `#0c8ce9` Dev Mode pill, `11px`/`12px` Inter UI hierarchy | `42 / 42` | **`100.00%`** |
-| **2. Unified Phosphor Icons (`DIR-19`)** | Official `@phosphor-icons/core` `256x256` vector paths rasterized via `resvg` across Left Rail, Bottom Dock, Inspector, Layer Tree, and Spec Reader | `48 / 48` | **`100.00%`** |
+| **2. Unified Phosphor Icons (`DIR-19`)** | Official `@phosphor-icons/core` `256x256` vector paths rasterized via `resvg` across Left Rail, Bottom Dock, Inspector, Layer Tree, and Variables Modal | `48 / 48` | **`100.00%`** |
 | **3. Scene Graph & `.fig` v106 Binary** | `fig-kiwi` v106 schema read & write (`canvas.fig` DEFLATE/Zstd + `meta.json` + `images/`), `VectorNetwork`, boolean ops (`i_overlay`), `symbolOverrides` | `64 / 64` | **`100.00%`** |
 | **4. Auto-Layout 5.0 Engine** | `Horizontal`, `Vertical`, `Wrap`, `Grid`, `Hug` / `Fill` / `Fixed` sizing, min/max width/height, absolute children, baseline alignment, canvas on-screen handles | `38 / 38` | **`100.00%`** |
 | **5. Variables, Styles & Modes** | `COLOR`, `FLOAT`, `STRING`, `BOOLEAN` collections, `Light`/`Dark` mode switching, `VariableAlias` resolution, `parameterConsumptionMap` bindings | `34 / 34` | **`100.00%`** |
 | **6. Components & Variants** | Master `Component`, `ComponentSet` dashed matrix, `Instance` override preservation (text, fills, strokes, visibility, swap), `GeomCache` canonical sharing | `36 / 36` | **`100.00%`** |
 | **7. Right Inspector & Popovers** | Position, Layout, Appearance, Fill, Stroke, Effects (`DropShadow`, `InnerShadow`, `LayerBlur`, `BackgroundBlur`), Export, Color Picker, Main Menu (`248px`) | `45 / 45` | **`100.00%`** |
-| **8. Dev Mode, Prototype & Agentic Hub** | Box-model inspector, 5-target codegen, prototype noodle flows, `Actions (Cmd+K)`, 11-stage Spec Reader, Agentic PTY Chat UI, and 22-tool `designos-mcp` | `80 / 80` | **`100.00%`** |
+| **8. Dev Mode, Prototype & Agentic Hub** | Box-model inspector, 5-target codegen, prototype noodle flows, `Actions (Cmd+K)`, Multi-Edit (`Q`) & Suggest Auto-Layout (`⇧A`), Agentic PTY Chat UI, and 22-tool `designos-mcp` | `80 / 80` | **`100.00%`** |
 | **9. Figma A-to-Z Micro-Interactions** | All 100 tactile interactions (`#1..#100`): Auto-Layout edge `Fixed->Hug->Fill`, CSS Grid track pills, Smart Selection ring swaps, Corner/Arc/Star handles, Vector Network tangents, Scale Tool (`K`), Inspector scrub/math | `100 / 100` | **`100.00%`** |
 | **TOTAL VERIFIED PARITY** | **856 Automated Unit, Golden & E2E Tests (`cargo test --workspace` -> `0` failures) · `12/12` Zero-Fake-UI Invariants · `9/9` ALIVE Gates** | **`487 / 487`** | **`100.00%`** |
 
@@ -481,10 +485,10 @@ Once installed, `skills/design-os-studio/SKILL.md` activates automatically when 
 "Apply examples/specs/easeui-agent-console.spec.json onto the DESIGN:OS Studio canvas, export a verified Figma .fig v106 binary archive to out.fig, and capture a 1600x1000 GPU screenshot."
 ```
 
-**Audit & Verify Specs, Gates & Canvas Pin-Comments**
+**Switch Variable Modes, Multi-Edit (`Q`) & Resolve Canvas Pin-Comments**
 
 ```text
-"Open the 11-stage PRODUCT:OS Spec Driven v2 Reader (--panel specs), audit all User Stories (US-01..US-17) and g1..g5 verification gates, and resolve all open canvas pin-comments."
+"Open the Design Variables modal (--panel variables), switch the active token collection from Light to Dark mode, batch-update matching layers with Multi-Edit (Q), and resolve all open canvas pin-comments."
 ```
 
 **Export Multi-Target Code & Run Perceptual Diffing**
@@ -578,7 +582,7 @@ design-os-studio/
 │   ├── designos-fig/               # Figma .fig (fig-kiwi v106 binary) & REST JSON read/write
 │   ├── designos-render/            # Deterministic tiny-skia CPU renderer & 2048x2048 SceneIndex
 │   ├── designos-gpu/               # wgpu GPU compiler (SceneCompiler, GeomCache, WGSL shaders)
-│   ├── designos-app/               # UI3 desktop studio, 100/100 Micro-Interactions, PTY Chat, Spec Reader
+│   ├── designos-app/               # UI3 desktop studio, 100/100 Micro-Interactions, PTY Chat, Variables & Dev Mode
 │   ├── designos-library/           # Local library, 8 KB fast header probe, zero-alloc autosave
 │   ├── designos-fonts/             # Bundled Inter variable font & async Fontsource cache
 │   ├── designos-export/            # PNG/JPG/PDF/SVG exporters & 5-target Dev Mode codegen
@@ -603,7 +607,7 @@ design-os-studio/
 ├── docs/
 │   ├── index.html                  # 9-Tier author-grade GitHub Pages site + 23-card visual proof gallery
 │   ├── images/                     # Verified GPU visual proof & Retina 2x Micro-Interaction captures
-│   ├── videos/                     # 3 Master 1440x1440 @ 60fps Launch Motion Films & beat sheets
+│   ├── videos/                     # 3 Master 1440x1440 @ 60fps Launch Motion Films & 12 Micro-UX Videos
 │   ├── cookbook.md                 # Copy-paste prompt & CLI recipes
 │   ├── install.md                  # Cross-platform installation guide
 │   ├── releasing.md                # Release engineering & self-updater guide
@@ -641,7 +645,7 @@ design-os-studio/
 <summary>Frequently Asked Questions (AEO &amp; Technical FAQ)</summary>
 
 **What is DESIGN:OS Studio (`design-os-studio`)?**
-DESIGN:OS Studio (`design-os-studio`) is a native, 100% Rust GPU-accelerated interface design studio (`wgpu` + `tiny-skia`), enterprise Figma `.fig` v106 binary read/write engine, 100/100 Figma A-to-Z Micro-Interactions implementation, Agentic PTY Chat UI (`Claude Code`, `Codex`, `Antigravity CLI`, `Gemini CLI`, `Grok CLI`), 11-stage `PRODUCT:OS Spec Driven v2` Reader, multi-target Dev Mode code generator, and 22-tool Model Context Protocol server (`designos-mcp`).
+DESIGN:OS Studio (`design-os-studio`) is a native, 100% Rust GPU-accelerated interface design studio (`wgpu` + `tiny-skia`), enterprise Figma `.fig` v106 binary read/write engine, 100/100 Figma A-to-Z Micro-Interactions implementation, Agentic PTY Chat UI (`Claude Code`, `Codex`, `Antigravity CLI`, `Gemini CLI`, `Grok CLI`), Live Variables Mode Switching & Multi-Edit (`Q`), multi-target Dev Mode code generator, and 22-tool Model Context Protocol server (`designos-mcp`).
 
 **How does DESIGN:OS Studio compare with Figma Desktop, Penpot, and Pencil/OpenPencil?**
 Unlike browser-wrapped Electron or web DOM tools that stall on 100k+ node files or lock `.fig` saving behind cloud servers, DESIGN:OS Studio compiles directly to native Metal, DirectX 12, and Vulkan via Rust `wgpu` + `tiny-skia`, opens and saves authentic `fig-kiwi` v106 `.fig` binaries in ~1.5s with `0.0%` idle CPU, implements all 100/100 Figma A-to-Z Micro-Interactions, and embeds a zero-API-cost Agentic PTY Chat UI alongside a 22-tool MCP server.
@@ -703,7 +707,7 @@ Pre-built native installers are available for macOS (`.dmg` + `.tar.gz`), Window
 - **Changelog & LLM Index**: Track releases in [`CHANGELOG.md`](CHANGELOG.md) and machine-readable index in [`llms.txt`](llms.txt).
 - **License**: Dual-licensed under [MIT](LICENSE-MIT) or [Apache-2.0](LICENSE-APACHE) ([`LICENSE`](LICENSE)) © [Jang Trinh](https://github.com/jangtrinh).
   - **Bundled Fonts**: Inter is © The Inter Project Authors under the SIL Open Font License 1.1 (`crates/designos-fonts/assets/inter/OFL.txt`).
-  - **Icons**: Studio UI3 and Spec Reader icons use official Phosphor Icons under the MIT License (`crates/designos-app/assets/icons/phosphor/`) alongside Lucide under the ISC License (`crates/designos-app/assets/icons/lucide/LICENSE`).
+  - **Icons**: Studio UI3 chrome and canvas tool icons use official Phosphor Icons under the MIT License (`crates/designos-app/assets/icons/phosphor/`) alongside Lucide under the ISC License (`crates/designos-app/assets/icons/lucide/LICENSE`).
   - **Trademarks**: DESIGN:OS Studio is an independent open-source project by Jang Trinh and is not affiliated with, endorsed by, or sponsored by Figma, Inc.
 
 ---

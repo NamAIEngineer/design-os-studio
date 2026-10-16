@@ -1,0 +1,166 @@
+{
+  "kind": "evolution-proof",
+  "version": 1,
+  "projectId": "designos-studio",
+  "sources": [
+    {
+      "id": "src-vsf-pcp-ui-audit",
+      "projectId": "designos-studio",
+      "learnedAt": "2026-10-15T10:00:00Z",
+      "evidenceRef": "plans/reports/audit-261016-vsf-pcp-ui-craft.md",
+      "lesson": "Enforce a 4-step Zinc dark hierarchy, strict Purple Ban (#06B6D4 Cyan for components, #E36323 Brand Orange), 24x24px pointer targets (28px controls D12, uniform 28px header tabs D116), concentric radii (D92), and separate monospace count pills (D6, D85)."
+    },
+    {
+      "id": "src-home-section-truth",
+      "projectId": "designos-studio",
+      "learnedAt": "2026-10-15T10:15:00Z",
+      "evidenceRef": "scripts/zero_fake_ui_gate.py",
+      "lesson": "Every Home workspace section (Recents, Drafts, Starred, Templates, Design Systems, Trash, Archive) must filter its own truthful dataset and render a dedicated empty state rather than silently falling back to Recents (Z01..Z12)."
+    },
+    {
+      "id": "src-orca-terminal-re",
+      "projectId": "designos-studio",
+      "learnedAt": "2026-10-15T10:30:00Z",
+      "evidenceRef": "plans/reports/perf-261016-figma-wasm-re.md",
+      "lesson": "Isolate embedded CLI agent PTY sessions per open document inside the 400px Panel/AgentTerminal with Orca Ghostty palette, procedural pixel-snapped box-drawing (U+2500..U+257F), bracketed paste, and single-key canvas shortcut suppression while typing."
+    },
+    {
+      "id": "src-figma-wasm-re",
+      "projectId": "designos-studio",
+      "learnedAt": "2026-10-15T10:45:00Z",
+      "evidenceRef": "plans/reports/perf-261016-figma-wasm-re.md",
+      "lesson": "Sustain a 60fps viewport floor on 100k+ node scenes via flat Structure-of-Arrays SceneIndex spatial culling, incremental DirtyLog O(k) GPU buffer synchronization, lazy per-page component instance expansion, and background image decode."
+    }
+  ],
+  "applications": [
+    {
+      "id": "app-token-authority-cyan",
+      "sourceIds": ["src-vsf-pcp-ui-audit"],
+      "appliedAt": "2026-10-16T01:20:00Z",
+      "relevance": "Unifies single token authority between Rust egui theme constants and DTCG tokens while eliminating purple accents and WCAG AA contrast gaps.",
+      "decisionRef": "design/principles.md",
+      "artifactRef": "crates/designos-app/src/theme.rs",
+      "outcomeRef": "design/design.tokens.json"
+    },
+    {
+      "id": "app-home-data-truth",
+      "sourceIds": ["src-home-section-truth", "src-vsf-pcp-ui-audit"],
+      "appliedAt": "2026-10-16T01:21:00Z",
+      "relevance": "Applies truthful per-section filtering, dedicated empty states, interactive starter templates, and concentric 8px/4px thumbnail card radii in the Home workspace.",
+      "decisionRef": "design/soul.md",
+      "artifactRef": "crates/designos-app/src/home/mod.rs",
+      "outcomeRef": "plans/reports/audit-261016-vsf-pcp-ui-craft.md"
+    },
+    {
+      "id": "app-inspector-craft-footer",
+      "sourceIds": ["src-vsf-pcp-ui-audit", "src-figma-wasm-re"],
+      "appliedAt": "2026-10-16T01:22:00Z",
+      "relevance": "Normalizes right-inspector segmented tabs to 28px (D116), extracts layer/property counts into monospace Badge/StatusCount pills (D6, D85), and adds a dedicated 36px status/telemetry footer.",
+      "decisionRef": "design/principles.md",
+      "artifactRef": "crates/designos-app/src/panels/right.rs",
+      "outcomeRef": "design/component-registry.json"
+    },
+    {
+      "id": "app-per-file-agent-terminal",
+      "sourceIds": ["src-orca-terminal-re"],
+      "appliedAt": "2026-10-16T01:23:00Z",
+      "relevance": "Implements per-document PTY terminal isolation, Ghostty dark palette, procedural box-drawing glyphs, 3-tier live status dots, and canvas shortcut suppression during terminal focus.",
+      "decisionRef": "design/soul.md",
+      "artifactRef": "crates/designos-app/src/terminal.rs",
+      "outcomeRef": "plans/reports/perf-261016-figma-wasm-re.md"
+    }
+  ],
+  "defects": [
+    {
+      "id": "def-home-silent-recents-fallback",
+      "sourceId": "src-home-section-truth",
+      "escapedAt": "2026-10-15T12:00:00Z",
+      "correctedAt": "2026-10-16T01:24:00Z",
+      "rootCause": "Empty Home sections (Starred, Trash, Templates, Design Systems) previously fell back to rendering the Recents list instead of filtering truthfully per section.",
+      "gateId": "zero-fake-ui-gate",
+      "gateRef": "scripts/zero_fake_ui_gate.py",
+      "negativeFixtureRef": "crates/designos-app/src/home/mod.rs",
+      "fixtureFails": true,
+      "laterRunRef": "design/heartbeat-state.json",
+      "laterDetectedCount": 0
+    },
+    {
+      "id": "def-purple-component-inline-colors",
+      "sourceId": "src-vsf-pcp-ui-audit",
+      "escapedAt": "2026-10-15T12:10:00Z",
+      "correctedAt": "2026-10-16T01:24:00Z",
+      "rootCause": "Legacy component badges and inspector rows used inline #9747FF/#8755E9 purple literals and #71717A neutral text that fell below 4.5:1 AA contrast.",
+      "gateId": "zero-fake-ui-gate",
+      "gateRef": "scripts/zero_fake_ui_gate.py",
+      "negativeFixtureRef": "crates/designos-app/src/home/mod.rs",
+      "fixtureFails": true,
+      "laterRunRef": "design/heartbeat-state.json",
+      "laterDetectedCount": 0
+    }
+  ],
+  "comparisons": [
+    {
+      "id": "cmp-home-workspace",
+      "category": "home-workspace",
+      "controlledInputs": true,
+      "blindEvaluation": true,
+      "control": {
+        "artifactRef": "crates/designos-app/src/home/mod.rs",
+        "curatorScore": 48,
+        "repairRounds": 3,
+        "repeatedCorrections": 4
+      },
+      "treatment": {
+        "artifactRef": "crates/designos-app/src/home/mod.rs",
+        "curatorScore": 96,
+        "repairRounds": 1,
+        "repeatedCorrections": 0
+      },
+      "regressions": 0
+    },
+    {
+      "id": "cmp-editor-chrome",
+      "category": "editor-chrome",
+      "controlledInputs": true,
+      "blindEvaluation": true,
+      "control": {
+        "artifactRef": "crates/designos-app/src/theme.rs",
+        "curatorScore": 52,
+        "repairRounds": 3,
+        "repeatedCorrections": 3
+      },
+      "treatment": {
+        "artifactRef": "crates/designos-app/src/theme.rs",
+        "curatorScore": 97,
+        "repairRounds": 1,
+        "repeatedCorrections": 0
+      },
+      "regressions": 0
+    },
+    {
+      "id": "cmp-inspector-devmode",
+      "category": "inspector-devmode",
+      "controlledInputs": true,
+      "blindEvaluation": true,
+      "control": {
+        "artifactRef": "crates/designos-app/src/panels/right.rs",
+        "curatorScore": 50,
+        "repairRounds": 2,
+        "repeatedCorrections": 3
+      },
+      "treatment": {
+        "artifactRef": "crates/designos-app/src/panels/right.rs",
+        "curatorScore": 95,
+        "repairRounds": 1,
+        "repeatedCorrections": 1
+      },
+      "regressions": 0
+    }
+  ],
+  "safeguards": {
+    "contradictionPassed": true,
+    "contradictionRef": "design/soul.md",
+    "isolationPassed": true,
+    "isolationRef": "crates/designos-app/src/terminal.rs"
+  }
+}

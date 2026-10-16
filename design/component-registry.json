@@ -1,0 +1,340 @@
+{
+  "components": [
+    {
+      "category": "feedback",
+      "description": "Pill count and semantic status badge using monospace numerals separated from section headers (D85)",
+      "markup": "<span class=\"badge-status-count\">12</span>\n",
+      "name": "Badge/StatusCount",
+      "scope": "local",
+      "tokensUsed": [
+        "colors.secondary",
+        "colors.muted-foreground",
+        "colors.component",
+        "colors.success",
+        "spacing.space-1",
+        "spacing.space-2",
+        "radius.radius-pill",
+        "typography.font-family-mono",
+        "typography.font-size-small"
+      ],
+      "variants": [
+        "Tone=Neutral",
+        "State=Default",
+        "State=Hover",
+        "State=Active",
+        "State=Focus",
+        "State=Disabled"
+      ]
+    },
+    {
+      "category": "action",
+      "description": "Brand orange primary CTA button (#E36323 fill, #09090B label, 28px min height, 6px radius)",
+      "markup": "<button class=\"btn-primary\" type=\"button\">Create New File</button>\n",
+      "name": "Button/Primary",
+      "scope": "local",
+      "tokensUsed": [
+        "colors.primary",
+        "colors.primary-foreground",
+        "colors.primary-hover",
+        "colors.primary-active",
+        "colors.ring",
+        "spacing.space-3",
+        "spacing.space-2",
+        "radius.radius-md",
+        "typography.font-family-sans",
+        "typography.font-size-body",
+        "duration.duration-fast"
+      ],
+      "variants": [
+        "Size=28px",
+        "State=Default",
+        "State=Hover",
+        "State=Active",
+        "State=Focus",
+        "State=Disabled"
+      ]
+    },
+    {
+      "category": "action",
+      "description": "Elevated zinc secondary action button (#27272A fill, #F5F5F7 label, 1px #27272A border)",
+      "markup": "<button class=\"btn-secondary\" type=\"button\">Import File</button>\n",
+      "name": "Button/Secondary",
+      "scope": "local",
+      "tokensUsed": [
+        "colors.secondary",
+        "colors.secondary-foreground",
+        "colors.secondary-hover",
+        "colors.secondary-active",
+        "colors.border",
+        "spacing.space-3",
+        "spacing.space-2",
+        "radius.radius-md",
+        "typography.font-family-sans",
+        "typography.font-size-body",
+        "duration.duration-fast"
+      ],
+      "variants": [
+        "Tone=Zinc",
+        "State=Default",
+        "State=Hover",
+        "State=Active",
+        "State=Focus",
+        "State=Disabled"
+      ]
+    },
+    {
+      "category": "content",
+      "description": "Home workspace file card with live node mini-map preview, concentric 8px outer / 4px inner radius, and context actions",
+      "markup": "<article class=\"card-file-thumbnail\"><header class=\"thumb-preview\"><code>.fig</code></header><p class=\"thumb-meta\">Design System v2</p></article>\n",
+      "name": "Card/FileThumbnail",
+      "scope": "local",
+      "tokensUsed": [
+        "colors.card",
+        "colors.card-foreground",
+        "colors.surface-hover",
+        "colors.border",
+        "colors.muted-foreground",
+        "spacing.space-3",
+        "spacing.space-4",
+        "radius.radius-lg",
+        "typography.font-family-sans",
+        "typography.font-size-title",
+        "typography.font-size-caption"
+      ],
+      "variants": [
+        "View=Grid",
+        "State=Default",
+        "State=Hover",
+        "State=Active",
+        "State=Focus",
+        "State=Disabled"
+      ]
+    },
+    {
+      "category": "content",
+      "description": "Interactive starter template card in Home top tray with mini-canvas preview and one-click document seeding",
+      "markup": "<article class=\"card-starter-template\"><header class=\"tpl-preview\"><code>1600x1000</code></header><p class=\"tpl-title\">SaaS Analytics Dashboard</p></article>\n",
+      "name": "Card/StarterTemplate",
+      "scope": "local",
+      "tokensUsed": [
+        "colors.card",
+        "colors.card-foreground",
+        "colors.surface-hover",
+        "colors.border",
+        "colors.primary",
+        "spacing.space-3",
+        "spacing.space-4",
+        "radius.radius-lg",
+        "typography.font-family-sans",
+        "typography.font-size-title"
+      ],
+      "variants": [
+        "Tray=Home",
+        "State=Default",
+        "State=Hover",
+        "State=Active",
+        "State=Focus",
+        "State=Disabled"
+      ]
+    },
+    {
+      "category": "overlay",
+      "description": "Modal Cmd+K command palette overlay with fuzzy action search, keyboard shortcut badges, and focus trap",
+      "markup": "<div class=\"dialog-command-palette\" role=\"dialog\" aria-label=\"Command palette\"><input class=\"cmd-input\" type=\"search\" aria-label=\"Search commands and layers\" placeholder=\"Search commands...\" /><ul class=\"cmd-list\"><li>Rename Layers</li></ul></div>\n",
+      "name": "Dialog/CommandPalette",
+      "scope": "local",
+      "tokensUsed": [
+        "colors.popover",
+        "colors.popover-foreground",
+        "colors.surface-hover",
+        "colors.border-strong",
+        "colors.primary",
+        "spacing.space-3",
+        "spacing.space-4",
+        "radius.radius-xl",
+        "typography.font-family-sans",
+        "typography.font-family-mono",
+        "typography.font-size-title"
+      ],
+      "variants": [
+        "Mode=CmdK",
+        "State=Default",
+        "State=Hover",
+        "State=Active",
+        "State=Focus",
+        "State=Disabled"
+      ]
+    },
+    {
+      "category": "form",
+      "description": "24px height numeric/text scrubbable inspector input with muted prefix label and #E36323 focus ring",
+      "markup": "<label class=\"input-property-field\"><span class=\"prop-prefix\">X</span><input type=\"text\" aria-label=\"Property value\" value=\"128\" /></label>\n",
+      "name": "Input/PropertyField",
+      "scope": "local",
+      "tokensUsed": [
+        "colors.input",
+        "colors.bg-foreground",
+        "colors.muted-foreground",
+        "colors.border-subtle",
+        "colors.border-focus",
+        "colors.ring",
+        "spacing.space-1",
+        "spacing.space-2",
+        "radius.radius-sm",
+        "typography.font-family-mono",
+        "typography.font-size-body"
+      ],
+      "variants": [
+        "Axis=Scrub",
+        "State=Default",
+        "State=Hover",
+        "State=Active",
+        "State=Focus",
+        "State=Disabled"
+      ]
+    },
+    {
+      "category": "navigation",
+      "description": "Floating bottom canvas creation dock with tool triggers and #14AE5C Dev Mode toggle",
+      "markup": "<div class=\"bottom-canvas-toolbar\" role=\"toolbar\" aria-label=\"Canvas tools\"><button class=\"tool active\" type=\"button\">Move (V)</button><button class=\"tool\" type=\"button\">Frame (F)</button><button class=\"dev-mode\" type=\"button\">Dev Mode</button></div>\n",
+      "name": "Navigation/BottomCanvasToolbar",
+      "scope": "local",
+      "tokensUsed": [
+        "colors.surface",
+        "colors.surface-foreground",
+        "colors.surface-hover",
+        "colors.primary",
+        "colors.success",
+        "colors.border",
+        "spacing.space-2",
+        "spacing.space-3",
+        "radius.radius-lg",
+        "typography.font-family-sans",
+        "typography.font-size-body"
+      ],
+      "variants": [
+        "Dock=Canvas",
+        "State=Default",
+        "State=Hover",
+        "State=Active",
+        "State=Focus",
+        "State=Disabled"
+      ]
+    },
+    {
+      "category": "navigation",
+      "description": "Home sidebar and 56px editor activity rail with 1px right border and orange active indicator",
+      "markup": "<nav class=\"left-rail\" aria-label=\"Workspace navigation\"><button class=\"rail-item active\" type=\"button\">Recents</button><button class=\"rail-item\" type=\"button\">Drafts</button></nav>\n",
+      "name": "Navigation/LeftRail",
+      "scope": "local",
+      "tokensUsed": [
+        "colors.bg",
+        "colors.bg-foreground",
+        "colors.surface-hover",
+        "colors.surface-active",
+        "colors.border",
+        "colors.primary",
+        "spacing.rail-width",
+        "spacing.space-2",
+        "radius.radius-md",
+        "typography.font-family-sans",
+        "typography.font-size-body"
+      ],
+      "variants": [
+        "Rail=56px",
+        "State=Default",
+        "State=Hover",
+        "State=Active",
+        "State=Focus",
+        "State=Disabled"
+      ]
+    },
+    {
+      "category": "navigation",
+      "description": "36px multi-document workspace top tab bar with Home button, document tabs, and window controls",
+      "markup": "<header class=\"top-tab-bar\"><button class=\"tab-home\" type=\"button\">Home</button><span class=\"tab-active\">Untitled</span></header>\n",
+      "name": "Navigation/TopTabBar",
+      "scope": "local",
+      "tokensUsed": [
+        "colors.bg",
+        "colors.bg-foreground",
+        "colors.surface",
+        "colors.border",
+        "colors.primary",
+        "spacing.space-2",
+        "spacing.space-3",
+        "radius.radius-sm",
+        "typography.font-family-sans",
+        "typography.font-size-body"
+      ],
+      "variants": [
+        "Bar=36px",
+        "State=Default",
+        "State=Hover",
+        "State=Active",
+        "State=Focus",
+        "State=Disabled"
+      ]
+    },
+    {
+      "category": "layout",
+      "description": "400px resizable per-file embedded VTE PTY terminal panel with Orca Ghostty palette, procedural box-drawing, and 3-tier live status dots",
+      "markup": "<aside class=\"panel-agent-terminal\" aria-label=\"Agent terminal\"><header class=\"term-tabs\"><span class=\"dot-live\"></span> Claude Code</header><pre class=\"term-grid\">$ design-os status</pre></aside>\n",
+      "name": "Panel/AgentTerminal",
+      "scope": "local",
+      "tokensUsed": [
+        "colors.canvas",
+        "colors.canvas-foreground",
+        "colors.bg",
+        "colors.border",
+        "colors.primary",
+        "colors.success",
+        "colors.warning",
+        "spacing.ai-panel-width",
+        "spacing.space-2",
+        "radius.radius-sm",
+        "typography.font-family-mono",
+        "typography.font-size-body"
+      ],
+      "variants": [
+        "Pty=Live",
+        "State=Default",
+        "State=Hover",
+        "State=Active",
+        "State=Focus",
+        "State=Disabled"
+      ]
+    },
+    {
+      "category": "layout",
+      "description": "240px right properties and Dev Mode inspector with 28px header tabs, collapsible property sections, and dedicated 36px status footer",
+      "markup": "<aside class=\"panel-right-inspector\" aria-label=\"Properties inspector\"><header class=\"inspector-tabs\">Design | Prototype | Inspect</header><p class=\"inspector-body\"><code>W 1600 · H 1000</code></p><footer class=\"inspector-footer\">Ready</footer></aside>\n",
+      "name": "Panel/RightInspector",
+      "scope": "local",
+      "tokensUsed": [
+        "colors.bg",
+        "colors.bg-foreground",
+        "colors.surface",
+        "colors.border",
+        "colors.component",
+        "colors.success",
+        "spacing.panel-width",
+        "spacing.space-2",
+        "spacing.space-3",
+        "radius.radius-sm",
+        "typography.font-family-sans",
+        "typography.font-family-mono",
+        "typography.font-size-body"
+      ],
+      "variants": [
+        "Tab=Design",
+        "State=Default",
+        "State=Hover",
+        "State=Active",
+        "State=Focus",
+        "State=Disabled"
+      ]
+    }
+  ],
+  "version": "0.1.0"
+}

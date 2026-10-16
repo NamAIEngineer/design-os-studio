@@ -42,6 +42,8 @@ pub struct TileView {
     zoom_changed_at: f64,
     /// The document was replaced: the GPU geometry cache must be dropped.
     pub gpu_reset: bool,
+    /// When true (during `--screenshot` / sequence capture), render all visible tiles synchronously at settled zoom.
+    pub unlimited_budget: bool,
 }
 
 impl TileView {
@@ -130,7 +132,7 @@ pub fn paint(app: &mut App, ui: &Ui, rect: ERect) {
     tv.frame_no += 1;
 
     // Zoom gesture handling: keep rendering at the settled zoom until idle.
-    if tv.settled_zoom <= 0.0 {
+    if tv.unlimited_budget || tv.settled_zoom <= 0.0 {
         tv.settled_zoom = zoom;
         tv.last_zoom = zoom;
     }
@@ -151,7 +153,8 @@ pub fn paint(app: &mut App, ui: &Ui, rect: ERect) {
     let ratio = rz / zoom;
     let vp = Viewport { offset, zoom: rz, dpr: ppp };
     let size = ((w * ratio).ceil().max(1.0) as u32, (h * ratio).ceil().max(1.0) as u32);
-    let frame = tv.cache.render_tiles(&app.doc, page, &vp, size, tv.rev, TileBudget::time(RENDER_BUDGET));
+    let budget = if tv.unlimited_budget { TileBudget::unlimited() } else { TileBudget::time(RENDER_BUDGET) };
+    let frame = tv.cache.render_tiles(&app.doc, page, &vp, size, tv.rev, budget);
     let pending = frame.pending() > 0 || frame.prefetch_pending > 0;
 
     // Tiles are laid out in device pixels of the actual zoom, snapped so

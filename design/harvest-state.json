@@ -1,0 +1,14 @@
+{
+  "harvested": {
+    "plans/reports/audit-261016-vsf-pcp-ui-craft.md": {
+      "recorded": 0,
+      "sha256": "233a0a738b3bc1dfccce13e86b27adaa339e5486263f762cd94897b979e0970b"
+    },
+    "plans/reports/perf-261016-figma-wasm-re.md": {
+      "recorded": 3,
+      "sha256": "1e1afe5b6f15572e1c207390c8908ef9eae7e9a09af1e34517df5ca13310ace5"
+    }
+  },
+  "promptVersion": "harvest-extract-v1",
+  "version": 1
+}

@@ -750,10 +750,6 @@ impl TerminalState {
             self.provision_session_agent_files(file_path);
             self.last_synced_key = Some(key);
         }
-
-        if !cfg!(test) && self.tabs.is_empty() {
-            self.ensure_default_tab(file_path);
-        }
     }
 
     fn provision_session_agent_files(&self, file_path: Option<&Path>) {
@@ -2318,7 +2314,8 @@ pub fn show_left(state: &mut TerminalState, ui: &mut Ui, rect: Rect, file_path: 
             render_runtime_dropdown_menu(state, ui, rect, bar_r.bottom() + 4.0, file_path);
         }
 
-        ui.ctx().request_repaint_after(std::time::Duration::from_millis(50));
+        let repaint_ms = if state.viewport_focused { 50 } else { 500 };
+        ui.ctx().request_repaint_after(std::time::Duration::from_millis(repaint_ms));
         return actions;
     }
 

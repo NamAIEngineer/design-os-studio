@@ -139,6 +139,15 @@ impl KiwiValue {
             _ => None,
         }
     }
+    pub fn take_field(&mut self, name: &str) -> Option<KiwiValue> {
+        match self {
+            KiwiValue::Struct(f) | KiwiValue::Message(f) => {
+                let idx = f.iter().position(|(n, _)| &**n == name)?;
+                Some(f.swap_remove(idx).1)
+            }
+            _ => None,
+        }
+    }
     pub fn as_array(&self) -> Option<&[KiwiValue]> {
         match self {
             KiwiValue::Array(a) => Some(a),
@@ -314,7 +323,16 @@ impl Schema {
     /// Decodes a root message of definition `root`.
     pub fn decode_message(&self, root: usize, data: &[u8]) -> Result<KiwiValue> {
         let mut r = Reader::new(data);
-        self.decode_def(root, &mut r, 0)
+        self.decode_def(root, &mut r, 0, false)
+    }
+
+    /// Decodes a root message for `.fig` import, dropping unused multi-gigabyte
+    /// derived fields (`editInfo`, `derivedTextData`, `derivedImmutableFrameData`)
+    /// on the fly when the message payload exceeds 2 MB.
+    pub fn decode_message_for_import(&self, root: usize, data: &[u8]) -> Result<KiwiValue> {
+        let mut r = Reader::new(data);
+        let skip_heavy = data.len() > 2_000_000;
+        self.decode_def(root, &mut r, 0, skip_heavy)
     }
 
     /// Picks the `Message` definition (Figma's root), falling back to the last message def.
@@ -322,7 +340,7 @@ impl Schema {
         self.find("Message").filter(|&i| self.defs[i].kind == DefKind::Message).or_else(|| self.defs.iter().rposition(|d| d.kind == DefKind::Message))
     }
 
-    fn decode_def(&self, idx: usize, r: &mut Reader, depth: usize) -> Result<KiwiValue> {
+    fn decode_def(&self, idx: usize, r: &mut Reader, depth: usize, skip_heavy: bool) -> Result<KiwiValue> {
         if depth > MAX_DEPTH {
             return Err(KiwiError::Bad("nesting too deep".into()));
         }
@@ -339,7 +357,7 @@ impl Schema {
             DefKind::Struct => {
                 let mut out = Vec::with_capacity(def.fields.len());
                 for f in &def.fields {
-                    out.push((f.name.clone(), self.decode_field(f, r, depth)?));
+                    out.push((f.name.clone(), self.decode_field(f, r, depth, skip_heavy)?));
                 }
                 Ok(KiwiValue::Struct(out))
             }
@@ -357,16 +375,24 @@ impl Schema {
                         .map(|i| &def.fields[i])
                         .or_else(|| def.fields.iter().find(|f| f.value == id))
                         .ok_or_else(|| KiwiError::Bad(format!("unknown field id {id} in {}", def.name)))?;
-                    out.push((f.name.clone(), self.decode_field(f, r, depth)?));
+                    let val = self.decode_field(f, r, depth, skip_heavy)?;
+                    if skip_heavy && matches!(&*f.name, "editInfo" | "derivedTextData" | "derivedImmutableFrameData") {
+                        drop(val);
+                        continue;
+                    }
+                    out.push((f.name.clone(), val));
+                }
+                if skip_heavy && out.capacity() > out.len() + 4 {
+                    out.shrink_to_fit();
                 }
                 Ok(KiwiValue::Message(out))
             }
         }
     }
 
-    fn decode_field(&self, f: &Field, r: &mut Reader, depth: usize) -> Result<KiwiValue> {
+    fn decode_field(&self, f: &Field, r: &mut Reader, depth: usize, skip_heavy: bool) -> Result<KiwiValue> {
         if !f.is_array {
-            return self.decode_type(f.ty, r, depth + 1);
+            return self.decode_type(f.ty, r, depth + 1, skip_heavy);
         }
         let n = r.var_u32()? as usize;
         if f.ty == FieldType::Native(Native::Byte) {
@@ -377,12 +403,12 @@ impl Schema {
         }
         let mut v = Vec::with_capacity(n);
         for _ in 0..n {
-            v.push(self.decode_type(f.ty, r, depth + 1)?);
+            v.push(self.decode_type(f.ty, r, depth + 1, skip_heavy)?);
         }
         Ok(KiwiValue::Array(v))
     }
 
-    fn decode_type(&self, ty: FieldType, r: &mut Reader, depth: usize) -> Result<KiwiValue> {
+    fn decode_type(&self, ty: FieldType, r: &mut Reader, depth: usize, skip_heavy: bool) -> Result<KiwiValue> {
         Ok(match ty {
             FieldType::Native(n) => match n {
                 Native::Bool => KiwiValue::Bool(r.byte()? != 0),
@@ -394,7 +420,7 @@ impl Schema {
                 Native::Int64 => KiwiValue::Int64(r.var_i64()?),
                 Native::Uint64 => KiwiValue::Uint64(r.var_u64()?),
             },
-            FieldType::Def(i) => self.decode_def(i, r, depth)?,
+            FieldType::Def(i) => self.decode_def(i, r, depth, skip_heavy)?,
         })
     }
 
@@ -552,6 +578,44 @@ pub fn to_json(v: &KiwiValue) -> serde_json::Value {
     }
 }
 
+/// Consumes a `KiwiValue` and converts it to JSON without cloning strings.
+pub fn into_json(v: KiwiValue) -> serde_json::Value {
+    use serde_json::{Number, Value};
+    match v {
+        KiwiValue::Bool(b) => Value::Bool(b),
+        KiwiValue::Byte(b) => Value::from(b),
+        KiwiValue::Int(i) => Value::from(i),
+        KiwiValue::Uint(u) => Value::from(u),
+        KiwiValue::Float(f) => clean_f32(f),
+        KiwiValue::String(s) => Value::String(s),
+        KiwiValue::Int64(i) => {
+            if i.unsigned_abs() < (1 << 53) {
+                Value::from(i)
+            } else {
+                Value::String(i.to_string())
+            }
+        }
+        KiwiValue::Uint64(u) => {
+            if u < (1 << 53) {
+                Value::from(u)
+            } else {
+                Value::String(u.to_string())
+            }
+        }
+        KiwiValue::Bytes(b) => Value::String(hex(&b)),
+        KiwiValue::Enum(n) => Value::String(n.to_string()),
+        KiwiValue::EnumRaw(u) => Value::Number(Number::from(u)),
+        KiwiValue::Array(a) => Value::Array(a.into_iter().map(into_json).collect()),
+        KiwiValue::Struct(f) | KiwiValue::Message(f) => {
+            let mut m = serde_json::Map::new();
+            for (k, v) in f {
+                m.insert(k.to_string(), into_json(v));
+            }
+            Value::Object(m)
+        }
+    }
+}
+
 /// Fast conversion of a decoded value to JSON for internal `.fig` import,
 /// converting `f32` directly to `f64` without string round-tripping.
 pub fn to_json_fast(v: &KiwiValue) -> serde_json::Value {
@@ -588,6 +652,48 @@ pub fn to_json_fast(v: &KiwiValue) -> serde_json::Value {
                     continue;
                 }
                 m.insert(k.to_string(), to_json_fast(v));
+            }
+            Value::Object(m)
+        }
+    }
+}
+
+/// Consumes a `KiwiValue` for fast `.fig` import, moving strings and freeing
+/// intermediate Kiwi nodes as they are converted to `serde_json::Value`.
+pub fn into_json_fast(v: KiwiValue) -> serde_json::Value {
+    use serde_json::{Number, Value};
+    match v {
+        KiwiValue::Bool(b) => Value::Bool(b),
+        KiwiValue::Byte(b) => Value::from(b),
+        KiwiValue::Int(i) => Value::from(i),
+        KiwiValue::Uint(u) => Value::from(u),
+        KiwiValue::Float(f) => Number::from_f64(f as f64).map(Value::Number).unwrap_or(Value::Null),
+        KiwiValue::String(s) => Value::String(s),
+        KiwiValue::Int64(i) => {
+            if i.unsigned_abs() < (1 << 53) {
+                Value::from(i)
+            } else {
+                Value::String(i.to_string())
+            }
+        }
+        KiwiValue::Uint64(u) => {
+            if u < (1 << 53) {
+                Value::from(u)
+            } else {
+                Value::String(u.to_string())
+            }
+        }
+        KiwiValue::Bytes(b) => Value::String(hex(&b)),
+        KiwiValue::Enum(n) => Value::String(n.to_string()),
+        KiwiValue::EnumRaw(u) => Value::Number(Number::from(u)),
+        KiwiValue::Array(a) => Value::Array(a.into_iter().map(into_json_fast).collect()),
+        KiwiValue::Struct(f) | KiwiValue::Message(f) => {
+            let mut m = serde_json::Map::with_capacity(f.len());
+            for (k, v) in f {
+                if matches!(&*k, "editInfo" | "derivedTextData" | "derivedImmutableFrameData" | "derivedSymbolData") {
+                    continue;
+                }
+                m.insert(k.to_string(), into_json_fast(v));
             }
             Value::Object(m)
         }

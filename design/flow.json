@@ -1,0 +1,1128 @@
+{
+  "name": "design:os studio \u2014 Multi-Screen IA & Workspace Flow",
+  "entryPoints": [
+    {
+      "id": "entry-launch-home",
+      "screen": "home-recents",
+      "name": "Default App Launch (Home Recents)"
+    },
+    {
+      "id": "entry-cli-file",
+      "screen": "editor-canvas",
+      "name": "CLI Direct File Launch (designos <file.dos>)"
+    }
+  ],
+  "screens": [
+    {
+      "id": "home-recents",
+      "name": "Home \u2014 Recents & Starter Templates Tray",
+      "mode": "screen",
+      "artifact": "crates/designos-app/src/home/mod.rs",
+      "states": [
+        "default",
+        "loading",
+        "empty",
+        "error"
+      ]
+    },
+    {
+      "id": "home-templates",
+      "name": "Home \u2014 Starter Templates & Kits",
+      "mode": "screen",
+      "artifact": "crates/designos-app/src/home/mod.rs",
+      "states": [
+        "default",
+        "loading",
+        "empty",
+        "error"
+      ]
+    },
+    {
+      "id": "home-all-folders",
+      "name": "Home \u2014 All Folders & Projects",
+      "mode": "screen",
+      "artifact": "crates/designos-app/src/home/mod.rs",
+      "states": [
+        "default",
+        "loading",
+        "empty",
+        "error"
+      ]
+    },
+    {
+      "id": "home-resources",
+      "name": "Home \u2014 Community & CLI Resources",
+      "mode": "screen",
+      "artifact": "crates/designos-app/src/home/mod.rs",
+      "states": [
+        "default",
+        "loading",
+        "empty",
+        "error"
+      ]
+    },
+    {
+      "id": "home-drafts",
+      "name": "Home \u2014 Personal Drafts",
+      "mode": "screen",
+      "artifact": "crates/designos-app/src/home/mod.rs",
+      "states": [
+        "default",
+        "loading",
+        "empty",
+        "error"
+      ]
+    },
+    {
+      "id": "home-trash",
+      "name": "Home \u2014 Trash & Recovery",
+      "mode": "screen",
+      "artifact": "crates/designos-app/src/home/mod.rs",
+      "states": [
+        "default",
+        "loading",
+        "empty",
+        "error"
+      ]
+    },
+    {
+      "id": "editor-canvas",
+      "name": "Editor \u2014 Infinite 2D GPU Canvas & Design Inspector",
+      "mode": "screen",
+      "artifact": "crates/designos-app/src/canvas/mod.rs",
+      "states": [
+        "default",
+        "loading",
+        "empty",
+        "error"
+      ]
+    },
+    {
+      "id": "editor-devmode",
+      "name": "Editor \u2014 Dev Mode Inspect (CSS / Tailwind / SwiftUI / React / Rust egui)",
+      "mode": "screen",
+      "artifact": "crates/designos-app/src/dev/mod.rs",
+      "states": [
+        "default",
+        "loading",
+        "empty",
+        "error"
+      ]
+    },
+    {
+      "id": "editor-prototype",
+      "name": "Editor \u2014 Prototype Interactions & Flow Noodles",
+      "mode": "screen",
+      "artifact": "crates/designos-app/src/proto/mod.rs",
+      "states": [
+        "default",
+        "loading",
+        "empty",
+        "error"
+      ]
+    },
+    {
+      "id": "editor-present",
+      "name": "Editor \u2014 Interactive Prototype Presentation Player",
+      "mode": "screen",
+      "artifact": "crates/designos-app/src/proto/present.rs",
+      "states": [
+        "default",
+        "loading",
+        "empty",
+        "error"
+      ]
+    },
+    {
+      "id": "panel-agents-terminal",
+      "name": "Panel \u2014 Embedded VTE PTY Agent Terminal & AI Co-Pilot",
+      "mode": "drawer",
+      "artifact": "crates/designos-app/src/terminal.rs",
+      "states": [
+        "default",
+        "loading",
+        "empty",
+        "error"
+      ]
+    },
+    {
+      "id": "panel-specs-reader",
+      "name": "Panel \u2014 Live Markdown & Spec Bundle Reader",
+      "mode": "drawer",
+      "artifact": "crates/designos-app/src/specs.rs",
+      "states": [
+        "default",
+        "loading",
+        "empty",
+        "error"
+      ]
+    },
+    {
+      "id": "modal-variables",
+      "name": "Modal \u2014 Design Tokens & Multi-Mode Variables Table",
+      "mode": "modal",
+      "artifact": "crates/designos-app/src/variables/mod.rs",
+      "states": [
+        "default",
+        "loading",
+        "empty",
+        "error"
+      ]
+    },
+    {
+      "id": "modal-assets-libraries",
+      "name": "Modal \u2014 Component Assets & Shared Team Libraries",
+      "mode": "modal",
+      "artifact": "crates/designos-app/src/libraries/mod.rs",
+      "states": [
+        "default",
+        "loading",
+        "empty",
+        "error"
+      ]
+    },
+    {
+      "id": "modal-plugins",
+      "name": "Modal \u2014 Local JSON-RPC & WASM Plugins Manager",
+      "mode": "modal",
+      "artifact": "crates/designos-app/src/plugins/mod.rs",
+      "states": [
+        "default",
+        "loading",
+        "empty",
+        "error"
+      ]
+    },
+    {
+      "id": "modal-cmdk",
+      "name": "Modal \u2014 Cmd+K Command Palette & Design Gate Auditor",
+      "mode": "modal",
+      "artifact": "crates/designos-app/src/cmdk.rs",
+      "states": [
+        "default",
+        "loading",
+        "empty",
+        "error"
+      ]
+    }
+  ],
+  "transitions": [
+    {
+      "id": "tr-recents-to-templates",
+      "from": "home-recents",
+      "to": "home-templates",
+      "trigger": "ON_CLICK",
+      "label": "Select Templates in Home Sidebar"
+    },
+    {
+      "id": "tr-templates-to-recents",
+      "from": "home-templates",
+      "to": "home-recents",
+      "trigger": "ON_CLICK",
+      "label": "Back to Recents in Home Sidebar"
+    },
+    {
+      "id": "tr-recents-to-folders",
+      "from": "home-recents",
+      "to": "home-all-folders",
+      "trigger": "ON_CLICK",
+      "label": "Select All folders in Home Sidebar"
+    },
+    {
+      "id": "tr-folders-to-recents",
+      "from": "home-all-folders",
+      "to": "home-recents",
+      "trigger": "ON_CLICK",
+      "label": "Back to Recents from All folders"
+    },
+    {
+      "id": "tr-recents-to-resources",
+      "from": "home-recents",
+      "to": "home-resources",
+      "trigger": "ON_CLICK",
+      "label": "Select Resources in Home Sidebar"
+    },
+    {
+      "id": "tr-resources-to-recents",
+      "from": "home-resources",
+      "to": "home-recents",
+      "trigger": "ON_CLICK",
+      "label": "Back to Recents from Resources"
+    },
+    {
+      "id": "tr-recents-to-drafts",
+      "from": "home-recents",
+      "to": "home-drafts",
+      "trigger": "ON_CLICK",
+      "label": "Select Drafts in Home Sidebar"
+    },
+    {
+      "id": "tr-drafts-to-recents",
+      "from": "home-drafts",
+      "to": "home-recents",
+      "trigger": "ON_CLICK",
+      "label": "Back to Recents from Drafts"
+    },
+    {
+      "id": "tr-recents-to-trash",
+      "from": "home-recents",
+      "to": "home-trash",
+      "trigger": "ON_CLICK",
+      "label": "Select Trash in Home Sidebar"
+    },
+    {
+      "id": "tr-trash-to-recents",
+      "from": "home-trash",
+      "to": "home-recents",
+      "trigger": "ON_CLICK",
+      "label": "Back to Recents from Trash"
+    },
+    {
+      "id": "tr-recents-open-editor",
+      "from": "home-recents",
+      "to": "editor-canvas",
+      "trigger": "ON_CLICK",
+      "label": "Open Recent File or Create New Design File"
+    },
+    {
+      "id": "tr-templates-seed-editor",
+      "from": "home-templates",
+      "to": "editor-canvas",
+      "trigger": "ON_CLICK",
+      "label": "Seed Starter Template into Editor"
+    },
+    {
+      "id": "tr-folders-open-editor",
+      "from": "home-all-folders",
+      "to": "editor-canvas",
+      "trigger": "ON_CLICK",
+      "label": "Open Project File in Editor"
+    },
+    {
+      "id": "tr-drafts-open-editor",
+      "from": "home-drafts",
+      "to": "editor-canvas",
+      "trigger": "ON_CLICK",
+      "label": "Open Draft File in Editor"
+    },
+    {
+      "id": "tr-editor-back-home",
+      "from": "editor-canvas",
+      "to": "home-recents",
+      "trigger": "ON_CLICK",
+      "label": "Click Home Tab Icon in Top Tab Bar"
+    },
+    {
+      "id": "tr-canvas-to-devmode",
+      "from": "editor-canvas",
+      "to": "editor-devmode",
+      "trigger": "ON_CLICK",
+      "label": "Toggle Dev Mode (Shift+D)"
+    },
+    {
+      "id": "tr-devmode-to-canvas",
+      "from": "editor-devmode",
+      "to": "editor-canvas",
+      "trigger": "ON_CLICK",
+      "label": "Exit Dev Mode back to Design Canvas"
+    },
+    {
+      "id": "tr-canvas-to-prototype",
+      "from": "editor-canvas",
+      "to": "editor-prototype",
+      "trigger": "ON_CLICK",
+      "label": "Switch Right Inspector to Prototype Tab"
+    },
+    {
+      "id": "tr-prototype-to-canvas",
+      "from": "editor-prototype",
+      "to": "editor-canvas",
+      "trigger": "ON_CLICK",
+      "label": "Switch Right Inspector back to Design Tab"
+    },
+    {
+      "id": "tr-prototype-to-present",
+      "from": "editor-prototype",
+      "to": "editor-present",
+      "trigger": "ON_CLICK",
+      "label": "Launch Prototype Presentation Player"
+    },
+    {
+      "id": "tr-canvas-to-present",
+      "from": "editor-canvas",
+      "to": "editor-present",
+      "trigger": "ON_CLICK",
+      "label": "Click Present Button in Top-Right Header"
+    },
+    {
+      "id": "tr-present-to-canvas",
+      "from": "editor-present",
+      "to": "editor-canvas",
+      "trigger": "ON_KEY",
+      "label": "Close Presentation Player (Esc)"
+    },
+    {
+      "id": "tr-present-to-prototype",
+      "from": "editor-present",
+      "to": "editor-prototype",
+      "trigger": "ON_CLICK",
+      "label": "Return to Prototype Editor from Player"
+    },
+    {
+      "id": "tr-canvas-open-agents",
+      "from": "editor-canvas",
+      "to": "panel-agents-terminal",
+      "trigger": "ON_CLICK",
+      "label": "Open Agents PTY Terminal from Left Rail"
+    },
+    {
+      "id": "tr-agents-back-canvas",
+      "from": "panel-agents-terminal",
+      "to": "editor-canvas",
+      "trigger": "ON_CLICK",
+      "label": "Collapse Agents Panel or Focus Canvas"
+    },
+    {
+      "id": "tr-canvas-open-specs",
+      "from": "editor-canvas",
+      "to": "panel-specs-reader",
+      "trigger": "ON_CLICK",
+      "label": "Open Specs Reader from Left Rail"
+    },
+    {
+      "id": "tr-specs-back-canvas",
+      "from": "panel-specs-reader",
+      "to": "editor-canvas",
+      "trigger": "ON_CLICK",
+      "label": "Close Specs Reader back to Canvas"
+    },
+    {
+      "id": "tr-canvas-open-variables",
+      "from": "editor-canvas",
+      "to": "modal-variables",
+      "trigger": "ON_CLICK",
+      "label": "Open Local Variables Modal from Right Inspector"
+    },
+    {
+      "id": "tr-variables-back-canvas",
+      "from": "modal-variables",
+      "to": "editor-canvas",
+      "trigger": "ON_KEY",
+      "label": "Close Variables Modal (Esc)"
+    },
+    {
+      "id": "tr-canvas-open-assets",
+      "from": "editor-canvas",
+      "to": "modal-assets-libraries",
+      "trigger": "ON_CLICK",
+      "label": "Open Assets & Shared Libraries Modal"
+    },
+    {
+      "id": "tr-assets-back-canvas",
+      "from": "modal-assets-libraries",
+      "to": "editor-canvas",
+      "trigger": "ON_KEY",
+      "label": "Close Libraries Modal (Esc)"
+    },
+    {
+      "id": "tr-canvas-open-plugins",
+      "from": "editor-canvas",
+      "to": "modal-plugins",
+      "trigger": "ON_CLICK",
+      "label": "Open Plugins Manager from Rail or Toolbar"
+    },
+    {
+      "id": "tr-plugins-back-canvas",
+      "from": "modal-plugins",
+      "to": "editor-canvas",
+      "trigger": "ON_KEY",
+      "label": "Close Plugins Modal (Esc)"
+    },
+    {
+      "id": "tr-canvas-open-cmdk",
+      "from": "editor-canvas",
+      "to": "modal-cmdk",
+      "trigger": "ON_KEY",
+      "label": "Open Command Palette & Gate Auditor (Cmd+K)"
+    },
+    {
+      "id": "tr-cmdk-back-canvas",
+      "from": "modal-cmdk",
+      "to": "editor-canvas",
+      "trigger": "ON_KEY",
+      "label": "Dismiss Command Palette (Esc)"
+    },
+    {
+      "id": "tr-home-recents-load",
+      "from": "home-recents.default",
+      "to": "home-recents.loading",
+      "trigger": "ON_CLICK",
+      "label": "Refresh home-recents"
+    },
+    {
+      "id": "tr-home-recents-loaded",
+      "from": "home-recents.loading",
+      "to": "home-recents.default",
+      "trigger": "AFTER_DELAY",
+      "label": "home-recents loaded with items"
+    },
+    {
+      "id": "tr-home-recents-empty",
+      "from": "home-recents.loading",
+      "to": "home-recents.empty",
+      "trigger": "AFTER_DELAY",
+      "label": "home-recents loaded empty"
+    },
+    {
+      "id": "tr-home-recents-error",
+      "from": "home-recents.loading",
+      "to": "home-recents.error",
+      "trigger": "AFTER_DELAY",
+      "label": "home-recents failed to load"
+    },
+    {
+      "id": "tr-home-recents-retry",
+      "from": "home-recents.error",
+      "to": "home-recents.loading",
+      "trigger": "ON_CLICK",
+      "label": "Retry loading home-recents"
+    },
+    {
+      "id": "tr-home-recents-seed-from-empty",
+      "from": "home-recents.empty",
+      "to": "home-recents.default",
+      "trigger": "ON_CLICK",
+      "label": "Create first item in home-recents"
+    },
+    {
+      "id": "tr-home-templates-load",
+      "from": "home-templates.default",
+      "to": "home-templates.loading",
+      "trigger": "ON_CLICK",
+      "label": "Refresh home-templates"
+    },
+    {
+      "id": "tr-home-templates-loaded",
+      "from": "home-templates.loading",
+      "to": "home-templates.default",
+      "trigger": "AFTER_DELAY",
+      "label": "home-templates loaded with items"
+    },
+    {
+      "id": "tr-home-templates-empty",
+      "from": "home-templates.loading",
+      "to": "home-templates.empty",
+      "trigger": "AFTER_DELAY",
+      "label": "home-templates loaded empty"
+    },
+    {
+      "id": "tr-home-templates-error",
+      "from": "home-templates.loading",
+      "to": "home-templates.error",
+      "trigger": "AFTER_DELAY",
+      "label": "home-templates failed to load"
+    },
+    {
+      "id": "tr-home-templates-retry",
+      "from": "home-templates.error",
+      "to": "home-templates.loading",
+      "trigger": "ON_CLICK",
+      "label": "Retry loading home-templates"
+    },
+    {
+      "id": "tr-home-templates-seed-from-empty",
+      "from": "home-templates.empty",
+      "to": "home-templates.default",
+      "trigger": "ON_CLICK",
+      "label": "Create first item in home-templates"
+    },
+    {
+      "id": "tr-home-all-folders-load",
+      "from": "home-all-folders.default",
+      "to": "home-all-folders.loading",
+      "trigger": "ON_CLICK",
+      "label": "Refresh home-all-folders"
+    },
+    {
+      "id": "tr-home-all-folders-loaded",
+      "from": "home-all-folders.loading",
+      "to": "home-all-folders.default",
+      "trigger": "AFTER_DELAY",
+      "label": "home-all-folders loaded with items"
+    },
+    {
+      "id": "tr-home-all-folders-empty",
+      "from": "home-all-folders.loading",
+      "to": "home-all-folders.empty",
+      "trigger": "AFTER_DELAY",
+      "label": "home-all-folders loaded empty"
+    },
+    {
+      "id": "tr-home-all-folders-error",
+      "from": "home-all-folders.loading",
+      "to": "home-all-folders.error",
+      "trigger": "AFTER_DELAY",
+      "label": "home-all-folders failed to load"
+    },
+    {
+      "id": "tr-home-all-folders-retry",
+      "from": "home-all-folders.error",
+      "to": "home-all-folders.loading",
+      "trigger": "ON_CLICK",
+      "label": "Retry loading home-all-folders"
+    },
+    {
+      "id": "tr-home-all-folders-seed-from-empty",
+      "from": "home-all-folders.empty",
+      "to": "home-all-folders.default",
+      "trigger": "ON_CLICK",
+      "label": "Create first item in home-all-folders"
+    },
+    {
+      "id": "tr-home-resources-load",
+      "from": "home-resources.default",
+      "to": "home-resources.loading",
+      "trigger": "ON_CLICK",
+      "label": "Refresh home-resources"
+    },
+    {
+      "id": "tr-home-resources-loaded",
+      "from": "home-resources.loading",
+      "to": "home-resources.default",
+      "trigger": "AFTER_DELAY",
+      "label": "home-resources loaded with items"
+    },
+    {
+      "id": "tr-home-resources-empty",
+      "from": "home-resources.loading",
+      "to": "home-resources.empty",
+      "trigger": "AFTER_DELAY",
+      "label": "home-resources loaded empty"
+    },
+    {
+      "id": "tr-home-resources-error",
+      "from": "home-resources.loading",
+      "to": "home-resources.error",
+      "trigger": "AFTER_DELAY",
+      "label": "home-resources failed to load"
+    },
+    {
+      "id": "tr-home-resources-retry",
+      "from": "home-resources.error",
+      "to": "home-resources.loading",
+      "trigger": "ON_CLICK",
+      "label": "Retry loading home-resources"
+    },
+    {
+      "id": "tr-home-resources-seed-from-empty",
+      "from": "home-resources.empty",
+      "to": "home-resources.default",
+      "trigger": "ON_CLICK",
+      "label": "Create first item in home-resources"
+    },
+    {
+      "id": "tr-home-drafts-load",
+      "from": "home-drafts.default",
+      "to": "home-drafts.loading",
+      "trigger": "ON_CLICK",
+      "label": "Refresh home-drafts"
+    },
+    {
+      "id": "tr-home-drafts-loaded",
+      "from": "home-drafts.loading",
+      "to": "home-drafts.default",
+      "trigger": "AFTER_DELAY",
+      "label": "home-drafts loaded with items"
+    },
+    {
+      "id": "tr-home-drafts-empty",
+      "from": "home-drafts.loading",
+      "to": "home-drafts.empty",
+      "trigger": "AFTER_DELAY",
+      "label": "home-drafts loaded empty"
+    },
+    {
+      "id": "tr-home-drafts-error",
+      "from": "home-drafts.loading",
+      "to": "home-drafts.error",
+      "trigger": "AFTER_DELAY",
+      "label": "home-drafts failed to load"
+    },
+    {
+      "id": "tr-home-drafts-retry",
+      "from": "home-drafts.error",
+      "to": "home-drafts.loading",
+      "trigger": "ON_CLICK",
+      "label": "Retry loading home-drafts"
+    },
+    {
+      "id": "tr-home-drafts-seed-from-empty",
+      "from": "home-drafts.empty",
+      "to": "home-drafts.default",
+      "trigger": "ON_CLICK",
+      "label": "Create first item in home-drafts"
+    },
+    {
+      "id": "tr-home-trash-load",
+      "from": "home-trash.default",
+      "to": "home-trash.loading",
+      "trigger": "ON_CLICK",
+      "label": "Refresh home-trash"
+    },
+    {
+      "id": "tr-home-trash-loaded",
+      "from": "home-trash.loading",
+      "to": "home-trash.default",
+      "trigger": "AFTER_DELAY",
+      "label": "home-trash loaded with items"
+    },
+    {
+      "id": "tr-home-trash-empty",
+      "from": "home-trash.loading",
+      "to": "home-trash.empty",
+      "trigger": "AFTER_DELAY",
+      "label": "home-trash loaded empty"
+    },
+    {
+      "id": "tr-home-trash-error",
+      "from": "home-trash.loading",
+      "to": "home-trash.error",
+      "trigger": "AFTER_DELAY",
+      "label": "home-trash failed to load"
+    },
+    {
+      "id": "tr-home-trash-retry",
+      "from": "home-trash.error",
+      "to": "home-trash.loading",
+      "trigger": "ON_CLICK",
+      "label": "Retry loading home-trash"
+    },
+    {
+      "id": "tr-home-trash-seed-from-empty",
+      "from": "home-trash.empty",
+      "to": "home-trash.default",
+      "trigger": "ON_CLICK",
+      "label": "Create first item in home-trash"
+    },
+    {
+      "id": "tr-editor-canvas-load",
+      "from": "editor-canvas.default",
+      "to": "editor-canvas.loading",
+      "trigger": "ON_CLICK",
+      "label": "Refresh editor-canvas"
+    },
+    {
+      "id": "tr-editor-canvas-loaded",
+      "from": "editor-canvas.loading",
+      "to": "editor-canvas.default",
+      "trigger": "AFTER_DELAY",
+      "label": "editor-canvas loaded with items"
+    },
+    {
+      "id": "tr-editor-canvas-empty",
+      "from": "editor-canvas.loading",
+      "to": "editor-canvas.empty",
+      "trigger": "AFTER_DELAY",
+      "label": "editor-canvas loaded empty"
+    },
+    {
+      "id": "tr-editor-canvas-error",
+      "from": "editor-canvas.loading",
+      "to": "editor-canvas.error",
+      "trigger": "AFTER_DELAY",
+      "label": "editor-canvas failed to load"
+    },
+    {
+      "id": "tr-editor-canvas-retry",
+      "from": "editor-canvas.error",
+      "to": "editor-canvas.loading",
+      "trigger": "ON_CLICK",
+      "label": "Retry loading editor-canvas"
+    },
+    {
+      "id": "tr-editor-canvas-seed-from-empty",
+      "from": "editor-canvas.empty",
+      "to": "editor-canvas.default",
+      "trigger": "ON_CLICK",
+      "label": "Create first item in editor-canvas"
+    },
+    {
+      "id": "tr-editor-devmode-load",
+      "from": "editor-devmode.default",
+      "to": "editor-devmode.loading",
+      "trigger": "ON_CLICK",
+      "label": "Refresh editor-devmode"
+    },
+    {
+      "id": "tr-editor-devmode-loaded",
+      "from": "editor-devmode.loading",
+      "to": "editor-devmode.default",
+      "trigger": "AFTER_DELAY",
+      "label": "editor-devmode loaded with items"
+    },
+    {
+      "id": "tr-editor-devmode-empty",
+      "from": "editor-devmode.loading",
+      "to": "editor-devmode.empty",
+      "trigger": "AFTER_DELAY",
+      "label": "editor-devmode loaded empty"
+    },
+    {
+      "id": "tr-editor-devmode-error",
+      "from": "editor-devmode.loading",
+      "to": "editor-devmode.error",
+      "trigger": "AFTER_DELAY",
+      "label": "editor-devmode failed to load"
+    },
+    {
+      "id": "tr-editor-devmode-retry",
+      "from": "editor-devmode.error",
+      "to": "editor-devmode.loading",
+      "trigger": "ON_CLICK",
+      "label": "Retry loading editor-devmode"
+    },
+    {
+      "id": "tr-editor-devmode-seed-from-empty",
+      "from": "editor-devmode.empty",
+      "to": "editor-devmode.default",
+      "trigger": "ON_CLICK",
+      "label": "Create first item in editor-devmode"
+    },
+    {
+      "id": "tr-editor-prototype-load",
+      "from": "editor-prototype.default",
+      "to": "editor-prototype.loading",
+      "trigger": "ON_CLICK",
+      "label": "Refresh editor-prototype"
+    },
+    {
+      "id": "tr-editor-prototype-loaded",
+      "from": "editor-prototype.loading",
+      "to": "editor-prototype.default",
+      "trigger": "AFTER_DELAY",
+      "label": "editor-prototype loaded with items"
+    },
+    {
+      "id": "tr-editor-prototype-empty",
+      "from": "editor-prototype.loading",
+      "to": "editor-prototype.empty",
+      "trigger": "AFTER_DELAY",
+      "label": "editor-prototype loaded empty"
+    },
+    {
+      "id": "tr-editor-prototype-error",
+      "from": "editor-prototype.loading",
+      "to": "editor-prototype.error",
+      "trigger": "AFTER_DELAY",
+      "label": "editor-prototype failed to load"
+    },
+    {
+      "id": "tr-editor-prototype-retry",
+      "from": "editor-prototype.error",
+      "to": "editor-prototype.loading",
+      "trigger": "ON_CLICK",
+      "label": "Retry loading editor-prototype"
+    },
+    {
+      "id": "tr-editor-prototype-seed-from-empty",
+      "from": "editor-prototype.empty",
+      "to": "editor-prototype.default",
+      "trigger": "ON_CLICK",
+      "label": "Create first item in editor-prototype"
+    },
+    {
+      "id": "tr-editor-present-load",
+      "from": "editor-present.default",
+      "to": "editor-present.loading",
+      "trigger": "ON_CLICK",
+      "label": "Refresh editor-present"
+    },
+    {
+      "id": "tr-editor-present-loaded",
+      "from": "editor-present.loading",
+      "to": "editor-present.default",
+      "trigger": "AFTER_DELAY",
+      "label": "editor-present loaded with items"
+    },
+    {
+      "id": "tr-editor-present-empty",
+      "from": "editor-present.loading",
+      "to": "editor-present.empty",
+      "trigger": "AFTER_DELAY",
+      "label": "editor-present loaded empty"
+    },
+    {
+      "id": "tr-editor-present-error",
+      "from": "editor-present.loading",
+      "to": "editor-present.error",
+      "trigger": "AFTER_DELAY",
+      "label": "editor-present failed to load"
+    },
+    {
+      "id": "tr-editor-present-retry",
+      "from": "editor-present.error",
+      "to": "editor-present.loading",
+      "trigger": "ON_CLICK",
+      "label": "Retry loading editor-present"
+    },
+    {
+      "id": "tr-editor-present-seed-from-empty",
+      "from": "editor-present.empty",
+      "to": "editor-present.default",
+      "trigger": "ON_CLICK",
+      "label": "Create first item in editor-present"
+    },
+    {
+      "id": "tr-panel-agents-terminal-load",
+      "from": "panel-agents-terminal.default",
+      "to": "panel-agents-terminal.loading",
+      "trigger": "ON_CLICK",
+      "label": "Refresh panel-agents-terminal"
+    },
+    {
+      "id": "tr-panel-agents-terminal-loaded",
+      "from": "panel-agents-terminal.loading",
+      "to": "panel-agents-terminal.default",
+      "trigger": "AFTER_DELAY",
+      "label": "panel-agents-terminal loaded with items"
+    },
+    {
+      "id": "tr-panel-agents-terminal-empty",
+      "from": "panel-agents-terminal.loading",
+      "to": "panel-agents-terminal.empty",
+      "trigger": "AFTER_DELAY",
+      "label": "panel-agents-terminal loaded empty"
+    },
+    {
+      "id": "tr-panel-agents-terminal-error",
+      "from": "panel-agents-terminal.loading",
+      "to": "panel-agents-terminal.error",
+      "trigger": "AFTER_DELAY",
+      "label": "panel-agents-terminal failed to load"
+    },
+    {
+      "id": "tr-panel-agents-terminal-retry",
+      "from": "panel-agents-terminal.error",
+      "to": "panel-agents-terminal.loading",
+      "trigger": "ON_CLICK",
+      "label": "Retry loading panel-agents-terminal"
+    },
+    {
+      "id": "tr-panel-agents-terminal-seed-from-empty",
+      "from": "panel-agents-terminal.empty",
+      "to": "panel-agents-terminal.default",
+      "trigger": "ON_CLICK",
+      "label": "Create first item in panel-agents-terminal"
+    },
+    {
+      "id": "tr-panel-specs-reader-load",
+      "from": "panel-specs-reader.default",
+      "to": "panel-specs-reader.loading",
+      "trigger": "ON_CLICK",
+      "label": "Refresh panel-specs-reader"
+    },
+    {
+      "id": "tr-panel-specs-reader-loaded",
+      "from": "panel-specs-reader.loading",
+      "to": "panel-specs-reader.default",
+      "trigger": "AFTER_DELAY",
+      "label": "panel-specs-reader loaded with items"
+    },
+    {
+      "id": "tr-panel-specs-reader-empty",
+      "from": "panel-specs-reader.loading",
+      "to": "panel-specs-reader.empty",
+      "trigger": "AFTER_DELAY",
+      "label": "panel-specs-reader loaded empty"
+    },
+    {
+      "id": "tr-panel-specs-reader-error",
+      "from": "panel-specs-reader.loading",
+      "to": "panel-specs-reader.error",
+      "trigger": "AFTER_DELAY",
+      "label": "panel-specs-reader failed to load"
+    },
+    {
+      "id": "tr-panel-specs-reader-retry",
+      "from": "panel-specs-reader.error",
+      "to": "panel-specs-reader.loading",
+      "trigger": "ON_CLICK",
+      "label": "Retry loading panel-specs-reader"
+    },
+    {
+      "id": "tr-panel-specs-reader-seed-from-empty",
+      "from": "panel-specs-reader.empty",
+      "to": "panel-specs-reader.default",
+      "trigger": "ON_CLICK",
+      "label": "Create first item in panel-specs-reader"
+    },
+    {
+      "id": "tr-modal-variables-load",
+      "from": "modal-variables.default",
+      "to": "modal-variables.loading",
+      "trigger": "ON_CLICK",
+      "label": "Refresh modal-variables"
+    },
+    {
+      "id": "tr-modal-variables-loaded",
+      "from": "modal-variables.loading",
+      "to": "modal-variables.default",
+      "trigger": "AFTER_DELAY",
+      "label": "modal-variables loaded with items"
+    },
+    {
+      "id": "tr-modal-variables-empty",
+      "from": "modal-variables.loading",
+      "to": "modal-variables.empty",
+      "trigger": "AFTER_DELAY",
+      "label": "modal-variables loaded empty"
+    },
+    {
+      "id": "tr-modal-variables-error",
+      "from": "modal-variables.loading",
+      "to": "modal-variables.error",
+      "trigger": "AFTER_DELAY",
+      "label": "modal-variables failed to load"
+    },
+    {
+      "id": "tr-modal-variables-retry",
+      "from": "modal-variables.error",
+      "to": "modal-variables.loading",
+      "trigger": "ON_CLICK",
+      "label": "Retry loading modal-variables"
+    },
+    {
+      "id": "tr-modal-variables-seed-from-empty",
+      "from": "modal-variables.empty",
+      "to": "modal-variables.default",
+      "trigger": "ON_CLICK",
+      "label": "Create first item in modal-variables"
+    },
+    {
+      "id": "tr-modal-assets-libraries-load",
+      "from": "modal-assets-libraries.default",
+      "to": "modal-assets-libraries.loading",
+      "trigger": "ON_CLICK",
+      "label": "Refresh modal-assets-libraries"
+    },
+    {
+      "id": "tr-modal-assets-libraries-loaded",
+      "from": "modal-assets-libraries.loading",
+      "to": "modal-assets-libraries.default",
+      "trigger": "AFTER_DELAY",
+      "label": "modal-assets-libraries loaded with items"
+    },
+    {
+      "id": "tr-modal-assets-libraries-empty",
+      "from": "modal-assets-libraries.loading",
+      "to": "modal-assets-libraries.empty",
+      "trigger": "AFTER_DELAY",
+      "label": "modal-assets-libraries loaded empty"
+    },
+    {
+      "id": "tr-modal-assets-libraries-error",
+      "from": "modal-assets-libraries.loading",
+      "to": "modal-assets-libraries.error",
+      "trigger": "AFTER_DELAY",
+      "label": "modal-assets-libraries failed to load"
+    },
+    {
+      "id": "tr-modal-assets-libraries-retry",
+      "from": "modal-assets-libraries.error",
+      "to": "modal-assets-libraries.loading",
+      "trigger": "ON_CLICK",
+      "label": "Retry loading modal-assets-libraries"
+    },
+    {
+      "id": "tr-modal-assets-libraries-seed-from-empty",
+      "from": "modal-assets-libraries.empty",
+      "to": "modal-assets-libraries.default",
+      "trigger": "ON_CLICK",
+      "label": "Create first item in modal-assets-libraries"
+    },
+    {
+      "id": "tr-modal-plugins-load",
+      "from": "modal-plugins.default",
+      "to": "modal-plugins.loading",
+      "trigger": "ON_CLICK",
+      "label": "Refresh modal-plugins"
+    },
+    {
+      "id": "tr-modal-plugins-loaded",
+      "from": "modal-plugins.loading",
+      "to": "modal-plugins.default",
+      "trigger": "AFTER_DELAY",
+      "label": "modal-plugins loaded with items"
+    },
+    {
+      "id": "tr-modal-plugins-empty",
+      "from": "modal-plugins.loading",
+      "to": "modal-plugins.empty",
+      "trigger": "AFTER_DELAY",
+      "label": "modal-plugins loaded empty"
+    },
+    {
+      "id": "tr-modal-plugins-error",
+      "from": "modal-plugins.loading",
+      "to": "modal-plugins.error",
+      "trigger": "AFTER_DELAY",
+      "label": "modal-plugins failed to load"
+    },
+    {
+      "id": "tr-modal-plugins-retry",
+      "from": "modal-plugins.error",
+      "to": "modal-plugins.loading",
+      "trigger": "ON_CLICK",
+      "label": "Retry loading modal-plugins"
+    },
+    {
+      "id": "tr-modal-plugins-seed-from-empty",
+      "from": "modal-plugins.empty",
+      "to": "modal-plugins.default",
+      "trigger": "ON_CLICK",
+      "label": "Create first item in modal-plugins"
+    },
+    {
+      "id": "tr-modal-cmdk-load",
+      "from": "modal-cmdk.default",
+      "to": "modal-cmdk.loading",
+      "trigger": "ON_CLICK",
+      "label": "Refresh modal-cmdk"
+    },
+    {
+      "id": "tr-modal-cmdk-loaded",
+      "from": "modal-cmdk.loading",
+      "to": "modal-cmdk.default",
+      "trigger": "AFTER_DELAY",
+      "label": "modal-cmdk loaded with items"
+    },
+    {
+      "id": "tr-modal-cmdk-empty",
+      "from": "modal-cmdk.loading",
+      "to": "modal-cmdk.empty",
+      "trigger": "AFTER_DELAY",
+      "label": "modal-cmdk loaded empty"
+    },
+    {
+      "id": "tr-modal-cmdk-error",
+      "from": "modal-cmdk.loading",
+      "to": "modal-cmdk.error",
+      "trigger": "AFTER_DELAY",
+      "label": "modal-cmdk failed to load"
+    },
+    {
+      "id": "tr-modal-cmdk-retry",
+      "from": "modal-cmdk.error",
+      "to": "modal-cmdk.loading",
+      "trigger": "ON_CLICK",
+      "label": "Retry loading modal-cmdk"
+    },
+    {
+      "id": "tr-modal-cmdk-seed-from-empty",
+      "from": "modal-cmdk.empty",
+      "to": "modal-cmdk.default",
+      "trigger": "ON_CLICK",
+      "label": "Create first item in modal-cmdk"
+    }
+  ]
+}

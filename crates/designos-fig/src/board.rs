@@ -225,6 +225,18 @@ pub(crate) fn finish_node(n: &mut Node) {
     }
 }
 
+pub(crate) fn link_connector_list(doc: &mut Document, ids: &BTreeMap<String, NodeId>, connectors: &[(NodeId, Option<String>, Option<String>)]) {
+    for (cid, start_ep, end_ep) in connectors {
+        let a = start_ep.as_deref().and_then(|s| ids.get(s)).copied();
+        let b = end_ep.as_deref().and_then(|s| ids.get(s)).copied();
+        if let Some(NodeKind::Connector(c)) = doc.get_mut(*cid).map(|n| &mut n.kind) {
+            c.start.node = a;
+            c.end.node = b;
+        }
+        sync_connector(doc, *cid);
+    }
+}
+
 /// Attaches connector ends to the nodes they name (`endpointNodeId` is a REST id) and
 /// places every connector on its route. Walks the REST tree below `root`.
 pub(crate) fn link_connectors(doc: &mut Document, ids: &BTreeMap<String, NodeId>, root: &Value) {
