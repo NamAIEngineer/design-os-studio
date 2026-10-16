@@ -82,6 +82,7 @@ cargo test -p designos-mcp
 
 4. **CAP offscreen GPU `Program` allocations (`self.progs.len() < 64`) and reuse `FrameKey` (`crates/designos-app/src/canvas/gpu.rs`):**
    - Unbounded offscreen render passes (`Program`s) on 723k-node pages exhaust `egui-wgpu`'s Metal staging ring buffer and crash the GPU driver. Keep offscreen layer/mask/clip/blend `Program` creation capped at `< 64` in `interactive()` mode (falling back to hardware scissor clips).
+   - Exception (owner ruling 2026-10-16): when the view is idle (key unchanged, `stale_hits == 0`, no pointer down), `GpuView::plan` runs exactly ONE compile with `CompileOptions.uncap_programs = true`, caches it under the same `FrameKey` (`refined = true`), and from then on re-blits with `Cb { frame: None }`. Masks, blur, blend modes and group opacity render at full quality at rest. Any viewport or document change goes back to the capped interactive compile.
    - In `canvas::gpu::paint`, when `last_key == Some(key) && compiler.geom.stale_hits == 0`, pass `Cb { frame: None }` so `Canvas` re-blits the cached `Output` texture at `0.0%` idle CPU without recompiling or re-uploading vertex buffers.
    - `GeomCache::get` MUST track cumulative `frame_build_nanos` against the 8ms per-frame budget (`compiler.geom.budget`) and defer uncached `Text`/`Vector`/`BooleanOp` tessellation across subsequent frames via `stale_hits`.
 
