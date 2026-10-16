@@ -51,6 +51,9 @@ jobs:
       - name: Test workspace
         run: cargo test --workspace --locked
 
+      - name: Frame-budget benchmark (release)
+        run: cargo test --release --locked -p designos-gpu --test large_file_perf
+
   lint:
     name: Clippy
     runs-on: ubuntu-latest

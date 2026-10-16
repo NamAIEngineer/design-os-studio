@@ -49,6 +49,7 @@ pub fn format_grid_track(track: GridTrack) -> String {
 }
 
 /// Computes the 2D CSS Grid cell rects, column/row tracks, padding, and gaps for `LayoutDirection::Grid`.
+#[allow(clippy::needless_range_loop)] // track index `c`/`r` also addresses the parallel track and placement tables
 pub fn compute_css_grid_overlay(al: &AutoLayout, frame_size: DV, child_sizes: &[DV], spans: &[(u16, u16)]) -> CssGridOverlay {
     let [pt, pr, pb, pl] = al.padding;
     let cols = (if al.grid_columns > 0 { al.grid_columns as usize } else { 3 }).clamp(1, 16);
@@ -325,7 +326,7 @@ fn layout_grids(app: &App, p: &Painter, rect: ERect) {
             }
         } else {
             for &cid in &page.children {
-                if index.bounds_of(cid).map_or(true, overlaps_win) {
+                if index.bounds_of(cid).is_none_or(overlaps_win) {
                     stack.push((cid, Affine::IDENTITY));
                 }
             }
@@ -352,7 +353,7 @@ fn layout_grids(app: &App, p: &Painter, rect: ERect) {
             let descend = if idx.is_none() && n.kind.frame_props().is_some_and(|f| f.clips_content) { own_bb.intersects(&view) } else { true };
             if descend {
                 for &cid in &n.children {
-                    if idx.and_then(|i| i.bounds_of(cid)).map_or(true, overlaps_win) {
+                    if idx.and_then(|i| i.bounds_of(cid)).is_none_or(overlaps_win) {
                         stack.push((cid, w));
                     }
                 }

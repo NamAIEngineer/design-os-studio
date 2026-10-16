@@ -101,7 +101,6 @@ pub struct SmartSelectionDragState {
     pub start_page: DV,
     /// Sorted `(id, world_aabb, start_tx, start_ty)` along the primary axis at drag start.
     pub sorted: Vec<(NodeId, Rect, f32, f32)>,
-    pub horiz: bool,
     pub start_gap: f32,
 }
 

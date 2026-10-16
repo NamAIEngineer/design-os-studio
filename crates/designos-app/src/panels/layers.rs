@@ -263,10 +263,8 @@ pub fn show(app: &mut App, ui: &mut Ui, region: Rect) {
             for id in sel.iter().take(8) {
                 let mut cur = app.doc.get(*id).and_then(|n| n.parent);
                 while let Some(p) = cur {
-                    if !huge_doc || app.doc.get(p).is_some_and(|n| n.children.len() <= 500) {
-                        if app.layers.expanded.insert(p) {
-                            app.layers.expanded_gen = app.layers.expanded_gen.wrapping_add(1);
-                        }
+                    if (!huge_doc || app.doc.get(p).is_some_and(|n| n.children.len() <= 500)) && app.layers.expanded.insert(p) {
+                        app.layers.expanded_gen = app.layers.expanded_gen.wrapping_add(1);
                     }
                     cur = app.doc.get(p).and_then(|n| n.parent);
                 }
@@ -659,12 +657,16 @@ mod tests {
         let plain = NodeKind::Frame(FrameProps::default());
         assert_eq!(kind_icon(&plain), Icon::Frame);
 
-        let mut h_frame = FrameProps::default();
-        h_frame.auto_layout = Some(AutoLayout { direction: LayoutDirection::Horizontal, ..AutoLayout::default() });
+        let h_frame = FrameProps {
+            auto_layout: Some(AutoLayout { direction: LayoutDirection::Horizontal, ..AutoLayout::default() }),
+            ..FrameProps::default()
+        };
         assert_eq!(kind_icon(&NodeKind::Frame(h_frame)), Icon::AutoLayoutH);
 
-        let mut v_frame = FrameProps::default();
-        v_frame.auto_layout = Some(AutoLayout { direction: LayoutDirection::Vertical, ..AutoLayout::default() });
+        let v_frame = FrameProps {
+            auto_layout: Some(AutoLayout { direction: LayoutDirection::Vertical, ..AutoLayout::default() }),
+            ..FrameProps::default()
+        };
         assert_eq!(kind_icon(&NodeKind::Frame(v_frame)), Icon::AutoLayoutV);
 
         assert_eq!(kind_icon(&NodeKind::Component(FrameProps::default())), Icon::Component);

@@ -193,7 +193,7 @@ fn run_benchmark_suite(suite_name: &str, doc: &mut Document, page: NodeId, defau
             let h = b.3 - b.1;
             if (300.0..=8000.0).contains(&w) && (300.0..=8000.0).contains(&h) {
                 let score = n.children.len();
-                if best_artboard.map_or(true, |(_, _, s)| score > s) {
+                if best_artboard.is_none_or(|(_, _, s)| score > s) {
                     best_artboard = Some((n.id, b, score));
                 }
             }
@@ -432,13 +432,18 @@ fn large_file_compile_benchmarks() {
         eprintln!("NOTE: /Users/jangtrinh/Downloads/VSF - PCP.fig not found; skipping real-file benchmark");
     }
 
-    // Unoptimized debug builds (`cargo test` without `--release`) and shared CI VMs
-    // run ~10x slower on 50k-node compilation than release builds.
-    let budget_scale = if cfg!(debug_assertions) || std::env::var("CI").is_ok() { 15.0 } else { 1.0 };
-    let frame_budget_ms = 16.0 * budget_scale;
-    let crud_p50_budget_ms = 2.0 * budget_scale;
-    let crud_p95_budget_ms = 5.0 * budget_scale;
-    let drag_p50_budget_ms = 5.0 * budget_scale;
+    // The budgets below are release-build frame budgets. An unoptimized build is ~10x slower
+    // on 50k-node compilation, so its timings say nothing about the budget: the suite still
+    // runs (and prints) in debug, but the assertions only gate release builds, which CI runs
+    // in a dedicated `cargo test --release` step.
+    if cfg!(debug_assertions) {
+        eprintln!("NOTE: frame budgets are asserted only in release builds (cargo test --release -p designos-gpu --test large_file_perf)");
+        return;
+    }
+    let frame_budget_ms = 16.0;
+    let crud_p50_budget_ms = 2.0;
+    let crud_p95_budget_ms = 5.0;
+    let drag_p50_budget_ms = 5.0;
 
     for m in &res_50k {
         assert!(m.p50_ms < frame_budget_ms, "50k {} p50 {:.2} ms exceeded {:.1} ms budget", m.label, m.p50_ms, frame_budget_ms);

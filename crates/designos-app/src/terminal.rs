@@ -1345,7 +1345,7 @@ pub fn strip_ansi_codes(raw: &str) -> String {
             match chars.peek().copied() {
                 Some('[') => {
                     chars.next();
-                    while let Some(c) = chars.next() {
+                    for c in chars.by_ref() {
                         if ('@'..='~').contains(&c) {
                             break;
                         }
@@ -3513,9 +3513,7 @@ fn render_vt100_viewport(state: &mut TerminalState, ui: &mut Ui, viewport_rect: 
                         for start_c in 0..=(row_chars.len() - q_chars.len()) {
                             if row_chars[start_c..start_c + q_chars.len()] == q_chars[..] {
                                 search_matches += 1;
-                                for hit_c in start_c..start_c + q_chars.len() {
-                                    row_search_hit[hit_c] = true;
-                                }
+                                row_search_hit[start_c..start_c + q_chars.len()].fill(true);
                             }
                         }
                     }
@@ -4166,9 +4164,7 @@ Done!
         let ctx = egui::Context::default();
         crate::theme::install_fonts(&ctx);
         crate::theme::apply(&ctx);
-        let mut st = TerminalState::default();
-        st.side_panel_pty_open = false;
-        st.chat_mode = true;
+        let mut st = TerminalState { side_panel_pty_open: false, chat_mode: true, ..TerminalState::default() };
         let panel_rect = Rect::from_min_size(Pos2::new(48.0, 0.0), Vec2::new(240.0, 800.0));
 
         // First pass to record widget rects

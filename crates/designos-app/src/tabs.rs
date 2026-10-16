@@ -377,9 +377,7 @@ impl TabsState {
 
     /// Saves the current tab, pushes a new `ProjectTab`, switches to it, and closes `Home`.
     pub fn open_new_tab(&mut self, app: &mut App, title: &str, mut doc: Document, kind: ProjectTabKind) -> usize {
-        if self.entries.is_empty() && app.home.is_none() {
-            self.park_active_from_app(app);
-        } else if app.home.is_none() {
+        if app.home.is_none() {
             self.park_active_from_app(app);
         }
         doc.name = title.to_string();
@@ -848,8 +846,8 @@ pub fn show_top_tab_bar_ui(ui: &mut Ui, bar_rect: Rect, app: &mut App) {
         }
     }
 
-    // 4c. Right-aligned compact Update check button ("top-tab-update-btn")
-    {
+    // 4c. Right-aligned compact Update check button ("top-tab-update-btn"); hidden until the updater is real (see `updater::UPDATER_UI_ENABLED`)
+    if crate::home::updater::UPDATER_UI_ENABLED {
         let upd_rect = Rect::from_min_size(Pos2::new(bar_rect.right() - 68.0, bar_rect.top() + 4.0), Vec2::new(60.0, 24.0));
         widgets::record(ui, "top-tab-update-btn", upd_rect);
         let upd_resp = ui.interact(upd_rect, ui.id().with("top-tab-update-btn"), Sense::click());

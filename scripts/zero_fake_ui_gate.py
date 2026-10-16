@@ -7,7 +7,7 @@ Every visible button, input bar, scrollbar, tab, menu item, and agent CLI runtim
 `design:os studio` (`crates/designos-app/src/`) must execute real state mutation, real OS
 clipboard/filesystem I/O, or real CLI subprocess execution.
 
-Verifies 12 hard Zero-Fake-UI invariants (`Z01..Z12`):
+Verifies 14 hard Zero-Fake-UI invariants (`Z01..Z14`):
   - Z01: `terminal.rs` has `runtime_binary_available` and real CLI invocation
          (`claude -p`, `codex exec`, `agy -p`, `grok -p`) in `submit_chat_prompt`.
   - Z02: `terminal.rs` `set_active_runtime` mutates `tab.preset` (not just renaming `tab.title`)
@@ -23,9 +23,8 @@ Verifies 12 hard Zero-Fake-UI invariants (`Z01..Z12`):
          `SpecComment` creation/resolution (`comment_draft` + `TextEdit::singleline`).
   - Z07: `specs.rs` `draw_wrapped_prose` does NOT truncate prose at `lines.len() >= 3`,
          and `render_tab_blueprints` renders `pkg.ui_contract`.
-  - Z08: `panels/toolbar.rs` contextual buttons (`ctx-crop`, `ctx-select-area`,
-         `ctx-remove-bg`, `ctx-edit-image`) mutate `app.doc` / `app.tool` instead of only
-         calling `app.show_toast`.
+  - Z08: `panels/toolbar.rs` contextual buttons (`ctx-select-area`, `ctx-edit-prompt`) mutate
+         `app.doc` / `app.tool`; the mislabelled `ctx-crop` / `ctx-remove-bg` stubs stay removed.
   - Z09: `home/mod.rs` `Act::ExportFig` writes `.fig` bytes to disk (`std::fs::write`),
          and `Nav::AllFolders` / `Nav::Templates` / `Nav::Libraries` filter distinctly.
   - Z10: `panels/right.rs` `"Share"` copies to clipboard (`copy_text`), and Dev Mode's 2nd tab
@@ -33,12 +32,16 @@ Verifies 12 hard Zero-Fake-UI invariants (`Z01..Z12`):
   - Z11: `panels/inspect.rs` (`dev-code-connect`, `dev-mcp-btn`, `dev-add-redlines`,
          `inspect_keyframes_section`) and `panels/properties.rs` (`copy-to-slides`) perform
          real clipboard/document mutations.
+  - Z13: `panels/menus.rs` Zoom menu rows all carry a real `Action` (no `action: None` rows, no
+         hard-coded "Multiplayer cursors" check).
+  - Z14: the in-app updater UI stays hidden (`UPDATER_UI_ENABLED = false`) while `updater.rs`
+         still builds its candidate from `ReleaseManifest::sample_for_channel`.
   - Z12: `widgets/picker.rs` `Mode::Image` creates real `Paint::Image` / `app.doc.images`
          entries, and `panels/mod.rs::scrollbar` + `variables/view.rs::hscrollbar` support
          `Sense::click_and_drag()`.
 
 Exit code:
-  0 when 12/12 invariants pass, 1 if any invariant fails.
+  0 when 14/14 invariants pass, 1 if any invariant fails.
 """
 
 from __future__ import annotations
@@ -227,21 +230,24 @@ def check_z07(specs_rs: str) -> Tuple[bool, str]:
 
 
 def check_z08(toolbar_rs: str) -> Tuple[bool, str]:
-    has_crop = "ctx-crop" in toolbar_rs
     has_select = "ctx-select-area" in toolbar_rs
-    has_remove_bg = "ctx-remove-bg" in toolbar_rs
     has_edit_img = ("ctx-edit-image" in toolbar_rs) or ("ctx-edit-prompt" in toolbar_rs)
+    # Crop / Remove-background had no real implementation (a 5% shrink and "delete first fill").
+    # They may only come back with an honest implementation, which must update this check.
+    stubs_gone = ("(Icon::Frame, \"ctx-crop\"" not in toolbar_rs) and ("(Icon::Sparkle, \"ctx-remove-bg\"" not in toolbar_rs) and (
+        '"ctx-remove-bg" =>' not in toolbar_rs
+    )
     mutates_state = (
         ("app.doc" in toolbar_rs or "doc." in toolbar_rs)
         and ("app.tool" in toolbar_rs)
         and ("apply_contextual_action" in toolbar_rs or "clips_content" in toolbar_rs)
     )
-    ok = has_crop and has_select and has_remove_bg and has_edit_img and mutates_state
+    ok = has_select and has_edit_img and stubs_gone and mutates_state
     if ok:
-        return True, "`panels/toolbar.rs` contextual buttons (`ctx-crop`, `ctx-select-area`, `ctx-remove-bg`, `ctx-edit-image`) mutate `app.doc` / `app.tool`"
+        return True, "`panels/toolbar.rs` contextual buttons (`ctx-select-area`, `ctx-edit-prompt`) mutate `app.doc` / `app.tool`; no crop/remove-bg stubs"
     return (
         False,
-        f"crop={has_crop}, select={has_select}, remove_bg={has_remove_bg}, edit_img={has_edit_img}, mutates_state={mutates_state}",
+        f"select={has_select}, edit_img={has_edit_img}, fake_stubs_removed={stubs_gone}, mutates_state={mutates_state}",
     )
 
 
@@ -331,6 +337,31 @@ def check_z12(picker_rs: str, panels_mod_rs: str, vars_view_rs: str, properties_
     )
 
 
+def check_z13(menus_rs: str) -> Tuple[bool, str]:
+    zoom_src = menus_rs
+    start = menus_rs.find("struct ZoomRowSpec")
+    if start != -1:
+        zoom_src = menus_rs[start : menus_rs.find("fn show_zoom_menu", start)]
+    dead_rows = len(re.findall(r"action:\s*None", zoom_src))
+    fake_check = "Multiplayer cursors" in zoom_src
+    optional_action = bool(re.search(r"action:\s*Option<", zoom_src))
+    ok = start != -1 and dead_rows == 0 and not fake_check and not optional_action
+    if ok:
+        return True, "Zoom menu rows all carry a real `Action` (no `action: None`, no hard-coded Multiplayer cursors)"
+    return False, f"found_struct={start != -1}, action_none_rows={dead_rows}, multiplayer_cursors={fake_check}, optional_action={optional_action}"
+
+
+def check_z14(updater_rs: str, tabs_rs: str) -> Tuple[bool, str]:
+    body = updater_rs.split("#[cfg(test)]")[0]
+    uses_sample = "sample_for_channel" in body
+    hidden = bool(re.search(r"pub const UPDATER_UI_ENABLED:\s*bool\s*=\s*false\s*;", body))
+    tab_entry_gated = ("top-tab-update-btn" not in tabs_rs) or ("UPDATER_UI_ENABLED" in tabs_rs)
+    ok = (not uses_sample or hidden) and tab_entry_gated
+    if ok:
+        return True, f"updater UI hidden={hidden}, sample manifest used={uses_sample}, tab entry gated={tab_entry_gated}"
+    return False, f"updater builds a sample manifest but its UI is visible: hidden={hidden}, uses_sample={uses_sample}, tab_entry_gated={tab_entry_gated}"
+
+
 def run_all_checks() -> List[Dict[str, Any]]:
     terminal_rs = read_src("terminal.rs")
     specs_rs = read_src("specs.rs")
@@ -343,6 +374,9 @@ def run_all_checks() -> List[Dict[str, Any]]:
     picker_rs = read_src("widgets/picker.rs")
     panels_mod_rs = read_src("panels/mod.rs")
     vars_view_rs = read_src("variables/view.rs")
+    menus_rs = read_src("panels/menus.rs")
+    updater_rs = read_src("updater.rs")
+    tabs_rs = read_src("tabs.rs")
 
     specs = [
         ("Z01", "terminal.rs", "Real CLI binary detection & invocation in submit_chat_prompt", lambda: check_z01(terminal_rs)),
@@ -357,6 +391,8 @@ def run_all_checks() -> List[Dict[str, Any]]:
         ("Z10", "panels/right.rs", "Share copies to clipboard & Dev Mode 2nd tab renders Dev Plugins inspector", lambda: check_z10(right_rs)),
         ("Z11", "panels/inspect.rs + properties.rs", "Dev Mode Code Connect/MCP/Redlines/Keyframes & Copy to Slides mutate state/clipboard", lambda: check_z11(inspect_rs, properties_rs, dev_sections_rs)),
         ("Z12", "widgets/picker.rs + panels/mod.rs + variables/view.rs", "Mode::Image creates Paint::Image/doc.images & scrollbars support Sense::click_and_drag()", lambda: check_z12(picker_rs, panels_mod_rs, vars_view_rs, properties_rs)),
+        ("Z13", "panels/menus.rs", "Zoom menu rows all carry a real Action (no dead rows, no fake Multiplayer cursors check)", lambda: check_z13(menus_rs)),
+        ("Z14", "updater.rs + tabs.rs", "Sample-manifest updater UI stays hidden until a real manifest fetch exists", lambda: check_z14(updater_rs, tabs_rs)),
     ]
 
     results: List[Dict[str, Any]] = []

@@ -14,6 +14,9 @@ use std::rc::Rc;
 use std::sync::{Arc, Mutex, OnceLock};
 use tiny_skia as sk;
 
+/// Set to any value before the first text layout to build the font database from the bundled fonts only.
+const BUNDLED_FONTS_ONLY_ENV: &str = "DESIGNOS_BUNDLED_FONTS_ONLY";
+
 struct Fonts {
     fs: FontSystem,
     swash: SwashCache,
@@ -65,7 +68,10 @@ fn base_db() -> &'static (fontdb::Database, HashSet<fontdb::ID>) {
             owned.insert(asset.family.to_lowercase());
             bundled.extend(db.load_font_source(fontdb::Source::Binary(Arc::new(asset.data))));
         }
-        db.load_system_fonts();
+        // Hermetic runs (tests, reproducible renders) set this to ignore whatever the host has installed.
+        if std::env::var_os(BUNDLED_FONTS_ONLY_ENV).is_none() {
+            db.load_system_fonts();
+        }
         let shadowed: Vec<fontdb::ID> =
             db.faces().filter(|f| !bundled.contains(&f.id) && f.families.iter().any(|(n, _)| owned.contains(&n.to_lowercase()))).map(|f| f.id).collect();
         for id in shadowed {

@@ -85,7 +85,7 @@ pub(crate) fn active_index(app: &App) -> Option<&designos_render::SceneIndex> {
     let gpu_idx = app.canvas.gpu.scene_index();
     let tile_idx = app.canvas.tiles.scene_index();
     let first_vis = app.doc.get(app.page).and_then(|p| p.children.iter().find(|&&cid| app.doc.get(cid).is_some_and(|n| n.visible)).copied());
-    if app.canvas.gpu.active() && first_vis.map_or(true, |cid| gpu_idx.bounds_of(cid).is_some()) {
+    if app.canvas.gpu.active() && first_vis.is_none_or(|cid| gpu_idx.bounds_of(cid).is_some()) {
         return Some(gpu_idx);
     }
     if first_vis.is_some_and(|cid| gpu_idx.bounds_of(cid).is_some()) {
@@ -503,7 +503,7 @@ fn try_start_smart_selection_handle(app: &mut App, rect: ERect, pos: Pos2, page:
             Some((id, r, n.transform.tx, n.transform.ty))
         })
         .collect();
-    app.canvas.inter = Interaction::SmartSelectionDrag(SmartSelectionDragState { tx: Tx::new(), kind, start_page: page, sorted, horiz, start_gap });
+    app.canvas.inter = Interaction::SmartSelectionDrag(SmartSelectionDragState { tx: Tx::new(), kind, start_page: page, sorted, start_gap });
     true
 }
 

@@ -83,7 +83,7 @@ fn take_pending_ai_op() -> Option<FigmaAiOp> {
 /// Actions returned by `cmdk::show` for the host `App` / `Shell` to execute.
 #[derive(Clone, Debug, PartialEq)]
 pub enum CmdKAction {
-    ApplySpec(NodeSpec),
+    ApplySpec(Box<NodeSpec>),
     OpenSpecReader,
     OpenTerminal(AgentCliPreset),
     SendSelectionToTerminal,
@@ -363,7 +363,7 @@ pub fn show(ctx: &Context, state: &mut CmdKState, doc: &Document, page: NodeId, 
             let spec = synthesize_spec_from_prompt(prompt);
             state.status = Some(format!("Synthesized '{}' on Canvas", spec.name));
             state.open = false;
-            out_action = Some(CmdKAction::ApplySpec(spec));
+            out_action = Some(CmdKAction::ApplySpec(Box::new(spec)));
         }
 
         let edit_rect =
@@ -472,7 +472,7 @@ pub fn show(ctx: &Context, state: &mut CmdKState, doc: &Document, page: NodeId, 
                         let spec = synthesize_spec_from_prompt(prompt);
                         state.status = Some(format!("Synthesized '{}' (Instant Local NodeSpec)", spec.name));
                         state.open = false;
-                        out_action = Some(CmdKAction::ApplySpec(spec));
+                        out_action = Some(CmdKAction::ApplySpec(Box::new(spec)));
                     }
                     "cmdk-make-prototype" => {
                         queue_pending_ai_op(FigmaAiOp::RemoveBackground);
@@ -1600,8 +1600,7 @@ mod tests {
         doc.insert(page, btn).unwrap();
 
         let txt_id = doc.alloc_id();
-        let mut style = TextStyle::default();
-        style.font_size = 9.0;
+        let style = TextStyle { font_size: 9.0, ..TextStyle::default() };
         let txt = Node::text(txt_id, Rect::new(0.0, 0.0, 60.0, 12.0), "Click", style);
         doc.insert(btn_id, txt).unwrap();
 
