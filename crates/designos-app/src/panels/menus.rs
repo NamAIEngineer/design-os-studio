@@ -595,62 +595,58 @@ fn file_items(app: &App) -> Vec<(MenuItem, Option<Action>)> {
 struct ZoomRowSpec {
     label: &'static str,
     shortcut: &'static str,
-    action: Option<Action>,
+    action: Action,
     checked: bool,
-    has_sub: bool,
     sep_after: bool,
 }
 
-/// Renders the 1:1 Figma UI3 Zoom / View menu (`figma_ui3_zoom_menu.png`) with an editable
-/// zoom percentage box at the top (`#0D99FF` active border ring), Zoom presets, View toggles,
-/// and Collaboration overlays.
-fn show_zoom_menu(app: &mut App, ctx: &Context, id: Id, anchor: Option<Rect>) {
-    let rows = [
-        ZoomRowSpec { label: "Zoom in", shortcut: "⌘+", action: Some(Action::ZoomIn), checked: false, has_sub: false, sep_after: false },
-        ZoomRowSpec { label: "Zoom out", shortcut: "⌘-", action: Some(Action::ZoomOut), checked: false, has_sub: false, sep_after: false },
-        ZoomRowSpec { label: "Zoom to fit", shortcut: "⇧1", action: Some(Action::FitAll), checked: false, has_sub: false, sep_after: false },
-        ZoomRowSpec { label: "Zoom to 50%", shortcut: "", action: Some(Action::ZoomTo(0.5)), checked: false, has_sub: false, sep_after: false },
-        ZoomRowSpec { label: "Zoom to 100%", shortcut: "⌘0", action: Some(Action::Zoom100), checked: false, has_sub: false, sep_after: false },
-        ZoomRowSpec { label: "Zoom to 200%", shortcut: "", action: Some(Action::ZoomTo(2.0)), checked: false, has_sub: false, sep_after: true },
-        ZoomRowSpec { label: "Pixel preview", shortcut: "⇧⌘P", action: None, checked: false, has_sub: true, sep_after: false },
+/// Rows of the Zoom / View menu. Every row runs a real [`Action`]; Figma rows with no
+/// backing feature (pixel preview, outlines, multiplayer cursors, extra labels, annotations)
+/// are not listed.
+fn zoom_rows(app: &App) -> Vec<ZoomRowSpec> {
+    vec![
+        ZoomRowSpec { label: "Zoom in", shortcut: "⌘+", action: Action::ZoomIn, checked: false, sep_after: false },
+        ZoomRowSpec { label: "Zoom out", shortcut: "⌘-", action: Action::ZoomOut, checked: false, sep_after: false },
+        ZoomRowSpec { label: "Zoom to fit", shortcut: "⇧1", action: Action::FitAll, checked: false, sep_after: false },
+        ZoomRowSpec { label: "Zoom to 50%", shortcut: "", action: Action::ZoomTo(0.5), checked: false, sep_after: false },
+        ZoomRowSpec { label: "Zoom to 100%", shortcut: "⌘0", action: Action::Zoom100, checked: false, sep_after: false },
+        ZoomRowSpec { label: "Zoom to 200%", shortcut: "", action: Action::ZoomTo(2.0), checked: false, sep_after: true },
         ZoomRowSpec {
             label: "Pixel grid",
             shortcut: "⌘'",
-            action: Some(Action::TogglePixelGrid),
+            action: Action::TogglePixelGrid,
             checked: app.ui.pixel_grid,
-            has_sub: false,
             sep_after: false,
         },
         ZoomRowSpec {
             label: "Snap to pixel grid",
             shortcut: "⇧⌘'",
-            action: Some(Action::ToggleSnapPixel),
+            action: Action::ToggleSnapPixel,
             checked: !app.ui.no_pixel_snap,
-            has_sub: false,
             sep_after: false,
         },
         ZoomRowSpec {
             label: "Layout guides",
             shortcut: "⌃G",
-            action: Some(Action::ToggleLayoutGrids),
+            action: Action::ToggleLayoutGrids,
             checked: !app.ui.hide_layout_grids,
-            has_sub: false,
             sep_after: false,
         },
-        ZoomRowSpec { label: "Rulers", shortcut: "⇧R", action: Some(Action::ToggleRulers), checked: app.ui.rulers, has_sub: false, sep_after: false },
-        ZoomRowSpec { label: "Outlines", shortcut: "⇧O", action: None, checked: false, has_sub: true, sep_after: false },
-        ZoomRowSpec { label: "Multiplayer cursors", shortcut: "⌥⌘\\", action: None, checked: true, has_sub: false, sep_after: false },
-        ZoomRowSpec { label: "Additional labels", shortcut: "", action: None, checked: false, has_sub: false, sep_after: true },
+        ZoomRowSpec { label: "Rulers", shortcut: "⇧R", action: Action::ToggleRulers, checked: app.ui.rulers, sep_after: true },
         ZoomRowSpec {
             label: "Comments",
             shortcut: "⇧C",
-            action: Some(Action::Tool(Tool::Comment)),
+            action: Action::Tool(Tool::Comment),
             checked: app.tool == Tool::Comment,
-            has_sub: false,
             sep_after: false,
         },
-        ZoomRowSpec { label: "Annotations", shortcut: "⇧Y", action: None, checked: false, has_sub: false, sep_after: false },
-    ];
+    ]
+}
+
+/// Renders the Zoom / View menu (`figma_ui3_zoom_menu.png`) with an editable zoom percentage
+/// box at the top (`#0D99FF` active border ring), zoom presets and view toggles.
+fn show_zoom_menu(app: &mut App, ctx: &Context, id: Id, anchor: Option<Rect>) {
+    let rows = zoom_rows(app);
 
     let screen = ctx.content_rect();
     let w = 212.0;
@@ -713,18 +709,7 @@ fn show_zoom_menu(app: &mut App, ctx: &Context, id: Id, anchor: Option<Rect>) {
                 icons::paint(&p, Icon::Check, Pos2::new(r_rect.left() + 18.0, r_rect.center().y), 12.0, theme::TEXT);
             }
             p.text(Pos2::new(r_rect.left() + 32.0, r_rect.center().y), Align2::LEFT_CENTER, r.label, font.clone(), theme::TEXT);
-            if r.has_sub {
-                icons::paint(&p, Icon::ChevronRight, Pos2::new(r_rect.right() - 16.0, r_rect.center().y), 11.0, theme::ICON_SECONDARY);
-                if !r.shortcut.is_empty() {
-                    p.text(
-                        Pos2::new(r_rect.right() - 28.0, r_rect.center().y),
-                        Align2::RIGHT_CENTER,
-                        r.shortcut,
-                        font.clone(),
-                        if row_resp.hovered() { theme::MENU_SHORTCUT_HIGHLIGHT } else { theme::TEXT_SECONDARY },
-                    );
-                }
-            } else if !r.shortcut.is_empty() {
+            if !r.shortcut.is_empty() {
                 p.text(
                     Pos2::new(r_rect.right() - theme::MENU_SHORTCUT_PAD, r_rect.center().y),
                     Align2::RIGHT_CENTER,
@@ -734,9 +719,7 @@ fn show_zoom_menu(app: &mut App, ctx: &Context, id: Id, anchor: Option<Rect>) {
                 );
             }
             if row_resp.clicked() {
-                if let Some(act) = r.action {
-                    picked = Some(act);
-                }
+                picked = Some(r.action);
             }
             ry += row_h;
             if r.sep_after {
@@ -1066,5 +1049,15 @@ mod tests {
         assert!(matches_query("Zoom to fit", "zoom fit"));
         assert!(matches_query("Zoom to fit", ""));
         assert!(!matches_query("Zoom to fit", "pen"));
+    }
+
+    #[test]
+    fn zoom_menu_lists_only_rows_with_a_real_action() {
+        let app = App::new(designos_doc::Document::new("t"));
+        let labels: Vec<&str> = zoom_rows(&app).iter().map(|r| r.label).collect();
+        for fake in ["Pixel preview", "Outlines", "Multiplayer cursors", "Additional labels", "Annotations"] {
+            assert!(!labels.contains(&fake), "{fake} has no backing feature and must not be listed");
+        }
+        assert!(labels.contains(&"Zoom to fit") && labels.contains(&"Rulers"));
     }
 }
