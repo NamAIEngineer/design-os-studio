@@ -377,9 +377,7 @@ impl TabsState {
 
     /// Saves the current tab, pushes a new `ProjectTab`, switches to it, and closes `Home`.
     pub fn open_new_tab(&mut self, app: &mut App, title: &str, mut doc: Document, kind: ProjectTabKind) -> usize {
-        if self.entries.is_empty() && app.home.is_none() {
-            self.park_active_from_app(app);
-        } else if app.home.is_none() {
+        if app.home.is_none() {
             self.park_active_from_app(app);
         }
         doc.name = title.to_string();

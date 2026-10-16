@@ -57,6 +57,7 @@ impl Axes {
 }
 
 /// Solves a 2D CSS Grid auto-layout frame (`LayoutDirection::Grid`).
+#[allow(clippy::needless_range_loop)] // track index `c`/`r` also addresses the parallel track and placement tables
 pub fn compute_grid(al: &AutoLayout, frame: Vec2, kids: &[ChildIn], spans: &[(u16, u16)]) -> LayoutOut {
     let [pt, pr, pb, pl] = al.padding;
     let cols = if al.grid_columns > 0 { al.grid_columns as usize } else { 3 };

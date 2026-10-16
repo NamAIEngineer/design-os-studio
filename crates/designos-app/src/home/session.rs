@@ -376,10 +376,8 @@ impl App {
     fn watched_disk_path(&self) -> Option<PathBuf> {
         if let (Some(lib), Some(lf)) = (&self.lib, &self.lib_file) {
             Some(lib.path("projects").join(&lf.project_id).join("files").join(format!("{}.designos", lf.id)))
-        } else if let Some(p) = &self.file_path {
-            Some(p.clone())
         } else {
-            None
+            self.file_path.clone()
         }
     }
 

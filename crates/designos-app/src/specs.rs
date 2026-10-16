@@ -942,6 +942,7 @@ impl SpecsState {
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Formats a canonical `product-os-spec-driven` **"Copy cho AI"** citation block.
+#[allow(clippy::too_many_arguments)]
 pub fn format_copy_for_ai(
     quoted_text: &str,
     file_path: &str,
@@ -1530,12 +1531,7 @@ fn find_workspace_root() -> Option<PathBuf> {
         candidates.push(p.to_path_buf());
         cur = p.parent();
     }
-    for cand in candidates {
-        if cand.join("plans").join("specs").is_dir() || cand.join("examples").join("specs").is_dir() {
-            return Some(cand);
-        }
-    }
-    None
+    candidates.into_iter().find(|cand| cand.join("plans").join("specs").is_dir() || cand.join("examples").join("specs").is_dir())
 }
 
 fn collect_json_specs_in(dir: &Path, out: &mut Vec<(String, PathBuf, String)>) {
@@ -2816,7 +2812,7 @@ pub fn show_reader(app: &mut App, ui: &mut Ui, rect: Rect) {
     }
 
     // 3. Bottom-Left Floating Figma Specs Agent Pill (`[ ✦ Ask @agent about this Spec   (↑) ]`)
-    let ask_w = (rect.width() - 40.0).min(460.0).max(180.0);
+    let ask_w = (rect.width() - 40.0).clamp(180.0, 460.0);
     let ask_rect = Rect::from_min_size(Pos2::new(rect.left() + 20.0, rect.bottom() - 42.0), Vec2::new(ask_w, 32.0));
     p.rect_filled(ask_rect, CornerRadius::same(99), pal.doc_sheet);
     p.rect_stroke(ask_rect, CornerRadius::same(99), Stroke::new(1.0, pal.border), StrokeKind::Inside);
@@ -3184,7 +3180,7 @@ fn render_po_view_tab(app: &mut App, ui: &mut Ui, rect: Rect, pkg: &SpecPackage)
 
     clipped(ui, rect, |ui| {
         let p = ui.painter().clone();
-        let col_w = (rect.width() - 64.0).min(680.0).max(240.0);
+        let col_w = (rect.width() - 64.0).clamp(240.0, 680.0);
         let col_x = rect.center().x - col_w * 0.5;
         let sheet_rect = Rect::from_min_size(
             Pos2::new((col_x - 28.0).max(rect.left() + 8.0), rect.top() + 12.0),
@@ -3391,7 +3387,7 @@ fn render_dev_view_tab(app: &mut App, ui: &mut Ui, rect: Rect, pkg: &SpecPackage
 
     clipped(ui, rect, |ui| {
         let p = ui.painter().clone();
-        let col_w = (rect.width() - 64.0).min(680.0).max(240.0);
+        let col_w = (rect.width() - 64.0).clamp(240.0, 680.0);
         let col_x = rect.center().x - col_w * 0.5;
         let sheet_rect = Rect::from_min_size(
             Pos2::new((col_x - 28.0).max(rect.left() + 8.0), rect.top() + 12.0),
@@ -3503,7 +3499,7 @@ fn render_qa_coverage_tab(app: &mut App, ui: &mut Ui, rect: Rect, pkg: &SpecPack
 
     clipped(ui, rect, |ui| {
         let p = ui.painter().clone();
-        let col_w = (rect.width() - 64.0).min(680.0).max(240.0);
+        let col_w = (rect.width() - 64.0).clamp(240.0, 680.0);
         let col_x = rect.center().x - col_w * 0.5;
         let sheet_rect = Rect::from_min_size(
             Pos2::new((col_x - 28.0).max(rect.left() + 8.0), rect.top() + 12.0),
@@ -3573,7 +3569,7 @@ fn render_wireframes_and_contract_tab(app: &mut App, ui: &mut Ui, rect: Rect, pk
 
     clipped(ui, rect, |ui| {
         let p = ui.painter().clone();
-        let col_w = (rect.width() - 64.0).min(680.0).max(240.0);
+        let col_w = (rect.width() - 64.0).clamp(240.0, 680.0);
         let col_x = rect.center().x - col_w * 0.5;
         let sheet_rect = Rect::from_min_size(
             Pos2::new((col_x - 28.0).max(rect.left() + 8.0), rect.top() + 12.0),
@@ -3670,7 +3666,7 @@ fn render_gates_and_canvas_tab(app: &mut App, ui: &mut Ui, rect: Rect, pkg: &Spe
 
     clipped(ui, rect, |ui| {
         let p = ui.painter().clone();
-        let col_w = (rect.width() - 64.0).min(680.0).max(240.0);
+        let col_w = (rect.width() - 64.0).clamp(240.0, 680.0);
         let col_x = rect.center().x - col_w * 0.5;
         let sheet_rect = Rect::from_min_size(
             Pos2::new((col_x - 28.0).max(rect.left() + 8.0), rect.top() + 12.0),
