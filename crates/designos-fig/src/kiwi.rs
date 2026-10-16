@@ -25,6 +25,12 @@ const MAX_DEPTH: usize = 96;
 /// Sizing: a measured real file (723k-node page, 1,058,895 nodes in total) decodes 54,870,017 values, i.e. ~52 per
 /// node (the figure in `KIWI_VALUES_PER_NODE`). 1.06M nodes therefore need ~55M; the cap is 2^28 = 268M, about 4.9x that.
 const MAX_DECODED_VALUES: usize = 1 << 28;
+/// Absolute cap on decoded instances of zero-wire-size definitions (see `Schema::zero_wire_defs`) per message.
+///
+/// A struct whose fields are all (nested) empty structs encodes to no bytes at all, so unlike every other value it
+/// is free for an attacker: a ~40 KB file can claim 2^28 of them, which is ~8 GiB (empty struct) to ~13 GiB (15-field
+/// empty struct) once materialised. Every other value consumes at least one input byte, so the input length bounds it.
+const MAX_ZERO_WIRE_INSTANCES: usize = 1 << 16;
 /// Values per node measured on a real `.fig` (see [`MAX_DECODED_VALUES`]).
 #[cfg(test)]
 const KIWI_VALUES_PER_NODE: usize = 52;
@@ -175,17 +181,24 @@ pub struct Reader<'a> {
     data: &'a [u8],
     pos: usize,
     values_left: usize,
+    /// Per definition: decoding it consumes no input bytes (empty for a reader not driven by a schema).
+    zero_wire: Vec<bool>,
+    zero_wire_left: usize,
 }
 
 impl<'a> Reader<'a> {
     pub fn new(data: &'a [u8]) -> Self {
-        Self { data, pos: 0, values_left: usize::MAX }
+        Self { data, pos: 0, values_left: usize::MAX, zero_wire: Vec::new(), zero_wire_left: usize::MAX }
     }
     pub fn remaining(&self) -> usize {
         self.data.len() - self.pos
     }
     fn charge(&mut self) -> Result<()> {
         self.values_left = self.values_left.checked_sub(1).ok_or_else(|| KiwiError::Bad("decoded value count exceeds budget".into()))?;
+        Ok(())
+    }
+    fn charge_zero_wire(&mut self) -> Result<()> {
+        self.zero_wire_left = self.zero_wire_left.checked_sub(1).ok_or_else(|| KiwiError::Bad("zero-size struct count exceeds budget".into()))?;
         Ok(())
     }
     pub fn at_end(&self) -> bool {
@@ -334,14 +347,49 @@ impl Schema {
 
     /// Decodes a root message of definition `root`.
     pub fn decode_message(&self, root: usize, data: &[u8]) -> Result<KiwiValue> {
-        self.decode_message_with_budget(root, data, MAX_DECODED_VALUES)
+        self.decode_message_with_limits(root, data, MAX_DECODED_VALUES, MAX_ZERO_WIRE_INSTANCES)
     }
 
+    /// Only the value budget applies; zero-size instances are unlimited (tests the value budget in isolation).
+    #[cfg(test)]
     fn decode_message_with_budget(&self, root: usize, data: &[u8], budget: usize) -> Result<KiwiValue> {
+        self.decode_message_with_limits(root, data, budget, usize::MAX)
+    }
+
+    fn decode_message_with_limits(&self, root: usize, data: &[u8], values: usize, zero_wire_instances: usize) -> Result<KiwiValue> {
         let mut r = Reader::new(data);
-        r.values_left = budget;
+        r.values_left = values;
+        r.zero_wire = self.zero_wire_defs();
+        r.zero_wire_left = zero_wire_instances;
         r.charge()?;
         self.decode_def(root, &mut r, 0)
+    }
+
+    /// Per definition: whether one instance occupies zero bytes on the wire. Enums (a varint), messages (a terminator)
+    /// and arrays (a length) always take bytes; a struct takes none only if every field is a non-array zero-size struct.
+    /// A cyclic struct can never finish decoding, so it is not reported as zero-size.
+    fn zero_wire_defs(&self) -> Vec<bool> {
+        #[derive(Clone, Copy, PartialEq)]
+        enum State {
+            Unknown,
+            Visiting,
+            Zero,
+            NonZero,
+        }
+        fn resolve(defs: &[Def], i: usize, state: &mut [State]) -> bool {
+            match state[i] {
+                State::Zero => return true,
+                State::NonZero | State::Visiting => return false,
+                State::Unknown => {}
+            }
+            state[i] = State::Visiting;
+            let zero = defs[i].kind == DefKind::Struct
+                && defs[i].fields.iter().all(|f| !f.is_array && matches!(f.ty, FieldType::Def(d) if d < defs.len() && resolve(defs, d, state)));
+            state[i] = if zero { State::Zero } else { State::NonZero };
+            zero
+        }
+        let mut state = vec![State::Unknown; self.defs.len()];
+        (0..self.defs.len()).map(|i| resolve(&self.defs, i, &mut state)).collect()
     }
 
     /// Picks the `Message` definition (Figma's root), falling back to the last message def.
@@ -411,6 +459,9 @@ impl Schema {
 
     fn decode_type(&self, ty: FieldType, r: &mut Reader, depth: usize) -> Result<KiwiValue> {
         r.charge()?;
+        if matches!(ty, FieldType::Def(i) if r.zero_wire.get(i) == Some(&true)) {
+            r.charge_zero_wire()?;
+        }
         Ok(match ty {
             FieldType::Native(n) => match n {
                 Native::Bool => KiwiValue::Bool(r.byte()? != 0),
