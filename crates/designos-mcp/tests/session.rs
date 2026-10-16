@@ -1,13 +1,20 @@
 use designos_mcp::server::Session;
 use serde_json::json;
-use std::{fs, path::PathBuf};
+use std::{
+    fs,
+    path::PathBuf,
+    sync::atomic::{AtomicU64, Ordering},
+};
+
+static WORKSPACE_SEQ: AtomicU64 = AtomicU64::new(0);
 
 struct Workspace(PathBuf);
 impl Workspace {
     fn new() -> Self {
         let nonce = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
-        let p = std::env::temp_dir().join(format!("designos-mcp-{}-{nonce}", std::process::id()));
-        fs::create_dir(&p).unwrap();
+        let seq = WORKSPACE_SEQ.fetch_add(1, Ordering::Relaxed);
+        let p = std::env::temp_dir().join(format!("designos-mcp-{}-{nonce}-{seq}", std::process::id()));
+        fs::create_dir_all(&p).unwrap();
         Self(p)
     }
 }
