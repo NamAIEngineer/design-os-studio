@@ -268,9 +268,33 @@ impl Document {
         Self { name: name.into(), ..Default::default() }
     }
 
+    /// Hands out a fresh id. The counter never wraps: once it is exhausted (a hostile or
+    /// corrupted file can carry ids near `u64::MAX`) the lowest id no node uses is returned
+    /// instead. Falling back to a real gap, rather than saturating at `u64::MAX`, keeps the id
+    /// unique without any extra state in the document; the caller is expected to insert the node
+    /// before allocating again, as every call site does.
     pub fn alloc_id(&mut self) -> NodeId {
-        self.next_id += 1;
-        NodeId(self.next_id)
+        match self.next_id.checked_add(1) {
+            Some(next) => {
+                self.next_id = next;
+                NodeId(next)
+            }
+            None => self.lowest_unused_id(),
+        }
+    }
+
+    /// Smallest id (never 0) that no node uses; scans the sorted keys once.
+    fn lowest_unused_id(&self) -> NodeId {
+        let mut candidate = 1u64;
+        for id in self.nodes.keys() {
+            match id.0.cmp(&candidate) {
+                std::cmp::Ordering::Less => {}
+                // saturating: all of 1..=u64::MAX in use would need more memory than exists.
+                std::cmp::Ordering::Equal => candidate = candidate.saturating_add(1),
+                std::cmp::Ordering::Greater => break,
+            }
+        }
+        NodeId(candidate)
     }
 
     /// Allocate safely after importing a document whose stored counter may be

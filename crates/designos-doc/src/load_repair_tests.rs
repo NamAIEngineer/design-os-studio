@@ -154,3 +154,69 @@ fn valid_document_is_untouched() {
     let back = reload(&d);
     assert_eq!(back.to_json().unwrap(), before);
 }
+
+#[test]
+fn page_listed_under_another_pages_node_stays_a_root() {
+    let mut d = Document::new("Pages");
+    let p1 = d.add_page("P1");
+    let p2 = d.add_page("P2");
+    let x = d.alloc_id();
+    d.insert(p1, Node::frame(x, Rect::new(0.0, 0.0, 10.0, 10.0))).unwrap();
+    let y = d.alloc_id();
+    d.insert(p2, Node::rectangle(y, Rect::new(0.0, 0.0, 10.0, 10.0))).unwrap();
+    d.nodes.get_mut(&x).unwrap().children.push(p2);
+    let (mut back, report) = Document::from_json_with_report(&d.to_json().unwrap()).unwrap();
+    assert_consistent(&mut back);
+    assert_eq!(back.nodes[&p2].parent, None, "a page never gains a parent");
+    assert!(!back.nodes[&x].children.contains(&p2));
+    assert_eq!(back.pages, vec![p1, p2]);
+    assert_eq!(back.page_of(y), Some(p2), "the page keeps its own content");
+    assert_eq!(report.duplicate_claims, 1);
+}
+
+#[test]
+fn library_page_listed_under_a_page_node_stays_a_root() {
+    let (mut d, _page, frame, _rect) = sample();
+    let lib = d.alloc_id();
+    d.nodes.insert(lib, Node::new(lib, crate::NodeKind::Page { background: crate::Color::rgb(0, 0, 0) }));
+    d.library_page = Some(lib);
+    d.nodes.get_mut(&frame).unwrap().children.push(lib);
+    let mut back = reload(&d);
+    assert_consistent(&mut back);
+    assert_eq!(back.nodes[&lib].parent, None);
+    assert!(!back.nodes[&frame].children.contains(&lib));
+}
+
+#[test]
+fn max_node_id_loads_without_overflow_and_is_flagged() {
+    let mut d = Document::new("Max");
+    let page = d.add_page("P");
+    d.insert(page, Node::rectangle(NodeId(u64::MAX), Rect::new(0.0, 0.0, 1.0, 1.0))).unwrap();
+    let mut v = serde_json::to_value(&d).unwrap();
+    v["next_id"] = serde_json::json!(5);
+    let (mut back, report) = Document::from_json_with_report(&v.to_string()).unwrap();
+    assert!(report.id_space_exhausted);
+    assert!(report.structural_summary().unwrap().contains("too close to the maximum"));
+    let fresh = back.alloc_id();
+    assert!(!back.nodes.contains_key(&fresh), "alloc_id must not collide with {fresh:?}");
+}
+
+#[test]
+fn alloc_id_never_wraps_when_the_counter_is_exhausted() {
+    let (mut d, page, frame, rect) = sample();
+    d.next_id = u64::MAX;
+    let fresh = d.alloc_id();
+    assert!(fresh.0 > 0 && ![page, frame, rect].contains(&fresh));
+    assert_eq!(fresh, NodeId(4), "the lowest unused id is handed out");
+    d.insert(page, Node::rectangle(fresh, Rect::new(0.0, 0.0, 1.0, 1.0))).unwrap();
+    let next = d.alloc_id();
+    assert_eq!(next, NodeId(5));
+    assert!(!d.nodes.contains_key(&next));
+}
+
+#[test]
+fn headroom_below_the_limit_is_not_flagged() {
+    let (d, ..) = sample();
+    let (_, report) = Document::from_json_with_report(&d.to_json().unwrap()).unwrap();
+    assert!(!report.id_space_exhausted && report.is_clean());
+}

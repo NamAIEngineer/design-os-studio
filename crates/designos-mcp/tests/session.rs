@@ -6,7 +6,10 @@ struct Workspace(PathBuf);
 impl Workspace {
     fn new() -> Self {
         let nonce = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
-        let p = std::env::temp_dir().join(format!("designos-mcp-{}-{nonce}", std::process::id()));
+        // The counter keeps two workspaces created within one clock tick apart.
+        static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let p = std::env::temp_dir().join(format!("designos-mcp-{}-{nonce}-{seq}", std::process::id()));
         fs::create_dir(&p).unwrap();
         Self(p)
     }
@@ -89,4 +92,21 @@ fn imported_stale_id_counter_does_not_overwrite_existing_nodes() {
     let before = s.engine.doc.to_json().unwrap();
     assert!(s.call("designos_create_node", json!({"parent_id":page,"kind":"rectangle"})).unwrap_err().contains("exhausted"));
     assert_eq!(s.engine.doc.to_json().unwrap(), before);
+}
+
+#[test]
+fn node_id_without_allocation_headroom_is_refused_on_open() {
+    use designos_doc::{Node, NodeId, Rect};
+    let dir = Workspace::new();
+    let mut s = Session::new(&dir.0).unwrap();
+    let before = s.call("designos_get_document", json!({})).unwrap();
+    let mut doc = s.engine.doc.clone();
+    let page = doc.pages[0];
+    doc.insert(page, Node::rectangle(NodeId(u64::MAX), Rect::new(0.0, 0.0, 1.0, 1.0))).unwrap();
+    fs::write(dir.0.join("maxid.designos"), doc.to_json().unwrap()).unwrap();
+
+    let err = s.call("designos_open_file", json!({"path":"maxid.designos","discard_changes":true})).unwrap_err();
+
+    assert!(err.contains("malformed") && err.contains("too close to the maximum"), "{err}");
+    assert_eq!(s.call("designos_get_document", json!({})).unwrap(), before, "the session keeps its document");
 }
