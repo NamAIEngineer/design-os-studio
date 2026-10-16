@@ -42,7 +42,7 @@ fn message_claiming(repeats: usize, claimed: usize) -> Vec<u8> {
         varint(claimed as u32, &mut msg);
     }
     msg.push(0);
-    msg.extend(std::iter::repeat(0u8).take(claimed));
+    msg.extend(std::iter::repeat_n(0u8, claimed));
     msg
 }
 
@@ -94,7 +94,7 @@ fn structs_that_take_bytes_are_not_subject_to_the_zero_size_cap() {
     let mut msg = Vec::new();
     varint(1, &mut msg);
     varint(30_000, &mut msg);
-    msg.extend(std::iter::repeat(7u8).take(30_000));
+    msg.extend(std::iter::repeat_n(7u8, 30_000));
     msg.push(0);
     let v = schema.decode_message(m, &msg).unwrap();
     assert_eq!(v.get("a").and_then(|a| a.as_array()).map(<[_]>::len), Some(30_000));
@@ -115,7 +115,7 @@ fn array_fields_inside_a_struct_make_it_take_bytes() {
     let mut msg = Vec::new();
     varint(1, &mut msg);
     varint(20_000, &mut msg);
-    msg.extend(std::iter::repeat(0u8).take(20_000));
+    msg.extend(std::iter::repeat_n(0u8, 20_000));
     msg.push(0);
     let v = schema.decode_message(m, &msg).unwrap();
     assert_eq!(v.get("h").and_then(|a| a.as_array()).map(<[_]>::len), Some(20_000));
