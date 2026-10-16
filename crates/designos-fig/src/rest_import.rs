@@ -10,9 +10,6 @@ use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 const MAX_DEPTH: usize = 300;
-/// Deepest chain of components nested in components that is expanded recursively; deeper
-/// instances are expanded later from the top level, so no chain can exhaust the stack.
-const MAX_EXPAND_DEPTH: usize = 64;
 
 // ------------------------------------------------------------ JSON helpers
 
@@ -378,8 +375,6 @@ struct Ctx<'a> {
     blob_cache: HashMap<(usize, bool), Path>,
     /// Components whose nested instances have already been expanded.
     expanded_comps: HashSet<NodeId>,
-    /// Current `expand_rec` nesting; bounds recursion along component-in-component chains.
-    expand_depth: usize,
     /// Whether any `CONNECTOR` node was encountered during import.
     has_connectors: bool,
 }
@@ -497,7 +492,6 @@ pub(crate) fn import_rest_value_with_blobs<'a>(
         path_cache: HashMap::new(),
         blob_cache: HashMap::with_capacity(blobs.len()),
         expanded_comps: HashSet::new(),
-        expand_depth: 0,
         has_connectors: false,
     };
     if let Some(comps) = v.get("components").and_then(Value::as_object) {
@@ -1181,28 +1175,39 @@ impl<'a> Ctx<'a> {
 
     /// Expands `inst`, first expanding instances nested inside its component so
     /// their (overridden) children are copied too.
+    ///
+    /// Iterative post-order walk on an explicit stack, so a chain of any depth is expanded completely
+    /// (inner components first, each before it is cloned) without growing the call stack. An instance is
+    /// entered once (`done`) and a component's nested instances are listed once (`expanded_comps`), which
+    /// keeps component cycles finite.
     fn expand_rec(&mut self, inst: NodeId, targets: &BTreeMap<NodeId, NodeId>, done: &mut BTreeSet<NodeId>) {
-        if self.expand_depth >= MAX_EXPAND_DEPTH {
-            return;
+        enum Step {
+            Enter(NodeId),
+            Finish(NodeId, NodeId),
         }
-        self.expand_depth += 1;
-        self.expand_rec_bounded(inst, targets, done);
-        self.expand_depth -= 1;
-    }
-
-    fn expand_rec_bounded(&mut self, inst: NodeId, targets: &BTreeMap<NodeId, NodeId>, done: &mut BTreeSet<NodeId>) {
-        if !done.insert(inst) {
-            return;
+        let mut stack = vec![Step::Enter(inst)];
+        while let Some(step) = stack.pop() {
+            match step {
+                Step::Enter(inst) => {
+                    if !done.insert(inst) {
+                        continue;
+                    }
+                    let Some(&comp) = targets.get(&inst) else { continue };
+                    stack.push(Step::Finish(inst, comp));
+                    // Reversed so the lowest id is expanded first, which keeps clone ids deterministic.
+                    stack.extend(self.take_nested_instances(comp, targets).into_iter().rev().map(Step::Enter));
+                }
+                Step::Finish(inst, comp) => {
+                    self.expand_instance(inst, comp);
+                    if let Some(s) = self.scales.get(&inst).copied() {
+                        self.scale_contents(inst, s);
+                    }
+                    // Property values first: an instance swap changes which nodes the overrides address.
+                    self.apply_props(inst, targets, done);
+                    self.apply_overrides(inst, targets, done);
+                }
+            }
         }
-        let Some(&comp) = targets.get(&inst) else { return };
-        self.expand_nested(comp, targets, done);
-        self.expand_instance(inst, comp);
-        if let Some(s) = self.scales.get(&inst).copied() {
-            self.scale_contents(inst, s);
-        }
-        // Property values first: an instance swap changes which nodes the overrides address.
-        self.apply_props(inst, targets, done);
-        self.apply_overrides(inst, targets, done);
     }
 
     /// Scales the copied children of an instance made with the scale tool
@@ -1267,8 +1272,15 @@ impl<'a> Ctx<'a> {
 
     /// Expands the instances inside `comp` (innermost first).
     fn expand_nested(&mut self, comp: NodeId, targets: &BTreeMap<NodeId, NodeId>, done: &mut BTreeSet<NodeId>) {
+        for n in self.take_nested_instances(comp, targets) {
+            self.expand_rec(n, targets, done);
+        }
+    }
+
+    /// Instances inside `comp` that still have to be expanded, lowest id first; empty once `comp` was listed.
+    fn take_nested_instances(&mut self, comp: NodeId, targets: &BTreeMap<NodeId, NodeId>) -> Vec<NodeId> {
         if !self.expanded_comps.insert(comp) {
-            return;
+            return Vec::new();
         }
         let mut stack = vec![comp];
         let mut nested = Vec::new();
@@ -1281,9 +1293,7 @@ impl<'a> Ctx<'a> {
             }
         }
         nested.sort();
-        for n in nested {
-            self.expand_rec(n, targets, done);
-        }
+        nested
     }
 
     /// Applies the instance's component property values to the nodes of its
@@ -1379,40 +1389,36 @@ impl<'a> Ctx<'a> {
         let prefix = if fast_clone { String::new() } else { self.doc.get(inst).and_then(|n| n.source_id.clone()).unwrap_or_default() };
         let kids = self.doc.get(comp).map(|n| n.children.clone()).unwrap_or_default();
         let mut budget = 50_000usize;
-        for k in kids {
-            self.clone_subtree(k, inst, &prefix, &mut budget, 0, fast_clone);
-        }
-    }
-
-    fn clone_subtree(&mut self, src: NodeId, parent: NodeId, prefix: &str, budget: &mut usize, depth: usize, fast_clone: bool) {
-        if *budget == 0 || depth > MAX_DEPTH {
-            return;
-        }
-        *budget -= 1;
-        let Some(mut n) = self.doc.get(src).cloned() else { return };
-        let orig_children = std::mem::take(&mut n.children);
-        let id = self.fresh_id();
-        n.id = id;
-        n.parent = Some(parent);
-        if fast_clone {
-            n.fig_metadata.clear();
-        } else {
-            n.source_id = n.source_id.as_ref().map(|s| format!("I{prefix};{s}"));
-        }
-        n.component.source = Some(src);
-        n.component.overrides.clear();
-        n.component.props.clear();
-        let container = n.kind.is_container();
-        if let Some(k) = self.override_keys.get(&src).cloned() {
-            self.override_keys.insert(id, k);
-        }
-        self.doc.nodes.insert(id, n);
-        if let Some(p) = self.doc.nodes.get_mut(&parent) {
-            p.children.push(id);
-        }
-        if container {
-            for c in orig_children {
-                self.clone_subtree(c, id, prefix, budget, depth + 1, fast_clone);
+        // Pre-order on an explicit stack: a component of any depth is copied completely without recursion.
+        let mut stack: Vec<(NodeId, NodeId)> = kids.into_iter().rev().map(|k| (k, inst)).collect();
+        while let Some((src, parent)) = stack.pop() {
+            if budget == 0 {
+                return;
+            }
+            budget -= 1;
+            let Some(mut n) = self.doc.get(src).cloned() else { continue };
+            let orig_children = std::mem::take(&mut n.children);
+            let id = self.fresh_id();
+            n.id = id;
+            n.parent = Some(parent);
+            if fast_clone {
+                n.fig_metadata.clear();
+            } else {
+                n.source_id = n.source_id.as_ref().map(|s| format!("I{prefix};{s}"));
+            }
+            n.component.source = Some(src);
+            n.component.overrides.clear();
+            n.component.props.clear();
+            let container = n.kind.is_container();
+            if let Some(k) = self.override_keys.get(&src).cloned() {
+                self.override_keys.insert(id, k);
+            }
+            self.doc.nodes.insert(id, n);
+            if let Some(p) = self.doc.nodes.get_mut(&parent) {
+                p.children.push(id);
+            }
+            if container {
+                stack.extend(orig_children.into_iter().rev().map(|c| (c, id)));
             }
         }
     }
@@ -2480,6 +2486,42 @@ mod expand_depth_tests {
         }
         kids.push(json!({"id": "1:1", "name": "Use", "type": "INSTANCE", "componentId": "10:1", "size": {"x": 4, "y": 4}}));
         json!({"document": {"type": "DOCUMENT", "children": [{"id": "0:1", "type": "CANVAS", "children": kids}]}})
+    }
+
+    fn subtree_of_named(doc: &Document, name: &str) -> Vec<String> {
+        let root = doc.nodes.values().find(|n| n.name == name).unwrap_or_else(|| panic!("no node named {name}")).id;
+        let mut out = Vec::new();
+        let mut stack = vec![root];
+        while let Some(id) = stack.pop() {
+            let n = doc.get(id).unwrap();
+            out.push(n.name.clone());
+            stack.extend(n.children.iter().copied());
+        }
+        out
+    }
+
+    #[test]
+    fn deep_component_chain_expands_completely() {
+        // Use -> C0 -> C1 -> ... -> C(len-1) -> Dot: every link must be expanded before it is cloned, however deep.
+        for len in [70usize, 100, 200, 400] {
+            let doc = import_rest_value(&component_chain(len), true).unwrap();
+            let names = subtree_of_named(&doc, "Use");
+            assert_eq!(names.len(), len + 1, "chain of {len}");
+            assert!(names.iter().any(|n| n == "Dot"), "chain of {len} lost its leaf");
+        }
+    }
+
+    #[test]
+    fn component_cycles_still_terminate() {
+        // C0 holds an instance of C1 and C1 an instance of C0.
+        let doc = json!({"document": {"type": "DOCUMENT", "children": [{"id": "0:1", "type": "CANVAS", "children": [
+            {"id": "10:1", "name": "C0", "type": "COMPONENT", "size": {"x": 4, "y": 4}, "children": [
+                {"id": "10:2", "name": "toC1", "type": "INSTANCE", "componentId": "11:1", "size": {"x": 4, "y": 4}}]},
+            {"id": "11:1", "name": "C1", "type": "COMPONENT", "size": {"x": 4, "y": 4}, "children": [
+                {"id": "11:2", "name": "toC0", "type": "INSTANCE", "componentId": "10:1", "size": {"x": 4, "y": 4}}]},
+            {"id": "1:1", "name": "Use", "type": "INSTANCE", "componentId": "10:1", "size": {"x": 4, "y": 4}}]}]}});
+        let imported = import_rest_value(&doc, true).unwrap();
+        assert!(imported.nodes.len() < 50, "{}", imported.nodes.len());
     }
 
     #[test]
