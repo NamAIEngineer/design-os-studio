@@ -1471,10 +1471,7 @@ mod tests {
     fn long_acyclic_alias_chain_still_resolves() {
         let mut vars = vec![r#""v0":{"type":"number","value":42}"#.to_string()];
         vars.extend((1..2000).map(|i| format!(r#""v{i}":{{"type":"number","value":"$v{}"}}"#, i - 1)));
-        let json = format!(
-            r##"{{"version":"1.0","variables":{{{}}},"children":[{{"id":"n","type":"frame","width":"$v1999","height":10}}]}}"##,
-            vars.join(",")
-        );
+        let json = format!(r##"{{"version":"1.0","variables":{{{}}},"children":[{{"id":"n","type":"frame","width":"$v1999","height":10}}]}}"##, vars.join(","));
         let doc = import_pen_json(&json).unwrap();
         let n = doc.get(doc.get(doc.pages[0]).unwrap().children[0]).unwrap();
         assert_eq!(n.size.x, 42.0);
@@ -1502,11 +1499,9 @@ mod tests {
 
     #[test]
     fn exhausted_clone_budget_keeps_earlier_instances_and_skips_later_ones() {
-        let mut kids = vec![
-            r##"{"id":"comp","type":"frame","reusable":true,"children":[
+        let mut kids = vec![r##"{"id":"comp","type":"frame","reusable":true,"children":[
             {"id":"l1","type":"frame"},{"id":"l2","type":"frame"},{"id":"l3","type":"frame"}]}"##
-                .to_string(),
-        ];
+            .to_string()];
         kids.extend((0..5).map(|i| format!(r##"{{"id":"i{i}","type":"ref","ref":"comp"}}"##)));
         let json = format!(r##"{{"version":"1.0","children":[{}]}}"##, kids.join(","));
 

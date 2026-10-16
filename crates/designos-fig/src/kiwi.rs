@@ -786,7 +786,7 @@ mod tests {
     #[test]
     fn value_budget_covers_real_files_with_margin() {
         const REAL_NODES: usize = 1_060_000;
-        assert!(MAX_DECODED_VALUES >= 4 * REAL_NODES * KIWI_VALUES_PER_NODE, "{MAX_DECODED_VALUES}");
+        const { assert!(MAX_DECODED_VALUES >= 4 * REAL_NODES * KIWI_VALUES_PER_NODE) };
     }
 
     #[test]
