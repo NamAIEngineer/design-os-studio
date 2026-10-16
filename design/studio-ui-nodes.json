@@ -1,0 +1,511 @@
+[
+  {
+    "name": "TopWindowTitleBar",
+    "type": "FRAME",
+    "role": "navigation",
+    "cornerRadius": 0,
+    "itemSpacing": 8,
+    "paddingTop": 4,
+    "paddingRight": 12,
+    "paddingBottom": 4,
+    "paddingLeft": 12,
+    "fills": [
+      {
+        "hex": "#121215",
+        "boundToken": "colors.canvas"
+      }
+    ],
+    "children": [
+      {
+        "name": "BrandTitle",
+        "type": "TEXT",
+        "characters": "design:os studio",
+        "fills": [
+          {
+            "hex": "#f5f5f7",
+            "boundToken": "colors.bg-foreground"
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "name": "TopTabBar",
+    "type": "INSTANCE",
+    "mainComponent": "Navigation/TopTabBar",
+    "detached": false,
+    "cornerRadius": 0,
+    "itemSpacing": 4,
+    "paddingTop": 4,
+    "paddingRight": 8,
+    "paddingBottom": 4,
+    "paddingLeft": 8,
+    "fills": [
+      {
+        "hex": "#18181b",
+        "boundToken": "colors.bg"
+      }
+    ],
+    "children": [
+      {
+        "name": "HomeTabButton",
+        "type": "INSTANCE",
+        "mainComponent": "Button/Secondary",
+        "detached": false,
+        "cornerRadius": 4,
+        "itemSpacing": 4,
+        "paddingTop": 4,
+        "paddingRight": 8,
+        "paddingBottom": 4,
+        "paddingLeft": 8,
+        "fills": [
+          {
+            "hex": "#27272a",
+            "boundToken": "colors.secondary"
+          }
+        ]
+      },
+      {
+        "name": "ActiveDocumentTab",
+        "type": "FRAME",
+        "cornerRadius": 4,
+        "itemSpacing": 8,
+        "paddingTop": 4,
+        "paddingRight": 12,
+        "paddingBottom": 4,
+        "paddingLeft": 12,
+        "fills": [
+          {
+            "hex": "#1e1e22",
+            "boundToken": "colors.surface"
+          }
+        ],
+        "children": [
+          {
+            "name": "DocumentTitle",
+            "type": "TEXT",
+            "characters": "Design System v2",
+            "fills": [
+              {
+                "hex": "#f5f5f7",
+                "boundToken": "colors.surface-foreground"
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "name": "LeftRail",
+    "type": "INSTANCE",
+    "mainComponent": "Navigation/LeftRail",
+    "detached": false,
+    "cornerRadius": 0,
+    "itemSpacing": 8,
+    "paddingTop": 8,
+    "paddingRight": 8,
+    "paddingBottom": 8,
+    "paddingLeft": 8,
+    "fills": [
+      {
+        "hex": "#18181b",
+        "boundToken": "colors.bg"
+      }
+    ]
+  },
+  {
+    "name": "HomeSidebar",
+    "type": "FRAME",
+    "role": "navigation",
+    "cornerRadius": 0,
+    "itemSpacing": 4,
+    "paddingTop": 16,
+    "paddingRight": 12,
+    "paddingBottom": 16,
+    "paddingLeft": 12,
+    "fills": [
+      {
+        "hex": "#18181b",
+        "boundToken": "colors.bg"
+      }
+    ],
+    "children": [
+      {
+        "name": "HomeSearchInput",
+        "type": "INSTANCE",
+        "mainComponent": "Input/PropertyField",
+        "detached": false,
+        "cornerRadius": 4,
+        "itemSpacing": 8,
+        "paddingTop": 4,
+        "paddingRight": 8,
+        "paddingBottom": 4,
+        "paddingLeft": 8,
+        "fills": [
+          {
+            "hex": "#121215",
+            "boundToken": "colors.input"
+          }
+        ]
+      },
+      {
+        "name": "NavRecentsRow",
+        "type": "FRAME",
+        "cornerRadius": 8,
+        "itemSpacing": 8,
+        "paddingTop": 8,
+        "paddingRight": 12,
+        "paddingBottom": 8,
+        "paddingLeft": 12,
+        "fills": [
+          {
+            "hex": "#2b1d16",
+            "boundToken": "colors.accent"
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "name": "HomeMainView",
+    "type": "FRAME",
+    "role": "main",
+    "cornerRadius": 0,
+    "itemSpacing": 24,
+    "paddingTop": 24,
+    "paddingRight": 32,
+    "paddingBottom": 24,
+    "paddingLeft": 32,
+    "fills": [
+      {
+        "hex": "#121215",
+        "boundToken": "colors.canvas"
+      }
+    ],
+    "children": [
+      {
+        "name": "HomeHeaderActions",
+        "type": "FRAME",
+        "cornerRadius": 0,
+        "itemSpacing": 8,
+        "paddingTop": 0,
+        "paddingRight": 0,
+        "paddingBottom": 0,
+        "paddingLeft": 0,
+        "fills": [
+          {
+            "hex": "#121215",
+            "boundToken": "colors.canvas"
+          }
+        ],
+        "children": [
+          {
+            "name": "ImportFileButton",
+            "type": "INSTANCE",
+            "mainComponent": "Button/Secondary",
+            "detached": false,
+            "cornerRadius": 8,
+            "itemSpacing": 8,
+            "paddingTop": 4,
+            "paddingRight": 12,
+            "paddingBottom": 4,
+            "paddingLeft": 12,
+            "fills": [
+              {
+                "hex": "#27272a",
+                "boundToken": "colors.secondary"
+              }
+            ]
+          },
+          {
+            "name": "CreateNewFileButton",
+            "type": "INSTANCE",
+            "mainComponent": "Button/Primary",
+            "detached": false,
+            "cornerRadius": 8,
+            "itemSpacing": 8,
+            "paddingTop": 4,
+            "paddingRight": 12,
+            "paddingBottom": 4,
+            "paddingLeft": 12,
+            "fills": [
+              {
+                "hex": "#e36323",
+                "boundToken": "colors.primary"
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "name": "StarterTemplatesTray",
+        "type": "FRAME",
+        "cornerRadius": 8,
+        "itemSpacing": 16,
+        "paddingTop": 16,
+        "paddingRight": 16,
+        "paddingBottom": 16,
+        "paddingLeft": 16,
+        "fills": [
+          {
+            "hex": "#18181b",
+            "boundToken": "colors.bg"
+          }
+        ],
+        "children": [
+          {
+            "name": "StarterTemplateItem",
+            "type": "INSTANCE",
+            "mainComponent": "Card/StarterTemplate",
+            "detached": false,
+            "cornerRadius": 8,
+            "itemSpacing": 8,
+            "paddingTop": 12,
+            "paddingRight": 12,
+            "paddingBottom": 12,
+            "paddingLeft": 12,
+            "fills": [
+              {
+                "hex": "#1e1e22",
+                "boundToken": "colors.card"
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "name": "RecentFilesGrid",
+        "type": "FRAME",
+        "cornerRadius": 0,
+        "itemSpacing": 24,
+        "paddingTop": 0,
+        "paddingRight": 0,
+        "paddingBottom": 0,
+        "paddingLeft": 0,
+        "fills": [
+          {
+            "hex": "#121215",
+            "boundToken": "colors.canvas"
+          }
+        ],
+        "children": [
+          {
+            "name": "FileThumbnailItem",
+            "type": "INSTANCE",
+            "mainComponent": "Card/FileThumbnail",
+            "detached": false,
+            "cornerRadius": 8,
+            "itemSpacing": 8,
+            "paddingTop": 12,
+            "paddingRight": 12,
+            "paddingBottom": 12,
+            "paddingLeft": 12,
+            "fills": [
+              {
+                "hex": "#1e1e22",
+                "boundToken": "colors.card"
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "name": "LeftLayersPanel",
+    "type": "FRAME",
+    "role": "complementary",
+    "cornerRadius": 0,
+    "itemSpacing": 4,
+    "paddingTop": 8,
+    "paddingRight": 8,
+    "paddingBottom": 8,
+    "paddingLeft": 8,
+    "fills": [
+      {
+        "hex": "#18181b",
+        "boundToken": "colors.bg"
+      }
+    ],
+    "children": [
+      {
+        "name": "ComponentLayerRow",
+        "type": "FRAME",
+        "cornerRadius": 4,
+        "itemSpacing": 8,
+        "paddingTop": 4,
+        "paddingRight": 8,
+        "paddingBottom": 4,
+        "paddingLeft": 8,
+        "fills": [
+          {
+            "hex": "#1e1e22",
+            "boundToken": "colors.surface"
+          }
+        ],
+        "children": [
+          {
+            "name": "ComponentLayerLabel",
+            "type": "TEXT",
+            "characters": "Card/FileThumbnail",
+            "fills": [
+              {
+                "hex": "#06b6d4",
+                "boundToken": "colors.component"
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "name": "AgentTerminalPanel",
+    "type": "INSTANCE",
+    "mainComponent": "Panel/AgentTerminal",
+    "detached": false,
+    "cornerRadius": 0,
+    "itemSpacing": 8,
+    "paddingTop": 8,
+    "paddingRight": 8,
+    "paddingBottom": 8,
+    "paddingLeft": 8,
+    "fills": [
+      {
+        "hex": "#121215",
+        "boundToken": "colors.canvas"
+      }
+    ],
+    "children": [
+      {
+        "name": "AgentStatusBadge",
+        "type": "INSTANCE",
+        "mainComponent": "Badge/StatusCount",
+        "detached": false,
+        "cornerRadius": 100,
+        "itemSpacing": 4,
+        "paddingTop": 4,
+        "paddingRight": 8,
+        "paddingBottom": 4,
+        "paddingLeft": 8,
+        "fills": [
+          {
+            "hex": "#14ae5c",
+            "boundToken": "colors.success"
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "name": "CanvasViewport",
+    "type": "FRAME",
+    "role": "region",
+    "cornerRadius": 0,
+    "itemSpacing": 0,
+    "paddingTop": 0,
+    "paddingRight": 0,
+    "paddingBottom": 0,
+    "paddingLeft": 0,
+    "fills": [
+      {
+        "hex": "#121215",
+        "boundToken": "colors.canvas"
+      }
+    ]
+  },
+  {
+    "name": "BottomCanvasToolbar",
+    "type": "INSTANCE",
+    "mainComponent": "Navigation/BottomCanvasToolbar",
+    "detached": false,
+    "cornerRadius": 12,
+    "itemSpacing": 8,
+    "paddingTop": 8,
+    "paddingRight": 8,
+    "paddingBottom": 8,
+    "paddingLeft": 8,
+    "fills": [
+      {
+        "hex": "#18181b",
+        "boundToken": "colors.bg"
+      }
+    ]
+  },
+  {
+    "name": "RightInspectorPanel",
+    "type": "INSTANCE",
+    "mainComponent": "Panel/RightInspector",
+    "detached": false,
+    "cornerRadius": 0,
+    "itemSpacing": 8,
+    "paddingTop": 8,
+    "paddingRight": 16,
+    "paddingBottom": 8,
+    "paddingLeft": 16,
+    "fills": [
+      {
+        "hex": "#18181b",
+        "boundToken": "colors.bg"
+      }
+    ],
+    "children": [
+      {
+        "name": "PositionXField",
+        "type": "INSTANCE",
+        "mainComponent": "Input/PropertyField",
+        "detached": false,
+        "cornerRadius": 4,
+        "itemSpacing": 4,
+        "paddingTop": 4,
+        "paddingRight": 8,
+        "paddingBottom": 4,
+        "paddingLeft": 8,
+        "fills": [
+          {
+            "hex": "#121215",
+            "boundToken": "colors.input"
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "name": "DevModeInspector",
+    "type": "FRAME",
+    "role": "complementary",
+    "cornerRadius": 0,
+    "itemSpacing": 12,
+    "paddingTop": 12,
+    "paddingRight": 16,
+    "paddingBottom": 12,
+    "paddingLeft": 16,
+    "fills": [
+      {
+        "hex": "#18181b",
+        "boundToken": "colors.bg"
+      }
+    ],
+    "children": [
+      {
+        "name": "ReadyForDevBadge",
+        "type": "INSTANCE",
+        "mainComponent": "Badge/StatusCount",
+        "detached": false,
+        "cornerRadius": 100,
+        "itemSpacing": 4,
+        "paddingTop": 4,
+        "paddingRight": 8,
+        "paddingBottom": 4,
+        "paddingLeft": 8,
+        "fills": [
+          {
+            "hex": "#14ae5c",
+            "boundToken": "colors.success"
+          }
+        ]
+      }
+    ]
+  }
+]

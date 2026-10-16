@@ -201,8 +201,17 @@ pub fn runtime_binary_available(bin: &str) -> bool {
     }
     dirs.push(PathBuf::from("/opt/homebrew/bin"));
     dirs.push(PathBuf::from("/usr/local/bin"));
+    if cfg!(windows) {
+        dirs.push(PathBuf::from(r"C:\Program Files\Git\bin"));
+        dirs.push(PathBuf::from(r"C:\Program Files\Git\usr\bin"));
+        dirs.push(PathBuf::from(r"C:\Windows\System32"));
+    }
 
-    dirs.into_iter().any(|d| d.join(trimmed).is_file())
+    dirs.into_iter().any(|d| {
+        d.join(trimmed).is_file()
+            || (cfg!(windows)
+                && (d.join(format!("{trimmed}.exe")).is_file() || d.join(format!("{trimmed}.cmd")).is_file() || d.join(format!("{trimmed}.bat")).is_file()))
+    })
 }
 
 /// Per-file isolated session environment paths and active document/page metadata.
@@ -370,6 +379,9 @@ impl TerminalTab {
                 if cfg!(test) {
                     if shell_bin.ends_with("zsh") {
                         c.arg("-f");
+                    } else if shell_bin.ends_with("bash") || shell_bin.ends_with("bash.exe") {
+                        c.arg("--norc");
+                        c.arg("--noprofile");
                     }
                 } else if !cfg!(windows) {
                     c.arg("-l");
@@ -737,10 +749,6 @@ impl TerminalState {
 
             self.provision_session_agent_files(file_path);
             self.last_synced_key = Some(key);
-        }
-
-        if !cfg!(test) && self.tabs.is_empty() {
-            self.ensure_default_tab(file_path);
         }
     }
 
@@ -1914,6 +1922,11 @@ fn format_copy_for_ai_payload(block_markdown: &str) -> String {
 
 fn default_shell_program() -> String {
     if cfg!(windows) {
+        for candidate in [r"C:\Program Files\Git\bin\bash.exe", r"C:\Program Files\Git\usr\bin\sh.exe"] {
+            if Path::new(candidate).is_file() {
+                return candidate.to_string();
+            }
+        }
         std::env::var("COMSPEC").unwrap_or_else(|_| "powershell.exe".into())
     } else {
         std::env::var("SHELL").ok().filter(|s| !s.trim().is_empty()).unwrap_or_else(|| {
@@ -1928,7 +1941,7 @@ fn default_shell_program() -> String {
 
 fn build_agent_shell_cmd(shell_bin: &str, agent_cli: &str) -> CommandBuilder {
     let mut c = CommandBuilder::new(shell_bin);
-    if cfg!(windows) {
+    if cfg!(windows) && !shell_bin.ends_with("bash.exe") && !shell_bin.ends_with("sh.exe") {
         c.arg("-Command");
         c.arg(agent_cli);
     } else {
@@ -2003,8 +2016,13 @@ pub fn configure_pty_env_with_session(cmd: &mut CommandBuilder, preset: AgentCli
         extra_paths.push(format!("{home}/.local/bin"));
         extra_paths.push(format!("{home}/.antigravity/bin"));
     }
-    extra_paths.push("/opt/homebrew/bin".into());
-    extra_paths.push("/usr/local/bin".into());
+    if cfg!(windows) {
+        extra_paths.push(r"C:\Program Files\Git\usr\bin".into());
+        extra_paths.push(r"C:\Program Files\Git\bin".into());
+    } else {
+        extra_paths.push("/opt/homebrew/bin".into());
+        extra_paths.push("/usr/local/bin".into());
+    }
 
     let current_path = std::env::var("PATH").unwrap_or_default();
     let sep = if cfg!(windows) { ";" } else { ":" };
@@ -2296,7 +2314,8 @@ pub fn show_left(state: &mut TerminalState, ui: &mut Ui, rect: Rect, file_path: 
             render_runtime_dropdown_menu(state, ui, rect, bar_r.bottom() + 4.0, file_path);
         }
 
-        ui.ctx().request_repaint_after(std::time::Duration::from_millis(50));
+        let repaint_ms = if state.viewport_focused { 50 } else { 500 };
+        ui.ctx().request_repaint_after(std::time::Duration::from_millis(repaint_ms));
         return actions;
     }
 

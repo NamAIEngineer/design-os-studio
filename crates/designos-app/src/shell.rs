@@ -17,6 +17,29 @@ use std::sync::atomic::{AtomicBool, Ordering};
 /// Set once an `--screenshot` run has written its PNG.
 pub static SHOT_OK: AtomicBool = AtomicBool::new(false);
 
+#[derive(Clone, Default)]
+pub struct MicroSeqHud {
+    pub focus_page: designos_doc::Vec2,
+    pub zoom: f32,
+    pub cursor_page: designos_doc::Vec2,
+    pub drag_start_page: Option<designos_doc::Vec2>,
+    pub cursor_screen_override: Option<Pos2>,
+    pub dragging: bool,
+    pub badge_text: String,
+    pub keycap: String,
+    pub caption: String,
+    pub accent_orange: bool,
+}
+
+struct MicroSeqCapture {
+    slug: String,
+    cur: usize,
+    total: usize,
+    base_doc: designos_doc::Document,
+    hud: MicroSeqHud,
+    wait_frames: u32,
+}
+
 struct Shot {
     path: PathBuf,
     size: (u32, u32),
@@ -24,6 +47,7 @@ struct Shot {
     scale: f32,
     frames: u32,
     requested: bool,
+    seq: Option<MicroSeqCapture>,
 }
 
 /// Height of the custom top window title bar (`🟠 design:os studio`).
@@ -50,9 +74,10 @@ impl Shell {
         opts.home = opts.wants_home();
         let screenshot = opts.screenshot.is_some();
         let panel_was_none = opts.panel.is_none();
+        let has_file = opts.file.is_some() || opts.open_id.is_some();
         let (gpu_flag, library) = (opts.gpu, opts.library.clone());
         let mut shell = Self::build(&cc.egui_ctx, opts);
-        if !screenshot && panel_was_none {
+        if !screenshot && panel_was_none && !has_file {
             shell.app.ui.rail = Some(crate::app::RailItem::Agents);
             shell.app.ui.left_collapsed = false;
         }
@@ -86,6 +111,7 @@ impl Shell {
             Some("board") => crate::board::demo::document(),
             Some("board-empty") => crate::board::create::new_document("Untitled"),
             Some(f) if crate::vecfixture::FIXTURES.contains(&f) => crate::vecfixture::document(),
+            None if opts.file.is_some() || opts.open_id.is_some() || opts.home => designos_doc::Document::new("Untitled"),
             _ => demo::demo_document(),
         });
         if !matches!(opts.fixture.as_deref(), Some("variables" | "deck" | crate::showcase::FIXTURE)) {
@@ -260,17 +286,10 @@ impl Shell {
                 app.vars.full = panel == "variables";
                 app.open_variables();
             }
-            Some(
-                p @ ("micro-autolayout"
-                | "micro-css-grid"
-                | "micro-smart-selection"
-                | "micro-shape-controls"
-                | "micro-vector-edit"
-                | "micro-layer-picker"
-                | "micro-dev-boxmodel"
-                | "micro-scale-tool"),
-            ) => {
-                apply_micro_interaction_showcase_preset(&mut app, p);
+            Some(p) if p.starts_with("micro-") => {
+                if !p.contains(":seq:") {
+                    apply_micro_interaction_showcase_preset(&mut app, p);
+                }
             }
             Some(spec) => {
                 let (w, h) = opts.size.unwrap_or((theme::DEFAULT_WINDOW.0 as u32, theme::DEFAULT_WINDOW.1 as u32));
@@ -278,12 +297,26 @@ impl Shell {
             }
             None => {}
         }
+        app.canvas.tiles.unlimited_budget = opts.screenshot.is_some();
+        let mut seq_capture = None;
+        if let Some(p) = opts.panel.as_deref() {
+            if let Some((slug, rest)) = p.split_once(":seq:") {
+                let total = rest.trim().parse::<usize>().unwrap_or(60).max(2);
+                if opts.size.is_some_and(|(w, h)| w < h) {
+                    app.ui.left_collapsed = true;
+                }
+                let base_doc = app.doc.clone();
+                let hud = apply_micro_interaction_continuous_frame(&mut app, &base_doc, slug, 0, total);
+                seq_capture = Some(MicroSeqCapture { slug: slug.to_string(), cur: 0, total, base_doc, hud, wait_frames: 0 });
+            }
+        }
         let shot = opts.screenshot.map(|path| Shot {
             path,
             size: opts.size.unwrap_or((theme::DEFAULT_WINDOW.0 as u32, theme::DEFAULT_WINDOW.1 as u32)),
             scale: opts.scale.unwrap_or(1.0),
             frames: 0,
             requested: false,
+            seq: seq_capture,
         });
         Self { app, shot, title: String::new() }
     }
@@ -307,15 +340,42 @@ impl Shell {
                 if let Some(buf) = image::RgbaImage::from_raw(w, h, raw) {
                     let want = ((shot.size.0 as f32 * shot.scale).round() as u32, (shot.size.1 as f32 * shot.scale).round() as u32);
                     let buf = if (w, h) != want { image::imageops::resize(&buf, want.0, want.1, image::imageops::FilterType::Lanczos3) } else { buf };
-                    if let Some(dir) = shot.path.parent() {
-                        let _ = std::fs::create_dir_all(dir);
-                    }
-                    match buf.save(&shot.path) {
-                        Ok(()) => SHOT_OK.store(true, Ordering::SeqCst),
-                        Err(e) => eprintln!("designos: cannot write {}: {e}", shot.path.display()),
+                    if let Some(seq) = &mut shot.seq {
+                        let _ = std::fs::create_dir_all(&shot.path);
+                        let frame_path = shot.path.join(format!("frame-{:04}.jpg", seq.cur));
+                        let rgb = image::DynamicImage::ImageRgba8(buf).into_rgb8();
+                        if let Err(e) = rgb.save(&frame_path) {
+                            eprintln!("designos: cannot write {}: {e}", frame_path.display());
+                        }
+                        seq.cur += 1;
+                        if seq.cur < seq.total {
+                            seq.hud = apply_micro_interaction_continuous_frame(&mut self.app, &seq.base_doc, &seq.slug, seq.cur, seq.total);
+                            shot.requested = false;
+                            seq.wait_frames = 2;
+                            shot.frames = 12;
+                            return;
+                        } else {
+                            SHOT_OK.store(true, Ordering::SeqCst);
+                            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                            return;
+                        }
+                    } else {
+                        if let Some(dir) = shot.path.parent() {
+                            let _ = std::fs::create_dir_all(dir);
+                        }
+                        match buf.save(&shot.path) {
+                            Ok(()) => SHOT_OK.store(true, Ordering::SeqCst),
+                            Err(e) => eprintln!("designos: cannot write {}: {e}", shot.path.display()),
+                        }
                     }
                 }
                 ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                return;
+            }
+        }
+        if let Some(seq) = &mut shot.seq {
+            if seq.wait_frames > 0 {
+                seq.wait_frames -= 1;
                 return;
             }
         }
@@ -327,7 +387,7 @@ impl Shell {
             shot.requested = true;
             ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(egui::UserData::default()));
         }
-        if shot.frames > 240 {
+        if shot.frames > 240 && shot.seq.is_none() {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
         }
     }
@@ -474,6 +534,15 @@ impl Shell {
                 (Key::K, false, true) => Some(Action::CreateComponent),
                 (Key::B, false, true) => Some(Action::Detach),
                 (Key::K, true, false) => Some(Action::CombineVariants),
+                (Key::A, true, true) => {
+                    if let Ok(res) = designos_doc::changelog_features::suggest_auto_layout(&mut app.doc, &app.selection) {
+                        app.selection = vec![res.root_frame];
+                        app.canvas.tiles.invalidate_all();
+                        app.changed();
+                        app.show_toast(format!("Suggested Auto-Layout ({:?})", res.kind), false);
+                    }
+                    None
+                }
                 (Key::A, true, false) => Some(Action::SelectInverse),
                 (Key::A, false, true) => {
                     if app.select_matching_layers() == 0 {
@@ -960,7 +1029,7 @@ impl Shell {
         let notes_rect = Rect::from_min_max(Pos2::new(canvas_left, canvas_rect.bottom()), Pos2::new(right_rect.left(), full.bottom()));
 
         let full_vars = self.app.vars.open && self.app.vars.full;
-        if self.shot.is_none() {
+        if self.shot.is_none() && (is_ai_panel || self.app.terminal.dock_open) {
             self.app.terminal.ensure_default_tab(self.app.file_path.as_deref());
         }
         self.app.terminal.sync_live_file_context(&self.app.doc, self.app.page, &self.app.selection, self.app.file_path.as_deref());
@@ -987,6 +1056,18 @@ impl Shell {
                 self.app.canvas_rect = main_canvas_rect;
                 crate::specs::show_reader(&mut self.app, ui, main_canvas_rect);
             } else {
+                if let Some(seq) = self.shot.as_ref().and_then(|s| s.seq.as_ref()) {
+                    if seq.hud.zoom > 0.0 {
+                        self.app.first_fit_done = true;
+                        let aspect_scale = (main_canvas_rect.width() / 1080.0).clamp(0.70, 1.05);
+                        let z = (seq.hud.zoom * aspect_scale).max(0.25);
+                        self.app.view.zoom = z;
+                        self.app.view.offset = designos_doc::Vec2::new(
+                            seq.hud.focus_page.x - (main_canvas_rect.width() * 0.5) / z,
+                            seq.hud.focus_page.y - (main_canvas_rect.height() * 0.5) / z,
+                        );
+                    }
+                }
                 canvas::show(&mut self.app, ui, main_canvas_rect);
                 if deck {
                     crate::decks::ui::notes(&mut self.app, ui, notes_rect);
@@ -1074,6 +1155,9 @@ impl Shell {
             panels::context::show(&mut self.app, &ctx);
             // the floating panel (or only the inspector's binding picker when closed)
             crate::variables::view::show(&mut self.app, ui, full);
+            if let Some(seq) = self.shot.as_ref().and_then(|s| s.seq.as_ref()) {
+                paint_micro_seq_hud(ui, &self.app, main_canvas_rect, right_rect, &seq.hud, seq.cur, seq.total);
+            }
         }
         if let Some(cmdk_act) = crate::cmdk::show(&ctx, &mut self.app.cmdk, &self.app.doc, self.app.page, &self.app.selection) {
             execute_cmdk_action(&mut self.app, cmdk_act);
@@ -1216,69 +1300,266 @@ pub fn execute_cmdk_action(app: &mut App, action: crate::cmdk::CmdKAction) {
 /// Configures `app` with a rich, deterministic visual showcase scene for each of the 8
 /// Figma A-to-Z Micro-Interaction & Feature categories (`--panel micro-*`).
 pub fn apply_micro_interaction_showcase_preset(app: &mut App, preset: &str) {
+    use designos_doc::vector::End as VEnd;
     use designos_doc::{
-        Affine, AutoLayout, Color, DevStatus, GridTrack, LayoutDirection, Node, NodeKind, Paint, Rect as DRect, Sizing, Stroke as DStroke, Vec2 as DV,
+        Affine, AutoLayout, Color, DevStatus, GridTrack, HandleMirror, LayoutAlign, LayoutDirection, Node, NodeKind, Paint, Rect as DRect, Sizing,
+        Stroke as DStroke, Vec2 as DV,
     };
     app.ui.rulers = true;
     let page = app.page;
-    match preset {
+    let (base, step) = match preset.split_once(':') {
+        Some((b, s)) => (b, s.parse::<usize>().unwrap_or(0)),
+        None => (preset, 0),
+    };
+    match base {
         "micro-autolayout" => {
+            type FlowCards = Vec<(&'static str, Color, Sizing)>;
+            let (gap, pad, primary_sz, width, align_p, cards): (f32, [f32; 4], Sizing, f32, LayoutAlign, FlowCards) = match step {
+                1 => (
+                    12.0,
+                    [16.0, 16.0, 16.0, 16.0],
+                    Sizing::Hug,
+                    420.0,
+                    LayoutAlign::Start,
+                    vec![
+                        ("Badge · Hug", Color::rgb(0xE3, 0x63, 0x23), Sizing::Fixed),
+                        ("Metric · Hug", Color::rgb(0x0D, 0x99, 0xFF), Sizing::Fixed),
+                        ("Status · Ready", Color::rgb(0x14, 0xAE, 0x5C), Sizing::Fixed),
+                    ],
+                ),
+                2 => (
+                    28.0,
+                    [18.0, 18.0, 18.0, 18.0],
+                    Sizing::Hug,
+                    460.0,
+                    LayoutAlign::Start,
+                    vec![
+                        ("Badge · Hug", Color::rgb(0xE3, 0x63, 0x23), Sizing::Fixed),
+                        ("Metric · Gap 28", Color::rgb(0x0D, 0x99, 0xFF), Sizing::Fixed),
+                        ("Status · Ready", Color::rgb(0x14, 0xAE, 0x5C), Sizing::Fixed),
+                    ],
+                ),
+                3 => (
+                    36.0,
+                    [20.0, 20.0, 20.0, 20.0],
+                    Sizing::Hug,
+                    480.0,
+                    LayoutAlign::Start,
+                    vec![
+                        ("Badge · Hug", Color::rgb(0xE3, 0x63, 0x23), Sizing::Fixed),
+                        ("Metric · Inline 36", Color::rgb(0x0D, 0x99, 0xFF), Sizing::Fixed),
+                        ("Status · Ready", Color::rgb(0x14, 0xAE, 0x5C), Sizing::Fixed),
+                    ],
+                ),
+                4 => (
+                    24.0,
+                    [36.0, 44.0, 36.0, 44.0],
+                    Sizing::Hug,
+                    510.0,
+                    LayoutAlign::Start,
+                    vec![
+                        ("Badge · Pad 44", Color::rgb(0xE3, 0x63, 0x23), Sizing::Fixed),
+                        ("Metric · Fill", Color::rgb(0x0D, 0x99, 0xFF), Sizing::Fill),
+                        ("Status · Ready", Color::rgb(0x14, 0xAE, 0x5C), Sizing::Fixed),
+                    ],
+                ),
+                5 => (
+                    20.0,
+                    [28.0, 32.0, 28.0, 32.0],
+                    Sizing::Fixed,
+                    560.0,
+                    LayoutAlign::SpaceBetween,
+                    vec![
+                        ("Badge · Hug", Color::rgb(0xE3, 0x63, 0x23), Sizing::Fixed),
+                        ("Metric · Fill Stretch", Color::rgb(0x0D, 0x99, 0xFF), Sizing::Fill),
+                        ("Status · Ready", Color::rgb(0x14, 0xAE, 0x5C), Sizing::Fixed),
+                    ],
+                ),
+                6 => (
+                    -18.0,
+                    [28.0, 28.0, 28.0, 28.0],
+                    Sizing::Hug,
+                    420.0,
+                    LayoutAlign::Start,
+                    vec![
+                        ("Stack · 01", Color::rgb(0xE3, 0x63, 0x23), Sizing::Fixed),
+                        ("Stack · 02", Color::rgb(0x0D, 0x99, 0xFF), Sizing::Fixed),
+                        ("Stack · 03", Color::rgb(0x14, 0xAE, 0x5C), Sizing::Fixed),
+                        ("Stack · 04", Color::rgb(0x97, 0x47, 0xFF), Sizing::Fixed),
+                    ],
+                ),
+                _ => (
+                    20.0,
+                    [28.0, 28.0, 28.0, 28.0],
+                    Sizing::Hug,
+                    440.0,
+                    LayoutAlign::Start,
+                    vec![
+                        ("Badge · Hug", Color::rgb(0xE3, 0x63, 0x23), Sizing::Fixed),
+                        ("Metric · Fill", Color::rgb(0x0D, 0x99, 0xFF), Sizing::Fill),
+                        ("Status · Ready", Color::rgb(0x14, 0xAE, 0x5C), Sizing::Fixed),
+                    ],
+                ),
+            };
             let fid = app.doc.alloc_id();
-            let mut frame = Node::frame(fid, DRect::new(2400.0, 200.0, 440.0, 220.0));
+            let mut frame = Node::frame(fid, DRect::new(2400.0, 200.0, width, 220.0));
             frame.name = "Auto-Layout 5.0 · Padding & Negative Gap".into();
             frame.fills = vec![Paint::solid(Color::rgb(0x1E, 0x1E, 0x24))];
             frame.corner_radii = [16.0; 4];
             if let Some(fp) = frame.kind.frame_props_mut() {
                 fp.auto_layout = Some(AutoLayout {
                     direction: LayoutDirection::Horizontal,
-                    item_spacing: 20.0,
-                    padding: [28.0, 28.0, 28.0, 28.0],
-                    primary_sizing: Sizing::Hug,
+                    item_spacing: gap,
+                    padding: pad,
+                    primary_sizing: primary_sz,
                     counter_sizing: Sizing::Hug,
+                    primary_align: align_p,
                     ..Default::default()
                 });
             }
             let fid = app.doc.insert(page, frame).unwrap();
-            for (i, (label, col)) in [
-                ("Badge · Hug", Color::rgb(0xE3, 0x63, 0x23)),
-                ("Metric · Fill", Color::rgb(0x0D, 0x99, 0xFF)),
-                ("Status · Ready", Color::rgb(0x14, 0xAE, 0x5C)),
-            ]
-            .into_iter()
-            .enumerate()
-            {
+            for (label, col, h_sz) in cards {
                 let cid = app.doc.alloc_id();
                 let mut card = Node::rectangle(cid, DRect::new(0.0, 0.0, 116.0, 124.0));
                 card.name = label.into();
                 card.fills = vec![Paint::solid(col)];
                 card.corner_radii = [10.0; 4];
-                if i == 1 {
-                    card.layout_child.horizontal = Sizing::Fill;
-                }
+                card.layout_child.horizontal = h_sz;
                 let _ = app.doc.insert(fid, card);
             }
             let mut ed = crate::edit::Edit::default();
             crate::layout::relayout_around(&mut app.doc, &mut ed, fid);
             app.selection = vec![fid];
             app.startup_zoom = Some(1.45);
-            app.canvas.al_inline = Some(crate::canvas::AutoLayoutInlineEdit {
-                id: fid,
-                kind: crate::canvas::handles::AutoLayoutHandleKind::Gap(0),
-                anchor_page: DV::new(2544.0, 290.0),
-                text: "20".into(),
-                request_focus: false,
-            });
+            if matches!(step, 0 | 2 | 3) {
+                let val_str = if step == 2 {
+                    "28"
+                } else if step == 3 {
+                    "36"
+                } else {
+                    "20"
+                };
+                app.canvas.al_inline = Some(crate::canvas::AutoLayoutInlineEdit {
+                    id: fid,
+                    kind: crate::canvas::handles::AutoLayoutHandleKind::Gap(0),
+                    anchor_page: DV::new(2544.0, 290.0),
+                    text: val_str.into(),
+                    request_focus: false,
+                });
+            } else if step == 4 {
+                app.canvas.al_inline = Some(crate::canvas::AutoLayoutInlineEdit {
+                    id: fid,
+                    kind: crate::canvas::handles::AutoLayoutHandleKind::Padding(1),
+                    anchor_page: DV::new(2422.0, 290.0),
+                    text: "44".into(),
+                    request_focus: false,
+                });
+            }
         }
         "micro-css-grid" => {
+            type GridCellSpecs = Vec<(&'static str, Color, u16, u16, f32, f32)>;
+            let (col1, col2, gap, pad, fw, fh, specs): (GridTrack, GridTrack, f32, f32, f32, f32, GridCellSpecs) = match step {
+                1 => (
+                    GridTrack::Flex(1.0),
+                    GridTrack::Flex(1.0),
+                    12.0,
+                    20.0,
+                    540.0,
+                    320.0,
+                    vec![
+                        ("Hero 1×1", Color::rgb(0x0D, 0x99, 0xFF), 1, 1, 150.0, 120.0),
+                        ("KPI Card", Color::rgb(0xE3, 0x63, 0x23), 1, 1, 150.0, 120.0),
+                        ("Users Cell", Color::rgb(0x97, 0x47, 0xFF), 1, 1, 150.0, 120.0),
+                        ("Revenue Cell", Color::rgb(0x14, 0xAE, 0x5C), 1, 1, 150.0, 120.0),
+                        ("Retention", Color::rgb(0x27, 0x27, 0x2A), 1, 1, 150.0, 120.0),
+                        ("Latency", Color::rgb(0x3F, 0x3F, 0x46), 1, 1, 150.0, 120.0),
+                    ],
+                ),
+                2 => (
+                    GridTrack::Fixed(160.0),
+                    GridTrack::Flex(1.0),
+                    14.0,
+                    22.0,
+                    550.0,
+                    330.0,
+                    vec![
+                        ("Hero 1×1", Color::rgb(0x0D, 0x99, 0xFF), 1, 1, 160.0, 120.0),
+                        ("KPI Fixed 160", Color::rgb(0xE3, 0x63, 0x23), 1, 1, 160.0, 120.0),
+                        ("Users Flex", Color::rgb(0x97, 0x47, 0xFF), 1, 1, 150.0, 120.0),
+                        ("Revenue Cell", Color::rgb(0x14, 0xAE, 0x5C), 1, 1, 150.0, 120.0),
+                        ("Retention", Color::rgb(0x27, 0x27, 0x2A), 1, 1, 160.0, 120.0),
+                        ("Latency", Color::rgb(0x3F, 0x3F, 0x46), 1, 1, 150.0, 120.0),
+                    ],
+                ),
+                3 => (
+                    GridTrack::Fixed(160.0),
+                    GridTrack::Hug,
+                    16.0,
+                    24.0,
+                    560.0,
+                    340.0,
+                    vec![
+                        ("Hero Flex 1fr", Color::rgb(0x0D, 0x99, 0xFF), 1, 1, 180.0, 120.0),
+                        ("KPI Fixed 160", Color::rgb(0xE3, 0x63, 0x23), 1, 1, 160.0, 120.0),
+                        ("Users Hug", Color::rgb(0x97, 0x47, 0xFF), 1, 1, 118.0, 120.0),
+                        ("Revenue Cell", Color::rgb(0x14, 0xAE, 0x5C), 1, 1, 180.0, 120.0),
+                        ("Retention", Color::rgb(0x27, 0x27, 0x2A), 1, 1, 160.0, 120.0),
+                        ("Latency Hug", Color::rgb(0x3F, 0x3F, 0x46), 1, 1, 118.0, 120.0),
+                    ],
+                ),
+                4 => (
+                    GridTrack::Fixed(160.0),
+                    GridTrack::Hug,
+                    16.0,
+                    24.0,
+                    560.0,
+                    340.0,
+                    vec![
+                        ("Hero Span 2×1", Color::rgb(0x0D, 0x99, 0xFF), 2, 1, 260.0, 120.0),
+                        ("KPI Card", Color::rgb(0xE3, 0x63, 0x23), 1, 1, 130.0, 120.0),
+                        ("Revenue Cell", Color::rgb(0x14, 0xAE, 0x5C), 1, 1, 150.0, 120.0),
+                        ("Retention", Color::rgb(0x27, 0x27, 0x2A), 1, 1, 160.0, 120.0),
+                        ("Latency", Color::rgb(0x97, 0x47, 0xFF), 1, 1, 130.0, 120.0),
+                    ],
+                ),
+                6 => (
+                    GridTrack::Fixed(172.0),
+                    GridTrack::Hug,
+                    24.0,
+                    32.0,
+                    600.0,
+                    368.0,
+                    vec![
+                        ("Hero Span 2×1", Color::rgb(0x0D, 0x99, 0xFF), 2, 1, 280.0, 132.0),
+                        ("KPI Card", Color::rgb(0xE3, 0x63, 0x23), 1, 1, 140.0, 132.0),
+                        ("Revenue Cell", Color::rgb(0x14, 0xAE, 0x5C), 1, 1, 160.0, 132.0),
+                        ("Retention Span 2×1", Color::rgb(0x97, 0x47, 0xFF), 2, 1, 300.0, 132.0),
+                    ],
+                ),
+                _ => (
+                    GridTrack::Fixed(160.0),
+                    GridTrack::Hug,
+                    16.0,
+                    24.0,
+                    560.0,
+                    340.0,
+                    vec![
+                        ("Hero Span 2×1", Color::rgb(0x0D, 0x99, 0xFF), 2, 1, 260.0, 120.0),
+                        ("KPI Card", Color::rgb(0xE3, 0x63, 0x23), 1, 1, 130.0, 120.0),
+                        ("Revenue Cell", Color::rgb(0x14, 0xAE, 0x5C), 1, 1, 150.0, 120.0),
+                        ("Retention Cell", Color::rgb(0x27, 0x27, 0x2A), 2, 1, 280.0, 120.0),
+                    ],
+                ),
+            };
             let fid = app.doc.alloc_id();
-            let mut grid_frame = Node::frame(fid, DRect::new(2400.0, 600.0, 560.0, 340.0));
+            let mut grid_frame = Node::frame(fid, DRect::new(2400.0, 600.0, fw, fh));
             grid_frame.name = "2D CSS Grid · Track Pills & Span 2×1".into();
             grid_frame.fills = vec![Paint::solid(Color::rgb(0x18, 0x18, 0x1B))];
             grid_frame.corner_radii = [16.0; 4];
             let mut col_tracks = [GridTrack::Flex(1.0); 8];
             col_tracks[0] = GridTrack::Flex(1.0);
-            col_tracks[1] = GridTrack::Fixed(160.0);
-            col_tracks[2] = GridTrack::Hug;
+            col_tracks[1] = col1;
+            col_tracks[2] = col2;
             let mut row_tracks = [GridTrack::Hug; 8];
             row_tracks[0] = GridTrack::Fixed(130.0);
             row_tracks[1] = GridTrack::Flex(1.0);
@@ -1287,9 +1568,9 @@ pub fn apply_micro_interaction_showcase_preset(app: &mut App, preset: &str) {
                     direction: LayoutDirection::Grid,
                     grid_columns: 3,
                     grid_rows: 2,
-                    item_spacing: 16.0,
-                    counter_spacing: 16.0,
-                    padding: [24.0, 24.0, 24.0, 24.0],
+                    item_spacing: gap,
+                    counter_spacing: gap,
+                    padding: [pad, pad, pad, pad],
                     grid_col_tracks: col_tracks,
                     grid_row_tracks: row_tracks,
                     primary_sizing: Sizing::Fixed,
@@ -1298,13 +1579,7 @@ pub fn apply_micro_interaction_showcase_preset(app: &mut App, preset: &str) {
                 });
             }
             let fid = app.doc.insert(page, grid_frame).unwrap();
-            let specs = [
-                ("Hero Span 2×1", Color::rgb(0x0D, 0x99, 0xFF), 2u16, 1u16, 260.0, 120.0),
-                ("KPI Card", Color::rgb(0xE3, 0x63, 0x23), 1, 1, 130.0, 120.0),
-                ("Revenue Cell", Color::rgb(0x14, 0xAE, 0x5C), 1, 1, 150.0, 120.0),
-                ("Retention Cell", Color::rgb(0x27, 0x27, 0x2A), 2, 1, 280.0, 120.0),
-            ];
-            let mut first_child = None;
+            let mut child_ids = Vec::new();
             for (name, col, cs, rs, w, h) in specs {
                 let cid = app.doc.alloc_id();
                 let mut c = Node::rectangle(cid, DRect::new(0.0, 0.0, w, h));
@@ -1313,31 +1588,60 @@ pub fn apply_micro_interaction_showcase_preset(app: &mut App, preset: &str) {
                 c.corner_radii = [10.0; 4];
                 c.layout_child.col_span = cs;
                 c.layout_child.row_span = rs;
-                let cid = app.doc.insert(fid, c).unwrap();
-                if first_child.is_none() {
-                    first_child = Some(cid);
-                }
+                child_ids.push(app.doc.insert(fid, c).unwrap());
             }
             let mut ed = crate::edit::Edit::default();
             crate::layout::relayout_around(&mut app.doc, &mut ed, fid);
-            app.selection = match first_child {
-                Some(c0) => vec![fid, c0],
-                None => vec![fid],
+            app.selection = match (step, child_ids.first().copied(), child_ids.last().copied()) {
+                (5, _, Some(last)) => vec![fid, last],
+                (6, _, _) => vec![fid],
+                (_, Some(c0), _) => vec![fid, c0],
+                _ => vec![fid],
             };
             app.startup_zoom = Some(1.30);
         }
         "micro-smart-selection" => {
+            let cards: Vec<(&str, Color, f32, f32, f32)> = match step {
+                1 => vec![
+                    ("Plan · Starter", Color::rgb(0x27, 0x27, 0x2A), 2394.0, 1122.0, 190.0),
+                    ("Plan · Pro", Color::rgb(0xE3, 0x63, 0x23), 2562.0, 1084.0, 190.0),
+                    ("Plan · Enterprise", Color::rgb(0x0D, 0x99, 0xFF), 2786.0, 1112.0, 190.0),
+                ],
+                2 => vec![
+                    ("Plan · Starter", Color::rgb(0x27, 0x27, 0x2A), 2400.0, 1100.0, 190.0),
+                    ("Plan · Pro", Color::rgb(0xE3, 0x63, 0x23), 2572.0, 1100.0, 190.0),
+                    ("Plan · Enterprise", Color::rgb(0x0D, 0x99, 0xFF), 2744.0, 1100.0, 190.0),
+                ],
+                3 => vec![
+                    ("Plan · Starter", Color::rgb(0x27, 0x27, 0x2A), 2376.0, 1100.0, 190.0),
+                    ("Plan · Pro", Color::rgb(0xE3, 0x63, 0x23), 2572.0, 1100.0, 190.0),
+                    ("Plan · Enterprise", Color::rgb(0x0D, 0x99, 0xFF), 2768.0, 1100.0, 190.0),
+                ],
+                4 => vec![
+                    ("Plan · Pro", Color::rgb(0xE3, 0x63, 0x23), 2400.0, 1100.0, 190.0),
+                    ("Plan · Starter", Color::rgb(0x27, 0x27, 0x2A), 2580.0, 1100.0, 190.0),
+                    ("Plan · Enterprise", Color::rgb(0x0D, 0x99, 0xFF), 2760.0, 1100.0, 190.0),
+                ],
+                5 => vec![
+                    ("Plan · Pro", Color::rgb(0xE3, 0x63, 0x23), 2400.0, 1100.0, 190.0),
+                    ("Plan · Enterprise", Color::rgb(0x0D, 0x99, 0xFF), 2580.0, 1100.0, 190.0),
+                    ("Plan · Starter", Color::rgb(0x27, 0x27, 0x2A), 2760.0, 1100.0, 190.0),
+                ],
+                6 => vec![
+                    ("Plan · Pro", Color::rgb(0xE3, 0x63, 0x23), 2412.0, 1094.0, 204.0),
+                    ("Plan · Enterprise", Color::rgb(0x0D, 0x99, 0xFF), 2576.0, 1094.0, 204.0),
+                    ("Plan · Starter", Color::rgb(0x14, 0xAE, 0x5C), 2740.0, 1094.0, 204.0),
+                ],
+                _ => vec![
+                    ("Plan · Starter", Color::rgb(0x27, 0x27, 0x2A), 2400.0, 1100.0, 190.0),
+                    ("Plan · Pro", Color::rgb(0xE3, 0x63, 0x23), 2584.0, 1100.0, 190.0),
+                    ("Plan · Enterprise", Color::rgb(0x0D, 0x99, 0xFF), 2768.0, 1100.0, 190.0),
+                ],
+            };
             let mut ids = Vec::new();
-            for (i, (name, col)) in [
-                ("Plan · Starter", Color::rgb(0x27, 0x27, 0x2A)),
-                ("Plan · Pro", Color::rgb(0xE3, 0x63, 0x23)),
-                ("Plan · Enterprise", Color::rgb(0x0D, 0x99, 0xFF)),
-            ]
-            .into_iter()
-            .enumerate()
-            {
+            for (name, col, x, y, h) in cards {
                 let cid = app.doc.alloc_id();
-                let mut card = Node::rectangle(cid, DRect::new(2400.0 + (i as f32) * 184.0, 1100.0, 148.0, 190.0));
+                let mut card = Node::rectangle(cid, DRect::new(x, y, 148.0, h));
                 card.name = name.into();
                 card.fills = vec![Paint::solid(col)];
                 card.corner_radii = [14.0; 4];
@@ -1347,36 +1651,65 @@ pub fn apply_micro_interaction_showcase_preset(app: &mut App, preset: &str) {
             app.startup_zoom = Some(1.30);
         }
         "micro-shape-controls" => {
+            let (arc_start, arc_end, arc_ratio, star_cnt, star_ratio, select_star, add_poly) = match step {
+                1 => (0.0, std::f32::consts::TAU, 0.0, 5u32, 0.38, false, false),
+                2 => (-0.45, 4.15, 0.0, 5, 0.38, false, false),
+                3 => (-0.45, 4.35, 0.58, 5, 0.38, false, false),
+                4 => (-0.45, 4.35, 0.58, 7, 0.42, true, false),
+                5 => (-0.45, 4.35, 0.58, 8, 0.62, true, false),
+                6 => (-0.35, 4.65, 0.62, 8, 0.56, false, true),
+                _ => (-0.45, 4.15, 0.52, 7, 0.44, false, false),
+            };
             let eid = app.doc.alloc_id();
             let mut ell = Node::ellipse(eid, DRect::new(2420.0, 1450.0, 220.0, 220.0));
             if let NodeKind::Ellipse(arc) = &mut ell.kind {
-                arc.start = -0.45;
-                arc.end = 4.15;
-                arc.inner_radius = 0.52;
+                arc.start = arc_start;
+                arc.end = arc_end;
+                arc.inner_radius = arc_ratio;
             }
             ell.name = "Donut Arc · Sweep & Ratio".into();
             ell.fills = vec![Paint::solid(Color::rgb(0x0D, 0x99, 0xFF))];
             let eid = app.doc.insert(page, ell).unwrap();
 
             let sid = app.doc.alloc_id();
-            let mut star = Node::new(sid, NodeKind::Star { count: 7, inner_ratio: 0.44 });
-            star.name = "Star · 7 pts · 44%".into();
+            let mut star = Node::new(sid, NodeKind::Star { count: star_cnt, inner_ratio: star_ratio });
+            star.name = format!("Star · {star_cnt} pts · {:.0}%", star_ratio * 100.0);
             star.transform = Affine::translate(2680.0, 1450.0);
             star.size = DV::new(220.0, 220.0);
             star.fills = vec![Paint::solid(Color::rgb(0xE3, 0x63, 0x23))];
-            let _ = app.doc.insert(page, star);
+            let sid = app.doc.insert(page, star).unwrap();
 
-            app.selection = vec![eid];
-            app.canvas.inter = crate::canvas::Interaction::ShapeControl(crate::canvas::ShapeControlDragState {
-                tx: crate::edit::Tx::new(),
-                id: eid,
-                kind: crate::canvas::handles::ShapeControlKind::EllipseSweep,
-                start_page: DV::new(2530.0, 1560.0),
-                start_count: 0,
-                start_ratio: 0.52,
-                start_end_angle: 4.15,
-            });
-            app.startup_zoom = Some(1.50);
+            if add_poly {
+                let pid = app.doc.alloc_id();
+                let mut poly = Node::new(pid, NodeKind::Polygon { count: 6 });
+                poly.name = "Polygon · 6 Sides".into();
+                poly.transform = Affine::translate(2930.0, 1465.0);
+                poly.size = DV::new(190.0, 190.0);
+                poly.corner_radii = [14.0; 4];
+                poly.fills = vec![Paint::solid(Color::rgb(0x14, 0xAE, 0x5C))];
+                let pid = app.doc.insert(page, poly).unwrap();
+                app.selection = vec![eid, sid, pid];
+                app.startup_zoom = Some(1.22);
+            } else {
+                let active_id = if select_star { sid } else { eid };
+                let kind = match step {
+                    3 => crate::canvas::handles::ShapeControlKind::EllipseInnerRadius,
+                    4 => crate::canvas::handles::ShapeControlKind::StarCount,
+                    5 => crate::canvas::handles::ShapeControlKind::StarInnerRatio,
+                    _ => crate::canvas::handles::ShapeControlKind::EllipseSweep,
+                };
+                app.selection = vec![active_id];
+                app.canvas.inter = crate::canvas::Interaction::ShapeControl(crate::canvas::ShapeControlDragState {
+                    tx: crate::edit::Tx::new(),
+                    id: active_id,
+                    kind,
+                    start_page: DV::new(2530.0, 1560.0),
+                    start_count: star_cnt,
+                    start_ratio: if select_star { star_ratio } else { arc_ratio },
+                    start_end_angle: arc_end,
+                });
+                app.startup_zoom = Some(1.50);
+            }
         }
         "micro-vector-edit" => {
             let vid = app.doc.alloc_id();
@@ -1389,8 +1722,76 @@ pub fn apply_micro_interaction_showcase_preset(app: &mut App, preset: &str) {
             let vid = app.doc.insert(page, vec_node).unwrap();
             app.selection = vec![vid];
             crate::canvas::vector::enter(app, vid);
-            if let Some(v) = app.canvas.vedit.as_mut() {
-                v.sel = [0usize, 1usize, 2usize].into_iter().collect();
+            match step {
+                1 => {
+                    if let Some(v) = app.canvas.vedit.as_mut() {
+                        v.sel = [0usize, 1usize].into_iter().collect();
+                    }
+                }
+                2 => {
+                    crate::canvas::vector::edit(app, |net, sel| {
+                        let nv = net.split_segment(0, 0.5);
+                        net.vertices[nv].pos.y -= 42.0;
+                        *sel = [nv].into_iter().collect();
+                        true
+                    });
+                }
+                3 => {
+                    crate::canvas::vector::edit(app, |net, sel| {
+                        let nv = net.split_segment(0, 0.5);
+                        net.vertices[nv].pos.y -= 48.0;
+                        net.set_tangent(0, VEnd::End, DV::new(-46.0, -18.0));
+                        let last_seg = net.segments.len() - 1;
+                        net.set_tangent(last_seg, VEnd::Start, DV::new(46.0, -18.0));
+                        net.vertices[nv].mirror = HandleMirror::AngleAndLength;
+                        *sel = [nv, 1usize].into_iter().collect();
+                        true
+                    });
+                }
+                4 => {
+                    crate::canvas::vector::edit(app, |net, sel| {
+                        let nv = net.split_segment(0, 0.5);
+                        net.vertices[nv].pos.y -= 48.0;
+                        net.vertices[nv].mirror = HandleMirror::None;
+                        net.set_tangent(0, VEnd::End, DV::new(-64.0, -34.0));
+                        let last_seg = net.segments.len() - 1;
+                        net.set_tangent(last_seg, VEnd::Start, DV::new(52.0, 26.0));
+                        net.set_tangent(1, VEnd::Start, DV::new(36.0, -30.0));
+                        *sel = [nv, 1usize, 2usize].into_iter().collect();
+                        true
+                    });
+                }
+                5 => {
+                    crate::canvas::vector::edit(app, |net, sel| {
+                        let nv = net.split_segment(0, 0.5);
+                        net.vertices[nv].pos.y -= 44.0;
+                        net.set_tangent(0, VEnd::End, DV::new(-48.0, -18.0));
+                        if net.vertices.len() > 4 {
+                            net.delete_vertex(3);
+                        }
+                        *sel = [0usize, 1usize, 2usize].into_iter().collect();
+                        true
+                    });
+                }
+                6 => {
+                    crate::canvas::vector::edit(app, |net, sel| {
+                        let nv = net.split_segment(0, 0.5);
+                        net.vertices[nv].pos.y -= 44.0;
+                        net.set_tangent(0, VEnd::End, DV::new(-48.0, -18.0));
+                        *sel = [0usize, 1usize].into_iter().collect();
+                        true
+                    });
+                    crate::canvas::vector::exit(app);
+                    if let Some(n) = app.doc.get_mut(vid) {
+                        n.fills = vec![Paint::solid(Color::rgba(20, 174, 92, 92))];
+                        n.stroke = DStroke { paints: vec![Paint::solid(Color::rgb(0x14, 0xAE, 0x5C))], weight: 3.5, ..Default::default() };
+                    }
+                }
+                _ => {
+                    if let Some(v) = app.canvas.vedit.as_mut() {
+                        v.sel = [0usize, 1usize, 2usize].into_iter().collect();
+                    }
+                }
             }
             app.startup_zoom = Some(1.60);
         }
@@ -1402,41 +1803,127 @@ pub fn apply_micro_interaction_showcase_preset(app: &mut App, preset: &str) {
                 if cands.is_empty() {
                     cands.push(sel);
                 }
-                if let Some(first) = cands.first().copied() {
-                    app.hover_layer = Some(first);
+                match step {
+                    2 => {
+                        let target = cands.get(1).copied().or_else(|| cands.first().copied()).unwrap_or(sel);
+                        app.selection = vec![target];
+                        app.hover_layer = Some(target);
+                        app.startup_zoom = Some(1.18);
+                    }
+                    3 => {
+                        if let Some(n) = app.doc.get_mut(sel) {
+                            n.dev.status = Some(DevStatus::ReadyForDev);
+                        }
+                        app.hover = Some(sel);
+                        app.startup_zoom = Some(1.15);
+                    }
+                    4 => {
+                        app.props.eyedropper = Some(crate::panels::properties::PickTarget::Fill(0));
+                        app.props.eyedropper_format = crate::panels::properties::EyedropperFormat::Hex;
+                        app.hover = cands.first().copied();
+                        app.startup_zoom = Some(1.22);
+                    }
+                    5 => {
+                        app.props.eyedropper = Some(crate::panels::properties::PickTarget::Fill(0));
+                        app.props.eyedropper_format = crate::panels::properties::EyedropperFormat::Rgb;
+                        app.hover = cands.get(1).copied().or_else(|| cands.first().copied());
+                        app.startup_zoom = Some(1.22);
+                    }
+                    6 => {
+                        app.props.eyedropper = Some(crate::panels::properties::PickTarget::Fill(0));
+                        app.props.eyedropper_format = crate::panels::properties::EyedropperFormat::Hsl;
+                        app.hover = cands.first().copied();
+                        app.startup_zoom = Some(1.12);
+                    }
+                    _ => {
+                        if let Some(first) = cands.first().copied() {
+                            app.hover_layer = Some(first);
+                        }
+                        app.ui.layer_picker = Some((Pos2::new(680.0, 410.0), cands));
+                        app.startup_zoom = Some(1.05);
+                    }
                 }
-                app.ui.layer_picker = Some((Pos2::new(680.0, 410.0), cands));
+            } else {
+                app.startup_zoom = Some(1.05);
             }
-            app.startup_zoom = Some(1.05);
         }
         "micro-dev-boxmodel" => {
             app.ui.dev_mode = true;
             app.ui.right_tab = Some(crate::app::RightTab::Design);
-            app.dev.lang = crate::dev::Language::React;
+            app.dev.lang = match step {
+                3 => crate::dev::Language::Tailwind,
+                4 => crate::dev::Language::Css,
+                5 => crate::dev::Language::SwiftUi,
+                6 => crate::dev::Language::Compose,
+                _ => crate::dev::Language::React,
+            };
             crate::dev::preset::apply(app);
-            // Ensure an Auto-Layout frame with generous padding is selected so the emerald Box-Model padding tint is visible.
+            let mut al_frames = Vec::new();
             for (&id, n) in &mut app.doc.nodes {
                 if n.parent == Some(page) && n.kind.frame_props().is_some() {
                     n.dev.status = Some(DevStatus::ReadyForDev);
                 }
                 if let Some(al) = n.kind.frame_props_mut().and_then(|fp| fp.auto_layout.as_mut()) {
                     if al.padding.iter().all(|&p| p >= 12.0) {
-                        app.selection = vec![id];
-                        app.hover = Some(id);
+                        al_frames.push(id);
                     }
                 }
             }
-            app.startup_zoom = Some(1.40);
+            if let Some(&chosen) = al_frames.get(step.saturating_sub(1) % al_frames.len().max(1)).or_else(|| al_frames.first()) {
+                app.selection = vec![chosen];
+                app.hover = Some(chosen);
+            }
+            app.startup_zoom = match step {
+                1 => Some(1.18),
+                6 => Some(1.08),
+                _ => Some(1.40),
+            };
         }
         "micro-scale-tool" => {
             app.tool = crate::canvas::tools::Tool::Scale;
+            let mult: f32 = match step {
+                1 => 1.00,
+                2 => 1.25,
+                3 => 1.50,
+                4 => 1.75,
+                5 => 2.00,
+                6 => 1.50,
+                _ => 1.25,
+            };
+            if step >= 3 {
+                let ref_id = app.doc.alloc_id();
+                let mut ref_card = Node::frame(ref_id, DRect::new(2130.0, 2200.0, 256.0, 160.0));
+                ref_card.name = "Baseline · 1.00× (256×160)".into();
+                ref_card.fills = vec![Paint::solid(Color::rgb(0x27, 0x27, 0x2A))];
+                ref_card.stroke = DStroke { paints: vec![Paint::solid(Color::rgb(0x71, 0x71, 0x7A))], weight: 2.0, ..Default::default() };
+                ref_card.corner_radii = [14.0; 4];
+                let _ = app.doc.insert(page, ref_card);
+            }
             let sid = app.doc.alloc_id();
-            let mut card = Node::frame(sid, DRect::new(2420.0, 2200.0, 320.0, 200.0));
-            card.name = "Scale Tool (K) · 1.25× Proportional".into();
+            let w = (256.0 * mult).round();
+            let h = (160.0 * mult).round();
+            let mut card = Node::frame(sid, DRect::new(2420.0, 2200.0, w, h));
+            card.name = format!("Scale Tool (K) · {mult:.2}× Proportional");
             card.fills = vec![Paint::solid(Color::rgb(0x1E, 0x1E, 0x24))];
-            card.stroke = DStroke { paints: vec![Paint::solid(Color::rgb(0x0D, 0x99, 0xFF))], weight: 2.5, ..Default::default() };
-            card.corner_radii = [18.0; 4];
+            let stroke_col = if step == 6 { Color::rgb(0x14, 0xAE, 0x5C) } else { Color::rgb(0x0D, 0x99, 0xFF) };
+            card.stroke = DStroke { paints: vec![Paint::solid(stroke_col)], weight: 2.0 * mult, ..Default::default() };
+            card.corner_radii = [14.0 * mult; 4];
             let sid = app.doc.insert(page, card).unwrap();
+
+            let badge_id = app.doc.alloc_id();
+            let mut badge_node = Node::rectangle(badge_id, DRect::new(24.0 * mult, 24.0 * mult, 112.0 * mult, 44.0 * mult));
+            badge_node.name = format!("Badge · {mult:.2}×");
+            badge_node.fills = vec![Paint::solid(Color::rgb(0x0D, 0x99, 0xFF))];
+            badge_node.corner_radii = [8.0 * mult; 4];
+            let _ = app.doc.insert(sid, badge_node);
+
+            let pill_id = app.doc.alloc_id();
+            let mut pill_node = Node::rectangle(pill_id, DRect::new(24.0 * mult, 84.0 * mult, 188.0 * mult, 48.0 * mult));
+            pill_node.name = format!("Metric · {w:.0}×{h:.0}");
+            pill_node.fills = vec![Paint::solid(Color::rgb(0xE3, 0x63, 0x23))];
+            pill_node.corner_radii = [10.0 * mult; 4];
+            let _ = app.doc.insert(sid, pill_node);
+
             app.selection = vec![sid];
             app.canvas.inter = crate::canvas::Interaction::Resize(crate::canvas::ResizeState {
                 tx: crate::edit::Tx::new(),
@@ -1449,9 +1936,1101 @@ pub fn apply_micro_interaction_showcase_preset(app: &mut App, preset: &str) {
                 },
                 targets: vec![],
             });
-            app.startup_zoom = Some(1.45);
+            app.startup_zoom = if step >= 3 { Some(1.18) } else { Some(1.45) };
+        }
+        "micro-inspector-math" => {
+            let (w, h, rad, rot_deg, fill_col, opacity) = match step {
+                1 => (280.0, 160.0, 10.0, 0.0f32, Color::rgb(0x0D, 0x99, 0xFF), 1.0),
+                2 => (340.0, 184.0, 14.0, 0.0, Color::rgb(0x0D, 0x99, 0xFF), 1.0),
+                3 => (404.0, 208.0, 18.0, 6.0, Color::rgb(0x0D, 0x99, 0xFF), 1.0),
+                4 => (404.0, 208.0, 28.0, 0.0, Color::rgb(0xE3, 0x63, 0x23), 1.0),
+                5 => (404.0, 208.0, 28.0, 0.0, Color::rgb(0xE3, 0x63, 0x23), 0.65),
+                _ => (420.0, 216.0, 24.0, 0.0, Color::rgb(0x14, 0xAE, 0x5C), 1.0),
+            };
+            let cid = app.doc.alloc_id();
+            let mut card = Node::frame(cid, DRect::new(2420.0, 2520.0, w, h));
+            card.name = format!("Inspector Math · {w:.0}×{h:.0} · R{rad:.0}");
+            card.fills = vec![Paint::solid(fill_col)];
+            card.opacity = opacity;
+            card.corner_radii = [rad; 4];
+            if rot_deg.abs() > 0.01 {
+                card.transform = Affine::translate(2420.0, 2520.0) * Affine::rotate(rot_deg.to_radians());
+            }
+            let cid = app.doc.insert(page, card).unwrap();
+            app.selection = vec![cid];
+            app.startup_zoom = Some(1.38);
+        }
+        "micro-selection-corner" => {
+            let count = match step {
+                1 => 2,
+                2 | 3 => 4,
+                _ => 3,
+            };
+            let radii = match step {
+                4 => [28.0, 28.0, 28.0, 28.0],
+                5 => [44.0, 8.0, 44.0, 8.0],
+                6 => [36.0, 12.0, 36.0, 12.0],
+                _ => [12.0, 12.0, 12.0, 12.0],
+            };
+            let mut ids = Vec::new();
+            for i in 0..count {
+                let id = app.doc.alloc_id();
+                let mut n = Node::rectangle(id, DRect::new(2400.0 + i as f32 * 168.0, 2840.0, 144.0, 180.0));
+                n.name = format!("Card · {:02} (Cmd+D)", i + 1);
+                let col = match i % 3 {
+                    0 => Color::rgb(0x0D, 0x99, 0xFF),
+                    1 => Color::rgb(0xE3, 0x63, 0x23),
+                    _ => Color::rgb(0x14, 0xAE, 0x5C),
+                };
+                n.fills = vec![Paint::solid(col)];
+                n.corner_radii = if i == 0 { radii } else { [14.0; 4] };
+                ids.push(app.doc.insert(page, n).unwrap());
+            }
+            app.selection = if step >= 4 { ids.into_iter().take(1).collect() } else { ids };
+            app.startup_zoom = Some(1.32);
+        }
+        "micro-typography-multiedit" => {
+            let mut selected = Vec::new();
+            for i in 0..3 {
+                let fid = app.doc.alloc_id();
+                let mut f = Node::frame(fid, DRect::new(2400.0 + i as f32 * 196.0, 3160.0, 176.0, 200.0));
+                f.name = format!("Tier Card · {:02}", i + 1);
+                f.fills = vec![Paint::solid(Color::rgb(0x1E, 0x1E, 0x24))];
+                f.corner_radii = [14.0; 4];
+                let fid = app.doc.insert(page, f).unwrap();
+
+                let bid = app.doc.alloc_id();
+                let col = if step >= 4 { Color::rgb(0x14, 0xAE, 0x5C) } else { Color::rgb(0x0D, 0x99, 0xFF) };
+                let bw = if step >= 3 { 140.0 } else { 112.0 };
+                let mut badge = Node::rectangle(bid, DRect::new(18.0, 20.0, bw, 42.0));
+                badge.name = "Plan CTA".into();
+                badge.fills = vec![Paint::solid(col)];
+                badge.corner_radii = [10.0; 4];
+                let bid = app.doc.insert(fid, badge).unwrap();
+                selected.push(bid);
+            }
+            app.selection = selected;
+            app.startup_zoom = Some(1.25);
+        }
+        "micro-components-variables" => {
+            app.open_variables();
+            app.vars.full = false;
+            if step >= 5 {
+                app.ui.right_tab = Some(crate::app::RightTab::Prototype);
+            }
+            app.startup_zoom = Some(1.15);
         }
         _ => {}
+    }
+}
+
+fn smooth01(t: f32) -> f32 {
+    let x = t.clamp(0.0, 1.0);
+    x * x * (3.0 - 2.0 * x)
+}
+
+fn lerp_f32(a: f32, b: f32, t: f32) -> f32 {
+    a + (b - a) * t
+}
+
+fn lerp_dv(a: designos_doc::Vec2, b: designos_doc::Vec2, t: f32) -> designos_doc::Vec2 {
+    designos_doc::Vec2::new(lerp_f32(a.x, b.x, t), lerp_f32(a.y, b.y, t))
+}
+
+fn lerp_color(a: designos_doc::Color, b: designos_doc::Color, t: f32) -> designos_doc::Color {
+    designos_doc::Color { r: lerp_f32(a.r, b.r, t), g: lerp_f32(a.g, b.g, t), b: lerp_f32(a.b, b.b, t), a: lerp_f32(a.a, b.a, t) }
+}
+
+/// Mutates `app` continuously at normalized time `u = cur / (total - 1)` (`0.0..=1.0`)
+/// from a clean `base_doc` snapshot so every frame of `--panel micro-<slug>:seq:<N>`
+/// renders real interpolated canvas geometry, handles, and inspector states.
+pub fn apply_micro_interaction_continuous_frame(app: &mut App, base_doc: &designos_doc::Document, slug: &str, cur: usize, total: usize) -> MicroSeqHud {
+    use designos_doc::vector::End as VEnd;
+    use designos_doc::{
+        Affine, AutoLayout, Color, DevStatus, GridTrack, HandleMirror, LayoutAlign, LayoutDirection, Node, NodeKind, Paint, Rect as DRect, Sizing,
+        Stroke as DStroke, TextStyle, Vec2 as DV,
+    };
+
+    app.doc = base_doc.clone();
+    app.ui.rulers = true;
+    app.ui.dev_mode = false;
+    app.ui.right_tab = Some(crate::app::RightTab::Design);
+    app.ui.layer_picker = None;
+    app.props.eyedropper = None;
+    app.canvas.inter = crate::canvas::Interaction::None;
+    app.canvas.al_inline = None;
+    app.canvas.vedit = None;
+    app.vars.open = false;
+    app.vars.full = false;
+    app.tool = crate::canvas::tools::Tool::Move;
+
+    let page = app.page;
+    let u = if total <= 1 { 0.0 } else { (cur as f32) / ((total - 1) as f32) };
+    let mut hud = MicroSeqHud {
+        focus_page: DV::new(2660.0, 310.0),
+        zoom: 1.38,
+        cursor_page: DV::new(2660.0, 310.0),
+        drag_start_page: None,
+        cursor_screen_override: None,
+        dragging: false,
+        badge_text: String::new(),
+        keycap: String::new(),
+        caption: String::new(),
+        accent_orange: false,
+    };
+
+    match slug {
+        "micro-autolayout" => {
+            // 4 continuous phases across u in 0..1:
+            // [0.00..0.28]: Drag Gap handle continuously from 12px -> 38px
+            // [0.28..0.55]: Drag Horizontal Padding handle continuously from 16px -> 44px
+            // [0.55..0.78]: Switch middle card to Fill & drag Frame width 480px -> 600px
+            // [0.78..1.00]: Drag Gap handle into Negative Stack (-20px) with 4 overlapping cards
+            let (gap, pad_h, pad_v, primary_sz, width, align_p, is_neg_stack) = if u < 0.28 {
+                let t = smooth01(u / 0.28);
+                let g = lerp_f32(12.0, 38.0, t);
+                (g, 18.0, 18.0, Sizing::Hug, 440.0, LayoutAlign::Start, false)
+            } else if u < 0.55 {
+                let t = smooth01((u - 0.28) / 0.27);
+                let ph = lerp_f32(18.0, 46.0, t);
+                let pv = lerp_f32(18.0, 34.0, t);
+                (28.0, ph, pv, Sizing::Hug, 480.0, LayoutAlign::Start, false)
+            } else if u < 0.78 {
+                let t = smooth01((u - 0.55) / 0.23);
+                let w = lerp_f32(470.0, 610.0, t);
+                (20.0, 28.0, 26.0, Sizing::Fixed, w, LayoutAlign::SpaceBetween, false)
+            } else {
+                let t = smooth01((u - 0.78) / 0.22);
+                let g = lerp_f32(16.0, -22.0, t);
+                (g, 28.0, 26.0, Sizing::Hug, 460.0, LayoutAlign::Start, true)
+            };
+
+            let fid = app.doc.alloc_id();
+            let mut frame = Node::frame(fid, DRect::new(2400.0, 200.0, width, 210.0));
+            frame.name = format!("Auto-Layout 5.0 · Gap {gap:.0}px · Pad {pad_h:.0}px");
+            frame.fills = vec![Paint::solid(Color::rgb(0x1E, 0x1E, 0x24))];
+            frame.stroke = DStroke { paints: vec![Paint::solid(Color::rgb(0x0D, 0x99, 0xFF))], weight: 1.5, ..Default::default() };
+            frame.corner_radii = [16.0; 4];
+            if let Some(fp) = frame.kind.frame_props_mut() {
+                fp.auto_layout = Some(AutoLayout {
+                    direction: LayoutDirection::Horizontal,
+                    item_spacing: gap,
+                    padding: [pad_v, pad_h, pad_v, pad_h],
+                    primary_sizing: primary_sz,
+                    counter_sizing: Sizing::Hug,
+                    primary_align: align_p,
+                    ..Default::default()
+                });
+            }
+            let fid = app.doc.insert(page, frame).unwrap();
+
+            let cards: Vec<(String, Color, Sizing)> = if is_neg_stack {
+                vec![
+                    ("Stack · 01".into(), Color::rgb(0xE3, 0x63, 0x23), Sizing::Fixed),
+                    ("Stack · 02".into(), Color::rgb(0x0D, 0x99, 0xFF), Sizing::Fixed),
+                    ("Stack · 03".into(), Color::rgb(0x14, 0xAE, 0x5C), Sizing::Fixed),
+                    ("Stack · 04".into(), Color::rgb(0x97, 0x47, 0xFF), Sizing::Fixed),
+                ]
+            } else {
+                let mid_sz = if u >= 0.55 { Sizing::Fill } else { Sizing::Fixed };
+                vec![
+                    ("Badge · Hug".into(), Color::rgb(0xE3, 0x63, 0x23), Sizing::Fixed),
+                    (format!("Metric · {}", if mid_sz == Sizing::Fill { "Fill" } else { "Fixed" }), Color::rgb(0x0D, 0x99, 0xFF), mid_sz),
+                    ("Status · Ready".into(), Color::rgb(0x14, 0xAE, 0x5C), Sizing::Fixed),
+                ]
+            };
+            for (label, col, h_sz) in cards {
+                let cid = app.doc.alloc_id();
+                let mut card = Node::rectangle(cid, DRect::new(0.0, 0.0, 120.0, 126.0));
+                card.name = label;
+                card.fills = vec![Paint::solid(col)];
+                card.stroke = DStroke { paints: vec![Paint::solid(Color::rgba(255, 255, 255, 48))], weight: 1.5, ..Default::default() };
+                card.corner_radii = [12.0; 4];
+                card.layout_child.horizontal = h_sz;
+                let _ = app.doc.insert(fid, card);
+            }
+            let mut ed = crate::edit::Edit::default();
+            crate::layout::relayout_around(&mut app.doc, &mut ed, fid);
+            app.selection = vec![fid];
+
+            let f_size = app.doc.get(fid).map(|n| n.size).unwrap_or(DV::new(480.0, 180.0));
+            hud.focus_page = DV::new(2650.0, 290.0);
+            hud.zoom = 1.36;
+
+            if u < 0.28 {
+                let gx = 2400.0 + pad_h + 120.0 + gap * 0.5;
+                let gy = 200.0 + f_size.y * 0.5;
+                app.canvas.al_inline = Some(crate::canvas::AutoLayoutInlineEdit {
+                    id: fid,
+                    kind: crate::canvas::handles::AutoLayoutHandleKind::Gap(0),
+                    anchor_page: DV::new(gx, gy),
+                    text: format!("{gap:.0}"),
+                    request_focus: false,
+                });
+                hud.cursor_page = DV::new(gx, gy);
+                hud.drag_start_page = Some(DV::new(2400.0 + 18.0 + 126.0, gy));
+                hud.dragging = true;
+                hud.accent_orange = true;
+                hud.badge_text = format!("Gap: {gap:.0} px");
+                hud.keycap = "⇧A".into();
+                hud.caption = "Auto-Layout 5.0 · Dragging on-canvas pink gap handle".into();
+            } else if u < 0.55 {
+                let px = 2400.0 + pad_h * 0.5;
+                let py = 200.0 + f_size.y * 0.5;
+                app.canvas.al_inline = Some(crate::canvas::AutoLayoutInlineEdit {
+                    id: fid,
+                    kind: crate::canvas::handles::AutoLayoutHandleKind::Padding(1),
+                    anchor_page: DV::new(px, py),
+                    text: format!("{pad_h:.0}"),
+                    request_focus: false,
+                });
+                hud.cursor_page = DV::new(px, py);
+                hud.drag_start_page = Some(DV::new(2409.0, py));
+                hud.dragging = true;
+                hud.accent_orange = true;
+                hud.badge_text = format!("Padding H: {pad_h:.0} px · V: {pad_v:.0} px");
+                hud.keycap = "Alt+Drag".into();
+                hud.caption = "Mirror-scrubbing horizontal & vertical frame padding".into();
+            } else if u < 0.78 {
+                let rx = 2400.0 + f_size.x;
+                let ry = 200.0 + f_size.y * 0.5;
+                hud.cursor_page = DV::new(rx, ry);
+                hud.drag_start_page = Some(DV::new(2400.0 + 470.0, ry));
+                hud.dragging = true;
+                hud.badge_text = format!("Frame W: {:.0} px · Metric = Fill", f_size.x);
+                hud.keycap = "Fill".into();
+                hud.caption = "Stretching parent frame with Fill Container child sizing".into();
+            } else {
+                let gx = 2400.0 + pad_h + 120.0 + gap * 0.5;
+                let gy = 200.0 + f_size.y * 0.5;
+                hud.cursor_page = DV::new(gx, gy);
+                hud.dragging = true;
+                hud.accent_orange = true;
+                hud.badge_text = format!("Negative Gap: {gap:.0} px (Overlap Stack)");
+                hud.keycap = "-Gap".into();
+                hud.caption = "Negative gap (-22px) creates overlapping avatar/card stacks".into();
+            }
+        }
+        "micro-css-grid" => {
+            // [0.00..0.34]: Drag Col 2 Fixed track width from 124px -> 188px
+            // [0.34..0.67]: Expand Hero cell span to 2x1 & scrub grid gap 12px -> 22px
+            // [0.67..1.00]: Expand Retention cell span to 2x1 & scrub padding 20px -> 32px
+            let (col1_w, gap, pad, fw, fh, hero_span, ret_span) = if u < 0.34 {
+                let t = smooth01(u / 0.34);
+                (lerp_f32(124.0, 188.0, t), 12.0, 20.0, lerp_f32(520.0, 560.0, t), 324.0, 1u16, 1u16)
+            } else if u < 0.67 {
+                let t = smooth01((u - 0.34) / 0.33);
+                (168.0, lerp_f32(12.0, 22.0, t), lerp_f32(20.0, 26.0, t), lerp_f32(560.0, 584.0, t), 344.0, 2u16, 1u16)
+            } else {
+                let t = smooth01((u - 0.67) / 0.33);
+                (172.0, lerp_f32(22.0, 26.0, t), lerp_f32(26.0, 34.0, t), lerp_f32(584.0, 612.0, t), 368.0, 2u16, 2u16)
+            };
+
+            let fid = app.doc.alloc_id();
+            let mut grid_frame = Node::frame(fid, DRect::new(2400.0, 600.0, fw, fh));
+            grid_frame.name = format!("2D CSS Grid · 3×2 · Gap {gap:.0}px");
+            grid_frame.fills = vec![Paint::solid(Color::rgb(0x18, 0x18, 0x1B))];
+            grid_frame.stroke = DStroke { paints: vec![Paint::solid(Color::rgb(0x0D, 0x99, 0xFF))], weight: 1.5, ..Default::default() };
+            grid_frame.corner_radii = [16.0; 4];
+            let mut col_tracks = [GridTrack::Flex(1.0); 8];
+            col_tracks[0] = GridTrack::Flex(1.0);
+            col_tracks[1] = GridTrack::Fixed(col1_w);
+            col_tracks[2] = GridTrack::Flex(1.0);
+            let mut row_tracks = [GridTrack::Hug; 8];
+            row_tracks[0] = GridTrack::Fixed(132.0);
+            row_tracks[1] = GridTrack::Flex(1.0);
+            if let Some(fp) = grid_frame.kind.frame_props_mut() {
+                fp.auto_layout = Some(AutoLayout {
+                    direction: LayoutDirection::Grid,
+                    grid_columns: 3,
+                    grid_rows: 2,
+                    item_spacing: gap,
+                    counter_spacing: gap,
+                    padding: [pad, pad, pad, pad],
+                    grid_col_tracks: col_tracks,
+                    grid_row_tracks: row_tracks,
+                    primary_sizing: Sizing::Fixed,
+                    counter_sizing: Sizing::Fixed,
+                    ..Default::default()
+                });
+            }
+            let fid = app.doc.insert(page, grid_frame).unwrap();
+
+            let mut specs: Vec<(&str, Color, u16, u16)> = vec![
+                ("Hero · Span", Color::rgb(0x0D, 0x99, 0xFF), hero_span, 1),
+                ("KPI · Fixed", Color::rgb(0xE3, 0x63, 0x23), 1, 1),
+                ("Revenue", Color::rgb(0x14, 0xAE, 0x5C), 1, 1),
+                ("Retention", Color::rgb(0x97, 0x47, 0xFF), ret_span, 1),
+            ];
+            if hero_span == 1 {
+                specs.push(("Active Users", Color::rgb(0x27, 0x27, 0x2A), 1, 1));
+                specs.push(("Latency", Color::rgb(0x3F, 0x3F, 0x46), 1, 1));
+            } else if ret_span == 1 {
+                specs.push(("Latency", Color::rgb(0x3F, 0x3F, 0x46), 1, 1));
+            }
+
+            let mut child_ids = Vec::new();
+            for (name, col, cs, rs) in specs {
+                let cid = app.doc.alloc_id();
+                let mut c = Node::rectangle(cid, DRect::new(0.0, 0.0, 150.0, 120.0));
+                c.name = name.into();
+                c.fills = vec![Paint::solid(col)];
+                c.corner_radii = [10.0; 4];
+                c.layout_child.col_span = cs;
+                c.layout_child.row_span = rs;
+                child_ids.push(app.doc.insert(fid, c).unwrap());
+            }
+            let mut ed = crate::edit::Edit::default();
+            crate::layout::relayout_around(&mut app.doc, &mut ed, fid);
+            app.selection = vec![fid];
+
+            hud.focus_page = DV::new(2690.0, 775.0);
+            hud.zoom = 1.24;
+            if u < 0.34 {
+                hud.cursor_page = DV::new(2400.0 + pad + 160.0 + col1_w * 0.5, 600.0);
+                hud.dragging = true;
+                hud.badge_text = format!("Col 2 Track: {col1_w:.0}px Fixed · 1fr Flex");
+                hud.keycap = "Grid".into();
+                hud.caption = "Scrubbing 2D CSS Grid column track pill (Fixed px ↔ 1fr)".into();
+            } else if u < 0.67 {
+                if let Some(&first) = child_ids.first() {
+                    app.selection = vec![fid, first];
+                }
+                hud.cursor_page = DV::new(2400.0 + fw * 0.62, 600.0 + pad + 66.0);
+                hud.dragging = true;
+                hud.accent_orange = true;
+                hud.badge_text = format!("Hero Cell: Span 2×1 · Gap {gap:.0}px");
+                hud.keycap = "Span 2×1".into();
+                hud.caption = "Dragging cell span handle across 2 columns with live reflow".into();
+            } else {
+                if let Some(&last) = child_ids.last() {
+                    app.selection = vec![fid, last];
+                }
+                hud.cursor_page = DV::new(2400.0 + fw * 0.68, 600.0 + fh - pad - 64.0);
+                hud.dragging = true;
+                hud.badge_text = format!("Bento 3×2 · Pad {pad:.0}px · Gap {gap:.0}px");
+                hud.keycap = "CSS Grid".into();
+                hud.caption = "2D Bento Grid reflows both multi-column spans at 60fps".into();
+            }
+        }
+        "micro-smart-selection" => {
+            // [0.00..0.28]: Tidy Up smoothly aligns 3 scattered cards into a clean horizontal row
+            // [0.28..0.64]: Pink Smart Selection gap handle drags spacing continuously 20px -> 48px -> 26px
+            // [0.64..1.00]: Ring handle on middle card ("Plan · Pro") drags left to swap with "Plan · Starter"
+            let (x0, y0, x1, y1, x2, y2, h_card) = if u < 0.28 {
+                let t = smooth01(u / 0.28);
+                (
+                    lerp_f32(2388.0, 2400.0, t),
+                    lerp_f32(1134.0, 1100.0, t),
+                    lerp_f32(2560.0, 2568.0, t),
+                    lerp_f32(1072.0, 1100.0, t),
+                    lerp_f32(2790.0, 2736.0, t),
+                    lerp_f32(1120.0, 1100.0, t),
+                    190.0,
+                )
+            } else if u < 0.64 {
+                let t = smooth01((u - 0.28) / 0.36);
+                let wave = (t * std::f32::consts::PI).sin();
+                let gap = 20.0 + 30.0 * wave;
+                let w = 148.0;
+                (2400.0, 1100.0, 2400.0 + w + gap, 1100.0, 2400.0 + (w + gap) * 2.0, 1100.0, 190.0)
+            } else {
+                let t = smooth01((u - 0.64) / 0.36);
+                let w = 148.0;
+                let gap = 24.0;
+                let slot0 = 2400.0;
+                let slot1 = 2400.0 + w + gap;
+                let slot2 = 2400.0 + (w + gap) * 2.0;
+                // Card 0 (Starter) glides from slot0 -> slot1; Card 1 (Pro) glides from slot1 -> slot0 with a slight vertical arc
+                let arc = (t * std::f32::consts::PI).sin() * -18.0;
+                (lerp_f32(slot0, slot1, t), 1100.0, lerp_f32(slot1, slot0, t), 1100.0 + arc, slot2, 1100.0, lerp_f32(190.0, 202.0, t))
+            };
+
+            let specs = [
+                ("Plan · Starter", Color::rgb(0x27, 0x27, 0x2A), x0, y0),
+                ("Plan · Pro", Color::rgb(0xE3, 0x63, 0x23), x1, y1),
+                ("Plan · Enterprise", Color::rgb(0x0D, 0x99, 0xFF), x2, y2),
+            ];
+            let mut ids = Vec::new();
+            for (name, col, x, y) in specs {
+                let cid = app.doc.alloc_id();
+                let mut card = Node::rectangle(cid, DRect::new(x, y, 148.0, h_card));
+                card.name = name.into();
+                card.fills = vec![Paint::solid(col)];
+                card.stroke = DStroke { paints: vec![Paint::solid(Color::rgba(255, 255, 255, 42))], weight: 1.5, ..Default::default() };
+                card.corner_radii = [14.0; 4];
+                ids.push(app.doc.insert(page, card).unwrap());
+            }
+            app.selection = ids;
+            hud.focus_page = DV::new(2650.0, 1195.0);
+            hud.zoom = 1.28;
+
+            if u < 0.28 {
+                hud.cursor_page = DV::new(x1 + 74.0, y1 + 95.0);
+                hud.dragging = true;
+                hud.badge_text = "Tidy Up · Equalizing Y & Gap = 20px".into();
+                hud.keycap = "Tidy Up".into();
+                hud.caption = "Smart Selection detects 3 sibling cards and aligns row spacing".into();
+            } else if u < 0.64 {
+                let gap_val = (x1 - (x0 + 148.0)).max(0.0);
+                let gx = x0 + 148.0 + gap_val * 0.5;
+                hud.cursor_page = DV::new(gx, 1195.0);
+                hud.dragging = true;
+                hud.accent_orange = true;
+                hud.badge_text = format!("Smart Gap: {gap_val:.0} px");
+                hud.keycap = "Drag Gap".into();
+                hud.caption = "Dragging pink Smart Selection gap handle adjusts uniform spacing".into();
+            } else {
+                hud.cursor_page = DV::new(x1 + 74.0, y1 + 95.0);
+                hud.drag_start_page = Some(DV::new(2572.0 + 74.0, 1195.0));
+                hud.dragging = true;
+                hud.accent_orange = true;
+                hud.badge_text = "Ring Swap: Plan · Pro ⇄ Plan · Starter".into();
+                hud.keycap = "Swap".into();
+                hud.caption = "Dragging center concentric ring swaps sibling card order live".into();
+            }
+        }
+        "micro-shape-controls" => {
+            // [0.00..0.35]: Sweep arc angle from 360 deg (TAU) -> 235 deg (4.10 rad)
+            // [0.35..0.68]: Pull Donut inner_radius from 0.0 -> 0.62
+            // [0.68..1.00]: Morph Star count (5 -> 8) and inner_ratio (0.36 -> 0.64) + Polygon
+            let (arc_start, arc_end, arc_ratio, star_cnt, star_ratio, select_star, show_poly) = if u < 0.35 {
+                let t = smooth01(u / 0.35);
+                (lerp_f32(0.0, -0.45, t), lerp_f32(std::f32::consts::TAU, 4.15, t), 0.0, 5u32, 0.38, false, false)
+            } else if u < 0.68 {
+                let t = smooth01((u - 0.35) / 0.33);
+                (-0.45, 4.25, lerp_f32(0.0, 0.62, t), 5u32, 0.38, false, false)
+            } else {
+                let t = smooth01((u - 0.68) / 0.32);
+                let cnt = (5.0 + (t * 3.0).round()) as u32;
+                (-0.40, 4.45, 0.60, cnt.clamp(5, 8), lerp_f32(0.38, 0.64, t), true, t > 0.45)
+            };
+
+            let eid = app.doc.alloc_id();
+            let mut ell = Node::ellipse(eid, DRect::new(2420.0, 1450.0, 220.0, 220.0));
+            if let NodeKind::Ellipse(arc) = &mut ell.kind {
+                arc.start = arc_start;
+                arc.end = arc_end;
+                arc.inner_radius = arc_ratio;
+            }
+            ell.name = "Donut Arc · Sweep & Ratio".into();
+            ell.fills = vec![Paint::solid(Color::rgb(0x0D, 0x99, 0xFF))];
+            let eid = app.doc.insert(page, ell).unwrap();
+
+            let sid = app.doc.alloc_id();
+            let mut star = Node::new(sid, NodeKind::Star { count: star_cnt, inner_ratio: star_ratio });
+            star.name = format!("Star · {star_cnt} pts · {:.0}%", star_ratio * 100.0);
+            star.transform = Affine::translate(2680.0, 1450.0);
+            star.size = DV::new(220.0, 220.0);
+            star.fills = vec![Paint::solid(Color::rgb(0xE3, 0x63, 0x23))];
+            let sid = app.doc.insert(page, star).unwrap();
+
+            if show_poly {
+                let pid = app.doc.alloc_id();
+                let mut poly = Node::new(pid, NodeKind::Polygon { count: 6 });
+                poly.name = "Polygon · 6 Sides".into();
+                poly.transform = Affine::translate(2930.0, 1465.0);
+                poly.size = DV::new(190.0, 190.0);
+                poly.corner_radii = [14.0; 4];
+                poly.fills = vec![Paint::solid(Color::rgb(0x14, 0xAE, 0x5C))];
+                let pid = app.doc.insert(page, poly).unwrap();
+                app.selection = vec![eid, sid, pid];
+            } else {
+                let active_id = if select_star { sid } else { eid };
+                let kind = if u < 0.35 {
+                    crate::canvas::handles::ShapeControlKind::EllipseSweep
+                } else if u < 0.68 {
+                    crate::canvas::handles::ShapeControlKind::EllipseInnerRadius
+                } else {
+                    crate::canvas::handles::ShapeControlKind::StarInnerRatio
+                };
+                app.selection = vec![active_id];
+                app.canvas.inter = crate::canvas::Interaction::ShapeControl(crate::canvas::ShapeControlDragState {
+                    tx: crate::edit::Tx::new(),
+                    id: active_id,
+                    kind,
+                    start_page: DV::new(2530.0, 1560.0),
+                    start_count: star_cnt,
+                    start_ratio: if select_star { star_ratio } else { arc_ratio },
+                    start_end_angle: arc_end,
+                });
+            }
+
+            hud.focus_page = DV::new(2680.0, 1560.0);
+            hud.zoom = 1.32;
+            if u < 0.35 {
+                let cx = 2530.0 + 95.0 * arc_end.cos();
+                let cy = 1560.0 + 95.0 * arc_end.sin();
+                hud.cursor_page = DV::new(cx, cy);
+                hud.dragging = true;
+                hud.badge_text = format!("Arc Sweep: {:.0}°", (arc_end - arc_start).to_degrees());
+                hud.keycap = "O · Arc".into();
+                hud.caption = "Dragging on-canvas Ellipse Sweep handle carves live sector".into();
+            } else if u < 0.68 {
+                hud.cursor_page = DV::new(2530.0 + arc_ratio * 65.0, 1560.0);
+                hud.dragging = true;
+                hud.accent_orange = true;
+                hud.badge_text = format!("Donut Inner Ratio: {:.0}%", arc_ratio * 100.0);
+                hud.keycap = "Donut".into();
+                hud.caption = "Pulling center ratio handle converts pie sector into Donut ring".into();
+            } else {
+                hud.cursor_page = DV::new(2790.0, 1560.0 - star_ratio * 75.0);
+                hud.dragging = true;
+                hud.accent_orange = true;
+                hud.badge_text = format!("Star: {star_cnt} Points · Inner Ratio {:.0}%", star_ratio * 100.0);
+                hud.keycap = "Star".into();
+                hud.caption = "Live Star point-count & inner-radius handles + rounded Polygon".into();
+            }
+        }
+        "micro-vector-edit" => {
+            // [0.00..0.33]: Split top segment midpoint & pull new vertex upward (dy 0 -> -54px)
+            // [0.33..0.72]: Drag symmetric Bezier tangent handles outward (HandleMirror::AngleAndLength)
+            // [0.72..1.00]: Break tangent symmetry (Alt) & commit vector path in emerald
+            let vid = app.doc.alloc_id();
+            let mut vec_node = Node::new(vid, NodeKind::Polygon { count: 6 });
+            vec_node.name = "Vector Network · Bezier & Midpoint Handles".into();
+            vec_node.transform = Affine::translate(2420.0, 1820.0);
+            vec_node.size = DV::new(340.0, 220.0);
+            let done = u > 0.88;
+            vec_node.fills = vec![Paint::solid(if done { Color::rgba(20, 174, 92, 92) } else { Color::rgba(13, 153, 255, 68) })];
+            vec_node.stroke = DStroke {
+                paints: vec![Paint::solid(if done { Color::rgb(0x14, 0xAE, 0x5C) } else { Color::rgb(0x0D, 0x99, 0xFF) })],
+                weight: 3.2,
+                ..Default::default()
+            };
+            let vid = app.doc.insert(page, vec_node).unwrap();
+            app.selection = vec![vid];
+            crate::canvas::vector::enter(app, vid);
+
+            let dy = if u < 0.33 { lerp_f32(-6.0, -54.0, smooth01(u / 0.33)) } else { -54.0 };
+            let (tx_l, ty_l, tx_r, ty_r, broken) = if u < 0.33 {
+                (0.0, 0.0, 0.0, 0.0, false)
+            } else if u < 0.72 {
+                let t = smooth01((u - 0.33) / 0.39);
+                (lerp_f32(-4.0, -58.0, t), lerp_f32(-2.0, -24.0, t), lerp_f32(4.0, 58.0, t), lerp_f32(-2.0, -24.0, t), false)
+            } else {
+                let t = smooth01((u - 0.72) / 0.28);
+                (-58.0, -24.0, lerp_f32(58.0, 52.0, t), lerp_f32(-24.0, 32.0, t), true)
+            };
+
+            crate::canvas::vector::edit(app, |net, sel| {
+                let nv = net.split_segment(0, 0.5);
+                net.vertices[nv].pos.y += dy;
+                if tx_l.abs() > 0.5 {
+                    net.set_tangent(0, VEnd::End, DV::new(tx_l, ty_l));
+                    let last_seg = net.segments.len() - 1;
+                    net.set_tangent(last_seg, VEnd::Start, DV::new(tx_r, ty_r));
+                    net.vertices[nv].mirror = if broken { HandleMirror::None } else { HandleMirror::AngleAndLength };
+                }
+                *sel = [nv, 1usize].into_iter().collect();
+                true
+            });
+            if done {
+                crate::canvas::vector::exit(app);
+            }
+
+            hud.focus_page = DV::new(2590.0, 1910.0);
+            hud.zoom = 1.48;
+            let apex = DV::new(2590.0, 1820.0 + dy);
+            if u < 0.33 {
+                hud.cursor_page = apex;
+                hud.dragging = true;
+                hud.badge_text = format!("Midpoint Split: ΔY {dy:.0} px");
+                hud.keycap = "Enter · P".into();
+                hud.caption = "Clicking segment midpoint diamond splits edge & drags new vertex".into();
+            } else if u < 0.72 {
+                hud.cursor_page = DV::new(apex.x + tx_l, apex.y + ty_l);
+                hud.drag_start_page = Some(apex);
+                hud.dragging = true;
+                hud.accent_orange = true;
+                hud.badge_text = format!("Mirrored Tangent: ({tx_l:.0}, {ty_l:.0})");
+                hud.keycap = "Bezier".into();
+                hud.caption = "Dragging cubic Bezier tangent with AngleAndLength mirroring".into();
+            } else {
+                hud.cursor_page = DV::new(apex.x + tx_r, apex.y + ty_r);
+                hud.drag_start_page = Some(apex);
+                hud.dragging = !done;
+                hud.badge_text = if done { "Vector Network Committed".into() } else { format!("Asymmetric Tangent: ({tx_r:.0}, {ty_r:.0})") };
+                hud.keycap = "Alt+Drag".into();
+                hud.caption = "Alt-drag breaks tangent handle symmetry for sharp cusp control".into();
+            }
+        }
+        "micro-layer-picker" => {
+            // [0.00..0.36]: Cmd+Right-Click Select Layer popup menu cycling overlapping candidates
+            // [0.36..0.62]: Ready-for-Dev green status badge on screen frame
+            // [0.62..1.00]: Eyedropper (I) gliding across canvas cards cycling HEX -> RGB -> HSL
+            let sel = app.selection.first().copied().or_else(|| app.doc.get(page).and_then(|p| p.children.first().copied()));
+            if let Some(sel) = sel {
+                let bb = crate::canvas::fast_world_aabb(&app.doc, None, sel);
+                let center_page = DV::new(bb.x + bb.w * 0.45, bb.y + bb.h * 0.42);
+                let mut cands = crate::canvas::hit::hit_all_under(&app.doc, app.page, center_page, None);
+                if cands.is_empty() {
+                    cands.push(sel);
+                }
+                hud.focus_page = center_page;
+                hud.zoom = 1.15;
+
+                if u < 0.36 {
+                    let t = (u / 0.36).clamp(0.0, 0.999);
+                    let idx = ((t * cands.len() as f32) as usize).min(cands.len().saturating_sub(1));
+                    let chosen = cands[idx];
+                    app.hover_layer = Some(chosen);
+                    app.selection = vec![chosen];
+                    app.ui.layer_picker = Some((Pos2::new(620.0, 360.0), cands));
+                    hud.cursor_screen_override = Some(Pos2::new(670.0, 392.0 + idx as f32 * 24.0));
+                    hud.dragging = false;
+                    hud.badge_text = format!("Select Layer #{}: Overlap Hit-Test", idx + 1);
+                    hud.keycap = "⌘+Right-Click".into();
+                    hud.caption = "Cycling overlapping layers at cursor via Select Layer menu (#27)".into();
+                } else if u < 0.62 {
+                    if let Some(n) = app.doc.get_mut(sel) {
+                        n.dev.status = Some(DevStatus::ReadyForDev);
+                    }
+                    app.selection = vec![sel];
+                    app.hover = Some(sel);
+                    hud.cursor_page = DV::new(bb.x + 80.0, bb.y - 14.0);
+                    hud.badge_text = "DevStatus::ReadyForDev Badge".into();
+                    hud.keycap = "Ready".into();
+                    hud.caption = "Toggling Ready for Dev badge on top-level screen header (#23)".into();
+                } else {
+                    let t = smooth01((u - 0.62) / 0.38);
+                    app.props.eyedropper = Some(crate::panels::properties::PickTarget::Fill(0));
+                    app.props.eyedropper_format = if t < 0.33 {
+                        crate::panels::properties::EyedropperFormat::Hex
+                    } else if t < 0.66 {
+                        crate::panels::properties::EyedropperFormat::Rgb
+                    } else {
+                        crate::panels::properties::EyedropperFormat::Hsl
+                    };
+                    let fmt_lbl = match app.props.eyedropper_format {
+                        crate::panels::properties::EyedropperFormat::Hex => "HEX #0D99FF",
+                        crate::panels::properties::EyedropperFormat::Rgb => "RGB(13, 153, 255)",
+                        crate::panels::properties::EyedropperFormat::Hsl => "HSL(205°, 100%, 53%)",
+                        crate::panels::properties::EyedropperFormat::Hsb => "HSB(205°, 95%, 100%)",
+                    };
+                    let p0 = DV::new(bb.x + bb.w * 0.28, bb.y + bb.h * 0.32);
+                    let p1 = DV::new(bb.x + bb.w * 0.64, bb.y + bb.h * 0.56);
+                    hud.cursor_page = lerp_dv(p0, p1, t);
+                    hud.dragging = true;
+                    hud.accent_orange = true;
+                    hud.badge_text = format!("Eyedropper (I) · {fmt_lbl}");
+                    hud.keycap = "I · Tab".into();
+                    hud.caption = "Sampling live canvas pixels & cycling HEX / RGB / HSL with Tab (#51)".into();
+                }
+            }
+        }
+        "micro-dev-boxmodel" => {
+            app.ui.dev_mode = true;
+            app.ui.right_tab = Some(crate::app::RightTab::Design);
+            app.dev.lang = if u < 0.22 {
+                crate::dev::Language::React
+            } else if u < 0.44 {
+                crate::dev::Language::Tailwind
+            } else if u < 0.66 {
+                crate::dev::Language::Css
+            } else if u < 0.84 {
+                crate::dev::Language::SwiftUi
+            } else {
+                crate::dev::Language::Compose
+            };
+            crate::dev::preset::apply(app);
+            let mut al_frames = Vec::new();
+            for (&id, n) in &mut app.doc.nodes {
+                if n.parent == Some(page) && n.kind.frame_props().is_some() {
+                    n.dev.status = Some(DevStatus::ReadyForDev);
+                }
+                if let Some(al) = n.kind.frame_props_mut().and_then(|fp| fp.auto_layout.as_mut()) {
+                    if al.padding.iter().all(|&p| p >= 12.0) {
+                        al_frames.push(id);
+                    }
+                }
+            }
+            al_frames.sort_by_key(|id| id.0);
+            if !al_frames.is_empty() {
+                let idx = ((u * al_frames.len() as f32) as usize).min(al_frames.len() - 1);
+                let chosen = al_frames[idx];
+                app.selection = vec![chosen];
+                app.hover = Some(chosen);
+                let bb = crate::canvas::fast_world_aabb(&app.doc, None, chosen);
+                hud.focus_page = DV::new(bb.x + bb.w * 0.5, bb.y + bb.h * 0.5);
+                hud.zoom = lerp_f32(1.22, 1.42, (u * std::f32::consts::PI).sin());
+                hud.cursor_page = DV::new(bb.x + bb.w * 0.55, bb.y + bb.h * 0.48);
+            }
+            let lang_name = match app.dev.lang {
+                crate::dev::Language::React => "React JSX",
+                crate::dev::Language::Tailwind => "Tailwind v4",
+                crate::dev::Language::Css => "CSS Flexbox/Grid",
+                crate::dev::Language::SwiftUi => "SwiftUI",
+                crate::dev::Language::Compose => "Jetpack Compose",
+            };
+            hud.badge_text = format!("Dev Mode · Box Model · {lang_name}");
+            hud.keycap = "⇧D".into();
+            hud.caption = format!("Inspecting live padding/gap box model & {lang_name} codegen (#78..#85)");
+        }
+        "micro-scale-tool" => {
+            app.tool = crate::canvas::tools::Tool::Scale;
+            let mult = if u < 0.72 { lerp_f32(1.00, 1.88, smooth01(u / 0.72)) } else { lerp_f32(1.88, 1.50, smooth01((u - 0.72) / 0.28)) };
+            let ref_id = app.doc.alloc_id();
+            let mut ref_card = Node::frame(ref_id, DRect::new(2130.0, 2200.0, 256.0, 160.0));
+            ref_card.name = "Baseline · 1.00× (256×160)".into();
+            ref_card.fills = vec![Paint::solid(Color::rgb(0x27, 0x27, 0x2A))];
+            ref_card.stroke = DStroke { paints: vec![Paint::solid(Color::rgb(0x71, 0x71, 0x7A))], weight: 2.0, ..Default::default() };
+            ref_card.corner_radii = [14.0; 4];
+            let _ = app.doc.insert(page, ref_card);
+
+            let sid = app.doc.alloc_id();
+            let w = (256.0 * mult).round();
+            let h = (160.0 * mult).round();
+            let mut card = Node::frame(sid, DRect::new(2420.0, 2200.0, w, h));
+            card.name = format!("Scale Tool (K) · {mult:.2}× Proportional");
+            card.fills = vec![Paint::solid(Color::rgb(0x1E, 0x1E, 0x24))];
+            let stroke_col = if u > 0.85 { Color::rgb(0x14, 0xAE, 0x5C) } else { Color::rgb(0x0D, 0x99, 0xFF) };
+            card.stroke = DStroke { paints: vec![Paint::solid(stroke_col)], weight: 2.0 * mult, ..Default::default() };
+            card.corner_radii = [14.0 * mult; 4];
+            let sid = app.doc.insert(page, card).unwrap();
+
+            let badge_id = app.doc.alloc_id();
+            let mut badge_node = Node::rectangle(badge_id, DRect::new(24.0 * mult, 24.0 * mult, 112.0 * mult, 44.0 * mult));
+            badge_node.name = format!("Badge · {mult:.2}×");
+            badge_node.fills = vec![Paint::solid(Color::rgb(0x0D, 0x99, 0xFF))];
+            badge_node.corner_radii = [8.0 * mult; 4];
+            let _ = app.doc.insert(sid, badge_node);
+
+            let pill_id = app.doc.alloc_id();
+            let mut pill_node = Node::rectangle(pill_id, DRect::new(24.0 * mult, 84.0 * mult, 188.0 * mult, 48.0 * mult));
+            pill_node.name = format!("Metric · {w:.0}×{h:.0}");
+            pill_node.fills = vec![Paint::solid(Color::rgb(0xE3, 0x63, 0x23))];
+            pill_node.corner_radii = [10.0 * mult; 4];
+            let _ = app.doc.insert(sid, pill_node);
+
+            app.selection = vec![sid];
+            app.canvas.inter = crate::canvas::Interaction::Resize(crate::canvas::ResizeState {
+                tx: crate::edit::Tx::new(),
+                handle: crate::canvas::handles::Handle::BR,
+                kind: crate::canvas::ResizeKind::Single {
+                    id: sid,
+                    world0: Affine::translate(2420.0, 2200.0),
+                    t0: Affine::translate(2420.0, 2200.0),
+                    size0: DV::new(256.0, 160.0),
+                },
+                targets: vec![],
+            });
+            hud.focus_page = DV::new(2540.0, 2330.0);
+            hud.zoom = 1.16;
+            hud.cursor_page = DV::new(2420.0 + w, 2200.0 + h);
+            hud.drag_start_page = Some(DV::new(2420.0 + 256.0, 2200.0 + 160.0));
+            hud.dragging = u <= 0.88;
+            hud.accent_orange = true;
+            hud.badge_text = format!("Scale: {mult:.2}× ({w:.0}×{h:.0}) · Radius {:.1}px", 14.0 * mult);
+            hud.keycap = "K · Scale".into();
+            hud.caption = "Proportional Scale Tool (K) scales geometry, strokes & radii in lockstep".into();
+        }
+        "micro-inspector-math" => {
+            // M09: Inspector Scrubbing, Math Expressions (`280+140`) & Hex Shorthand (`#09F` -> `#0D99FF`)
+            let (w, h, rad, col, op, msg, key) = if u < 0.35 {
+                let t = smooth01(u / 0.35);
+                let w = lerp_f32(260.0, 420.0, t);
+                let h = lerp_f32(156.0, 212.0, t);
+                (w, h, 14.0, Color::rgb(0x0D, 0x99, 0xFF), 1.0, format!("Scrub W: {w:.0} px · Math H: 156+56 = {h:.0} px"), "Alt+Scrub")
+            } else if u < 0.68 {
+                let t = smooth01((u - 0.35) / 0.33);
+                let r = lerp_f32(14.0, 38.0, t);
+                let c = lerp_color(Color::rgb(0x0D, 0x99, 0xFF), Color::rgb(0xE3, 0x63, 0x23), t);
+                (420.0, 212.0, r, c, 1.0, format!("Corner Scrub: {r:.0} px · Hex #E62 → #E36323"), "#E62")
+            } else {
+                let t = smooth01((u - 0.68) / 0.32);
+                let op = lerp_f32(0.50, 1.0, t);
+                let c = lerp_color(Color::rgb(0xE3, 0x63, 0x23), Color::rgb(0x14, 0xAE, 0x5C), t);
+                (420.0, 212.0, 28.0, c, op, format!("Opacity Shortcut: {:.0}% · Hex #1A5 → #14AE5C", op * 100.0), "0..9 Opacity")
+            };
+            let cid = app.doc.alloc_id();
+            let mut card = Node::frame(cid, DRect::new(2420.0, 2520.0, w, h));
+            card.name = format!("Inspector Math · {w:.0}×{h:.0} · R{rad:.0}");
+            card.fills = vec![Paint::solid(col)];
+            card.opacity = op;
+            card.corner_radii = [rad; 4];
+            card.stroke = DStroke { paints: vec![Paint::solid(Color::rgba(255, 255, 255, 70))], weight: 2.0, ..Default::default() };
+            let cid = app.doc.insert(page, card).unwrap();
+
+            let inner = app.doc.alloc_id();
+            let mut pill = Node::rectangle(inner, DRect::new(24.0, 24.0, (w - 48.0).max(80.0), 54.0));
+            pill.name = "Math Expression · 260 + 160".into();
+            pill.fills = vec![Paint::solid(Color::rgba(17, 18, 22, 190))];
+            pill.corner_radii = [(rad * 0.5).min(16.0); 4];
+            let _ = app.doc.insert(cid, pill);
+
+            app.selection = vec![cid];
+            hud.focus_page = DV::new(2630.0, 2625.0);
+            hud.zoom = 1.34;
+            hud.cursor_page = DV::new(2420.0 + w, 2520.0 + h * 0.5);
+            hud.dragging = true;
+            hud.accent_orange = (0.35..0.68).contains(&u);
+            hud.badge_text = msg;
+            hud.keycap = key.into();
+            hud.caption = "Inspector label scrubbing, inline math evaluation & hex shorthand (#1..#9, #50..#54)".into();
+        }
+        "micro-selection-corner" => {
+            // M10: Selection Traversal, Cmd+D Offset Memory & Independent 4-Corner Radius Handles
+            // [0.00..0.38]: Alt+Drag & Cmd+D spawns 4 rhythmic cards with offset memory (+164px)
+            // [0.38..0.70]: Drag symmetric on-canvas Corner Radius diamond (8px -> 38px)
+            // [0.70..1.00]: Alt-drag independent corners into asymmetric leaf card [46, 8, 46, 8]
+            let count: usize = if u < 0.12 {
+                1
+            } else if u < 0.24 {
+                2
+            } else if u < 0.36 {
+                3
+            } else {
+                4
+            };
+            let radii = if u < 0.38 {
+                [12.0; 4]
+            } else if u < 0.70 {
+                let r = lerp_f32(12.0, 38.0, smooth01((u - 0.38) / 0.32));
+                [r; 4]
+            } else {
+                let t = smooth01((u - 0.70) / 0.30);
+                let r_big = lerp_f32(38.0, 48.0, t);
+                let r_sm = lerp_f32(38.0, 8.0, t);
+                [r_big, r_sm, r_big, r_sm]
+            };
+
+            let mut ids = Vec::new();
+            for i in 0..count {
+                let id = app.doc.alloc_id();
+                let slide = if i == count - 1 && u < 0.38 {
+                    let frac = ((u * 8.33) % 1.0).clamp(0.0, 1.0);
+                    lerp_f32(-48.0, 0.0, smooth01(frac))
+                } else {
+                    0.0
+                };
+                let mut n = Node::rectangle(id, DRect::new(2400.0 + i as f32 * 164.0 + slide, 2840.0, 144.0, 184.0));
+                n.name = format!("Card · {:02} (⌘D)", i + 1);
+                let col = match i % 3 {
+                    0 => Color::rgb(0x0D, 0x99, 0xFF),
+                    1 => Color::rgb(0xE3, 0x63, 0x23),
+                    _ => Color::rgb(0x14, 0xAE, 0x5C),
+                };
+                n.fills = vec![Paint::solid(col)];
+                n.corner_radii = if i == 0 { radii } else { [14.0; 4] };
+                ids.push(app.doc.insert(page, n).unwrap());
+            }
+            app.selection = if u < 0.38 { ids.clone() } else { ids.into_iter().take(1).collect() };
+            hud.focus_page = DV::new(2640.0, 2932.0);
+            hud.zoom = 1.28;
+            if u < 0.38 {
+                let last_x = 2400.0 + (count.saturating_sub(1)) as f32 * 164.0 + 72.0;
+                hud.cursor_page = DV::new(last_x, 2932.0);
+                hud.dragging = true;
+                hud.badge_text = format!("⌘D Offset Memory: {count}× Cards (+164px)");
+                hud.keycap = "⌘D · Tab".into();
+                hud.caption = "Alt-drag + Cmd+D repeats exact translation offset across siblings (#16, #24)".into();
+            } else if u < 0.70 {
+                let r = radii[0];
+                hud.cursor_page = DV::new(2400.0 + r.max(16.0), 2840.0 + r.max(16.0));
+                hud.dragging = true;
+                hud.accent_orange = true;
+                hud.badge_text = format!("Uniform Corner Radius: {r:.0} px");
+                hud.keycap = "Radius".into();
+                hud.caption = "Dragging on-canvas corner diamond rounds all 4 corners live (#35)".into();
+            } else {
+                hud.cursor_page = DV::new(2400.0 + 144.0 - 14.0, 2840.0 + 14.0);
+                hud.dragging = true;
+                hud.accent_orange = true;
+                hud.badge_text = format!("Asymmetric Radii: [{:.0}, {:.0}, {:.0}, {:.0}] px", radii[0], radii[1], radii[2], radii[3]);
+                hud.keycap = "Alt+Corner".into();
+                hud.caption = "Holding Alt on a corner handle adjusts individual corner radius (#36)".into();
+            }
+        }
+        "micro-typography-multiedit" => {
+            // M11: Multi-Edit (`Q`) across sibling frames + Typography tracking & Auto-Height fit
+            let t_all = smooth01(u);
+            let badge_w = lerp_f32(104.0, 148.0, t_all);
+            let badge_r = lerp_f32(8.0, 20.0, t_all);
+            let badge_col = if u < 0.5 {
+                lerp_color(Color::rgb(0x0D, 0x99, 0xFF), Color::rgb(0xE3, 0x63, 0x23), smooth01(u * 2.0))
+            } else {
+                lerp_color(Color::rgb(0xE3, 0x63, 0x23), Color::rgb(0x14, 0xAE, 0x5C), smooth01((u - 0.5) * 2.0))
+            };
+            let mut selected = Vec::new();
+            for i in 0..3 {
+                let fid = app.doc.alloc_id();
+                let mut f = Node::frame(fid, DRect::new(2400.0 + i as f32 * 196.0, 3160.0, 176.0, 210.0));
+                f.name = format!("Multi-Edit Frame · {:02}", i + 1);
+                f.fills = vec![Paint::solid(Color::rgb(0x1E, 0x1E, 0x24))];
+                f.stroke = DStroke { paints: vec![Paint::solid(Color::rgb(0x3F, 0x3F, 0x46))], weight: 1.5, ..Default::default() };
+                f.corner_radii = [14.0; 4];
+                let fid = app.doc.insert(page, f).unwrap();
+
+                let bid = app.doc.alloc_id();
+                let mut badge = Node::rectangle(bid, DRect::new(16.0, 22.0, badge_w, 46.0));
+                badge.name = "Synced CTA · Multi-Edit (Q)".into();
+                badge.fills = vec![Paint::solid(badge_col)];
+                badge.corner_radii = [badge_r; 4];
+                let bid = app.doc.insert(fid, badge).unwrap();
+                selected.push(bid);
+
+                let tid = app.doc.alloc_id();
+                let style = TextStyle { font_size: lerp_f32(15.0, 18.0, t_all), letter_spacing: lerp_f32(0.0, 1.4, t_all), ..TextStyle::default() };
+                let txt = Node::text(tid, DRect::new(16.0, 88.0, 144.0, 84.0), format!("Tracking +{:.1}px\nAuto-Height", style.letter_spacing), style);
+                let _ = app.doc.insert(fid, txt);
+            }
+            app.selection = selected;
+            hud.focus_page = DV::new(2684.0, 3265.0);
+            hud.zoom = 1.24;
+            hud.cursor_page = DV::new(2400.0 + 196.0 + 16.0 + badge_w, 3160.0 + 45.0);
+            hud.dragging = true;
+            hud.accent_orange = u < 0.55;
+            hud.badge_text = format!("Multi-Edit (Q): 3 Layers · W {badge_w:.0}px · R {badge_r:.0}px");
+            hud.keycap = "Q · Multi-Edit".into();
+            hud.caption = "Pressing Q selects matching layers across sibling frames for lockstep editing (#26, #55..#70)".into();
+        }
+        "micro-components-variables" => {
+            // M12: Components (`Opt+Cmd+K`), Variables (`=`) Live Mode Switch & Prototype Noodles
+            let t = smooth01(u);
+            let is_dark = (0.35..0.72).contains(&u);
+            let is_proto = u >= 0.72;
+            if (0.28..0.72).contains(&u) {
+                app.open_variables();
+                app.vars.full = false;
+            }
+            if is_proto {
+                app.ui.right_tab = Some(crate::app::RightTab::Prototype);
+                crate::protovars::open_editor(app);
+            }
+
+            let surf = if is_dark { Color::rgb(0x14, 0x14, 0x18) } else { Color::rgb(0xF4, 0xF4, 0xF6) };
+            let accent = if is_dark { Color::rgb(0x97, 0x47, 0xFF) } else { Color::rgb(0x0D, 0x99, 0xFF) };
+            let inst_accent = Color::rgb(0xE3, 0x63, 0x23);
+            let comp_w = lerp_f32(180.0, 212.0, (t * std::f32::consts::PI).sin());
+
+            let mut comp_ids = Vec::new();
+            for i in 0..3 {
+                let cid = app.doc.alloc_id();
+                let mut card = Node::frame(cid, DRect::new(2390.0 + i as f32 * 228.0, 3500.0, comp_w, 188.0));
+                card.name = if i == 0 {
+                    "❖ Master Component · Card/Metric".into()
+                } else {
+                    format!("◇ Instance {:02} · Mode={}", i, if is_dark { "Dark" } else { "Light" })
+                };
+                card.fills = vec![Paint::solid(surf)];
+                card.stroke =
+                    DStroke { paints: vec![Paint::solid(Color::rgb(0x97, 0x47, 0xFF))], weight: if i == 0 { 2.5 } else { 1.5 }, ..Default::default() };
+                card.corner_radii = [16.0; 4];
+                let cid = app.doc.insert(page, card).unwrap();
+
+                let pill_id = app.doc.alloc_id();
+                let mut pill = Node::rectangle(pill_id, DRect::new(20.0, 24.0, comp_w - 40.0, 48.0));
+                pill.name = "Token Bound Header".into();
+                pill.fills = vec![Paint::solid(if i == 1 { inst_accent } else { accent })];
+                pill.corner_radii = [10.0; 4];
+                let _ = app.doc.insert(cid, pill);
+                comp_ids.push(cid);
+            }
+            app.selection = comp_ids;
+            hud.focus_page = DV::new(2690.0, 3594.0);
+            hud.zoom = 1.18;
+            hud.cursor_page = DV::new(2390.0 + comp_w, 3594.0);
+            hud.dragging = u < 0.72;
+            hud.accent_orange = is_dark;
+            hud.badge_text = if u < 0.35 {
+                format!("❖ Master → 2 Instances Live Sync (W: {comp_w:.0}px)")
+            } else if u < 0.72 {
+                "Variables (=) · Subtree Mode Switch: Light ⇄ Dark".into()
+            } else {
+                "Prototype Tab · Interactive Variant & Flow Wiring".into()
+            };
+            hud.keycap = if u < 0.35 {
+                "⌥⌘K".into()
+            } else if u < 0.72 {
+                "= · Modes".into()
+            } else {
+                "Prototype".into()
+            };
+            hud.caption = "Master Component propagation, Variables mode switching & Prototype flows (#71..#100)".into();
+        }
+        _ => {}
+    }
+
+    app.canvas.tiles.invalidate_all();
+    app.changed();
+    hud
+}
+
+/// Paints the native on-canvas pointer, pulsing drag ring, live metric pill, and bottom shortcut HUD
+/// directly into the `egui` foreground layer during `--panel micro-<slug>:seq:<N>` recording.
+fn paint_micro_seq_hud(ui: &egui::Ui, app: &App, canvas_rect: Rect, _right_rect: Rect, hud: &MicroSeqHud, cur: usize, total: usize) {
+    let p = ui.ctx().layer_painter(egui::LayerId::new(egui::Order::Foreground, egui::Id::new("micro-seq-hud")));
+    let cursor_pos = hud.cursor_screen_override.unwrap_or_else(|| app.view.to_screen(canvas_rect.min, hud.cursor_page));
+    let accent = if hud.accent_orange { egui::Color32::from_rgb(0xE3, 0x63, 0x23) } else { egui::Color32::from_rgb(0x0D, 0x99, 0xFF) };
+
+    if let Some(start_page) = hud.drag_start_page {
+        let start_pos = app.view.to_screen(canvas_rect.min, start_page);
+        if (cursor_pos - start_pos).length() > 6.0 {
+            p.line_segment([start_pos, cursor_pos], egui::Stroke::new(2.0, accent.gamma_multiply(0.75)));
+            p.circle_filled(start_pos, 4.5, accent);
+        }
+    }
+
+    if hud.dragging {
+        let pulse = ((cur as f32 * 0.35).sin() * 0.5 + 0.5) * 6.0;
+        p.circle_filled(cursor_pos, 14.0 + pulse * 0.4, accent.gamma_multiply(0.22));
+        p.circle_stroke(cursor_pos, 16.0 + pulse, egui::Stroke::new(2.0, accent));
+    }
+
+    // Crisp vector pointer arrow at `cursor_pos`
+    let tip = cursor_pos;
+    let arrow = vec![
+        tip,
+        Pos2::new(tip.x, tip.y + 20.0),
+        Pos2::new(tip.x + 5.5, tip.y + 15.0),
+        Pos2::new(tip.x + 9.5, tip.y + 23.0),
+        Pos2::new(tip.x + 12.5, tip.y + 21.5),
+        Pos2::new(tip.x + 8.5, tip.y + 13.5),
+        Pos2::new(tip.x + 15.0, tip.y + 13.5),
+    ];
+    p.add(egui::Shape::convex_polygon(arrow.clone(), egui::Color32::from_rgb(0x11, 0x12, 0x16), egui::Stroke::new(2.0, egui::Color32::WHITE)));
+
+    // Floating live metric pill near cursor
+    if !hud.badge_text.is_empty() {
+        let font = theme::font_body_strong();
+        let tw = widgets::text_width(&p, &hud.badge_text, &font);
+        let pill_w = tw + 24.0;
+        let pill_h = 28.0;
+        let mut px = (tip.x + 22.0).min(canvas_rect.right() - pill_w - 12.0).max(canvas_rect.left() + 12.0);
+        let mut py = (tip.y - 34.0).max(canvas_rect.top() + 16.0);
+        if py + pill_h > canvas_rect.bottom() - 64.0 {
+            py = tip.y - pill_h - 12.0;
+        }
+        if px < canvas_rect.left() + 12.0 {
+            px = canvas_rect.left() + 12.0;
+        }
+        let pill_rect = Rect::from_min_size(Pos2::new(px, py), Vec2::new(pill_w, pill_h));
+        widgets::elevation_shadow(&p, pill_rect, 8);
+        p.rect_filled(pill_rect, 8.0, egui::Color32::from_rgba_unmultiplied(17, 18, 22, 242));
+        p.rect_stroke(pill_rect, 8.0, egui::Stroke::new(1.5, accent), egui::StrokeKind::Outside);
+        p.text(pill_rect.center(), Align2::CENTER_CENTER, &hud.badge_text, font, egui::Color32::WHITE);
+    }
+
+    // Top-center HUD caption bar with keycap badge + progress bar
+    if !hud.caption.is_empty() {
+        let font_cap = theme::font_body_strong();
+        let font_key = theme::font_body_strong();
+        let kw = widgets::text_width(&p, &hud.keycap, &font_key) + 18.0;
+        let cw = widgets::text_width(&p, &hud.caption, &font_cap);
+        let bar_w = (kw + cw + 46.0).min(canvas_rect.width() - 24.0);
+        let bar_h = 38.0;
+        let bar_rect = Rect::from_center_size(Pos2::new(canvas_rect.center().x, canvas_rect.top() + 48.0), Vec2::new(bar_w, bar_h));
+        widgets::elevation_shadow(&p, bar_rect, 10);
+        p.rect_filled(bar_rect, 10.0, egui::Color32::from_rgba_unmultiplied(17, 18, 22, 238));
+        p.rect_stroke(bar_rect, 10.0, egui::Stroke::new(1.0, egui::Color32::from_rgba_unmultiplied(255, 255, 255, 36)), egui::StrokeKind::Outside);
+        let key_rect = Rect::from_min_size(Pos2::new(bar_rect.left() + 10.0, bar_rect.top() + 7.0), Vec2::new(kw, 24.0));
+        p.rect_filled(key_rect, 6.0, accent);
+        p.text(key_rect.center(), Align2::CENTER_CENTER, &hud.keycap, font_key, egui::Color32::WHITE);
+        p.text(Pos2::new(key_rect.right() + 12.0, bar_rect.center().y), Align2::LEFT_CENTER, &hud.caption, font_cap, egui::Color32::from_rgb(0xF4, 0xF4, 0xF6));
+        let prog = if total <= 1 { 1.0 } else { (cur as f32 + 1.0) / (total as f32) };
+        let prog_rect = Rect::from_min_size(Pos2::new(bar_rect.left() + 8.0, bar_rect.bottom() - 3.0), Vec2::new((bar_w - 16.0) * prog, 2.0));
+        p.rect_filled(prog_rect, 1.0, accent);
     }
 }
 

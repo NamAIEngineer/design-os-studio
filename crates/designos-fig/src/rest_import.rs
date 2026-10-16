@@ -379,29 +379,53 @@ struct Ctx<'a> {
     has_instance_swap_values: bool,
     /// Whether any `CONNECTOR` node was encountered during import.
     has_connectors: bool,
+    connectors: Vec<(NodeId, Option<String>, Option<String>)>,
 }
 
 /// Overrides carried on `.fig` instance JSON as `_overrides` / `_derived`:
 /// `[{"path": ["1:6", ...], "set": {<partial REST node fields>}}]`.
 #[derive(Default)]
 struct Overrides<'a> {
-    set: Vec<OverrideEntry<'a>>,
-    derived: Vec<OverrideEntry<'a>>,
+    set: Vec<OverrideEntry>,
+    derived: Vec<OverrideEntry>,
     fast_derived: &'a [crate::fig::FastDerivedEntry],
 }
 
-struct OverrideEntry<'a> {
-    path: Vec<&'a str>,
-    set: &'a Value,
+struct OverrideEntry {
+    path: Vec<String>,
+    set: Value,
 }
 
-fn parse_override_entries<'a>(v: Option<&'a Value>) -> Vec<OverrideEntry<'a>> {
+fn parse_override_entries(v: Option<&Value>) -> Vec<OverrideEntry> {
     v.and_then(Value::as_array)
         .map(|a| {
             a.iter()
                 .filter_map(|e| {
-                    let path = e.get("path")?.as_array()?.iter().filter_map(Value::as_str).collect();
-                    Some(OverrideEntry { path, set: e.get("set")? })
+                    let path = e.get("path")?.as_array()?.iter().filter_map(|s| s.as_str().map(String::from)).collect();
+                    Some(OverrideEntry { path, set: e.get("set")?.clone() })
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn take_override_entries(v: Option<&mut Value>) -> Vec<OverrideEntry> {
+    v.and_then(Value::as_array_mut)
+        .map(|a| {
+            std::mem::take(a)
+                .into_iter()
+                .filter_map(|mut e| {
+                    let path = e
+                        .get_mut("path")?
+                        .as_array_mut()?
+                        .iter_mut()
+                        .filter_map(|p| match std::mem::take(p) {
+                            Value::String(s) => Some(s),
+                            _ => None,
+                        })
+                        .collect();
+                    let set = std::mem::take(e.get_mut("set")?);
+                    Some(OverrideEntry { path, set })
                 })
                 .collect()
         })
@@ -462,6 +486,110 @@ pub(crate) fn import_rest_value(v: &Value, expand_instances: bool) -> Result<Doc
     import_rest_value_with_blobs(v, expand_instances, &[], None)
 }
 
+pub(crate) fn import_rest_value_owned<'a>(
+    mut v: Value,
+    expand_instances: bool,
+    blobs: &'a [&'a [u8]],
+    fast_derived_map: Option<&'a HashMap<String, Vec<crate::fig::FastDerivedEntry>>>,
+) -> Result<Document, FigError> {
+    if crate::board::is_figjam(&v) {
+        return import_rest_value_with_blobs(&v, expand_instances, blobs, fast_derived_map);
+    }
+    let has_doc = v.get("document").is_some();
+    if !has_doc && fstr(&v, "type").is_none() {
+        return Err(FigError::Format("REST JSON has no `document`".into()));
+    }
+    let doc_name = fstr(&v, "name").unwrap_or("Untitled").to_string();
+    let mut cx = Ctx {
+        doc: Document::new(&doc_name),
+        blobs,
+        fast_derived_map,
+        ids: BTreeMap::new(),
+        instances: Vec::new(),
+        unresolved: Vec::new(),
+        component_keys: BTreeMap::new(),
+        overrides: BTreeMap::new(),
+        next_clone: 0,
+        override_keys: HashMap::new(),
+        scales: BTreeMap::new(),
+        library_keys: BTreeMap::new(),
+        pending_swaps: Vec::new(),
+        rest_overrides: Vec::new(),
+        proto: Vec::new(),
+        overlay_props: BTreeMap::new(),
+        flow_pages: Vec::new(),
+        path_cache: HashMap::new(),
+        blob_cache: HashMap::with_capacity(blobs.len()),
+        expanded_comps: HashSet::new(),
+        has_instance_swap_values: false,
+        has_connectors: false,
+        connectors: Vec::new(),
+    };
+    if let Some(comps) = v.get("components").and_then(Value::as_object) {
+        for (id, c) in comps {
+            if let Some(k) = fstr(c, "key") {
+                cx.component_keys.insert(id.clone(), k.to_string());
+            }
+        }
+    }
+    let pages: Vec<Value> = if has_doc {
+        let root = v.get_mut("document").unwrap();
+        if fstr(root, "type") == Some("CANVAS") {
+            vec![std::mem::take(root)]
+        } else {
+            root.get_mut("children")
+                .and_then(Value::as_array_mut)
+                .map(|arr| std::mem::take(arr).into_iter().filter(|c| fstr(c, "type") == Some("CANVAS")).collect())
+                .unwrap_or_default()
+        }
+    } else if fstr(&v, "type") == Some("CANVAS") {
+        vec![std::mem::take(&mut v)]
+    } else {
+        v.get_mut("children")
+            .and_then(Value::as_array_mut)
+            .map(|arr| std::mem::take(arr).into_iter().filter(|c| fstr(c, "type") == Some("CANVAS")).collect())
+            .unwrap_or_default()
+    };
+    for p in pages {
+        cx.import_page_owned(p);
+    }
+    let library_pages: Vec<Value> = v.get_mut("libraryPages").and_then(Value::as_array_mut).map(std::mem::take).unwrap_or_default();
+    if !library_pages.is_empty() {
+        let lib = ensure_library_page(&mut cx.doc);
+        let info = ParentInfo { origin: Vec2::ZERO, layout: None };
+        for mut p in library_pages {
+            let children: Vec<Value> = p.get_mut("children").and_then(Value::as_array_mut).map(std::mem::take).unwrap_or_default();
+            drop(p);
+            for c in children {
+                cx.import_node_owned(c, lib, info, 0);
+            }
+        }
+    }
+    if cx.doc.nodes.len() > 10_000 {
+        crate::fig::release_os_memory();
+    }
+    cx.finish(expand_instances);
+    cx.register_library_assets();
+    cx.doc.kind = DocumentKind::Design;
+    if !cx.connectors.is_empty() {
+        crate::board::link_connector_list(&mut cx.doc, &cx.ids, &cx.connectors);
+    }
+    cx.link_remote_components(&v);
+    crate::variables::import_variables_value(&mut cx.doc, &v);
+    cx.doc.style_meta = style_meta(v.get("styles"), &cx.doc);
+    drop(v);
+    let doc = cx.doc;
+    drop(cx.override_keys);
+    drop(cx.ids);
+    drop(cx.instances);
+    drop(cx.blob_cache);
+    drop(cx.path_cache);
+    if doc.nodes.len() > 10_000 {
+        crate::fig::release_os_memory();
+    }
+    Ok(doc)
+}
+
 pub(crate) fn import_rest_value_with_blobs<'a>(
     v: &'a Value,
     expand_instances: bool,
@@ -496,6 +624,7 @@ pub(crate) fn import_rest_value_with_blobs<'a>(
         expanded_comps: HashSet::new(),
         has_instance_swap_values: false,
         has_connectors: false,
+        connectors: Vec::new(),
     };
     if let Some(comps) = v.get("components").and_then(Value::as_object) {
         for (id, c) in comps {
@@ -540,24 +669,120 @@ pub(crate) fn import_rest_value_with_blobs<'a>(
     crate::variables::import_variables_value(&mut cx.doc, v);
     cx.doc.style_meta = style_meta(v.get("styles"), &cx.doc);
     let doc = cx.doc;
-    let override_keys = cx.override_keys;
-    let ids = cx.ids;
-    let instances = cx.instances;
-    let blob_cache = cx.blob_cache;
-    let path_cache = cx.path_cache;
+    drop(cx.override_keys);
+    drop(cx.ids);
+    drop(cx.instances);
+    drop(cx.blob_cache);
+    drop(cx.path_cache);
     if doc.nodes.len() > 10_000 {
-        std::thread::spawn(move || {
-            drop(override_keys);
-            drop(ids);
-            drop(instances);
-            drop(blob_cache);
-            drop(path_cache);
-        });
+        crate::fig::release_os_memory();
     }
     Ok(doc)
 }
 
 impl<'a> Ctx<'a> {
+    fn import_page_owned(&mut self, mut v: Value) {
+        let pid = self.doc.add_page(fstr(&v, "name").unwrap_or("Page"));
+        if let Some(src) = fstr(&v, "id") {
+            self.ids.insert(src.to_string(), pid);
+        }
+        let bg = v.get("backgroundColor").and_then(color).unwrap_or(Color::rgb(0xE5, 0xE5, 0xE5));
+        if let Some(n) = self.doc.get_mut(pid) {
+            n.kind = NodeKind::Page { background: bg.with_alpha(1.0) };
+            n.source_id = fstr(&v, "id").map(String::from);
+        }
+        if let Some(fl) = v.get_mut("flowStartingPoints").map(std::mem::take) {
+            self.flow_pages.push((pid, serde_json::json!({ "flowStartingPoints": fl })));
+        }
+        let guides = parse_guides(&v, None);
+        if !guides.is_empty() {
+            self.doc.guides.entry(pid).or_default().extend(guides);
+        }
+        let children: Vec<Value> = v.get_mut("children").and_then(Value::as_array_mut).map(std::mem::take).unwrap_or_default();
+        drop(v);
+        let info = ParentInfo { origin: Vec2::ZERO, layout: None };
+        for c in children {
+            self.import_node_owned(c, pid, info, 0);
+        }
+    }
+
+    fn import_node_owned(&mut self, mut v: Value, parent: NodeId, pinfo: ParentInfo, depth: usize) {
+        if depth > MAX_DEPTH {
+            return;
+        }
+        let Some(ty_str) = fstr(&v, "type").map(String::from) else { return };
+        let ty = ty_str.as_str();
+        if ty == "CANVAS" || ty == "DOCUMENT" {
+            return;
+        }
+        let children: Vec<Value> = v.get_mut("children").and_then(Value::as_array_mut).map(std::mem::take).unwrap_or_default();
+        let id = self.doc.alloc_id();
+        let (mut node, my_layout) = self.build_node(id, ty, &v, pinfo);
+        node.source_id = fstr(&v, "id").map(String::from);
+        if let Some(src) = &node.source_id {
+            self.ids.insert(src.clone(), id);
+        }
+        crate::proto::apply_scroll(&mut node, &v);
+        if let Some(k) = fstr(&v, "_overrideKey") {
+            self.override_keys.insert(id, std::sync::Arc::from(k));
+        }
+        if let (Some(k), true) = (fstr(&v, "componentKey"), matches!(node.kind, NodeKind::Component(_) | NodeKind::ComponentSet(_))) {
+            self.library_keys.insert(id, (k.to_string(), fstr(&v, "sourceLibraryKey").map(String::from)));
+        }
+        let is_instance = matches!(node.kind, NodeKind::Instance { .. });
+        let origin = abs_origin(&v).unwrap_or(pinfo.origin);
+        let container = node.kind.is_container();
+        let is_frame = node.kind.frame_props().is_some();
+        if self.doc.insert(parent, node).is_err() {
+            return;
+        }
+        if is_frame {
+            let guides = parse_guides(&v, Some(id));
+            if let (false, Some(page)) = (guides.is_empty(), self.doc.page_of(id)) {
+                self.doc.guides.entry(page).or_default().extend(guides);
+            }
+        }
+        if let Some(raw) = crate::proto::collect(&v) {
+            self.proto.push((id, raw));
+        }
+        if let Some(o) = crate::proto::collect_overlay(&v) {
+            if let Some(src) = fstr(&v, "id") {
+                self.overlay_props.insert(src.to_string(), o);
+            }
+        }
+        if crate::proto::is_fixed(&v) {
+            if let Some(p) = self.doc.get_mut(parent) {
+                p.prototype.fixed_children.push(id);
+            }
+        }
+        if is_instance {
+            if let Some(cid) = fstr(&v, "componentId") {
+                self.instances.push((id, cid.to_string()));
+            }
+            if let Some(s) = fnum(&v, "_uniformScale").filter(|s| *s > 0.0 && (*s - 1.0).abs() > 1e-4) {
+                self.scales.insert(id, s);
+            }
+            for e in farr(&v, "overrides") {
+                if let Some(nid) = fstr(e, "id") {
+                    let fields: Vec<String> = farr(e, "overriddenFields").iter().filter_map(|f| f.as_str().map(String::from)).collect();
+                    self.rest_overrides.push((id, nid.to_string(), fields));
+                }
+            }
+            let fast_derived = fstr(&v, "id").and_then(|sid| self.fast_derived_map.and_then(|m| m.get(sid))).map(Vec::as_slice).unwrap_or(&[]);
+            let ov = Overrides { set: take_override_entries(v.get_mut("_overrides")), derived: take_override_entries(v.get_mut("_derived")), fast_derived };
+            if !ov.set.is_empty() || !ov.derived.is_empty() || !ov.fast_derived.is_empty() {
+                self.overrides.insert(id, ov);
+            }
+        }
+        drop(v);
+        if container {
+            let info = ParentInfo { origin, layout: my_layout };
+            for c in children {
+                self.import_node_owned(c, id, info, depth + 1);
+            }
+        }
+    }
+
     fn import_page(&mut self, v: &'a Value) {
         let pid = self.doc.add_page(fstr(v, "name").unwrap_or("Page"));
         if let Some(src) = fstr(v, "id") {
@@ -672,6 +897,9 @@ impl<'a> Ctx<'a> {
             "STICKY" | "SHAPE_WITH_TEXT" | "STAMP" | "CONNECTOR" => {
                 if ty == "CONNECTOR" {
                     self.has_connectors = true;
+                    let start_ep = v.get("connectorStart").and_then(|e| fstr(e, "endpointNodeId")).map(String::from);
+                    let end_ep = v.get("connectorEnd").and_then(|e| fstr(e, "endpointNodeId")).map(String::from);
+                    self.connectors.push((id, start_ep, end_ep));
                 }
                 crate::board::kind_from_json(ty, v, pinfo.origin).unwrap_or(NodeKind::Unknown { type_name: ty.to_string() })
             }
@@ -1292,7 +1520,7 @@ impl<'a> Ctx<'a> {
         let mut out: Vec<NodeId> = Vec::new();
         if let Some(ov) = self.overrides.get(&inst) {
             for e in &ov.set {
-                out.extend(fstr(e.set, "componentId").and_then(|c| self.ids.get(c)).copied());
+                out.extend(fstr(&e.set, "componentId").and_then(|c| self.ids.get(c)).copied());
                 if let Some(props) = e.set.get("componentProperties").and_then(Value::as_object) {
                     let swapped = props.values().filter(|p| fstr(p, "type") == Some("INSTANCE_SWAP")).filter_map(|p| p.get("value").and_then(Value::as_str));
                     out.extend(swapped.filter_map(|c| self.ids.get(c)).copied());
@@ -1447,6 +1675,9 @@ impl<'a> Ctx<'a> {
             n.parent = Some(parent);
             if fast_clone {
                 n.fig_metadata.clear();
+                if let Some(sid) = n.source_id.take() {
+                    self.override_keys.entry(src).or_insert_with(|| std::sync::Arc::from(sid.rsplit(';').next().unwrap_or(&sid)));
+                }
             } else {
                 n.source_id = n.source_id.as_ref().map(|s| format!("I{prefix};{s}"));
             }
@@ -1474,7 +1705,7 @@ impl<'a> Ctx<'a> {
         let mut subtree_maps: HashMap<NodeId, HashMap<String, NodeId>> = HashMap::new();
         for e in &ov.set {
             if let Some(t) = self.resolve_path_cached(inst, &e.path, &mut subtree_maps) {
-                if self.apply_override(t, e.set, false, targets, done) {
+                if self.apply_override(t, &e.set, false, targets, done) {
                     subtree_maps.clear();
                 }
             }
@@ -1482,7 +1713,7 @@ impl<'a> Ctx<'a> {
         // Figma's computed results for resized instances win over the raw overrides.
         for e in &ov.derived {
             if let Some(t) = self.resolve_path_cached(inst, &e.path, &mut subtree_maps) {
-                self.apply_override(t, e.set, true, targets, done);
+                self.apply_override(t, &e.set, true, targets, done);
             }
         }
         for d in ov.fast_derived {

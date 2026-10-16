@@ -1,0 +1,189 @@
+{
+  "version": 1,
+  "tasks": {
+    "a11y": {
+      "nextRunAt": "2026-10-17T12:02:55.096036+07:00",
+      "lastStatus": "ok",
+      "lastSummary": {
+        "failures": 0
+      },
+      "suppressCount": 8,
+      "runs": 9,
+      "history": [
+        {
+          "at": "2026-10-16T12:02:55.096036+07:00",
+          "status": "ok",
+          "summary": {
+            "failures": 0
+          }
+        },
+        {
+          "at": "2026-10-16T11:36:39.001485+07:00",
+          "status": "ok",
+          "summary": {
+            "failures": 0
+          }
+        },
+        {
+          "at": "2026-10-16T11:32:32.896021+07:00",
+          "status": "ok",
+          "summary": {
+            "failures": 0
+          }
+        },
+        {
+          "at": "2026-10-16T10:59:34.557832+07:00",
+          "status": "ok",
+          "summary": {
+            "failures": 0
+          }
+        },
+        {
+          "at": "2026-10-16T10:28:43.597228+07:00",
+          "status": "ok",
+          "summary": {
+            "failures": 0
+          }
+        },
+        {
+          "at": "2026-10-16T09:16:35.223127+07:00",
+          "status": "ok",
+          "summary": {
+            "failures": 0
+          }
+        },
+        {
+          "at": "2026-10-16T09:10:51.101182+07:00",
+          "status": "ok",
+          "summary": {
+            "failures": 0
+          }
+        },
+        {
+          "at": "2026-10-16T08:49:13.635495+07:00",
+          "status": "ok",
+          "summary": {
+            "failures": 0
+          }
+        },
+        {
+          "at": "2026-10-16T08:42:37.665454+07:00",
+          "status": "baseline",
+          "summary": {
+            "failures": 0
+          }
+        }
+      ]
+    },
+    "specimen": {
+      "nextRunAt": "2026-10-17T12:02:55.096036+07:00",
+      "lastStatus": "ok",
+      "lastSummary": {
+        "gaps": 0
+      },
+      "suppressCount": 8,
+      "runs": 9,
+      "history": [
+        {
+          "at": "2026-10-16T12:02:55.096036+07:00",
+          "status": "ok",
+          "summary": {
+            "gaps": 0
+          }
+        },
+        {
+          "at": "2026-10-16T11:36:39.001485+07:00",
+          "status": "ok",
+          "summary": {
+            "gaps": 0
+          }
+        },
+        {
+          "at": "2026-10-16T11:32:32.896021+07:00",
+          "status": "ok",
+          "summary": {
+            "gaps": 0
+          }
+        },
+        {
+          "at": "2026-10-16T10:59:34.557832+07:00",
+          "status": "ok",
+          "summary": {
+            "gaps": 0
+          }
+        },
+        {
+          "at": "2026-10-16T10:28:43.597228+07:00",
+          "status": "ok",
+          "summary": {
+            "gaps": 0
+          }
+        },
+        {
+          "at": "2026-10-16T09:16:35.223127+07:00",
+          "status": "ok",
+          "summary": {
+            "gaps": 0
+          }
+        },
+        {
+          "at": "2026-10-16T09:10:51.101182+07:00",
+          "status": "ok",
+          "summary": {
+            "gaps": 0
+          }
+        },
+        {
+          "at": "2026-10-16T08:49:13.635495+07:00",
+          "status": "ok",
+          "summary": {
+            "gaps": 0
+          }
+        },
+        {
+          "at": "2026-10-16T08:42:37.665454+07:00",
+          "status": "baseline",
+          "summary": {
+            "gaps": 0
+          }
+        }
+      ]
+    },
+    "harvest": {
+      "nextRunAt": "2026-10-16T21:37:11.665454+07:00",
+      "lastStatus": "baseline",
+      "lastSummary": {
+        "failures": 0
+      },
+      "suppressCount": 0,
+      "runs": 1,
+      "history": [
+        {
+          "at": "2026-10-16T08:42:37.665454+07:00",
+          "status": "baseline",
+          "summary": {
+            "failures": 0
+          }
+        }
+      ]
+    },
+    "reflect": {
+      "nextRunAt": "2026-10-17T09:37:11.665454+07:00",
+      "lastStatus": "baseline",
+      "lastSummary": {
+        "failures": 0
+      },
+      "suppressCount": 0,
+      "runs": 1,
+      "history": [
+        {
+          "at": "2026-10-16T08:42:37.665454+07:00",
+          "status": "baseline",
+          "summary": {
+            "failures": 0
+          }
+        }
+      ]
+    }
+  }
+}

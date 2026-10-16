@@ -94,7 +94,7 @@ impl ProjectTab {
             id,
             title,
             kind,
-            doc: app.doc.clone(),
+            doc: Document::default(),
             hist: History::default(),
             terminal: crate::terminal::TerminalState::for_tab(id),
             page: app.page,
@@ -198,11 +198,16 @@ impl TabsState {
         tab.dirty = app.hist.can_undo() || tab.hist.can_undo() || app.autosave.pending();
     }
 
-    /// Parks the active tab's state (including `app.doc`) AND moves `app.hist` + `app.terminal` into `entries[active_idx]`.
+    /// Parks the active tab's state (moving `app.doc`, `app.hist`, and `app.terminal` into `entries[active_idx]`).
     fn park_active_from_app(&mut self, app: &mut App) {
         if self.entries.is_empty() {
+            crate::decks::ui::flush_notes(app);
+            app.stop_plugin();
+            app.exit_version_view();
+            app.flush_autosave();
             let id = self.alloc_id();
             let mut tab = ProjectTab::from_app(id, app, None);
+            tab.doc = std::mem::take(&mut app.doc);
             tab.hist = std::mem::take(&mut app.hist);
             app.terminal.bind_session(&format!("tab-{id}"));
             tab.terminal = std::mem::take(&mut app.terminal);
@@ -213,15 +218,27 @@ impl TabsState {
             return;
         }
         if app.home.is_some() {
+            if self.hist_in_app && self.active_idx < self.entries.len() {
+                let active_id = self.entries[self.active_idx].id;
+                app.terminal.bind_session(&format!("tab-{active_id}"));
+                if self.entries[self.active_idx].doc.nodes.is_empty() {
+                    self.entries[self.active_idx].doc = std::mem::take(&mut app.doc);
+                }
+                self.entries[self.active_idx].hist = std::mem::take(&mut app.hist);
+                self.entries[self.active_idx].terminal = std::mem::take(&mut app.terminal);
+                self.hist_in_app = false;
+            }
             return;
         }
         self.sync_from_app(app);
-        if self.active_idx < self.entries.len() {
-            self.entries[self.active_idx].doc = app.doc.clone();
-        }
         if self.hist_in_app && self.active_idx < self.entries.len() {
+            crate::decks::ui::flush_notes(app);
+            app.stop_plugin();
+            app.exit_version_view();
+            app.flush_autosave();
             let active_id = self.entries[self.active_idx].id;
             app.terminal.bind_session(&format!("tab-{active_id}"));
+            self.entries[self.active_idx].doc = std::mem::take(&mut app.doc);
             self.entries[self.active_idx].hist = std::mem::take(&mut app.hist);
             self.entries[self.active_idx].terminal = std::mem::take(&mut app.terminal);
             self.entries[self.active_idx].dirty = self.entries[self.active_idx].hist.can_undo() || app.autosave.pending();
@@ -229,25 +246,35 @@ impl TabsState {
         }
     }
 
-    /// Loads `entries[idx]` into `app.{doc, page, selection, view, file_path, lib_file, ui.dev_mode}`
+    /// Moves `entries[idx]` into `app.{doc, page, selection, view, file_path, lib_file, ui.dev_mode}`
     /// and sets `app.home = None`.
-    pub fn apply_to_app(&self, idx: usize, app: &mut App) {
-        let Some(tab) = self.entries.get(idx) else { return };
+    pub fn apply_to_app(&mut self, idx: usize, app: &mut App) {
+        if idx >= self.entries.len() {
+            return;
+        }
         crate::decks::ui::flush_notes(app);
         app.stop_plugin();
         app.exit_version_view();
         app.flush_autosave();
 
-        let mut doc = tab.doc.clone();
+        let (mut doc, tab_page, tab_selection, tab_view, tab_file_path, tab_lib_file, tab_dev_mode, tab_kind) = {
+            let tab = &mut self.entries[idx];
+            let doc = if tab.doc.nodes.is_empty() && idx == self.active_idx && !app.doc.nodes.is_empty() {
+                std::mem::take(&mut app.doc)
+            } else {
+                std::mem::take(&mut tab.doc)
+            };
+            (doc, tab.page, tab.selection.clone(), tab.view, tab.file_path.clone(), tab.lib_file.clone(), tab.dev_mode, tab.kind)
+        };
         crate::io::ensure_page(&mut doc);
-        let page = if doc.pages.contains(&tab.page) { tab.page } else { doc.pages[0] };
+        let page = if doc.pages.contains(&tab_page) { tab_page } else { doc.pages[0] };
         app.doc = doc;
         app.page = page;
-        app.selection = tab.selection.clone();
-        app.view = tab.view;
-        app.file_path = tab.file_path.clone();
-        app.lib_file = tab.lib_file.clone();
-        app.ui.dev_mode = tab.dev_mode;
+        app.selection = tab_selection;
+        app.view = tab_view;
+        app.file_path = tab_file_path;
+        app.lib_file = tab_lib_file;
+        app.ui.dev_mode = tab_dev_mode;
         app.renaming_file = false;
         app.hover = None;
         app.hover_layer = None;
@@ -255,7 +282,7 @@ impl TabsState {
         app.comments.close_popovers();
         app.layers.reset();
         app.fonts.load_for(&app.doc);
-        if tab.kind == ProjectTabKind::Spec {
+        if tab_kind == ProjectTabKind::Spec {
             app.ui.rail = Some(RailItem::Specs);
             app.specs.open = true;
             app.specs.ensure_loaded();
@@ -326,6 +353,7 @@ impl TabsState {
                 if let Some(existing) = self.entries.iter().position(|t| t.lib_file.as_ref().is_some_and(|tlf| tlf.id == lf.id)) {
                     let tab_id = self.entries[existing].id;
                     self.active_idx = existing;
+                    self.entries[existing].doc = Document::default();
                     app.terminal = std::mem::take(&mut self.entries[existing].terminal);
                     app.terminal.bind_session(&format!("tab-{tab_id}"));
                     app.terminal.sync_live_file_context(&app.doc, app.page, &app.selection, app.file_path.as_deref());
@@ -337,6 +365,7 @@ impl TabsState {
                 if let Some(existing) = self.entries.iter().position(|t| t.file_path.as_ref() == Some(path)) {
                     let tab_id = self.entries[existing].id;
                     self.active_idx = existing;
+                    self.entries[existing].doc = Document::default();
                     app.terminal = std::mem::take(&mut self.entries[existing].terminal);
                     app.terminal.bind_session(&format!("tab-{tab_id}"));
                     app.terminal.sync_live_file_context(&app.doc, app.page, &app.selection, app.file_path.as_deref());
@@ -362,9 +391,11 @@ impl TabsState {
             }
             if let Some(tab) = self.entries.get_mut(self.active_idx) {
                 let tab_id = tab.id;
+                tab.doc = Document::default();
                 if !self.hist_in_app {
                     app.terminal = std::mem::take(&mut tab.terminal);
                 }
+                self.hist_in_app = true;
                 app.terminal.bind_session(&format!("tab-{tab_id}"));
             }
         }

@@ -1,0 +1,151 @@
+{
+  "v": 1,
+  "compiledAt": "2026-10-16T05:02:55.379Z",
+  "eventCount": 300,
+  "halfLifeDays": 30,
+  "personas": {},
+  "axes": {},
+  "vibes": [],
+  "tokens": {
+    "colors.neutral": {
+      "changes": 1,
+      "lastReason": "AA contrast fix: raise neutral contrast against #f5f5f7 above 4.5:1"
+    }
+  },
+  "designs": {
+    "home-workspace-v2": {
+      "medium": [],
+      "picked": false
+    },
+    "variant-zinc-cyan": {
+      "medium": [],
+      "picked": true
+    }
+  },
+  "insights": [
+    {
+      "id": "e7",
+      "t": "2026-10-16T01:42:37.397Z",
+      "text": "Unifying crates/designos-app/src/theme.rs with design/design.tokens.json and replacing purple component accents with #06B6D4 Cyan while raising colors.neutral to #6e6e77 eliminates all WCAG AA contrast failures and lifts curator scores above 95.",
+      "refs": [
+        "e1",
+        "e6",
+        "e7"
+      ],
+      "seen": 1,
+      "upvotes": 0,
+      "downvotes": 0,
+      "lastSeenAt": "2026-10-16T01:42:37.397Z"
+    },
+    {
+      "id": "e8",
+      "t": "2026-10-16T01:42:37.452Z",
+      "text": "Enforcing Z01..Z12 Zero Fake UI gates on Home workspace section filters and separating section count badges into monospace Badge/StatusCount pills (D85) prevents silent data fallbacks and visual label clutter.",
+      "refs": [
+        "e2",
+        "e3",
+        "e6"
+      ],
+      "seen": 1,
+      "upvotes": 0,
+      "downvotes": 0,
+      "lastSeenAt": "2026-10-16T01:42:37.452Z"
+    },
+    {
+      "id": "e9",
+      "t": "2026-10-16T01:42:37.508Z",
+      "text": "Combining Figma C++/WASM flat SoA SceneIndex + DirtyLog O(k) GPU sync with per-file isolated PTY terminals (procedural box-drawing + canvas shortcut suppression) sustains 60fps while running live CLI design agents.",
+      "refs": [
+        "e4",
+        "e5"
+      ],
+      "seen": 1,
+      "upvotes": 0,
+      "downvotes": 0,
+      "lastSeenAt": "2026-10-16T01:42:37.508Z"
+    },
+    {
+      "id": "e12",
+      "t": "2026-10-16T01:43:15.162Z",
+      "text": "Font glyphs for Unicode box-drawing characters (U+2500..U+257F) often introduce subpixel gaps or seams at fractional display scaling. Rendering box-drawing characters procedurally as pixel-snapped geometric quads guarantees seamless borders and tables across all zoom levels and DPI scales.",
+      "refs": [
+        "e11"
+      ],
+      "seen": 1,
+      "upvotes": 0,
+      "downvotes": 0,
+      "lastSeenAt": "2026-10-16T01:43:15.162Z"
+    },
+    {
+      "id": "e13",
+      "t": "2026-10-16T01:43:15.217Z",
+      "text": "Pointer-chasing deep hierarchical scene graph trees during pan and zoom culling causes CPU cache misses. Flattening spatial bounding boxes (AABBs), visibility flags, and page membership into contiguous Structure-of-Arrays (SoA) slices enables vectorizable, cache-efficient frustum culling.",
+      "refs": [
+        "e11"
+      ],
+      "seen": 1,
+      "upvotes": 0,
+      "downvotes": 0,
+      "lastSeenAt": "2026-10-16T01:43:15.217Z"
+    },
+    {
+      "id": "e14",
+      "t": "2026-10-16T01:43:15.272Z",
+      "text": "Rebuilding or re-uploading complete vertex and instance buffers on every canvas mutation scales with total document size O(N). Appending modified node IDs to a bounded dirty log allows frame preparation to patch only the dirty GPU buffer slots in O(k) time.",
+      "refs": [
+        "e11"
+      ],
+      "seen": 1,
+      "upvotes": 0,
+      "downvotes": 0,
+      "lastSeenAt": "2026-10-16T01:43:15.272Z"
+    },
+    {
+      "id": "e15",
+      "t": "2026-10-16T01:48:02.441Z",
+      "text": "Empty collection filters must render explicit, contextual empty states rather than silently falling back to a default dataset; silent fallbacks mask missing items and mislead users into modifying the wrong scope.",
+      "refs": [
+        "e1",
+        "e5",
+        "e7",
+        "e8",
+        "e9",
+        "e10",
+        "e11",
+        "e12",
+        "e13",
+        "e14"
+      ],
+      "seen": 1,
+      "upvotes": 0,
+      "downvotes": 0,
+      "lastSeenAt": "2026-10-16T01:48:02.441Z"
+    },
+    {
+      "id": "e19",
+      "t": "2026-10-16T01:49:33.686Z",
+      "text": "Single token authority between crates/designos-app/src/theme.rs and design/design.tokens.json eliminates multi-palette border clashes and enforces the Purple Ban across all studio surfaces.",
+      "refs": [
+        "e1",
+        "e2"
+      ],
+      "seen": 2,
+      "upvotes": 1,
+      "downvotes": 0,
+      "lastSeenAt": "2026-10-16T01:49:33.746Z"
+    },
+    {
+      "id": "e20",
+      "t": "2026-10-16T01:49:33.746Z",
+      "text": "Single token authority between crates/designos-app/src/theme.rs and design/design.tokens.json eliminates multi-palette border clashes and enforces the Purple Ban across all studio surfaces.",
+      "refs": [
+        "e3",
+        "e4"
+      ],
+      "seen": 2,
+      "upvotes": 1,
+      "downvotes": 0,
+      "lastSeenAt": "2026-10-16T01:49:33.746Z"
+    }
+  ]
+}

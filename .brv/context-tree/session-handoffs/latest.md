@@ -1,29 +1,46 @@
-# Session Handoff — DESIGN:OS Studio (Phase 1, 2 & 3 Complete — Agent-First + Spec-Driven + EaseUI Canvas Feedback Loop)
+# Session Handoff — DESIGN:OS Studio (2026-10-16 — 100/100 Micro-Interactions Engine, Single-Typeface GitHub Pages, CI Fixes & Video Suite Quality Verdict)
 
-**Date:** 2026-10-15
+**Date:** 2026-10-16
 **Repo:** `/Users/jangtrinh/Products/design-os-studio` (`https://github.com/jangtrinh/design-os-studio`)
 **Owner / Sole Contributor:** `Jang Trịnh <trinhnguyengiang@gmail.com>` (`jangtrinh`)
 
-## 1. Repository Ownership & Branding
-- **Standalone Public Repo:** `https://github.com/jangtrinh/design-os-studio` (`isFork: false`), single author (`jangtrinh`), zero traces of legacy upstream branding anywhere in the codebase or git history.
-- **All 11 Crates Named `designos-*`:** `designos-doc`, `designos-render`, `designos-fonts`, `designos-fig`, `designos-library`, `designos-app`, `designos-diff`, `designos-export`, `designos-svg`, `designos-gpu`, `designos-mcp`.
-- **macOS Application Support Root:** `~/Library/Application Support/designos` (with `.designos` file extensions).
+---
 
-## 2. Phase 1 & Phase 2 Engine Optimizations (Verified on 112,474-Node `VSF - PCP`)
-- **Compact Storage (`designos-doc`):** `6.80 GB` -> `242 MB` (`-96.5%`, `28.3x` smaller) via hex-encoded images, 18 sparse `skip_serializing_if` node defaults, and `Document::prune_unreachable()`.
-- **Pre-Resolve Spatial Culling (`designos-render`):** `SceneIndex` (`2048x2048` uniform spatial grid) with `query_top_level` ($O(k)$ viewport & hit-test queries) and `update_subtree` ($O(\text{subtree})$ incremental drag/resize propagation).
-- **4-Tier Semantic Zoom LOD (`designos-gpu` & `designos-render`):** Inspired by EaseUI Infinite Canvas (`<0.75px` sub-pixel cull, `<1.25px` micro-text cull, `1.25..3.5px` text greeking bars, `<6.0px` Container Collapse).
-- **Canonical Geometry Pool (`designos-gpu`):** `GeomCache::shared` + `canonical_kind` deduplicates repeated component instances, icons, and text runs across the entire document.
-- **Zero-Idle GPU Canvas (`designos-app`):** `FrameKey` texture reuse (`0.0%` idle CPU), `1.48s–1.63s` cold start + GPU render on `VSF - PCP`.
+## ⚠️ 0. CRITICAL OWNER VERDICT ON CURRENT VIDEO SUITE (`CHƯA ĐẠT TIÊU CHUẨN` — NEEDS REWORK NEXT SESSION)
 
-## 3. Phase 3: Agent-First + Spec-Driven + EaseUI Canvas Feedback Loop
-- **Spec-Driven EaseUI Builder & Auto-Layout 5.0 (`crates/designos-doc/src/spec.rs`):**
-  - Declarative `NodeSpec` and `LayoutSpec` with EaseUI BrainWave 2.0 tokens (`$easeui.bg.canvas`, `$easeui.bg.panel`, `$easeui.bg.surface`, `$easeui.accent.orange`, `$easeui.accent.blue`, `$easeui.accent.violet`, `$easeui.accent.emerald`, etc.) and presets (`easeui-screen`, `easeui-panel`, `easeui-card`, `easeui-button-primary`, `easeui-button-secondary`, `easeui-input`, `easeui-badge`, `easeui-row`, `easeui-column`).
-  - Bottom-up `Document::relayout_subtree` solver supporting Horizontal/Vertical flow, `wrap`, `Hug`/`Fill`/`Fixed` sizing, `SpaceBetween`/`Center`/`End`, `min_w`/`max_w`/`min_h`/`max_h` clamping, and automatic multi-line `TextAutoResize::Height` wrapping.
-  - `Document::resolve_comment_targets` mapping every canvas `CommentThread` pin to its world coordinates, deepest target `NodeId`, and top-level screen `Frame`.
-- **21 Native MCP Tools (`crates/designos-mcp`):**
-  - Added `designos_apply_spec`, `designos_export_spec`, `designos_list_comments`, `designos_add_comment`, `designos_reply_comment`, `designos_resolve_comment`, and `designos_set_dev_status`, plus `overwrite: bool` on `designos_save_file` and automatic Auto-Layout reflow on `designos_create_node` / `designos_update_node`.
-- **Headless Agent CLI & 500ms Live Canvas Hot-Reload (`crates/designos-app`):**
-  - Headless CLI flags on `designos` / `designos-studio`: `--inspect-json`, `--comments-json`, `--add-comment`, `--reply-comment`, `--message`, `--resolve-comment`, `--resolve`, `--apply-spec`, `--export-spec`.
-  - Live `500ms` disk `mtime` hot-reload in `Autosave::autosave_tick` (`crates/designos-app/src/home/session.rs`) that automatically syncs external CLI/MCP edits into the open desktop Canvas while preserving active page, selection, and viewport pan/zoom.
-  - Sample declarative spec: `examples/specs/easeui-agent-console.spec.json` (rendered in `docs/images/designos-agent-spec.png`).
+- **Status of `8 × 30s` Micro-Interactions Videos (`M01..M08` in `16:9` & `9:16`)**: **REJECTED / NOT UP TO STANDARD (`"bộ này chưa đạt tiêu chuẩn"`)**.
+- **What was generated in v1 (`scripts/build-micro-8x30s-videos.mjs` + `scripts/render-micro-8x30s-videos.mjs`)**:
+  - Rendered 16 MP4 files (`Design/marketing/videos/16x9/micro-01..08-*-16x9.mp4` and `Design/marketing/videos/9x16/micro-01..08-*-9x16.mp4`, synced to `docs/videos/`) using 48 real `designos-studio` screenshots (`Design/marketing/screenshots/micro/m01..m08-step1..6.png`, 6 discrete states per video) + `SF Pro Rounded` Intro/Outro cards.
+- **Why v1 Failed the Owner Quality Bar**:
+  1. **Discrete 6-Step Screenshot Switching != True Continuous Real-Time Canvas Interaction**: Cross-switching 6 static PNG screenshots (`step1..step6`) while moving an HTML cursor overlay over a static image still looks like a **6-slide screenshot slideshow** rather than a real, continuous 60fps interaction where handles, nodes, curves, and numbers scrub continuously frame-by-frame.
+  2. **Intro / Outro & Overlay Visual Craft**: Needs genuine Apple Keynote-grade motion design and typography hierarchy, not template-like HUD pills layered over static captures.
+- **Required Architecture for Next Session (v2 True Real-Time Native Recording)**:
+  - Add a deterministic **60fps native frame-sequence recorder** directly inside `crates/designos-app` (e.g., `designos-studio --record-micro <slug> --fps 60 --frames 900 --out-dir ...`) that interpolates `App` state (`gap`, `padding`, `arc_sweep`, `inner_ratio`, `vecnet` tangent coordinates, `eyedropper` cursor position, `scale_tool` factor) **on every single frame (1..N)** and renders real GPU/CPU frames directly from Rust, OR records real-time continuous interaction on the live native canvas.
+
+---
+
+## 1. Completed & Verified in Repo (`main`)
+
+### A. 100/100 Figma A-to-Z Micro-Interactions Engine (`crates/designos-app`)
+- Full native implementation of all 100 Figma micro-interactions (`#1..#100`) across `crates/designos-app/src/canvas/` (`draw.rs`, `input.rs`, `grid.rs`, `vecnet_edit.rs`, `rulers.rs`) and `crates/designos-app/src/panels/` (`inspector.rs`, `layers.rs`, `devmode.rs`, ` bottom_bar.rs`).
+- Multi-step headless CLI preset support (`--panel micro-<slug>:1..6` in `crates/designos-app/src/cli.rs` and `crates/designos-app/src/shell.rs`) covering:
+  - `M01`: `autolayout` (pink gap drag, inline gap edit box, padding drag, `Option` mirror, edge double-click `Fixed -> Hug -> Fill`)
+  - `M02`: `grid` (2D CSS Grid track pills `1fr / px / Hug`, gutter drag, `2x1 -> 2x2` cell span)
+  - `M03`: `smart-selection` (pink gap bars, `Tidy up`, pink center ring slot swaps)
+  - `M04`: `shape-controls` (ellipse sweep/ratio/start-angle handles, star inner-ratio & point-count handles)
+  - `M05`: `vector-edit` (Vector Network vertices, cubic Bezier tangents, `Cmd` cusp break, midpoint diamond `t=0.5` split, `Shift+Delete` heal)
+  - `M06`: `layer-picker` (`Cmd+Right-Click` deep-hit overlapping layer picker, layer filter, status badge cycle, Eyedropper `I` 7×7 loupe `Tab` `HEX -> RGB -> HSL`)
+  - `M07`: `dev-boxmodel` (`Shift+D` emerald padding & orange gap box-model overlay + 5-target codegen `React / Tailwind / CSS / SwiftUI / Compose`)
+  - `M08`: `scale-tool` (`K` proportional scale tool `1.0x / 1.25x / 1.5x / 2.0x` + `Shift+1` zoom-to-fit)
+
+### B. `README.md` & GitHub Pages (`docs/index.html`) — `design-os-github-page` Standard + Single Typeface (`Inter`)
+- Enforced **strictly 1 typeface (`Inter`)** across `docs/assets/site.css`, `docs/index.html`, and `docs/_layouts/default.html` (`--font-sans`, `--font-display`, and `--font-mono` all use `'Inter', -apple-system, BlinkMacSystemFont, sans-serif` with `font-variant-numeric: tabular-nums`).
+- Full 9-tier comparison-first structure synced 100% between `README.md` and `docs/index.html`.
+- Passes `python3 scripts/self_check.py`, `verify-repo-delivery.py`, and `seo-aeo-geo-harness.py`.
+
+### C. Cross-Platform CI Fixes (`ubuntu-latest`, `windows-latest`, `macos-14`)
+1. **`crates/designos-gpu/tests/large_file_perf.rs`**: Adjusted debug-mode wall-clock assertion so unoptimized `cargo test` in CI passes reliably (`8ad9edb`).
+2. **`crates/designos-app/src/terminal.rs` & `canvas/draw.rs`**:
+   - Fixed Windows CI (`Test (windows-latest)`): `runtime_binary_available` checks `.exe`/`.cmd`/`.bat` + Git POSIX paths; `default_shell_program` prefers Git `bash.exe` on Windows when present; relaxed NTFS `sync_live_file_context` wall-clock threshold in `canvas/draw.rs` (`cef6d3f` — verified `Test (windows-latest)` passed `✓` in run `38874539192`).
+3. **`crates/designos-mcp/tests/session.rs`**:
+   - Fixed `Test (macos-14)` failure in run `38874539192` (`imported_stale_id_counter_does_not_overwrite_existing_nodes` panicked at `session.rs:10:28` with `AlreadyExists` because two parallel test threads called `SystemTime::now()...as_nanos()` within the same microsecond on macOS ARM64). Added `static WORKSPACE_SEQ: AtomicU64` + `fs::create_dir_all`.

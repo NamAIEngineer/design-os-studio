@@ -1,0 +1,1031 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>DESIGN:OS Studio — Auto-Layout 5.0 & Edge Sizing (01 / 08)</title>
+  <link rel="stylesheet" href="./sf-pro-rounded.css" />
+  <style>
+    :root {
+      --font-rounded: 'SF Pro Rounded', ui-rounded, -apple-system, BlinkMacSystemFont, sans-serif;
+      --font-mono: 'SF Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
+      --accent: #0d99ff;
+      --bg-stage: #f2f1ed;
+      --ink-primary: #111216;
+      --ink-secondary: #525560;
+    }
+
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+      user-select: none;
+      -webkit-font-smoothing: antialiased;
+      -moz-osx-font-smoothing: grayscale;
+      text-rendering: optimizeLegibility;
+    }
+
+    html, body {
+      width: 100vw;
+      height: 100vh;
+      overflow: hidden;
+      background: #e6e4df;
+      font-family: var(--font-rounded);
+      color: var(--ink-primary);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+
+    #stage {
+      position: relative;
+      width: 100vw;
+      height: 100vh;
+      overflow: hidden;
+      background:
+        radial-gradient(circle at 18% 14%, rgba(13, 153, 255, 0.085), transparent 46%),
+        radial-gradient(circle at 82% 84%, rgba(227, 99, 35, 0.08), transparent 48%),
+        linear-gradient(180deg, #f7f6f2 0%, #eceae4 100%);
+    }
+
+    /* Ambient grid */
+    .stage-grid {
+      position: absolute;
+      inset: 0;
+      background-image:
+        linear-gradient(to right, rgba(17, 18, 22, 0.032) 1px, transparent 1px),
+        linear-gradient(to bottom, rgba(17, 18, 22, 0.032) 1px, transparent 1px);
+      background-size: 48px 48px;
+      pointer-events: none;
+    }
+
+    /* Top Apple Keynote Header Bar */
+    #top-bar {
+      position: absolute;
+      top: 22px;
+      left: 36px;
+      right: 36px;
+      height: 46px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      z-index: 30;
+      pointer-events: none;
+    }
+
+    .apple-pill-light {
+      display: inline-flex;
+      align-items: center;
+      gap: 10px;
+      padding: 8px 16px;
+      border-radius: 999px;
+      background: rgba(255, 255, 255, 0.82);
+      backdrop-filter: blur(24px) saturate(180%);
+      -webkit-backdrop-filter: blur(24px) saturate(180%);
+      border: 1px solid rgba(17, 18, 22, 0.08);
+      box-shadow: 0 8px 24px rgba(15, 18, 24, 0.06), inset 0 1px 0 rgba(255, 255, 255, 0.9);
+      font-size: 13px;
+      font-weight: 700;
+      letter-spacing: -0.01em;
+      color: #14151a;
+    }
+
+    .apple-pill-dark {
+      display: inline-flex;
+      align-items: center;
+      gap: 10px;
+      padding: 8px 16px;
+      border-radius: 999px;
+      background: rgba(20, 22, 28, 0.88);
+      backdrop-filter: blur(24px) saturate(180%);
+      -webkit-backdrop-filter: blur(24px) saturate(180%);
+      border: 1px solid rgba(255, 255, 255, 0.14);
+      box-shadow: 0 10px 26px rgba(9, 12, 18, 0.18), inset 0 1px 0 rgba(255, 255, 255, 0.18);
+      font-size: 13px;
+      font-weight: 600;
+      color: #f5f6f8;
+      font-variant-numeric: tabular-nums;
+    }
+
+    .pill-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: var(--accent);
+      box-shadow: 0 0 0 3px rgba(13, 153, 255, 0.18);
+    }
+
+    /* Central Single Morphing Container (#morph-shell) */
+    #morph-shell {
+      position: absolute;
+      left: 50%;
+      top: 50%;
+      transform: translate(-50%, -50%);
+      background: #18181b;
+      border-radius: 28px;
+      overflow: hidden;
+      box-shadow:
+        0 34px 84px rgba(10, 13, 20, 0.28),
+        0 10px 26px rgba(10, 13, 20, 0.14),
+        0 0 0 1px rgba(17, 18, 22, 0.12),
+        inset 0 1px 0 rgba(255, 255, 255, 0.16);
+      z-index: 20;
+    }
+
+    /* Layer A: Intro Feature Title Card (Beats 0..4) */
+    #intro-card {
+      position: absolute;
+      inset: 0;
+      padding: 48px 56px;
+      display: flex;
+      flex-direction: column;
+      justify-content: space-between;
+      background:
+        radial-gradient(circle at 86% 18%, rgba(13, 153, 255, 0.22), transparent 48%),
+        radial-gradient(circle at 14% 88%, rgba(227, 99, 35, 0.18), transparent 46%),
+        linear-gradient(145deg, #16181f 0%, #0f1116 100%);
+      color: #ffffff;
+      z-index: 6;
+    }
+
+    .intro-top-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+    }
+
+    .intro-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 10px;
+      padding: 8px 16px;
+      border-radius: 999px;
+      background: rgba(255, 255, 255, 0.09);
+      border: 1px solid rgba(255, 255, 255, 0.16);
+      font-family: var(--font-mono);
+      font-size: 12px;
+      font-weight: 700;
+      letter-spacing: 0.05em;
+      color: #e4e7ef;
+    }
+
+    .intro-series-tag {
+      font-family: var(--font-mono);
+      font-size: 13px;
+      font-weight: 700;
+      color: rgba(255, 255, 255, 0.64);
+      padding: 6px 14px;
+      border-radius: 999px;
+      background: rgba(255, 255, 255, 0.06);
+      border: 1px solid rgba(255, 255, 255, 0.1);
+    }
+
+    .intro-center {
+      display: flex;
+      flex-direction: column;
+      gap: 18px;
+      max-width: 920px;
+    }
+
+    .intro-icon-orb {
+      width: 68px;
+      height: 68px;
+      border-radius: 20px;
+      background: linear-gradient(135deg, var(--accent), #14ae5c);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      box-shadow: 0 16px 36px rgba(13, 153, 255, 0.32), inset 0 1px 0 rgba(255, 255, 255, 0.45);
+      color: #ffffff;
+    }
+
+    .intro-title {
+      font-family: var(--font-rounded);
+      font-size: 54px;
+      font-weight: 800;
+      line-height: 1.06;
+      letter-spacing: -0.028em;
+      color: #ffffff;
+    }
+
+    .intro-subtitle {
+      font-family: var(--font-rounded);
+      font-size: 21px;
+      font-weight: 500;
+      line-height: 1.4;
+      color: rgba(235, 238, 245, 0.78);
+      max-width: 820px;
+    }
+
+    .intro-bottom-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+      flex-wrap: wrap;
+      padding-top: 20px;
+      border-top: 1px solid rgba(255, 255, 255, 0.1);
+    }
+
+    .keycap-group {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      flex-wrap: wrap;
+    }
+
+    .apple-keycap {
+      display: inline-flex;
+      align-items: center;
+      padding: 7px 14px;
+      border-radius: 10px;
+      background: rgba(255, 255, 255, 0.1);
+      border: 1px solid rgba(255, 255, 255, 0.18);
+      box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.22), 0 4px 10px rgba(0, 0, 0, 0.25);
+      font-family: var(--font-mono);
+      font-size: 12.5px;
+      font-weight: 600;
+      color: #f8fafc;
+    }
+
+    .intro-real-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 13px;
+      font-weight: 700;
+      color: #6ee7b7;
+    }
+
+    /* Layer B: Real macOS Sequoia DESIGN:OS Studio Window (Beats 4..43) */
+    #studio-stage {
+      position: absolute;
+      inset: 0;
+      display: flex;
+      flex-direction: column;
+      background: #1e1e1e;
+      z-index: 4;
+      opacity: 0;
+    }
+
+    .studio-window-header {
+      height: 38px;
+      padding: 0 16px;
+      background: linear-gradient(180deg, #2b2b30 0%, #222226 100%);
+      border-bottom: 1px solid rgba(255, 255, 255, 0.09);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      flex-shrink: 0;
+    }
+
+    .traffic-lights {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .tl {
+      width: 11px;
+      height: 11px;
+      border-radius: 50%;
+    }
+    .tl-close { background: #ff5f57; }
+    .tl-min { background: #febc2e; }
+    .tl-max { background: #28c840; }
+
+    .window-title-pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 4px 12px;
+      border-radius: 999px;
+      background: rgba(255, 255, 255, 0.06);
+      border: 1px solid rgba(255, 255, 255, 0.1);
+      font-size: 12px;
+      font-weight: 600;
+      color: #e4e4e7;
+    }
+
+    .window-step-readout {
+      font-family: var(--font-mono);
+      font-size: 11.5px;
+      font-weight: 600;
+      color: #a1a1aa;
+    }
+
+    .studio-viewport {
+      position: relative;
+      flex: 1;
+      width: 100%;
+      overflow: hidden;
+      background: #1e1e1e;
+    }
+
+    #camera-rig {
+      position: absolute;
+      inset: 0;
+      transform-origin: 50% 50%;
+    }
+
+    .real-studio-shot {
+      position: absolute;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+      object-fit: contain;
+      object-position: center center;
+      display: block;
+    }
+
+    /* Active Handle Target Ring on the Real Canvas */
+    #active-target-ring {
+      position: absolute;
+      width: 44px;
+      height: 44px;
+      margin-left: -22px;
+      margin-top: -22px;
+      border-radius: 50%;
+      border: 2px solid var(--accent);
+      background: rgba(13, 153, 255, 0.14);
+      box-shadow: 0 0 0 6px rgba(13, 153, 255, 0.12);
+      pointer-events: auto;
+      z-index: 10;
+    }
+
+    /* Layer C: Apple Keynote GitHub Repo Outro Card (Beats 43..50) */
+    #outro-card {
+      position: absolute;
+      inset: 0;
+      padding: 48px 56px;
+      display: flex;
+      flex-direction: column;
+      justify-content: space-between;
+      background:
+        radial-gradient(circle at 82% 20%, rgba(20, 174, 92, 0.22), transparent 48%),
+        radial-gradient(circle at 18% 82%, rgba(13, 153, 255, 0.22), transparent 48%),
+        linear-gradient(145deg, #12141a 0%, #0b0d12 100%);
+      color: #ffffff;
+      z-index: 8;
+      opacity: 0;
+    }
+
+    .outro-center {
+      display: flex;
+      flex-direction: column;
+      gap: 18px;
+    }
+
+    .github-repo-pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 14px;
+      padding: 14px 22px;
+      border-radius: 18px;
+      background: rgba(255, 255, 255, 0.09);
+      border: 1px solid rgba(255, 255, 255, 0.2);
+      box-shadow: 0 18px 42px rgba(0, 0, 0, 0.34), inset 0 1px 0 rgba(255, 255, 255, 0.22);
+      width: fit-content;
+    }
+
+    .github-repo-url {
+      font-family: var(--font-mono);
+      font-size: 24px;
+      font-weight: 700;
+      color: #ffffff;
+      letter-spacing: -0.02em;
+    }
+
+    .outro-title {
+      font-family: var(--font-rounded);
+      font-size: 46px;
+      font-weight: 800;
+      line-height: 1.08;
+      letter-spacing: -0.025em;
+      color: #ffffff;
+    }
+
+    .outro-cli-box {
+      display: inline-flex;
+      align-items: center;
+      gap: 12px;
+      padding: 12px 18px;
+      border-radius: 14px;
+      background: rgba(13, 153, 255, 0.14);
+      border: 1px solid rgba(13, 153, 255, 0.34);
+      font-family: var(--font-mono);
+      font-size: 14px;
+      font-weight: 600;
+      color: #e0f2fe;
+      width: fit-content;
+    }
+
+    /* Bottom iOS 26 Liquid Glass HUD Dock */
+    #bottom-dock {
+      position: absolute;
+      bottom: 20px;
+      left: 50%;
+      transform: translateX(-50%);
+      display: flex;
+      align-items: center;
+      gap: 16px;
+      padding: 10px 20px;
+      border-radius: 999px;
+      background: rgba(20, 22, 28, 0.88);
+      backdrop-filter: blur(28px) saturate(190%);
+      -webkit-backdrop-filter: blur(28px) saturate(190%);
+      border: 1px solid rgba(255, 255, 255, 0.16);
+      box-shadow:
+        0 20px 44px rgba(9, 12, 18, 0.24),
+        inset 0 1px 0 rgba(255, 255, 255, 0.22);
+      color: #ffffff;
+      z-index: 30;
+      white-space: nowrap;
+      pointer-events: none;
+    }
+
+    .step-dots {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    .step-dot {
+      padding: 4px 9px;
+      border-radius: 999px;
+      font-family: var(--font-mono);
+      font-size: 11px;
+      font-weight: 700;
+      color: rgba(255, 255, 255, 0.5);
+      background: rgba(255, 255, 255, 0.06);
+    }
+
+    .step-dot.active {
+      color: #ffffff;
+      background: var(--accent);
+      box-shadow: 0 0 12px rgba(13, 153, 255, 0.45);
+    }
+
+    #dock-step-title {
+      font-size: 14px;
+      font-weight: 700;
+      color: #ffffff;
+      letter-spacing: -0.01em;
+    }
+
+    #dock-shortcut-pill {
+      padding: 5px 12px;
+      border-radius: 999px;
+      background: rgba(255, 255, 255, 0.12);
+      border: 1px solid rgba(255, 255, 255, 0.2);
+      font-family: var(--font-mono);
+      font-size: 12px;
+      font-weight: 700;
+      color: #7dd3fc;
+    }
+
+    /* Canonical Virtual Cursor & Concentric Click Ripple (Gate 6) */
+    #virtual-cursor {
+      position: fixed;
+      left: 0;
+      top: 0;
+      width: 34px;
+      height: 34px;
+      pointer-events: none;
+      z-index: 90;
+      transform-origin: 0px 0px;
+      filter: drop-shadow(0 6px 12px rgba(0, 0, 0, 0.32));
+    }
+
+    #click-ripple {
+      position: fixed;
+      left: 0;
+      top: 0;
+      width: 48px;
+      height: 48px;
+      margin-left: -24px;
+      margin-top: -24px;
+      border-radius: 50%;
+      border: 2.5px solid var(--accent);
+      background: rgba(13, 153, 255, 0.22);
+      pointer-events: none;
+      z-index: 89;
+      opacity: 0;
+    }
+
+    /* Universal Studio Player Bar (Gate 9 — hidden during ?render=1) */
+    #player-bar {
+      position: fixed;
+      bottom: 12px;
+      right: 16px;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 6px 12px;
+      border-radius: 999px;
+      background: rgba(17, 18, 22, 0.85);
+      color: #fff;
+      font-family: var(--font-mono);
+      font-size: 11px;
+      z-index: 100;
+    }
+    body.render-mode #player-bar {
+      display: none !important;
+    }
+
+    /* Responsive 9:16 Vertical Layout (1080x1920) */
+    @media (max-aspect-ratio: 1/1) {
+      #top-bar {
+        top: 34px;
+        left: 28px;
+        right: 28px;
+      }
+      #intro-card, #outro-card {
+        padding: 38px 34px;
+      }
+      .intro-title {
+        font-size: 40px;
+      }
+      .intro-subtitle {
+        font-size: 17px;
+      }
+      .outro-title {
+        font-size: 34px;
+      }
+      .github-repo-url {
+        font-size: 19px;
+      }
+      .outro-cli-box {
+        font-size: 11.5px;
+      }
+      #bottom-dock {
+        bottom: 34px;
+        max-width: 94vw;
+        padding: 10px 16px;
+        gap: 10px;
+      }
+      #dock-step-title {
+        font-size: 13px;
+      }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      * {
+        animation: none !important;
+        transition: none !important;
+      }
+    }
+  </style>
+</head>
+<body>
+  <svg class="svg-defs" aria-hidden="true" width="0" height="0" style="position:absolute;width:0;height:0;overflow:hidden">
+  <title>Design OS Studio Official Vector Icon &amp; Filter Library</title>
+  <defs>
+    <filter id="apple-keynote-shadow" x="-20%" y="-20%" width="140%" height="150%">
+      <feDropShadow dx="0" dy="22" stdDeviation="28" flood-color="#090d16" flood-opacity="0.22" />
+      <feDropShadow dx="0" dy="4" stdDeviation="8" flood-color="#090d16" flood-opacity="0.10" />
+    </filter>
+    <filter id="liquid-glass-goo" x="-20%" y="-20%" width="140%" height="140%">
+      <feGaussianBlur in="SourceGraphic" stdDeviation="6" result="blur" />
+      <feColorMatrix in="blur" mode="matrix" values="1 0 0 0 0  0 1 0 0 0  0 0 1 0 0  0 0 0 18 -7" result="goo" />
+      <feComposite in="SourceGraphic" in2="goo" operator="atop" />
+    </filter>
+    <filter id="glass-refraction" x="-10%" y="-10%" width="120%" height="120%">
+      <feTurbulence type="fractalNoise" baseFrequency="0.015" numOctaves="2" result="noise" />
+      <feDisplacementMap in="SourceGraphic" in2="noise" scale="2" xChannelSelector="R" yChannelSelector="G" />
+    </filter>
+    <linearGradient id="apple-accent-grad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#0d99ff" />
+      <stop offset="52%" stop-color="#14ae5c" />
+      <stop offset="100%" stop-color="#e36323" />
+    </linearGradient>
+
+    <!-- Official Phosphor Icons (256x256 viewBox) -->
+    <symbol id="icon-layout" viewBox="0 0 256 256">
+      <path fill="currentColor" d="M216,40H40A16,16,0,0,0,24,56V200a16,16,0,0,0,16,16H216a16,16,0,0,0,16-16V56A16,16,0,0,0,216,40Zm0,16V96H40V56ZM40,112H96v88H40Zm176,88H112V112H216v88Z"/>
+    </symbol>
+    <symbol id="icon-grid-four" viewBox="0 0 256 256">
+      <path fill="currentColor" d="M200,32H56A24,24,0,0,0,32,56V200a24,24,0,0,0,24,24H200a24,24,0,0,0,24-24V56A24,24,0,0,0,200,32Zm8,24v64H136V48h64A8,8,0,0,1,208,56ZM56,48h64v72H48V56A8,8,0,0,1,56,48ZM48,200V136h72v72H56A8,8,0,0,1,48,200Zm152,8H136V136h72v64A8,8,0,0,1,200,208Z"/>
+    </symbol>
+    <symbol id="icon-selection-all" viewBox="0 0 256 256">
+      <path fill="currentColor" d="M104,40a8,8,0,0,1,8-8h32a8,8,0,0,1,0,16H112A8,8,0,0,1,104,40Zm40,168H112a8,8,0,0,0,0,16h32a8,8,0,0,0,0-16Zm64-176H184a8,8,0,0,0,0,16h24v24a8,8,0,0,0,16,0V48A16,16,0,0,0,208,32Zm8,72a8,8,0,0,0-8,8v32a8,8,0,0,0,16,0V112A8,8,0,0,0,216,104Zm0,72a8,8,0,0,0-8,8v24H184a8,8,0,0,0,0,16h24a16,16,0,0,0,16-16V184A8,8,0,0,0,216,176ZM40,152a8,8,0,0,0,8-8V112a8,8,0,0,0-16,0v32A8,8,0,0,0,40,152Zm32,56H48V184a8,8,0,0,0-16,0v24a16,16,0,0,0,16,16H72a8,8,0,0,0,0-16ZM48,72V48H72a8,8,0,0,0,0-16H48A16,16,0,0,0,32,48V72a8,8,0,0,0,16,0Zm32,16v80a8,8,0,0,0,8,8h80a8,8,0,0,0,8-8V88a8,8,0,0,0-8-8H88A8,8,0,0,0,80,88Zm16,8h64v64H96Z"/>
+    </symbol>
+    <symbol id="icon-polygon" viewBox="0 0 256 256">
+      <path fill="currentColor" d="M232,96a24,24,0,1,0-39.13,18.61l-30.2,52.9A23.86,23.86,0,0,0,152,166a24,24,0,1,0,24,24,23.8,23.8,0,0,0-1.15-7.24l30.2-52.9A23.92,23.92,0,0,0,232,96ZM64,72A24,24,0,1,0,40,96a23.8,23.8,0,0,0,7.24-1.15l52.9,30.2A24,24,0,1,0,124,100a23.86,23.86,0,0,0-10.61,2.52L60.49,72.32A23.8,23.8,0,0,0,64,72Z"/>
+    </symbol>
+    <symbol id="icon-bezier-curve" viewBox="0 0 256 256">
+      <path fill="currentColor" d="M224,160a32,32,0,0,0-31,24.13C183.15,134.81,144.36,96,96,96V72a24,24,0,1,0-16,0V96c-48.36,0-87.15,38.81-97,88.13a32,32,0,1,0,15.72,3.77C7.63,144.62,47.62,112,96,112h64c48.38,0,88.37,32.62,97.28,75.9A32,32,0,1,0,224,160Z"/>
+    </symbol>
+    <symbol id="icon-eyedropper" viewBox="0 0 256 256">
+      <path fill="currentColor" d="M224,69.66,186.34,32a32,32,0,0,0-45.25,0L112,61.09,98.34,47.43a8,8,0,0,0-11.31,11.31L98.69,70.4,45.66,123.43a31.82,31.82,0,0,0-8.75,17.27l-4.83,33.82L20.34,186.26a16,16,0,0,0,22.63,22.63l11.74-11.75,33.82-4.83a31.82,31.82,0,0,0,17.27-8.75L158.83,130.5l11.66,11.66a8,8,0,0,0,11.31-11.31L168.14,117.2,197.23,88.1A32,32,0,0,0,224,69.66Z"/>
+    </symbol>
+    <symbol id="icon-code" viewBox="0 0 256 256">
+      <path fill="currentColor" d="M69.12,94.15,28.5,128l40.62,33.85a8,8,0,1,1-10.24,12.29l-48-40a8,8,0,0,1,0-12.29l48-40a8,8,0,0,1,10.24,12.3Zm176,27.7-48-40a8,8,0,1,0-10.24,12.3L227.5,128l-40.62,33.85a8,8,0,1,0,10.24,12.29l48-40a8,8,0,0,0,0-12.29ZM162.73,32.48a8,8,0,0,0-10.25,4.79l-64,176a8,8,0,0,0,4.79,10.26A8.14,8.14,0,0,0,96,224a8,8,0,0,0,7.52-5.27l64-176A8,8,0,0,0,162.73,32.48Z"/>
+    </symbol>
+    <symbol id="icon-arrows-out" viewBox="0 0 256 256">
+      <path fill="currentColor" d="M216,48V96a8,8,0,0,1-16,0V67.31l-42.34,42.35a8,8,0,0,1-11.32-11.32L188.69,56H160a8,8,0,0,1,0-16h48A8,8,0,0,1,216,48ZM98.34,146.34,56,188.69V160a8,8,0,0,0-16,0v48a8,8,0,0,0,8,8H96a8,8,0,0,0,0-16H67.31l42.35-42.34a8,8,0,0,0-11.32-11.32ZM208,152a8,8,0,0,0-8,8v28.69l-42.34-42.35a8,8,0,0,0-11.32,11.32L188.69,200H160a8,8,0,0,0,0,16h48a8,8,0,0,0,8-8V160A8,8,0,0,0,208,152ZM67.31,56H96a8,8,0,0,0,0-16H48a8,8,0,0,0-8,8V96a8,8,0,0,0,16,0V67.31l42.34,42.35a8,8,0,0,0,11.32-11.32Z"/>
+    </symbol>
+    <symbol id="icon-check-circle" viewBox="0 0 256 256">
+      <path fill="currentColor" d="M128,24A104,104,0,1,0,232,128,104.11,104.11,0,0,0,128,24Zm45.66,85.66-56,56a8,8,0,0,1-11.32,0l-24-24a8,8,0,0,1,11.32-11.32L112,148.69l50.34-50.35a8,8,0,0,1,11.32,11.32Z"/>
+    </symbol>
+    <symbol id="icon-terminal-window" viewBox="0 0 256 256">
+      <path fill="currentColor" d="M216,40H40A16,16,0,0,0,24,56V200a16,16,0,0,0,16,16H216a16,16,0,0,0,16-16V56A16,16,0,0,0,216,40ZM40,56H216V88H40ZM216,200H40V104H216v96Zm-96-48a8,8,0,0,1-2.34,5.66l-32,32a8,8,0,0,1-11.32-11.32L100.69,152,74.34,125.66a8,8,0,0,1,11.32-11.32l32,32A8,8,0,0,1,120,152Zm56,24H136a8,8,0,0,1,0-16h40a8,8,0,0,1,0,16Z"/>
+    </symbol>
+    <symbol id="icon-sparkle" viewBox="0 0 256 256">
+      <path fill="currentColor" d="M208,144a15.78,15.78,0,0,1-10.42,14.94l-51.65,19-19,51.61a15.92,15.92,0,0,1-29.88,0L78,178l-51.62-19a15.92,15.92,0,0,1,0-29.88l51.65-19,19-51.61a15.92,15.92,0,0,1,29.88,0l19,51.65,51.61,19A15.78,15.78,0,0,1,208,144Z"/>
+    </symbol>
+    <symbol id="brand-github" viewBox="0 0 256 256">
+      <path fill="currentColor" d="M128,16A112,112,0,0,0,92.59,234.25c5.6,1,7.65-2.43,7.65-5.4,0-2.66-.1-9.7-.15-19.05-31.13,6.77-37.7-15-37.7-15-5.09-12.93-12.43-16.37-12.43-16.37-10.16-6.95.77-6.81.77-6.81,11.23.79,17.14,11.53,17.14,11.53,10,17.1,26.19,12.16,32.57,9.3a23.82,23.82,0,0,1,7.11-14.95c-24.85-2.83-50.98-12.43-50.98-55.31,0-12.22,4.36-22.21,11.52-30.04-1.15-2.83-5-14.21,1.1-29.62,0,0,9.4-3.01,30.8,11.47a106.5,106.5,0,0,1,56.08,0c21.38-14.48,30.77-11.47,30.77-11.47,6.12,15.41,2.27,26.79,1.12,29.62,7.17,7.83,11.5,17.82,11.5,30.04,0,43-26.18,52.45-51.1,55.22,4.01,3.46,7.59,10.29,7.59,20.74,0,14.97-.14,27.05-.14,30.72,0,3,2.02,6.49,7.71,5.39A112.03,112.03,0,0,0,128,16Z"/>
+    </symbol>
+  </defs>
+</svg>
+
+  <main id="stage">
+    <div class="stage-grid"></div>
+
+    <!-- Top Keynote Status Bar -->
+    <header id="top-bar">
+      <div class="apple-pill-light">
+        <span class="pill-dot"></span>
+        <span>DESIGN:OS STUDIO · REAL GPU/CPU CANVAS</span>
+      </div>
+      <div class="apple-pill-dark">
+        <svg width="15" height="15"><use href="#icon-layout"></use></svg>
+        <span id="top-phase-label">01 / 08 · Auto-Layout 5.0 & Edge Sizing</span>
+      </div>
+    </header>
+
+    <!-- Single Continuous Morphing Container (#morph-shell) -->
+    <section id="morph-shell" data-interactive="true">
+      <!-- 1. Intro Card (Beats 0..4) -->
+      <div id="intro-card">
+        <div class="intro-top-row">
+          <div class="intro-badge">
+            <svg width="16" height="16"><use href="#icon-layout"></use></svg>
+            <span>MICRO-INTERACTIONS #10–#17 · AUTO-LAYOUT 5.0</span>
+          </div>
+          <span class="intro-series-tag">SERIES 01 / 08</span>
+        </div>
+
+        <div class="intro-center">
+          <div class="intro-icon-orb">
+            <svg width="36" height="36"><use href="#icon-layout"></use></svg>
+          </div>
+          <h1 class="intro-title">Auto-Layout 5.0 & Edge Sizing</h1>
+          <p class="intro-subtitle">On-canvas pink gap drag, inline pill typing, symmetric padding & negative spacing</p>
+        </div>
+
+        <div class="intro-bottom-row">
+          <div class="keycap-group">
+            <span class="apple-keycap">Shift+A</span><span class="apple-keycap">Option+Drag</span><span class="apple-keycap">Double-Click Edge</span><span class="apple-keycap">Space-Between</span>
+          </div>
+          <div class="intro-real-badge">
+            <svg width="16" height="16"><use href="#icon-check-circle"></use></svg>
+            <span>100% Real Rust/GPU Studio Canvas</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- 2. Real Multi-Step DESIGN:OS Studio Window (Beats 4..43) -->
+      <div id="studio-stage">
+        <div class="studio-window-header">
+          <div class="traffic-lights">
+            <span class="tl tl-close"></span>
+            <span class="tl tl-min"></span>
+            <span class="tl tl-max"></span>
+          </div>
+          <div class="window-title-pill">
+            <svg width="14" height="14"><use href="#icon-layout"></use></svg>
+            <span>designos-studio — Auto-Layout 5.0 & Edge Sizing</span>
+          </div>
+          <div id="header-step-readout" class="window-step-readout">STEP 01 / 06</div>
+        </div>
+
+        <div class="studio-viewport">
+          <div id="camera-rig">
+            <img id="real-step-1" class="real-studio-shot" src="../screenshots/micro/m01-step1.png" alt="Auto-Layout 5.0 & Edge Sizing — Step 1: Initial Hug Frame (Gap 12px · Padding 16px)" style="opacity:1" />
+              <img id="real-step-2" class="real-studio-shot" src="../screenshots/micro/m01-step2.png" alt="Auto-Layout 5.0 & Edge Sizing — Step 2: Drag Pink Gap Handle (12px -> 28px)" style="opacity:0" />
+              <img id="real-step-3" class="real-studio-shot" src="../screenshots/micro/m01-step3.png" alt="Auto-Layout 5.0 & Edge Sizing — Step 3: Click Inline Gap Pill & Type 36px" style="opacity:0" />
+              <img id="real-step-4" class="real-studio-shot" src="../screenshots/micro/m01-step4.png" alt="Auto-Layout 5.0 & Edge Sizing — Step 4: Option-Drag Symmetric Padding (16px -> 44px)" style="opacity:0" />
+              <img id="real-step-5" class="real-studio-shot" src="../screenshots/micro/m01-step5.png" alt="Auto-Layout 5.0 & Edge Sizing — Step 5: Double-Click Edge -> Fill & Space-Between" style="opacity:0" />
+              <img id="real-step-6" class="real-studio-shot" src="../screenshots/micro/m01-step6.png" alt="Auto-Layout 5.0 & Edge Sizing — Step 6: Negative Gap (-18px) Overlapping Card Stack" style="opacity:0" />
+            <div id="active-target-ring" data-interactive="true"></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- 3. GitHub Repo Outro Card (Beats 43..50) -->
+      <div id="outro-card">
+        <div class="intro-top-row">
+          <div class="intro-badge">
+            <svg width="16" height="16"><use href="#brand-github"></use></svg>
+            <span>OPEN SOURCE · MIT LICENSE · NATIVE RUST + WGPU</span>
+          </div>
+          <span class="intro-series-tag">100 / 100 FIGMA A–Z PASS</span>
+        </div>
+
+        <div class="outro-center">
+          <div class="github-repo-pill">
+            <svg width="30" height="30"><use href="#brand-github"></use></svg>
+            <span class="github-repo-url">github.com/jangtrinh/design-os-studio</span>
+          </div>
+          <h2 class="outro-title">Clone, Star &amp; Run Native Design IDE</h2>
+          <div class="outro-cli-box">
+            <svg width="18" height="18"><use href="#icon-terminal-window"></use></svg>
+            <span>cargo run --release -p designos-app --bin designos-studio</span>
+          </div>
+        </div>
+
+        <div class="intro-bottom-row">
+          <div class="keycap-group">
+            <span class="apple-keycap">macOS Metal .dmg</span>
+            <span class="apple-keycap">Windows DirectX 12 .exe</span>
+            <span class="apple-keycap">Linux Vulkan .deb</span>
+            <span class="apple-keycap">22 MCP Tools</span>
+          </div>
+          <div class="intro-real-badge">
+            <svg width="16" height="16"><use href="#icon-sparkle"></use></svg>
+            <span>jangtrinh.github.io/design-os-studio</span>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Bottom iOS 26 Liquid Glass Step & Shortcut Dock -->
+    <footer id="bottom-dock">
+      <div class="step-dots">
+        <div id="step-dot-0" class="step-dot active"><span>01</span></div><div id="step-dot-1" class="step-dot"><span>02</span></div><div id="step-dot-2" class="step-dot"><span>03</span></div><div id="step-dot-3" class="step-dot"><span>04</span></div><div id="step-dot-4" class="step-dot"><span>05</span></div><div id="step-dot-5" class="step-dot"><span>06</span></div>
+      </div>
+      <span id="dock-step-title">Initial Hug Frame (Gap 12px · Padding 16px)</span>
+      <span id="dock-shortcut-pill">Shift + A</span>
+    </footer>
+
+    <!-- Concentric Click Ripple & Canonical macOS Pointer Tip at (0,0) -->
+    <div id="click-ripple"></div>
+    <svg id="virtual-cursor" viewBox="0 0 32 32">
+      <path
+        d="M 0,0 L 0,25.5 L 6.4,19.6 L 11.4,29.5 L 15.6,27.4 L 10.6,17.5 L 19.2,17.5 Z"
+        fill="#111216"
+        stroke="#ffffff"
+        stroke-width="2"
+        stroke-linejoin="round"
+      />
+    </svg>
+
+    <!-- Universal Player Controls (hidden in ?render=1) -->
+    <div id="player-bar">
+      <button id="play-btn" type="button" style="background:none;border:none;color:#fff;cursor:pointer;font-family:inherit">Pause</button>
+      <input id="scrub" type="range" min="0" max="29.821074" step="0.016" value="0" style="width:120px" />
+      <span id="time-readout">0.00s / 29.82s</span>
+    </div>
+  </main>
+
+  <script>
+    (function () {
+      const params = new URLSearchParams(window.location.search);
+      if (params.get('render') === '1') {
+        document.body.classList.add('render-mode');
+      }
+
+      const BEAT = 0.5964214711729623;
+      const TOTAL_BEATS = 50;
+      const DURATION = 29.821074;
+      const STEPS = [{"step":1,"label":"Initial Hug Frame (Gap 12px · Padding 16px)","detail":"Select Auto-Layout frame to reveal pink gap & padding handles on canvas","shortcut":"Shift + A","cam":{"zoom":1.04,"panX":-18,"panY":12},"cursor":{"x0":0.46,"y0":0.44,"x1":0.44,"y1":0.39,"action":"click"}},{"step":2,"label":"Drag Pink Gap Handle (12px -> 28px)","detail":"Direct manipulation on canvas updates item_spacing & Right Inspector live","shortcut":"Drag Gap Bar","cam":{"zoom":1.24,"panX":-42,"panY":28},"cursor":{"x0":0.44,"y0":0.39,"x1":0.49,"y1":0.39,"action":"drag"}},{"step":3,"label":"Click Inline Gap Pill & Type 36px","detail":"On-canvas AutoLayoutInlineEdit pill opens directly over the gap band","shortcut":"Click Pill -> 36","cam":{"zoom":1.28,"panX":-48,"panY":32},"cursor":{"x0":0.49,"y0":0.39,"x1":0.47,"y1":0.38,"action":"click"}},{"step":4,"label":"Option-Drag Symmetric Padding (16px -> 44px)","detail":"Hold Option to scrub opposite horizontal & vertical padding bands together","shortcut":"Option + Drag Pad","cam":{"zoom":1.22,"panX":-36,"panY":24},"cursor":{"x0":0.47,"y0":0.38,"x1":0.39,"y1":0.39,"action":"drag"}},{"step":5,"label":"Double-Click Edge -> Fill & Space-Between","detail":"Metric card switches to Fill sizing across 560px Space-Between container","shortcut":"Option + Dbl-Click","cam":{"zoom":1.16,"panX":-24,"panY":18},"cursor":{"x0":0.39,"y0":0.39,"x1":0.62,"y1":0.39,"action":"click"}},{"step":6,"label":"Negative Gap (-18px) Overlapping Card Stack","detail":"Supports negative spacing with deterministic First-on-Top z-order stacking","shortcut":"Gap: -18px","cam":{"zoom":1,"panX":0,"panY":0},"cursor":{"x0":0.62,"y0":0.39,"x1":0.86,"y1":0.34,"action":"click"}}];
+
+      const morphShell = document.getElementById('morph-shell');
+      const introCard = document.getElementById('intro-card');
+      const studioStage = document.getElementById('studio-stage');
+      const outroCard = document.getElementById('outro-card');
+      const cameraRig = document.getElementById('camera-rig');
+      const activeTargetRing = document.getElementById('active-target-ring');
+      const headerStepReadout = document.getElementById('header-step-readout');
+      const dockStepTitle = document.getElementById('dock-step-title');
+      const dockShortcutPill = document.getElementById('dock-shortcut-pill');
+      const bottomDock = document.getElementById('bottom-dock');
+      const cursorEl = document.getElementById('virtual-cursor');
+      const rippleEl = document.getElementById('click-ripple');
+      const stepImgs = STEPS.map((s) => document.getElementById('real-step-' + s.step));
+      const stepDots = STEPS.map((_, idx) => document.getElementById('step-dot-' + idx));
+
+      function clamp(v, lo, hi) {
+        return Math.max(lo, Math.min(hi, v));
+      }
+
+      function smoothstep(edge0, edge1, x) {
+        const t = clamp((x - edge0) / Math.max(1e-6, edge1 - edge0), 0, 1);
+        return t * t * (3 - 2 * t);
+      }
+
+      // Closed-form critically damped spring step response (0 -> 1)
+      function springStep(dt, omega = 13.5, zeta = 0.82) {
+        if (dt <= 0) return 0;
+        const wd = omega * Math.sqrt(Math.max(1e-4, 1 - zeta * zeta));
+        const env = Math.exp(-zeta * omega * dt);
+        const val = 1 - env * (Math.cos(wd * dt) + (zeta * omega / wd) * Math.sin(wd * dt));
+        return clamp(val, 0, 1.04);
+      }
+
+      function lerp(a, b, t) {
+        return a + (b - a) * t;
+      }
+
+      function seek(rawTime) {
+        let t = Number(rawTime);
+        if (!Number.isFinite(t) || t < 0) t = 0;
+        // Exact loop closure: Frame Last === Frame 0
+        if (t >= DURATION - 1e-4) {
+          t = 0;
+        }
+
+        const W = window.innerWidth || 1920;
+        const H = window.innerHeight || 1080;
+        const isPortrait = H > W;
+
+        const beat = t / BEAT;
+
+        // Geometry targets for 16:9 vs 9:16
+        const introW = isPortrait ? Math.round(W * 0.88) : Math.round(Math.min(1140, W * 0.66));
+        const introH = isPortrait ? Math.round(H * 0.50) : Math.round(Math.min(620, H * 0.62));
+        const studioW = isPortrait ? Math.round(W * 0.92) : Math.round(Math.min(1640, W * 0.86));
+        const studioH = isPortrait ? Math.round(H * 0.62) : Math.round(Math.min(910, H * 0.82));
+
+        // Phase weights:
+        // - Intro: beats 0..4
+        // - Studio: beats 4..43 (6 steps x 6.5 beats each = 39 beats)
+        // - Outro: beats 43..48.8
+        // - Loop return to Intro: beats 48.8..50
+        const toStudio = springStep((beat - 3.6) * BEAT, 12.0, 0.84);
+        const toOutro = springStep((beat - 43.0) * BEAT, 12.0, 0.84);
+        const toLoopIntro = smoothstep(48.6, 49.95, beat);
+
+        const studioWeight = clamp(toStudio * (1 - toOutro), 0, 1);
+        const outroWeight = clamp(toOutro * (1 - toLoopIntro), 0, 1);
+        const introWeight = clamp(1 - studioWeight - outroWeight, 0, 1);
+
+        const curW = Math.round(introW * (introWeight + outroWeight) + studioW * studioWeight);
+        const curH = Math.round(introH * (introWeight + outroWeight) + studioH * studioWeight);
+        const curRadius = Math.round(32 * (introWeight + outroWeight) + 18 * studioWeight);
+
+        morphShell.style.width = curW + 'px';
+        morphShell.style.height = curH + 'px';
+        morphShell.style.borderRadius = curRadius + 'px';
+
+        introCard.style.opacity = introWeight.toFixed(4);
+        introCard.style.pointerEvents = introWeight > 0.5 ? 'auto' : 'none';
+
+        studioStage.style.opacity = studioWeight.toFixed(4);
+        studioStage.style.pointerEvents = studioWeight > 0.5 ? 'auto' : 'none';
+
+        outroCard.style.opacity = outroWeight.toFixed(4);
+        outroCard.style.pointerEvents = outroWeight > 0.5 ? 'auto' : 'none';
+
+        // Active Step inside Beats 4..43 (6 steps, 6.5 beats each)
+        const stepSpan = 6.5;
+        const rawStepFloat = clamp((beat - 4.0) / stepSpan, 0, STEPS.length - 0.001);
+        const stepIdx = clamp(Math.floor(rawStepFloat), 0, STEPS.length - 1);
+        const stepLocalBeat = (beat - (4.0 + stepIdx * stepSpan));
+        const activeStep = STEPS[stepIdx];
+        const prevStep = STEPS[Math.max(0, stepIdx - 1)];
+
+        // Cross-step image opacity (100% real Studio screenshots)
+        for (let i = 0; i < STEPS.length; i++) {
+          let op = 0;
+          if (i === stepIdx) {
+            op = 1;
+          }
+          stepImgs[i].style.opacity = String(op);
+          if (stepDots[i]) {
+            if (i === stepIdx) stepDots[i].classList.add('active');
+            else stepDots[i].classList.remove('active');
+          }
+        }
+
+        headerStepReadout.textContent = 'STEP 0' + activeStep.step + ' / 06 · REAL STUDIO';
+        dockStepTitle.textContent = activeStep.label;
+        dockShortcutPill.textContent = activeStep.shortcut;
+        bottomDock.style.opacity = clamp(studioWeight * 1.15, 0.18, 1).toFixed(3);
+
+        // Smooth spring camera zoom/pan across the 6 real steps
+        const stepSpring = springStep(stepLocalBeat * BEAT, 11.0, 0.85);
+        let camZoom = lerp(prevStep.cam.zoom, activeStep.cam.zoom, stepSpring);
+        let camPanX = lerp(prevStep.cam.panX, activeStep.cam.panX, stepSpring);
+        let camPanY = lerp(prevStep.cam.panY, activeStep.cam.panY, stepSpring);
+
+        // In 9:16 portrait mode, slightly boost zoom so the real Studio canvas & Inspector read crisply on mobile
+        if (isPortrait) {
+          camZoom *= 1.12;
+        }
+
+        cameraRig.style.transform =
+          'translate3d(' + camPanX.toFixed(2) + 'px, ' + camPanY.toFixed(2) + 'px, 0) scale(' + camZoom.toFixed(4) + ')';
+
+        // Cursor choreography (strictly locked to home position at Frame 0 & Frame Last)
+        const homeX = Math.round(W * 0.50);
+        const homeY = Math.round(H * 0.54);
+
+        const shellLeft = (W - curW) * 0.5;
+        const shellTop = (H - curH) * 0.5;
+
+        const moveProgress = smoothstep(0.4, 2.6, stepLocalBeat);
+        const relX = lerp(activeStep.cursor.x0, activeStep.cursor.x1, moveProgress);
+        const relY = lerp(activeStep.cursor.y0, activeStep.cursor.y1, moveProgress);
+
+        const studioCursorX = shellLeft + curW * relX;
+        const studioCursorY = shellTop + 38 + (curH - 38) * relY;
+
+        const outroTargetX = W * 0.50;
+        const outroTargetY = H * 0.48;
+
+        const cx = lerp(
+          homeX,
+          lerp(studioCursorX, outroTargetX, toOutro),
+          clamp(toStudio * (1 - toLoopIntro), 0, 1)
+        );
+        const cy = lerp(
+          homeY,
+          lerp(studioCursorY, outroTargetY, toOutro),
+          clamp(toStudio * (1 - toLoopIntro), 0, 1)
+        );
+
+        // Position active target ring inside viewport so cursor hit-test is 100% verified
+        activeTargetRing.style.left = (relX * 100).toFixed(2) + '%';
+        activeTargetRing.style.top = (relY * 100).toFixed(2) + '%';
+        activeTargetRing.style.opacity = (studioWeight * 0.85).toFixed(3);
+
+        // Click / Drag impulse at stepLocalBeat = 2.4
+        const clickDt = (stepLocalBeat - 2.4) * BEAT;
+        let cursorScale = 1.0;
+        let rippleOp = 0.0;
+        let rippleScale = 0.5;
+        if (studioWeight > 0.6 && clickDt >= 0 && clickDt < 0.55) {
+          const p = clickDt / 0.55;
+          cursorScale = 1.0 - 0.14 * Math.sin(Math.min(1, p * 2.2) * Math.PI);
+          rippleOp = (1 - p) * 0.85;
+          rippleScale = 0.45 + p * 1.35;
+        }
+
+        cursorEl.style.transform =
+          'translate3d(' + cx.toFixed(2) + 'px, ' + cy.toFixed(2) + 'px, 0) scale(' + cursorScale.toFixed(4) + ')';
+        rippleEl.style.transform =
+          'translate3d(' + cx.toFixed(2) + 'px, ' + cy.toFixed(2) + 'px, 0) scale(' + rippleScale.toFixed(4) + ')';
+        rippleEl.style.opacity = rippleOp.toFixed(4);
+
+        window.__cursorAudit = {
+          t,
+          beat,
+          stepIdx,
+          x: cx,
+          y: cy,
+          targetId: 'morph-shell',
+        };
+
+        const scrub = document.getElementById('scrub');
+        const readout = document.getElementById('time-readout');
+        if (scrub) scrub.value = String(t);
+        if (readout) readout.textContent = t.toFixed(2) + 's / ' + DURATION.toFixed(2) + 's';
+      }
+
+      window.seek = seek;
+      window.__seekToTime = seek;
+      window.DURATION = DURATION;
+
+      // Interactive player loop when opened in browser without ?render=1
+      let playing = !document.body.classList.contains('render-mode');
+      let startWall = performance.now();
+      let pausedAt = 0;
+
+      const playBtn = document.getElementById('play-btn');
+      const scrubEl = document.getElementById('scrub');
+      if (playBtn) {
+        playBtn.addEventListener('click', () => {
+          playing = !playing;
+          playBtn.textContent = playing ? 'Pause' : 'Play';
+          if (playing) startWall = performance.now() - pausedAt * 1000;
+        });
+      }
+      if (scrubEl) {
+        scrubEl.addEventListener('input', (e) => {
+          playing = false;
+          if (playBtn) playBtn.textContent = 'Play';
+          pausedAt = parseFloat(e.target.value) || 0;
+          seek(pausedAt);
+        });
+      }
+
+      function tick(now) {
+        if (playing) {
+          pausedAt = ((now - startWall) / 1000) % DURATION;
+          seek(pausedAt);
+        }
+        requestAnimationFrame(tick);
+      }
+
+      seek(0);
+      if (playing) {
+        requestAnimationFrame(tick);
+      }
+    })();
+  </script>
+</body>
+</html>

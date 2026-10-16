@@ -1,8 +1,8 @@
 # DESIGN:OS Studio (design-os-studio)
 
-> Local-first Rust/wgpu interface design studio with 387/387 Figma UI3 & .fig v106 binary read/write parity, 100/100 Figma A-to-Z Micro-Interactions, native Agentic PTY Chat UI, 11-stage Spec Reader, and 22 MCP tools.
+> Local-first Rust/wgpu interface design studio with 387/387 Figma UI3 & .fig v106 binary read/write parity, 100/100 Figma A-to-Z Micro-Interactions, native Agentic PTY Chat UI, Live Variables Mode Switching & Multi-Edit, and 22 MCP tools.
 
-Native GPU-accelerated interface design studio (`wgpu` Metal / DirectX 12 / Vulkan + `tiny-skia`), enterprise Figma `.fig` v106 binary read/write engine, 100/100 Figma A-to-Z Micro-Interactions (`#1..#100`), native Agentic PTY Chat UI (`Claude Code` · `Codex` · `Antigravity CLI`), 11-stage `PRODUCT:OS Spec Driven v2` Reader, multi-target Dev Mode code generator, and 22-tool Model Context Protocol server (`designos-mcp`) built in 100% Rust.
+Native GPU-accelerated interface design studio (`wgpu` Metal / DirectX 12 / Vulkan + `tiny-skia`), enterprise Figma `.fig` v106 binary read/write engine, 100/100 Figma A-to-Z Micro-Interactions (`#1..#100`), native Agentic PTY Chat UI (`Claude Code` · `Codex` · `Antigravity CLI`), Live Variables Mode Switching & Multi-Edit (`Q`), multi-target Dev Mode code generator, and 22-tool Model Context Protocol server (`designos-mcp`) built in 100% Rust.
 
 ## Key Facts & Verification Metrics
 

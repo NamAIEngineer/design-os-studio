@@ -2,7 +2,7 @@
   "version": "1.0",
   "project": "design-os-studio",
   "brand": "design:os studio",
-  "updated_at": "2026-10-15T14:52:00Z",
+  "updated_at": "2026-10-16T09:05:00Z",
   "entries": [
     {
       "id": "figma-ai-terminal-core",
@@ -30,6 +30,15 @@
       "spec_bundle": "plans/specs/designos-studio-v2",
       "stories": ["US-15"],
       "decisions": ["D18", "D19"]
+    },
+    {
+      "id": "micro-interactions-video-suite-review",
+      "category": "features",
+      "title": "8x30s A-to-Z Micro-Interactions Video Suite (16:9 & 9:16) — v1 Rejected (Chưa đạt tiêu chuẩn: Needs Continuous 60fps Native Frame Recording)",
+      "path": "features/micro-interactions-video-suite-review/status.md",
+      "spec_bundle": "plans/specs/designos-studio-v2",
+      "stories": ["US-16", "US-17"],
+      "decisions": ["D20", "D21"]
     }
   ]
 }

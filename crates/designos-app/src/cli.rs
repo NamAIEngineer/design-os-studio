@@ -101,7 +101,7 @@ impl Options {
 
 /// Values of `--panel`: `agents`, `agents-chat`, `specs`, `assets`, `variables` / `variables-floating` open the local views,
 /// `libraries` the Libraries modal; the others are inspector popups opened on the selection for screenshots.
-pub const PANELS: [&str; 34] = [
+pub const PANELS: [&str; 38] = [
     "agents",
     "agents-chat",
     "specs",
@@ -136,6 +136,10 @@ pub const PANELS: [&str; 34] = [
     "micro-layer-picker",
     "micro-dev-boxmodel",
     "micro-scale-tool",
+    "micro-inspector-math",
+    "micro-selection-corner",
+    "micro-typography-multiedit",
+    "micro-components-variables",
 ];
 
 pub fn parse_size(s: &str) -> Option<(u32, u32)> {
@@ -195,7 +199,8 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Options, String> 
             }
             "--panel" => {
                 let t = it.next().ok_or("--panel needs a name (see --help)")?;
-                if !PANELS.contains(&t.as_str()) {
+                let base = t.split_once(':').map(|(b, _)| b).unwrap_or(t.as_str());
+                if !PANELS.contains(&base) {
                     return Err(format!("unknown panel '{t}' (expected {})", PANELS.join(", ")));
                 }
                 o.panel = Some(t);

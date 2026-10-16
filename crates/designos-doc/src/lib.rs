@@ -16,6 +16,7 @@
 )]
 
 mod board;
+pub mod changelog_features;
 mod comments;
 mod components;
 mod dev;
@@ -44,6 +45,7 @@ pub mod vector;
 mod vector_fit;
 
 pub use board::*;
+pub use changelog_features::*;
 pub use comments::*;
 pub use components::*;
 pub use dev::*;

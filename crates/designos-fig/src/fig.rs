@@ -19,13 +19,32 @@ struct Decoded {
     message: KiwiValue,
 }
 
-fn decode(bytes: &[u8]) -> Result<Decoded, FigError> {
-    let archive = container::open(bytes)?;
+#[inline]
+pub(crate) fn release_os_memory() {
+    #[cfg(target_os = "macos")]
+    unsafe {
+        extern "C" {
+            fn malloc_zone_pressure_relief(zone: *mut std::ffi::c_void, goal: usize) -> usize;
+        }
+        malloc_zone_pressure_relief(std::ptr::null_mut(), 0);
+    }
+}
+
+fn decode_inner(bytes: &[u8], for_import: bool) -> Result<Decoded, FigError> {
+    let mut archive = container::open(bytes)?;
     let (schema_bin, msg_bin) = container::read_archive_chunks(&archive)?;
+    archive.canvas = Vec::new();
     let schema = Schema::decode(&schema_bin).map_err(|e| FigError::Format(format!("kiwi schema: {e}")))?;
+    drop(schema_bin);
     let root = schema.root_message().ok_or_else(|| FigError::Format("schema has no message definition".into()))?;
-    let message = schema.decode_message(root, &msg_bin).map_err(|e| FigError::Format(format!("kiwi message: {e}")))?;
+    let message = if for_import { schema.decode_message_for_import(root, &msg_bin) } else { schema.decode_message(root, &msg_bin) }
+        .map_err(|e| FigError::Format(format!("kiwi message: {e}")))?;
+    drop(msg_bin);
     Ok(Decoded { archive, message })
+}
+
+fn decode(bytes: &[u8]) -> Result<Decoded, FigError> {
+    decode_inner(bytes, false)
 }
 
 /// Raw kiwi message as JSON (enums by name, byte arrays as hex) for debugging.
@@ -139,30 +158,49 @@ fn extract_fast_derived(raw_changes: &[KiwiValue], num_blobs: usize) -> HashMap<
 
 /// Imports a `.fig` file (raw fig-kiwi or zip-wrapped) from bytes.
 pub fn import_fig(bytes: &[u8]) -> Result<Document, FigError> {
-    let d = decode(bytes)?;
+    let mut d = decode_inner(bytes, true)?;
     let name = d.archive.meta.as_ref().and_then(|m| fstr(m, "file_name").or_else(|| fstr(m, "name"))).unwrap_or("Untitled").to_string();
-    let blobs: Vec<&[u8]> = d
-        .message
-        .get("blobs")
-        .and_then(KiwiValue::as_array)
-        .map(|a| a.iter().map(|b| b.get("bytes").and_then(KiwiValue::as_bytes).unwrap_or(&[])).collect())
-        .unwrap_or_default();
-    let raw_changes = d.message.get("nodeChanges").and_then(KiwiValue::as_array).unwrap_or(&[]);
+    let owned_blobs: Vec<Vec<u8>> = match d.message.take_field("blobs") {
+        Some(KiwiValue::Array(arr)) => arr
+            .into_iter()
+            .map(|mut b| match b.take_field("bytes") {
+                Some(KiwiValue::Bytes(bytes)) => bytes,
+                _ => Vec::new(),
+            })
+            .collect(),
+        _ => Vec::new(),
+    };
+    let raw_changes: Vec<KiwiValue> = match d.message.take_field("nodeChanges") {
+        Some(KiwiValue::Array(arr)) => arr,
+        _ => Vec::new(),
+    };
+    drop(d.message);
+
     let large = raw_changes.len() > 5_000;
-    let fast_derived = large.then(|| extract_fast_derived(raw_changes, blobs.len()));
-    let to_j = if large { kiwi::to_json_fast } else { kiwi::to_json };
-    let changes: Vec<Value> = raw_changes.iter().map(to_j).collect();
-    let rest = nodes_to_rest(changes, &blobs, &name);
-    let mut doc = rest_import::import_rest_value_with_blobs(&rest, true, &blobs, fast_derived.as_ref())?;
-    drop(blobs);
+    let fast_derived = large.then(|| extract_fast_derived(&raw_changes, owned_blobs.len()));
+    let into_j: fn(KiwiValue) -> Value = if large { kiwi::into_json_fast } else { kiwi::into_json };
+    let mut entries: Vec<Entry> = Vec::with_capacity(raw_changes.len());
+    for kc in raw_changes {
+        let j = into_j(kc);
+        if let Some(entry) = entry_from_json(j) {
+            entries.push(entry);
+        }
+    }
+    if large {
+        release_os_memory();
+    }
+    let blob_refs: Vec<&[u8]> = owned_blobs.iter().map(Vec::as_slice).collect();
+    let rest = entries_to_rest(entries, &blob_refs, &name);
+    if large {
+        release_os_memory();
+    }
+    let mut doc = rest_import::import_rest_value_owned(rest, true, &blob_refs, fast_derived.as_ref())?;
+    drop(fast_derived);
+    drop(blob_refs);
+    drop(owned_blobs);
     doc.images = d.archive.images;
     if large {
-        let msg = d.message;
-        std::thread::spawn(move || {
-            drop(fast_derived);
-            drop(rest);
-            drop(msg);
-        });
+        release_os_memory();
     }
     Ok(doc)
 }
@@ -174,6 +212,16 @@ struct Entry {
     parent: Option<String>,
     pos: String,
     json: Value,
+}
+
+fn entry_from_json(j: Value) -> Option<Entry> {
+    if fstr(&j, "phase") == Some("REMOVED") || rest_import::fbool(&j, "isSoftDeleted") == Some(true) {
+        return None;
+    }
+    let id = j.get("guid").and_then(guid_str)?;
+    let parent = j.get("parentIndex").and_then(|p| p.get("guid")).and_then(guid_str);
+    let pos = j.get("parentIndex").and_then(|p| fstr(p, "position")).unwrap_or("").to_string();
+    Some(Entry { id, parent, pos, json: j })
 }
 
 fn guid_str(g: &Value) -> Option<String> {
@@ -194,15 +242,15 @@ struct Lk<'a> {
     large_file: bool,
     geo_cache: std::cell::RefCell<HashMap<(usize, bool), Value>>,
     /// Variable key -> `VariableID:s:l`.
-    var_by_key: HashMap<&'a str, String>,
+    var_by_key: HashMap<String, String>,
     /// Variable-set key -> `VariableCollectionId:s:l`.
-    set_by_key: HashMap<&'a str, String>,
+    set_by_key: HashMap<String, String>,
     /// Style key -> `s:l` of the style node.
-    style_by_key: HashMap<&'a str, String>,
-    /// Style key -> its node (for paints the style supplies).
-    style_nodes: HashMap<&'a str, &'a Value>,
+    style_by_key: HashMap<String, String>,
+    /// Style key -> its node (for paints/typography the style supplies).
+    style_nodes: HashMap<String, Value>,
     /// Style node id (`s:l`) -> node, for styles defined in this file.
-    style_by_id: HashMap<&'a str, &'a Value>,
+    style_by_id: HashMap<String, Value>,
     /// Property definition id (including the `parentPropDefId` aliases that
     /// variants carry) -> (`Name#s:l`, REST type).
     prop_defs: HashMap<String, (String, &'static str)>,
@@ -212,11 +260,11 @@ struct Lk<'a> {
 }
 
 impl<'a> Lk<'a> {
-    fn new(entries: &'a [Entry], blobs: &'a [&'a [u8]]) -> Self {
+    fn new(entries: &[Entry], blobs: &'a [&'a [u8]]) -> Self {
         let mut lk = Lk {
             blobs,
             large_file: entries.len() > 5_000,
-            geo_cache: std::cell::RefCell::new(HashMap::with_capacity(blobs.len())),
+            geo_cache: std::cell::RefCell::new(HashMap::with_capacity(if entries.len() > 5_000 { 0 } else { blobs.len() })),
             var_by_key: HashMap::new(),
             set_by_key: HashMap::new(),
             style_by_key: HashMap::new(),
@@ -230,7 +278,7 @@ impl<'a> Lk<'a> {
             let j = &e.json;
             let key = fstr(j, "key").filter(|k| !k.is_empty());
             if fstr(j, "styleType").is_some() {
-                lk.style_by_id.insert(e.id.as_str(), j);
+                lk.style_by_id.insert(e.id.clone(), j.clone());
             }
             for h in j.get("handoffStatusMap").map(|m| rest_import::farr(m, "entries")).unwrap_or(&[]) {
                 let Some(gid) = h.get("guid").and_then(guid_str) else { continue };
@@ -246,14 +294,14 @@ impl<'a> Lk<'a> {
             }
             match (fstr(j, "type"), key) {
                 (Some("VARIABLE"), Some(k)) => {
-                    lk.var_by_key.insert(k, format!("VariableID:{}", e.id));
+                    lk.var_by_key.insert(k.to_string(), format!("VariableID:{}", e.id));
                 }
                 (Some("VARIABLE_SET"), Some(k)) => {
-                    lk.set_by_key.insert(k, format!("VariableCollectionId:{}", e.id));
+                    lk.set_by_key.insert(k.to_string(), format!("VariableCollectionId:{}", e.id));
                 }
                 (_, Some(k)) if fstr(j, "styleType").is_some() => {
-                    lk.style_by_key.insert(k, e.id.clone());
-                    lk.style_nodes.insert(k, j);
+                    lk.style_by_key.insert(k.to_string(), e.id.clone());
+                    lk.style_nodes.insert(k.to_string(), j.clone());
                 }
                 _ => {}
             }
@@ -312,10 +360,10 @@ impl<'a> Lk<'a> {
     }
 
     /// The style node a `styleIdFor*` reference points at.
-    fn style_node(&self, r: &Value) -> Option<&'a Value> {
+    fn style_node(&self, r: &Value) -> Option<&Value> {
         match asset_key(r) {
-            Some(k) => self.style_nodes.get(k).copied(),
-            None => self.style_by_id.get(r.get("guid").and_then(guid_str)?.as_str()).copied(),
+            Some(k) => self.style_nodes.get(k),
+            None => self.style_by_id.get(r.get("guid").and_then(guid_str)?.as_str()),
         }
     }
 
@@ -389,24 +437,20 @@ pub fn import_fig_node_changes(changes: &Value, name: &str) -> Result<Document, 
 }
 
 fn nodes_to_rest(changes: Vec<Value>, blobs: &[&[u8]], name: &str) -> Value {
-    let mut entries: Vec<Entry> = Vec::with_capacity(changes.len());
-    for j in changes {
-        if fstr(&j, "phase") == Some("REMOVED") || rest_import::fbool(&j, "isSoftDeleted") == Some(true) {
-            continue;
-        }
-        let Some(id) = j.get("guid").and_then(guid_str) else { continue };
-        let parent = j.get("parentIndex").and_then(|p| p.get("guid")).and_then(guid_str);
-        let pos = j.get("parentIndex").and_then(|p| fstr(p, "position")).unwrap_or("").to_string();
-        entries.push(Entry { id, parent, pos, json: j });
-    }
+    let entries: Vec<Entry> = changes.into_iter().filter_map(entry_from_json).collect();
+    entries_to_rest(entries, blobs, name)
+}
 
-    let index: HashMap<&str, usize> = entries.iter().enumerate().map(|(i, e)| (e.id.as_str(), i)).collect();
+fn entries_to_rest(mut entries: Vec<Entry>, blobs: &[&[u8]], name: &str) -> Value {
     let mut children: HashMap<usize, Vec<usize>> = HashMap::new();
     let mut roots: Vec<usize> = Vec::new();
-    for (i, e) in entries.iter().enumerate() {
-        match e.parent.as_deref().and_then(|p| index.get(p)) {
-            Some(&p) if p != i => children.entry(p).or_default().push(i),
-            _ => roots.push(i),
+    {
+        let index: HashMap<&str, usize> = entries.iter().enumerate().map(|(i, e)| (e.id.as_str(), i)).collect();
+        for (i, e) in entries.iter().enumerate() {
+            match e.parent.as_deref().and_then(|p| index.get(p)) {
+                Some(&p) if p != i => children.entry(p).or_default().push(i),
+                _ => roots.push(i),
+            }
         }
     }
     for list in children.values_mut() {
@@ -418,15 +462,22 @@ fn nodes_to_rest(changes: Vec<Value>, blobs: &[&[u8]], name: &str) -> Value {
         Some(d) => children.get(&d).cloned().unwrap_or_default(),
         None => roots.iter().copied().filter(|&i| fstr(&entries[i].json, "type") == Some("CANVAS")).collect(),
     };
+    let canvas_internal: Vec<(usize, bool)> =
+        canvases.into_iter().map(|i| (i, entries[i].json.get("internalOnly").and_then(Value::as_bool) == Some(true))).collect();
 
     let lk = Lk::new(&entries, blobs);
-    let mut visited: HashSet<usize> = HashSet::new();
-    let is_internal = |i: usize| entries[i].json.get("internalOnly").and_then(Value::as_bool) == Some(true);
-    let pages: Vec<Value> = canvases
+    let styles = style_table(&entries);
+    let variables = {
+        let var_entries: Vec<&Value> = entries.iter().map(|e| &e.json).filter(|j| matches!(fstr(j, "type"), Some("VARIABLE_SET" | "VARIABLE"))).collect();
+        crate::variables::from_fig_entries(&var_entries)
+    };
+
+    let mut visited: HashSet<usize> = HashSet::with_capacity(entries.len());
+    let pages: Vec<Value> = canvas_internal
         .iter()
         .copied()
-        .filter(|&i| !is_internal(i))
-        .filter_map(|i| build(&entries, &children, &lk, i, &mut visited, 0))
+        .filter(|&(_, internal)| !internal)
+        .filter_map(|(i, _)| build(&mut entries, &children, &lk, i, &mut visited, 0))
         .map(|mut p| {
             crate::proto::lift_flow_starts(&mut p);
             p
@@ -434,32 +485,29 @@ fn nodes_to_rest(changes: Vec<Value>, blobs: &[&[u8]], name: &str) -> Value {
         .collect();
     // Internal-only canvases hold what the file uses from libraries (remote
     // components and styles); they become the hidden library page.
-    let library_pages: Vec<Value> = canvases
+    let library_pages: Vec<Value> = canvas_internal
         .iter()
         .copied()
-        .filter(|&i| is_internal(i))
-        .filter_map(|i| build(&entries, &children, &lk, i, &mut visited, 0))
+        .filter(|&(_, internal)| internal)
+        .filter_map(|(i, _)| build(&mut entries, &children, &lk, i, &mut visited, 0))
         .filter(|p| p.get("children").and_then(Value::as_array).is_some_and(|c| !c.is_empty()))
         .collect();
 
-    let var_entries: Vec<&Value> = entries.iter().map(|e| &e.json).filter(|j| matches!(fstr(j, "type"), Some("VARIABLE_SET" | "VARIABLE"))).collect();
+    drop(entries);
+    drop(children);
+    drop(visited);
+    drop(lk);
+
     let mut out = json!({
         "name": name,
         "document": {"id": "0:0", "name": "Document", "type": "DOCUMENT", "children": pages},
-        "styles": style_table(&entries),
+        "styles": styles,
     });
-    if let (Some(v), Some(o)) = (crate::variables::from_fig_entries(&var_entries), out.as_object_mut()) {
+    if let (Some(v), Some(o)) = (variables, out.as_object_mut()) {
         o.insert("variables".into(), v);
     }
     if !library_pages.is_empty() {
         out["libraryPages"] = Value::Array(library_pages);
-    }
-    let large_file = lk.large_file;
-    drop(var_entries);
-    drop(lk);
-    drop(index);
-    if large_file {
-        std::thread::spawn(move || drop(entries));
     }
     out
 }
@@ -506,6 +554,18 @@ fn symbol_id_str(v: &Value) -> Option<String> {
 }
 
 fn extract_fig_metadata(nc: &Value, orig_ty: &str, large_file: bool) -> Option<Value> {
+    if large_file {
+        if orig_ty == "BRUSH" {
+            let bt = fstr(nc, "brushType").filter(|s| !s.is_empty()).unwrap_or("STRETCH");
+            return Some(json!({"brushType": bt}));
+        }
+        if orig_ty == "SHAPE_WITH_TEXT" {
+            if let Some(swt) = fstr(nc, "shapeWithTextType").or_else(|| fstr(nc, "shapeType")).filter(|s| !s.is_empty()) {
+                return Some(json!({"shapeWithTextType": swt}));
+            }
+        }
+        return None;
+    }
     let obj = nc.as_object()?;
     let mut meta = Map::new();
     let mut has_brush_type = false;
@@ -640,15 +700,17 @@ fn extract_fig_metadata(nc: &Value, orig_ty: &str, large_file: bool) -> Option<V
     (!meta.is_empty()).then_some(Value::Object(meta))
 }
 
-fn build(entries: &[Entry], children: &HashMap<usize, Vec<usize>>, lk: &Lk, i: usize, visited: &mut HashSet<usize>, depth: usize) -> Option<Value> {
+fn build(entries: &mut [Entry], children: &HashMap<usize, Vec<usize>>, lk: &Lk, i: usize, visited: &mut HashSet<usize>, depth: usize) -> Option<Value> {
     if depth > 250 || !visited.insert(i) {
         return None;
     }
-    let e = &entries[i];
-    let mut m = convert_node(&e.json, &e.id, lk)?;
+    let node_json = std::mem::take(&mut entries[i].json);
+    let is_container = matches!(fstr(&node_json, "type"), Some("CANVAS" | "FRAME" | "GROUP" | "SYMBOL" | "INSTANCE" | "SECTION" | "BOOLEAN_OPERATION"));
+    let mut m = convert_node(&node_json, &entries[i].id, lk)?;
+    drop(node_json);
     let kids: Vec<Value> =
         children.get(&i).map(|c| c.iter().filter_map(|&k| build(entries, children, lk, k, visited, depth + 1)).collect()).unwrap_or_default();
-    if !kids.is_empty() || matches!(fstr(&e.json, "type"), Some("CANVAS" | "FRAME" | "GROUP" | "SYMBOL" | "INSTANCE" | "SECTION" | "BOOLEAN_OPERATION")) {
+    if !kids.is_empty() || is_container {
         m.insert("children".into(), Value::Array(kids));
     }
     Some(Value::Object(m))
