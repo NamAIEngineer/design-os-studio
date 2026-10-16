@@ -70,7 +70,7 @@ pub fn import_pen_json(raw: &str) -> Result<Document, String> {
     }
 
     // 3. Resolve `type: "ref"` component links and clone/override descendants
-    resolve_pen_refs(&mut doc, &id_map, pending_refs);
+    resolve_pen_refs(&mut doc, &id_map, pending_refs)?;
 
     doc.mark_full_dirty();
     Ok(doc)
@@ -848,11 +848,18 @@ fn import_pen_node(
     Ok(id)
 }
 
-fn resolve_pen_refs(doc: &mut Document, id_map: &BTreeMap<String, NodeId>, pending_refs: Vec<(NodeId, String, Option<Map<String, Value>>)>) {
+/// Nodes the whole import may clone while expanding `ref`s; stops chained components from multiplying without bound.
+const MAX_PEN_REF_CLONES: usize = 50_000;
+
+fn resolve_pen_refs(doc: &mut Document, id_map: &BTreeMap<String, NodeId>, pending_refs: Vec<(NodeId, String, Option<Map<String, Value>>)>) -> Result<(), String> {
+    let mut clone_budget = MAX_PEN_REF_CLONES;
     for (inst_id, ref_key, descendants) in pending_refs {
         let Some(&comp_id) = id_map.get(&ref_key) else {
             continue;
         };
+        if comp_id == inst_id || doc.is_ancestor(comp_id, inst_id) {
+            return Err(format!("component \"{ref_key}\" is referenced from inside itself; remove the ref from its own contents"));
+        }
         let has_explicit_children = doc.get(inst_id).is_some_and(|n| !n.children.is_empty());
         if let Some(inst_node) = doc.get_mut(inst_id) {
             if let NodeKind::Instance { component, .. } = &mut inst_node.kind {
@@ -864,7 +871,7 @@ fn resolve_pen_refs(doc: &mut Document, id_map: &BTreeMap<String, NodeId>, pendi
         if !has_explicit_children {
             let comp_children = doc.get(comp_id).map(|c| c.children.clone()).unwrap_or_default();
             for cid in comp_children {
-                clone_component_subtree(doc, cid, inst_id, &mut source_to_clone);
+                clone_component_subtree(doc, cid, inst_id, &mut source_to_clone, &mut clone_budget)?;
             }
         }
         // Apply `descendants` overrides
@@ -878,10 +885,18 @@ fn resolve_pen_refs(doc: &mut Document, id_map: &BTreeMap<String, NodeId>, pendi
             }
         }
     }
+    Ok(())
 }
 
-fn clone_component_subtree(doc: &mut Document, src_id: NodeId, new_parent: NodeId, source_to_clone: &mut BTreeMap<String, NodeId>) {
-    let Some(orig) = doc.get(src_id).cloned() else { return };
+fn clone_component_subtree(
+    doc: &mut Document,
+    src_id: NodeId,
+    new_parent: NodeId,
+    source_to_clone: &mut BTreeMap<String, NodeId>,
+    budget: &mut usize,
+) -> Result<(), String> {
+    let Some(orig) = doc.get(src_id).cloned() else { return Ok(()) };
+    *budget = budget.checked_sub(1).ok_or_else(|| format!("component references expand past {MAX_PEN_REF_CLONES} nodes; flatten nested components"))?;
     let new_id = doc.alloc_id();
     let mut copy = orig.clone();
     copy.id = new_id;
@@ -893,8 +908,9 @@ fn clone_component_subtree(doc: &mut Document, src_id: NodeId, new_parent: NodeI
     }
     let _ = doc.insert(new_parent, copy);
     for child_id in orig.children {
-        clone_component_subtree(doc, child_id, new_id, source_to_clone);
+        clone_component_subtree(doc, child_id, new_id, source_to_clone, budget)?;
     }
+    Ok(())
 }
 
 fn apply_descendant_override(doc: &mut Document, tid: NodeId, ov_obj: &Map<String, Value>) {
@@ -1366,5 +1382,36 @@ mod tests {
         let rinst = reimported.get(rchildren[1]).unwrap();
         let rlabel = reimported.get(rinst.children[0]).unwrap();
         assert_eq!(rlabel.kind.any_text().unwrap().content, "Get Started");
+    }
+
+    #[test]
+    fn ref_to_own_component_or_itself_is_rejected() {
+        let inside_component = r##"{"version":"1.0","children":[
+            {"id":"c","type":"frame","reusable":true,"children":[{"id":"i","type":"ref","ref":"c"}]}]}"##;
+        let err = import_pen_json(inside_component).unwrap_err();
+        assert!(err.contains("referenced from inside itself"), "{err}");
+
+        let deep = r##"{"version":"1.0","children":[
+            {"id":"c","type":"frame","reusable":true,"children":[{"id":"g","type":"frame","children":[{"id":"i","type":"ref","ref":"c"}]}]}]}"##;
+        assert!(import_pen_json(deep).is_err());
+
+        let self_ref = r##"{"version":"1.0","children":[{"id":"i","type":"ref","ref":"i"}]}"##;
+        assert!(import_pen_json(self_ref).is_err());
+    }
+
+    #[test]
+    fn chained_component_refs_hit_the_clone_budget() {
+        // c23 holds two refs to c24, c22 two refs to c23, ... declared deepest-first so every
+        // level clones an already-expanded subtree: 2^24 nodes without a budget.
+        let mut children = vec![r##"{"id":"c24","type":"frame","reusable":true,"children":[]}"##.to_string()];
+        for i in (0..24).rev() {
+            let next = i + 1;
+            children.push(format!(
+                r##"{{"id":"c{i}","type":"frame","reusable":true,"children":[{{"id":"a{i}","type":"ref","ref":"c{next}"}},{{"id":"b{i}","type":"ref","ref":"c{next}"}}]}}"##
+            ));
+        }
+        let json = format!(r##"{{"version":"1.0","children":[{}]}}"##, children.join(","));
+        let err = import_pen_json(&json).unwrap_err();
+        assert!(err.contains("expand past"), "{err}");
     }
 }
