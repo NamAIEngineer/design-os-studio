@@ -226,30 +226,42 @@ fn parse_var_value(kind: VariableKind, v: &Value) -> Option<VariableValue> {
     }
 }
 
-fn resolve_doc_var_color(doc: &Document, var_name: &str) -> Option<Color> {
-    let key = var_name.trim_start_matches('$');
-    let var = doc.variables.get(key)?;
-    for val in var.values.values() {
-        match val {
-            VariableValue::Color(c) => return Some(*c),
-            VariableValue::Alias(target) => return resolve_doc_var_color(doc, target),
-            _ => {}
+/// Follows `$alias` links iteratively and returns the first value `pick` accepts. A cycle (or a dangling alias)
+/// resolves to `None`, so callers use their fallback.
+fn resolve_doc_var<T>(doc: &Document, var_name: &str, pick: impl Fn(&VariableValue) -> Option<T>) -> Option<T> {
+    let mut visited: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    let mut key = var_name.trim_start_matches('$');
+    loop {
+        if !visited.insert(key) {
+            return None;
         }
+        let var = doc.variables.get(key)?;
+        let mut next = None;
+        for val in var.values.values() {
+            if let Some(found) = pick(val) {
+                return Some(found);
+            }
+            if let VariableValue::Alias(target) = val {
+                next = Some(target.trim_start_matches('$'));
+                break;
+            }
+        }
+        key = next?;
     }
-    None
+}
+
+fn resolve_doc_var_color(doc: &Document, var_name: &str) -> Option<Color> {
+    resolve_doc_var(doc, var_name, |v| match v {
+        VariableValue::Color(c) => Some(*c),
+        _ => None,
+    })
 }
 
 fn resolve_doc_var_number(doc: &Document, var_name: &str) -> Option<f32> {
-    let key = var_name.trim_start_matches('$');
-    let var = doc.variables.get(key)?;
-    for val in var.values.values() {
-        match val {
-            VariableValue::Number(n) => return Some(*n),
-            VariableValue::Alias(target) => return resolve_doc_var_number(doc, target),
-            _ => {}
-        }
-    }
-    None
+    resolve_doc_var(doc, var_name, |v| match v {
+        VariableValue::Number(n) => Some(*n),
+        _ => None,
+    })
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -1401,6 +1413,35 @@ mod tests {
 
         let self_ref = r##"{"version":"1.0","children":[{"id":"i","type":"ref","ref":"i"}]}"##;
         assert!(import_pen_json(self_ref).is_err());
+    }
+
+    #[test]
+    fn cyclic_variable_aliases_fall_back_instead_of_recursing() {
+        let json = r##"{"version":"1.0",
+            "variables":{"a":{"type":"number","value":"$b"},"b":{"type":"number","value":"$a"},
+                         "c":{"type":"color","value":"$d"},"d":{"type":"color","value":"$c"},
+                         "self":{"type":"number","value":"$self"}},
+            "children":[
+                {"id":"n","type":"frame","width":"$a","height":"$self","fill":"$c"}]}"##;
+        let doc = import_pen_json(json).expect("a variable cycle must not fail the import");
+        let n = doc.get(doc.get(doc.pages[0]).unwrap().children[0]).unwrap();
+        // Unresolved: both dimensions fall back to the default size, the fill to black.
+        let (w, h) = (n.size.x, n.size.y);
+        assert!(w.is_finite() && h.is_finite());
+        assert_eq!(n.variables.bindings.get("fills/0").map(String::as_str), Some("c"));
+    }
+
+    #[test]
+    fn long_acyclic_alias_chain_still_resolves() {
+        let mut vars = vec![r#""v0":{"type":"number","value":42}"#.to_string()];
+        vars.extend((1..2000).map(|i| format!(r#""v{i}":{{"type":"number","value":"$v{}"}}"#, i - 1)));
+        let json = format!(
+            r##"{{"version":"1.0","variables":{{{}}},"children":[{{"id":"n","type":"frame","width":"$v1999","height":10}}]}}"##,
+            vars.join(",")
+        );
+        let doc = import_pen_json(&json).unwrap();
+        let n = doc.get(doc.get(doc.pages[0]).unwrap().children[0]).unwrap();
+        assert_eq!(n.size.x, 42.0);
     }
 
     #[test]
