@@ -10,6 +10,9 @@ use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 const MAX_DEPTH: usize = 300;
+/// Deepest chain of components nested in components that is expanded recursively; deeper
+/// instances are expanded later from the top level, so no chain can exhaust the stack.
+const MAX_EXPAND_DEPTH: usize = 64;
 
 // ------------------------------------------------------------ JSON helpers
 
@@ -375,6 +378,8 @@ struct Ctx<'a> {
     blob_cache: HashMap<(usize, bool), Path>,
     /// Components whose nested instances have already been expanded.
     expanded_comps: HashSet<NodeId>,
+    /// Current `expand_rec` nesting; bounds recursion along component-in-component chains.
+    expand_depth: usize,
     /// Whether any `CONNECTOR` node was encountered during import.
     has_connectors: bool,
 }
@@ -492,6 +497,7 @@ pub(crate) fn import_rest_value_with_blobs<'a>(
         path_cache: HashMap::new(),
         blob_cache: HashMap::with_capacity(blobs.len()),
         expanded_comps: HashSet::new(),
+        expand_depth: 0,
         has_connectors: false,
     };
     if let Some(comps) = v.get("components").and_then(Value::as_object) {
@@ -1176,6 +1182,15 @@ impl<'a> Ctx<'a> {
     /// Expands `inst`, first expanding instances nested inside its component so
     /// their (overridden) children are copied too.
     fn expand_rec(&mut self, inst: NodeId, targets: &BTreeMap<NodeId, NodeId>, done: &mut BTreeSet<NodeId>) {
+        if self.expand_depth >= MAX_EXPAND_DEPTH {
+            return;
+        }
+        self.expand_depth += 1;
+        self.expand_rec_bounded(inst, targets, done);
+        self.expand_depth -= 1;
+    }
+
+    fn expand_rec_bounded(&mut self, inst: NodeId, targets: &BTreeMap<NodeId, NodeId>, done: &mut BTreeSet<NodeId>) {
         if !done.insert(inst) {
             return;
         }
@@ -2143,19 +2158,60 @@ fn parse_grid_sizing(s: &str) -> (u32, [GridTrack; 8]) {
         }
     }
 
-    fn collect_tokens(input: &str, out: &mut Vec<GridTrack>) {
+    /// Tracks seen so far: the first [`KEPT_TRACKS`] are kept, the rest are only counted.
+    #[derive(Default)]
+    struct Tracks {
+        kept: Vec<GridTrack>,
+        count: u32,
+    }
+
+    impl Tracks {
+        fn push(&mut self, t: GridTrack) {
+            if self.kept.len() < KEPT_TRACKS {
+                self.kept.push(t);
+            }
+            self.count = (self.count + 1).min(MAX_TRACK_COUNT);
+        }
+
+        /// Appends `times` copies of `sub` without materialising more than the kept prefix.
+        fn push_repeated(&mut self, sub: &Tracks, times: u32) {
+            if sub.count == 0 {
+                return;
+            }
+            for _ in 0..times {
+                if self.kept.len() >= KEPT_TRACKS {
+                    break;
+                }
+                let room = KEPT_TRACKS - self.kept.len();
+                self.kept.extend(sub.kept.iter().copied().take(room));
+            }
+            self.count = self.count.saturating_add(sub.count.saturating_mul(times)).min(MAX_TRACK_COUNT);
+        }
+    }
+
+    const KEPT_TRACKS: usize = 8;
+    const MAX_TRACK_COUNT: u32 = 1024;
+    const MAX_REPEAT_DEPTH: usize = 8;
+
+    fn starts_with_ignore_case(s: &str, prefix: &str) -> bool {
+        s.as_bytes().get(..prefix.len()).is_some_and(|head| head.eq_ignore_ascii_case(prefix.as_bytes()))
+    }
+
+    fn collect_tokens(input: &str, out: &mut Tracks, depth: usize) {
         let mut rest = input.trim();
         while !rest.is_empty() {
-            let lower = rest.to_ascii_lowercase();
-            if lower.starts_with("repeat(") {
-                let mut depth = 0usize;
+            if starts_with_ignore_case(rest, "repeat(") {
+                if depth >= MAX_REPEAT_DEPTH {
+                    return;
+                }
+                let mut paren_depth = 0usize;
                 let mut end_idx = None;
                 for (i, ch) in rest.char_indices() {
                     match ch {
-                        '(' => depth += 1,
+                        '(' => paren_depth += 1,
                         ')' => {
-                            depth = depth.saturating_sub(1);
-                            if depth == 0 {
+                            paren_depth = paren_depth.saturating_sub(1);
+                            if paren_depth == 0 {
                                 end_idx = Some(i);
                                 break;
                             }
@@ -2163,21 +2219,19 @@ fn parse_grid_sizing(s: &str) -> (u32, [GridTrack; 8]) {
                         _ => {}
                     }
                 }
-                if let Some(end) = end_idx {
-                    let inner = &rest["repeat(".len()..end];
-                    if let Some((cnt_str, pat)) = inner.split_once(',') {
-                        let cnt = cnt_str.trim().parse::<usize>().unwrap_or(1).min(64);
-                        let mut sub = Vec::new();
-                        collect_tokens(pat, &mut sub);
-                        for _ in 0..cnt {
-                            out.extend_from_slice(&sub);
-                        }
-                    }
-                    rest = rest[end + 1..].trim_start();
-                    continue;
+                // An unclosed repeat() has no defined extent; stop rather than rescanning the tail per token.
+                let Some(end) = end_idx else { return };
+                let inner = &rest["repeat(".len()..end];
+                if let Some((cnt_str, pat)) = inner.split_once(',') {
+                    let cnt = cnt_str.trim().parse::<u32>().unwrap_or(1).min(64);
+                    let mut sub = Tracks::default();
+                    collect_tokens(pat, &mut sub, depth + 1);
+                    out.push_repeated(&sub, cnt);
                 }
+                rest = rest[end + 1..].trim_start();
+                continue;
             }
-            if lower.starts_with("minmax(") {
+            if starts_with_ignore_case(rest, "minmax(") {
                 if let Some(end) = rest.find(')') {
                     out.push(parse_one(&rest[..=end]));
                     rest = rest[end + 1..].trim_start();
@@ -2194,13 +2248,13 @@ fn parse_grid_sizing(s: &str) -> (u32, [GridTrack; 8]) {
         }
     }
 
-    let mut list = Vec::new();
-    collect_tokens(s, &mut list);
-    let mut tracks = [GridTrack::default(); 8];
-    for (i, t) in list.iter().copied().take(8).enumerate() {
-        tracks[i] = t;
+    let mut list = Tracks::default();
+    collect_tokens(s, &mut list, 0);
+    let mut tracks = [GridTrack::default(); KEPT_TRACKS];
+    for (slot, t) in tracks.iter_mut().zip(list.kept.iter().copied()) {
+        *slot = t;
     }
-    (list.len() as u32, tracks)
+    (list.count, tracks)
 }
 
 fn frame_props(v: &Value) -> FrameProps {
@@ -2406,4 +2460,94 @@ pub fn image_refs(doc: &Document) -> Vec<String> {
         }
     }
     set.into_iter().collect()
+}
+
+#[cfg(test)]
+mod expand_depth_tests {
+    use super::*;
+    use serde_json::json;
+
+    /// Component `C{i}` holds an instance of `C{i+1}`; an instance of `C0` sits at the end.
+    fn component_chain(len: usize) -> Value {
+        let mut kids = Vec::new();
+        for i in 0..len {
+            let inner = if i + 1 < len {
+                json!({"id": format!("{}:2", i + 10), "name": "N", "type": "INSTANCE", "componentId": format!("{}:1", i + 11), "size": {"x": 4, "y": 4}})
+            } else {
+                json!({"id": format!("{}:2", i + 10), "name": "Dot", "type": "RECTANGLE", "size": {"x": 4, "y": 4}})
+            };
+            kids.push(json!({"id": format!("{}:1", i + 10), "name": format!("C{i}"), "type": "COMPONENT", "size": {"x": 4, "y": 4}, "children": [inner]}));
+        }
+        kids.push(json!({"id": "1:1", "name": "Use", "type": "INSTANCE", "componentId": "10:1", "size": {"x": 4, "y": 4}}));
+        json!({"document": {"type": "DOCUMENT", "children": [{"id": "0:1", "type": "CANVAS", "children": kids}]}})
+    }
+
+    #[test]
+    fn long_component_chain_expands_without_exhausting_the_stack() {
+        // A small stack stands in for a very long chain; the old recursion needed a frame pair per link.
+        let handle = std::thread::Builder::new()
+            .stack_size(512 * 1024)
+            .spawn(|| {
+                let doc = import_rest_value(&component_chain(700), true).unwrap();
+                assert!(doc.nodes.len() > 700);
+            })
+            .unwrap();
+        handle.join().expect("import must not overflow the stack");
+    }
+}
+
+#[cfg(test)]
+mod grid_sizing_tests {
+    use super::*;
+
+    #[test]
+    fn plain_and_repeat_tracks_keep_their_meaning() {
+        let (n, t) = parse_grid_sizing("1fr 2fr 120px auto");
+        assert_eq!(n, 4);
+        assert_eq!(t[..4], [GridTrack::Flex(1.0), GridTrack::Flex(2.0), GridTrack::Fixed(120.0), GridTrack::Hug]);
+        let (n, t) = parse_grid_sizing("REPEAT(3, 1fr 50px) auto");
+        assert_eq!(n, 7);
+        assert_eq!(
+            t[..7],
+            [
+                GridTrack::Flex(1.0),
+                GridTrack::Fixed(50.0),
+                GridTrack::Flex(1.0),
+                GridTrack::Fixed(50.0),
+                GridTrack::Flex(1.0),
+                GridTrack::Fixed(50.0),
+                GridTrack::Hug
+            ]
+        );
+        assert_eq!(parse_grid_sizing("minmax(0, 1fr)").0, 1);
+    }
+
+    #[test]
+    fn nested_repeat_bomb_is_counted_not_expanded() {
+        // 64^6 tracks if expanded.
+        let s = format!("{}1fr{}", "repeat(64, ".repeat(6), ")".repeat(6));
+        let (n, t) = parse_grid_sizing(&s);
+        assert_eq!(n, 1024);
+        assert!(t.iter().all(|x| *x == GridTrack::Flex(1.0)));
+    }
+
+    #[test]
+    fn deeply_nested_repeat_stops_at_depth_cap() {
+        let s = format!("{}1fr{}", "repeat(2, ".repeat(20_000), ")".repeat(20_000));
+        let (n, _) = parse_grid_sizing(&s);
+        assert!(n <= 1024);
+    }
+
+    #[test]
+    fn long_track_list_parses_in_linear_time() {
+        let s = "1fr ".repeat(200_000);
+        let started = std::time::Instant::now();
+        let (n, _) = parse_grid_sizing(&s);
+        assert_eq!(n, 1024);
+        assert!(started.elapsed().as_millis() < 900, "took {:?}", started.elapsed());
+        let unclosed = "repeat( ".repeat(100_000);
+        let started = std::time::Instant::now();
+        let _ = parse_grid_sizing(&unclosed);
+        assert!(started.elapsed().as_millis() < 900, "took {:?}", started.elapsed());
+    }
 }
