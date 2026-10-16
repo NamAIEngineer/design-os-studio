@@ -611,35 +611,11 @@ fn zoom_rows(app: &App) -> Vec<ZoomRowSpec> {
         ZoomRowSpec { label: "Zoom to 50%", shortcut: "", action: Action::ZoomTo(0.5), checked: false, sep_after: false },
         ZoomRowSpec { label: "Zoom to 100%", shortcut: "⌘0", action: Action::Zoom100, checked: false, sep_after: false },
         ZoomRowSpec { label: "Zoom to 200%", shortcut: "", action: Action::ZoomTo(2.0), checked: false, sep_after: true },
-        ZoomRowSpec {
-            label: "Pixel grid",
-            shortcut: "⌘'",
-            action: Action::TogglePixelGrid,
-            checked: app.ui.pixel_grid,
-            sep_after: false,
-        },
-        ZoomRowSpec {
-            label: "Snap to pixel grid",
-            shortcut: "⇧⌘'",
-            action: Action::ToggleSnapPixel,
-            checked: !app.ui.no_pixel_snap,
-            sep_after: false,
-        },
-        ZoomRowSpec {
-            label: "Layout guides",
-            shortcut: "⌃G",
-            action: Action::ToggleLayoutGrids,
-            checked: !app.ui.hide_layout_grids,
-            sep_after: false,
-        },
+        ZoomRowSpec { label: "Pixel grid", shortcut: "⌘'", action: Action::TogglePixelGrid, checked: app.ui.pixel_grid, sep_after: false },
+        ZoomRowSpec { label: "Snap to pixel grid", shortcut: "⇧⌘'", action: Action::ToggleSnapPixel, checked: !app.ui.no_pixel_snap, sep_after: false },
+        ZoomRowSpec { label: "Layout guides", shortcut: "⌃G", action: Action::ToggleLayoutGrids, checked: !app.ui.hide_layout_grids, sep_after: false },
         ZoomRowSpec { label: "Rulers", shortcut: "⇧R", action: Action::ToggleRulers, checked: app.ui.rulers, sep_after: true },
-        ZoomRowSpec {
-            label: "Comments",
-            shortcut: "⇧C",
-            action: Action::Tool(Tool::Comment),
-            checked: app.tool == Tool::Comment,
-            sep_after: false,
-        },
+        ZoomRowSpec { label: "Comments", shortcut: "⇧C", action: Action::Tool(Tool::Comment), checked: app.tool == Tool::Comment, sep_after: false },
     ]
 }
 

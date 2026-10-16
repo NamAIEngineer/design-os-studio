@@ -487,8 +487,9 @@ pub fn show(app: &mut App, ui: &mut Ui, region: Rect) {
     p.text(Pos2::new(region.left() + 12.0, sec_top + 8.0), Align2::LEFT_CENTER, "All libraries", theme::font_body_strong(), Color32::WHITE);
 
     type AssetsDocCacheVal = (Vec<AssetEntry>, Vec<AssetEntry>, usize, std::collections::HashSet<NodeId>);
+    type AssetsDocCacheEntry = ((u64, u64, usize, u8), AssetsDocCacheVal);
     thread_local! {
-        static ASSETS_DOC_CACHE: std::cell::RefCell<Option<((u64, u64, usize, u8), AssetsDocCacheVal)>> = const { std::cell::RefCell::new(None) };
+        static ASSETS_DOC_CACHE: std::cell::RefCell<Option<AssetsDocCacheEntry>> = const { std::cell::RefCell::new(None) };
     }
     let assets_key = (app.doc.runtime_id(), app.doc.mutation_epoch(), app.doc.nodes.len(), cat);
     let (local_comps, unavail_comps, real_count, used_components) = ASSETS_DOC_CACHE.with(|cache| {

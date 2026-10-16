@@ -132,22 +132,24 @@ fn export_fig_then_import_fig_roundtrips_sample_and_rich_documents() {
     );
 
     // Component with asymmetric auto-layout, wrap, stroke_included, reverse_z, dev.status, bindings
-    let mut comp_props = FrameProps::default();
-    comp_props.clips_content = false;
-    comp_props.auto_layout = Some(AutoLayout {
-        direction: LayoutDirection::Horizontal,
-        item_spacing: 10.0,
-        padding: [8.0, 16.0, 12.0, 20.0], // top, right, bottom, left
-        primary_align: LayoutAlign::Center,
-        counter_align: LayoutAlign::Center,
-        primary_sizing: Sizing::Fixed,
-        counter_sizing: Sizing::Hug,
-        wrap: true,
-        counter_spacing: 14.0,
-        stroke_included: true,
-        reverse_z: true,
-        ..AutoLayout::default()
-    });
+    let comp_props = FrameProps {
+        clips_content: false,
+        auto_layout: Some(AutoLayout {
+            direction: LayoutDirection::Horizontal,
+            item_spacing: 10.0,
+            padding: [8.0, 16.0, 12.0, 20.0], // top, right, bottom, left
+            primary_align: LayoutAlign::Center,
+            counter_align: LayoutAlign::Center,
+            primary_sizing: Sizing::Fixed,
+            counter_sizing: Sizing::Hug,
+            wrap: true,
+            counter_spacing: 14.0,
+            stroke_included: true,
+            reverse_z: true,
+            ..AutoLayout::default()
+        }),
+        ..FrameProps::default()
+    };
     let comp_id = rich.alloc_id();
     let mut comp_node = Node::new(comp_id, NodeKind::Component(comp_props));
     comp_node.name = "PrimaryButton".into();
@@ -517,16 +519,18 @@ fn roundtrip_figma_parity_grid_slots_axes_props_and_overrides() {
 
     // 1. 2D CSS Grid Frame with explicit grid_columns, grid_rows, and child col_span/row_span/anchor
     let grid_id = doc.alloc_id();
-    let mut grid_props = FrameProps::default();
-    grid_props.auto_layout = Some(AutoLayout {
-        direction: LayoutDirection::Grid,
-        item_spacing: 12.0,
-        counter_spacing: 8.0,
-        padding: [16.0, 16.0, 16.0, 16.0],
-        grid_columns: 3,
-        grid_rows: 2,
-        ..AutoLayout::default()
-    });
+    let grid_props = FrameProps {
+        auto_layout: Some(AutoLayout {
+            direction: LayoutDirection::Grid,
+            item_spacing: 12.0,
+            counter_spacing: 8.0,
+            padding: [16.0, 16.0, 16.0, 16.0],
+            grid_columns: 3,
+            grid_rows: 2,
+            ..AutoLayout::default()
+        }),
+        ..FrameProps::default()
+    };
     let mut grid_frame = Node::new(grid_id, NodeKind::Frame(grid_props));
     grid_frame.name = "BentoGrid".into();
     grid_frame.size = Vec2::new(600.0, 400.0);

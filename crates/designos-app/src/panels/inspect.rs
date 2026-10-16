@@ -435,8 +435,9 @@ fn body(app: &mut App, ui: &mut Ui, c: &mut Cur, id: NodeId, count: usize) {
     );
     c.y += 22.0;
 
+    type InspectSubtreeCacheEntry = ((u64, NodeId, u64), (usize, Vec<ColorEntry>));
     thread_local! {
-        static INSPECT_SUBTREE_CACHE: std::cell::RefCell<Option<((u64, NodeId, u64), (usize, Vec<ColorEntry>))>> = const { std::cell::RefCell::new(None) };
+        static INSPECT_SUBTREE_CACHE: std::cell::RefCell<Option<InspectSubtreeCacheEntry>> = const { std::cell::RefCell::new(None) };
     }
     let inspect_key = (app.doc.runtime_id(), id, app.doc.mutation_epoch());
     let (subtree_count, cached_colors) = INSPECT_SUBTREE_CACHE.with(|cache| {
