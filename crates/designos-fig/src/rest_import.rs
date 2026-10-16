@@ -375,6 +375,8 @@ struct Ctx<'a> {
     blob_cache: HashMap<(usize, bool), Path>,
     /// Components whose nested instances have already been expanded.
     expanded_comps: HashSet<NodeId>,
+    /// Whether any node carries an instance-swap property value (set once before instances are expanded).
+    has_instance_swap_values: bool,
     /// Whether any `CONNECTOR` node was encountered during import.
     has_connectors: bool,
 }
@@ -492,6 +494,7 @@ pub(crate) fn import_rest_value_with_blobs<'a>(
         path_cache: HashMap::new(),
         blob_cache: HashMap::with_capacity(blobs.len()),
         expanded_comps: HashSet::new(),
+        has_instance_swap_values: false,
         has_connectors: false,
     };
     if let Some(comps) = v.get("components").and_then(Value::as_object) {
@@ -1005,6 +1008,7 @@ impl<'a> Ctx<'a> {
         // Clone ids are handed out sequentially above every imported id, in
         // instance order, so the same input always yields the same ids.
         self.next_clone = self.doc.nodes.keys().next_back().map(|k| k.0).unwrap_or(0) + 1;
+        self.has_instance_swap_values = self.doc.nodes.values().any(|n| n.component.values.values().any(|v| matches!(v, PropValue::Instance(t) if t.0 != 0)));
         let mut done = BTreeSet::new();
         let order: Vec<NodeId> = targets.keys().copied().collect();
         for inst in order {
@@ -1180,10 +1184,16 @@ impl<'a> Ctx<'a> {
     /// (inner components first, each before it is cloned) without growing the call stack. An instance is
     /// entered once (`done`) and a component's nested instances are listed once (`expanded_comps`), which
     /// keeps component cycles finite.
+    ///
+    /// An instance swap needs the new component's nested instances expanded before its contents are copied.
+    /// Those components are known before the swap runs (see [`Self::swap_target_components`]), so their nested
+    /// instances are scheduled on the same stack ahead of the step that applies the swap, instead of being
+    /// expanded from inside it, which would grow the call stack with the length of a swap chain.
     fn expand_rec(&mut self, inst: NodeId, targets: &BTreeMap<NodeId, NodeId>, done: &mut BTreeSet<NodeId>) {
         enum Step {
             Enter(NodeId),
             Finish(NodeId, NodeId),
+            Apply(NodeId),
         }
         let mut stack = vec![Step::Enter(inst)];
         while let Some(step) = stack.pop() {
@@ -1202,6 +1212,12 @@ impl<'a> Ctx<'a> {
                     if let Some(s) = self.scales.get(&inst).copied() {
                         self.scale_contents(inst, s);
                     }
+                    stack.push(Step::Apply(inst));
+                    let swap_nested_instances: Vec<NodeId> =
+                        self.swap_target_components(inst).into_iter().flat_map(|comp| self.take_nested_instances(comp, targets)).collect();
+                    stack.extend(swap_nested_instances.into_iter().rev().map(Step::Enter));
+                }
+                Step::Apply(inst) => {
                     // Property values first: an instance swap changes which nodes the overrides address.
                     self.apply_props(inst, targets, done);
                     self.apply_overrides(inst, targets, done);
@@ -1268,6 +1284,34 @@ impl<'a> Ctx<'a> {
                 }
             }
         }
+    }
+
+    /// Components the instance's property values and overrides may swap a nested instance to (a superset is
+    /// harmless: listing a component's nested instances earlier does not change what they expand to).
+    fn swap_target_components(&self, inst: NodeId) -> Vec<NodeId> {
+        let mut out: Vec<NodeId> = Vec::new();
+        if let Some(ov) = self.overrides.get(&inst) {
+            for e in &ov.set {
+                out.extend(fstr(e.set, "componentId").and_then(|c| self.ids.get(c)).copied());
+                if let Some(props) = e.set.get("componentProperties").and_then(Value::as_object) {
+                    let swapped = props.values().filter(|p| fstr(p, "type") == Some("INSTANCE_SWAP")).filter_map(|p| p.get("value").and_then(Value::as_str));
+                    out.extend(swapped.filter_map(|c| self.ids.get(c)).copied());
+                }
+            }
+        }
+        if self.has_instance_swap_values {
+            let mut stack = vec![inst];
+            while let Some(d) = stack.pop() {
+                let Some(n) = self.doc.get(d) else { continue };
+                stack.extend(n.children.iter().copied());
+                out.extend(n.component.values.values().filter_map(|v| match v {
+                    PropValue::Instance(t) if t.0 != 0 => Some(*t),
+                    _ => None,
+                }));
+            }
+        }
+        out.retain(|t| matches!(self.doc.get(*t).map(|n| &n.kind), Some(NodeKind::Component(_))));
+        out
     }
 
     /// Expands the instances inside `comp` (innermost first).
@@ -2532,6 +2576,97 @@ mod expand_depth_tests {
             .spawn(|| {
                 let doc = import_rest_value(&component_chain(700), true).unwrap();
                 assert!(doc.nodes.len() > 700);
+            })
+            .unwrap();
+        handle.join().expect("import must not overflow the stack");
+    }
+
+    /// `C{i}` holds an instance `X` of the holder `H`, whose own instance `S` is bound to the instance-swap property
+    /// `p`; `X` sets `p` to `C{i+1}` (the last one to the plain component `B`). Expanding `X` therefore swaps `S`
+    /// for `C{i+1}`, which first needs `C{i+1}`'s own `X` expanded, and so on down the whole chain.
+    fn instance_swap_chain(len: usize) -> Value {
+        let size = json!({"x": 4, "y": 4});
+        let mut kids = vec![
+            json!({"id": "4:1", "name": "B", "type": "COMPONENT", "size": size}),
+            json!({"id": "5:1", "name": "H", "type": "COMPONENT", "size": size, "children": [
+                {"id": "5:2", "name": "S", "type": "INSTANCE", "componentId": "4:1", "size": size,
+                 "componentPropertyReferences": {"mainComponent": "p"}}]}),
+        ];
+        for i in 0..len {
+            let next = if i + 1 < len { format!("{}:1", i + 11) } else { "4:1".to_string() };
+            kids.push(json!({"id": format!("{}:1", i + 10), "name": format!("C{i}"), "type": "COMPONENT", "size": size, "children": [
+                {"id": format!("{}:2", i + 10), "name": "X", "type": "INSTANCE", "componentId": "5:1", "size": size,
+                 "componentProperties": {"p": {"type": "INSTANCE_SWAP", "value": next}}}]}));
+        }
+        kids.push(json!({"id": "1:1", "name": "Use", "type": "INSTANCE", "componentId": "10:1", "size": size}));
+        json!({"document": {"type": "DOCUMENT", "children": [{"id": "0:1", "type": "CANVAS", "children": kids}]}})
+    }
+
+    /// Same chain, but each `X` swaps `S` through an instance override (`_overrides` with a `componentId`) rather
+    /// than through a component property.
+    fn override_swap_chain(len: usize) -> Value {
+        let size = json!({"x": 4, "y": 4});
+        let mut kids = vec![
+            json!({"id": "4:1", "name": "B", "type": "COMPONENT", "size": size}),
+            json!({"id": "5:1", "name": "H", "type": "COMPONENT", "size": size, "children": [
+                {"id": "5:2", "name": "S", "type": "INSTANCE", "componentId": "4:1", "size": size}]}),
+        ];
+        for i in 0..len {
+            let next = if i + 1 < len { format!("{}:1", i + 11) } else { "4:1".to_string() };
+            kids.push(json!({"id": format!("{}:1", i + 10), "name": format!("C{i}"), "type": "COMPONENT", "size": size, "children": [
+                {"id": format!("{}:2", i + 10), "name": "X", "type": "INSTANCE", "componentId": "5:1", "size": size,
+                 "_overrides": [{"path": ["5:2"], "set": {"componentId": next}}]}]}));
+        }
+        kids.push(json!({"id": "1:1", "name": "Use", "type": "INSTANCE", "componentId": "10:1", "size": size}));
+        json!({"document": {"type": "DOCUMENT", "children": [{"id": "0:1", "type": "CANVAS", "children": kids}]}})
+    }
+
+    /// Nesting depth of the deepest node below the node named `name` (iterative: the document's own `walk` recurses).
+    fn depth_below_named(doc: &Document, name: &str) -> usize {
+        let root = doc.nodes.values().find(|n| n.name == name).unwrap_or_else(|| panic!("no node named {name}")).id;
+        let (mut deepest, mut stack) = (0, vec![(root, 0usize)]);
+        while let Some((id, depth)) = stack.pop() {
+            deepest = deepest.max(depth);
+            stack.extend(doc.get(id).unwrap().children.iter().map(|&c| (c, depth + 1)));
+        }
+        deepest
+    }
+
+    #[test]
+    fn instance_swap_chain_expands_completely() {
+        // Use -> X -> S(swapped to C1) -> X -> S(swapped to C2) -> ... -> S(swapped to B): two nodes per link.
+        for len in [3usize, 20, 80] {
+            let doc = import_rest_value(&instance_swap_chain(len), true).unwrap();
+            assert_eq!(subtree_of_named(&doc, "Use").len(), 2 * len + 1, "chain of {len}");
+            assert_eq!(depth_below_named(&doc, "Use"), 2 * len, "chain of {len}");
+        }
+    }
+
+    #[test]
+    fn override_swap_chain_expands_completely_and_on_a_small_stack() {
+        for len in [3usize, 20, 80] {
+            let doc = import_rest_value(&override_swap_chain(len), true).unwrap();
+            assert_eq!(subtree_of_named(&doc, "Use").len(), 2 * len + 1, "chain of {len}");
+        }
+        let handle = std::thread::Builder::new()
+            .stack_size(256 * 1024)
+            .spawn(|| {
+                let doc = import_rest_value(&override_swap_chain(300), true).unwrap();
+                assert_eq!(subtree_of_named(&doc, "Use").len(), 2 * 300 + 1);
+            })
+            .unwrap();
+        handle.join().expect("import must not overflow the stack");
+    }
+
+    #[test]
+    fn long_instance_swap_chain_expands_without_exhausting_the_stack() {
+        // Swapping an instance used to expand the new component's contents from inside the swap itself, one
+        // frame group per link, so a long chain of swaps overflowed even though plain nesting no longer did.
+        let handle = std::thread::Builder::new()
+            .stack_size(256 * 1024)
+            .spawn(|| {
+                let doc = import_rest_value(&instance_swap_chain(300), true).unwrap();
+                assert_eq!(subtree_of_named(&doc, "Use").len(), 2 * 300 + 1);
             })
             .unwrap();
         handle.join().expect("import must not overflow the stack");
