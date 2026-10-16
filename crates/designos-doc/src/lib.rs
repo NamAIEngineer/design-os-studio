@@ -601,15 +601,23 @@ impl Document {
     }
 
     /// Parses a native document. Text written by older versions that emulated lists with
-    /// literal bullet and "1. " prefixes is converted to real lists.
+    /// literal bullet and "1. " prefixes is converted to real lists. A malformed node graph is
+    /// repaired in place (see [`Document::validate_and_repair`]) and noted on stderr.
     pub fn from_json(s: &str) -> serde_json::Result<Self> {
-        let mut doc: Self = serde_json::from_str(s)?;
-        let repaired = doc.validate_and_repair();
+        let (doc, repaired) = Self::from_json_with_report(s)?;
         if !repaired.is_clean() {
             eprintln!("designos-doc: repaired a malformed document on load: {repaired:?}");
         }
-        doc.migrate_text();
         Ok(doc)
+    }
+
+    /// Like [`Document::from_json`] but silent: returns what the load-time repair changed so a
+    /// caller that must not accept a repaired document (for example the MCP server) can refuse it.
+    pub fn from_json_with_report(s: &str) -> serde_json::Result<(Self, RepairReport)> {
+        let mut doc: Self = serde_json::from_str(s)?;
+        let report = doc.validate_and_repair();
+        doc.migrate_text();
+        Ok((doc, report))
     }
 
     /// Converts literal list prefixes of every text node to real lists (see [`migrate_literal_lists`]).
