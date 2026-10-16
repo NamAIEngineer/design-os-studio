@@ -2,6 +2,7 @@
 
 use designos_doc::{Document, Node, NodeId, Rect};
 use designos_export::{export_jpg, export_png, render_export};
+use designos_render::checked_pixmap_size;
 
 fn doc_with_frame(w: f32, h: f32) -> (Document, NodeId) {
     let mut d = Document::new("Big");
@@ -26,6 +27,14 @@ fn page_and_effect_overflow_paths_are_capped_too() {
     d.get_mut(id).unwrap().size.x = 1e7;
     assert!(render_export(&d, page, 32.0).is_none(), "page path");
     assert!(render_export(&d, id, 32.0).is_none(), "node path");
+}
+
+#[test]
+fn export_size_check_allows_large_legitimate_sizes_and_rejects_absurd_ones() {
+    // export sizes go through checked_pixmap_size; asserting on it avoids allocating hundreds of MB
+    assert!(checked_pixmap_size(16_000.0, 12_000.0).is_some());
+    assert!(checked_pixmap_size(4000.0 * 4.0, 3000.0 * 4.0).is_some(), "4000x3000 at 4x = 192 Mpx");
+    assert!(checked_pixmap_size(1e6, 1e6).is_none());
 }
 
 #[test]

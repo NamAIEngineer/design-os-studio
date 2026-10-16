@@ -135,8 +135,10 @@ pub(crate) fn render_with_transform(doc: &Document, page: NodeId, ts: sk::Transf
 
 /// Longest side, in device pixels, of any off-screen image the renderer will allocate.
 pub const MAX_PIXMAP_SIDE: u32 = 16_384;
-/// Most device pixels (width x height) of any off-screen image the renderer will allocate (512 MB RGBA).
-pub const MAX_PIXMAP_PIXELS: u64 = 1 << 27;
+/// Most device pixels (width x height) of any off-screen image the renderer will allocate: 16384 x 16384
+/// (1 GiB RGBA), equal to [`MAX_PIXMAP_SIDE`] squared and to the largest GPU texture. Every size the side
+/// cap admits therefore fits the budget, and exports such as 4000x3000 at 4x (192 Mpx) are allowed.
+pub const MAX_PIXMAP_PIXELS: u64 = 1 << 28;
 
 /// Pixel size of a `w` x `h` (already scaled) image, at least 1x1; `None` if it is not finite or
 /// exceeds [`MAX_PIXMAP_SIDE`] / [`MAX_PIXMAP_PIXELS`], so an oversized request fails instead of aborting on allocation.
