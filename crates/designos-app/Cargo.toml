@@ -51,6 +51,9 @@ resvg = { version = "0.45", default-features = false }
 portable-pty = "0.8"
 vt100 = "0.15"
 
+[dev-dependencies]
+designos-mcp.workspace = true
+
 [build-dependencies]
 winresource = "0.1"
 
