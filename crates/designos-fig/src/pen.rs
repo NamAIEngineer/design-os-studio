@@ -22,7 +22,23 @@ type PendingRef = (NodeId, String, Option<Map<String, Value>>);
 const PEN_COLLECTION_ID: &str = "pen:tokens";
 
 /// Parses a `.pen` (Pencil.dev) JSON string into a [`Document`].
+///
+/// Non-fatal import warnings (see [`import_pen_json_with_warnings`]) are written to stderr, the crate's only log sink.
 pub fn import_pen_json(raw: &str) -> Result<Document, String> {
+    let (doc, warning) = import_pen_json_with_warnings(raw)?;
+    if let Some(w) = warning {
+        eprintln!("designos-fig: .pen import warning: {w}");
+    }
+    Ok(doc)
+}
+
+/// Like [`import_pen_json`], but also returns the non-fatal warning, if any: the clone budget for `ref`
+/// expansion ran out, so the remaining instances were left unexpanded.
+pub fn import_pen_json_with_warnings(raw: &str) -> Result<(Document, Option<String>), String> {
+    import_pen_json_budgeted(raw, MAX_PEN_REF_CLONES)
+}
+
+fn import_pen_json_budgeted(raw: &str, clone_budget: usize) -> Result<(Document, Option<String>), String> {
     let root: Value = serde_json::from_str(raw).map_err(|e| format!("invalid .pen JSON: {e}"))?;
     let obj = root.as_object().ok_or_else(|| "expected top-level JSON object in .pen file".to_string())?;
 
@@ -74,10 +90,10 @@ pub fn import_pen_json(raw: &str) -> Result<Document, String> {
     }
 
     // 3. Resolve `type: "ref"` component links and clone/override descendants
-    resolve_pen_refs(&mut doc, &id_map, pending_refs)?;
+    let warning = resolve_pen_refs(&mut doc, &id_map, pending_refs, clone_budget)?;
 
     doc.mark_full_dirty();
-    Ok(doc)
+    Ok((doc, warning))
 }
 
 fn import_pen_variables(doc: &mut Document, obj: &Map<String, Value>) {
@@ -865,10 +881,19 @@ fn import_pen_node(
 }
 
 /// Nodes the whole import may clone while expanding `ref`s; stops chained components from multiplying without bound.
-const MAX_PEN_REF_CLONES: usize = 50_000;
+const MAX_PEN_REF_CLONES: usize = 2_000_000;
 
-fn resolve_pen_refs(doc: &mut Document, id_map: &BTreeMap<String, NodeId>, pending_refs: Vec<PendingRef>) -> Result<(), String> {
-    let mut clone_budget = MAX_PEN_REF_CLONES;
+/// Expands every `ref`. When expanding the next one would pass `clone_budget` nodes, that instance and all
+/// later ones are left unexpanded (everything cloned so far stays) and a warning is returned.
+/// Self and ancestor references are still hard errors, also after the budget ran out.
+fn resolve_pen_refs(
+    doc: &mut Document,
+    id_map: &BTreeMap<String, NodeId>,
+    pending_refs: Vec<PendingRef>,
+    clone_budget: usize,
+) -> Result<Option<String>, String> {
+    let mut budget_left = clone_budget;
+    let mut skipped = 0usize;
     for (inst_id, ref_key, descendants) in pending_refs {
         let Some(&comp_id) = id_map.get(&ref_key) else {
             continue;
@@ -877,18 +902,22 @@ fn resolve_pen_refs(doc: &mut Document, id_map: &BTreeMap<String, NodeId>, pendi
             return Err(format!("component \"{ref_key}\" is referenced from inside itself; remove the ref from its own contents"));
         }
         let has_explicit_children = doc.get(inst_id).is_some_and(|n| !n.children.is_empty());
+        // Clone component's children into instance if instance had no explicit children
+        let comp_children = if has_explicit_children { Vec::new() } else { doc.get(comp_id).map(|c| c.children.clone()).unwrap_or_default() };
+        let needed = subtree_len(doc, &comp_children);
+        if skipped > 0 || needed > budget_left {
+            skipped += 1;
+            continue;
+        }
+        budget_left -= needed;
         if let Some(inst_node) = doc.get_mut(inst_id) {
             if let NodeKind::Instance { component, .. } = &mut inst_node.kind {
                 *component = Some(comp_id);
             }
         }
-        // Clone component's children into instance if instance had no explicit children
         let mut source_to_clone: BTreeMap<String, NodeId> = BTreeMap::new();
-        if !has_explicit_children {
-            let comp_children = doc.get(comp_id).map(|c| c.children.clone()).unwrap_or_default();
-            for cid in comp_children {
-                clone_component_subtree(doc, cid, inst_id, &mut source_to_clone, &mut clone_budget)?;
-            }
+        for cid in comp_children {
+            clone_component_subtree(doc, cid, inst_id, &mut source_to_clone);
         }
         // Apply `descendants` overrides
         if let Some(desc_map) = descendants {
@@ -901,18 +930,26 @@ fn resolve_pen_refs(doc: &mut Document, id_map: &BTreeMap<String, NodeId>, pendi
             }
         }
     }
-    Ok(())
+    Ok((skipped > 0).then(|| {
+        format!("component references expand past {clone_budget} cloned nodes; {skipped} instance(s) were left unexpanded (flatten nested components)")
+    }))
 }
 
-fn clone_component_subtree(
-    doc: &mut Document,
-    src_id: NodeId,
-    new_parent: NodeId,
-    source_to_clone: &mut BTreeMap<String, NodeId>,
-    budget: &mut usize,
-) -> Result<(), String> {
-    let Some(orig) = doc.get(src_id).cloned() else { return Ok(()) };
-    *budget = budget.checked_sub(1).ok_or_else(|| format!("component references expand past {MAX_PEN_REF_CLONES} nodes; flatten nested components"))?;
+/// Number of nodes in the subtrees rooted at `roots` (iterative, so depth cannot overflow the stack).
+fn subtree_len(doc: &Document, roots: &[NodeId]) -> usize {
+    let mut stack: Vec<NodeId> = roots.to_vec();
+    let mut count = 0usize;
+    while let Some(id) = stack.pop() {
+        if let Some(n) = doc.get(id) {
+            count += 1;
+            stack.extend(n.children.iter().copied());
+        }
+    }
+    count
+}
+
+fn clone_component_subtree(doc: &mut Document, src_id: NodeId, new_parent: NodeId, source_to_clone: &mut BTreeMap<String, NodeId>) {
+    let Some(orig) = doc.get(src_id).cloned() else { return };
     let new_id = doc.alloc_id();
     let mut copy = orig.clone();
     copy.id = new_id;
@@ -924,9 +961,8 @@ fn clone_component_subtree(
     }
     let _ = doc.insert(new_parent, copy);
     for child_id in orig.children {
-        clone_component_subtree(doc, child_id, new_id, source_to_clone, budget)?;
+        clone_component_subtree(doc, child_id, new_id, source_to_clone);
     }
-    Ok(())
 }
 
 fn apply_descendant_override(doc: &mut Document, tid: NodeId, ov_obj: &Map<String, Value>) {
@@ -1456,7 +1492,47 @@ mod tests {
             ));
         }
         let json = format!(r##"{{"version":"1.0","children":[{}]}}"##, children.join(","));
-        let err = import_pen_json(&json).unwrap_err();
-        assert!(err.contains("expand past"), "{err}");
+        let (doc, warning) = import_pen_json_budgeted(&json, 1_000).expect("an exhausted clone budget must not fail the import");
+        let warning = warning.expect("budget exhaustion is surfaced as a warning");
+        assert!(warning.contains("expand past 1000"), "{warning}");
+        // The nodes imported before the budget ran out are all still there, and cloning stopped at the budget.
+        assert!(doc.get(doc.pages[0]).unwrap().children.len() >= 25);
+        assert!(doc.nodes.len() < 1_000 + 200, "got {} nodes", doc.nodes.len());
+    }
+
+    #[test]
+    fn exhausted_clone_budget_keeps_earlier_instances_and_skips_later_ones() {
+        let mut kids = vec![
+            r##"{"id":"comp","type":"frame","reusable":true,"children":[
+            {"id":"l1","type":"frame"},{"id":"l2","type":"frame"},{"id":"l3","type":"frame"}]}"##
+                .to_string(),
+        ];
+        kids.extend((0..5).map(|i| format!(r##"{{"id":"i{i}","type":"ref","ref":"comp"}}"##)));
+        let json = format!(r##"{{"version":"1.0","children":[{}]}}"##, kids.join(","));
+
+        // Budget 7 fits two 3-node expansions; the third needs 3 but only 1 is left.
+        let (doc, warning) = import_pen_json_budgeted(&json, 7).unwrap();
+        let page = doc.get(doc.pages[0]).unwrap();
+        let counts: Vec<usize> = page.children[1..].iter().map(|&i| doc.get(i).unwrap().children.len()).collect();
+        assert_eq!(counts, [3, 3, 0, 0, 0]);
+        let w = warning.unwrap();
+        assert!(w.contains("3 instance(s)"), "{w}");
+
+        // Enough budget: everything expands and there is no warning.
+        let (doc, warning) = import_pen_json_budgeted(&json, 15).unwrap();
+        assert!(warning.is_none());
+        let page = doc.get(doc.pages[0]).unwrap();
+        assert!(page.children[1..].iter().all(|&i| doc.get(i).unwrap().children.len() == 3));
+
+        // Self references stay errors even after the budget ran out.
+        let json = format!(r##"{{"version":"1.0","children":[{},{{"id":"s","type":"ref","ref":"s"}}]}}"##, kids.join(","));
+        assert!(import_pen_json_budgeted(&json, 7).is_err());
+    }
+
+    #[test]
+    fn public_warning_entry_point_reports_none_for_a_small_document() {
+        let json = r##"{"version":"1.0","children":[{"id":"c","type":"frame","reusable":true},{"id":"i","type":"ref","ref":"c"}]}"##;
+        assert!(import_pen_json_with_warnings(json).unwrap().1.is_none());
+        assert!(import_pen_json(json).is_ok());
     }
 }
