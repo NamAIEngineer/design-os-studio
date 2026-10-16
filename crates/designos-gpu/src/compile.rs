@@ -9,6 +9,7 @@ use crate::frame::*;
 use crate::geom::{bucket_of, GeomCache, NodeGeom};
 use crate::mesh::Mesh;
 use crate::paintconv::{PaintCache, PaintInst};
+use crate::pipelines::{FORMAT, MSAA};
 use designos_doc as d;
 use designos_doc::{resolve_node, Document, Effect, Node, NodeId, NodeKind, Vec2};
 use designos_render::board;
@@ -21,8 +22,20 @@ use std::sync::Arc;
 /// Decides which nodes the CPU renderer draws instead of the GPU.
 pub type FallbackFn = Arc<dyn Fn(&Node) -> bool + Send + Sync>;
 
+/// Default VRAM ceiling of the idle refine compile: 512 MiB.
+///
+/// Evidence: every offscreen program is accounted with the same per-pixel
+/// formula `Pool::bytes` (resources.rs) uses for the real pool, summed over the
+/// whole frame. That sum over-counts (the pool recycles equally sized free
+/// targets), so the real pool stays below it. 512 MiB is about five full
+/// 2880x1800 retina programs of MSAA colour + resolve + blur targets, far under
+/// the multi-GiB working set of the integrated GPUs the editor runs on, while a
+/// page at rest still gets thousands of regular-sized blurred layers. The value
+/// is a conservative owner-reviewed default, not a measured crash threshold.
+pub const DEFAULT_REFINE_VRAM_BUDGET_BYTES: u64 = 512 * 1024 * 1024;
+
 /// Compile-time knobs.
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct CompileOptions {
     /// Largest texture edge the device supports (0 = unlimited).
     pub max_texture: u32,
@@ -35,6 +48,18 @@ pub struct CompileOptions {
     /// Lifts the offscreen-program caps of interactive mode, for the one
     /// full-quality compile of an idle view. Headless compiles never cap.
     pub uncap_programs: bool,
+    /// With `uncap_programs`: offscreen programs are only opened while the
+    /// accounted GPU bytes of all targets of the frame stay within this budget
+    /// (see `program_bytes`); past it the compile degrades exactly like the
+    /// capped interactive path (scissor clip, skipped effect). Ignored by
+    /// capped and headless compiles.
+    pub refine_vram_budget_bytes: u64,
+}
+
+impl Default for CompileOptions {
+    fn default() -> Self {
+        Self { max_texture: 0, force_fallback: None, supersample: 0, uncap_programs: false, refine_vram_budget_bytes: DEFAULT_REFINE_VRAM_BUDGET_BYTES }
+    }
 }
 
 /// Persistent compiler state: geometry, paint and index caches.
@@ -45,6 +70,8 @@ pub struct SceneCompiler {
     pub index: SceneIndex,
     pub opts: CompileOptions,
     unit_rect: Option<Arc<Mesh>>,
+    /// Accounted GPU bytes of the offscreen targets of the last compiled frame.
+    pub last_vram_bytes: u64,
 }
 
 impl SceneCompiler {
@@ -97,6 +124,7 @@ impl SceneCompiler {
             unit,
             cull: !single,
             ss,
+            vram: 0,
         };
         let node = doc.get(root_node).map(|n| resolve_node(doc, n));
         let bg = match node.as_deref().map(|n| &n.kind) {
@@ -131,8 +159,75 @@ impl SceneCompiler {
                 cx.draw_children(&n.children, root_ts, full);
             }
         }
-        Frame { size, out_size, ss, root: 0, programs: cx.progs, clips: cx.clips }
+        let vram = cx.vram;
+        let frame = Frame { size, out_size, ss, root: 0, programs: cx.progs, clips: cx.clips };
+        self.last_vram_bytes = vram;
+        frame
     }
+}
+
+// ---------------------------------------------------------------- VRAM accounting
+
+/// Bytes per pixel of every offscreen target (`pipelines::FORMAT`, Rgba8Unorm).
+fn texel_bytes() -> u64 {
+    FORMAT.block_copy_size(None).map_or(4, u64::from)
+}
+
+/// Edge length of a pooled target: `resources.rs` rounds every request up to a
+/// power of two (8..=64) or a multiple of 64.
+fn pool_extent(v: i32) -> u64 {
+    let v = v.max(1) as u64;
+    if v <= 64 {
+        v.next_power_of_two().max(8)
+    } else {
+        v.div_ceil(64) * 64
+    }
+}
+
+/// Pixels of the pooled target a `rect`-sized request ends up with.
+fn pooled_pixels(rect: IRect) -> u64 {
+    pool_extent(rect.w()) * pool_extent(rect.h())
+}
+
+/// GPU bytes of one offscreen program: the 4x MSAA colour target (`ms_pool`,
+/// resources.rs `sample_count: MSAA`) plus its single-sample resolve target
+/// (`plain_pool`), both `FORMAT`, both at the pooled extent
+/// (exec.rs `run_program`: `ms_pool.acquire` + `plain_pool.acquire`).
+fn program_bytes(rect: IRect) -> u64 {
+    pooled_pixels(rect) * texel_bytes() * (MSAA as u64 + 1)
+}
+
+/// Extra bytes while a program's gaussian blur runs: the horizontal-pass target
+/// and the vertical-pass result, both `plain_pool` (exec.rs `blur`).
+fn blur_bytes(rect: IRect) -> u64 {
+    pooled_pixels(rect) * texel_bytes() * 2
+}
+
+/// Extra bytes of a displacement post: its destination target (exec.rs).
+fn displace_bytes(rect: IRect) -> u64 {
+    pooled_pixels(rect) * texel_bytes()
+}
+
+/// Scratch targets of a backdrop op over `pad`, all `plain_pool` (exec.rs
+/// `backdrop`): blur = backdrop copy, two blur targets, snapshot; glass =
+/// backdrop copy, frost blur (2), mask blur (2), output, snapshot.
+fn backdrop_bytes(glass: bool, pad: IRect) -> u64 {
+    pooled_pixels(pad) * texel_bytes() * if glass { 7 } else { 4 }
+}
+
+fn post_bytes(post: &Post, rect: IRect) -> u64 {
+    match post {
+        Post::Blur { .. } => blur_bytes(rect),
+        Post::Displace { .. } => displace_bytes(rect),
+    }
+}
+
+/// What a clip-mask program that the VRAM budget refuses degrades to.
+enum Degrade {
+    /// Clip to this rectangle instead (what the capped path does for a frame's children).
+    Scissor(IRect),
+    /// Leave the clip as it is (what the capped path does for strokes).
+    Keep,
 }
 
 // ---------------------------------------------------------------- helpers
@@ -222,6 +317,8 @@ struct Ctx<'a> {
     cull: bool,
     /// Supersampling factor of the target.
     ss: u32,
+    /// Accounted GPU bytes of the offscreen targets opened so far.
+    vram: u64,
 }
 
 impl Ctx<'_> {
@@ -236,15 +333,42 @@ impl Ctx<'_> {
         self.progs[c].ops.push(op);
     }
 
-    fn new_prog(&mut self, mut rect: IRect) -> ProgId {
-        // never ask for a texture bigger than the device allows (extreme blur radii)
+    /// `rect` as the texture the device can actually hold (extreme blur radii).
+    fn clamp_rect(&self, mut rect: IRect) -> IRect {
         let max = self.opts.max_texture as i32;
         if max > 0 {
             rect.x1 = rect.x1.min(rect.x0 + max);
             rect.y1 = rect.y1.min(rect.y0 + max);
         }
+        rect
+    }
+
+    fn new_prog(&mut self, rect: IRect) -> ProgId {
+        let rect = self.clamp_rect(rect);
+        self.vram += program_bytes(rect);
         self.progs.push(Program::new(rect));
         (self.progs.len() - 1) as ProgId
+    }
+
+    /// Adds a post-processing step to program `id`, accounting its targets.
+    fn push_post(&mut self, id: ProgId, post: Post) {
+        let prog = &mut self.progs[id as usize];
+        self.vram += post_bytes(&post, prog.rect);
+        prog.post.push(post);
+    }
+
+    fn push_backdrop(&mut self, op: BackdropOp) {
+        self.vram += backdrop_bytes(matches!(op.kind, BackdropKind::Glass(_)), op.pad);
+        self.push_op(Op::Backdrop(Box::new(op)));
+    }
+
+    /// Bytes of a program that would be opened for `rect`.
+    fn program_cost(&self, rect: IRect) -> u64 {
+        program_bytes(self.clamp_rect(rect))
+    }
+
+    fn blur_cost(&self, rect: IRect) -> u64 {
+        blur_bytes(self.clamp_rect(rect))
     }
 
     fn clip_for(&mut self, c: ClipDesc) -> ClipId {
@@ -282,13 +406,19 @@ impl Ctx<'_> {
     /// A mask program covering `mesh` (through `ts`) restricted by `parent`;
     /// returns the clip that limits draws to it (`invert`: to its complement
     /// within `roi`). `None` when nothing can remain visible.
-    fn mask_clip(&mut self, mesh: &Arc<Mesh>, ts: sk::Transform, parent: ClipId, invert: bool, roi: IRect) -> Option<ClipId> {
+    fn mask_clip(&mut self, mesh: &Arc<Mesh>, ts: sk::Transform, parent: ClipId, invert: bool, roi: IRect, degrade: Degrade) -> Option<ClipId> {
         let pdesc = self.clips[parent as usize];
         let bb = xform_bounds(&ts, mesh.bounds.0, mesh.bounds.1, mesh.bounds.2 - mesh.bounds.0, mesh.bounds.3 - mesh.bounds.1);
         let region = if invert { roi } else { IRect::outward(bb).intersect(roi) };
         let region = region.intersect(pdesc.scissor).intersect(self.progs[self.cur() as usize].rect);
         if region.is_empty() {
             return None;
+        }
+        if self.over_budget(self.program_cost(region)) {
+            return Some(match degrade {
+                Degrade::Scissor(r) => self.narrow_clip(parent, r),
+                Degrade::Keep => parent,
+            });
         }
         let prog = self.new_prog(region);
         let white = solid_inst([1.0, 1.0, 1.0, 1.0]);
@@ -337,6 +467,14 @@ impl Ctx<'_> {
     /// `limit` exist (lifted by `CompileOptions::uncap_programs`).
     fn prog_cap_hit(&self, limit: usize) -> bool {
         self.interactive() && !self.opts.uncap_programs && self.progs.len() >= limit
+    }
+
+    /// Whether the idle refine compile must not open offscreen targets worth
+    /// `bytes` more: the frame would exceed `refine_vram_budget_bytes`. Only
+    /// the uncapped interactive compile is bound; callers degrade exactly like
+    /// the `prog_cap_hit` fallback of the same site.
+    fn over_budget(&self, bytes: u64) -> bool {
+        self.interactive() && self.opts.uncap_programs && self.vram.saturating_add(bytes) > self.opts.refine_vram_budget_bytes
     }
 
     fn zoom_lod(&self) -> bool {
@@ -393,7 +531,7 @@ impl Ctx<'_> {
             return;
         }
         let rest = &siblings[i + 1..];
-        if self.prog_cap_hit(64) {
+        if self.prog_cap_hit(64) || self.over_budget(2 * self.program_cost(rect)) {
             let lclip = self.narrow_clip(clip, rect);
             self.draw_children(rest, parent_ts, lclip);
             return;
@@ -511,7 +649,7 @@ impl Ctx<'_> {
         }
         let need_layer = (special || layer_blur > 0.0 || textured || (opacity < 1.0 && (has_kids || paints > 1 || has_effects))) && !self.prog_cap_hit(64);
         if !need_layer {
-            self.draw_body(n, ts, clip, opacity);
+            self.draw_body(n, ts, clip, opacity, false);
             return;
         }
         let sigma = layer_blur * ts_scale(&ts) / 2.0;
@@ -529,13 +667,18 @@ impl Ctx<'_> {
         if rect.is_empty() {
             return;
         }
+        let blur_cost = if layer_blur > 0.0 { self.blur_cost(rect) } else { 0 };
+        if self.over_budget(self.program_cost(rect) + blur_cost) {
+            self.draw_body(n, ts, clip, opacity, false);
+            return;
+        }
         let layer = self.new_prog(rect);
         self.progs[layer as usize].needs_backdrop = self.has_bg_blur(n);
         // draws inside the layer keep the parent's clip (mask and scissor)
         let lclip = self.narrow_clip(clip, rect);
-        self.with_prog(layer, |c| c.draw_body(n, ts, lclip, 1.0));
+        self.with_prog(layer, |c| c.draw_body(n, ts, lclip, 1.0, true));
         if layer_blur > 0.0 {
-            self.progs[layer as usize].post.push(Post::Blur { sigma, clamp: false });
+            self.push_post(layer, Post::Blur { sigma, clamp: false });
         }
         let mode = if special { CompMode::Blend(n.blend) } else { CompMode::Over };
         let pclip = self.full_clip(rect);
@@ -562,9 +705,11 @@ impl Ctx<'_> {
 
     // ----- node body --------------------------------------------------------
 
-    fn draw_body(&mut self, n: &Node, ts: sk::Transform, clip: ClipId, alpha: f32) {
+    /// `isolated`: the node got its own layer program (the texture effects
+    /// displace that whole program, so they need it).
+    fn draw_body(&mut self, n: &Node, ts: sk::Transform, clip: ClipId, alpha: f32, isolated: bool) {
         self.draw_body_inner(n, ts, clip, alpha);
-        if self.prog_cap_hit(64) {
+        if self.prog_cap_hit(64) || !isolated {
             return;
         }
         for e in &n.effects {
@@ -576,15 +721,14 @@ impl Ctx<'_> {
             let amp = t.radius.max(0.0) * scale;
             let g = self.geom_of(n, &ts);
             let rect = self.progs[self.cur() as usize].rect;
-            let clip_to = if t.clip_to_shape {
-                let r = IRect::outward(self.bbox(n, &ts)).grow(amp.ceil() as i32 + 3).intersect(rect);
-                (!r.is_empty()).then(|| self.sil_program(n, &g, ts, r, 0.0, 0.0, 0.0, true))
-            } else {
-                None
-            };
+            let clip_rect = t.clip_to_shape.then(|| IRect::outward(self.bbox(n, &ts)).grow(amp.ceil() as i32 + 3).intersect(rect)).filter(|r| !r.is_empty());
+            if self.over_budget(displace_bytes(rect) + clip_rect.map_or(0, |r| self.program_cost(r))) {
+                continue;
+            }
+            let clip_to = clip_rect.map(|r| self.sil_program(n, &g, ts, r, 0.0, 0.0, 0.0, true));
             let cell = (t.size.max(0.1) * scale / self.ss as f32).max(1.0);
-            let c = self.cur() as usize;
-            self.progs[c].post.push(Post::Displace { amp, cell, seed: t.seed, grid: self.grid, clip_to, ss: self.ss });
+            let c = self.cur();
+            self.push_post(c, Post::Displace { amp, cell, seed: t.seed, grid: self.grid, clip_to, ss: self.ss });
         }
     }
 
@@ -751,7 +895,7 @@ impl Ctx<'_> {
                     Some(self.narrow_clip(clip, IRect::outward(inner_bb)))
                 } else if let Some(mesh) = &g.fill {
                     let roi = self.visible(clip);
-                    self.mask_clip(mesh, ts, clip, false, roi)
+                    self.mask_clip(mesh, ts, clip, false, roi, Degrade::Scissor(IRect::outward(inner_bb)))
                 } else {
                     None
                 };
@@ -775,6 +919,10 @@ impl Ctx<'_> {
             let bb = xform_bounds(&ts, mesh.bounds.0, mesh.bounds.1, mesh.bounds.2 - mesh.bounds.0, mesh.bounds.3 - mesh.bounds.1);
             let rect = IRect::outward(bb).grow(1).intersect(self.visible(clip));
             if rect.is_empty() {
+                return;
+            }
+            if self.over_budget(self.program_cost(rect)) {
+                self.draw_mesh(mesh, ts, pi, DrawBlend::Over, clip);
                 return;
             }
             let layer = self.new_prog(rect);
@@ -824,7 +972,7 @@ impl Ctx<'_> {
                 let Some(shape) = &g.fill else { return };
                 let b = mesh.bounds;
                 let roi = IRect::outward(xform_bounds(&ts, b.0, b.1, b.2 - b.0, b.3 - b.1)).grow(1);
-                let Some(c) = self.mask_clip(shape, ts, clip, how == StrokeClip::Outside, roi) else { return };
+                let Some(c) = self.mask_clip(shape, ts, clip, how == StrokeClip::Outside, roi, Degrade::Keep) else { return };
                 c
             }
         };
@@ -1000,9 +1148,14 @@ impl Ctx<'_> {
         if rect.is_empty() {
             return;
         }
+        let silhouettes = if show_behind { 1 } else { 2 };
+        let blur_cost = if sigma > 0.05 { self.blur_cost(rect) } else { 0 };
+        if self.over_budget(silhouettes * self.program_cost(rect) + blur_cost) {
+            return;
+        }
         let s = self.sil_program(n, g, ts, rect, ox, oy, spread, false);
         if sigma > 0.05 {
-            self.progs[s as usize].post.push(Post::Blur { sigma, clamp: false });
+            self.push_post(s, Post::Blur { sigma, clamp: false });
         }
         let aux = (!show_behind).then(|| (self.sil_program(n, g, ts, rect, 0.0, 0.0, 0.0, true), AuxMode::MulInv));
         let tint = [color.r.clamp(0.0, 1.0), color.g.clamp(0.0, 1.0), color.b.clamp(0.0, 1.0), (color.a * alpha).clamp(0.0, 1.0)];
@@ -1033,6 +1186,10 @@ impl Ctx<'_> {
         if rect.is_empty() {
             return;
         }
+        let blur_cost = if sigma > 0.05 { self.blur_cost(rect) } else { 0 };
+        if self.over_budget(3 * self.program_cost(rect) + blur_cost) {
+            return;
+        }
         let hole = self.sil_program(n, g, ts, rect, ox, oy, -spread, false);
         let p = self.new_prog(rect);
         let inner = self.full_clip(rect);
@@ -1041,7 +1198,7 @@ impl Ctx<'_> {
             c.push_op(Op::Composite(Box::new(CompositeOp { src: hole, rect, opacity: 1.0, tint: None, aux: None, mode: CompMode::Erase, clip: inner })));
         });
         if sigma > 0.05 {
-            self.progs[p as usize].post.push(Post::Blur { sigma, clamp: false });
+            self.push_post(p, Post::Blur { sigma, clamp: false });
         }
         let shape = self.sil_program(n, g, ts, rect, 0.0, 0.0, 0.0, false);
         let tint = [color.r.clamp(0.0, 1.0), color.g.clamp(0.0, 1.0), color.b.clamp(0.0, 1.0), (color.a * alpha).clamp(0.0, 1.0)];
@@ -1065,8 +1222,11 @@ impl Ctx<'_> {
         }
         let pad = (3.0 * sigma).ceil() as i32 + 1;
         let padr = region.grow(pad).intersect(self.root_rect);
+        if self.over_budget(self.program_cost(region) + backdrop_bytes(false, padr)) {
+            return;
+        }
         let mask = self.sil_program(n, g, ts, region, 0.0, 0.0, 0.0, true);
-        self.push_op(Op::Backdrop(Box::new(BackdropOp { kind: BackdropKind::Blur { sigma }, region, pad: padr, mask, clip, grid: self.grid })));
+        self.push_backdrop(BackdropOp { kind: BackdropKind::Blur { sigma }, region, pad: padr, mask, clip, grid: self.grid });
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1080,6 +1240,9 @@ impl Ctx<'_> {
         let sigma_m = (depth / 3.0).max(0.6);
         let pad = (3.0 * sigma_f.max(sigma_m)).ceil() as i32 + (depth * 1.5).ceil() as i32 + 2;
         let padr = region.grow(pad).intersect(self.root_rect);
+        if self.over_budget(self.program_cost(padr) + backdrop_bytes(true, padr)) {
+            return;
+        }
         let mask = self.sil_program(n, g, ts, padr, 0.0, 0.0, 0.0, true);
         let ang = e.light_angle.to_radians();
         let params = GlassParams {
@@ -1091,7 +1254,7 @@ impl Ctx<'_> {
             sigma_frost: sigma_f,
             sigma_mask: sigma_m,
         };
-        self.push_op(Op::Backdrop(Box::new(BackdropOp { kind: BackdropKind::Glass(params), region, pad: padr, mask, clip, grid: self.grid })));
+        self.push_backdrop(BackdropOp { kind: BackdropKind::Glass(params), region, pad: padr, mask, clip, grid: self.grid });
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1134,6 +1297,9 @@ impl Ctx<'_> {
             }
         }
         // general case: grain layer masked by the opaque silhouette
+        if self.over_budget(2 * self.program_cost(rect)) {
+            return;
+        }
         let layer = self.new_prog(rect);
         let lclip = self.full_clip(rect);
         self.with_prog(layer, |c| c.draw_quad(rect, pi, DrawBlend::Over, lclip));
