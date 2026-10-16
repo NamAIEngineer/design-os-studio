@@ -901,11 +901,16 @@ fn resolve_pen_refs(
         if comp_id == inst_id || doc.is_ancestor(comp_id, inst_id) {
             return Err(format!("component \"{ref_key}\" is referenced from inside itself; remove the ref from its own contents"));
         }
+        // Once one instance was left unexpanded, every later one is too: do not even size its component.
+        if skipped > 0 {
+            skipped += 1;
+            continue;
+        }
         let has_explicit_children = doc.get(inst_id).is_some_and(|n| !n.children.is_empty());
         // Clone component's children into instance if instance had no explicit children
         let comp_children = if has_explicit_children { Vec::new() } else { doc.get(comp_id).map(|c| c.children.clone()).unwrap_or_default() };
-        let needed = subtree_len(doc, &comp_children);
-        if skipped > 0 || needed > budget_left {
+        let needed = subtree_len_up_to(doc, &comp_children, budget_left);
+        if needed > budget_left {
             skipped += 1;
             continue;
         }
@@ -935,33 +940,41 @@ fn resolve_pen_refs(
     }))
 }
 
-/// Number of nodes in the subtrees rooted at `roots` (iterative, so depth cannot overflow the stack).
-fn subtree_len(doc: &Document, roots: &[NodeId]) -> usize {
+/// Number of nodes in the subtrees rooted at `roots`, counting stops once it exceeds `limit` (the result is then
+/// some value above `limit`, not the true size). Iterative, so depth cannot overflow the stack.
+fn subtree_len_up_to(doc: &Document, roots: &[NodeId], limit: usize) -> usize {
     let mut stack: Vec<NodeId> = roots.to_vec();
     let mut count = 0usize;
     while let Some(id) = stack.pop() {
         if let Some(n) = doc.get(id) {
             count += 1;
+            if count > limit {
+                break;
+            }
             stack.extend(n.children.iter().copied());
         }
     }
     count
 }
 
+/// Clones the subtree rooted at `src_id` under `new_parent`, parents before children and siblings in order.
+/// Iterative (explicit stack), so a component nested thousands of levels deep cannot overflow the call stack.
 fn clone_component_subtree(doc: &mut Document, src_id: NodeId, new_parent: NodeId, source_to_clone: &mut BTreeMap<String, NodeId>) {
-    let Some(orig) = doc.get(src_id).cloned() else { return };
-    let new_id = doc.alloc_id();
-    let mut copy = orig.clone();
-    copy.id = new_id;
-    copy.parent = Some(new_parent);
-    copy.children = Vec::new();
-    copy.component.source = Some(src_id);
-    if let Some(sid) = &orig.source_id {
-        source_to_clone.insert(sid.clone(), new_id);
-    }
-    let _ = doc.insert(new_parent, copy);
-    for child_id in orig.children {
-        clone_component_subtree(doc, child_id, new_id, source_to_clone);
+    let mut stack: Vec<(NodeId, NodeId)> = vec![(src_id, new_parent)];
+    while let Some((src_id, new_parent)) = stack.pop() {
+        let Some(orig) = doc.get(src_id).cloned() else { continue };
+        let new_id = doc.alloc_id();
+        let mut copy = orig.clone();
+        copy.id = new_id;
+        copy.parent = Some(new_parent);
+        copy.children = Vec::new();
+        copy.component.source = Some(src_id);
+        if let Some(sid) = &orig.source_id {
+            source_to_clone.insert(sid.clone(), new_id);
+        }
+        let _ = doc.insert(new_parent, copy);
+        // Reversed so the first child is popped (and so allocated and inserted) first.
+        stack.extend(orig.children.into_iter().rev().map(|child| (child, new_id)));
     }
 }
 
@@ -1529,5 +1542,34 @@ mod tests {
         let json = r##"{"version":"1.0","children":[{"id":"c","type":"frame","reusable":true},{"id":"i","type":"ref","ref":"c"}]}"##;
         assert!(import_pen_json_with_warnings(json).unwrap().1.is_none());
         assert!(import_pen_json(json).is_ok());
+    }
+
+    #[test]
+    fn subtree_count_stops_once_it_passes_the_limit() {
+        let kids: Vec<String> = (0..50).map(|i| format!(r##"{{"id":"k{i}","type":"frame"}}"##)).collect();
+        let json = format!(r##"{{"version":"1.0","children":[{{"id":"c","type":"frame","reusable":true,"children":[{}]}}]}}"##, kids.join(","));
+        let (doc, _) = import_pen_json_budgeted(&json, 1_000).unwrap();
+        let comp = doc.get(doc.pages[0]).unwrap().children[0];
+        let roots = doc.get(comp).unwrap().children.clone();
+        assert_eq!(subtree_len_up_to(&doc, &roots, 1_000), 50);
+        assert_eq!(subtree_len_up_to(&doc, &roots, 50), 50);
+        assert_eq!(subtree_len_up_to(&doc, &roots, 10), 11, "the walk gives up one node past the limit");
+        assert_eq!(subtree_len_up_to(&doc, &roots, 0), 1);
+    }
+
+    #[test]
+    fn skipped_refs_do_not_re_walk_a_huge_component() {
+        // 20,000-node component, 3,000 refs, budget 10: every ref is skipped. Sizing the component per skipped ref
+        // costs 60M node visits (seconds in a debug build); skipping without sizing costs next to nothing.
+        let kids: Vec<String> = (0..20_000).map(|i| format!(r##"{{"id":"k{i}","type":"frame"}}"##)).collect();
+        let refs: Vec<String> = (0..3_000).map(|i| format!(r##"{{"id":"r{i}","type":"ref","ref":"comp"}}"##)).collect();
+        let json =
+            format!(r##"{{"version":"1.0","children":[{{"id":"comp","type":"frame","reusable":true,"children":[{}]}},{}]}}"##, kids.join(","), refs.join(","));
+        let started = std::time::Instant::now();
+        let (doc, warning) = import_pen_json_budgeted(&json, 10).unwrap();
+        let elapsed = started.elapsed();
+        assert!(warning.expect("budget exhaustion is surfaced as a warning").contains("3000 instance(s)"));
+        assert_eq!(doc.nodes.len(), 1 + 1 + 20_000 + 3_000, "nothing was cloned");
+        assert!(elapsed < std::time::Duration::from_millis(1_500), "importing took {elapsed:?}");
     }
 }
