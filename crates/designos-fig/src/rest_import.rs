@@ -10,6 +10,9 @@ use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 const MAX_DEPTH: usize = 300;
+/// Deepest chain of components nested in components that is expanded recursively; deeper
+/// instances are expanded later from the top level, so no chain can exhaust the stack.
+const MAX_EXPAND_DEPTH: usize = 64;
 
 // ------------------------------------------------------------ JSON helpers
 
@@ -375,6 +378,8 @@ struct Ctx<'a> {
     blob_cache: HashMap<(usize, bool), Path>,
     /// Components whose nested instances have already been expanded.
     expanded_comps: HashSet<NodeId>,
+    /// Current `expand_rec` nesting; bounds recursion along component-in-component chains.
+    expand_depth: usize,
     /// Whether any `CONNECTOR` node was encountered during import.
     has_connectors: bool,
 }
@@ -492,6 +497,7 @@ pub(crate) fn import_rest_value_with_blobs<'a>(
         path_cache: HashMap::new(),
         blob_cache: HashMap::with_capacity(blobs.len()),
         expanded_comps: HashSet::new(),
+        expand_depth: 0,
         has_connectors: false,
     };
     if let Some(comps) = v.get("components").and_then(Value::as_object) {
@@ -1176,6 +1182,15 @@ impl<'a> Ctx<'a> {
     /// Expands `inst`, first expanding instances nested inside its component so
     /// their (overridden) children are copied too.
     fn expand_rec(&mut self, inst: NodeId, targets: &BTreeMap<NodeId, NodeId>, done: &mut BTreeSet<NodeId>) {
+        if self.expand_depth >= MAX_EXPAND_DEPTH {
+            return;
+        }
+        self.expand_depth += 1;
+        self.expand_rec_bounded(inst, targets, done);
+        self.expand_depth -= 1;
+    }
+
+    fn expand_rec_bounded(&mut self, inst: NodeId, targets: &BTreeMap<NodeId, NodeId>, done: &mut BTreeSet<NodeId>) {
         if !done.insert(inst) {
             return;
         }
@@ -2445,6 +2460,40 @@ pub fn image_refs(doc: &Document) -> Vec<String> {
         }
     }
     set.into_iter().collect()
+}
+
+#[cfg(test)]
+mod expand_depth_tests {
+    use super::*;
+    use serde_json::json;
+
+    /// Component `C{i}` holds an instance of `C{i+1}`; an instance of `C0` sits at the end.
+    fn component_chain(len: usize) -> Value {
+        let mut kids = Vec::new();
+        for i in 0..len {
+            let inner = if i + 1 < len {
+                json!({"id": format!("{}:2", i + 10), "name": "N", "type": "INSTANCE", "componentId": format!("{}:1", i + 11), "size": {"x": 4, "y": 4}})
+            } else {
+                json!({"id": format!("{}:2", i + 10), "name": "Dot", "type": "RECTANGLE", "size": {"x": 4, "y": 4}})
+            };
+            kids.push(json!({"id": format!("{}:1", i + 10), "name": format!("C{i}"), "type": "COMPONENT", "size": {"x": 4, "y": 4}, "children": [inner]}));
+        }
+        kids.push(json!({"id": "1:1", "name": "Use", "type": "INSTANCE", "componentId": "10:1", "size": {"x": 4, "y": 4}}));
+        json!({"document": {"type": "DOCUMENT", "children": [{"id": "0:1", "type": "CANVAS", "children": kids}]}})
+    }
+
+    #[test]
+    fn long_component_chain_expands_without_exhausting_the_stack() {
+        // A small stack stands in for a very long chain; the old recursion needed a frame pair per link.
+        let handle = std::thread::Builder::new()
+            .stack_size(512 * 1024)
+            .spawn(|| {
+                let doc = import_rest_value(&component_chain(700), true).unwrap();
+                assert!(doc.nodes.len() > 700);
+            })
+            .unwrap();
+        handle.join().expect("import must not overflow the stack");
+    }
 }
 
 #[cfg(test)]
