@@ -24,6 +24,9 @@ mod geom;
 mod history;
 mod library;
 mod library_ops;
+mod load_repair;
+#[cfg(test)]
+mod load_repair_tests;
 mod node;
 pub mod openpencil;
 mod paint;
@@ -45,6 +48,7 @@ pub use geom::*;
 pub use history::*;
 pub use library::*;
 pub use library_ops::*;
+pub use load_repair::*;
 pub use node::*;
 pub use openpencil::*;
 pub use paint::*;
@@ -600,6 +604,10 @@ impl Document {
     /// literal bullet and "1. " prefixes is converted to real lists.
     pub fn from_json(s: &str) -> serde_json::Result<Self> {
         let mut doc: Self = serde_json::from_str(s)?;
+        let repaired = doc.validate_and_repair();
+        if !repaired.is_clean() {
+            eprintln!("designos-doc: repaired a malformed document on load: {repaired:?}");
+        }
         doc.migrate_text();
         Ok(doc)
     }

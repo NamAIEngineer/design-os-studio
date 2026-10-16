@@ -47,6 +47,7 @@ pub fn load_path(path: &Path) -> Result<Document, String> {
             Document::from_json(&text).map_err(|e| format!("Invalid designos file: {e}"))?
         }
     };
+    doc.validate_and_repair();
     if doc.name.is_empty() {
         doc.name = path.file_stem().and_then(|s| s.to_str()).unwrap_or("Untitled").to_string();
     }
@@ -69,16 +70,16 @@ pub fn save_path(doc: &Document, path: &Path) -> Result<PathBuf, String> {
     }
     if p.extension().and_then(|e| e.to_str()).is_some_and(|e| e.eq_ignore_ascii_case("fig")) {
         let bytes = designos_fig::export_fig(doc).map_err(|e| format!("Cannot export .fig: {e}"))?;
-        std::fs::write(&p, bytes).map_err(|e| format!("Cannot write {}: {e}", p.display()))?;
+        designos_library::write_atomic(&p, &bytes).map_err(|e| format!("Cannot write {}: {e}", p.display()))?;
         return Ok(p);
     }
     if p.extension().and_then(|e| e.to_str()).is_some_and(|e| e.eq_ignore_ascii_case("pen")) {
         let pen_json = designos_fig::export_pen_json(doc).map_err(|e| format!("Cannot export .pen: {e}"))?;
-        std::fs::write(&p, pen_json).map_err(|e| format!("Cannot write {}: {e}", p.display()))?;
+        designos_library::write_atomic(&p, pen_json.as_bytes()).map_err(|e| format!("Cannot write {}: {e}", p.display()))?;
         return Ok(p);
     }
     let json = doc.to_json().map_err(|e| format!("Cannot serialize: {e}"))?;
-    std::fs::write(&p, json).map_err(|e| format!("Cannot write {}: {e}", p.display()))?;
+    designos_library::write_atomic(&p, json.as_bytes()).map_err(|e| format!("Cannot write {}: {e}", p.display()))?;
     Ok(p)
 }
 
@@ -186,5 +187,48 @@ mod tests {
         assert!(!back.pages.is_empty());
         assert!(back.nodes.len() >= 2);
         std::fs::remove_file(p).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn failed_save_leaves_original_intact() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tmp("readonly_dir");
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut d = Document::new("Old");
+        d.add_page("P");
+        for name in ["keep.designos", "keep.fig", "keep.pen"] {
+            let target = dir.join(name);
+            std::fs::write(&target, b"original bytes").unwrap();
+            std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o555)).unwrap();
+            let res = save_path(&d, &target);
+            std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+            if std::fs::File::create(dir.join("probe")).is_ok() {
+                std::fs::remove_file(dir.join("probe")).ok();
+            } else {
+                panic!("cannot restore dir permissions");
+            }
+            assert!(res.is_err(), "{name}: save into a read-only dir must fail");
+            assert_eq!(std::fs::read(&target).unwrap(), b"original bytes", "{name}: original must be intact");
+            let leftovers: Vec<_> = std::fs::read_dir(&dir).unwrap().map(|e| e.unwrap().file_name()).collect();
+            assert!(leftovers.iter().all(|n| !n.to_string_lossy().ends_with(".tmp")), "{name}: tmp file left behind: {leftovers:?}");
+        }
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn cyclic_file_loads_into_a_consistent_tree() {
+        let mut d = Document::new("Cyc");
+        let page = d.add_page("P");
+        let a = d.alloc_id();
+        d.insert(page, Node::rectangle(a, Rect::new(0.0, 0.0, 1.0, 1.0))).unwrap();
+        d.nodes.get_mut(&a).unwrap().children.push(page);
+        d.nodes.get_mut(&page).unwrap().parent = Some(a);
+        let p = tmp("cyc.designos");
+        std::fs::write(&p, d.to_json().unwrap()).unwrap();
+        let back = load_path(&p).unwrap();
+        std::fs::remove_file(&p).ok();
+        assert_eq!(back.page_of(a), Some(page));
+        let _ = back.world_transform(a);
     }
 }
