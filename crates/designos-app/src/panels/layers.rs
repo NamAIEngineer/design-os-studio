@@ -657,16 +657,10 @@ mod tests {
         let plain = NodeKind::Frame(FrameProps::default());
         assert_eq!(kind_icon(&plain), Icon::Frame);
 
-        let h_frame = FrameProps {
-            auto_layout: Some(AutoLayout { direction: LayoutDirection::Horizontal, ..AutoLayout::default() }),
-            ..FrameProps::default()
-        };
+        let h_frame = FrameProps { auto_layout: Some(AutoLayout { direction: LayoutDirection::Horizontal, ..AutoLayout::default() }), ..FrameProps::default() };
         assert_eq!(kind_icon(&NodeKind::Frame(h_frame)), Icon::AutoLayoutH);
 
-        let v_frame = FrameProps {
-            auto_layout: Some(AutoLayout { direction: LayoutDirection::Vertical, ..AutoLayout::default() }),
-            ..FrameProps::default()
-        };
+        let v_frame = FrameProps { auto_layout: Some(AutoLayout { direction: LayoutDirection::Vertical, ..AutoLayout::default() }), ..FrameProps::default() };
         assert_eq!(kind_icon(&NodeKind::Frame(v_frame)), Icon::AutoLayoutV);
 
         assert_eq!(kind_icon(&NodeKind::Component(FrameProps::default())), Icon::Component);

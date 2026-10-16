@@ -42,7 +42,8 @@ impl RepairReport {
             ("duplicate or cyclic child claims", self.duplicate_claims),
             ("subtrees nested too deep", self.depth_detached),
             ("wrong parent links", self.parents_rebuilt),
-            ("mismatched node ids", self.ids_realigned),        ]
+            ("mismatched node ids", self.ids_realigned),
+        ]
         .into_iter()
         .filter(|(_, n)| *n > 0)
         .map(|(what, n)| format!("{n} {what}"))
@@ -84,11 +85,7 @@ impl Document {
 
         // Nodes no page reaches: real orphans first, then whatever is left (cycles, depth casualties).
         let unvisited = |visited: &HashSet<NodeId>, nodes: &BTreeMap<NodeId, crate::Node>, orphans: bool| -> Vec<NodeId> {
-            nodes
-                .iter()
-                .filter(|(id, n)| !visited.contains(*id) && orphans == n.parent.is_none_or(|p| !nodes.contains_key(&p)))
-                .map(|(id, _)| *id)
-                .collect()
+            nodes.iter().filter(|(id, n)| !visited.contains(*id) && orphans == n.parent.is_none_or(|p| !nodes.contains_key(&p))).map(|(id, _)| *id).collect()
         };
         for orphans in [true, false] {
             for id in unvisited(&visited, &self.nodes, orphans) {

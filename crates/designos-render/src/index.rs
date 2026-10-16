@@ -275,10 +275,7 @@ impl SceneIndex {
                                     }
                                 }
                             }
-                        } else if doc.get(id).is_some()
-                            && doc.page_of(id) == Some(page)
-                            && !self.update_subtree(doc, id, rev)
-                        {
+                        } else if doc.get(id).is_some() && doc.page_of(id) == Some(page) && !self.update_subtree(doc, id, rev) {
                             ok = false;
                             break;
                         }
