@@ -339,7 +339,8 @@ fn auto_resize(s: &str) -> TextAutoResize {
 struct Ctx<'a> {
     doc: Document,
     blobs: &'a [&'a [u8]],
-    fast_derived_map: Option<&'a HashMap<String, Vec<crate::fig::FastDerivedEntry>>>,
+    fast_derived_map: Option<&'a mut HashMap<String, Vec<crate::fig::FastDerivedEntry>>>,
+    large_file: bool,
     ids: BTreeMap<String, NodeId>,
     /// (instance, REST componentId)
     instances: Vec<(NodeId, String)>,
@@ -348,7 +349,7 @@ struct Ctx<'a> {
     unresolved: Vec<(NodeId, String)>,
     component_keys: BTreeMap<String, String>,
     /// `.fig` instance overrides / derived data, keyed by instance.
-    overrides: BTreeMap<NodeId, Overrides<'a>>,
+    overrides: BTreeMap<NodeId, Overrides>,
     next_clone: u64,
     /// `.fig` override keys (`_overrideKey`): the id override paths use for a
     /// node. Clones inherit the key of the node they copy.
@@ -378,17 +379,20 @@ struct Ctx<'a> {
     /// Whether any `CONNECTOR` node was encountered during import.
     has_connectors: bool,
     connectors: Vec<(NodeId, Option<String>, Option<String>)>,
+    /// Deferred multi-page hydrator state assembled during `finish`.
+    deferred_pending: Option<(HashMap<NodeId, Vec<NodeId>>, HashSet<NodeId>, BTreeMap<NodeId, NodeId>, BTreeSet<NodeId>)>,
 }
 
 /// Overrides carried on `.fig` instance JSON as `_overrides` / `_derived`:
 /// `[{"path": ["1:6", ...], "set": {<partial REST node fields>}}]`.
-#[derive(Default)]
-struct Overrides<'a> {
+#[derive(Default, Debug)]
+struct Overrides {
     set: Vec<OverrideEntry>,
     derived: Vec<OverrideEntry>,
-    fast_derived: &'a [crate::fig::FastDerivedEntry],
+    fast_derived: Vec<crate::fig::FastDerivedEntry>,
 }
 
+#[derive(Debug)]
 struct OverrideEntry {
     path: Vec<String>,
     set: Value,
@@ -488,7 +492,7 @@ pub(crate) fn import_rest_value_owned<'a>(
     mut v: Value,
     expand_instances: bool,
     blobs: &'a [&'a [u8]],
-    fast_derived_map: Option<&'a HashMap<String, Vec<crate::fig::FastDerivedEntry>>>,
+    fast_derived_map: Option<&'a mut HashMap<String, Vec<crate::fig::FastDerivedEntry>>>,
 ) -> Result<Document, FigError> {
     if crate::board::is_figjam(&v) {
         return import_rest_value_with_blobs(&v, expand_instances, blobs, fast_derived_map);
@@ -498,10 +502,12 @@ pub(crate) fn import_rest_value_owned<'a>(
         return Err(FigError::Format("REST JSON has no `document`".into()));
     }
     let doc_name = fstr(&v, "name").unwrap_or("Untitled").to_string();
+    let large_file = fast_derived_map.is_some();
     let mut cx = Ctx {
         doc: Document::new(&doc_name),
         blobs,
         fast_derived_map,
+        large_file,
         ids: BTreeMap::new(),
         instances: Vec::new(),
         unresolved: Vec::new(),
@@ -521,6 +527,7 @@ pub(crate) fn import_rest_value_owned<'a>(
         expanded_comps: HashSet::new(),
         has_connectors: false,
         connectors: Vec::new(),
+        deferred_pending: None,
     };
     if let Some(comps) = v.get("components").and_then(Value::as_object) {
         for (id, c) in comps {
@@ -583,6 +590,7 @@ pub(crate) fn import_rest_value_owned<'a>(
     crate::variables::import_variables_value(&mut cx.doc, &v);
     cx.doc.style_meta = style_meta(v.get("styles"), &cx.doc);
     drop(v);
+    cx.install_deferred_hydrator();
     let doc = cx.doc;
     drop(cx.override_keys);
     drop(cx.ids);
@@ -599,17 +607,19 @@ pub(crate) fn import_rest_value_with_blobs<'a>(
     v: &'a Value,
     expand_instances: bool,
     blobs: &'a [&'a [u8]],
-    fast_derived_map: Option<&'a HashMap<String, Vec<crate::fig::FastDerivedEntry>>>,
+    fast_derived_map: Option<&'a mut HashMap<String, Vec<crate::fig::FastDerivedEntry>>>,
 ) -> Result<Document, FigError> {
     let root = match v.get("document") {
         Some(d) => d,
         None if fstr(v, "type").is_some() => v,
         None => return Err(FigError::Format("REST JSON has no `document`".into())),
     };
+    let large_file = fast_derived_map.is_some();
     let mut cx = Ctx {
         doc: Document::new(fstr(v, "name").unwrap_or("Untitled")),
         blobs,
         fast_derived_map,
+        large_file,
         ids: BTreeMap::new(),
         instances: Vec::new(),
         unresolved: Vec::new(),
@@ -629,6 +639,7 @@ pub(crate) fn import_rest_value_with_blobs<'a>(
         expanded_comps: HashSet::new(),
         has_connectors: false,
         connectors: Vec::new(),
+        deferred_pending: None,
     };
     if let Some(comps) = v.get("components").and_then(Value::as_object) {
         for (id, c) in comps {
@@ -672,6 +683,7 @@ pub(crate) fn import_rest_value_with_blobs<'a>(
     cx.link_remote_components(v);
     crate::variables::import_variables_value(&mut cx.doc, v);
     cx.doc.style_meta = style_meta(v.get("styles"), &cx.doc);
+    cx.install_deferred_hydrator();
     let doc = cx.doc;
     drop(cx.override_keys);
     drop(cx.ids);
@@ -780,7 +792,9 @@ impl<'a> Ctx<'a> {
                     self.rest_overrides.push((id, nid.to_string(), fields));
                 }
             }
-            let fast_derived = fstr(&v, "id").and_then(|sid| self.fast_derived_map.and_then(|m| m.get(sid))).map(Vec::as_slice).unwrap_or(&[]);
+            let fast_derived = fstr(&v, "id")
+                .and_then(|sid| self.fast_derived_map.as_deref_mut().and_then(|m| m.remove(sid)))
+                .unwrap_or_default();
             let ov = Overrides {
                 set: take_override_entries(v.get_mut("_overrides")),
                 derived: take_override_entries(v.get_mut("_derived")),
@@ -882,7 +896,9 @@ impl<'a> Ctx<'a> {
                     self.rest_overrides.push((id, nid.to_string(), fields));
                 }
             }
-            let fast_derived = fstr(v, "id").and_then(|sid| self.fast_derived_map.and_then(|m| m.get(sid))).map(Vec::as_slice).unwrap_or(&[]);
+            let fast_derived = fstr(v, "id")
+                .and_then(|sid| self.fast_derived_map.as_deref_mut().and_then(|m| m.remove(sid)))
+                .unwrap_or_default();
             let ov = Overrides { set: parse_override_entries(v.get("_overrides")), derived: parse_override_entries(v.get("_derived")), fast_derived };
             if !ov.set.is_empty() || !ov.derived.is_empty() || !ov.fast_derived.is_empty() {
                 self.overrides.insert(id, ov);
@@ -899,11 +915,13 @@ impl<'a> Ctx<'a> {
     /// Returns the node and, for auto-layout frames, its direction.
     fn build_node(&mut self, id: NodeId, ty: &str, v: &Value, pinfo: ParentInfo) -> (Node, Option<LayoutDirection>) {
         let frame = || frame_props(v);
+        let skip_geo = ty == "TEXT"
+            || (self.large_file && matches!(ty, "FRAME" | "COMPONENT" | "COMPONENT_SET" | "INSTANCE" | "SECTION" | "RECTANGLE"));
         // Text outlines (glyph paths) are not stored; the renderer lays text out itself.
-        let fill_geo = (ty != "TEXT")
+        let mut fill_geo = (!skip_geo)
             .then(|| parse_geometry_cached(farr(v, "fillGeometry"), &mut self.path_cache, &mut self.blob_cache, self.blobs))
             .filter(|g| !g.is_empty());
-        let stroke_geo = (ty != "TEXT")
+        let stroke_geo = (!skip_geo)
             .then(|| parse_geometry_cached(farr(v, "strokeGeometry"), &mut self.path_cache, &mut self.blob_cache, self.blobs))
             .filter(|g| !g.is_empty());
         let kind = match ty {
@@ -945,7 +963,11 @@ impl<'a> Ctx<'a> {
             "VECTOR" | "BRUSH" => {
                 // an editable network when the file carries one; Figma's own outline stays the rendered geometry
                 let network = v.get("vectorNetwork").and_then(crate::vecnet::network_from_json).filter(|n| !n.vertices.is_empty());
-                let paths = fill_geo.clone().or_else(|| stroke_geo.clone()).or_else(|| network.as_ref().map(|n| n.to_paths())).unwrap_or_default();
+                let paths = if self.large_file && network.is_none() {
+                    fill_geo.take().or_else(|| stroke_geo.clone()).unwrap_or_default()
+                } else {
+                    fill_geo.clone().or_else(|| stroke_geo.clone()).or_else(|| network.as_ref().map(|n| n.to_paths())).unwrap_or_default()
+                };
                 NodeKind::Vector { paths, network }
             }
             "TEXT" => NodeKind::Text(text_props(v)),
@@ -1253,20 +1275,134 @@ impl<'a> Ctx<'a> {
         // instance order, so the same input always yields the same ids.
         self.next_clone = self.doc.nodes.keys().next_back().map(|k| k.0).unwrap_or(0) + 1;
         let mut done = BTreeSet::new();
-        let order: Vec<NodeId> = targets.keys().copied().collect();
-        for inst in order {
-            self.expand_rec(inst, &targets, &mut done);
-        }
-        // Instances whose component is unknown still honour their own overrides.
-        let rest: Vec<NodeId> = self.overrides.keys().copied().filter(|i| !done.contains(i)).collect();
-        for inst in rest {
-            self.apply_overrides(inst, &targets, &mut done);
+        let defer_inactive = self.large_file && self.doc.nodes.len() > 25_000 && self.doc.pages.len() > 2;
+        if defer_inactive {
+            let mut node_page: HashMap<NodeId, NodeId> = HashMap::with_capacity(self.doc.nodes.len());
+            let mut page_counts: HashMap<NodeId, usize> = HashMap::with_capacity(self.doc.pages.len() + 1);
+            let mut stack = Vec::new();
+            for &pid in self.doc.pages.iter().chain(self.doc.library_page.iter()) {
+                stack.push(pid);
+                let mut cnt = 0usize;
+                while let Some(nid) = stack.pop() {
+                    node_page.insert(nid, pid);
+                    cnt += 1;
+                    if let Some(n) = self.doc.get(nid) {
+                        stack.extend(n.children.iter().copied());
+                    }
+                }
+                page_counts.insert(pid, cnt);
+            }
+            let mut initial_pages: HashSet<NodeId> = HashSet::new();
+            if let Some(&first_p) = self.doc.pages.first() {
+                initial_pages.insert(first_p);
+            }
+            if let Some(&non_empty_p) = self.doc.pages.iter().find(|&&p| page_counts.get(&p).copied().unwrap_or(0) >= 50) {
+                initial_pages.insert(non_empty_p);
+            }
+            if let Some(&largest_p) = self.doc.pages.iter().max_by_key(|&&p| page_counts.get(&p).copied().unwrap_or(0)) {
+                initial_pages.insert(largest_p);
+            }
+            if let Some(lp) = self.doc.library_page {
+                initial_pages.insert(lp);
+            }
+            let all_comps: BTreeSet<NodeId> = targets.values().copied().collect();
+            for comp in all_comps {
+                self.expand_nested(comp, &targets, &mut done);
+            }
+            let mut pending_by_page: HashMap<NodeId, Vec<NodeId>> = HashMap::new();
+            let order: Vec<NodeId> = targets.keys().copied().collect();
+            for inst in order {
+                if done.contains(&inst) {
+                    continue;
+                }
+                match node_page.get(&inst).copied() {
+                    Some(p) if !initial_pages.contains(&p) => {
+                        pending_by_page.entry(p).or_default().push(inst);
+                    }
+                    _ => {
+                        self.expand_rec(inst, &targets, &mut done);
+                    }
+                }
+            }
+            let rest: Vec<NodeId> = self.overrides.keys().copied().filter(|i| !done.contains(i)).collect();
+            for inst in rest {
+                match node_page.get(&inst).copied() {
+                    Some(p) if !initial_pages.contains(&p) => {
+                        let list = pending_by_page.entry(p).or_default();
+                        if !list.contains(&inst) {
+                            list.push(inst);
+                        }
+                    }
+                    _ => {
+                        self.apply_overrides(inst, &targets, &mut done);
+                    }
+                }
+            }
+            if !pending_by_page.is_empty() {
+                self.deferred_pending = Some((pending_by_page, initial_pages, targets, done));
+            }
+        } else {
+            let order: Vec<NodeId> = targets.keys().copied().collect();
+            for inst in order {
+                self.expand_rec(inst, &targets, &mut done);
+            }
+            // Instances whose component is unknown still honour their own overrides.
+            let rest: Vec<NodeId> = self.overrides.keys().copied().filter(|i| !done.contains(i)).collect();
+            for inst in rest {
+                self.apply_overrides(inst, &targets, &mut done);
+            }
         }
         if self.next_clone > 1 {
             self.doc.reserve_ids(NodeId(self.next_clone - 1));
         }
         self.apply_rest_overrides();
         self.resolve_proto();
+    }
+
+    fn install_deferred_hydrator(&mut self) {
+        let Some((pending_by_page, hydrated_pages, targets, done)) = self.deferred_pending.take() else {
+            return;
+        };
+        if pending_by_page.is_empty() {
+            return;
+        }
+        for ov in self.overrides.values() {
+            for d in &ov.fast_derived {
+                for &(idx, odd) in d.fill_geometry.iter().chain(d.stroke_geometry.iter()).flatten() {
+                    if !self.blob_cache.contains_key(&(idx, odd)) {
+                        if let Some(blob) = self.blobs.get(idx) {
+                            let parsed = crate::fig::commands_blob_to_path(blob, odd);
+                            if !parsed.cmds.is_empty() {
+                                self.blob_cache.insert((idx, odd), parsed);
+                            }
+                        }
+                    }
+                }
+            }
+            for e in ov.set.iter().chain(ov.derived.iter()) {
+                for k in ["fillGeometry", "strokeGeometry"] {
+                    let arr = farr(&e.set, k);
+                    if !arr.is_empty() {
+                        let _ = parse_geometry_cached(arr, &mut self.path_cache, &mut self.blob_cache, self.blobs);
+                    }
+                }
+            }
+        }
+        let hydrator = DeferredFigHydrator {
+            pending_by_page,
+            hydrated_pages,
+            targets,
+            done,
+            ids: std::mem::take(&mut self.ids),
+            overrides: std::mem::take(&mut self.overrides),
+            override_keys: std::mem::take(&mut self.override_keys),
+            scales: std::mem::take(&mut self.scales),
+            path_cache: std::mem::take(&mut self.path_cache),
+            blob_cache: std::mem::take(&mut self.blob_cache),
+            expanded_comps: std::mem::take(&mut self.expanded_comps),
+            next_clone: self.next_clone,
+        };
+        self.doc.page_hydrator = Some(std::sync::Arc::new(std::sync::Mutex::new(hydrator)));
     }
 
     /// Instances of components defined in other files (`remote: true` in the
@@ -1636,14 +1772,14 @@ impl<'a> Ctx<'a> {
             }
         } else {
             n.source_id = n.source_id.as_ref().map(|s| format!("I{prefix};{s}"));
+            if let Some(k) = self.override_keys.get(&src).cloned() {
+                self.override_keys.insert(id, k);
+            }
         }
         n.component.source = Some(src);
         n.component.overrides.clear();
         n.component.props.clear();
         let container = n.kind.is_container();
-        if let Some(k) = self.override_keys.get(&src).cloned() {
-            self.override_keys.insert(id, k);
-        }
         self.doc.nodes.insert(id, n);
         if let Some(p) = self.doc.nodes.get_mut(&parent) {
             p.children.push(id);
@@ -1653,6 +1789,22 @@ impl<'a> Ctx<'a> {
                 self.clone_subtree(c, id, prefix, budget, depth + 1, fast_clone);
             }
         }
+    }
+
+    fn override_key_of(&self, mut id: NodeId) -> Option<&std::sync::Arc<str>> {
+        for _ in 0..8 {
+            if let Some(k) = self.override_keys.get(&id) {
+                return Some(k);
+            }
+            let Some(src) = self.doc.get(id).and_then(|n| n.component.source) else {
+                return None;
+            };
+            if src == id {
+                return None;
+            }
+            id = src;
+        }
+        None
     }
 
     /// Applies `.fig` `symbolOverrides` and then `derivedSymbolData` to the
@@ -1673,7 +1825,7 @@ impl<'a> Ctx<'a> {
                 self.apply_override(t, &e.set, true, targets, done);
             }
         }
-        for d in ov.fast_derived {
+        for d in &ov.fast_derived {
             if let Some(t) = self.resolve_path_cached(inst, &d.path, &mut subtree_maps) {
                 self.apply_fast_derived(t, d);
             }
@@ -1681,48 +1833,69 @@ impl<'a> Ctx<'a> {
     }
 
     fn apply_fast_derived(&mut self, id: NodeId, d: &crate::fig::FastDerivedEntry) {
-        let mut fill_geo = d.fill_geometry.as_ref().map(|arr| {
-            arr.iter()
-                .filter_map(|&(idx, odd)| {
-                    if let Some(cached) = self.blob_cache.get(&(idx, odd)) {
-                        return Some(cached.clone());
-                    }
-                    let blob = self.blobs.get(idx)?;
-                    let parsed = crate::fig::commands_blob_to_path(blob, odd);
-                    if parsed.cmds.is_empty() {
-                        None
-                    } else {
-                        self.blob_cache.insert((idx, odd), parsed.clone());
-                        Some(parsed)
-                    }
-                })
-                .collect::<Vec<Path>>()
-        });
-        let stroke_geo = d.stroke_geometry.as_ref().map(|arr| {
-            arr.iter()
-                .filter_map(|&(idx, odd)| {
-                    if let Some(cached) = self.blob_cache.get(&(idx, odd)) {
-                        return Some(cached.clone());
-                    }
-                    let blob = self.blobs.get(idx)?;
-                    let parsed = crate::fig::commands_blob_to_path(blob, odd);
-                    if parsed.cmds.is_empty() {
-                        None
-                    } else {
-                        self.blob_cache.insert((idx, odd), parsed.clone());
-                        Some(parsed)
-                    }
-                })
-                .collect::<Vec<Path>>()
-        });
+        let skip_geo = match self.doc.get(id).map(|n| &n.kind) {
+            Some(
+                NodeKind::Text(_)
+                | NodeKind::Sticky(_)
+                | NodeKind::ShapeWithText(_)
+                | NodeKind::Connector(_)
+                | NodeKind::Stamp { .. }
+                | NodeKind::Frame(_)
+                | NodeKind::Component(_)
+                | NodeKind::ComponentSet(_)
+                | NodeKind::Instance { .. }
+                | NodeKind::Section
+                | NodeKind::Rectangle,
+            ) => true,
+            Some(_) => false,
+            None => return,
+        };
+        let mut fill_geo = (!skip_geo).then(|| {
+            d.fill_geometry.as_ref().map(|arr| {
+                arr.iter()
+                    .filter_map(|&(idx, odd)| {
+                        if let Some(cached) = self.blob_cache.get(&(idx, odd)) {
+                            return Some(cached.clone());
+                        }
+                        let blob = self.blobs.get(idx)?;
+                        let parsed = crate::fig::commands_blob_to_path(blob, odd);
+                        if parsed.cmds.is_empty() {
+                            None
+                        } else {
+                            self.blob_cache.insert((idx, odd), parsed.clone());
+                            Some(parsed)
+                        }
+                    })
+                    .collect::<Vec<Path>>()
+            })
+        }).flatten();
+        let stroke_geo = (!skip_geo).then(|| {
+            d.stroke_geometry.as_ref().map(|arr| {
+                arr.iter()
+                    .filter_map(|&(idx, odd)| {
+                        if let Some(cached) = self.blob_cache.get(&(idx, odd)) {
+                            return Some(cached.clone());
+                        }
+                        let blob = self.blobs.get(idx)?;
+                        let parsed = crate::fig::commands_blob_to_path(blob, odd);
+                        if parsed.cmds.is_empty() {
+                            None
+                        } else {
+                            self.blob_cache.insert((idx, odd), parsed.clone());
+                            Some(parsed)
+                        }
+                    })
+                    .collect::<Vec<Path>>()
+            })
+        }).flatten();
         let Some(n) = self.doc.get_mut(id) else { return };
         let is_vec_or_bool = matches!(n.kind, NodeKind::Vector { .. } | NodeKind::BooleanOp(_));
         if let Some(sz) = d.size {
             if n.size != sz && !is_vec_or_bool {
-                if d.fill_geometry.is_none() {
+                if d.fill_geometry.is_none() || skip_geo {
                     n.fill_geometry = None;
                 }
-                if d.stroke_geometry.is_none() {
+                if d.stroke_geometry.is_none() || skip_geo {
                     n.stroke_geometry = None;
                 }
             }
@@ -1733,10 +1906,12 @@ impl<'a> Ctx<'a> {
         }
         if let Some(g) = fill_geo.take() {
             if let NodeKind::Vector { paths, network } = &mut n.kind {
-                *paths = g.clone();
+                *paths = g;
                 *network = None;
+                n.fill_geometry = None;
+            } else {
+                n.fill_geometry = Some(g).filter(|g| !g.is_empty());
             }
-            n.fill_geometry = Some(g).filter(|g| !g.is_empty());
         }
         if let Some(g) = stroke_geo {
             n.stroke_geometry = Some(g).filter(|g| !g.is_empty());
@@ -1744,7 +1919,7 @@ impl<'a> Ctx<'a> {
     }
 
     fn node_matches(&self, c: NodeId, g: &str) -> bool {
-        if let Some(k) = self.override_keys.get(&c) {
+        if let Some(k) = self.override_key_of(c) {
             if &**k == g {
                 return true;
             }
@@ -1759,7 +1934,7 @@ impl<'a> Ctx<'a> {
         let mut map = HashMap::new();
         let Some(node) = self.doc.get(root) else { return map };
         for &c in &node.children {
-            let ok = self.override_keys.get(&c);
+            let ok = self.override_key_of(c);
             if let Some(k) = ok {
                 if !map.contains_key(&**k) {
                     map.insert(k.to_string(), c);
@@ -1782,7 +1957,7 @@ impl<'a> Ctx<'a> {
         }
         while let Some(n) = stack.pop() {
             let Some(nn) = self.doc.get(n) else { continue };
-            let ok = self.override_keys.get(&n);
+            let ok = self.override_key_of(n);
             if let Some(k) = ok {
                 if !map.contains_key(&**k) {
                     map.insert(k.to_string(), n);
@@ -1850,13 +2025,26 @@ impl<'a> Ctx<'a> {
         let keep = |k: &str| !derived_only || matches!(k, "size" | "relativeTransform" | "fillGeometry" | "strokeGeometry");
         let has = |k: &str| keep(k) && set.get(k).is_some();
         let is_vec_or_bool = matches!(n.kind, NodeKind::Vector { .. } | NodeKind::BooleanOp(_));
+        let skip_geo = matches!(
+            n.kind,
+            NodeKind::Text(_) | NodeKind::Sticky(_) | NodeKind::ShapeWithText(_) | NodeKind::Connector(_) | NodeKind::Stamp { .. }
+        ) || (self.large_file
+            && matches!(
+                n.kind,
+                NodeKind::Frame(_)
+                    | NodeKind::Component(_)
+                    | NodeKind::ComponentSet(_)
+                    | NodeKind::Instance { .. }
+                    | NodeKind::Section
+                    | NodeKind::Rectangle
+            ));
         if has("size") {
             if let Some(sz) = set.get("size").and_then(vec2) {
                 if n.size != sz && !is_vec_or_bool {
-                    if !has("fillGeometry") {
+                    if !has("fillGeometry") || skip_geo {
                         n.fill_geometry = None;
                     }
-                    if !has("strokeGeometry") {
+                    if !has("strokeGeometry") || skip_geo {
                         n.stroke_geometry = None;
                     }
                 }
@@ -1868,16 +2056,24 @@ impl<'a> Ctx<'a> {
                 n.transform = t;
             }
         }
-        if has("fillGeometry") {
+        if has("fillGeometry") && !skip_geo {
             let g = parse_geometry_cached(farr(set, "fillGeometry"), &mut self.path_cache, &mut self.blob_cache, self.blobs);
             if let NodeKind::Vector { paths, network } = &mut n.kind {
-                *paths = g.clone();
-                // the new outline replaces what the network described
-                *network = None;
+                if self.large_file {
+                    *paths = g;
+                    *network = None;
+                    n.fill_geometry = None;
+                } else {
+                    *paths = g.clone();
+                    // the new outline replaces what the network described
+                    *network = None;
+                    n.fill_geometry = Some(g).filter(|g| !g.is_empty());
+                }
+            } else {
+                n.fill_geometry = Some(g).filter(|g| !g.is_empty());
             }
-            n.fill_geometry = Some(g).filter(|g| !g.is_empty());
         }
-        if has("strokeGeometry") {
+        if has("strokeGeometry") && !skip_geo {
             n.stroke_geometry =
                 Some(parse_geometry_cached(farr(set, "strokeGeometry"), &mut self.path_cache, &mut self.blob_cache, self.blobs)).filter(|g| !g.is_empty());
         }
@@ -2198,6 +2394,112 @@ impl<'a> Ctx<'a> {
             }
         }
         swapped
+    }
+}
+
+struct DeferredFigHydrator {
+    pending_by_page: HashMap<NodeId, Vec<NodeId>>,
+    hydrated_pages: HashSet<NodeId>,
+    targets: BTreeMap<NodeId, NodeId>,
+    done: BTreeSet<NodeId>,
+    ids: BTreeMap<String, NodeId>,
+    overrides: BTreeMap<NodeId, Overrides>,
+    override_keys: HashMap<NodeId, std::sync::Arc<str>>,
+    scales: BTreeMap<NodeId, f32>,
+    path_cache: HashMap<String, Path>,
+    blob_cache: HashMap<(usize, bool), Path>,
+    expanded_comps: HashSet<NodeId>,
+    next_clone: u64,
+}
+
+impl std::fmt::Debug for DeferredFigHydrator {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DeferredFigHydrator")
+            .field("pending_pages", &self.pending_by_page.len())
+            .field("hydrated_pages", &self.hydrated_pages.len())
+            .finish()
+    }
+}
+
+impl designos_doc::PageHydrator for DeferredFigHydrator {
+    fn hydrate_page(&mut self, doc: &mut Document, page: NodeId) -> bool {
+        if !self.hydrated_pages.insert(page) {
+            return false;
+        }
+        let Some(insts) = self.pending_by_page.remove(&page) else {
+            return false;
+        };
+        if insts.is_empty() {
+            return false;
+        }
+        let next_clone = self.next_clone.max(doc.peek_next_id().0);
+        let taken_doc = std::mem::take(doc);
+        let mut cx = Ctx {
+            doc: taken_doc,
+            ids: std::mem::take(&mut self.ids),
+            instances: Vec::new(),
+            unresolved: Vec::new(),
+            overrides: std::mem::take(&mut self.overrides),
+            rest_overrides: Vec::new(),
+            override_keys: std::mem::take(&mut self.override_keys),
+            scales: std::mem::take(&mut self.scales),
+            pending_swaps: Vec::new(),
+            component_keys: BTreeMap::new(),
+            library_keys: BTreeMap::new(),
+            proto: Vec::new(),
+            overlay_props: BTreeMap::new(),
+            flow_pages: Vec::new(),
+            path_cache: std::mem::take(&mut self.path_cache),
+            blob_cache: std::mem::take(&mut self.blob_cache),
+            blobs: &[],
+            fast_derived_map: None,
+            large_file: true,
+            expanded_comps: std::mem::take(&mut self.expanded_comps),
+            next_clone,
+            has_connectors: false,
+            connectors: Vec::new(),
+            deferred_pending: None,
+        };
+        for inst in insts {
+            if self.targets.contains_key(&inst) {
+                cx.expand_rec(inst, &self.targets, &mut self.done);
+            } else if !self.done.contains(&inst) {
+                cx.apply_overrides(inst, &self.targets, &mut self.done);
+            }
+        }
+        if cx.next_clone > 1 {
+            cx.doc.reserve_ids(NodeId(cx.next_clone - 1));
+        }
+        self.next_clone = cx.next_clone;
+        *doc = cx.doc;
+        if !self.pending_by_page.is_empty() {
+            self.ids = cx.ids;
+            self.overrides = cx.overrides;
+            self.override_keys = cx.override_keys;
+            self.scales = cx.scales;
+            self.path_cache = cx.path_cache;
+            self.blob_cache = cx.blob_cache;
+            self.expanded_comps = cx.expanded_comps;
+        } else {
+            self.targets.clear();
+            self.done.clear();
+        }
+        true
+    }
+
+    fn hydrate_all(&mut self, doc: &mut Document) -> bool {
+        let pages: Vec<NodeId> = self.pending_by_page.keys().copied().collect();
+        let mut any = false;
+        for page in pages {
+            if self.hydrate_page(doc, page) {
+                any = true;
+            }
+        }
+        any
+    }
+
+    fn is_hydrated(&self, page: NodeId) -> bool {
+        self.hydrated_pages.contains(&page) || !self.pending_by_page.contains_key(&page)
     }
 }
 

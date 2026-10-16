@@ -87,9 +87,13 @@ impl Shell {
                 shell.app.canvas.gpu.set_max_texture(max);
             }
         }
-        // GPU canvas on by default; screenshots stay on the deterministic CPU path unless --gpu
+        // GPU canvas on by default; small test fixture screenshots stay on the deterministic CPU path unless --gpu
         let saved = library.as_deref().and_then(|l| crate::comments::settings::load_flag(l, "use_gpu"));
-        shell.app.canvas.gpu.pref = if screenshot { gpu_flag } else { gpu_flag || saved.unwrap_or(true) };
+        shell.app.canvas.gpu.pref = if screenshot {
+            gpu_flag || shell.app.doc.nodes.len() > 5_000
+        } else {
+            gpu_flag || saved.unwrap_or(true)
+        };
         shell.app.tabs.always_visible = true;
         if shell.app.home.is_none() {
             let mut tabs = std::mem::take(&mut shell.app.tabs);
@@ -145,6 +149,7 @@ impl Shell {
                 |top: bool| app.doc.nodes.values().find(|n| &n.name == name && (!top || n.parent.is_some_and(|p| app.doc.pages.contains(&p)))).map(|n| n.id);
             if let Some(id) = named(true).or_else(|| named(false)) {
                 if let Some(pg) = app.doc.page_of(id) {
+                    app.doc.ensure_page_hydrated(pg);
                     app.page = pg;
                 }
                 app.selection = vec![id];
@@ -193,6 +198,7 @@ impl Shell {
             let found = app.doc.nodes.values().find(|n| &n.name == name && matches!(n.kind, designos_doc::NodeKind::Text(_))).map(|n| n.id);
             if let Some(id) = found {
                 if let Some(pg) = app.doc.page_of(id) {
+                    app.doc.ensure_page_hydrated(pg);
                     app.page = pg;
                 }
                 canvas::interact::begin_text_edit(&mut app, id);

@@ -133,18 +133,52 @@ fn feeds_boolean(n: &Node) -> bool {
     matches!(n.kind, NodeKind::BooleanOp(_) | NodeKind::Group)
 }
 
+fn hash_path_slice(paths: &[d::Path], h: &mut IdHasher) {
+    paths.len().hash(h);
+    for p in paths.iter().take(4) {
+        (p.cmds.len(), matches!(p.fill_rule, d::FillRule::EvenOdd)).hash(h);
+        let step = (p.cmds.len() / 8).max(1);
+        for cmd in p.cmds.iter().step_by(step).take(12) {
+            match cmd {
+                d::PathCmd::MoveTo(a) => (1u8, fbits(a.x), fbits(a.y)).hash(h),
+                d::PathCmd::LineTo(a) => (2u8, fbits(a.x), fbits(a.y)).hash(h),
+                d::PathCmd::QuadTo(a, b) => (3u8, fbits(a.x), fbits(a.y), fbits(b.x), fbits(b.y)).hash(h),
+                d::PathCmd::CubicTo(a, b, c) => (4u8, fbits(a.x), fbits(a.y), fbits(b.x), fbits(b.y), fbits(c.x), fbits(c.y)).hash(h),
+                d::PathCmd::Close => 5u8.hash(h),
+            }
+        }
+    }
+}
+
 impl GeomSrc {
     fn shape_hash(n: &Node, bucket: i32, font_gen: usize) -> u64 {
         let mut h = IdHasher::default();
         let canonical_frame = NodeKind::Frame(d::FrameProps::default());
         let disc = if is_frame_like(&n.kind) { std::mem::discriminant(&canonical_frame) } else { std::mem::discriminant(&n.kind) };
         (bucket, font_gen, fbits(n.size.x), fbits(n.size.y), n.corner_radii.map(fbits), fbits(n.corner_smoothing), fbits(n.stroke.weight), disc).hash(&mut h);
+        if let Some(fg) = &n.fill_geometry {
+            1u8.hash(&mut h);
+            hash_path_slice(fg, &mut h);
+        }
+        if let Some(sg) = &n.stroke_geometry {
+            2u8.hash(&mut h);
+            hash_path_slice(sg, &mut h);
+        }
         match &n.kind {
             NodeKind::Text(tp) => {
                 (&tp.content, fbits(tp.style.font_size), &tp.style.font_family, tp.style.font_weight, tp.runs.len()).hash(&mut h);
             }
             NodeKind::Vector { paths, .. } => {
-                (paths.len(), paths.first().map(|p| p.cmds.len()).unwrap_or(0)).hash(&mut h);
+                hash_path_slice(paths, &mut h);
+            }
+            NodeKind::Star { count, inner_ratio } => {
+                (*count, fbits(*inner_ratio)).hash(&mut h);
+            }
+            NodeKind::Polygon { count } => {
+                count.hash(&mut h);
+            }
+            NodeKind::Ellipse(arc) => {
+                (fbits(arc.start), fbits(arc.end), fbits(arc.inner_radius)).hash(&mut h);
             }
             _ => {}
         }
@@ -415,7 +449,7 @@ impl GeomCache {
         let src = Rc::new(GeomSrc::build(doc, n, false));
         if let Some(h) = shared_key {
             let bucket_vec = self.shared.entry(h).or_default();
-            if bucket_vec.len() < 8 {
+            if bucket_vec.len() < 16 {
                 bucket_vec.push((src.clone(), geom.clone()));
             }
         }
@@ -549,5 +583,52 @@ mod tests {
         assert_eq!(cache.shared_hits, 2);
         assert!(Rc::ptr_eq(&gt1, &gt2));
         assert!(Rc::ptr_eq(&gv1, &gv2));
+    }
+
+    #[test]
+    fn distinct_vector_paths_do_not_collide_in_shape_hash() {
+        let mut doc = Document::new("icons");
+        let page = doc.add_page("Page 1");
+        let mut originals = Vec::new();
+        let mut clones = Vec::new();
+
+        // Create 20 distinct 24x24 vector icons that all have 1 path with 5 commands.
+        for i in 0..20 {
+            let offset = (i as f32) * 1.25 + 1.0;
+            let path = Path {
+                cmds: vec![
+                    PathCmd::MoveTo(Vec2::new(offset, 2.0)),
+                    PathCmd::LineTo(Vec2::new(24.0 - offset, 4.0)),
+                    PathCmd::LineTo(Vec2::new(12.0, 22.0 - offset * 0.2)),
+                    PathCmd::LineTo(Vec2::new(2.0, 12.0 + offset * 0.3)),
+                    PathCmd::Close,
+                ],
+                fill_rule: d::FillRule::NonZero,
+            };
+            let id1 = doc.alloc_id();
+            let mut n1 = Node::new(id1, NodeKind::Vector { paths: vec![path.clone()], network: None });
+            n1.size = Vec2::new(24.0, 24.0);
+            doc.insert(page, n1).unwrap();
+            originals.push(id1);
+
+            let id2 = doc.alloc_id();
+            let mut n2 = Node::new(id2, NodeKind::Vector { paths: vec![path], network: None });
+            n2.size = Vec2::new(24.0, 24.0);
+            doc.insert(page, n2).unwrap();
+            clones.push(id2);
+        }
+
+        let mut cache = GeomCache::new();
+        for &id in &originals {
+            let _ = cache.get(&doc, doc.get(id).unwrap(), 0, 1);
+        }
+        assert_eq!(cache.builds, 20);
+        for (&orig, &clone) in originals.iter().zip(clones.iter()) {
+            let g_orig = cache.get(&doc, doc.get(orig).unwrap(), 0, 1);
+            let g_clone = cache.get(&doc, doc.get(clone).unwrap(), 0, 1);
+            assert!(Rc::ptr_eq(&g_orig, &g_clone));
+        }
+        assert_eq!(cache.builds, 20);
+        assert_eq!(cache.shared_hits, 20);
     }
 }

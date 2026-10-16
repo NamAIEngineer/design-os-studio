@@ -28,10 +28,10 @@ Open and save 723,136-record enterprise Figma `.fig` v106 binary archives in ~1.
 
 <p align="center">
   <a href="https://jangtrinh.github.io/design-os-studio/#videos">
-    <img src="docs/videos/designos-studio-launch-preview.gif" alt="DESIGN:OS Studio One-Shape UI Motion and Real Studio Captures 60fps Launch Film Preview" width="640">
+    <img src="docs/videos/designos-studio-launch-preview.gif" alt="DESIGN:OS Studio Native GPU Canvas, Agentic PTY Chat, Live Variables Mode Switching, and Dev Mode" width="640">
   </a>
   <br>
-  <sub><b>Embedded Launch Motion Preview (<code>1440×1440 @ 60fps</code>):</b> Click to stream all 3 Master Launch Motion Films on <a href="https://jangtrinh.github.io/design-os-studio/#videos">GitHub Pages</a> or open <a href="docs/videos/01-designos-studio-launch-hero.mp4"><code>01-designos-studio-launch-hero.mp4</code></a> (`7.1 MB`).</sub>
+  <sub><b>Interactive Desktop Overview:</b> Native Metal/Vulkan/DX12 canvas, Agentic PTY Chat UI, Live Variables Mode Switching (<code>Light / Dark</code>), <code>⌘K</code> AI Synthesis, and 5-target Dev Mode codegen on <a href="https://jangtrinh.github.io/design-os-studio/#videos">GitHub Pages</a>.</sub>
 </p>
 
 ---
@@ -131,159 +131,129 @@ Open your project in your AI coding agent (or inside the Studio's `Agents` left-
 ---
 
 <a id="video-showcase"></a>
-## Video Showcase (`1440×1440 @ 60fps` Master Launch Films + 12-Part A-to-Z Micro-Interactions Deep-Dive)
+## Interactive Functional Showcase — 12 Core Capabilities & Micro-Interactions (`#1..#100`)
 
-### Part A — 3 Master Launch Motion Films (`1440×1440 @ 60fps` · One-Shape UI Motion + Real Studio Assets)
+Every one of the **100 Figma A-to-Z Micro-Interactions (`#1..#100`)** runs natively in 100% Rust (`wgpu` + `egui` + `designos-doc`) and is captured below directly from live `designos-studio` desktop workflows.
 
-Built with the `design-os-svg-animation` HyperFrames v2 deterministic frame-seeking pipeline (`window.seek(t)`, closed-form 2nd-order step-response springs, `4× subframe tmix` motion blur, and 28-beat choreography @ `100.60 BPM`).
+### 01. Auto-Layout 5.0 & Edge Sizing (`#10..#15`)
 
-| Film | MP4 (`1440×1440 @ 60fps`, `4× tmix`) | 28-Beat Contact Sheet (`100.60 BPM`) | Highlights |
-| :--- | :--- | :--- | :--- |
-| **01 · Launch Hero** | [`docs/videos/01-designos-studio-launch-hero.mp4`](docs/videos/01-designos-studio-launch-hero.mp4) (`7.1 MB`) | [`01-beat-contact-sheet.png`](docs/videos/01-designos-studio-launch-hero-beat-contact-sheet.png) | `723,136` Kiwi records load in `1.54s` on Metal, UI3 Dark Chrome, Agentic PTY Chat, Live Variables Mode Switching (`Light / Dark`), `⌘K` AI Synth, Components & Dev Mode |
-| **02 · 100/100 Micro-Interactions** | [`docs/videos/02-figma-100-micro-interactions.mp4`](docs/videos/02-figma-100-micro-interactions.mp4) (`6.8 MB`) | [`02-beat-contact-sheet.png`](docs/videos/02-figma-100-micro-interactions-beat-contact-sheet.png) | Auto-Layout 5.0 edge double-click `Fixed -> Hug -> Fill`, CSS Grid track pills, Smart Selection ring swaps, Corner/Arc/Star handles, Vector Network tangents & Scale Tool (`K`) |
-| **03 · Agent-First & Dev Mode** | [`docs/videos/03-agent-first-specs-and-devmode.mp4`](docs/videos/03-agent-first-specs-and-devmode.mp4) (`5.8 MB`) | [`03-beat-contact-sheet.png`](docs/videos/03-agent-first-specs-and-devmode-beat-contact-sheet.png) | 22-tool `designos-mcp` server, Claude/Codex/Antigravity PTY Chat, Variables & Mode Switching (`Light / Dark`), Multi-Edit (`Q`), 5-target Dev Mode codegen & Prototype flows |
+- **On-canvas gap & padding handles:** Drag pink gap handles (`8px -> 36px`) or click the inline pill to type exact pixel values directly on the canvas.
+- **Modifier-driven padding symmetry:** Hold `⌥` while dragging a padding handle to mirror opposite sides (`Top+Bottom` or `Left+Right`), or `⇧⌥` to adjust all four edges uniformly (`16px -> 44px`).
+- **Tactile edge sizing cycle:** Double-click any frame edge to toggle `Fixed <-> Hug Contents`, or `⌥`-double-click to set `Fill Container` without leaving the viewport.
 
-### Part B — 12 × 30s Real-Canvas A-to-Z Micro-Interactions Deep-Dive Videos (`16:9` `1920×1080` & `9:16` `1080×1920` @ `60fps`)
+<p align="center">
+  <img src="docs/videos/micro-01-autolayout-5-16x9.gif" width="100%" alt="01 — Auto-Layout 5.0 gap and padding scrubbing, inline pill input, and edge Fixed to Hug to Fill cycling">
+</p>
 
-Every one of the **100 Figma A-to-Z Micro-Interactions (`#1..#100`)** is implemented in native Rust + `wgpu`/`egui` and proven by **12 × 30-second (`29.82s` = 50 beats @ `100.60 BPM`) Real-Canvas motion films** rendered in both **16:9 Widescreen (`1920×1080`)** and **9:16 Vertical (`1080×1920`)** from **72 real sequential `designos-studio` captures** (`Design/marketing/screenshots/micro/m01..m12-step1..6.png`, zero fake mockups), bookended by an Apple Keynote `SF Pro Rounded` Intro Card and GitHub Repo Outro Card (`github.com/jangtrinh/design-os-studio`).
+### 02. 2D CSS Grid Tracks & Cell Span (`#16..#18`)
 
-| Suite | Feature Title | 16:9 Widescreen (`GIF` / `MP4`) | 9:16 Vertical (`GIF` / `MP4`) | Continuous Real-Canvas Interaction Sequence |
-| :--- | :--- | :--- | :--- | :--- |
-| **M01** | **Auto-Layout 5.0 & Edge Sizing** | [`16x9.gif`](docs/videos/micro-01-autolayout-5-16x9.gif) · [`MP4`](docs/videos/micro-01-autolayout-5-16x9.mp4) | [`9x16.gif`](docs/videos/micro-01-autolayout-5-9x16.gif) · [`MP4`](docs/videos/micro-01-autolayout-5-9x16.mp4) | Pink gap drag (`8px -> 36px`), inline gap input, padding drag (`16px -> 44px`), `⌥` mirror, edge double-click `Fixed -> Hug -> Fill` |
-| **M02** | **2D CSS Grid Tracks & Cell Span** | [`16x9.gif`](docs/videos/micro-02-css-grid-16x9.gif) · [`MP4`](docs/videos/micro-02-css-grid-16x9.mp4) | [`9x16.gif`](docs/videos/micro-02-css-grid-9x16.gif) · [`MP4`](docs/videos/micro-02-css-grid-9x16.mp4) | Column track pill `1fr -> 220px -> Hug`, row track sizing, column gutter drag (`12px -> 36px`), child span `2x1 -> 2x2` |
-| **M03** | **Smart Selection & One-Click Tidy Up** | [`16x9.gif`](docs/videos/micro-03-smart-selection-16x9.gif) · [`MP4`](docs/videos/micro-03-smart-selection-16x9.mp4) | [`9x16.gif`](docs/videos/micro-03-smart-selection-9x16.gif) · [`MP4`](docs/videos/micro-03-smart-selection-9x16.mp4) | Multi-select 3 uneven cards, click `Tidy up` (`24px` equal gaps), drag pink gap bar (`14px -> 42px`), drag pink ring handle to swap cards |
-| **M04** | **Parametric Arc, Donut, Star & Polygon** | [`16x9.gif`](docs/videos/micro-04-shape-controls-16x9.gif) · [`MP4`](docs/videos/micro-04-shape-controls-16x9.mp4) | [`9x16.gif`](docs/videos/micro-04-shape-controls-9x16.gif) · [`MP4`](docs/videos/micro-04-shape-controls-9x16.mp4) | Sweep handle (`90° -> 330°`), inner donut ratio (`35% -> 76%`), start angle (`0° -> 65°`), star inner ratio & point count (`5 -> 9 pts`) |
-| **M05** | **Vector Network & Bezier Tangents** | [`16x9.gif`](docs/videos/micro-05-vector-network-16x9.gif) · [`MP4`](docs/videos/micro-05-vector-network-16x9.mp4) | [`9x16.gif`](docs/videos/micro-05-vector-network-9x16.gif) · [`MP4`](docs/videos/micro-05-vector-network-9x16.mp4) | Enter Vector Edit (`Enter`), drag cubic Bezier tangent, `⌘`-drag cusp, click midpoint diamond (`t = 0.5`), `⇧⌫` heal-delete vertex |
-| **M06** | **Deep-Hit Layer Picker & Eyedropper Loupe** | [`16x9.gif`](docs/videos/micro-06-layer-eyedropper-16x9.gif) · [`MP4`](docs/videos/micro-06-layer-eyedropper-16x9.mp4) | [`9x16.gif`](docs/videos/micro-06-layer-eyedropper-9x16.gif) · [`MP4`](docs/videos/micro-06-layer-eyedropper-9x16.mp4) | `⌘`-Right-Click overlapping stack, filter layer tree, cycle status badge (`Ready -> In Progress -> Needs Review`), Eyedropper `Tab` (`HEX -> RGB -> HSL`) |
-| **M07** | **Dev Mode Box-Model & 5-Target Codegen** | [`16x9.gif`](docs/videos/micro-07-devmode-boxmodel-16x9.gif) · [`MP4`](docs/videos/micro-07-devmode-boxmodel-16x9.mp4) | [`9x16.gif`](docs/videos/micro-07-devmode-boxmodel-9x16.gif) · [`MP4`](docs/videos/micro-07-devmode-boxmodel-9x16.mp4) | `⇧D` emerald padding (`24px`) & orange gap (`16px`) overlay, plus live switching across `React`, `Tailwind v4`, `CSS`, `SwiftUI`, and `Compose` |
-| **M08** | **Proportional Scale Tool (`K`) & Navigation** | [`16x9.gif`](docs/videos/micro-08-scale-navigation-16x9.gif) · [`MP4`](docs/videos/micro-08-scale-navigation-16x9.mp4) | [`9x16.gif`](docs/videos/micro-08-scale-navigation-9x16.gif) · [`MP4`](docs/videos/micro-08-scale-navigation-9x16.mp4) | Activate Scale Tool (`K`), drag proportional scale (`1.0x -> 1.85x`), click multiplier pills (`1.25x / 1.5x / 2.0x`), and `⇧1` Zoom-to-Fit |
-| **M09** | **Inspector Scrubbing, Math (`100+24`) & Hex Shorthand (`#1..#9`)** | [`16x9.gif`](docs/videos/micro-09-inspector-math-16x9.gif) · [`MP4`](docs/videos/micro-09-inspector-math-16x9.mp4) | [`9x16.gif`](docs/videos/micro-09-inspector-math-9x16.gif) · [`MP4`](docs/videos/micro-09-inspector-math-9x16.mp4) | Label drag-scrub (`240px -> 420px`), inline math (`100+24`), `10,20,10,20` padding shorthand, Aspect Ratio Lock, `#1..#9` hex & `0..9` opacity |
-| **M10** | **Selection Traversal, `Cmd+D` Offset Memory & 4-Corner Radius (`#19..#36`)** | [`16x9.gif`](docs/videos/micro-10-selection-corner-16x9.gif) · [`MP4`](docs/videos/micro-10-selection-corner-16x9.mp4) | [`9x16.gif`](docs/videos/micro-10-selection-corner-9x16.gif) · [`MP4`](docs/videos/micro-10-selection-corner-9x16.mp4) | `Enter` / `⇧Enter` / `Tab` selection traversal, `⌥`-drag + `⌘D` offset memory, `⌥`-hover red distance guides, and 4-corner radius (`4px -> 44px`) |
-| **M11** | **Typography Auto-Height Fit, Tracking & Multi-Edit (`Q`) (`#55..#70`)** | [`16x9.gif`](docs/videos/micro-11-typography-multiedit-16x9.gif) · [`MP4`](docs/videos/micro-11-typography-multiedit-16x9.mp4) | [`9x16.gif`](docs/videos/micro-11-typography-multiedit-9x16.gif) · [`MP4`](docs/videos/micro-11-typography-multiedit-9x16.mp4) | Double-click text handle auto-height fit, `⌥←`/`→` tracking & `⌥↑`/`↓` leading nudges, `Q` Multi-Edit across matching layers |
-| **M12** | **Components, Variables (`=`) Live Mode Switch & Prototype (`#71..#100`)** | [`16x9.gif`](docs/videos/micro-12-components-variables-16x9.gif) · [`MP4`](docs/videos/micro-12-components-variables-16x9.mp4) | [`9x16.gif`](docs/videos/micro-12-components-variables-9x16.gif) · [`MP4`](docs/videos/micro-12-components-variables-9x16.mp4) | `⌥⌘K` component & variant set matrix, `=` variable alias binding, live `Light` / `Dark` mode switch, and Prototype noodle triggers |
+- **Interactive track header pills:** Click column or row track headers to cycle sizing modes between fractional units (`1fr`), fixed pixels (`220px`), and content-driven `Hug`.
+- **Direct gutter & track scrubbing:** Drag column and row gutter bars on canvas (`12px -> 36px`) with live multi-cell reflow across the 2D grid container.
+- **Multi-cell spanning handles:** Drag any child frame's bottom-right grid span handle to span across multiple columns and rows (`2×1 -> 2×2`) while preserving responsive track constraints.
 
-<table>
-  <tr>
-    <td width="68%" valign="top" align="center">
-      <a href="docs/videos/micro-01-autolayout-5-16x9.mp4"><img src="docs/videos/micro-01-autolayout-5-16x9.gif" alt="M01 16:9 — Auto-Layout 5.0 & Edge Sizing" width="540"></a><br>
-      <sub><b>M01 (16:9) · Auto-Layout 5.0 &amp; Edge Sizing (`#10..#15`)</b> — Continuous real-canvas gap &amp; padding drag (`8px -> 36px`), inline input, and `Fixed -> Hug -> Fill` cycle.</sub>
-    </td>
-    <td width="32%" valign="top" align="center">
-      <a href="docs/videos/micro-01-autolayout-5-9x16.mp4"><img src="docs/videos/micro-01-autolayout-5-9x16.gif" alt="M01 9:16 — Auto-Layout 5.0 & Edge Sizing" height="304"></a><br>
-      <sub><b>M01 (9:16) · Vertical Mobile Reel</b></sub>
-    </td>
-  </tr>
-  <tr>
-    <td width="68%" valign="top" align="center">
-      <a href="docs/videos/micro-02-css-grid-16x9.mp4"><img src="docs/videos/micro-02-css-grid-16x9.gif" alt="M02 16:9 — 2D CSS Grid Tracks & Cell Span" width="540"></a><br>
-      <sub><b>M02 (16:9) · 2D CSS Grid Tracks &amp; Cell Span (`#16..#18`)</b> — Track header pills (`1fr -> 220px -> Hug`), gutter drag (`12px -> 36px`), and `2x1 -> 2x2` cell span.</sub>
-    </td>
-    <td width="32%" valign="top" align="center">
-      <a href="docs/videos/micro-02-css-grid-9x16.mp4"><img src="docs/videos/micro-02-css-grid-9x16.gif" alt="M02 9:16 — 2D CSS Grid Tracks & Cell Span" height="304"></a><br>
-      <sub><b>M02 (9:16) · Vertical Mobile Reel</b></sub>
-    </td>
-  </tr>
-  <tr>
-    <td width="68%" valign="top" align="center">
-      <a href="docs/videos/micro-03-smart-selection-16x9.mp4"><img src="docs/videos/micro-03-smart-selection-16x9.gif" alt="M03 16:9 — Smart Selection & One-Click Tidy Up" width="540"></a><br>
-      <sub><b>M03 (16:9) · Smart Selection &amp; One-Click Tidy Up (`#19..#21`)</b> — One-click `Tidy up`, pink gap bar drag (`14px -> 42px`), and pink ring card swap.</sub>
-    </td>
-    <td width="32%" valign="top" align="center">
-      <a href="docs/videos/micro-03-smart-selection-9x16.mp4"><img src="docs/videos/micro-03-smart-selection-9x16.gif" alt="M03 9:16 — Smart Selection & One-Click Tidy Up" height="304"></a><br>
-      <sub><b>M03 (9:16) · Vertical Mobile Reel</b></sub>
-    </td>
-  </tr>
-  <tr>
-    <td width="68%" valign="top" align="center">
-      <a href="docs/videos/micro-04-shape-controls-16x9.mp4"><img src="docs/videos/micro-04-shape-controls-16x9.gif" alt="M04 16:9 — Parametric Arc, Donut, Star & Polygon" width="540"></a><br>
-      <sub><b>M04 (16:9) · Parametric Arc, Donut, Star &amp; Polygon (`#30..#32`)</b> — Continuous arc sweep (`90° -> 330°`), donut ratio (`35% -> 76%`), and star point handles (`5 -> 9 pts`).</sub>
-    </td>
-    <td width="32%" valign="top" align="center">
-      <a href="docs/videos/micro-04-shape-controls-9x16.mp4"><img src="docs/videos/micro-04-shape-controls-9x16.gif" alt="M04 9:16 — Parametric Arc, Donut, Star & Polygon" height="304"></a><br>
-      <sub><b>M04 (9:16) · Vertical Mobile Reel</b></sub>
-    </td>
-  </tr>
-  <tr>
-    <td width="68%" valign="top" align="center">
-      <a href="docs/videos/micro-05-vector-network-16x9.mp4"><img src="docs/videos/micro-05-vector-network-16x9.gif" alt="M05 16:9 — Vector Network & Bezier Tangents" width="540"></a><br>
-      <sub><b>M05 (16:9) · Vector Network &amp; Bezier Tangents (`#33..#35`)</b> — Cubic Bezier tangent drag, `⌘`-drag cusp, midpoint subdivide (`t = 0.5`), and `⇧⌫` heal-delete.</sub>
-    </td>
-    <td width="32%" valign="top" align="center">
-      <a href="docs/videos/micro-05-vector-network-9x16.mp4"><img src="docs/videos/micro-05-vector-network-9x16.gif" alt="M05 9:16 — Vector Network & Bezier Tangents" height="304"></a><br>
-      <sub><b>M05 (9:16) · Vertical Mobile Reel</b></sub>
-    </td>
-  </tr>
-  <tr>
-    <td width="68%" valign="top" align="center">
-      <a href="docs/videos/micro-06-layer-eyedropper-16x9.mp4"><img src="docs/videos/micro-06-layer-eyedropper-16x9.gif" alt="M06 16:9 — Deep-Hit Layer Picker & Eyedropper Loupe" width="540"></a><br>
-      <sub><b>M06 (16:9) · Deep-Hit Layer Picker &amp; Eyedropper Loupe (`#36..#45`)</b> — `⌘`-Right-Click stack picker, status badge cycle, and `I` Eyedropper `Tab` format cycle (`HEX -> RGB -> HSL`).</sub>
-    </td>
-    <td width="32%" valign="top" align="center">
-      <a href="docs/videos/micro-06-layer-eyedropper-9x16.mp4"><img src="docs/videos/micro-06-layer-eyedropper-9x16.gif" alt="M06 9:16 — Deep-Hit Layer Picker & Eyedropper Loupe" height="304"></a><br>
-      <sub><b>M06 (9:16) · Vertical Mobile Reel</b></sub>
-    </td>
-  </tr>
-  <tr>
-    <td width="68%" valign="top" align="center">
-      <a href="docs/videos/micro-07-devmode-boxmodel-16x9.mp4"><img src="docs/videos/micro-07-devmode-boxmodel-16x9.gif" alt="M07 16:9 — Dev Mode Box-Model & 5-Target Codegen" width="540"></a><br>
-      <sub><b>M07 (16:9) · Dev Mode Box-Model &amp; 5-Target Codegen (`#46..#47`)</b> — Emerald padding &amp; orange gap overlays with live switching across `React`, `Tailwind v4`, `CSS`, `SwiftUI`, and `Compose`.</sub>
-    </td>
-    <td width="32%" valign="top" align="center">
-      <a href="docs/videos/micro-07-devmode-boxmodel-9x16.mp4"><img src="docs/videos/micro-07-devmode-boxmodel-9x16.gif" alt="M07 9:16 — Dev Mode Box-Model & 5-Target Codegen" height="304"></a><br>
-      <sub><b>M07 (9:16) · Vertical Mobile Reel</b></sub>
-    </td>
-  </tr>
-  <tr>
-    <td width="68%" valign="top" align="center">
-      <a href="docs/videos/micro-08-scale-navigation-16x9.mp4"><img src="docs/videos/micro-08-scale-navigation-16x9.gif" alt="M08 16:9 — Proportional Scale Tool (K) & Navigation" width="540"></a><br>
-      <sub><b>M08 (16:9) · Proportional Scale Tool (`K`) &amp; Navigation (`#48..#54`)</b> — Continuous proportional scale (`1.0x -> 1.85x`) scaling bounds, font size, corner radius, and stroke weight together.</sub>
-    </td>
-    <td width="32%" valign="top" align="center">
-      <a href="docs/videos/micro-08-scale-navigation-9x16.mp4"><img src="docs/videos/micro-08-scale-navigation-9x16.gif" alt="M08 9:16 — Proportional Scale Tool (K) & Navigation" height="304"></a><br>
-      <sub><b>M08 (9:16) · Vertical Mobile Reel</b></sub>
-    </td>
-  </tr>
-  <tr>
-    <td width="68%" valign="top" align="center">
-      <a href="docs/videos/micro-09-inspector-math-16x9.mp4"><img src="docs/videos/micro-09-inspector-math-16x9.gif" alt="M09 16:9 — Inspector Scrubbing, Math (100+24) & Hex Shorthand" width="540"></a><br>
-      <sub><b>M09 (16:9) · Inspector Scrubbing, Math (`100+24`) &amp; Hex Shorthand (`#1..#9`)</b> — Label drag-scrub (`240px -> 420px`), inline math (`100+24`), `10,20,10,20` padding, and `0..9` opacity.</sub>
-    </td>
-    <td width="32%" valign="top" align="center">
-      <a href="docs/videos/micro-09-inspector-math-9x16.mp4"><img src="docs/videos/micro-09-inspector-math-9x16.gif" alt="M09 9:16 — Inspector Scrubbing, Math (100+24) & Hex Shorthand" height="304"></a><br>
-      <sub><b>M09 (9:16) · Vertical Mobile Reel</b></sub>
-    </td>
-  </tr>
-  <tr>
-    <td width="68%" valign="top" align="center">
-      <a href="docs/videos/micro-10-selection-corner-16x9.mp4"><img src="docs/videos/micro-10-selection-corner-16x9.gif" alt="M10 16:9 — Selection Traversal, Cmd+D Offset Memory & 4-Corner Radius" width="540"></a><br>
-      <sub><b>M10 (16:9) · Selection Traversal, `Cmd+D` Offset Memory &amp; 4-Corner Radius (`#19..#36`)</b> — `Enter`/`Tab` traversal, `⌥`-drag + `⌘D` offset memory, and 4-corner radius (`4px -> 44px`).</sub>
-    </td>
-    <td width="32%" valign="top" align="center">
-      <a href="docs/videos/micro-10-selection-corner-9x16.mp4"><img src="docs/videos/micro-10-selection-corner-9x16.gif" alt="M10 9:16 — Selection Traversal, Cmd+D Offset Memory & 4-Corner Radius" height="304"></a><br>
-      <sub><b>M10 (9:16) · Vertical Mobile Reel</b></sub>
-    </td>
-  </tr>
-  <tr>
-    <td width="68%" valign="top" align="center">
-      <a href="docs/videos/micro-11-typography-multiedit-16x9.mp4"><img src="docs/videos/micro-11-typography-multiedit-16x9.gif" alt="M11 16:9 — Typography Auto-Height Fit, Tracking & Multi-Edit (Q)" width="540"></a><br>
-      <sub><b>M11 (16:9) · Typography Auto-Height Fit, Tracking &amp; Multi-Edit (`Q`) (`#55..#70`)</b> — Double-click auto-height fit, `⌥←`/`→` tracking, `⌥↑`/`↓` leading, and `Q` Multi-Edit across matching layers.</sub>
-    </td>
-    <td width="32%" valign="top" align="center">
-      <a href="docs/videos/micro-11-typography-multiedit-9x16.mp4"><img src="docs/videos/micro-11-typography-multiedit-9x16.gif" alt="M11 9:16 — Typography Auto-Height Fit, Tracking & Multi-Edit (Q)" height="304"></a><br>
-      <sub><b>M11 (9:16) · Vertical Mobile Reel</b></sub>
-    </td>
-  </tr>
-  <tr>
-    <td width="68%" valign="top" align="center">
-      <a href="docs/videos/micro-12-components-variables-16x9.mp4"><img src="docs/videos/micro-12-components-variables-16x9.gif" alt="M12 16:9 — Components, Variables (=) Live Mode Switch & Prototype" width="540"></a><br>
-      <sub><b>M12 (16:9) · Components, Variables (`=`) Live Mode Switch &amp; Prototype (`#71..#100`)</b> — `⌥⌘K` component &amp; variant matrix, `=` variable alias binding, and live `Light` / `Dark` mode switch.</sub>
-    </td>
-    <td width="32%" valign="top" align="center">
-      <a href="docs/videos/micro-12-components-variables-9x16.mp4"><img src="docs/videos/micro-12-components-variables-9x16.gif" alt="M12 9:16 — Components, Variables (=) Live Mode Switch & Prototype" height="304"></a><br>
-      <sub><b>M12 (9:16) · Vertical Mobile Reel</b></sub>
-    </td>
-  </tr>
-</table>
+<p align="center">
+  <img src="docs/videos/micro-02-css-grid-16x9.gif" width="100%" alt="02 — 2D CSS Grid column and row track header pills, gutter scrubbing, and multi-cell spanning">
+</p>
+
+### 03. Smart Selection & One-Click Tidy Up (`#19..#21`)
+
+- **One-click `Tidy up` normalization:** Select any group of unevenly spaced cards or layers and click `Tidy up` to snap them into a uniform grid with equalized `24px` gaps.
+- **Uniform gap bar scrubbing:** Drag the pink Smart Selection gap bar between siblings (`14px -> 42px`) to reflow spacing across the entire selection simultaneously.
+- **Pink ring slot swapping:** Drag the centered pink ring handle on any selected item and drop it onto another sibling to swap their positions cleanly without breaking layout alignment.
+
+<p align="center">
+  <img src="docs/videos/micro-03-smart-selection-16x9.gif" width="100%" alt="03 — Smart Selection one-click Tidy up, uniform pink gap scrubbing, and pink ring slot swapping">
+</p>
+
+### 04. Parametric Arc, Donut, Star & Polygon Controls (`#30..#32`)
+
+- **Live ellipse arc & donut handles:** Drag the on-canvas Sweep handle (`90° -> 330°`), inner Ratio handle (`35% -> 76%` donut ring), and Start Angle handle (`0° -> 65°`) for gauges and progress rings.
+- **Parametric star & polygon geometry:** Drag the Star inner-radius handle to sharpen or soften star spikes and scrub the Count handle (`5 -> 9 pts`) with live `Lyon` GPU re-tessellation.
+- **Non-destructive `.fig` v106 preservation:** Parametric arc data (`arcData`) and star/polygon counts serialize losslessly into standard Figma `.fig` v106 archives.
+
+<p align="center">
+  <img src="docs/videos/micro-04-shape-controls-16x9.gif" width="100%" alt="04 — Parametric Arc sweep, Donut inner ratio, Start angle, and Star point count handles">
+</p>
+
+### 05. Vector Network & Bezier Tangents (`#33..#35`)
+
+- **True graph-based Vector Networks:** Press `Enter` on any vector path to edit multi-edge vertices and cubic Bezier control handles (`dx`, `dy`) directly on the GPU canvas.
+- **Asymmetric cusp tangents (`⌘`-drag):** Hold `⌘` while dragging a tangent handle to break mirror symmetry and sculpt sharp corner cusps.
+- **Midpoint subdivision & heal-delete (`⇧⌫`):** Click the live midpoint diamond (`t = 0.5`) on any segment to split it in place, or press `⇧⌫` on a vertex to remove it and heal the surrounding curve continuously.
+
+<p align="center">
+  <img src="docs/videos/micro-05-vector-network-16x9.gif" width="100%" alt="05 — Vector Network cubic Bezier tangent handles, Cmd-drag cusp break, midpoint split, and heal-delete">
+</p>
+
+### 06. Deep-Hit Layer Picker & `7×7` Eyedropper Loupe (`#36..#45`)
+
+- **Overlapping layer stack picker (`⌘`+Right-Click):** `⌘`-Right-Click anywhere on a dense canvas to list every intersecting node in z-order and select deeply nested layers directly.
+- **Layer tree search & workflow status badges:** Filter 100k+ node hierarchies instantly, sweep across lock/visibility icons, and cycle frame status badges (`Ready for Dev -> In Progress -> Needs Review`).
+- **Precision `7×7` Eyedropper (`I` + `Tab`):** Sample live GPU framebuffer pixels through a magnified `7×7` loupe with centered pixel readout, pressing `Tab` to cycle `HEX -> RGB -> HSL` clipboard formats.
+
+<p align="center">
+  <img src="docs/videos/micro-06-layer-eyedropper-16x9.gif" width="100%" alt="06 — Deep-Hit Layer Picker context menu, Layer Tree filter and status badges, and 7x7 Eyedropper loupe">
+</p>
+
+### 07. Dev Mode Box-Model & 5-Target Codegen (`#46..#47`)
+
+- **Interactive box-model visualization (`⇧D`):** Toggle Dev Mode to inspect emerald padding bands (`24px`), orange item-spacing gaps (`16px`), and resolved token aliases directly on the selected frame.
+- **Deterministic 5-target production codegen:** Switch live between **React (JSX)**, **Tailwind v4**, **CSS**, **SwiftUI**, and **Jetpack Compose**—emitting real `display: flex` / `grid`, resolved variable tokens, and exact typography styles.
+- **One-click copy & asset readiness:** Copy production-ready component snippets with instant toast confirmation and inspect exportable vector/raster assets side by side.
+
+<p align="center">
+  <img src="docs/videos/micro-07-devmode-boxmodel-16x9.gif" width="100%" alt="07 — Dev Mode emerald padding and orange gap box-model overlay with 5-target code generation">
+</p>
+
+### 08. Proportional Scale Tool (`K`) & Viewport Navigation (`#48..#62`)
+
+- **Proportional Scale Tool (`K`):** Scale bounding boxes, typography font sizes, line heights, corner radii, strokes, and Auto-Layout padding/gaps proportionally in a single drag (`1.0x -> 1.85x`) or via preset multiplier pills (`1.25x`, `1.5x`, `2.0x`).
+- **Anchor-aware origin scaling:** Choose any of the 9 transform origin anchor points (`Top-Left` through `Center` and `Bottom-Right`) before scaling complex component hierarchies.
+- **Instant viewport choreography:** Navigate massive artboards with `Space`-drag panning, `Z` marquee zoom, `⇧1` Zoom-to-Fit All, `⇧2` Zoom-to-Selection, and `N` / `⇧N` frame-to-frame walking.
+
+<p align="center">
+  <img src="docs/videos/micro-08-scale-navigation-16x9.gif" width="100%" alt="08 — Proportional Scale Tool (K) multiplier HUD, proportional typography and radius scaling, and viewport navigation">
+</p>
+
+### 09. Inspector Numeric Scrubbing, Inline Math & Hex Shorthand (`#1..#9`)
+
+- **Modifier-aware label drag-scrubbing:** Drag any numeric Inspector label (`X`, `Y`, `W`, `H`, `R`, `Gap`, `Padding`) at `1px` default speed, `⇧` for `10px` coarse steps, or `⌥` for `0.1px` sub-pixel precision.
+- **Inline arithmetic & shorthand expressions:** Evaluate `100+24`, `320/2`, or `50%` directly inside Inspector fields, type `10,20,10,20` for 4-edge CSS padding shorthand, and lock aspect ratio (`W/H`) for proportional resizing.
+- **Single-char hex & quick opacity shortcuts:** Expand `#3` to `#333333` or `#f0a` to `#ff00aa` automatically, and press `0..9` (`5` -> `50%`, `00` -> `0%`, `0` -> `100%`) to set layer opacity from the canvas.
+
+<p align="center">
+  <img src="docs/videos/micro-09-inspector-math-16x9.gif" width="100%" alt="09 — Inspector numeric label scrubbing, inline math evaluation, padding shorthand, and hex/opacity shortcuts">
+</p>
+
+### 10. Selection Traversal, `⌘D` Offset Memory & 4-Corner Radius (`#19..#36`)
+
+- **Keyboard hierarchy traversal:** Drill into child layers with `Enter`, climb back to parent frames with `⇧Enter`, and cycle forward or backward across siblings with `Tab` / `⇧Tab`.
+- **Duplicate with offset memory (`⌥`-drag + `⌘D`):** Hold `⌥` while dragging a node to duplicate it with live red distance guides, then press `⌘D` repeatedly to stamp additional copies using the exact delta offset.
+- **On-canvas 4-corner radius handles:** Drag inner corner radius dots to round all corners uniformly (`4px -> 44px`), or hold `⌥` to sculpt a single independent corner (`topLeftRadius`, `topRightRadius`, `bottomRightRadius`, `bottomLeftRadius`).
+
+<p align="center">
+  <img src="docs/videos/micro-10-selection-corner-16x9.gif" width="100%" alt="10 — Keyboard hierarchy traversal, Option-drag and Cmd+D offset memory, red distance guides, and 4-corner radius handles">
+</p>
+
+### 11. Typography Auto-Height Fit, Tracking & Multi-Edit (`Q`) (`#55..#70`)
+
+- **Text box auto-fit handles:** Double-click the bottom or right edge of any text frame to snap its bounds tightly to shaped `cosmic-text` glyph metrics (`Auto-Height` / `Auto-Width`).
+- **Tactile typographic nudging:** Adjust letter-spacing (`⌥←` / `⌥→`), line-height (`⌥↑` / `⌥↓`), font size (`⇧⌘>` / `⇧⌘<`), and weight/style (`⌘B`, `⌘I`, `⌘U`) with immediate GPU glyph re-layout.
+- **Simultaneous Multi-Edit (`Q` / `⌘E`):** Press `Q` to select all matching sibling or component instances across artboards and edit their text content, fills, or typography in lockstep.
+
+<p align="center">
+  <img src="docs/videos/micro-11-typography-multiedit-16x9.gif" width="100%" alt="11 — Typography auto-height fit, Option tracking and leading nudges, and Q Multi-Edit across matching layers">
+</p>
+
+### 12. Components, Live Variables Mode Switch (`=`) & Prototype Flows (`#71..#100`)
+
+- **Components & Variant Set matrices (`⌥⌘K`):** Create reusable master Components, organize purple dashed `ComponentSet` variant grids, swap variant property pills in the Inspector, and jump to master definitions or detach instances (`⌥⌘B`).
+- **Design Variables (`=`) & Live Mode Switching:** Bind fill, stroke, spacing, and radius fields to semantic tokens via the `=` alias picker, and switch collections between `Light` and `Dark` modes with instant scene-graph propagation.
+- **Interactive Prototype noodles & triggers:** Drag blue prototype connection nodes between frames and configure interaction triggers (`On Click`, `On Hover`, `After Delay`) and transitions (`Smart Animate`, `Dissolve`, `Push`).
+
+<p align="center">
+  <img src="docs/videos/micro-12-components-variables-16x9.gif" width="100%" alt="12 — Components and Variant Sets, Variables alias binding and Light/Dark mode switching, and Prototype flow noodles">
+</p>
 
 ---
 

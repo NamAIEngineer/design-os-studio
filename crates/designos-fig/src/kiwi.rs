@@ -139,6 +139,12 @@ impl KiwiValue {
             _ => None,
         }
     }
+    pub fn get_mut(&mut self, name: &str) -> Option<&mut KiwiValue> {
+        match self {
+            KiwiValue::Struct(f) | KiwiValue::Message(f) => f.iter_mut().find(|(n, _)| &**n == name).map(|(_, v)| v),
+            _ => None,
+        }
+    }
     pub fn take_field(&mut self, name: &str) -> Option<KiwiValue> {
         match self {
             KiwiValue::Struct(f) | KiwiValue::Message(f) => {
@@ -236,6 +242,12 @@ impl<'a> Reader<'a> {
         let s = String::from_utf8_lossy(&rest[..n]).into_owned();
         self.pos += n + 1;
         Ok(s)
+    }
+    pub fn skip_string(&mut self) -> Result<()> {
+        let rest = &self.data[self.pos..];
+        let n = rest.iter().position(|&b| b == 0).ok_or(KiwiError::Eof(self.data.len()))?;
+        self.pos += n + 1;
+        Ok(())
     }
 }
 
@@ -375,11 +387,11 @@ impl Schema {
                         .map(|i| &def.fields[i])
                         .or_else(|| def.fields.iter().find(|f| f.value == id))
                         .ok_or_else(|| KiwiError::Bad(format!("unknown field id {id} in {}", def.name)))?;
-                    let val = self.decode_field(f, r, depth, skip_heavy)?;
                     if skip_heavy && matches!(&*f.name, "editInfo" | "derivedTextData" | "derivedImmutableFrameData") {
-                        drop(val);
+                        self.skip_field(f, r, depth)?;
                         continue;
                     }
+                    let val = self.decode_field(f, r, depth, skip_heavy)?;
                     out.push((f.name.clone(), val));
                 }
                 if skip_heavy && out.capacity() > out.len() + 4 {
@@ -388,6 +400,90 @@ impl Schema {
                 Ok(KiwiValue::Message(out))
             }
         }
+    }
+
+    fn skip_def(&self, idx: usize, r: &mut Reader, depth: usize) -> Result<()> {
+        if depth > MAX_DEPTH {
+            return Err(KiwiError::Bad("nesting too deep".into()));
+        }
+        let def = &self.defs[idx];
+        match def.kind {
+            DefKind::Enum => {
+                let _ = r.var_u32()?;
+                Ok(())
+            }
+            DefKind::Struct => {
+                for f in &def.fields {
+                    self.skip_field(f, r, depth)?;
+                }
+                Ok(())
+            }
+            DefKind::Message => {
+                loop {
+                    let id = r.var_u32()?;
+                    if id == 0 {
+                        break;
+                    }
+                    let f = def
+                        .field_by_value
+                        .get(id as usize)
+                        .and_then(|&x| x)
+                        .map(|i| &def.fields[i])
+                        .or_else(|| def.fields.iter().find(|f| f.value == id))
+                        .ok_or_else(|| KiwiError::Bad(format!("unknown field id {id} in {}", def.name)))?;
+                    self.skip_field(f, r, depth)?;
+                }
+                Ok(())
+            }
+        }
+    }
+
+    fn skip_field(&self, f: &Field, r: &mut Reader, depth: usize) -> Result<()> {
+        if !f.is_array {
+            return self.skip_type(f.ty, r, depth + 1);
+        }
+        let n = r.var_u32()? as usize;
+        if f.ty == FieldType::Native(Native::Byte) {
+            let _ = r.take(n)?;
+            return Ok(());
+        }
+        if n > r.remaining() {
+            return Err(KiwiError::Bad(format!("array length {n} exceeds data")));
+        }
+        for _ in 0..n {
+            self.skip_type(f.ty, r, depth + 1)?;
+        }
+        Ok(())
+    }
+
+    fn skip_type(&self, ty: FieldType, r: &mut Reader, depth: usize) -> Result<()> {
+        match ty {
+            FieldType::Native(n) => match n {
+                Native::Bool | Native::Byte => {
+                    let _ = r.byte()?;
+                }
+                Native::Int => {
+                    let _ = r.var_i32()?;
+                }
+                Native::Uint => {
+                    let _ = r.var_u32()?;
+                }
+                Native::Float => {
+                    let _ = r.var_f32()?;
+                }
+                Native::String => {
+                    r.skip_string()?;
+                }
+                Native::Int64 => {
+                    let _ = r.var_i64()?;
+                }
+                Native::Uint64 => {
+                    let _ = r.var_u64()?;
+                }
+            },
+            FieldType::Def(i) => self.skip_def(i, r, depth)?,
+        }
+        Ok(())
     }
 
     fn decode_field(&self, f: &Field, r: &mut Reader, depth: usize, skip_heavy: bool) -> Result<KiwiValue> {
@@ -813,5 +909,56 @@ mod tests {
         for n in 0..bytes.len() {
             assert!(s.decode_message(0, &bytes[..n]).is_err());
         }
+    }
+
+    #[test]
+    fn skip_heavy_fields_without_allocation() {
+        let mut b = SchemaBuilder::new();
+        let edit_info = b.define("EditInfo", DefKind::Message);
+        b.field(edit_info, "userId", FieldType::Native(Native::String), false, 1);
+        b.field(edit_info, "createdAt", FieldType::Native(Native::Uint), false, 2);
+
+        let derived_text = b.define("DerivedTextData", DefKind::Message);
+        b.field(derived_text, "fontDigest", FieldType::Native(Native::Byte), true, 1);
+        b.field(derived_text, "baselines", FieldType::Native(Native::Float), true, 2);
+
+        let node_change = b.define("NodeChange", DefKind::Message);
+        b.field(node_change, "name", FieldType::Native(Native::String), false, 1);
+        b.field(node_change, "editInfo", FieldType::Def(edit_info), false, 2);
+        b.field(node_change, "derivedTextData", FieldType::Def(derived_text), false, 3);
+        b.field(node_change, "opacity", FieldType::Native(Native::Float), false, 4);
+
+        let root = b.define("Message", DefKind::Message);
+        b.field(root, "nodeChanges", FieldType::Def(node_change), true, 1);
+        let s = b.build();
+
+        let msg = KiwiValue::Message(vec![(
+            "nodeChanges".into(),
+            KiwiValue::Array(vec![KiwiValue::Message(vec![
+                ("name".into(), KiwiValue::String("Button Label".into())),
+                (
+                    "editInfo".into(),
+                    KiwiValue::Message(vec![
+                        ("userId".into(), KiwiValue::String("user-999".into())),
+                        ("createdAt".into(), KiwiValue::Uint(1_700_000_000)),
+                    ]),
+                ),
+                (
+                    "derivedTextData".into(),
+                    KiwiValue::Message(vec![
+                        ("fontDigest".into(), KiwiValue::Bytes(vec![1, 2, 3, 4, 5])),
+                        ("baselines".into(), KiwiValue::Array(vec![KiwiValue::Float(12.0), KiwiValue::Float(28.0)])),
+                    ]),
+                ),
+                ("opacity".into(), KiwiValue::Float(0.85)),
+            ])]),
+        )]);
+        let bytes = s.encode_message(root, &msg).unwrap();
+        let filtered = s.decode_def(root, &mut Reader::new(&bytes), 0, true).unwrap();
+        let nc = &filtered.get("nodeChanges").unwrap().as_array().unwrap()[0];
+        assert_eq!(nc.get("name"), Some(&KiwiValue::String("Button Label".into())));
+        assert!(nc.get("editInfo").is_none());
+        assert!(nc.get("derivedTextData").is_none());
+        assert_eq!(nc.get("opacity"), Some(&KiwiValue::Float(0.85)));
     }
 }
