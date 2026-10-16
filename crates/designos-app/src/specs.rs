@@ -941,19 +941,22 @@ impl SpecsState {
 // Spec Format v2 Parsers (`spec.manifest.json`, `PRD.md`, `US-*.md`, `ui-contract.md`, `gates/*.md`)
 // ─────────────────────────────────────────────────────────────────────────────
 
+/// Everything a **"Copy cho AI"** citation block quotes: the spec excerpt, where it lives, and the user's request.
+pub struct CopyForAiCitation<'a> {
+    pub quoted_text: &'a str,
+    pub file_path: &'a str,
+    pub line_start: usize,
+    pub line_end: usize,
+    pub section_id: &'a str,
+    pub section_title: &'a str,
+    pub reader_view: &'a str,
+    pub project_name: &'a str,
+    pub request: &'a str,
+}
+
 /// Formats a canonical `product-os-spec-driven` **"Copy cho AI"** citation block.
-#[allow(clippy::too_many_arguments)]
-pub fn format_copy_for_ai(
-    quoted_text: &str,
-    file_path: &str,
-    line_start: usize,
-    line_end: usize,
-    section_id: &str,
-    section_title: &str,
-    reader_view: &str,
-    project_name: &str,
-    request: &str,
-) -> String {
+pub fn format_copy_for_ai(citation: &CopyForAiCitation) -> String {
+    let CopyForAiCitation { quoted_text, file_path, line_start, line_end, section_id, section_title, reader_view, project_name, request } = *citation;
     let quote_lines: String = quoted_text
         .lines()
         .map(|l| {
@@ -999,17 +1002,17 @@ pub fn format_parity_report_for_ai(scorecard: &FigmaParityScorecard, reader_view
             quote.push_str(&format!("  - [{} · {}] {} (-{:.2}% · {})\n", g.id, p.id, g.title, g.impact_pct, g.file_hint));
         }
     }
-    format_copy_for_ai(
-        quote.trim_end(),
-        "plans/specs/designos-studio-v2/research/parity-scorecard.json",
-        1,
-        48,
-        "PARITY-SCORECARD",
-        &format!("Figma 1:1 Parity Meter ({:.1}% Match · {:.1}% Remaining)", scorecard.overall_parity_pct, scorecard.remaining_gap_pct),
+    format_copy_for_ai(&CopyForAiCitation {
+        quoted_text: quote.trim_end(),
+        file_path: "plans/specs/designos-studio-v2/research/parity-scorecard.json",
+        line_start: 1,
+        line_end: 48,
+        section_id: "PARITY-SCORECARD",
+        section_title: &format!("Figma 1:1 Parity Meter ({:.1}% Match · {:.1}% Remaining)", scorecard.overall_parity_pct, scorecard.remaining_gap_pct),
         reader_view,
         project_name,
-        "Đóng các khoảng cách Parity còn lại để tiến tới 100% khớp 1:1 với Figma Desktop 126.9.13.",
-    )
+        request: "Đóng các khoảng cách Parity còn lại để tiến tới 100% khớp 1:1 với Figma Desktop 126.9.13.",
+    })
 }
 
 /// One parsed Markdown table: `(headers, Vec<(line_number_1_based, Vec<cell_string>)>)`.
@@ -3080,29 +3083,29 @@ pub fn show_right(app: &mut App, ui: &mut Ui, rect: Rect) {
         if resp_ai.clicked() {
             let active_us = pkg.stories.get(app.specs.selected_story).or_else(|| pkg.stories.first());
             let payload = if let Some(us) = active_us {
-                format_copy_for_ai(
-                    &us.user_story_md,
-                    &us.file_path,
-                    us.line_start,
-                    us.line_end,
-                    &us.id,
-                    &us.title,
-                    app.specs.active_tab.label(),
-                    &pkg.project_name,
-                    "Reference this Spec (@spec) to implement the User Story and verify all ACs.",
-                )
+                format_copy_for_ai(&CopyForAiCitation {
+                    quoted_text: &us.user_story_md,
+                    file_path: &us.file_path,
+                    line_start: us.line_start,
+                    line_end: us.line_end,
+                    section_id: &us.id,
+                    section_title: &us.title,
+                    reader_view: app.specs.active_tab.label(),
+                    project_name: &pkg.project_name,
+                    request: "Reference this Spec (@spec) to implement the User Story and verify all ACs.",
+                })
             } else {
-                format_copy_for_ai(
-                    &pkg.title,
-                    &format!("{}/spec.manifest.json", pkg.root_display),
-                    1,
-                    30,
-                    &pkg.contract_id,
-                    &pkg.title,
-                    app.specs.active_tab.label(),
-                    &pkg.project_name,
-                    "",
-                )
+                format_copy_for_ai(&CopyForAiCitation {
+                    quoted_text: &pkg.title,
+                    file_path: &format!("{}/spec.manifest.json", pkg.root_display),
+                    line_start: 1,
+                    line_end: 30,
+                    section_id: &pkg.contract_id,
+                    section_title: &pkg.title,
+                    reader_view: app.specs.active_tab.label(),
+                    project_name: &pkg.project_name,
+                    request: "",
+                })
             };
             copied_payload = Some(payload);
         }
@@ -3919,17 +3922,17 @@ mod tests {
 
     #[test]
     fn formats_copy_cho_ai_citation_markdown() {
-        let md = format_copy_for_ai(
-            "AC-01 | File .fig chuẩn v106 | Mở và lưu lại | Bảo toàn 100% raw_fields",
-            "plans/specs/designos-studio-v2/us/US-01.md",
-            48,
-            52,
-            "US-01",
-            "1:1 Figma .fig v106 Binary R/W & 2D CSS Grid",
-            "Dev View",
-            "design-os-studio",
-            "Kiểm tra round-trip .fig v106",
-        );
+        let md = format_copy_for_ai(&CopyForAiCitation {
+            quoted_text: "AC-01 | File .fig chuẩn v106 | Mở và lưu lại | Bảo toàn 100% raw_fields",
+            file_path: "plans/specs/designos-studio-v2/us/US-01.md",
+            line_start: 48,
+            line_end: 52,
+            section_id: "US-01",
+            section_title: "1:1 Figma .fig v106 Binary R/W & 2D CSS Grid",
+            reader_view: "Dev View",
+            project_name: "design-os-studio",
+            request: "Kiểm tra round-trip .fig v106",
+        });
         assert!(md.contains("File: plans/specs/designos-studio-v2/us/US-01.md:48-52"));
         assert!(md.contains("Mục: US-01 › 1:1 Figma .fig v106 Binary R/W & 2D CSS Grid"));
         assert!(md.contains("Trang reader: Dev View"));
