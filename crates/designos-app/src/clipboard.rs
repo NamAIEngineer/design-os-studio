@@ -168,4 +168,23 @@ mod tests {
         assert_eq!(copy[1].parent, Some(copy[0].id));
         assert!(d.get(copy[0].id).is_none(), "clone is not inserted yet");
     }
+
+    #[test]
+    fn pasting_into_a_document_with_an_exhausted_id_counter_keeps_every_copy_distinct() {
+        let (d, page, f) = doc();
+        let mut d = d;
+        d.insert(page, Node::rectangle(NodeId(u64::MAX), Rect::new(0.0, 0.0, 1.0, 1.0))).unwrap();
+        // Loaders that do not renumber (library store, history) still hand such a document over.
+        let (mut d, report) = Document::from_json_with_report(&d.to_json().unwrap()).unwrap();
+        assert!(report.id_space_exhausted);
+        let clip = capture(&d, &[f]).unwrap();
+
+        let copies = instantiate(&mut d, &clip);
+        let mut ids: Vec<NodeId> = copies.iter().flatten().map(|n| n.id).collect();
+        let more = instantiate(&mut d, &clip);
+        ids.extend(more.iter().flatten().map(|n| n.id));
+        assert_eq!(ids.len(), 4);
+        assert_eq!(ids.iter().collect::<std::collections::BTreeSet<_>>().len(), 4, "{ids:?}");
+        assert!(ids.iter().all(|id| d.get(*id).is_none()), "none collides with an existing node");
+    }
 }

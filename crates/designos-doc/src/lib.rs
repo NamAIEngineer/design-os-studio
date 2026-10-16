@@ -31,6 +31,9 @@ mod node;
 pub mod openpencil;
 mod paint;
 mod prototype;
+mod renumber_ids;
+#[cfg(test)]
+mod renumber_ids_tests;
 mod settings;
 pub mod spec;
 mod textmodel;
@@ -158,6 +161,10 @@ pub struct Document {
     #[serde(default, with = "serde_images", skip_serializing_if = "BTreeMap::is_empty")]
     pub images: BTreeMap<String, Vec<u8>>,
     next_id: u64,
+    /// Where the exhausted-counter fallback resumes scanning, so one id is never handed out twice
+    /// before its node is inserted. Runtime only.
+    #[serde(skip)]
+    gap_cursor: u64,
     #[serde(skip)]
     dirty: DirtyLog,
 }
@@ -269,31 +276,31 @@ impl Document {
     }
 
     /// Hands out a fresh id. The counter never wraps: once it is exhausted (a hostile or
-    /// corrupted file can carry ids near `u64::MAX`) the lowest id no node uses is returned
-    /// instead. Falling back to a real gap, rather than saturating at `u64::MAX`, keeps the id
-    /// unique without any extra state in the document; the caller is expected to insert the node
-    /// before allocating again, as every call site does.
+    /// corrupted file can carry ids near `u64::MAX`) ids come from the gaps below the largest
+    /// node id instead. Loaders that can renumber (`renumber_ids_for_headroom`) make this a last
+    /// resort; the fallback still never returns an id it already returned, even when several ids
+    /// are allocated before any of them is inserted.
     pub fn alloc_id(&mut self) -> NodeId {
         match self.next_id.checked_add(1) {
             Some(next) => {
                 self.next_id = next;
                 NodeId(next)
             }
-            None => self.lowest_unused_id(),
+            None => self.next_gap_id(),
         }
     }
 
-    /// Smallest id (never 0) that no node uses; scans the sorted keys once.
-    fn lowest_unused_id(&self) -> NodeId {
-        let mut candidate = 1u64;
-        for id in self.nodes.keys() {
-            match id.0.cmp(&candidate) {
-                std::cmp::Ordering::Less => {}
-                // saturating: all of 1..=u64::MAX in use would need more memory than exists.
-                std::cmp::Ordering::Equal => candidate = candidate.saturating_add(1),
-                std::cmp::Ordering::Greater => break,
+    /// Smallest id (never 0) at or above the cursor that no node uses; advances the cursor past it.
+    fn next_gap_id(&mut self) -> NodeId {
+        let mut candidate = self.gap_cursor.max(1);
+        for id in self.nodes.range(NodeId(candidate)..).map(|(id, _)| id) {
+            if id.0 != candidate {
+                break;
             }
+            // saturating: all of 1..=u64::MAX in use would need more memory than exists.
+            candidate = candidate.saturating_add(1);
         }
+        self.gap_cursor = candidate.saturating_add(1);
         NodeId(candidate)
     }
 
