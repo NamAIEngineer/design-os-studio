@@ -461,3 +461,72 @@ fn library_files_store_the_snapshot_as_a_named_version() {
     let diff = diff_subtree(&nodes, &s.app().doc, card);
     assert!(diff.iter().any(|c| c.id == card), "{diff:?}");
 }
+
+#[test]
+fn dev_mode_component_playground_toggles_props_without_mutating_doc_and_updates_codegen_live() {
+    let mut s = Sim::with(Options { select: Some("Get started".into()), dev: Some("react".into()), ..Default::default() });
+    let inst = s.by_name("Get started");
+    assert!(s.app().doc.get(inst).is_some());
+    frames(&mut s, 2);
+
+    let before_hash = crate::home::doc_hash(&s.app().doc);
+    let before_epoch = s.app().doc.mutation_epoch();
+
+    let copy_code = |s: &mut Sim| -> String {
+        let p = s.rect_of("dev-inspect-code").center();
+        let mut copied = String::new();
+        for pressed in [true, false] {
+            s.t += 0.05;
+            let raw = RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1600.0, 1088.0))),
+                time: Some(s.t),
+                events: vec![Event::PointerMoved(p), Event::PointerButton { pos: p, button: PointerButton::Primary, pressed, modifiers: Modifiers::NONE }],
+                ..Default::default()
+            };
+            let ctx = s.ctx.clone();
+            let out = ctx.run_ui(raw, |ui| s.shell.draw(ui));
+            for cmd in out.platform_output.commands {
+                if let egui::OutputCommand::CopyText(text) = cmd {
+                    copied = text;
+                }
+            }
+        }
+        copied
+    };
+
+    // Baseline React snippet has `label="Get started"` and default `Show icon = true` (omitted).
+    let initial_code = copy_code(&mut s);
+    assert!(initial_code.contains("label=\"Get started\""), "initial code: {initial_code}");
+    assert!(!initial_code.contains("showIcon={false}"), "initial code should not have showIcon={{false}}: {initial_code}");
+
+    // Toggle `Show icon` in the Dev Mode Component Playground.
+    let show_icon_toggle = s.rect_of("dev-playground-prop-Show icon");
+    s.click(show_icon_toggle.center());
+    frames(&mut s, 2);
+
+    // Document hash and mutation epoch must remain 100% unchanged!
+    assert_eq!(crate::home::doc_hash(&s.app().doc), before_hash, "playground prop toggle must never mutate the document");
+    assert_eq!(s.app().doc.mutation_epoch(), before_epoch, "playground prop toggle must not advance mutation_epoch");
+
+    // Live codegen must immediately reflect `showIcon={false}`.
+    let toggled_code = copy_code(&mut s);
+    assert!(toggled_code.contains("showIcon={false}"), "live codegen should include showIcon={{false}}: {toggled_code}");
+
+    // Edit the `Label` text property in the playground.
+    let label_field = s.rect_of("dev-playground-prop-Label");
+    s.click(label_field.center());
+    s.type_text(" now");
+    frames(&mut s, 2);
+
+    assert_eq!(crate::home::doc_hash(&s.app().doc), before_hash, "playground text edit must never mutate the document");
+    let edited_code = copy_code(&mut s);
+    assert!(edited_code.contains("Get started now"), "live codegen should reflect edited label: {edited_code}");
+
+    // Reset button restores baseline props and codegen without touching the document.
+    let reset_btn = s.rect_of("dev-playground-reset");
+    s.click(reset_btn.center());
+    frames(&mut s, 2);
+    assert_eq!(crate::home::doc_hash(&s.app().doc), before_hash);
+    let reset_code = copy_code(&mut s);
+    assert_eq!(reset_code, initial_code, "resetting playground restores initial codegen");
+}
