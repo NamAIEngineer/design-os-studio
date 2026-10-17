@@ -303,3 +303,78 @@ fn combine_selection_builds_a_component_set() {
     s.cmd_key(Key::Z);
     assert!(s.app().doc.get(set).is_none());
 }
+
+#[test]
+fn convert_frame_to_slot_and_edit_slot_settings_persists_and_undoes() {
+    let mut s = Sim::with(Options { select: Some("Primary button".into()), ..Default::default() });
+    let main = s.by_name("Primary button");
+    // Insert a child Frame named "Leading slot" inside the main component.
+    let slot_frame = {
+        let id = s.shell.app.doc.alloc_id();
+        let mut f = designos_doc::Node::frame(id, designos_doc::Rect::new(8.0, 8.0, 24.0, 24.0));
+        f.name = "Leading slot".into();
+        s.shell.app.doc.insert(main, f).unwrap()
+    };
+    s.shell.app.selection = vec![slot_frame];
+    s.frame(vec![]);
+    s.frame(vec![]);
+
+    // Click "Convert to slot" in the inspector.
+    let btn = s.rect_of("convert-to-slot");
+    s.click(btn.center());
+    s.frame(vec![]);
+    s.frame(vec![]);
+
+    assert!(s.app().doc.get(slot_frame).unwrap().component.is_slot, "frame is converted to a slot");
+    assert_eq!(s.app().doc.get(slot_frame).unwrap().component.bindings.get(&OverrideField::SlotContent).map(String::as_str), Some("Leading slot"));
+    assert!(
+        s.app().doc.get(main).unwrap().component.props.iter().any(|p| p.name == "Leading slot" && p.kind == designos_doc::PropKind::Slot),
+        "main component has the Slot property"
+    );
+
+    // Undo reverts the entire conversion in one undo step.
+    s.cmd_key(Key::Z);
+    s.frame(vec![]);
+    s.frame(vec![]);
+    assert!(!s.app().doc.get(slot_frame).unwrap().component.is_slot, "undo reverts is_slot in one step");
+    assert!(!s.app().doc.get(main).unwrap().component.props.iter().any(|p| p.name == "Leading slot"));
+
+    // Convert again and configure slot settings in the inspector.
+    let btn = s.rect_of("convert-to-slot");
+    s.click(btn.center());
+    s.frame(vec![]);
+    s.frame(vec![]);
+
+    let min_field = s.rect_of("slot-min-children");
+    s.click(min_field.center());
+    s.frame(vec![Event::Key { key: Key::A, physical_key: Some(Key::A), pressed: true, repeat: false, modifiers: Modifiers::COMMAND }]);
+    s.type_text("1");
+    s.key(Key::Enter);
+    s.frame(vec![]);
+
+    let max_field = s.rect_of("slot-max-children");
+    s.click(max_field.center());
+    s.frame(vec![Event::Key { key: Key::A, physical_key: Some(Key::A), pressed: true, repeat: false, modifiers: Modifiers::COMMAND }]);
+    s.type_text("3");
+    s.key(Key::Enter);
+    s.frame(vec![]);
+
+    let pref_toggle = s.rect_of("toggle:slot-preferred-only");
+    s.click(pref_toggle.left_center() + Vec2::new(10.0, 0.0));
+    s.frame(vec![]);
+
+    let stretch_toggle = s.rect_of("toggle:slot-stretch-on-insert");
+    s.click(stretch_toggle.left_center() + Vec2::new(10.0, 0.0));
+    s.frame(vec![]);
+
+    let empty_toggle = s.rect_of("toggle:slot-show-empty");
+    s.click(empty_toggle.left_center() + Vec2::new(10.0, 0.0));
+    s.frame(vec![]);
+
+    let cfg = s.app().doc.get(main).unwrap().component.slot_configs.get("Leading slot").expect("slot config persisted");
+    assert_eq!(cfg.min_children, Some(1));
+    assert_eq!(cfg.max_children, Some(3));
+    assert_eq!(cfg.allow_preferred_values_only, Some(true));
+    assert_eq!(cfg.stretch_child_on_insert, Some(true));
+    assert_eq!(cfg.display_by_default, Some(true));
+}
