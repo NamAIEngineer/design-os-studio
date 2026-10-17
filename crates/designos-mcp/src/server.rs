@@ -168,8 +168,11 @@ impl Session {
                         if let Ok(raw) = fs::read_to_string(&canvas_path) {
                             if let Ok(doc) = parse_unrepaired_native(&raw).and_then(|doc| validate_document(&doc).map(|()| doc)) {
                                 self.engine.doc = doc;
-                                // Ops recorded against the replaced copy no longer apply.
+                                // Ops recorded against the replaced copy no longer apply, and neither
+                                // does the undo history: the editor may have renumbered the agent's
+                                // nodes, so an old inverse would hit whatever now holds that id.
                                 self.engine.take_live_ops();
+                                self.engine.history = designos_doc::History::default();
                                 self.bridge.last_canvas_mtime = Some(mtime);
                             }
                         }
@@ -427,8 +430,7 @@ impl Session {
                 Ok(json!({"output_path": path, "path": path, "bytes": bytes.len(), "saved": true}))
             }
             _ => {
-                let mut result = self.engine.call(name, args)?;
-                if matches!(
+                let mutates = matches!(
                     name,
                     "designos_create_node"
                         | "designos_update_node"
@@ -440,13 +442,21 @@ impl Session {
                         | "designos_set_dev_status"
                         | "designos_undo"
                         | "designos_redo"
-                ) && result.get("changed").and_then(Value::as_bool) != Some(false)
-                {
+                );
+                // What to return to if the editor cannot be given the edit.
+                let rollback = (mutates && self.bridge.live_doc_patch_path.is_some()).then(|| (self.engine.doc.clone(), self.engine.history.clone(), self.dirty));
+                let result = self.engine.call(name, args)?;
+                if mutates && result.get("changed").and_then(Value::as_bool) != Some(false) {
                     self.dirty = true;
                     if let Err(e) = self.publish_live_patch() {
-                        if let Some(obj) = result.as_object_mut() {
-                            obj.insert("live_sync_error".into(), json!(format!("The open editor did not receive this edit: {e}")));
+                        // Keeping the edit would leave the agent working on a document the
+                        // open editor does not have, so it is undone without a history entry.
+                        if let Some((doc, history, dirty)) = rollback {
+                            self.engine.doc = doc;
+                            self.engine.history = history;
+                            self.dirty = dirty;
                         }
+                        return Err(format!("The open editor did not receive this edit, so it was not applied: {e}"));
                     }
                 }
                 Ok(result)

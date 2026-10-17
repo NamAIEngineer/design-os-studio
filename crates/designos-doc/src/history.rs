@@ -199,7 +199,7 @@ impl Document {
 }
 
 /// Linear undo stack.
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct History {
     undo: Vec<Command>,
     redo: Vec<Command>,
