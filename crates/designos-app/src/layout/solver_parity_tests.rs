@@ -413,6 +413,120 @@ fn grid_fixed_child_spanning_rows_keeps_its_size() {
     assert_eq!(solved.kids[0], [0.0, 0.0, 40.0, 25.0]);
 }
 
+#[test]
+fn grid_clamps_child_sizes_when_sizing_hug_columns_and_auto_rows() {
+    let mut al = grid(2);
+    al.item_spacing = 10.0;
+    al.primary_sizing = Sizing::Hug;
+    al.counter_sizing = Sizing::Hug;
+    al.grid_col_tracks[0] = GridTrack::Hug;
+    al.grid_col_tracks[1] = GridTrack::Hug;
+    let capped = kid_with(120.0, 80.0, |lc| {
+        lc.max_w = Some(50.0);
+        lc.max_h = Some(30.0);
+    });
+    let plain = kid(40.0, 20.0);
+    let solved = solve_everywhere(al, v2(300.0, 300.0), &[capped, plain]);
+    assert_eq!(solved.frame, (100.0, 30.0));
+    assert_eq!(solved.kids[0], [0.0, 0.0, 50.0, 30.0]);
+    assert_eq!(solved.kids[1], [60.0, 0.0, 40.0, 20.0]);
+}
+
+#[test]
+fn grid_row_span_does_not_inflate_rows_that_already_hold_it() {
+    let mut al = grid(2);
+    al.item_spacing = 10.0;
+    al.counter_sizing = Sizing::Hug;
+    // Row 0 is 40 high, row 1 is 15 high; with the 10 gap they already provide 65 >= 50.
+    let spanning_fits = kid_with(40.0, 50.0, |lc| lc.row_span = 2);
+    let solved = solve_everywhere(al, v2(300.0, 300.0), &[spanning_fits, kid(40.0, 40.0), kid(40.0, 15.0)]);
+    assert_eq!(solved.frame, (300.0, 65.0));
+    assert_eq!(solved.kids[2], [155.0, 50.0, 40.0, 15.0]);
+
+    // When a spanning item (70) exceeds row 0 (40) + gap (10) + row 1 (10) = 60,
+    // row 0 already exceeds an even 30 split, so only row 1 grows to 20 (total 70).
+    let spanning_grows_short_row = kid_with(40.0, 70.0, |lc| lc.row_span = 2);
+    let solved2 = solve_everywhere(al, v2(300.0, 300.0), &[spanning_grows_short_row, kid(40.0, 40.0), kid(40.0, 10.0)]);
+    assert_eq!(solved2.frame, (300.0, 70.0));
+    assert_eq!(solved2.kids[2], [155.0, 50.0, 40.0, 10.0]);
+}
+
+/// Solves `kids` placed in child order `order` (indices into `kids`); returns the frame and each
+/// kid's rect keyed by its index in `kids`, so different orders can be compared kid by kid.
+fn solve_in_child_order(al: AutoLayout, frame: Vec2, kids: &[Kid], order: &[usize]) -> ((f32, f32), Vec<[f32; 4]>) {
+    let reordered: Vec<Kid> = order.iter().map(|&i| kids[i]).collect();
+    let solved = solve_everywhere(al, frame, &reordered);
+    let mut rects = vec![[0.0; 4]; kids.len()];
+    for (pos, &i) in order.iter().enumerate() {
+        rects[i] = solved.kids[pos];
+    }
+    (solved.frame, rects)
+}
+
+const ORDERS_OF_THREE: [[usize; 3]; 6] = [[0, 1, 2], [0, 2, 1], [1, 0, 2], [1, 2, 0], [2, 0, 1], [2, 1, 0]];
+
+fn pinned_span(h: f32, column: u16, row: u16, row_span: u16) -> Kid {
+    kid_with(40.0, h, |lc| {
+        lc.grid_column = Some(column);
+        lc.grid_row = Some(row);
+        lc.row_span = row_span;
+    })
+}
+
+fn hugging_grid(columns: u32) -> AutoLayout {
+    let mut al = grid(columns);
+    al.item_spacing = 10.0;
+    al.counter_sizing = Sizing::Hug;
+    al
+}
+
+#[test]
+fn grid_overlapping_row_spans_size_rows_independent_of_child_order() {
+    // The tall item holds rows 0-1 (100 high), the short one rows 1-2 (40 high). Rows 0 and 1 share the
+    // tall item's 90 (45 each), which already holds the short item, so the empty row 2 stays flat:
+    // 45 + 45 + 0 + two 10 gaps = 110 whichever of the two comes first.
+    let pair = [pinned_span(100.0, 0, 0, 2), pinned_span(40.0, 1, 1, 2)];
+    let forward = solve_in_child_order(hugging_grid(2), v2(300.0, 300.0), &pair, &[0, 1]);
+    let reversed = solve_in_child_order(hugging_grid(2), v2(300.0, 300.0), &pair, &[1, 0]);
+    assert_eq!(forward.0, (300.0, 110.0));
+    assert_eq!(reversed, forward);
+}
+
+#[test]
+fn grid_overlapping_row_spans_keep_content_below_in_place_for_every_child_order() {
+    // Same spans plus a plain 5-high item in row 2: the rows stay 45, 45, 5 (frame 115) and the item sits at 110.
+    let kids = [pinned_span(100.0, 0, 0, 2), pinned_span(40.0, 1, 1, 2), pinned_span(5.0, 0, 2, 1)];
+    let first = solve_in_child_order(hugging_grid(2), v2(300.0, 300.0), &kids, &ORDERS_OF_THREE[0]);
+    assert_eq!(first.0, (300.0, 115.0));
+    assert_eq!(first.1[2], [0.0, 110.0, 40.0, 5.0]);
+    for order in &ORDERS_OF_THREE[1..] {
+        assert_eq!(solve_in_child_order(hugging_grid(2), v2(300.0, 300.0), &kids, order), first, "child order {order:?} changed the layout");
+    }
+}
+
+#[test]
+fn grid_row_spans_of_different_lengths_size_rows_independent_of_child_order() {
+    // A 3-row span (110), a 2-row span over rows 0-1 (100) and a 2-row span over rows 1-2 (60).
+    // The 2-row spans settle first: rows 45, 45, then row 2 gains the 5 the lower span still needs.
+    // The 3-row span (90 without gaps) already fits in 95, so no row grows: 45 + 45 + 5 + two gaps.
+    let kids = [pinned_span(110.0, 0, 0, 3), pinned_span(100.0, 1, 0, 2), pinned_span(60.0, 2, 1, 2)];
+    let first = solve_in_child_order(hugging_grid(3), v2(300.0, 300.0), &kids, &ORDERS_OF_THREE[0]);
+    assert_eq!(first.0, (300.0, 115.0));
+    for order in &ORDERS_OF_THREE[1..] {
+        assert_eq!(solve_in_child_order(hugging_grid(3), v2(300.0, 300.0), &kids, order), first, "child order {order:?} changed the layout");
+    }
+}
+
+#[test]
+fn grid_overlapping_row_spans_size_rows_the_same_when_the_tall_span_is_lower() {
+    // Mirror image of the pair above: the tall item holds rows 1-2, the short one rows 0-1.
+    let pair = [pinned_span(40.0, 1, 0, 2), pinned_span(100.0, 0, 1, 2)];
+    let forward = solve_in_child_order(hugging_grid(2), v2(300.0, 300.0), &pair, &[0, 1]);
+    let reversed = solve_in_child_order(hugging_grid(2), v2(300.0, 300.0), &pair, &[1, 0]);
+    assert_eq!(forward.0, (300.0, 110.0));
+    assert_eq!(reversed, forward);
+}
+
 // ---- grid placement: pinned first, then locked, then auto -------------------------------------
 
 fn two_fixed_columns() -> AutoLayout {
