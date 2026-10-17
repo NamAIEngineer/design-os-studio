@@ -5,7 +5,8 @@ use common::*;
 use designos_doc::*;
 use designos_render::tiny_skia::Pixmap;
 
-const STRIPE_PERIOD: f32 = 4.0;
+const STRIPE_PERIOD: f32 = 16.0;
+const STRIPE_WIDTH: f32 = 8.0;
 const SIDE: f32 = 80.0;
 
 fn ramp(background: bool, start_radius: f32, end_radius: f32, start: (f32, f32), end: (f32, f32)) -> Effect {
@@ -27,7 +28,7 @@ fn top_to_bottom(background: bool, start_radius: f32, end_radius: f32) -> Effect
 fn stripes(t: &mut T, parent: Option<NodeId>) {
     let mut x = 1.0;
     while x < SIDE + 16.0 {
-        t.rect(parent, Rect::new(x, 0.0, 2.0, SIDE), Color::BLACK);
+        t.rect(parent, Rect::new(x, 0.0, STRIPE_WIDTH, SIDE), Color::BLACK);
         x += STRIPE_PERIOD;
     }
 }
@@ -170,14 +171,12 @@ fn background_ramp_blurs_what_is_behind_progressively_inside_the_shape_only() {
 #[test]
 fn background_ramp_is_independent_of_the_layer_variant() {
     // a layer ramp must not blur the backdrop and a background ramp must not blur the layer
-    let (layer, _) = layer_scene(top_to_bottom(false, 0.0, 16.0));
     let on_page = background_scene(top_to_bottom(false, 0.0, 16.0));
     // `on_page`: the pane itself is empty, so a layer blur of it changes nothing visible
     let pm = on_page.render(100, 80);
     assert!(row_contrast(&pm, 70, 20, 60) >= 240, "layer ramp on an empty pane leaves the backdrop alone");
-    let (mut own, f) = layer_scene(top_to_bottom(true, 0.0, 16.0));
-    let _ = layer;
-    let pm = own.render(100, 80);
-    own.node(f).effects.clear();
+    let (own, _) = layer_scene(top_to_bottom(true, 0.0, 16.0));
+    // taller than the pane so the page edge does not fade the blurred backdrop
+    let pm = own.render(100, 120);
     assert!(row_contrast(&pm, 70, 20, 60) >= 240, "background ramp does not blur the pane's own children");
 }

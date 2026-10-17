@@ -80,6 +80,7 @@ pub(crate) fn node_margin(n: &Node) -> f32 {
                 m = m.max(offset.x.abs().max(offset.y.abs()) + spread.max(0.0) + radius * 1.6 + 2.0)
             }
             Effect::LayerBlur { radius, visible: true } => m = m.max(radius * 1.6 + 2.0),
+            Effect::ProgressiveBlur(p) if p.visible && !p.background => m = m.max(p.max_radius() * 1.6 + 2.0),
             Effect::Texture(t) if t.visible => m = m.max(t.radius.max(0.0) + 2.0),
             _ => {}
         }
@@ -107,6 +108,7 @@ fn blur_reach(n: &Node) -> f32 {
                 r = r.max(offset.x.abs().max(offset.y.abs()) + spread.abs() + radius * 1.6 + 2.0)
             }
             Effect::LayerBlur { radius, visible: true } | Effect::BackgroundBlur { radius, visible: true } if *radius > 0.0 => r = r.max(radius * 1.6 + 2.0),
+            Effect::ProgressiveBlur(p) if p.visible => r = r.max(p.max_radius() * 1.6 + 2.0),
             Effect::Texture(t) if t.visible => r = r.max(t.radius.max(0.0) + 2.0),
             Effect::Glass(g) if g.visible => r = r.max(g.frost.max(0.0) * 1.6 + g.depth.max(0.0) * 2.0 + 6.0),
             _ => {}
@@ -552,7 +554,7 @@ impl SceneIndex {
                                         }
                                     }
                                 }
-                                let layer_blur = n.effects.iter().any(|e| matches!(e, Effect::LayerBlur { visible: true, radius } if *radius > 0.0));
+                                let layer_blur = n.effects.iter().any(|e| e.layer_blur_radius().is_some());
                                 let chrome = is_chrome_node(doc, n, dirty_id);
                                 if chrome {
                                     if !self.chrome_nodes.contains(&dirty_id) {
@@ -709,7 +711,7 @@ impl SceneIndex {
                 sub = union(sub, kids);
             }
         }
-        let layer_blur = n.effects.iter().any(|e| matches!(e, Effect::LayerBlur { visible: true, radius } if *radius > 0.0));
+        let layer_blur = n.effects.iter().any(|e| e.layer_blur_radius().is_some());
         if !is_empty(sub) {
             let reach = blur_reach(n);
             if reach > 0.0 {
@@ -719,7 +721,7 @@ impl SceneIndex {
             }
             if n.effects
                 .iter()
-                .any(|e| matches!(e, Effect::BackgroundBlur { visible: true, radius } if *radius > 0.0) || matches!(e, Effect::Glass(g) if g.visible))
+                .any(|e| e.background_blur_radius().is_some() || matches!(e, Effect::Glass(g) if g.visible))
             {
                 self.bg_blur.push(sub);
             }

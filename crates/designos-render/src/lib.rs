@@ -17,6 +17,7 @@ mod geom;
 mod index;
 mod outline;
 mod paint;
+pub mod progressive;
 mod shadow;
 #[cfg(test)]
 mod shadow_tests;
@@ -297,7 +298,7 @@ impl Renderer<'_> {
         if !n.visible {
             return false;
         }
-        n.effects.iter().any(|e| matches!(e, Effect::BackgroundBlur { visible: true, radius } if *radius > 0.0) || matches!(e, Effect::Glass(g) if g.visible))
+        n.effects.iter().any(|e| e.background_blur_radius().is_some() || matches!(e, Effect::Glass(g) if g.visible))
             || (Self::draws_children(n) && n.children.iter().any(|c| self.doc.get(*c).is_some_and(|c| self.has_bg_blur(c))))
     }
 
@@ -335,25 +336,27 @@ impl Renderer<'_> {
         let paints = self.visible_fills(n).len() + self.visible_strokes(n).len();
         let has_effects = n.effects.iter().any(|e| {
             matches!(e, Effect::DropShadow { visible: true, .. } | Effect::InnerShadow { visible: true, .. } | Effect::BackgroundBlur { visible: true, .. })
+                || e.background_blur_radius().is_some()
                 || matches!(e, Effect::Glass(g) if g.visible)
                 || matches!(e, Effect::Noise(n) if n.visible)
         });
         // Texture warps the node's own pixels, so it needs them in an isolated layer.
         let textured = n.effects.iter().any(|e| matches!(e, Effect::Texture(t) if t.visible && t.radius > 0.0));
-        let layer_blur = n
+        let layer_blur = n.effects.iter().filter(|e| matches!(e, Effect::LayerBlur { .. })).filter_map(Effect::layer_blur_radius).fold(0.0f32, f32::max);
+        let layer_ramps: Vec<progressive::Ramp> = n
             .effects
             .iter()
             .filter_map(|e| match e {
-                Effect::LayerBlur { radius, visible: true } if *radius > 0.0 => Some(*radius),
+                Effect::ProgressiveBlur(p) if !p.background => progressive::Ramp::new(p, n.size, &ts),
                 _ => None,
             })
-            .fold(0.0f32, f32::max);
+            .collect();
         let special_blend = !matches!(n.blend, designos_doc::BlendMode::Normal | designos_doc::BlendMode::PassThrough);
         let opacity = n.opacity.clamp(0.0, 1.0);
         if opacity <= 0.0 && !special_blend {
             return;
         }
-        let need_layer = special_blend || layer_blur > 0.0 || textured || (opacity < 1.0 && (has_kids || paints > 1 || has_effects));
+        let need_layer = special_blend || layer_blur > 0.0 || !layer_ramps.is_empty() || textured || (opacity < 1.0 && (has_kids || paints > 1 || has_effects));
         if !need_layer {
             self.draw_body(n, ts, target, clip, opacity, back);
             return;
@@ -367,6 +370,10 @@ impl Renderer<'_> {
             let sigma = layer_blur * ts_scale(&ts) / 2.0;
             let full = (0.0, 0.0, layer.width() as f32, layer.height() as f32);
             effects::blur_rect(&mut layer, if has_kids && !clips { full } else { bb }, sigma);
+        }
+        for ramp in &layer_ramps {
+            let full = (0.0, 0.0, layer.width() as f32, layer.height() as f32);
+            effects::progressive_blur_rect(&mut layer, if has_kids && !clips { full } else { bb }, ramp);
         }
         if let Some(mode) = paint::custom_blend(n.blend) {
             paint::blend_layer(target, &layer, opacity, mode);
@@ -448,6 +455,11 @@ impl Renderer<'_> {
                 }
                 Effect::BackgroundBlur { radius, visible: true } if *radius > 0.0 => {
                     effects::background_blur(target, back, clip, inner_bb, scale, *radius, &sil)
+                }
+                Effect::ProgressiveBlur(p) if p.background => {
+                    if let Some(ramp) = progressive::Ramp::new(p, n.size, &ts) {
+                        effects::background_progressive_blur(target, back, clip, inner_bb, &ramp, &sil)
+                    }
                 }
                 Effect::Glass(g) if g.visible => fx::glass(target, back, clip, inner_bb, scale, g, &sil),
                 _ => {}
