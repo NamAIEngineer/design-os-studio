@@ -294,6 +294,8 @@ pub enum Effect {
     Texture(TextureEffect),
     /// Frosted, refractive glass over what is behind the layer.
     Glass(GlassEffect),
+    /// Blur whose radius ramps linearly between two points of the layer.
+    ProgressiveBlur(ProgressiveBlurEffect),
 }
 
 impl Effect {
@@ -306,7 +308,62 @@ impl Effect {
             Effect::Noise(e) => e.visible,
             Effect::Texture(e) => e.visible,
             Effect::Glass(e) => e.visible,
+            Effect::ProgressiveBlur(e) => e.visible,
         }
+    }
+
+    /// Radius of a visible blur of the layer itself (plain, or the largest
+    /// radius of a progressive one); `None` when it blurs nothing.
+    pub fn layer_blur_radius(&self) -> Option<f32> {
+        match self {
+            Effect::LayerBlur { radius, visible: true } if *radius > 0.0 => Some(*radius),
+            Effect::ProgressiveBlur(p) if p.visible && !p.background && p.max_radius() > 0.0 => Some(p.max_radius()),
+            _ => None,
+        }
+    }
+
+    /// Radius of a visible blur of what lies behind the layer (plain, or the
+    /// largest radius of a progressive one); `None` when it blurs nothing.
+    pub fn background_blur_radius(&self) -> Option<f32> {
+        match self {
+            Effect::BackgroundBlur { radius, visible: true } if *radius > 0.0 => Some(*radius),
+            Effect::ProgressiveBlur(p) if p.visible && p.background && p.max_radius() > 0.0 => Some(p.max_radius()),
+            _ => None,
+        }
+    }
+}
+
+/// A layer or background blur whose radius ramps linearly from `start_radius`
+/// at `start_offset` to `end_radius` at `end_offset` (Figma's progressive blur).
+///
+/// Offsets are positions in the layer's normalized object space: (0, 0) is its
+/// top-left corner and (1, 1) its bottom-right, so (0.5, 0) -> (0.5, 1) is a
+/// top-to-bottom ramp. Pixels before the start point use `start_radius`, pixels
+/// past the end point use `end_radius`.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ProgressiveBlurEffect {
+    /// Blurs what is behind the layer (background blur) instead of the layer itself.
+    pub background: bool,
+    /// Blur radius (px) at `start_offset`.
+    pub start_radius: f32,
+    /// Blur radius (px) at `end_offset` (Figma's `radius`).
+    pub end_radius: f32,
+    pub start_offset: Vec2,
+    pub end_offset: Vec2,
+    pub visible: bool,
+}
+
+impl ProgressiveBlurEffect {
+    /// The largest radius of the ramp (what the blur needs room for).
+    pub fn max_radius(&self) -> f32 {
+        self.start_radius.max(self.end_radius).max(0.0)
+    }
+}
+
+impl Default for ProgressiveBlurEffect {
+    /// Top-to-bottom ramp from sharp to a 16 px blur.
+    fn default() -> Self {
+        Self { background: false, start_radius: 0.0, end_radius: 16.0, start_offset: Vec2::new(0.5, 0.0), end_offset: Vec2::new(0.5, 1.0), visible: true }
     }
 }
 
@@ -547,5 +604,39 @@ mod tests {
         assert_eq!(Color::from_hex("blue"), Some(Color::rgb(0, 0, 255)));
         assert_eq!(Color::from_hex("coral"), Some(Color::rgb(255, 127, 80)));
         assert_eq!(Color::from_hex("rebeccapurple"), Some(Color::rgb(102, 51, 153)));
+    }
+
+    fn progressive(background: bool, start: f32, end: f32) -> ProgressiveBlurEffect {
+        ProgressiveBlurEffect { background, start_radius: start, end_radius: end, ..Default::default() }
+    }
+
+    #[test]
+    fn progressive_blur_reports_the_largest_radius_for_its_target_only() {
+        let layer = Effect::ProgressiveBlur(progressive(false, 21.0, 4.0));
+        assert_eq!(layer.layer_blur_radius(), Some(21.0));
+        assert_eq!(layer.background_blur_radius(), None);
+        let back = Effect::ProgressiveBlur(progressive(true, 0.0, 12.0));
+        assert_eq!(back.background_blur_radius(), Some(12.0));
+        assert_eq!(back.layer_blur_radius(), None);
+        let flat = Effect::ProgressiveBlur(progressive(false, 0.0, 0.0));
+        assert_eq!(flat.layer_blur_radius(), None, "a ramp of zero radii blurs nothing");
+        let hidden = Effect::ProgressiveBlur(ProgressiveBlurEffect { visible: false, ..progressive(false, 5.0, 5.0) });
+        assert!(!hidden.visible());
+        assert_eq!(hidden.layer_blur_radius(), None);
+    }
+
+    #[test]
+    fn progressive_blur_survives_the_compact_json_round_trip() {
+        let e = Effect::ProgressiveBlur(ProgressiveBlurEffect {
+            background: true,
+            start_radius: 21.0,
+            end_radius: 4.0,
+            start_offset: Vec2::new(0.25, 0.1),
+            end_offset: Vec2::new(0.75, 0.9),
+            visible: true,
+        });
+        let json = serde_json::to_string(&e).unwrap();
+        let back: Effect = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, e);
     }
 }

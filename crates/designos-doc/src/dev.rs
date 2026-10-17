@@ -312,6 +312,9 @@ fn effects_text(e: &[Effect]) -> String {
             Effect::Noise(_) => "noise".into(),
             Effect::Texture(_) => "texture".into(),
             Effect::Glass(_) => "glass".into(),
+            Effect::ProgressiveBlur(p) => {
+                format!("progressive {} blur {} to {}", if p.background { "background" } else { "layer" }, n2(p.start_radius), n2(p.end_radius))
+            }
         })
         .collect::<Vec<_>>()
         .join(", ")
