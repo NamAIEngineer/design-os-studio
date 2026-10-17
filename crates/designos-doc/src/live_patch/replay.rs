@@ -1,6 +1,7 @@
 //! Editor side: replay a [`LivePatch`] on the full document as ordinary [`Command`]s.
 
 use super::replay_comments::{resolve_comments, CommentRemap};
+use super::validate_insert::check_inserted_subtree;
 use super::{LiveOp, LivePatch, SiblingHint, LIVE_PATCH_VERSION, STRUCTURAL_FIELDS};
 use crate::{Command, DocError, Document, Node, NodeId};
 use serde_json::{Map, Value};
@@ -10,7 +11,7 @@ use std::collections::{BTreeMap, BTreeSet};
 const LAYOUT_FIELDS: [&str; 4] = ["size", "kind", "layout_child", "visible"];
 
 /// Replay state kept across patches of one agent session.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct LivePatchState {
     /// Agent ids that collided with nodes the editor created meanwhile, and their new ids.
     remap: BTreeMap<NodeId, NodeId>,
@@ -38,7 +39,9 @@ pub struct LivePatchReport {
 
 /// Replays `patch` on `doc`, one op at a time so each is checked against the state the previous
 /// ones left. Every command goes through `exec`, so the editor can run them in one transaction.
-/// Ops whose target is gone are skipped and reported; only an `exec` failure aborts.
+/// Ops whose target is gone, or that no real agent session produces (a malformed inserted
+/// subtree, a container turned into a leaf), are skipped and reported; only an `exec` failure
+/// aborts, and then `state` is left as it was before the patch.
 pub fn replay_live_patch(
     doc: &mut Document,
     patch: &LivePatch,
@@ -50,6 +53,22 @@ pub fn replay_live_patch(
         report.skipped.push(format!("unsupported live patch version {}", patch.v));
         return Ok(report);
     }
+    let before = state.clone();
+    let replayed = replay_ops(doc, patch, state, exec, &mut report);
+    if replayed.is_err() {
+        // The caller cancels the commands already run, so the ids they remapped are not in use.
+        *state = before;
+    }
+    replayed.map(|()| report)
+}
+
+fn replay_ops(
+    doc: &mut Document,
+    patch: &LivePatch,
+    state: &mut LivePatchState,
+    exec: &mut dyn FnMut(&mut Document, Command) -> Result<(), DocError>,
+    report: &mut LivePatchReport,
+) -> Result<(), DocError> {
     if patch.base != state.base {
         // The agent reloaded a canvas the editor wrote with its own ids; earlier remaps would
         // now send its edits to the wrong node or thread.
@@ -58,12 +77,12 @@ pub fn replay_live_patch(
         state.base = patch.base;
     }
     for op in &patch.ops {
-        if let Some(cmd) = resolve(doc, op, state, &mut report) {
+        if let Some(cmd) = resolve(doc, op, state, report) {
             exec(doc, cmd)?;
             report.applied += 1;
         }
     }
-    Ok(report)
+    Ok(())
 }
 
 fn resolve(doc: &mut Document, op: &LiveOp, state: &mut LivePatchState, report: &mut LivePatchReport) -> Option<Command> {
@@ -85,6 +104,10 @@ fn resolve(doc: &mut Document, op: &LiveOp, state: &mut LivePatchState, report: 
             };
             if merged == *cur {
                 report.duplicates += 1;
+                return None;
+            }
+            if !cur.children.is_empty() && !merged.kind.is_container() {
+                report.skipped.push(format!("update of node {}: it has children and cannot become a layer that holds none", id.0));
                 return None;
             }
             if set.keys().chain(unset).any(|k| LAYOUT_FIELDS.contains(&k.as_str())) {
@@ -144,6 +167,10 @@ fn resolve_insert(
     let Some(root) = nodes.first() else { return None };
     if !doc.get(parent).is_some_and(|p| p.kind.is_container()) {
         report.skipped.push(format!("insert of node {} into missing parent {}", root.id.0, parent.0));
+        return None;
+    }
+    if let Err(e) = check_inserted_subtree(doc, parent, nodes) {
+        report.skipped.push(format!("insert of node {} into {}: {e}", root.id.0, parent.0));
         return None;
     }
     let mut nodes: Vec<Node> = nodes.to_vec();

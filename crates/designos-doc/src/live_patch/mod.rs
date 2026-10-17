@@ -10,6 +10,7 @@
 mod record;
 mod replay;
 mod replay_comments;
+mod validate_insert;
 
 pub use record::live_ops_for_command;
 pub use replay::{replay_live_patch, LivePatchReport, LivePatchState};
@@ -139,5 +140,7 @@ pub const MAX_LIVE_PATCH_LINE_BYTES: usize = 16 << 20;
 /// Fields that structural ops own; field updates never touch them.
 pub(crate) const STRUCTURAL_FIELDS: [&str; 3] = ["id", "parent", "children"];
 
+#[cfg(test)]
+mod replay_guard_tests;
 #[cfg(test)]
 mod tests;

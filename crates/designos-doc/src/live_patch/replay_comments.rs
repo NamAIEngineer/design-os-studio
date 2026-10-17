@@ -5,7 +5,7 @@ use crate::{Command, Comment, CommentThread, Document, NodeId};
 use std::collections::BTreeMap;
 
 /// Agent comment ids that collided with ones the editor already used, and their new ids.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub(super) struct CommentRemap {
     threads: BTreeMap<String, String>,
     /// Keyed by (editor thread id, agent message id).
