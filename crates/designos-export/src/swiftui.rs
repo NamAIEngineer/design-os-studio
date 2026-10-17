@@ -11,6 +11,9 @@ use designos_doc::*;
 /// component properties as arguments; bound variables become `Color("name")` / `Tokens.name`.
 pub fn swiftui_for(doc: &Document, node: NodeId) -> String {
     let mut o = Out::new("    ");
+    for s in slot_params(doc, node) {
+        o.line(0, format!("@ViewBuilder var {s}: () -> Content"));
+    }
     view(doc, node, Parent::root(), 0, &mut o);
     o.finish()
 }
@@ -268,6 +271,7 @@ fn view(doc: &Document, id: NodeId, parent: Parent, depth: usize, o: &mut Out) {
     let mut stack: Option<String> = None; // "HStack(...) {"
     let mut spacers = (false, false, false); // before, between, after
     let radius_shape = shape(doc, n);
+    let slot_call = react_slot_expr(doc, id).and_then(|_| slot_param_name(doc, id)).map(|s| format!("{s}()"));
 
     if let NodeKind::Instance { .. } = n.kind {
         let args: Vec<String> = instance_args(doc, n)
@@ -278,7 +282,14 @@ fn view(doc: &Document, id: NodeId, parent: Parent, depth: usize, o: &mut Out) {
                 PropLit::Instance(v) => format!("{name}: {v}()"),
             })
             .collect();
-        head.push(call(&view_name(doc, n), &args));
+        let slot_kids = instance_slot_children(doc, n);
+        if slot_kids.is_empty() {
+            head.push(call(&view_name(doc, n), &args));
+        } else {
+            let vname = view_name(doc, n);
+            stack = Some(if args.is_empty() { format!("{vname} {{") } else { format!("{} {{", call(&vname, &args)) });
+            body = Some(slot_kids);
+        }
         if let Some(f) = frame_args(sz.w, sz.h, None, n, doc) {
             mods.push(f);
         }
@@ -292,7 +303,7 @@ fn view(doc: &Document, id: NodeId, parent: Parent, depth: usize, o: &mut Out) {
         if let Some(f) = frame_args(sz.w, sz.h, None, n, doc) {
             mods.push(f);
         }
-    } else if let Some(al) = own_al.filter(|_| !kids.is_empty()) {
+    } else if let Some(al) = own_al.filter(|_| !kids.is_empty() || slot_call.is_some()) {
         let horizontal = al.direction == LayoutDirection::Horizontal;
         let counter = match (al.counter_align, horizontal) {
             (LayoutAlign::Center, _) => "center",
@@ -337,7 +348,7 @@ fn view(doc: &Document, id: NodeId, parent: Parent, depth: usize, o: &mut Out) {
             mods.push(f);
         }
         container_style(doc, n, &radius_shape, &mut mods);
-    } else if n.kind.is_container() && !kids.is_empty() {
+    } else if n.kind.is_container() && (!kids.is_empty() || slot_call.is_some()) {
         stack = Some("ZStack(alignment: .topLeading) {".into());
         body = Some(kids.iter().map(|k| k.id).collect());
         if let Some(f) = frame_args(sz.w, sz.h, Some(".topLeading"), n, doc) {
@@ -404,6 +415,9 @@ fn view(doc: &Document, id: NodeId, parent: Parent, depth: usize, o: &mut Out) {
         let me = Parent::of(n);
         if spacers.0 {
             o.line(depth + 1, "Spacer()");
+        }
+        if let Some(sc) = &slot_call {
+            o.line(depth + 1, sc);
         }
         for (i, c) in children.iter().enumerate() {
             if i > 0 && spacers.1 {
@@ -483,5 +497,17 @@ mod tests {
     .clipShape(RoundedRectangle(cornerRadius: 8))
     .shadow(color: Color.black.opacity(0.25), radius: 4, x: 0, y: 4)"####;
         assert_eq!(swiftui_for(&d, id), expected);
+    }
+
+    #[test]
+    fn golden_slot_component_and_instance() {
+        let (d, comp, _slot, inst) = fixture::slot_card();
+        let comp_swift = swiftui_for(&d, comp);
+        assert!(comp_swift.contains("@ViewBuilder var body: () -> Content"), "{comp_swift}");
+        assert!(comp_swift.contains("body()"), "{comp_swift}");
+
+        let inst_swift = swiftui_for(&d, inst);
+        assert!(inst_swift.contains("Dialog {"), "{inst_swift}");
+        assert!(inst_swift.contains("Text(\"Slot content\")"), "{inst_swift}");
     }
 }

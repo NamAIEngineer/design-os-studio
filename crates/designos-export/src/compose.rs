@@ -11,6 +11,9 @@ use designos_doc::*;
 /// variables become `MaterialTheme.colorScheme.name` / `Tokens.name` placeholders.
 pub fn compose_for(doc: &Document, node: NodeId) -> String {
     let mut o = Out::new("    ");
+    for s in slot_params(doc, node) {
+        o.line(0, format!("val {s}: @Composable () -> Unit = {{}}"));
+    }
     emit(doc, node, Parent::root(), 0, &mut o);
     o.finish()
 }
@@ -268,6 +271,7 @@ fn emit(doc: &Document, id: NodeId, parent: Parent, depth: usize, o: &mut Out) {
         }
     }
     let rot = rotation_deg(n);
+    let slot_call = react_slot_expr(doc, id).and_then(|_| slot_param_name(doc, id)).map(|s| format!("{s}()"));
 
     if let NodeKind::Instance { .. } = n.kind {
         let mut args: Vec<Arg> = instance_args(doc, n)
@@ -281,7 +285,15 @@ fn emit(doc: &Document, id: NodeId, parent: Parent, depth: usize, o: &mut Out) {
         size_mods(doc, n, &sz, parent, &mut mods);
         finish_mods(doc, n, rot, &mut mods);
         args.extend(modifier_arg(&mods));
-        open_call(o, depth, &view_name(doc, n), args, false);
+        let slot_kids = instance_slot_children(doc, n);
+        open_call(o, depth, &view_name(doc, n), args, !slot_kids.is_empty());
+        if !slot_kids.is_empty() {
+            let me = Parent::of(n);
+            for k in slot_kids {
+                emit(doc, k, me, depth + 1, o);
+            }
+            o.line(depth, "}");
+        }
         return;
     }
     if is_vector_asset(doc, id) {
@@ -306,7 +318,7 @@ fn emit(doc: &Document, id: NodeId, parent: Parent, depth: usize, o: &mut Out) {
     let block;
     size_mods(doc, n, &sz, parent, &mut mods);
     style_mods(doc, n, &mut mods);
-    if let Some(al) = own_al.filter(|_| !kids.is_empty()) {
+    if let Some(al) = own_al.filter(|_| !kids.is_empty() || slot_call.is_some()) {
         let horizontal = al.direction == LayoutDirection::Horizontal;
         name = if horizontal { "Row" } else { "Column" };
         block = true;
@@ -343,12 +355,15 @@ fn emit(doc: &Document, id: NodeId, parent: Parent, depth: usize, o: &mut Out) {
         args.push(arg(format!("{} = {cross}", if horizontal { "verticalAlignment" } else { "horizontalAlignment" })));
     } else {
         name = "Box";
-        block = !kids.is_empty();
+        block = !kids.is_empty() || slot_call.is_some();
         finish_mods(doc, n, rot, &mut mods);
         args.extend(modifier_arg(&mods));
     }
     open_call(o, depth, name, args, block);
     if block {
+        if let Some(sc) = slot_call {
+            o.line(depth + 1, sc);
+        }
         let me = Parent::of(n);
         for k in kids {
             emit(doc, k.id, me, depth + 1, o);
@@ -424,5 +439,18 @@ mod tests {
     }
 }"####;
         assert_eq!(compose_for(&d, id), expected);
+    }
+
+    #[test]
+    fn golden_slot_component_and_instance() {
+        let (d, comp, _slot, inst) = fixture::slot_card();
+        let comp_kt = compose_for(&d, comp);
+        assert!(comp_kt.contains("val body: @Composable () -> Unit = {}"), "{comp_kt}");
+        assert!(comp_kt.contains("body()"), "{comp_kt}");
+
+        let inst_kt = compose_for(&d, inst);
+        assert!(inst_kt.contains("Dialog("), "{inst_kt}");
+        assert!(inst_kt.contains(") {"), "{inst_kt}");
+        assert!(inst_kt.contains("text = \"Slot content\""), "{inst_kt}");
     }
 }

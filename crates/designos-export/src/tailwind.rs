@@ -478,7 +478,18 @@ fn markup(doc: &Document, id: NodeId, parent: Parent, depth: usize, o: &mut Out,
     let class_attr = if cls.is_empty() { String::new() } else { format!(" {attr}=\"{cls}\"") };
 
     if matches!(n.kind, NodeKind::Instance { .. }) {
-        o.line(depth, format!("<{}{}{class_attr} />", view_name(doc, n), instance_attrs(doc, n)));
+        let slot_kids = instance_slot_children(doc, n);
+        if slot_kids.is_empty() {
+            o.line(depth, format!("<{}{}{class_attr} />", view_name(doc, n), instance_attrs(doc, n)));
+        } else {
+            let vname = view_name(doc, n);
+            o.line(depth, format!("<{}{}{class_attr}>", vname, instance_attrs(doc, n)));
+            let me = Parent::of(n);
+            for k in slot_kids {
+                markup(doc, k, me, depth + 1, o, jsx);
+            }
+            o.line(depth, format!("</{vname}>"));
+        }
         return;
     }
     if is_vector_asset(doc, id) {
@@ -499,7 +510,9 @@ fn markup(doc: &Document, id: NodeId, parent: Parent, depth: usize, o: &mut Out,
     }
     let tag = if matches!(n.kind, NodeKind::Section) { "section" } else { "div" };
     let kids = visible_children(doc, n);
-    if kids.is_empty() {
+    let slot_expr =
+        if jsx { react_slot_expr(doc, id) } else { react_slot_expr(doc, id).and_then(|_| slot_param_name(doc, id)).map(|p| format!("<!-- slot: {p} -->")) };
+    if kids.is_empty() && slot_expr.is_none() {
         if jsx {
             o.line(depth, format!("<{tag}{class_attr} />"));
         } else {
@@ -508,6 +521,9 @@ fn markup(doc: &Document, id: NodeId, parent: Parent, depth: usize, o: &mut Out,
         return;
     }
     o.line(depth, format!("<{tag}{class_attr}>"));
+    if let Some(expr) = slot_expr {
+        o.line(depth + 1, expr);
+    }
     let me = Parent::of(n);
     for k in kids {
         markup(doc, k.id, me, depth + 1, o, jsx);

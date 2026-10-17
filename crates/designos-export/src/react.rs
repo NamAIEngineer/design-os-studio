@@ -24,7 +24,7 @@ pub fn react_for(doc: &Document, node: NodeId) -> String {
 pub fn react_with(doc: &Document, node: NodeId, opts: &ReactOptions) -> String {
     let Some(n) = doc.get(node) else { return String::new() };
     let mut o = Out::new("  ");
-    o.line(0, format!("export function {}() {{", view_name(doc, n)));
+    o.line(0, react_slot_signature(doc, n));
     o.line(1, "return (");
     if opts.tailwind {
         jsx_markup(doc, node, 2, &mut o);
@@ -141,7 +141,18 @@ fn element(doc: &Document, id: NodeId, parent: Parent, depth: usize, o: &mut Out
     }
     let style = style_entries(doc, id, parent.root);
     if matches!(n.kind, NodeKind::Instance { .. }) {
-        open_tag(o, depth, &view_name(doc, n), &instance_attrs(doc, n), &style, "/>");
+        let slot_kids = instance_slot_children(doc, n);
+        if slot_kids.is_empty() {
+            open_tag(o, depth, &view_name(doc, n), &instance_attrs(doc, n), &style, "/>");
+        } else {
+            let vname = view_name(doc, n);
+            open_tag(o, depth, &vname, &instance_attrs(doc, n), &style, ">");
+            let me = Parent::of(n);
+            for k in slot_kids {
+                element(doc, k, me, depth + 1, o);
+            }
+            o.line(depth, format!("</{vname}>"));
+        }
         return;
     }
     if is_vector_asset(doc, id) {
@@ -164,11 +175,15 @@ fn element(doc: &Document, id: NodeId, parent: Parent, depth: usize, o: &mut Out
     }
     let tag = if matches!(n.kind, NodeKind::Section) { "section" } else { "div" };
     let kids = visible_children(doc, n);
-    if kids.is_empty() {
+    let slot_expr = react_slot_expr(doc, id);
+    if kids.is_empty() && slot_expr.is_none() {
         open_tag(o, depth, tag, "", &style, "/>");
         return;
     }
     open_tag(o, depth, tag, "", &style, ">");
+    if let Some(expr) = slot_expr {
+        o.line(depth + 1, expr);
+    }
     let me = Parent::of(n);
     for k in kids {
         element(doc, k.id, me, depth + 1, o);
@@ -279,5 +294,22 @@ mod tests {
   );
 }"####;
         assert_eq!(react_with(&d, id, &ReactOptions { tailwind: true }), expected);
+    }
+
+    #[test]
+    fn golden_slot_component_and_instance() {
+        let (d, comp, _slot, inst) = fixture::slot_card();
+        let comp_react = react_for(&d, comp);
+        assert!(comp_react.contains("export function Dialog({ children, body }: { children?: React.ReactNode; body?: React.ReactNode }) {"), "{comp_react}");
+        assert!(comp_react.contains("{body ?? children}"), "{comp_react}");
+
+        let comp_tw = react_with(&d, comp, &ReactOptions { tailwind: true });
+        assert!(comp_tw.contains("export function Dialog({ children, body }: { children?: React.ReactNode; body?: React.ReactNode }) {"), "{comp_tw}");
+        assert!(comp_tw.contains("{body ?? children}"), "{comp_tw}");
+
+        let inst_react = react_for(&d, inst);
+        assert!(inst_react.contains("<Dialog"), "{inst_react}");
+        assert!(inst_react.contains("Slot content"), "{inst_react}");
+        assert!(inst_react.contains("</Dialog>"), "{inst_react}");
     }
 }
