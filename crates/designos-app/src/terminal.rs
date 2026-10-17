@@ -546,6 +546,9 @@ pub struct TerminalState {
     pub last_doc_sync_mtime: Option<std::time::SystemTime>,
     /// Agent edits log (`doc-patch.jsonl`) written by `designos-mcp`, with its read position.
     pub live_patch: crate::live_patch_log::LivePatchLog,
+    /// Agent edits already read from the log (its offset has moved past them) that wait for the
+    /// canvas to be idle: replaying them mid-drag would be undone by the drag's own cancel.
+    pub pending_live_patches: Vec<designos_doc::live_patch::LivePatch>,
     pub last_synced_key: Option<(u64, u64, u64)>,
     pub current_page_id: u64,
     pub current_page_name: String,
@@ -627,6 +630,7 @@ impl TerminalState {
             selection_spec_path,
             last_doc_sync_mtime: initial_doc_mtime,
             live_patch,
+            pending_live_patches: Vec::new(),
             last_synced_key: None,
             current_page_id: 1,
             current_page_name: "Page 1".to_string(),
@@ -675,6 +679,7 @@ impl TerminalState {
         self.last_watched_mtime = std::fs::metadata(&self.live_spec_path).and_then(|m| m.modified()).ok();
         self.last_doc_sync_mtime = std::fs::metadata(&self.live_doc_sync_path).and_then(|m| m.modified()).ok();
         self.live_patch = crate::live_patch_log::LivePatchLog::bind(self.session_dir.join("doc-patch.jsonl"));
+        self.pending_live_patches.clear();
         self.last_synced_key = None;
     }
 

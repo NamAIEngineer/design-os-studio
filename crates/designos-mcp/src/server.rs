@@ -444,7 +444,8 @@ impl Session {
                         | "designos_redo"
                 );
                 // What to return to if the editor cannot be given the edit.
-                let rollback = (mutates && self.bridge.live_doc_patch_path.is_some()).then(|| (self.engine.doc.clone(), self.engine.history.clone(), self.dirty));
+                let rollback =
+                    (mutates && self.bridge.live_doc_patch_path.is_some()).then(|| (self.engine.doc.clone(), self.engine.history.clone(), self.dirty));
                 let result = self.engine.call(name, args)?;
                 if mutates && result.get("changed").and_then(Value::as_bool) != Some(false) {
                     self.dirty = true;

@@ -6,14 +6,40 @@
 //! again with their real children.
 
 use crate::app::App;
+use crate::canvas::Interaction;
 use crate::edit::Tx;
 use designos_doc::live_patch::{replay_live_patch, LivePatch, LivePatchReport};
 use designos_doc::{Document, NodeId};
 
+/// Whether the user is in the middle of something that works on a copy of the document: a drag
+/// or other pointer interaction (cancelling it reverts every node it touched), or an open text
+/// session (it commits its own copy of the text on close).
+fn canvas_is_busy(app: &App) -> bool {
+    !matches!(app.canvas.inter, Interaction::None) || app.canvas.text.is_some()
+}
+
+/// Holds `patches` for the next idle moment, then replays everything held if the canvas is idle
+/// now. The log offset has already moved past these lines, so they cannot be read again.
+pub fn queue_live_patches(app: &mut App, patches: Vec<LivePatch>) {
+    app.terminal.pending_live_patches.extend(patches);
+    apply_pending_live_patches(app);
+}
+
+/// Replays the held patches, oldest first, once the canvas is idle. True when any were replayed.
+pub fn apply_pending_live_patches(app: &mut App) -> bool {
+    if app.terminal.pending_live_patches.is_empty() || canvas_is_busy(app) {
+        return false;
+    }
+    let patches = std::mem::take(&mut app.terminal.pending_live_patches);
+    apply_live_patches(app, &patches);
+    app.terminal.sync_live_file_context(&app.doc, app.page, &app.selection, app.file_path.as_deref());
+    true
+}
+
 /// Replays `patches` on `app.doc`, one undo step per patch (one agent tool call), and reports
 /// the result in a toast. A patch that cannot be applied is reported and the rest still are: the
 /// log has already been read past them.
-pub fn apply_live_patches(app: &mut App, patches: &[LivePatch]) {
+fn apply_live_patches(app: &mut App, patches: &[LivePatch]) {
     let mut total = LivePatchReport::default();
     let mut committed_any = false;
     let mut failures = Vec::new();

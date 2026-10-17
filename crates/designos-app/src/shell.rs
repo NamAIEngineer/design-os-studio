@@ -1099,6 +1099,10 @@ impl Shell {
                     }
                 }
                 canvas::show(&mut self.app, ui, main_canvas_rect);
+                // An interaction that ended in this frame releases the agent edits held for it.
+                if crate::live_patch_apply::apply_pending_live_patches(&mut self.app) {
+                    ctx.request_repaint();
+                }
                 if deck {
                     crate::decks::ui::notes(&mut self.app, ui, notes_rect);
                 }
@@ -1244,10 +1248,7 @@ pub fn execute_terminal_actions(app: &mut App, actions: Vec<crate::terminal::Ter
                 },
                 Err(e) => app.show_toast(format!("Failed to read live doc {}: {e}", path.display()), true),
             },
-            crate::terminal::TerminalAction::ApplyLivePatch(patches) => {
-                crate::live_patch_apply::apply_live_patches(app, &patches);
-                app.terminal.sync_live_file_context(&app.doc, app.page, &app.selection, app.file_path.as_deref());
-            }
+            crate::terminal::TerminalAction::ApplyLivePatch(patches) => crate::live_patch_apply::queue_live_patches(app, patches),
             crate::terminal::TerminalAction::LiveSyncError(msg) => app.show_toast(msg, true),
             crate::terminal::TerminalAction::ReloadFromDisk => {
                 if let Some(p) = app.file_path.clone() {
