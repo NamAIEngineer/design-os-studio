@@ -269,3 +269,92 @@ fn preferred_components_without_a_slot_config_survive_a_fig_round_trip() {
     let icon = find(&rt, "Icon").id;
     assert_eq!(find(&rt, "Panel").component.slot_configs.get("Body"), Some(&SlotPropConfig { preferred: vec![icon], ..Default::default() }));
 }
+
+/// Verifies the embedded Kiwi schema tags (`isSlot=463`, `isSlotContent=495`, `SLOT=7`) and reports
+/// the actual slot record counts in the owner's `VSF - PCP.fig` when present on disk; skipped when
+/// the private file is absent (such as on CI). Per #160 AC #2, no synthetic slot fixture is invented
+/// when the file carries zero slot records.
+#[test]
+fn vsf_pcp_fig_slot_scan_skips_when_absent_and_verifies_schema_and_counts_when_present() {
+    use designos_fig::container;
+    use designos_fig::kiwi::{KiwiValue, Schema};
+
+    let candidates = ["/Users/jang/Downloads/VSF - PCP.fig", "/Users/jangtrinh/Downloads/VSF - PCP.fig", "/Users/jangtrinh/Downloads/VSF - PCP (1).fig"];
+    let Some((path, bytes)) = candidates.iter().find_map(|p| std::fs::read(p).ok().map(|b| (*p, b))) else {
+        eprintln!("SKIPPED: owner's VSF - PCP.fig is not present on this machine");
+        return;
+    };
+
+    let archive = container::open(&bytes).expect("open VSF - PCP.fig container");
+    let (schema_bin, msg_bin) = container::read_archive_chunks(&archive).expect("read archive chunks");
+    let schema = Schema::decode(&schema_bin).expect("decode embedded Kiwi schema");
+
+    let nc_def = schema.defs.iter().find(|d| d.name == "NodeChange").expect("NodeChange definition");
+    let is_slot_tag = nc_def.fields.iter().find(|f| f.name.as_ref() == "isSlot").map(|f| f.value);
+    let is_slot_content_tag = nc_def.fields.iter().find(|f| f.name.as_ref() == "isSlotContent").map(|f| f.value);
+    assert_eq!(is_slot_tag, Some(463), "NodeChange.isSlot field tag in VSF - PCP.fig");
+    assert_eq!(is_slot_content_tag, Some(495), "NodeChange.isSlotContent field tag in VSF - PCP.fig");
+
+    let cpt_def = schema.defs.iter().find(|d| d.name == "ComponentPropType").expect("ComponentPropType definition");
+    let slot_tag = cpt_def.fields.iter().find(|f| f.name.as_ref() == "SLOT").map(|f| f.value);
+    assert_eq!(slot_tag, Some(7), "ComponentPropType.SLOT enum value in VSF - PCP.fig");
+
+    let root = schema.root_message().expect("root message");
+    let msg = schema.decode_message(root, &msg_bin).expect("decode message");
+    let mut total_nodes = 0usize;
+    let mut is_slot_true = 0usize;
+    let mut is_slot_present = 0usize;
+    let mut is_slot_content_true = 0usize;
+    let mut is_slot_content_present = 0usize;
+    let mut slot_props = 0usize;
+    let mut slot_prop_configs = 0usize;
+    let mut slot_prop_refs = 0usize;
+    let mut slot_content_id_assigns = 0usize;
+    if let Some(KiwiValue::Array(changes)) = msg.get("nodeChanges") {
+        total_nodes = changes.len();
+        for nc in changes {
+            if let Some(v) = nc.get("isSlot") {
+                is_slot_present += 1;
+                if v == &KiwiValue::Bool(true) {
+                    is_slot_true += 1;
+                }
+            }
+            if let Some(v) = nc.get("isSlotContent") {
+                is_slot_content_present += 1;
+                if v == &KiwiValue::Bool(true) {
+                    is_slot_content_true += 1;
+                }
+            }
+            if let Some(KiwiValue::Array(defs)) = nc.get("componentPropDefs") {
+                for d in defs {
+                    if d.get("type") == Some(&KiwiValue::Enum("SLOT".into())) {
+                        slot_props += 1;
+                        if d.get("slotPropConfig").is_some() {
+                            slot_prop_configs += 1;
+                        }
+                    }
+                }
+            }
+            if let Some(KiwiValue::Array(refs)) = nc.get("componentPropRefs") {
+                for r in refs {
+                    if r.get("componentPropNodeField") == Some(&KiwiValue::Enum("SLOT_CONTENT_ID".into())) {
+                        slot_prop_refs += 1;
+                    }
+                }
+            }
+            if let Some(KiwiValue::Array(assigns)) = nc.get("componentPropAssignments") {
+                for a in assigns {
+                    if let Some(vv) = a.get("varValue") {
+                        if vv.get("value").and_then(|v| v.get("slotContentIdValue")).is_some() {
+                            slot_content_id_assigns += 1;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    eprintln!(
+        "VSF - PCP.fig ({path}): total_nodeChanges={total_nodes}, isSlot(true={is_slot_true}, present={is_slot_present}), isSlotContent(true={is_slot_content_true}, present={is_slot_content_present}), SLOT_props={slot_props}, slotPropConfigs={slot_prop_configs}, slotPropRefs={slot_prop_refs}, slotContentIdValue_assigns={slot_content_id_assigns}"
+    );
+    assert!(total_nodes > 0);
+}
