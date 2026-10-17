@@ -144,3 +144,7 @@ pub(crate) const STRUCTURAL_FIELDS: [&str; 3] = ["id", "parent", "children"];
 mod tests;
 #[cfg(test)]
 mod validate_tests;
+#[cfg(test)]
+mod replay_guard_tests;
+#[cfg(test)]
+mod reviewer_probe_tests;

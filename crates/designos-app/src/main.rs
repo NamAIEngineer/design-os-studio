@@ -25,6 +25,8 @@ mod live_patch_apply;
 mod live_patch_log;
 #[cfg(test)]
 mod live_sync_tests;
+#[cfg(test)]
+mod live_sync_interaction_tests;
 mod ops;
 mod panels;
 mod plugins;
