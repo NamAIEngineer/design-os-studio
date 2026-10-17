@@ -50,7 +50,7 @@ pub struct Options {
     pub find: Option<String>,
     /// Replacement text for `--find`; also shows the replace row.
     pub replace_with: Option<String>,
-    /// Open Dev mode with this code language: `css`, `tailwind`, `swiftui`, `compose` or `react`.
+    /// Open Dev mode with this code language: `css`, `tailwind`, `swiftui`, `uikit`, `compose`, `android-xml` or `react`.
     pub dev: Option<String>,
     /// With `--dev`: mark the selected layer Ready for dev and give it a demo annotation and link.
     pub dev_demo: bool,
@@ -106,7 +106,7 @@ impl Options {
 
 /// Values of `--panel`: `agents`, `agents-chat`, `specs`, `assets`, `variables` / `variables-floating` open the local views,
 /// `libraries` the Libraries modal; the others are inspector popups opened on the selection for screenshots.
-pub const PANELS: [&str; 38] = [
+pub const PANELS: [&str; 40] = [
     "agents",
     "agents-chat",
     "specs",
@@ -125,6 +125,8 @@ pub const PANELS: [&str; 38] = [
     "fill-d9",
     "picker-gradient",
     "effects-menu",
+    "effect-styles",
+    "grid-styles",
     "stroke-settings",
     "type-details",
     "effect-noise",
@@ -237,9 +239,9 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Options, String> 
             "--find" => o.find = Some(it.next().ok_or("--find needs the text to search for")?),
             "--replace-with" => o.replace_with = Some(it.next().ok_or("--replace-with needs the replacement text")?),
             "--dev" => {
-                let l = it.next().ok_or("--dev needs css, tailwind, swiftui, compose or react")?;
-                if !matches!(l.as_str(), "css" | "tailwind" | "swiftui" | "compose" | "react") {
-                    return Err(format!("unknown language '{l}' (expected css, tailwind, swiftui, compose or react)"));
+                let l = it.next().ok_or("--dev needs css, tailwind, swiftui, uikit, compose, android-xml or react")?;
+                if !matches!(l.as_str(), "css" | "tailwind" | "swiftui" | "uikit" | "compose" | "android-xml" | "react") {
+                    return Err(format!("unknown language '{l}' (expected css, tailwind, swiftui, uikit, compose, android-xml or react)"));
                 }
                 o.dev = Some(l);
             }
@@ -268,13 +270,13 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Options, String> 
     Ok(o)
 }
 
-pub const USAGE: &str = "usage: designos [FILE] [--screenshot OUT.png] [--size WxH] [--scale FACTOR] [--select LAYER|none] [--menu main|main/File|shape|palette] [--panel specs|assets|plugins|interaction|present-variables|variables|variables-floating|libraries|picker|picker-page|fill-d9|picker-gradient|effects-menu|stroke-settings|type-details|effect-noise|effect-texture|effect-glass|version-history|dev-annotate|dev-compare]\n               [--zoom PERCENT] [--rulers] [--grid] [--gpu] [--home] [--library DIR] [--layout-grid grid|columns|rows] [--edit-text LAYER [--select-text START-END]]\n               [--inspect-json] [--comments-json] [--add-comment TEXT] [--reply-comment ID [--message TEXT] [--resolve]] [--resolve-comment ID] [--apply-spec SPEC.json] [--export-spec OUT.json] [--export-fig OUT.fig]\n  FILE  .fig, .json (Figma REST or native), .svg or .designos; without a file the projects home screen opens
+pub const USAGE: &str = "usage: designos [FILE] [--screenshot OUT.png] [--size WxH] [--scale FACTOR] [--select LAYER|none] [--menu main|main/File|shape|palette] [--panel specs|assets|plugins|interaction|present-variables|variables|variables-floating|libraries|picker|picker-page|fill-d9|picker-gradient|effects-menu|effect-styles|grid-styles|stroke-settings|type-details|effect-noise|effect-texture|effect-glass|version-history|dev-annotate|dev-compare]\n               [--zoom PERCENT] [--rulers] [--grid] [--gpu] [--home] [--library DIR] [--layout-grid grid|columns|rows] [--edit-text LAYER [--select-text START-END]]\n               [--inspect-json] [--comments-json] [--add-comment TEXT] [--reply-comment ID [--message TEXT] [--resolve]] [--resolve-comment ID] [--apply-spec SPEC.json] [--export-spec OUT.json] [--export-fig OUT.fig]\n  FILE  .fig, .json (Figma REST or native), .svg or .designos; without a file the projects home screen opens
   --scale    with --screenshot: device pixel ratio (2 writes a PNG twice --size, rendered crisp rather than upscaled)
   --home     show the home screen (also in --screenshot mode)
   --present  open presentation preview; --fullscreen starts it in native fullscreen (F11 toggles, Esc returns)
   --gpu      draw the canvas on the GPU; --screenshot uses the CPU renderer unless this is given
   --library  use DIR as the projects library instead of the default location
-  --dev      open Dev mode with a code language (css|tailwind|swiftui|compose|react); --dev-demo marks the selection Ready for dev with an annotation
+  --dev      open Dev mode with a code language (css|tailwind|swiftui|uikit|compose|android-xml|react); --dev-demo marks the selection Ready for dev with an annotation
   --no-caption  with --panel micro-<slug>:seq:<N>: record frames without the top shortcut caption bar
   --no-toast    with --screenshot: leave transient toasts ('Opened <file>') out of the capture
   --seed-library  write the showcase sample files (a project with three files) into DIR and exit

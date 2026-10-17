@@ -264,6 +264,9 @@ struct Lk<'a> {
     style_nodes: HashMap<String, Value>,
     /// Style node id (`s:l`) -> node, for styles defined in this file.
     style_by_id: HashMap<String, Value>,
+    /// Ids (`s:l`) of style nodes the file marks as deleted: their values are never used and
+    /// the nodes that still point at them are left unlinked.
+    deleted_styles: std::collections::HashSet<String>,
     /// Property definition id (including the `parentPropDefId` aliases that
     /// variants carry) -> (`Name#s:l`, REST type).
     prop_defs: HashMap<String, (String, &'static str)>,
@@ -283,6 +286,7 @@ impl<'a> Lk<'a> {
             style_by_key: HashMap::new(),
             style_nodes: HashMap::new(),
             style_by_id: HashMap::new(),
+            deleted_styles: std::collections::HashSet::new(),
             prop_defs: HashMap::new(),
             handoff_status: HashMap::new(),
         };
@@ -290,8 +294,11 @@ impl<'a> Lk<'a> {
         for e in entries {
             let j = &e.json;
             let key = fstr(j, "key").filter(|k| !k.is_empty());
-            if fstr(j, "styleType").is_some() {
+            let live_style = fstr(j, "styleType").is_some() && !style_soft_deleted(j);
+            if live_style {
                 lk.style_by_id.insert(e.id.clone(), j.clone());
+            } else if fstr(j, "styleType").is_some() {
+                lk.deleted_styles.insert(e.id.clone());
             }
             for h in j.get("handoffStatusMap").map(|m| rest_import::farr(m, "entries")).unwrap_or(&[]) {
                 let Some(gid) = h.get("guid").and_then(guid_str) else { continue };
@@ -314,7 +321,9 @@ impl<'a> Lk<'a> {
                 }
                 (_, Some(k)) if fstr(j, "styleType").is_some() => {
                     lk.style_by_key.insert(k.to_string(), e.id.clone());
-                    lk.style_nodes.insert(k.to_string(), j.clone());
+                    if live_style {
+                        lk.style_nodes.insert(k.to_string(), j.clone());
+                    }
                 }
                 _ => {}
             }
@@ -378,6 +387,19 @@ impl<'a> Lk<'a> {
             Some(k) => self.style_nodes.get(k),
             None => self.style_by_id.get(r.get("guid").and_then(guid_str)?.as_str()),
         }
+    }
+
+    /// The live style node a consumer points at: its `modern` `styleIdFor*` reference, else the
+    /// legacy GUID reference `legacy` (`inherit*StyleID`).
+    fn style_node_of(&self, nc: &Value, modern: &str, legacy: &str) -> Option<&Value> {
+        nc.get(modern).and_then(|r| self.style_node(r)).or_else(|| self.style_by_id.get(guid_str(nc.get(legacy)?)?.as_str()))
+    }
+
+    /// Style id for a consumer's `modern` reference, else its `legacy` GUID reference. None when
+    /// the consumer has neither or the style is deleted.
+    fn style_id_of(&self, nc: &Value, modern: &str, legacy: Option<&str>) -> Option<String> {
+        let id = nc.get(modern).and_then(|r| self.style_id(r)).or_else(|| nc.get(legacy?).and_then(guid_str))?;
+        (!self.deleted_styles.contains(&id)).then_some(id)
     }
 
     fn prop_def(&self, r: &Value) -> Option<&(String, &'static str)> {
@@ -532,10 +554,10 @@ fn style_table(entries: &[Entry]) -> Value {
     let mut out = Map::new();
     for e in entries {
         let j = &e.json;
-        if rest_import::fbool(j, "isSoftDeleted") == Some(true) {
+        if style_soft_deleted(j) {
             continue;
         }
-        let Some(ty) = fstr(j, "styleType").filter(|t| matches!(*t, "FILL" | "TEXT" | "EFFECT" | "GRID")) else { continue };
+        let Some(ty) = fstr(j, "styleType").filter(|t| matches!(*t, "FILL" | "STROKE" | "TEXT" | "EFFECT" | "GRID")) else { continue };
         let key = fstr(j, "key").unwrap_or("");
         let mut m = Map::new();
         if !key.is_empty() {
@@ -544,9 +566,24 @@ fn style_table(entries: &[Entry]) -> Value {
         m.insert("name".into(), fstr(j, "name").unwrap_or("").into());
         m.insert("description".into(), fstr(j, "styleDescription").unwrap_or("").into());
         m.insert("styleType".into(), ty.into());
+        // The style node is the source of truth for the values it shares.
+        match ty {
+            "EFFECT" => {
+                m.insert("effects".into(), Value::Array(rest_import::farr(j, "effects").iter().filter_map(convert_effect).collect()));
+            }
+            "GRID" => {
+                m.insert("layoutGrids".into(), convert_grids(j).unwrap_or_else(|| Value::Array(Vec::new())));
+            }
+            _ => {}
+        }
         out.insert(e.id.clone(), Value::Object(m));
     }
     Value::Object(out)
+}
+
+/// A style node the file marks as deleted (`isSoftDeletedStyle`, or the node-level `isSoftDeleted`).
+fn style_soft_deleted(j: &Value) -> bool {
+    rest_import::fbool(j, "isSoftDeletedStyle") == Some(true) || rest_import::fbool(j, "isSoftDeleted") == Some(true)
 }
 
 fn symbol_id_str(v: &Value) -> Option<String> {
@@ -912,7 +949,10 @@ fn convert_node(nc: &Value, id: &str, lk: &Lk) -> Option<Map<String, Value>> {
             json!({"top": g("borderTopWeight"), "right": g("borderRightWeight"), "bottom": g("borderBottomWeight"), "left": g("borderLeftWeight")}),
         );
     }
-    let effects: Vec<Value> = rest_import::farr(nc, "effects").iter().filter_map(convert_effect).collect();
+    // Effects follow the same rule as paints: the style node's list wins unless a variable is bound.
+    let own_effects = rest_import::farr(nc, "effects");
+    let fx_style = lk.style_node_of(nc, "styleIdForEffect", "inheritEffectStyleID").filter(|_| !own_effects.iter().any(|e| e.get("colorVar").is_some()));
+    let effects: Vec<Value> = fx_style.map(|s| rest_import::farr(s, "effects")).unwrap_or(own_effects).iter().filter_map(convert_effect).collect();
     if !effects.is_empty() {
         m.insert("effects".into(), Value::Array(effects));
     }
@@ -962,7 +1002,7 @@ fn convert_node(nc: &Value, id: &str, lk: &Lk) -> Option<Map<String, Value>> {
         let masked = nc.get("frameMaskDisabled").and_then(Value::as_bool) != Some(true);
         m.insert("clipsContent".into(), masked.into());
         convert_stack(&mut m, nc);
-        if let Some(g) = convert_grids(nc) {
+        if let Some(g) = convert_grids(lk.style_node_of(nc, "styleIdForGrid", "inheritGridStyleID").unwrap_or(nc)) {
             m.insert("layoutGrids".into(), g);
         }
     }
@@ -999,10 +1039,14 @@ fn convert_node(nc: &Value, id: &str, lk: &Lk) -> Option<Map<String, Value>> {
 
     // Style references (`{assetRef: {key}}` for library styles, `{guid}` for local ones).
     let mut styles = Map::new();
-    for (src, dst) in
-        [("styleIdForFill", "fill"), ("styleIdForStrokeFill", "stroke"), ("styleIdForText", "text"), ("styleIdForEffect", "effect"), ("styleIdForGrid", "grid")]
-    {
-        if let Some(g) = nc.get(src).and_then(|r| lk.style_id(r)) {
+    for (src, legacy, dst) in [
+        ("styleIdForFill", None, "fill"),
+        ("styleIdForStrokeFill", None, "stroke"),
+        ("styleIdForText", None, "text"),
+        ("styleIdForEffect", Some("inheritEffectStyleID"), "effect"),
+        ("styleIdForGrid", Some("inheritGridStyleID"), "grid"),
+    ] {
+        if let Some(g) = lk.style_id_of(nc, src, legacy) {
             styles.insert(dst.into(), g.into());
         }
     }
@@ -1180,17 +1224,33 @@ fn bound_variables(nc: &Value, lk: &Lk) -> Option<Value> {
             out.insert((*k).into(), a.clone());
         }
     }
-    for (src, dst) in [("fillPaints", "fills"), ("strokePaints", "strokes")] {
+    for (src, dst, opacity_dst) in [("fillPaints", "fills", "fillOpacities"), ("strokePaints", "strokes", "strokeOpacities")] {
         let list: Vec<Value> = rest_import::farr(nc, src).iter().map(|p| p.get("colorVar").and_then(alias).unwrap_or(Value::Null)).collect();
         if list.iter().any(|v| !v.is_null()) {
             out.insert(dst.into(), Value::Array(list));
         }
+        // `Paint.opacityVar`: REST has no field for it, `variables::parse_node_variables` reads this key.
+        let opacities: Vec<Value> = rest_import::farr(nc, src).iter().map(|p| p.get("opacityVar").and_then(alias).unwrap_or(Value::Null)).collect();
+        if opacities.iter().any(|v| !v.is_null()) {
+            out.insert(opacity_dst.into(), Value::Array(opacities));
+        }
     }
     let fx: Vec<Value> = rest_import::farr(nc, "effects")
         .iter()
-        .map(|e| match e.get("colorVar").and_then(alias) {
-            Some(a) => json!({"color": a}),
-            None => Value::Null,
+        .map(|e| {
+            let mut bound = Map::new();
+            if let Some(a) = e.get("colorVar").and_then(alias) {
+                bound.insert("color".into(), a);
+            }
+            // `Effect.effectOpacityVar`
+            if let Some(a) = e.get("effectOpacityVar").and_then(alias) {
+                bound.insert("opacity".into(), a);
+            }
+            if bound.is_empty() {
+                Value::Null
+            } else {
+                Value::Object(bound)
+            }
         })
         .collect();
     if fx.iter().any(|v| !v.is_null()) {
@@ -1350,6 +1410,27 @@ fn stack_align(s: Option<&str>) -> &'static str {
         Some("SPACE_BETWEEN") | Some("SPACE_EVENLY") => "SPACE_BETWEEN",
         Some("BASELINE") => "BASELINE",
         _ => "MIN",
+    }
+}
+
+/// Primary-axis `StackJustify`. The legacy `SPACE_EVENLY` (3) is Figma's space-between (real files
+/// carry it and never `SPACE_BETWEEN`; Figma lints it when `stackLayoutVersion < 1`), so it maps to
+/// space-between; only the CSS-aligned `SPACE_EVENLY_CSS` (6) is space-evenly.
+fn stack_justify(s: Option<&str>) -> &'static str {
+    match s {
+        Some("SPACE_AROUND") => "SPACE_AROUND",
+        Some("SPACE_EVENLY_CSS") => "SPACE_EVENLY",
+        other => stack_align(other),
+    }
+}
+
+/// Wrap-line distribution and layout engine revision, which only matter once a stack is converted.
+fn convert_stack_extras(m: &mut Map<String, Value>, nc: &Value) {
+    if fstr(nc, "stackCounterAlignContent") == Some("SPACE_BETWEEN") {
+        m.insert("counterAxisAlignContent".into(), "SPACE_BETWEEN".into());
+    }
+    if let Some(n) = fnum(nc, "stackLayoutVersion").filter(|n| *n > 0.0) {
+        m.insert("stackLayoutVersion".into(), n.into());
     }
 }
 
@@ -1577,7 +1658,7 @@ fn convert_override(o: &Value, lk: &Lk) -> Map<String, Value> {
             }
         }
         if let Some(s) = fstr(o, "stackPrimaryAlignItems") {
-            m.insert("primaryAxisAlignItems".into(), stack_align(Some(s)).into());
+            m.insert("primaryAxisAlignItems".into(), stack_justify(Some(s)).into());
         }
         if let Some(s) = fstr(o, "stackCounterAlignItems") {
             m.insert("counterAxisAlignItems".into(), stack_align(Some(s)).into());
@@ -1709,7 +1790,7 @@ fn convert_stack(m: &mut Map<String, Value>, nc: &Value) {
     ins(m, "paddingTop", fnum(nc, "stackPaddingTop").or(v));
     ins(m, "paddingRight", fnum(nc, "stackPaddingRight").or(h));
     ins(m, "paddingBottom", fnum(nc, "stackPaddingBottom").or(v));
-    m.insert("primaryAxisAlignItems".into(), stack_align(fstr(nc, "stackPrimaryAlignItems")).into());
+    m.insert("primaryAxisAlignItems".into(), stack_justify(fstr(nc, "stackPrimaryAlignItems")).into());
     m.insert("counterAxisAlignItems".into(), stack_align(fstr(nc, "stackCounterAlignItems")).into());
     // Real files only ever write `FIXED` for the primary axis (absent = hug) and
     // `RESIZE_TO_FIT_WITH_IMPLICIT_SIZE` for the counter axis (absent = fixed).
@@ -1725,6 +1806,7 @@ fn convert_stack(m: &mut Map<String, Value>, nc: &Value) {
     if let Some(b) = rest_import::fbool(nc, "bordersTakeSpace") {
         m.insert("strokesIncludedInLayout".into(), b.into());
     }
+    convert_stack_extras(m, nc);
 }
 
 // ------------------------------------------------------------------ paint / effect
@@ -1899,6 +1981,7 @@ fn convert_text(m: &mut Map<String, Value>, nc: &Value, lk: &Lk) {
     copy(m, nc, "maxLines", "maxLines");
     copy(m, nc, "autoRename", "autoRename");
     copy(m, nc, "textDecorationSkipInk", "textDecorationSkipInk");
+    copy(m, nc, "textWrapStyle", "textWrapStyle");
     if let Some(lines) = td.and_then(|t| t.get("lines")).and_then(Value::as_array) {
         crate::textfmt::lines_from_kiwi(lines, m, &mut style);
     }

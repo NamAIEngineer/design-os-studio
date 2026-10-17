@@ -447,6 +447,20 @@ impl App {
         s
     }
 
+    /// Paste with the system clipboard's HTML flavour read through [`App::system_html`].
+    pub fn paste_from_system(&mut self, system_text: Option<&str>) {
+        let html = (self.system_html)();
+        self.paste_with_html(system_text, html.as_deref());
+    }
+
+    /// Paste with the system clipboard's HTML flavour at hand: a Figma payload wins over SVG and text.
+    pub fn paste_with_html(&mut self, system_text: Option<&str>, system_html: Option<&str>) {
+        if system_html.is_some_and(|h| clipboard::paste_figma(self, h)) {
+            return;
+        }
+        self.paste(system_text);
+    }
+
     pub fn paste(&mut self, system_text: Option<&str>) {
         // SVG markup on the system clipboard becomes layers.
         if system_text.is_some_and(|t| clipboard::paste_svg(self, t)) {

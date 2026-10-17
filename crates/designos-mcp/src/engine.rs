@@ -39,6 +39,12 @@ impl Engine {
                     "pages":self.doc.pages.iter().filter_map(|id|self.doc.get(*id)).map(summary).collect::<Vec<_>>(),
                     "node_count":self.doc.nodes.len(),"variable_count":self.doc.variables.len(),
                     "comment_count":self.doc.comments.len(),
+                    "style_count":self.doc.styles.len(),
+                    "styles":self.doc.styles.iter().map(|(key,values)|{
+                        let meta=self.doc.style_meta.get(key);
+                        json!({"key":key,"name":self.doc.style_name(key),"property":designos_doc::style_property(&self.doc,key),
+                            "description":meta.map(|m|m.description.as_str()).unwrap_or(""),"library_key":meta.and_then(|m|m.key.as_deref()),"values":values})
+                    }).collect::<Vec<_>>(),
                     "can_undo":self.history.can_undo(),"can_redo":self.history.can_redo()}))
             }
             "designos_list_nodes" => {
@@ -80,7 +86,8 @@ impl Engine {
                                 json!({
                                     "property":property,"variable_id":variable,
                                     "mode_id":self.doc.variables.get(variable).and_then(|v|self.doc.variable_mode(n.id,&v.collection)),
-                                    "value":self.doc.resolve_variable(n.id,variable)
+                                    "value":self.doc.resolve_variable(n.id,variable),
+                                    "code_syntax":self.doc.variables.get(variable).map(|v|&v.code_syntax)
                                 })
                             })
                             .collect::<Vec<_>>(),
@@ -88,7 +95,12 @@ impl Engine {
                 } else {
                     None
                 };
-                Ok(json!({"variables":self.doc.variables,"collections":self.doc.variable_collections,"effective_bindings":effective}))
+                // `code_syntax` is skipped in the native format when empty; tools get a stable shape.
+                let mut variables = json!(self.doc.variables);
+                for v in variables.as_object_mut().into_iter().flat_map(|m| m.values_mut()).filter_map(|v| v.as_object_mut()) {
+                    v.entry("code_syntax").or_insert_with(|| json!({}));
+                }
+                Ok(json!({"variables":variables,"collections":self.doc.variable_collections,"effective_bindings":effective}))
             }
             "designos_generate_code" => {
                 let a: CodeArgs = parse(args)?;
@@ -99,9 +111,11 @@ impl Engine {
                     "tailwind" => designos_export::tailwind_for(&doc, id),
                     "react" => designos_export::react_for(&doc, id),
                     "swiftui" => designos_export::swiftui_for(&doc, id),
+                    "uikit" => designos_export::uikit_for(&doc, id),
                     "compose" => designos_export::compose_for(&doc, id),
+                    "android-xml" => designos_export::android_xml_for(&doc, id),
                     "svg" => designos_export::export_svg(&doc, id, &Default::default()),
-                    _ => return Err("language must be css, tailwind, react, swiftui, compose, or svg".into()),
+                    _ => return Err("language must be css, tailwind, react, swiftui, uikit, compose, android-xml, or svg".into()),
                 };
                 Ok(json!({"node_id":id,"language":a.language,"code":code}))
             }
@@ -647,7 +661,14 @@ pub fn tools() -> Vec<Value> {
             "inputSchema":{"type":"object","properties":properties,"required":required,"additionalProperties":false},
             "annotations":{"readOnlyHint":read_only,"destructiveHint":!read_only,"idempotentHint":idempotent,"openWorldHint":false}}));
     };
-    add("get_document", "Summarize the current in-memory document, pages, counts, and undo state.", json!({}), vec![], true, true);
+    add(
+        "get_document",
+        "Summarize the current in-memory document: pages, counts, shared styles (fill, text, effect, grid) with their values, and undo state.",
+        json!({}),
+        vec![],
+        true,
+        true,
+    );
     add(
         "list_nodes",
         "List node summaries in numeric ID order. Query matches names case-insensitively; parent_id filters direct children. Use next_offset to paginate.",
@@ -668,7 +689,7 @@ pub fn tools() -> Vec<Value> {
     add(
         "generate_code",
         "Generate developer handoff code or SVG for a layer using resolved variable values. Returns source text; writes no files.",
-        json!({"node_id":id,"language":{"type":"string","enum":["css","tailwind","react","swiftui","compose","svg"]}}),
+        json!({"node_id":id,"language":{"type":"string","enum":["css","tailwind","react","swiftui","uikit","compose","android-xml","svg"]}}),
         vec!["node_id", "language"],
         true,
         true,
@@ -792,17 +813,54 @@ mod tests {
                     scopes: vec![],
                     hidden_from_publishing: false,
                     key: None,
+
+                    code_syntax: Default::default(),
                 },
             );
         }
         e.doc.get_mut(NodeId(1)).unwrap().variables.modes.insert("size".into(), "dark".into());
         e.doc.get_mut(NodeId(id)).unwrap().variables.bindings.insert("width".into(), "bound".into());
+        e.doc.variables.get_mut("bound").unwrap().code_syntax.insert(designos_doc::CodeSyntaxPlatform::Web, "var(--size-bound, 240px)".into());
+        e.doc.variables.get_mut("bound").unwrap().code_syntax.insert(designos_doc::CodeSyntaxPlatform::Ios, "Size.bound".into());
         let before = e.doc.to_json().unwrap();
         let values = e.call("designos_get_variables", json!({"node_id":id})).unwrap();
         assert_eq!(values["effective_bindings"][0]["value"], json!({"Number":240.0}));
+        let syntax = json!({"WEB": "var(--size-bound, 240px)", "iOS": "Size.bound"});
+        assert_eq!(values["variables"]["bound"]["code_syntax"], syntax);
+        assert_eq!(values["effective_bindings"][0]["code_syntax"], syntax);
+        assert_eq!(values["variables"]["width"]["code_syntax"], json!({}));
+        let css = e.call("designos_generate_code", json!({"node_id":id,"language":"css"})).unwrap();
+        assert!(css["code"].as_str().unwrap().contains("width: var(--size-bound, 240px);"), "{css}");
         let svg = e.call("designos_generate_code", json!({"node_id":id,"language":"svg"})).unwrap();
         assert!(svg["code"].as_str().unwrap().contains("width=\"240\""));
         assert_eq!(e.doc.to_json().unwrap(), before);
+    }
+    #[test]
+    fn get_document_lists_shared_effect_and_grid_styles_and_nodes_carry_their_links() {
+        use designos_doc::{Color, Effect, LayoutGrid, Style, StyleMeta, StyleProperty, Vec2};
+        let mut e = Engine::default();
+        let id = create(&mut e, "frame", "Card");
+        assert_eq!(e.call("designos_get_document", json!({})).unwrap()["styles"], json!([]), "no styles yet");
+        let shadow =
+            Effect::DropShadow { color: Color::rgba(0, 0, 0, 64), offset: Vec2::new(0.0, 4.0), radius: 8.0, spread: 0.0, visible: true, show_behind: false };
+        e.doc.styles.insert("Shadow/Card".into(), Style::Effect(vec![shadow]));
+        e.doc
+            .styles
+            .insert("Layout/Cols".into(), Style::Grid(vec![LayoutGrid::Columns { count: 12, gutter: 20.0, offset: 0.0, color: Color::rgba(255, 0, 0, 26) }]));
+        for (key, name, property) in [("Shadow/Card", "Shadow/Card", StyleProperty::Effect), ("Layout/Cols", "Layout / 12 col", StyleProperty::Grid)] {
+            e.doc.style_meta.insert(key.into(), StyleMeta { name: name.into(), key: None, description: String::new(), property });
+        }
+        e.doc.get_mut(NodeId(id)).unwrap().style_refs.insert("effect".into(), "Shadow/Card".into());
+        let doc = e.call("designos_get_document", json!({})).unwrap();
+        assert_eq!(doc["style_count"], 2);
+        let styles = doc["styles"].as_array().unwrap();
+        let by_key = |k: &str| styles.iter().find(|s| s["key"] == k).unwrap_or_else(|| panic!("style {k} listed"));
+        assert_eq!((by_key("Shadow/Card")["property"].as_str(), by_key("Shadow/Card")["name"].as_str()), (Some("Effect"), Some("Shadow/Card")));
+        assert_eq!(by_key("Shadow/Card")["values"]["Effect"][0]["DropShadow"]["radius"], 8.0);
+        assert_eq!((by_key("Layout/Cols")["property"].as_str(), by_key("Layout/Cols")["name"].as_str()), (Some("Grid"), Some("Layout / 12 col")));
+        assert_eq!(by_key("Layout/Cols")["values"]["Grid"][0]["Columns"]["count"], 12);
+        let node = e.call("designos_get_node", json!({"node_id":id})).unwrap();
+        assert_eq!(node["node"]["style_refs"]["effect"], "Shadow/Card");
     }
     fn create(e: &mut Engine, kind: &str, name: &str) -> u64 {
         e.call("designos_create_node", json!({"parent_id":1,"kind":kind,"name":name})).unwrap()["node"]["id"].as_u64().unwrap()
@@ -856,10 +914,16 @@ mod tests {
         assert_eq!(result["total"], 2);
         assert_eq!(result["nodes"][0]["node_id"], id);
         assert_eq!(result["next_offset"], 1);
-        for language in ["css", "tailwind", "react", "swiftui", "compose", "svg"] {
+        for language in ["css", "tailwind", "react", "swiftui", "uikit", "compose", "android-xml", "svg"] {
             let output = e.call("designos_generate_code", json!({"node_id":id,"language":language})).unwrap();
             assert!(!output["code"].as_str().unwrap().is_empty());
         }
+        let uikit = e.call("designos_generate_code", json!({"node_id":id,"language":"uikit"})).unwrap();
+        assert!(uikit["code"].as_str().unwrap().starts_with("let card = "), "{uikit}");
+        let xml = e.call("designos_generate_code", json!({"node_id":id,"language":"android-xml"})).unwrap();
+        assert!(xml["code"].as_str().unwrap().starts_with("<!-- res/layout/card.xml -->"), "{xml}");
+        let err = e.call("designos_generate_code", json!({"node_id":id,"language":"vue"})).unwrap_err();
+        assert!(err.contains("uikit") && err.contains("android-xml"), "{err}");
         assert!(e.call("designos_list_nodes", json!({"limit":501})).is_err());
         assert!(e.call("designos_get_node", json!({"node_id":"2"})).is_err());
     }

@@ -69,6 +69,13 @@ pub fn figma_like_schema() -> Schema {
     enum_def(&mut b, "EffectType", &["INNER_SHADOW", "DROP_SHADOW", "FOREGROUND_BLUR", "BACKGROUND_BLUR", "NOISE", "TEXTURE", "GLASS"]);
     enum_def(&mut b, "StackMode", &["NONE", "HORIZONTAL", "VERTICAL", "GRID"]);
     enum_def(&mut b, "StackAlign", &["MIN", "CENTER", "MAX", "SPACE_BETWEEN", "BASELINE", "SPACE_EVENLY"]);
+    // Figma's own values: SPACE_EVENLY (3) is the legacy spacing, SPACE_EVENLY_CSS (6) the CSS-aligned one.
+    let justify = b.define("StackJustify", DefKind::Enum);
+    for (name, value) in [("MIN", 0), ("CENTER", 1), ("MAX", 2), ("SPACE_EVENLY", 3), ("SPACE_BETWEEN", 4), ("SPACE_AROUND", 5), ("SPACE_EVENLY_CSS", 6)] {
+        b.variant(justify, name, value);
+    }
+    enum_def(&mut b, "StackCounterAlignContent", &["AUTO", "SPACE_BETWEEN"]);
+    enum_def(&mut b, "TextWrapStyle", &["AUTO", "BALANCE", "PRETTY"]);
     enum_def(&mut b, "StackSize", &["FIXED", "RESIZE_TO_FIT", "RESIZE_TO_FIT_WITH_IMPLICIT_SIZE"]);
     enum_def(&mut b, "StackCounterAlign", &["STRETCH", "AUTO"]);
     enum_def(&mut b, "StackPositioning", &["AUTO", "ABSOLUTE"]);
@@ -105,7 +112,7 @@ pub fn figma_like_schema() -> Schema {
         ],
     );
     enum_def(&mut b, "TextTruncation", &["DISABLED", "ENDING"]);
-    enum_def(&mut b, "StyleType", &["NONE", "FILL", "TEXT", "EFFECT", "EXPORT", "GRID"]);
+    enum_def(&mut b, "StyleType", &["NONE", "FILL", "TEXT", "EFFECT", "EXPORT", "GRID", "STROKE"]);
     enum_def(&mut b, "GridPattern", &["GRID", "COLUMNS", "ROWS"]);
     enum_def(&mut b, "ImageScaleMode", &["STRETCH", "FIT", "FILL", "TILE"]);
     enum_def(&mut b, "WindingRule", &["NONZERO", "ODD", "EVENODD"]);
@@ -213,6 +220,14 @@ pub fn figma_like_schema() -> Schema {
     let vdvs = b.define("VariableDataValues", DefKind::Message);
     b.field(vdvs, "entries", FieldType::Def(vdve), true, 1);
 
+    enum_def(&mut b, "CodeSyntaxPlatform", &["WEB", "ANDROID", "iOS"]);
+    let cse = b.define("CodeSyntaxMapEntry", DefKind::Message);
+    let cspt = def(&b, "CodeSyntaxPlatform");
+    b.field(cse, "platform", cspt, false, 1);
+    b.field(cse, "value", nat(String), false, 2);
+    let csm = b.define("CodeSyntaxMap", DefKind::Message);
+    b.field(csm, "entries", FieldType::Def(cse), true, 1);
+
     let paint = b.define("Paint", DefKind::Message);
     let t = def(&b, "PaintType");
     b.field(paint, "type", t, false, 1);
@@ -232,6 +247,8 @@ pub fn figma_like_schema() -> Schema {
     b.field(paint, "imageScaleMode", t, false, 9);
     b.field(paint, "colorVar", FieldType::Def(vd), false, 10);
     b.field(paint, "imageHash", nat(String), false, 11);
+    // Figma's own field id (rea-findings: Paint.opacityVar = 38).
+    b.field(paint, "opacityVar", FieldType::Def(vd), false, 38);
 
     let eff = b.define("Effect", DefKind::Message);
     let t = def(&b, "EffectType");
@@ -245,6 +262,8 @@ pub fn figma_like_schema() -> Schema {
     b.field(eff, "visible", nat(Bool), false, 6);
     b.field(eff, "showShadowBehindNode", nat(Bool), false, 7);
     b.field(eff, "colorVar", FieldType::Def(vd), false, 8);
+    // Figma's own field id (rea-findings: Effect.effectOpacityVar = 53).
+    b.field(eff, "effectOpacityVar", FieldType::Def(vd), false, 53);
 
     let fg = b.define("FillGeometry", DefKind::Message);
     let t = def(&b, "WindingRule");
@@ -448,8 +467,11 @@ pub fn figma_like_schema() -> Schema {
     f(&mut b, "stackVerticalPadding", nat(Float), false);
     f(&mut b, "stackPaddingRight", nat(Float), false);
     f(&mut b, "stackPaddingBottom", nat(Float), false);
-    f(&mut b, "stackPrimaryAlignItems", al, false);
+    let (justify, content) = (def(&b, "StackJustify"), def(&b, "StackCounterAlignContent"));
+    f(&mut b, "stackPrimaryAlignItems", justify, false);
     f(&mut b, "stackCounterAlignItems", al, false);
+    f(&mut b, "stackCounterAlignContent", content, false);
+    f(&mut b, "stackLayoutVersion", nat(Uint), false);
     f(&mut b, "stackPrimarySizing", sz, false);
     f(&mut b, "stackCounterSizing", sz, false);
     let (ca, sp) = (def(&b, "StackCounterAlign"), def(&b, "StackPositioning"));
@@ -568,6 +590,9 @@ pub fn figma_like_schema() -> Schema {
     f(&mut b, "variableResolvedType", vrdtt, false);
     f(&mut b, "variableDataType", vdtt, false);
     f(&mut b, "variableScopes", nat(String), true);
+    // Figma's own field id (rea-findings: NodeChange.codeSyntax = 358); the sequential ids above stay below it.
+    let csmt = def(&b, "CodeSyntaxMap");
+    b.field(nc, "codeSyntax", csmt, false, 358);
     f(&mut b, "variableDataValues", vdvt, false);
     f(&mut b, "sortPosition", nat(String), false);
     f(&mut b, "description", nat(String), false);
@@ -661,6 +686,8 @@ pub fn figma_like_schema() -> Schema {
     );
     f(&mut b, "autoRename", nat(Bool), false);
     f(&mut b, "textDecorationSkipInk", nat(Bool), false);
+    let wrap_style = def(&b, "TextWrapStyle");
+    f(&mut b, "textWrapStyle", wrap_style, false);
     f(&mut b, "overrideLevel", nat(Uint), false);
     f(&mut b, "detachedSymbolId", sidt, false);
     f(&mut b, "variantPropSpecs", vpst, true);
@@ -681,6 +708,11 @@ pub fn figma_like_schema() -> Schema {
     f(&mut b, "editInfo", eit_msg, false);
     f(&mut b, "pluginRelaunchData", prdt, true);
     f(&mut b, "nodeGenerationData", ngdt, false);
+    // Style bookkeeping: legacy GUID refs to effect / grid style nodes, and the soft-delete flag of a style node.
+    let guid_ty = def(&b, "GUID");
+    f(&mut b, "inheritEffectStyleID", guid_ty, false);
+    f(&mut b, "inheritGridStyleID", guid_ty, false);
+    f(&mut b, "isSoftDeletedStyle", nat(Bool), false);
 
     let blob = b.define("Blob", DefKind::Message);
     b.field(blob, "bytes", nat(Byte), true, 1);

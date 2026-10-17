@@ -6,10 +6,11 @@ use crate::app::App;
 use crate::edit::Tx;
 use crate::icons::{self, Icon};
 use crate::ops::{apply_resize, Align};
+use crate::styles::StyleKind;
 use crate::theme;
 use crate::util::v2;
 use crate::widgets::field::{self, Prefix};
-use crate::widgets::menu::dropdown;
+use crate::widgets::menu::{self, dropdown, MenuItem};
 use crate::widgets::{self, fmt_num};
 use designos_doc::Vec2 as DVec2;
 use designos_doc::*;
@@ -152,6 +153,10 @@ pub struct PropsState {
     pub fx_menu: bool,
     /// The paint styles menu (4-dots button) is open: Some(for_stroke).
     pub styles_menu: Option<bool>,
+    /// The style menu of the Effects (`Effect`) or Layout guide (`Grid`) header is open.
+    pub style_menu: Option<StyleProperty>,
+    /// The name of the style the Effects or Layout guide row shows is being edited.
+    pub style_rename: Option<StyleProperty>,
     /// Cached `(selection_hash, tile_rev, unique_colors, usage_counts)` for Selection colors.
     pub sel_colors_cache: Option<(u64, u64, Vec<Color>, Vec<usize>)>,
     /// Cached `(doc_node_count_and_epoch, sorted_component_ids)` for instance swap menus.
@@ -264,6 +269,11 @@ pub(super) fn row_end(pane: &mut Pane) {
 }
 
 pub(super) fn segmented(ui: &mut Ui, pane: &Pane, x: f32, key: &str, items: &[Icon], selected: Option<usize>) -> Option<usize> {
+    segmented_marks(ui, pane, x, key, items, selected.as_slice())
+}
+
+/// [`segmented`] where several segments can be lit at once (a direction plus the wrap toggle).
+fn segmented_marks(ui: &mut Ui, pane: &Pane, x: f32, key: &str, items: &[Icon], marked: &[usize]) -> Option<usize> {
     let mut out = None;
     let n = items.len();
     let seg_w = if n == 4 { 22.0 } else { theme::SEGMENT_W };
@@ -276,7 +286,7 @@ pub(super) fn segmented(ui: &mut Ui, pane: &Pane, x: f32, key: &str, items: &[Ic
             _ => theme::cr(0),
         };
         let resp = ui.interact(r, ui.id().with(("seg", key, i)), Sense::click());
-        let sel = selected == Some(i);
+        let sel = marked.contains(&i);
         let bg = if sel {
             theme::BG_TERTIARY
         } else if resp.hovered() {
@@ -441,8 +451,10 @@ fn paint_colors(p: &Paint) -> Vec<Color32> {
 fn styles_list(app: &mut App, ui: &mut Ui, pane: &mut Pane, target: &[NodeId]) {
     let applied = |app: &App, prop: &str| target.first().and_then(|t| app.doc.get(*t)).and_then(|n| n.style_refs.get(prop).cloned());
     let mut shown_groups = 0;
-    for (label, text) in [("Text styles", true), ("Color styles", false)] {
-        let entries = crate::styles::style_entries(&app.doc, text);
+    for (label, kind) in
+        [("Text styles", StyleKind::Text), ("Color styles", StyleKind::Color), ("Effect styles", StyleKind::Effect), ("Grid styles", StyleKind::Grid)]
+    {
+        let entries = crate::styles::style_entries_of(&app.doc, kind);
         if entries.is_empty() {
             continue;
         }
@@ -451,7 +463,7 @@ fn styles_list(app: &mut App, ui: &mut Ui, pane: &mut Pane, target: &[NodeId]) {
         let lr = pane.rect(theme::SECTION_CONTENT_X, 0.0, theme::SECTION_CONTENT_W, theme::SUBLABEL_HEIGHT);
         ui.painter().text(Pos2::new(lr.left(), lr.center().y), Align2::LEFT_CENTER, label, theme::font_body(), theme::TEXT_SECONDARY);
         pane.y += theme::SUBLABEL_HEIGHT + theme::STYLES_ROW_GAP;
-        let current = applied(app, if text { "text" } else { "fill" });
+        let current = applied(app, kind.ref_key());
         let mut last_folder: Option<String> = None;
         for e in &entries {
             let folder_key = format!("{label}/{}", e.folder);
@@ -487,14 +499,28 @@ fn styles_list(app: &mut App, ui: &mut Ui, pane: &mut Pane, target: &[NodeId]) {
             let indent = if e.folder.is_empty() { 0.0 } else { theme::STYLE_INDENT };
             let r = pane.rect(8.0, 0.0, theme::RIGHT_PANEL_WIDTH - 17.0, theme::STYLE_ROW_H);
             widgets::record(ui, &format!("style:{}", e.key), r);
-            let resp = ui.interact(r, ui.id().with((if text { "tstyle" } else { "cstyle" }, &e.key)), Sense::click());
+            let resp = ui.interact(r, ui.id().with((kind.ref_key(), &e.key)), Sense::click());
             let is_current = current.as_deref() == Some(e.key.as_str());
             if is_current {
                 ui.painter().rect_filled(r, theme::cr(theme::RADIUS_MEDIUM), theme::BG_SELECTED);
             } else if resp.hovered() {
                 ui.painter().rect_filled(r, theme::cr(theme::RADIUS_MEDIUM), theme::BG_HOVER);
             }
-            if text {
+            if matches!(kind, StyleKind::Effect | StyleKind::Grid) {
+                let icon = match app.doc.styles.get(&e.key) {
+                    Some(Style::Effect(fx)) => fx.first().map_or(Icon::DropShadow, |f| super::effects::KINDS[super::effects::kind_of(f)].1),
+                    _ => Icon::Grid2x2,
+                };
+                icons::paint(
+                    ui.painter(),
+                    icon,
+                    Pos2::new(r.left() + theme::STYLE_SWATCH_CX + indent, r.center().y),
+                    theme::STYLE_SWATCH,
+                    theme::ICON_SECONDARY,
+                );
+                let nm = widgets::elide(ui.painter(), &e.leaf, &theme::font_body(), 130.0 - indent);
+                ui.painter().text(Pos2::new(r.left() + theme::STYLE_LABEL_X + indent, r.center().y), Align2::LEFT_CENTER, nm, theme::font_body(), theme::TEXT);
+            } else if kind == StyleKind::Text {
                 let Some(Style::Text(t)) = app.doc.styles.get(&e.key).cloned() else { continue };
                 ui.painter().text(Pos2::new(r.left() + 10.0 + indent, r.center().y), Align2::LEFT_CENTER, "Ag", theme::font_body_strong(), theme::TEXT);
                 let nm = widgets::elide(ui.painter(), &e.leaf, &theme::font_body(), 110.0 - indent);
@@ -1012,31 +1038,32 @@ fn resizing_ui(app: &mut App, ui: &mut Ui, pane: &mut Pane, sel: &[NodeId], n0: 
 
 fn auto_layout_ui(app: &mut App, ui: &mut Ui, pane: &mut Pane, sel: &[NodeId], a: AutoLayout, n0: &Node, parent_al: bool) {
     sublabel(ui, pane, "Flow");
-    let dir_sel = if a.direction == LayoutDirection::Grid {
-        3
-    } else if a.wrap {
-        2
-    } else if a.direction == LayoutDirection::Horizontal {
-        0
-    } else {
-        1
+    // Horizontal and Vertical are the direction, Wrap is a toggle on top of either, Grid replaces both.
+    let grid = a.direction == LayoutDirection::Grid;
+    let flow_marks: Vec<usize> = match (a.direction, a.wrap) {
+        (LayoutDirection::Grid, _) => vec![3],
+        (LayoutDirection::Vertical, true) => vec![1, 2],
+        (LayoutDirection::Vertical, false) => vec![1],
+        (LayoutDirection::Horizontal, true) => vec![0, 2],
+        (LayoutDirection::Horizontal, false) => vec![0],
     };
     if let Some(i) =
-        segmented(ui, pane, theme::SECTION_CONTENT_X, "al-dir", &[Icon::DirHorizontal, Icon::DirVertical, Icon::Wrap, Icon::Grid2x2], Some(dir_sel))
+        segmented_marks(ui, pane, theme::SECTION_CONTENT_X, "al-dir", &[Icon::DirHorizontal, Icon::DirVertical, Icon::Wrap, Icon::Grid2x2], &flow_marks)
     {
         update_al(app, sel, |al| match i {
-            0 => {
-                al.direction = LayoutDirection::Horizontal;
-                al.wrap = false;
-            }
-            1 => {
-                al.direction = LayoutDirection::Vertical;
-                al.wrap = false;
+            0 | 1 => {
+                al.direction = if i == 0 { LayoutDirection::Horizontal } else { LayoutDirection::Vertical };
+                // wrap survives a direction change; a grid has no wrap
+                al.wrap = al.wrap && !grid;
             }
             2 => {
-                al.direction = LayoutDirection::Horizontal;
-                al.wrap = true;
-                al.primary_sizing = Sizing::Fixed;
+                if al.direction == LayoutDirection::Grid {
+                    al.direction = LayoutDirection::Horizontal;
+                }
+                al.wrap = !al.wrap;
+                if al.wrap {
+                    al.primary_sizing = Sizing::Fixed;
+                }
             }
             _ => {
                 al.direction = LayoutDirection::Grid;
@@ -1054,6 +1081,9 @@ fn auto_layout_ui(app: &mut App, ui: &mut Ui, pane: &mut Pane, sel: &[NodeId], a
         update_al(app, sel, |al| al.item_spacing = v);
     }
     row_end(pane);
+    if a.wrap && a.direction != LayoutDirection::Grid {
+        wrap_lines_ui(app, ui, pane, sel, a);
+    }
     if a.direction == LayoutDirection::Grid {
         sublabel(ui, pane, "Grid (Columns × Rows)");
         let cols = a.grid_columns.max(1) as f32;
@@ -1094,11 +1124,11 @@ fn auto_layout_ui(app: &mut App, ui: &mut Ui, pane: &mut Pane, sel: &[NodeId], a
     }
     row_end(pane);
     sublabel(ui, pane, "Alignment");
+    let auto_spacing = matches!(a.primary_align, LayoutAlign::SpaceBetween | LayoutAlign::SpaceAround | LayoutAlign::SpaceEvenly);
     let pi = match a.primary_align {
-        LayoutAlign::Start | LayoutAlign::Baseline => 0,
         LayoutAlign::Center => 1,
         LayoutAlign::End => 2,
-        LayoutAlign::SpaceBetween => 3,
+        _ => 0,
     };
     let ci = match a.counter_align {
         LayoutAlign::Center => 1,
@@ -1107,25 +1137,77 @@ fn auto_layout_ui(app: &mut App, ui: &mut Ui, pane: &mut Pane, sel: &[NodeId], a
     };
     let align_row_r = pane.full(0.0);
     let al_icons = [Icon::AlignLeft, Icon::AlignHCenter, Icon::AlignRight];
-    if let Some(i) = segmented(ui, pane, theme::SECTION_CONTENT_X, "al-main", &al_icons, Some(pi.min(2))) {
+    // with auto spacing the items are spread, so no packed alignment is lit
+    if let Some(i) = segmented(ui, pane, theme::SECTION_CONTENT_X, "al-main", &al_icons, (!auto_spacing).then_some(pi)) {
         update_al(app, sel, |al| al.primary_align = [LayoutAlign::Start, LayoutAlign::Center, LayoutAlign::End][i]);
     }
     let sb = pane.rect(theme::SECTION_CONTENT_X + 3.0 * theme::SEGMENT_W + 4.0, 0.0, 24.0, theme::FIELD_HEIGHT);
-    let sbr = widgets::icon_button(ui, sb, "al-space", Icon::Spacing, pi == 3, "Space between (double-click or X)");
+    let sbr = widgets::icon_button(ui, sb, "al-space", Icon::Spacing, auto_spacing, "Auto spacing (double-click or X)");
     let hover_align = ui.rect_contains_pointer(align_row_r);
     let dbl_or_x = (hover_align && ui.input(|i| i.pointer.button_double_clicked(egui::PointerButton::Primary)))
         || (hover_align && !ui.ctx().egui_wants_keyboard_input() && ui.input(|i| i.key_pressed(egui::Key::X)));
-    if sbr.clicked() || dbl_or_x {
-        let next = if pi == 3 { LayoutAlign::Start } else { LayoutAlign::SpaceBetween };
+    if dbl_or_x {
+        let next = if auto_spacing { LayoutAlign::Start } else { LayoutAlign::SpaceBetween };
         update_al(app, sel, |al| al.primary_align = next);
-        app.show_toast(if next == LayoutAlign::SpaceBetween { "Align: Space between (Auto)" } else { "Align: Packed" }, false);
+        app.show_toast(if next == LayoutAlign::SpaceBetween { "Align: Auto spacing (Between)" } else { "Align: Packed" }, false);
     }
+    auto_spacing_menu(app, ui, sel, a, sb, sbr.clicked() && !dbl_or_x);
     let v_icons = [Icon::AlignTop, Icon::AlignVCenter, Icon::AlignBottom];
     if let Some(i) = segmented(ui, pane, theme::FIELD_COL_X[1] + 16.0, "al-cross", &v_icons, Some(ci)) {
         update_al(app, sel, |al| al.counter_align = [LayoutAlign::Start, LayoutAlign::Center, LayoutAlign::End][i]);
     }
     row_end(pane);
     pane.y += 4.0;
+}
+
+/// Gap between the wrapped lines and how the lines spread across the counter axis.
+fn wrap_lines_ui(app: &mut App, ui: &mut Ui, pane: &mut Pane, sel: &[NodeId], a: AutoLayout) {
+    sublabel(ui, pane, "Wrap");
+    // horizontal wrap stacks rows (a vertical gap), vertical wrap stacks columns (a horizontal gap)
+    let icon = if a.direction == LayoutDirection::Horizontal { Icon::PaddingV } else { Icon::PaddingH };
+    if let Some(v) = field::num_field(ui, pane.col(0, 0.0), "al-counter-gap", Prefix::Icon(icon), Some(a.counter_spacing), "") {
+        update_al(app, sel, |al| al.counter_spacing = v);
+    }
+    let between = a.counter_align_content == CounterAlignContent::SpaceBetween;
+    let options = ["Auto", "Between"].map(String::from);
+    if let Some(i) = dropdown(ui, pane.col(1, 0.0), "al-counter-content", &options[between as usize], &options) {
+        update_al(app, sel, |al| al.counter_align_content = if i == 1 { CounterAlignContent::SpaceBetween } else { CounterAlignContent::Auto });
+    }
+    row_end(pane);
+}
+
+/// The Auto spacing popup: Between, Around or Evenly, or back to packed items.
+fn auto_spacing_menu(app: &mut App, ui: &mut Ui, sel: &[NodeId], a: AutoLayout, anchor: Rect, toggle: bool) {
+    let id = ui.id().with("al-auto-spacing-menu");
+    let open = ui.data(|d| d.get_temp::<bool>(id)).unwrap_or(false) != toggle;
+    ui.data_mut(|d| d.insert_temp(id, open));
+    if !open {
+        return;
+    }
+    let modes = [LayoutAlign::SpaceBetween, LayoutAlign::SpaceAround, LayoutAlign::SpaceEvenly];
+    let mut items = vec![MenuItem::new("Auto spacing").disabled(true).sep()];
+    items.extend(["Between", "Around", "Evenly"].iter().zip(modes).map(|(label, m)| MenuItem::new(*label).checked(a.primary_align == m)));
+    items.push(MenuItem::new("Packed").checked(!modes.contains(&a.primary_align)));
+    match menu::popup_menu(ui.ctx(), id.with("popup"), anchor.left_bottom() + Vec2::new(0.0, 2.0), 120.0, &items, Some(anchor)) {
+        menu::MenuResult::Picked(i) => {
+            ui.data_mut(|d| d.insert_temp(id, false));
+            if i == 0 {
+                return;
+            }
+            let mode = modes.get(i - 1).copied();
+            // Between / Around / Evenly follow CSS justify-content, which is layout version 1
+            update_al(app, sel, move |al| {
+                al.primary_align = mode.unwrap_or(LayoutAlign::Start);
+                if mode.is_some() {
+                    al.layout_version = al.layout_version.max(1);
+                }
+            });
+        }
+        menu::MenuResult::Closed => {
+            ui.data_mut(|d| d.insert_temp(id, false));
+        }
+        menu::MenuResult::Open => {}
+    }
 }
 
 fn update_al(app: &mut App, sel: &[NodeId], f: impl Fn(&mut AutoLayout)) {
@@ -2014,6 +2096,25 @@ pub fn preset_popup(app: &mut App, spec: &str, screen: Vec2) {
         "effects-menu" => {
             app.props.scroll = 1.0e6;
             app.props.fx_menu = true;
+        }
+        "effect-styles" | "grid-styles" => {
+            // The style menu of the Effects / Layout guide header. A frame without guides gets the
+            // usual 12 column ones, and with no style yet one is created from the selection.
+            let prop = if spec == "grid-styles" { StyleProperty::Grid } else { StyleProperty::Effect };
+            if prop == StyleProperty::Grid && app.doc.get(id).and_then(|n| n.kind.frame_props()).is_some_and(|f| f.grids.is_empty()) {
+                let grid = LayoutGrid::Columns { count: 12, gutter: 20.0, offset: 0.0, color: Color::rgba(255, 0, 0, 26) };
+                app.edit_nodes(&[id], |n| {
+                    if let Some(f) = n.kind.frame_props_mut() {
+                        f.grids.push(grid.clone());
+                    }
+                });
+            }
+            let kind = if prop == StyleProperty::Grid { StyleKind::Grid } else { StyleKind::Effect };
+            if crate::styles::style_entries_of(&app.doc, kind).is_empty() {
+                app.create_style_from(id, prop);
+            }
+            app.props.scroll = 1.0e6;
+            app.props.style_menu = Some(prop);
         }
         "stroke-settings" => {
             app.props.scroll = 1.0e6;

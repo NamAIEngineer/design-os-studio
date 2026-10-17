@@ -67,6 +67,7 @@ pub struct Shell {
     app: App,
     shot: Option<Shot>,
     title: String,
+    paste_chord: crate::clipboard::PasteChord,
 }
 
 impl Shell {
@@ -168,7 +169,9 @@ impl Shell {
             app.dev.lang = match l.as_str() {
                 "tailwind" => crate::dev::Language::Tailwind,
                 "swiftui" => crate::dev::Language::SwiftUi,
+                "uikit" => crate::dev::Language::UiKit,
                 "compose" => crate::dev::Language::Compose,
+                "android-xml" => crate::dev::Language::AndroidXml,
                 "react" => crate::dev::Language::React,
                 _ => crate::dev::Language::Css,
             };
@@ -328,7 +331,7 @@ impl Shell {
             seq: seq_capture,
             no_toast: opts.no_toast,
         });
-        Self { app, shot, title: String::new() }
+        Self { app, shot, title: String::new(), paste_chord: Default::default() }
     }
 
     fn drive_screenshot(&mut self, ctx: &Context) {
@@ -406,6 +409,7 @@ impl Shell {
     }
 
     fn handle_keys(&mut self, ctx: &Context) {
+        self.paste_chord.begin_frame(ctx.input(|i| i.modifiers.command));
         if self.app.plugins.open || self.app.dialog.is_some() || self.app.history.save_modal.is_some() || self.app.dev.compare.is_some() {
             return;
         }
@@ -430,6 +434,14 @@ impl Shell {
         }
         let events = ctx.input(|i| i.events.clone());
         for ev in events {
+            // egui-winit emits `Event::Paste` only for a non-empty `text/plain` and never a V press for a paste chord;
+            // a Figma copy can carry HTML alone, which only the V release reveals (see `PasteChord`).
+            if self.paste_chord.on_event(&ev) && !editing_text {
+                if let Some(html) = (self.app.system_html)() {
+                    self.app.paste_with_html(None, Some(&html));
+                }
+                continue;
+            }
             match ev {
                 Event::Copy if !editing_text => {
                     if let Some(s) = self.app.copy_selection() {
@@ -441,7 +453,9 @@ impl Shell {
                         ctx.copy_text(s);
                     }
                 }
-                Event::Paste(s) if !editing_text => self.app.paste(Some(&s)),
+                Event::Paste(s) if !editing_text => {
+                    self.app.paste_from_system(Some(&s));
+                }
                 Event::Key { key, pressed: true, modifiers, .. } => {
                     if self.try_typography_shortcut(key, modifiers) {
                         continue;
@@ -2677,7 +2691,9 @@ pub fn apply_micro_interaction_continuous_frame(app: &mut App, base_doc: &design
                 crate::dev::Language::Tailwind => "Tailwind v4",
                 crate::dev::Language::Css => "CSS Flexbox/Grid",
                 crate::dev::Language::SwiftUi => "SwiftUI",
+                crate::dev::Language::UiKit => "UIKit",
                 crate::dev::Language::Compose => "Jetpack Compose",
+                crate::dev::Language::AndroidXml => "Android XML",
             };
             hud.badge_text = format!("Dev Mode · Box Model · {lang_name}");
             hud.keycap = "⇧D".into();

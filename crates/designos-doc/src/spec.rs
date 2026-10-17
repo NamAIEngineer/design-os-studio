@@ -29,7 +29,7 @@ pub struct LayoutSpec {
     /// `[top, right, bottom, left]` padding in px.
     #[serde(default)]
     pub padding: [f32; 4],
-    /// `"start"`, `"center"`, `"end"`, `"space-between"`, or `"baseline"`.
+    /// `"start"`, `"center"`, `"end"`, `"space-between"`, `"space-around"`, `"space-evenly"`, or `"baseline"`.
     #[serde(default, alias = "justify", skip_serializing_if = "String::is_empty")]
     pub primary_align: String,
     /// `"start"`, `"center"`, `"end"`, or `"baseline"`.
@@ -182,6 +182,8 @@ fn parse_align(s: &str) -> LayoutAlign {
         "center" | "middle" => LayoutAlign::Center,
         "end" | "right" | "bottom" => LayoutAlign::End,
         "space-between" | "between" | "space_between" => LayoutAlign::SpaceBetween,
+        "space-around" | "around" | "space_around" => LayoutAlign::SpaceAround,
+        "space-evenly" | "evenly" | "space_evenly" => LayoutAlign::SpaceEvenly,
         "baseline" | "first-baseline" => LayoutAlign::Baseline,
         _ => LayoutAlign::Start,
     }
@@ -909,6 +911,12 @@ impl Document {
             fnode.size = new_sz;
         }
 
+        // Wrapped lines spread edge to edge (CSS align-content: space-between); the counter spacing stays the minimum gap.
+        let counter_gap = if al.wrap && al.counter_align_content == CounterAlignContent::SpaceBetween && lines.len() > 1 && !hug_cross {
+            ((frame_cross - pc - line_cross.iter().sum::<f32>()) / (lines.len() as f32 - 1.0)).max(al.counter_spacing)
+        } else {
+            al.counter_spacing
+        };
         let mut cross_cursor = pc_start;
         for (li, line) in lines.iter().enumerate() {
             let k_count = line.len() as f32;
@@ -927,8 +935,13 @@ impl Document {
                 })
                 .collect();
             let sum_main: f32 = mains.iter().sum();
+            // CSS justify-content: the free space ignores the fixed gap; with no free space the items pack from the start.
+            let free = main_avail - sum_main;
             let (start, gap) = match al.primary_align {
-                LayoutAlign::SpaceBetween if k_count > 1.0 => (0.0, ((main_avail - sum_main) / (k_count - 1.0)).max(0.0)),
+                LayoutAlign::SpaceBetween if k_count > 1.0 => (0.0, (free / (k_count - 1.0)).max(al.item_spacing.min(0.0))),
+                LayoutAlign::SpaceAround if free > 0.0 => (free / k_count / 2.0, free / k_count),
+                LayoutAlign::SpaceEvenly if free > 0.0 => (free / (k_count + 1.0), free / (k_count + 1.0)),
+                LayoutAlign::SpaceAround | LayoutAlign::SpaceEvenly => (0.0, 0.0),
                 LayoutAlign::Center => (((main_avail - sum_main - al.item_spacing * (k_count - 1.0)) / 2.0).max(0.0), al.item_spacing),
                 LayoutAlign::End => ((main_avail - sum_main - al.item_spacing * (k_count - 1.0)).max(0.0), al.item_spacing),
                 _ => (0.0, al.item_spacing),
@@ -968,7 +981,7 @@ impl Document {
                 }
                 cursor += m + gap;
             }
-            cross_cursor += line_cross[li] + al.counter_spacing;
+            cross_cursor += line_cross[li] + counter_gap;
         }
     }
 
