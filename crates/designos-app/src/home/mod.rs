@@ -1468,7 +1468,9 @@ mod main_view {
         let mut drag = None;
         let ctx = ui.ctx().clone();
 
-        let cards: [(&str, &str, Color32, Icon, &str, &str, Act, &str); 6] = [
+        /// (title, badge, accent, icon, description, button label, action, record key)
+        type TemplateCard<'a> = (&'a str, &'a str, Color32, Icon, &'a str, &'a str, Act, &'a str);
+        let cards: [TemplateCard; 6] = [
             (
                 "Marlow \u{2014} Mobile Banking Kit",
                 "Design Kit",
@@ -1917,7 +1919,11 @@ mod main_view {
 
         let lib_sub =
             format!("{} published librar{} \u{b7} Shared components & styles", published_libs.len(), if published_libs.len() == 1 { "y" } else { "ies" });
-        let hub_cards: [(&str, Icon, Color32, &str, (&str, Act, &str), Option<(&str, Act, &str)>); 4] = [
+        /// (button label, action, key)
+        type HubButton<'a> = (&'a str, Act, &'a str);
+        /// (title, icon, accent, description, primary button, optional secondary button)
+        type HubCard<'a> = (&'a str, Icon, Color32, &'a str, HubButton<'a>, Option<HubButton<'a>>);
+        let hub_cards: [HubCard; 4] = [
             (
                 "Shared Component Libraries",
                 Icon::Assets,
@@ -2344,7 +2350,9 @@ mod main_view {
             if list && !files.is_empty() {
                 let hr = Rect::from_min_size(Pos2::new(x0, y), Vec2::new(inner_w, 28.0));
                 let cols_x = list_columns(hr.right());
-                let col_defs: [(f32, &str, Option<(super::Sort, bool)>); 4] = [
+                /// (x, label, sort key and whether it sorts ascending first)
+                type ListColumn<'a> = (f32, &'a str, Option<(super::Sort, bool)>);
+                let col_defs: [ListColumn; 4] = [
                     (hr.left() + 60.0, "Name", Some((super::Sort::Name, true))),
                     (cols_x.0, "Location", None),
                     (cols_x.1, "Last modified", Some((super::Sort::LastModified, false))),

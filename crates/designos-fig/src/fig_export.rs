@@ -985,7 +985,7 @@ fn export_node_rec(cx: &mut ExportCtx, id: NodeId, parent_guid: (u32, u32), sibl
 
     // Geometry blobs.
     if !matches!(node.kind, NodeKind::Text(_)) {
-        let fill_paths = node.fill_geometry.as_ref().or_else(|| match &node.kind {
+        let fill_paths = node.fill_geometry.as_ref().or(match &node.kind {
             NodeKind::Vector { paths, .. } if !paths.is_empty() => Some(paths),
             _ => None,
         });
@@ -1519,7 +1519,7 @@ fn gradient_matrix_from_handles(h: &[Vec2; 3]) -> V {
 }
 
 fn unhex(s: &str) -> Option<Vec<u8>> {
-    if s.is_empty() || s.len() % 2 != 0 || !s.bytes().all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase()) {
+    if s.is_empty() || !s.len().is_multiple_of(2) || !s.bytes().all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase()) {
         return None;
     }
     (0..s.len()).step_by(2).map(|i| u8::from_str_radix(&s[i..i + 2], 16).ok()).collect()

@@ -62,7 +62,6 @@ pub enum TextAiMode {
 pub enum FigmaAiOp {
     MakePrototype,
     RenameLayers,
-    RemoveBackground,
     BoostResolution,
     RewriteText(TextAiMode),
     PopulateContent,
@@ -83,7 +82,7 @@ fn take_pending_ai_op() -> Option<FigmaAiOp> {
 /// Actions returned by `cmdk::show` for the host `App` / `Shell` to execute.
 #[derive(Clone, Debug, PartialEq)]
 pub enum CmdKAction {
-    ApplySpec(NodeSpec),
+    ApplySpec(Box<NodeSpec>),
     OpenSpecReader,
     OpenTerminal(AgentCliPreset),
     SendSelectionToTerminal,
@@ -96,7 +95,6 @@ pub enum CmdKAction {
 impl CmdKAction {
     pub const MakePrototype: CmdKAction = CmdKAction::AutoFixDesignGate;
     pub const RenameLayers: CmdKAction = CmdKAction::AutoFixDesignGate;
-    pub const RemoveBackground: CmdKAction = CmdKAction::AutoFixDesignGate;
     pub const BoostResolution: CmdKAction = CmdKAction::AutoFixDesignGate;
     pub const PopulateContent: CmdKAction = CmdKAction::AutoFixDesignGate;
 
@@ -120,7 +118,7 @@ struct QuickCommandItem {
     keywords: &'static str,
 }
 
-const QUICK_COMMANDS: [QuickCommandItem; 12] = [
+const QUICK_COMMANDS: [QuickCommandItem; 11] = [
     QuickCommandItem {
         id: "cmdk-open-terminal",
         section: "Recents",
@@ -153,17 +151,6 @@ const QUICK_COMMANDS: [QuickCommandItem; 12] = [
         shortcut: "↵",
         tab_mask: 0b1011,
         keywords: "make an image make design first draft generate create prompt card modal table pricing login hero sidebar console spec assets",
-    },
-    QuickCommandItem {
-        id: "cmdk-make-prototype",
-        section: "Image editing",
-        icon: Icon::Sparkle,
-        title: "Remove background",
-        subtitle: "Strips backdrop/first solid fill on selected layers (or wires SmartAnimate flows across frames)",
-        badge: "AI",
-        shortcut: "⌥⌘P",
-        tab_mask: 0b1001,
-        keywords: "remove background strip backdrop fill transparent cut out make prototype",
     },
     QuickCommandItem {
         id: "cmdk-rename-layers",
@@ -363,7 +350,7 @@ pub fn show(ctx: &Context, state: &mut CmdKState, doc: &Document, page: NodeId, 
             let spec = synthesize_spec_from_prompt(prompt);
             state.status = Some(format!("Synthesized '{}' on Canvas", spec.name));
             state.open = false;
-            out_action = Some(CmdKAction::ApplySpec(spec));
+            out_action = Some(CmdKAction::ApplySpec(Box::new(spec)));
         }
 
         let edit_rect =
@@ -472,13 +459,7 @@ pub fn show(ctx: &Context, state: &mut CmdKState, doc: &Document, page: NodeId, 
                         let spec = synthesize_spec_from_prompt(prompt);
                         state.status = Some(format!("Synthesized '{}' (Instant Local NodeSpec)", spec.name));
                         state.open = false;
-                        out_action = Some(CmdKAction::ApplySpec(spec));
-                    }
-                    "cmdk-make-prototype" => {
-                        queue_pending_ai_op(FigmaAiOp::RemoveBackground);
-                        state.status = Some("Removed background fill on selection".into());
-                        state.open = false;
-                        out_action = Some(CmdKAction::RemoveBackground);
+                        out_action = Some(CmdKAction::ApplySpec(Box::new(spec)));
                     }
                     "cmdk-wire-prototype" => {
                         queue_pending_ai_op(FigmaAiOp::MakePrototype);
@@ -1013,7 +994,6 @@ pub fn auto_fix_design_gate(doc: &mut Document, page: NodeId, selection: &[NodeI
             FigmaAiOp::RenameLayers => auto_rename_layers_semantically(doc, page, selection),
             FigmaAiOp::RewriteText(mode) => rewrite_selected_text(doc, page, selection, mode),
             FigmaAiOp::PopulateContent => populate_realistic_content(doc, page, selection),
-            FigmaAiOp::RemoveBackground => remove_background_on_selection(doc, page, selection),
             FigmaAiOp::BoostResolution => boost_resolution_on_selection(doc, page, selection),
         };
     }
@@ -1408,45 +1388,6 @@ pub fn populate_realistic_content(doc: &mut Document, page: NodeId, selection: &
     populated
 }
 
-/// Removes the background fill (first solid fill, or first fill if no solid fill is present)
-/// from the selected nodes (or top-level page children if selection is empty).
-/// If a selected frame has no direct fills, strips the background fill from its first backdrop child.
-pub fn remove_background_on_selection(doc: &mut Document, page: NodeId, selection: &[NodeId]) -> usize {
-    let targets: Vec<NodeId> = if !selection.is_empty() { selection.to_vec() } else { doc.get(page).map(|pg| pg.children.clone()).unwrap_or_default() };
-
-    let mut modified = 0usize;
-    for nid in targets {
-        let mut removed_direct = false;
-        let first_child = if let Some(node) = doc.get_mut(nid) {
-            if let Some(pos) = node.fills.iter().position(|p| matches!(p.kind, PaintKind::Solid(_))) {
-                node.fills.remove(pos);
-                removed_direct = true;
-            } else if !node.fills.is_empty() {
-                node.fills.remove(0);
-                removed_direct = true;
-            }
-            node.children.first().copied()
-        } else {
-            None
-        };
-
-        if removed_direct {
-            modified += 1;
-        } else if let Some(cid) = first_child {
-            if let Some(cnode) = doc.get_mut(cid) {
-                if let Some(pos) = cnode.fills.iter().position(|p| matches!(p.kind, PaintKind::Solid(_))) {
-                    cnode.fills.remove(pos);
-                    modified += 1;
-                } else if !cnode.fills.is_empty() {
-                    cnode.fills.remove(0);
-                    modified += 1;
-                }
-            }
-        }
-    }
-    modified
-}
-
 /// Upgrades image fills on the selected subtree to crisp `ImageScaleMode::Fill` at full opacity,
 /// snaps fractional node coordinates/sizes (`transform.tx`, `transform.ty`, `size.x`, `size.y`) to
 /// integer device pixels, and sharpens sub-pixel stroke weights to crisp integer widths.
@@ -1600,8 +1541,7 @@ mod tests {
         doc.insert(page, btn).unwrap();
 
         let txt_id = doc.alloc_id();
-        let mut style = TextStyle::default();
-        style.font_size = 9.0;
+        let style = TextStyle { font_size: 9.0, ..TextStyle::default() };
         let txt = Node::text(txt_id, Rect::new(0.0, 0.0, 60.0, 12.0), "Click", style);
         doc.insert(btn_id, txt).unwrap();
 
@@ -1688,7 +1628,7 @@ mod tests {
     #[test]
     fn actions_cmdk_modal_matches_figma_ui3_recents_and_image_editing_sections() {
         let all_tab_items: Vec<QuickCommandItem> = QUICK_COMMANDS.iter().copied().filter(|item| (item.tab_mask & 1) != 0).collect();
-        assert_eq!(all_tab_items.len(), 6);
+        assert_eq!(all_tab_items.len(), 5);
         assert_eq!(all_tab_items[0].section, "Recents");
         assert_eq!(all_tab_items[0].title, "Ease Design Figma Agent");
         assert_eq!(all_tab_items[0].badge, "Development");
@@ -1698,34 +1638,26 @@ mod tests {
         assert_eq!(all_tab_items[2].section, "Image editing");
         assert_eq!(all_tab_items[2].title, "Make an image");
         assert_eq!(all_tab_items[2].badge, "AI");
-        assert_eq!(all_tab_items[3].title, "Remove background");
-        assert_eq!(all_tab_items[4].title, "Boost resolution");
-        assert_eq!(all_tab_items[5].title, "Edit image with prompt");
+        assert_eq!(all_tab_items[3].title, "Boost resolution");
+        assert_eq!(all_tab_items[4].title, "Edit image with prompt");
+        assert!(QUICK_COMMANDS.iter().all(|item| item.title != "Remove background"), "the fake fill-strip entry must stay removed");
     }
 
     #[test]
-    fn remove_background_and_boost_resolution_mutate_document_cleanly() {
+    fn boost_resolution_mutates_document_cleanly() {
         let mut doc = Document::new("Image Editing AI Test");
         let page = doc.add_page("Page 1");
 
         let nid = doc.alloc_id();
         let mut node = Node::frame(nid, Rect::new(10.35, 20.72, 199.6, 120.4));
-        node.fills = vec![
-            Paint::solid(Color::from_hex("#18181B").unwrap()),
-            Paint {
-                kind: PaintKind::Image { image_ref: "hero-asset".into(), scale_mode: designos_doc::ImageScaleMode::Fit },
-                opacity: 0.85,
-                visible: true,
-                blend: designos_doc::BlendMode::Normal,
-            },
-        ];
+        node.fills = vec![Paint {
+            kind: PaintKind::Image { image_ref: "hero-asset".into(), scale_mode: designos_doc::ImageScaleMode::Fit },
+            opacity: 0.85,
+            visible: true,
+            blend: designos_doc::BlendMode::Normal,
+        }];
         node.stroke.weight = 1.4;
         doc.insert(page, node).unwrap();
-
-        let removed = remove_background_on_selection(&mut doc, page, &[nid]);
-        assert_eq!(removed, 1);
-        assert_eq!(doc.get(nid).unwrap().fills.len(), 1);
-        assert!(matches!(doc.get(nid).unwrap().fills[0].kind, PaintKind::Image { .. }));
 
         let boosted = boost_resolution_on_selection(&mut doc, page, &[nid]);
         assert_eq!(boosted, 1);

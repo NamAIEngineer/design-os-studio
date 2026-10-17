@@ -61,7 +61,8 @@ fn shape_from_name(s: &str) -> ShapeKind {
         "STAR" | "PLUS" => ShapeKind::Star,
         "HEXAGON" | "OCTAGON" | "CHEVRON" | "ARROW_LEFT" | "ARROW_RIGHT" => ShapeKind::Hexagon,
         "PENTAGON" => ShapeKind::Pentagon,
-        "SQUARE" | "RECTANGLE" | "PREDEFINED_PROCESS" | "INTERNAL_STORAGE" | _ => ShapeKind::Square,
+        // SQUARE, RECTANGLE, PREDEFINED_PROCESS, INTERNAL_STORAGE and every unknown shape.
+        _ => ShapeKind::Square,
     }
 }
 

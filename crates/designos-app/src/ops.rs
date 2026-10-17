@@ -1586,13 +1586,13 @@ impl App {
                 }
             }
         }
-        match io::load_path(&p) {
-            Ok(doc) => {
+        match io::load_path_with_warning(&p) {
+            Ok((doc, warning)) => {
                 let name = doc.name.clone();
                 // An SVG becomes a new unsaved document, never overwritten by Save.
                 let svg = p.extension().is_some_and(|e| e.eq_ignore_ascii_case("svg"));
                 self.replace_document(doc, (!svg).then_some(p));
-                self.show_toast(format!("Opened {name}"), false);
+                self.show_toast(io::opened_toast_text(&name, warning.as_deref()), warning.is_some());
             }
             Err(e) => self.show_toast(e, true),
         }

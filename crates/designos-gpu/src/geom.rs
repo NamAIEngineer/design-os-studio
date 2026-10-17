@@ -327,11 +327,14 @@ struct Entry {
     geom: Rc<NodeGeom>,
 }
 
+/// Canonical geometry buckets: sources that produced identical geometry, with the shared result.
+type SharedGeom = Vec<(Rc<GeomSrc>, Rc<NodeGeom>)>;
+
 /// Cache of [`NodeGeom`] per node.
 #[derive(Default)]
 pub struct GeomCache {
     entries: IdMap<NodeId, Entry>,
-    shared: IdMap<u64, Vec<(Rc<GeomSrc>, Rc<NodeGeom>)>>,
+    shared: IdMap<u64, SharedGeom>,
     /// Statistics: geometry builds since creation.
     pub builds: u64,
     /// Statistics: canonical geometry deduplication hits across nodes.

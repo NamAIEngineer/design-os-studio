@@ -133,12 +133,33 @@ pub(crate) fn render_with_transform(doc: &Document, page: NodeId, ts: sk::Transf
     r.draw_children(&p.children, ts, target, None, None);
 }
 
+/// Longest side, in device pixels, of any off-screen image the renderer will allocate.
+pub const MAX_PIXMAP_SIDE: u32 = 16_384;
+/// Most device pixels (width x height) of any off-screen image the renderer will allocate: 16384 x 16384
+/// (1 GiB RGBA), equal to [`MAX_PIXMAP_SIDE`] squared and to the largest GPU texture. Every size the side
+/// cap admits therefore fits the budget, and exports such as 4000x3000 at 4x (192 Mpx) are allowed.
+pub const MAX_PIXMAP_PIXELS: u64 = 1 << 28;
+
+/// Pixel size of a `w` x `h` (already scaled) image, at least 1x1; `None` if it is not finite or
+/// exceeds [`MAX_PIXMAP_SIDE`] / [`MAX_PIXMAP_PIXELS`], so an oversized request fails instead of aborting on allocation.
+pub fn checked_pixmap_size(w: f32, h: f32) -> Option<(u32, u32)> {
+    if !w.is_finite() || !h.is_finite() {
+        return None;
+    }
+    let (w, h) = (w.ceil().max(1.0), h.ceil().max(1.0));
+    let side = MAX_PIXMAP_SIDE as f32;
+    if w > side || h > side || (w as u64) * (h as u64) > MAX_PIXMAP_PIXELS {
+        return None;
+    }
+    Some((w as u32, h as u32))
+}
+
 /// Draws a single node subtree with its own top-left at (0,0); used for
-/// exports and per-frame diffs.
+/// exports and per-frame diffs. `None` if the node is missing or the image would exceed
+/// [`MAX_PIXMAP_SIDE`] / [`MAX_PIXMAP_PIXELS`].
 pub fn render_node(doc: &Document, node: NodeId, scale: f32) -> Option<tiny_skia::Pixmap> {
     let n = &*resolve_node(doc, doc.get(node)?);
-    let w = (n.size.x * scale).ceil().max(1.0) as u32;
-    let h = (n.size.y * scale).ceil().max(1.0) as u32;
+    let (w, h) = checked_pixmap_size(n.size.x * scale, n.size.y * scale)?;
     let mut pm = tiny_skia::Pixmap::new(w, h)?;
     let r = Renderer { doc, env: PaintEnv { doc }, cull: None };
     let ts = sk::Transform::from_scale(scale, scale);

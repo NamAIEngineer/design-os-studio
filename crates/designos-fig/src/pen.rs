@@ -15,10 +15,30 @@ use designos_doc::*;
 use serde_json::{json, Map, Value};
 use std::collections::BTreeMap;
 
+/// A `ref` instance waiting for its component: instance node, referenced component key, and the
+/// per-descendant overrides to apply once the component subtree is cloned.
+type PendingRef = (NodeId, String, Option<Map<String, Value>>);
+
 const PEN_COLLECTION_ID: &str = "pen:tokens";
 
 /// Parses a `.pen` (Pencil.dev) JSON string into a [`Document`].
+///
+/// Non-fatal import warnings (see [`import_pen_json_with_warnings`]) are written to stderr, the crate's only log sink.
 pub fn import_pen_json(raw: &str) -> Result<Document, String> {
+    let (doc, warning) = import_pen_json_with_warnings(raw)?;
+    if let Some(w) = warning {
+        eprintln!("designos-fig: .pen import warning: {w}");
+    }
+    Ok(doc)
+}
+
+/// Like [`import_pen_json`], but also returns the non-fatal warning, if any: the clone budget for `ref`
+/// expansion ran out, so the remaining instances were left unexpanded.
+pub fn import_pen_json_with_warnings(raw: &str) -> Result<(Document, Option<String>), String> {
+    import_pen_json_budgeted(raw, MAX_PEN_REF_CLONES)
+}
+
+fn import_pen_json_budgeted(raw: &str, clone_budget: usize) -> Result<(Document, Option<String>), String> {
     let root: Value = serde_json::from_str(raw).map_err(|e| format!("invalid .pen JSON: {e}"))?;
     let obj = root.as_object().ok_or_else(|| "expected top-level JSON object in .pen file".to_string())?;
 
@@ -30,7 +50,7 @@ pub fn import_pen_json(raw: &str) -> Result<Document, String> {
 
     // 2. Parse pages or top-level children
     let mut id_map: BTreeMap<String, NodeId> = BTreeMap::new();
-    let mut pending_refs: Vec<(NodeId, String, Option<Map<String, Value>>)> = Vec::new();
+    let mut pending_refs: Vec<PendingRef> = Vec::new();
 
     if let Some(pages) = obj.get("pages").and_then(Value::as_array) {
         if pages.is_empty() {
@@ -70,10 +90,10 @@ pub fn import_pen_json(raw: &str) -> Result<Document, String> {
     }
 
     // 3. Resolve `type: "ref"` component links and clone/override descendants
-    resolve_pen_refs(&mut doc, &id_map, pending_refs);
+    let warning = resolve_pen_refs(&mut doc, &id_map, pending_refs, clone_budget)?;
 
     doc.mark_full_dirty();
-    Ok(doc)
+    Ok((doc, warning))
 }
 
 fn import_pen_variables(doc: &mut Document, obj: &Map<String, Value>) {
@@ -222,30 +242,42 @@ fn parse_var_value(kind: VariableKind, v: &Value) -> Option<VariableValue> {
     }
 }
 
-fn resolve_doc_var_color(doc: &Document, var_name: &str) -> Option<Color> {
-    let key = var_name.trim_start_matches('$');
-    let var = doc.variables.get(key)?;
-    for val in var.values.values() {
-        match val {
-            VariableValue::Color(c) => return Some(*c),
-            VariableValue::Alias(target) => return resolve_doc_var_color(doc, target),
-            _ => {}
+/// Follows `$alias` links iteratively and returns the first value `pick` accepts. A cycle (or a dangling alias)
+/// resolves to `None`, so callers use their fallback.
+fn resolve_doc_var<T>(doc: &Document, var_name: &str, pick: impl Fn(&VariableValue) -> Option<T>) -> Option<T> {
+    let mut visited: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    let mut key = var_name.trim_start_matches('$');
+    loop {
+        if !visited.insert(key) {
+            return None;
         }
+        let var = doc.variables.get(key)?;
+        let mut next = None;
+        for val in var.values.values() {
+            if let Some(found) = pick(val) {
+                return Some(found);
+            }
+            if let VariableValue::Alias(target) = val {
+                next = Some(target.trim_start_matches('$'));
+                break;
+            }
+        }
+        key = next?;
     }
-    None
+}
+
+fn resolve_doc_var_color(doc: &Document, var_name: &str) -> Option<Color> {
+    resolve_doc_var(doc, var_name, |v| match v {
+        VariableValue::Color(c) => Some(*c),
+        _ => None,
+    })
 }
 
 fn resolve_doc_var_number(doc: &Document, var_name: &str) -> Option<f32> {
-    let key = var_name.trim_start_matches('$');
-    let var = doc.variables.get(key)?;
-    for val in var.values.values() {
-        match val {
-            VariableValue::Number(n) => return Some(*n),
-            VariableValue::Alias(target) => return resolve_doc_var_number(doc, target),
-            _ => {}
-        }
-    }
-    None
+    resolve_doc_var(doc, var_name, |v| match v {
+        VariableValue::Number(n) => Some(*n),
+        _ => None,
+    })
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -628,7 +660,7 @@ fn import_pen_node(
     parent: NodeId,
     val: &Value,
     id_map: &mut BTreeMap<String, NodeId>,
-    pending_refs: &mut Vec<(NodeId, String, Option<Map<String, Value>>)>,
+    pending_refs: &mut Vec<PendingRef>,
 ) -> Result<NodeId, String> {
     let obj = val.as_object().ok_or_else(|| "expected node object in .pen".to_string())?;
     let id = doc.alloc_id();
@@ -848,24 +880,49 @@ fn import_pen_node(
     Ok(id)
 }
 
-fn resolve_pen_refs(doc: &mut Document, id_map: &BTreeMap<String, NodeId>, pending_refs: Vec<(NodeId, String, Option<Map<String, Value>>)>) {
+/// Nodes the whole import may clone while expanding `ref`s; stops chained components from multiplying without bound.
+const MAX_PEN_REF_CLONES: usize = 2_000_000;
+
+/// Expands every `ref`. When expanding the next one would pass `clone_budget` nodes, that instance and all
+/// later ones are left unexpanded (everything cloned so far stays) and a warning is returned.
+/// Self and ancestor references are still hard errors, also after the budget ran out.
+fn resolve_pen_refs(
+    doc: &mut Document,
+    id_map: &BTreeMap<String, NodeId>,
+    pending_refs: Vec<PendingRef>,
+    clone_budget: usize,
+) -> Result<Option<String>, String> {
+    let mut budget_left = clone_budget;
+    let mut skipped = 0usize;
     for (inst_id, ref_key, descendants) in pending_refs {
         let Some(&comp_id) = id_map.get(&ref_key) else {
             continue;
         };
+        if comp_id == inst_id || doc.is_ancestor(comp_id, inst_id) {
+            return Err(format!("component \"{ref_key}\" is referenced from inside itself; remove the ref from its own contents"));
+        }
+        // Once one instance was left unexpanded, every later one is too: do not even size its component.
+        if skipped > 0 {
+            skipped += 1;
+            continue;
+        }
         let has_explicit_children = doc.get(inst_id).is_some_and(|n| !n.children.is_empty());
+        // Clone component's children into instance if instance had no explicit children
+        let comp_children = if has_explicit_children { Vec::new() } else { doc.get(comp_id).map(|c| c.children.clone()).unwrap_or_default() };
+        let needed = subtree_len_up_to(doc, &comp_children, budget_left);
+        if needed > budget_left {
+            skipped += 1;
+            continue;
+        }
+        budget_left -= needed;
         if let Some(inst_node) = doc.get_mut(inst_id) {
             if let NodeKind::Instance { component, .. } = &mut inst_node.kind {
                 *component = Some(comp_id);
             }
         }
-        // Clone component's children into instance if instance had no explicit children
         let mut source_to_clone: BTreeMap<String, NodeId> = BTreeMap::new();
-        if !has_explicit_children {
-            let comp_children = doc.get(comp_id).map(|c| c.children.clone()).unwrap_or_default();
-            for cid in comp_children {
-                clone_component_subtree(doc, cid, inst_id, &mut source_to_clone);
-            }
+        for cid in comp_children {
+            clone_component_subtree(doc, cid, inst_id, &mut source_to_clone);
         }
         // Apply `descendants` overrides
         if let Some(desc_map) = descendants {
@@ -878,22 +935,46 @@ fn resolve_pen_refs(doc: &mut Document, id_map: &BTreeMap<String, NodeId>, pendi
             }
         }
     }
+    Ok((skipped > 0).then(|| {
+        format!("component references expand past {clone_budget} cloned nodes; {skipped} instance(s) were left unexpanded (flatten nested components)")
+    }))
 }
 
-fn clone_component_subtree(doc: &mut Document, src_id: NodeId, new_parent: NodeId, source_to_clone: &mut BTreeMap<String, NodeId>) {
-    let Some(orig) = doc.get(src_id).cloned() else { return };
-    let new_id = doc.alloc_id();
-    let mut copy = orig.clone();
-    copy.id = new_id;
-    copy.parent = Some(new_parent);
-    copy.children = Vec::new();
-    copy.component.source = Some(src_id);
-    if let Some(sid) = &orig.source_id {
-        source_to_clone.insert(sid.clone(), new_id);
+/// Number of nodes in the subtrees rooted at `roots`, counting stops once it exceeds `limit` (the result is then
+/// some value above `limit`, not the true size). Iterative, so depth cannot overflow the stack.
+fn subtree_len_up_to(doc: &Document, roots: &[NodeId], limit: usize) -> usize {
+    let mut stack: Vec<NodeId> = roots.to_vec();
+    let mut count = 0usize;
+    while let Some(id) = stack.pop() {
+        if let Some(n) = doc.get(id) {
+            count += 1;
+            if count > limit {
+                break;
+            }
+            stack.extend(n.children.iter().copied());
+        }
     }
-    let _ = doc.insert(new_parent, copy);
-    for child_id in orig.children {
-        clone_component_subtree(doc, child_id, new_id, source_to_clone);
+    count
+}
+
+/// Clones the subtree rooted at `src_id` under `new_parent`, parents before children and siblings in order.
+/// Iterative (explicit stack), so a component nested thousands of levels deep cannot overflow the call stack.
+fn clone_component_subtree(doc: &mut Document, src_id: NodeId, new_parent: NodeId, source_to_clone: &mut BTreeMap<String, NodeId>) {
+    let mut stack: Vec<(NodeId, NodeId)> = vec![(src_id, new_parent)];
+    while let Some((src_id, new_parent)) = stack.pop() {
+        let Some(orig) = doc.get(src_id).cloned() else { continue };
+        let new_id = doc.alloc_id();
+        let mut copy = orig.clone();
+        copy.id = new_id;
+        copy.parent = Some(new_parent);
+        copy.children = Vec::new();
+        copy.component.source = Some(src_id);
+        if let Some(sid) = &orig.source_id {
+            source_to_clone.insert(sid.clone(), new_id);
+        }
+        let _ = doc.insert(new_parent, copy);
+        // Reversed so the first child is popped (and so allocated and inserted) first.
+        stack.extend(orig.children.into_iter().rev().map(|child| (child, new_id)));
     }
 }
 
@@ -1366,5 +1447,129 @@ mod tests {
         let rinst = reimported.get(rchildren[1]).unwrap();
         let rlabel = reimported.get(rinst.children[0]).unwrap();
         assert_eq!(rlabel.kind.any_text().unwrap().content, "Get Started");
+    }
+
+    #[test]
+    fn ref_to_own_component_or_itself_is_rejected() {
+        let inside_component = r##"{"version":"1.0","children":[
+            {"id":"c","type":"frame","reusable":true,"children":[{"id":"i","type":"ref","ref":"c"}]}]}"##;
+        let err = import_pen_json(inside_component).unwrap_err();
+        assert!(err.contains("referenced from inside itself"), "{err}");
+
+        let deep = r##"{"version":"1.0","children":[
+            {"id":"c","type":"frame","reusable":true,"children":[{"id":"g","type":"frame","children":[{"id":"i","type":"ref","ref":"c"}]}]}]}"##;
+        assert!(import_pen_json(deep).is_err());
+
+        let self_ref = r##"{"version":"1.0","children":[{"id":"i","type":"ref","ref":"i"}]}"##;
+        assert!(import_pen_json(self_ref).is_err());
+    }
+
+    #[test]
+    fn cyclic_variable_aliases_fall_back_instead_of_recursing() {
+        let json = r##"{"version":"1.0",
+            "variables":{"a":{"type":"number","value":"$b"},"b":{"type":"number","value":"$a"},
+                         "c":{"type":"color","value":"$d"},"d":{"type":"color","value":"$c"},
+                         "self":{"type":"number","value":"$self"}},
+            "children":[
+                {"id":"n","type":"frame","width":"$a","height":"$self","fill":"$c"}]}"##;
+        let doc = import_pen_json(json).expect("a variable cycle must not fail the import");
+        let n = doc.get(doc.get(doc.pages[0]).unwrap().children[0]).unwrap();
+        // Unresolved: both dimensions fall back to the default size, the fill to black.
+        let (w, h) = (n.size.x, n.size.y);
+        assert!(w.is_finite() && h.is_finite());
+        assert_eq!(n.variables.bindings.get("fills/0").map(String::as_str), Some("c"));
+    }
+
+    #[test]
+    fn long_acyclic_alias_chain_still_resolves() {
+        let mut vars = vec![r#""v0":{"type":"number","value":42}"#.to_string()];
+        vars.extend((1..2000).map(|i| format!(r#""v{i}":{{"type":"number","value":"$v{}"}}"#, i - 1)));
+        let json = format!(r##"{{"version":"1.0","variables":{{{}}},"children":[{{"id":"n","type":"frame","width":"$v1999","height":10}}]}}"##, vars.join(","));
+        let doc = import_pen_json(&json).unwrap();
+        let n = doc.get(doc.get(doc.pages[0]).unwrap().children[0]).unwrap();
+        assert_eq!(n.size.x, 42.0);
+    }
+
+    #[test]
+    fn chained_component_refs_hit_the_clone_budget() {
+        // c23 holds two refs to c24, c22 two refs to c23, ... declared deepest-first so every
+        // level clones an already-expanded subtree: 2^24 nodes without a budget.
+        let mut children = vec![r##"{"id":"c24","type":"frame","reusable":true,"children":[]}"##.to_string()];
+        for i in (0..24).rev() {
+            let next = i + 1;
+            children.push(format!(
+                r##"{{"id":"c{i}","type":"frame","reusable":true,"children":[{{"id":"a{i}","type":"ref","ref":"c{next}"}},{{"id":"b{i}","type":"ref","ref":"c{next}"}}]}}"##
+            ));
+        }
+        let json = format!(r##"{{"version":"1.0","children":[{}]}}"##, children.join(","));
+        let (doc, warning) = import_pen_json_budgeted(&json, 1_000).expect("an exhausted clone budget must not fail the import");
+        let warning = warning.expect("budget exhaustion is surfaced as a warning");
+        assert!(warning.contains("expand past 1000"), "{warning}");
+        // The nodes imported before the budget ran out are all still there, and cloning stopped at the budget.
+        assert!(doc.get(doc.pages[0]).unwrap().children.len() >= 25);
+        assert!(doc.nodes.len() < 1_000 + 200, "got {} nodes", doc.nodes.len());
+    }
+
+    #[test]
+    fn exhausted_clone_budget_keeps_earlier_instances_and_skips_later_ones() {
+        let mut kids = vec![r##"{"id":"comp","type":"frame","reusable":true,"children":[
+            {"id":"l1","type":"frame"},{"id":"l2","type":"frame"},{"id":"l3","type":"frame"}]}"##
+            .to_string()];
+        kids.extend((0..5).map(|i| format!(r##"{{"id":"i{i}","type":"ref","ref":"comp"}}"##)));
+        let json = format!(r##"{{"version":"1.0","children":[{}]}}"##, kids.join(","));
+
+        // Budget 7 fits two 3-node expansions; the third needs 3 but only 1 is left.
+        let (doc, warning) = import_pen_json_budgeted(&json, 7).unwrap();
+        let page = doc.get(doc.pages[0]).unwrap();
+        let counts: Vec<usize> = page.children[1..].iter().map(|&i| doc.get(i).unwrap().children.len()).collect();
+        assert_eq!(counts, [3, 3, 0, 0, 0]);
+        let w = warning.unwrap();
+        assert!(w.contains("3 instance(s)"), "{w}");
+
+        // Enough budget: everything expands and there is no warning.
+        let (doc, warning) = import_pen_json_budgeted(&json, 15).unwrap();
+        assert!(warning.is_none());
+        let page = doc.get(doc.pages[0]).unwrap();
+        assert!(page.children[1..].iter().all(|&i| doc.get(i).unwrap().children.len() == 3));
+
+        // Self references stay errors even after the budget ran out.
+        let json = format!(r##"{{"version":"1.0","children":[{},{{"id":"s","type":"ref","ref":"s"}}]}}"##, kids.join(","));
+        assert!(import_pen_json_budgeted(&json, 7).is_err());
+    }
+
+    #[test]
+    fn public_warning_entry_point_reports_none_for_a_small_document() {
+        let json = r##"{"version":"1.0","children":[{"id":"c","type":"frame","reusable":true},{"id":"i","type":"ref","ref":"c"}]}"##;
+        assert!(import_pen_json_with_warnings(json).unwrap().1.is_none());
+        assert!(import_pen_json(json).is_ok());
+    }
+
+    #[test]
+    fn subtree_count_stops_once_it_passes_the_limit() {
+        let kids: Vec<String> = (0..50).map(|i| format!(r##"{{"id":"k{i}","type":"frame"}}"##)).collect();
+        let json = format!(r##"{{"version":"1.0","children":[{{"id":"c","type":"frame","reusable":true,"children":[{}]}}]}}"##, kids.join(","));
+        let (doc, _) = import_pen_json_budgeted(&json, 1_000).unwrap();
+        let comp = doc.get(doc.pages[0]).unwrap().children[0];
+        let roots = doc.get(comp).unwrap().children.clone();
+        assert_eq!(subtree_len_up_to(&doc, &roots, 1_000), 50);
+        assert_eq!(subtree_len_up_to(&doc, &roots, 50), 50);
+        assert_eq!(subtree_len_up_to(&doc, &roots, 10), 11, "the walk gives up one node past the limit");
+        assert_eq!(subtree_len_up_to(&doc, &roots, 0), 1);
+    }
+
+    #[test]
+    fn skipped_refs_do_not_re_walk_a_huge_component() {
+        // 20,000-node component, 3,000 refs, budget 10: every ref is skipped. Sizing the component per skipped ref
+        // costs 60M node visits (seconds in a debug build); skipping without sizing costs next to nothing.
+        let kids: Vec<String> = (0..20_000).map(|i| format!(r##"{{"id":"k{i}","type":"frame"}}"##)).collect();
+        let refs: Vec<String> = (0..3_000).map(|i| format!(r##"{{"id":"r{i}","type":"ref","ref":"comp"}}"##)).collect();
+        let json =
+            format!(r##"{{"version":"1.0","children":[{{"id":"comp","type":"frame","reusable":true,"children":[{}]}},{}]}}"##, kids.join(","), refs.join(","));
+        let started = std::time::Instant::now();
+        let (doc, warning) = import_pen_json_budgeted(&json, 10).unwrap();
+        let elapsed = started.elapsed();
+        assert!(warning.expect("budget exhaustion is surfaced as a warning").contains("3000 instance(s)"));
+        assert_eq!(doc.nodes.len(), 1 + 1 + 20_000 + 3_000, "nothing was cloned");
+        assert!(elapsed < std::time::Duration::from_millis(1_500), "importing took {elapsed:?}");
     }
 }

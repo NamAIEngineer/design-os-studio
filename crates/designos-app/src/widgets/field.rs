@@ -213,6 +213,11 @@ enum Tok {
     RParen,
 }
 
+/// Byte-wise ASCII prefix check; unlike slicing `s[..n]` it cannot split a multi-byte character.
+fn starts_with_ignore_ascii_case(s: &str, prefix: &str) -> bool {
+    s.as_bytes().get(..prefix.len()).is_some_and(|head| head.eq_ignore_ascii_case(prefix.as_bytes()))
+}
+
 fn tokenize_expr(s: &str, current: Option<f32>) -> Option<Vec<Tok>> {
     let mut tokens = Vec::new();
     let bytes = s.as_bytes();
@@ -253,7 +258,7 @@ fn tokenize_expr(s: &str, current: Option<f32>) -> Option<Vec<Tok>> {
                 tokens.push(Tok::Caret);
                 i += 1;
             }
-            _ if rest.len() >= 5 && rest[..5].eq_ignore_ascii_case("mixed") => {
+            _ if starts_with_ignore_ascii_case(rest, "mixed") => {
                 let cur = current?;
                 tokens.push(Tok::Num(cur, NumSuffix::None));
                 i += 5;
@@ -306,22 +311,21 @@ fn tokenize_expr(s: &str, current: Option<f32>) -> Option<Vec<Tok>> {
                 } else if tail.starts_with('°') {
                     i += '°'.len_utf8();
                     NumSuffix::Unit
-                } else if tail.len() >= 3 && tail[..3].eq_ignore_ascii_case("deg") && !tail[3..].chars().next().is_some_and(|c| c.is_ascii_alphabetic()) {
+                } else if starts_with_ignore_ascii_case(tail, "deg") && !tail[3..].chars().next().is_some_and(|c| c.is_ascii_alphabetic()) {
                     i += 3;
                     NumSuffix::Unit
-                } else if tail.len() >= 2
-                    && (tail[..2].eq_ignore_ascii_case("px") || tail[..2].eq_ignore_ascii_case("ms"))
+                } else if (starts_with_ignore_ascii_case(tail, "px") || starts_with_ignore_ascii_case(tail, "ms"))
                     && !tail[2..].chars().next().is_some_and(|c| c.is_ascii_alphabetic())
                 {
                     i += 2;
                     NumSuffix::Unit
-                } else if tail.len() >= 1
+                } else if !tail.is_empty()
                     && (tail.starts_with('s') || tail.starts_with('S'))
                     && !tail[1..].chars().next().is_some_and(|c| c.is_ascii_alphabetic())
                 {
                     i += 1;
                     NumSuffix::Unit
-                } else if tail.len() >= 1
+                } else if !tail.is_empty()
                     && (tail.starts_with('x') || tail.starts_with('X'))
                     && !tail[1..].chars().next().is_some_and(|c| c.is_ascii_alphabetic())
                 {
@@ -339,11 +343,15 @@ fn tokenize_expr(s: &str, current: Option<f32>) -> Option<Vec<Tok>> {
     Some(tokens)
 }
 
-fn parse_expr_tokens(tokens: &[Tok], pos: &mut usize, current: Option<f32>, is_percent_field: bool) -> Option<f32> {
-    let mut lhs = parse_term_tokens(tokens, pos, current, is_percent_field, None)?;
+/// Maximum nesting of unary signs, exponent right-hand sides, parentheses and `op=` prefixes.
+/// Deeper input is an invalid expression rather than unbounded recursion (matches `prototype_expr.rs`).
+const MAX_EXPR_DEPTH: usize = 64;
+
+fn parse_expr_tokens(tokens: &[Tok], pos: &mut usize, current: Option<f32>, is_percent_field: bool, depth: usize) -> Option<f32> {
+    let mut lhs = parse_term_tokens(tokens, pos, current, is_percent_field, None, depth)?;
     while let Some(&op @ (Tok::Plus | Tok::Minus)) = tokens.get(*pos) {
         *pos += 1;
-        let rhs = parse_term_tokens(tokens, pos, current, is_percent_field, Some(lhs))?;
+        let rhs = parse_term_tokens(tokens, pos, current, is_percent_field, Some(lhs), depth)?;
         lhs = match op {
             Tok::Plus => lhs + rhs,
             _ => lhs - rhs,
@@ -352,11 +360,11 @@ fn parse_expr_tokens(tokens: &[Tok], pos: &mut usize, current: Option<f32>, is_p
     Some(lhs)
 }
 
-fn parse_term_tokens(tokens: &[Tok], pos: &mut usize, current: Option<f32>, is_percent_field: bool, add_lhs: Option<f32>) -> Option<f32> {
-    let mut lhs = parse_unary_tokens(tokens, pos, current, is_percent_field, add_lhs)?;
+fn parse_term_tokens(tokens: &[Tok], pos: &mut usize, current: Option<f32>, is_percent_field: bool, add_lhs: Option<f32>, depth: usize) -> Option<f32> {
+    let mut lhs = parse_unary_tokens(tokens, pos, current, is_percent_field, add_lhs, depth)?;
     while let Some(&op @ (Tok::Star | Tok::Slash)) = tokens.get(*pos) {
         *pos += 1;
-        let rhs = parse_unary_tokens(tokens, pos, current, is_percent_field, None)?;
+        let rhs = parse_unary_tokens(tokens, pos, current, is_percent_field, None, depth)?;
         lhs = match op {
             Tok::Star => lhs * rhs,
             _ => {
@@ -370,32 +378,36 @@ fn parse_term_tokens(tokens: &[Tok], pos: &mut usize, current: Option<f32>, is_p
     Some(lhs)
 }
 
-fn parse_unary_tokens(tokens: &[Tok], pos: &mut usize, current: Option<f32>, is_percent_field: bool, add_lhs: Option<f32>) -> Option<f32> {
+fn parse_unary_tokens(tokens: &[Tok], pos: &mut usize, current: Option<f32>, is_percent_field: bool, add_lhs: Option<f32>, depth: usize) -> Option<f32> {
+    // Every recursive cycle (unary sign, exponent rhs, parenthesis) passes through here.
+    if depth > MAX_EXPR_DEPTH {
+        return None;
+    }
     match tokens.get(*pos) {
         Some(Tok::Plus) => {
             *pos += 1;
-            parse_unary_tokens(tokens, pos, current, is_percent_field, add_lhs)
+            parse_unary_tokens(tokens, pos, current, is_percent_field, add_lhs, depth + 1)
         }
         Some(Tok::Minus) => {
             *pos += 1;
-            parse_unary_tokens(tokens, pos, current, is_percent_field, add_lhs).map(|v| -v)
+            parse_unary_tokens(tokens, pos, current, is_percent_field, add_lhs, depth + 1).map(|v| -v)
         }
-        _ => parse_power_tokens(tokens, pos, current, is_percent_field, add_lhs),
+        _ => parse_power_tokens(tokens, pos, current, is_percent_field, add_lhs, depth),
     }
 }
 
-fn parse_power_tokens(tokens: &[Tok], pos: &mut usize, current: Option<f32>, is_percent_field: bool, add_lhs: Option<f32>) -> Option<f32> {
-    let base = parse_primary_tokens(tokens, pos, current, is_percent_field, add_lhs)?;
+fn parse_power_tokens(tokens: &[Tok], pos: &mut usize, current: Option<f32>, is_percent_field: bool, add_lhs: Option<f32>, depth: usize) -> Option<f32> {
+    let base = parse_primary_tokens(tokens, pos, current, is_percent_field, add_lhs, depth)?;
     if matches!(tokens.get(*pos), Some(Tok::Caret)) {
         *pos += 1;
-        let exp = parse_unary_tokens(tokens, pos, current, is_percent_field, None)?;
+        let exp = parse_unary_tokens(tokens, pos, current, is_percent_field, None, depth + 1)?;
         Some(base.powf(exp))
     } else {
         Some(base)
     }
 }
 
-fn parse_primary_tokens(tokens: &[Tok], pos: &mut usize, current: Option<f32>, is_percent_field: bool, add_lhs: Option<f32>) -> Option<f32> {
+fn parse_primary_tokens(tokens: &[Tok], pos: &mut usize, current: Option<f32>, is_percent_field: bool, add_lhs: Option<f32>, depth: usize) -> Option<f32> {
     match tokens.get(*pos).copied()? {
         Tok::Num(val, suffix) => {
             *pos += 1;
@@ -413,7 +425,7 @@ fn parse_primary_tokens(tokens: &[Tok], pos: &mut usize, current: Option<f32>, i
         }
         Tok::LParen => {
             *pos += 1;
-            let val = parse_expr_tokens(tokens, pos, current, is_percent_field)?;
+            let val = parse_expr_tokens(tokens, pos, current, is_percent_field, depth + 1)?;
             if !matches!(tokens.get(*pos), Some(Tok::RParen)) {
                 return None;
             }
@@ -428,28 +440,35 @@ fn parse_primary_tokens(tokens: &[Tok], pos: &mut usize, current: Option<f32>, i
 /// scientific notation, comma decimals, unit suffixes `px`/`deg`/`°`/`ms`/`s`,
 /// postfix `%` and `x`, and relative operators `+=`, `-=`, `*=`, `/=`, `*N`, `/N`, `Mixed+N`).
 pub fn eval_number_expr(input: &str, current: Option<f32>, is_percent_field: bool) -> Option<f32> {
+    eval_number_expr_at(input, current, is_percent_field, 0)
+}
+
+fn eval_number_expr_at(input: &str, current: Option<f32>, is_percent_field: bool, depth: usize) -> Option<f32> {
+    if depth > MAX_EXPR_DEPTH {
+        return None;
+    }
     let s = input.trim();
     if s.is_empty() {
         return None;
     }
     if let Some(rest) = s.strip_prefix("+=") {
         let cur = current?;
-        let rhs = eval_number_expr(rest, current, is_percent_field)?;
+        let rhs = eval_number_expr_at(rest, current, is_percent_field, depth + 1)?;
         return Some(cur + rhs).filter(|v| v.is_finite());
     }
     if let Some(rest) = s.strip_prefix("-=") {
         let cur = current?;
-        let rhs = eval_number_expr(rest, current, is_percent_field)?;
+        let rhs = eval_number_expr_at(rest, current, is_percent_field, depth + 1)?;
         return Some(cur - rhs).filter(|v| v.is_finite());
     }
     if let Some(rest) = s.strip_prefix("*=") {
         let cur = current?;
-        let rhs = eval_number_expr(rest, current, is_percent_field)?;
+        let rhs = eval_number_expr_at(rest, current, is_percent_field, depth + 1)?;
         return Some(cur * rhs).filter(|v| v.is_finite());
     }
     if let Some(rest) = s.strip_prefix("/=") {
         let cur = current?;
-        let rhs = eval_number_expr(rest, current, is_percent_field)?;
+        let rhs = eval_number_expr_at(rest, current, is_percent_field, depth + 1)?;
         if rhs == 0.0 {
             return None;
         }
@@ -457,12 +476,12 @@ pub fn eval_number_expr(input: &str, current: Option<f32>, is_percent_field: boo
     }
     if let Some(rest) = s.strip_prefix('*') {
         let cur = current?;
-        let rhs = eval_number_expr(rest, current, is_percent_field)?;
+        let rhs = eval_number_expr_at(rest, current, is_percent_field, depth + 1)?;
         return Some(cur * rhs).filter(|v| v.is_finite());
     }
     if let Some(rest) = s.strip_prefix('/') {
         let cur = current?;
-        let rhs = eval_number_expr(rest, current, is_percent_field)?;
+        let rhs = eval_number_expr_at(rest, current, is_percent_field, depth + 1)?;
         if rhs == 0.0 {
             return None;
         }
@@ -473,7 +492,7 @@ pub fn eval_number_expr(input: &str, current: Option<f32>, is_percent_field: boo
         return None;
     }
     let mut pos = 0;
-    let res = parse_expr_tokens(&tokens, &mut pos, current, is_percent_field)?;
+    let res = parse_expr_tokens(&tokens, &mut pos, current, is_percent_field, 0)?;
     if pos != tokens.len() || !res.is_finite() {
         return None;
     }
@@ -657,6 +676,16 @@ mod tests {
     }
 
     #[test]
+    fn non_ascii_input_never_panics() {
+        for input in ["5€", "100 ₫", "日本", "10 độ", "日本語テキスト", "5 日本", "1e€", "€", "10 pxé", "mixé€"] {
+            assert_eq!(eval_number_expr(input, Some(3.0), false), None, "{input}");
+        }
+        assert_eq!(eval_number_expr("Mixed+2", Some(3.0), false), Some(5.0));
+        assert_eq!(eval_number_expr("45 deg", None, false), Some(45.0));
+        assert_eq!(eval_number_expr("12 px", None, false), Some(12.0));
+    }
+
+    #[test]
     fn evaluates_full_figma_math_expressions() {
         assert_eq!(eval_number_expr("100+24", None, false), Some(124.0));
         assert_eq!(eval_number_expr("10 + 5 * 2", None, false), Some(20.0));
@@ -678,6 +707,45 @@ mod tests {
         assert_eq!(eval_number_expr("/2", Some(50.0), false), Some(25.0));
         assert_eq!(eval_number_expr("Mixed+20", Some(80.0), false), Some(100.0));
         assert_eq!(eval_number_expr("Mixed-10", Some(80.0), false), Some(70.0));
+    }
+
+    /// Runs `f` on a 256 KiB stack so unbounded recursion aborts the test process instead of passing.
+    fn eval_on_small_stack(input: String) -> Option<f32> {
+        std::thread::Builder::new()
+            .stack_size(256 * 1024)
+            .spawn(move || eval_number_expr(&input, Some(3.0), false))
+            .expect("spawn small-stack thread")
+            .join()
+            .expect("evaluator must not panic")
+    }
+
+    #[test]
+    fn deep_unary_signs_are_rejected_without_stack_overflow() {
+        assert_eq!(eval_on_small_stack(format!("{}1", "-".repeat(100_000))), None);
+        assert_eq!(eval_on_small_stack(format!("{}1", "+".repeat(100_000))), None);
+    }
+
+    #[test]
+    fn deep_parentheses_are_rejected_without_stack_overflow() {
+        assert_eq!(eval_on_small_stack("(".repeat(100_000)), None);
+        assert_eq!(eval_on_small_stack(format!("{}1{}", "(".repeat(100_000), ")".repeat(100_000))), None);
+    }
+
+    #[test]
+    fn deep_exponent_chain_is_rejected_without_stack_overflow() {
+        assert_eq!(eval_on_small_stack(vec!["2"; 50_000].join("^")), None);
+    }
+
+    #[test]
+    fn deep_relative_operator_prefixes_are_rejected_without_stack_overflow() {
+        assert_eq!(eval_on_small_stack(format!("{}1", "+=".repeat(100_000))), None);
+    }
+
+    #[test]
+    fn moderate_nesting_still_evaluates() {
+        assert_eq!(eval_number_expr(&format!("{}1", "-".repeat(10)), None, false), Some(1.0));
+        assert_eq!(eval_number_expr(&format!("{}5{}", "(".repeat(20), ")".repeat(20)), None, false), Some(5.0));
+        assert_eq!(eval_number_expr("2^2^3", None, false), Some(256.0));
     }
 
     #[test]
@@ -708,8 +776,7 @@ mod tests {
         assert!(ctx.memory(|m| m.has_focus(num_id)));
 
         // Frame 3: press Shift + ArrowUp -> +10 (111.0)
-        let mut input = egui::RawInput::default();
-        input.modifiers = egui::Modifiers::SHIFT;
+        let mut input = egui::RawInput { modifiers: egui::Modifiers::SHIFT, ..Default::default() };
         input.events.push(egui::Event::Key { key: egui::Key::ArrowUp, physical_key: None, pressed: true, repeat: false, modifiers: egui::Modifiers::SHIFT });
         let _ = ctx.run_ui(input, |ui| {
             if let Some(v) = num_field(ui, rect, "test-w", Prefix::Text("W"), Some(val), "") {
@@ -719,8 +786,7 @@ mod tests {
         assert_eq!(val, 111.0);
 
         // Frame 4: press Alt + ArrowDown -> -0.1 (110.9)
-        let mut input = egui::RawInput::default();
-        input.modifiers = egui::Modifiers::ALT;
+        let mut input = egui::RawInput { modifiers: egui::Modifiers::ALT, ..Default::default() };
         input.events.push(egui::Event::Key { key: egui::Key::ArrowDown, physical_key: None, pressed: true, repeat: false, modifiers: egui::Modifiers::ALT });
         let _ = ctx.run_ui(input, |ui| {
             if let Some(v) = num_field(ui, rect, "test-w", Prefix::Text("W"), Some(val), "") {
@@ -740,8 +806,7 @@ mod tests {
         });
 
         // Whole selection (0..6) + Shift+ArrowUp -> +10 (0x0A) to all 3 channels: 1A2A3A
-        let mut input = egui::RawInput::default();
-        input.modifiers = egui::Modifiers::SHIFT;
+        let mut input = egui::RawInput { modifiers: egui::Modifiers::SHIFT, ..Default::default() };
         input.events.push(egui::Event::Key { key: egui::Key::ArrowUp, physical_key: None, pressed: true, repeat: false, modifiers: egui::Modifiers::SHIFT });
         let _ = ctx.run_ui(input, |ui| {
             if let Some(h) = edit_hex_text(ui, rect, hex_id, &hex, theme::font_body(), theme::TEXT, 0.0) {

@@ -39,6 +39,7 @@ pub fn hotspot_layers(app: &App) -> Vec<NodeId> {
 }
 
 /// Hotspot center (screen) of a layer.
+#[cfg(test)]
 pub fn hotspot_pos(app: &App, rect: ERect, id: NodeId) -> Pos2 {
     geom::hotspot_center(screen_rect(app, rect, id))
 }

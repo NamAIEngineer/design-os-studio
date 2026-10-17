@@ -25,10 +25,16 @@ mod geom;
 mod history;
 mod library;
 mod library_ops;
+mod load_repair;
+#[cfg(test)]
+mod load_repair_tests;
 mod node;
 pub mod openpencil;
 mod paint;
 mod prototype;
+mod renumber_ids;
+#[cfg(test)]
+mod renumber_ids_tests;
 mod settings;
 pub mod spec;
 mod textmodel;
@@ -47,6 +53,7 @@ pub use geom::*;
 pub use history::*;
 pub use library::*;
 pub use library_ops::*;
+pub use load_repair::*;
 pub use node::*;
 pub use openpencil::*;
 pub use paint::*;
@@ -156,6 +163,10 @@ pub struct Document {
     #[serde(default, with = "serde_images", skip_serializing_if = "BTreeMap::is_empty")]
     pub images: BTreeMap<String, Vec<u8>>,
     next_id: u64,
+    /// Where the exhausted-counter fallback resumes scanning, so one id is never handed out twice
+    /// before its node is inserted. Runtime only.
+    #[serde(skip)]
+    gap_cursor: u64,
     #[serde(skip)]
     dirty: DirtyLog,
     /// Optional on-demand hydrator that expands deferred component instances on inactive pages when switched to or exported.
@@ -302,9 +313,33 @@ impl Document {
         changed
     }
 
+    /// Hands out a fresh id. The counter never wraps: once it is exhausted (a hostile or
+    /// corrupted file can carry ids near `u64::MAX`) ids come from the gaps below the largest
+    /// node id instead. Loaders that can renumber (`renumber_ids_for_headroom`) make this a last
+    /// resort; the fallback still never returns an id it already returned, even when several ids
+    /// are allocated before any of them is inserted.
     pub fn alloc_id(&mut self) -> NodeId {
-        self.next_id += 1;
-        NodeId(self.next_id)
+        match self.next_id.checked_add(1) {
+            Some(next) => {
+                self.next_id = next;
+                NodeId(next)
+            }
+            None => self.next_gap_id(),
+        }
+    }
+
+    /// Smallest id (never 0) at or above the cursor that no node uses; advances the cursor past it.
+    fn next_gap_id(&mut self) -> NodeId {
+        let mut candidate = self.gap_cursor.max(1);
+        for id in self.nodes.range(NodeId(candidate)..).map(|(id, _)| id) {
+            if id.0 != candidate {
+                break;
+            }
+            // saturating: all of 1..=u64::MAX in use would need more memory than exists.
+            candidate = candidate.saturating_add(1);
+        }
+        self.gap_cursor = candidate.saturating_add(1);
+        NodeId(candidate)
     }
 
     pub fn peek_next_id(&self) -> NodeId {
@@ -639,11 +674,23 @@ impl Document {
     }
 
     /// Parses a native document. Text written by older versions that emulated lists with
-    /// literal bullet and "1. " prefixes is converted to real lists.
+    /// literal bullet and "1. " prefixes is converted to real lists. A malformed node graph is
+    /// repaired in place (see [`Document::validate_and_repair`]) and noted on stderr.
     pub fn from_json(s: &str) -> serde_json::Result<Self> {
-        let mut doc: Self = serde_json::from_str(s)?;
-        doc.migrate_text();
+        let (doc, repaired) = Self::from_json_with_report(s)?;
+        if !repaired.is_clean() {
+            eprintln!("designos-doc: repaired a malformed document on load: {repaired:?}");
+        }
         Ok(doc)
+    }
+
+    /// Like [`Document::from_json`] but silent: returns what the load-time repair changed so a
+    /// caller that must not accept a repaired document (for example the MCP server) can refuse it.
+    pub fn from_json_with_report(s: &str) -> serde_json::Result<(Self, RepairReport)> {
+        let mut doc: Self = serde_json::from_str(s)?;
+        let report = doc.validate_and_repair();
+        doc.migrate_text();
+        Ok((doc, report))
     }
 
     /// Converts literal list prefixes of every text node to real lists (see [`migrate_literal_lists`]).

@@ -111,12 +111,12 @@ pub fn compute_css_grid_overlay(al: &AutoLayout, frame_size: DV, child_sizes: &[
     let mut flex_total = 0.0f32;
     let mut fixed_used = 0.0f32;
 
-    for c in 0..cols {
+    for (c, col_w) in col_widths.iter_mut().enumerate() {
         let track = al.grid_col_tracks.get(c).copied().unwrap_or(GridTrack::Flex(1.0));
         match track {
             GridTrack::Fixed(w) => {
-                col_widths[c] = w.max(1.0);
-                fixed_used += col_widths[c];
+                *col_w = w.max(1.0);
+                fixed_used += *col_w;
             }
             GridTrack::Hug => {
                 let mut max_w = 0.0f32;
@@ -125,8 +125,8 @@ pub fn compute_css_grid_overlay(al: &AutoLayout, frame_size: DV, child_sizes: &[
                         max_w = max_w.max(child_sizes[i].x);
                     }
                 }
-                col_widths[c] = max_w.max(1.0);
-                fixed_used += col_widths[c];
+                *col_w = max_w.max(1.0);
+                fixed_used += *col_w;
             }
             GridTrack::Flex(fr) => {
                 flex_total += fr.max(0.1);
@@ -134,9 +134,9 @@ pub fn compute_css_grid_overlay(al: &AutoLayout, frame_size: DV, child_sizes: &[
         }
     }
     let rem_w = (inner_w - fixed_used).max(0.0);
-    for c in 0..cols {
+    for (c, col_w) in col_widths.iter_mut().enumerate() {
         if let GridTrack::Flex(fr) = al.grid_col_tracks.get(c).copied().unwrap_or(GridTrack::Flex(1.0)) {
-            col_widths[c] = if al.primary_sizing == Sizing::Hug && !child_sizes.is_empty() {
+            *col_w = if al.primary_sizing == Sizing::Hug && !child_sizes.is_empty() {
                 let mut max_w = 0.0f32;
                 for (i, &(_, col, _, cs)) in placements.iter().enumerate() {
                     if col == c && cs == 1 {
@@ -165,20 +165,20 @@ pub fn compute_css_grid_overlay(al: &AutoLayout, frame_size: DV, child_sizes: &[
     }
     let mut row_flex_total = 0.0f32;
     let mut row_fixed_used = 0.0f32;
-    for r in 0..rows {
+    for (r, row_h) in row_heights.iter_mut().enumerate() {
         let track = al.grid_row_tracks.get(r).copied().unwrap_or(GridTrack::Flex(1.0));
         match track {
             GridTrack::Fixed(h) => {
-                row_heights[r] = row_heights[r].max(h.max(1.0));
-                row_fixed_used += row_heights[r];
+                *row_h = row_h.max(h.max(1.0));
+                row_fixed_used += *row_h;
             }
             GridTrack::Hug => {
-                row_heights[r] = row_heights[r].max(1.0);
-                row_fixed_used += row_heights[r];
+                *row_h = row_h.max(1.0);
+                row_fixed_used += *row_h;
             }
             GridTrack::Flex(fr) => {
-                if row_heights[r] > 0.0 && al.counter_sizing == Sizing::Hug {
-                    row_fixed_used += row_heights[r];
+                if *row_h > 0.0 && al.counter_sizing == Sizing::Hug {
+                    row_fixed_used += *row_h;
                 } else {
                     row_flex_total += fr.max(0.1);
                 }
@@ -186,33 +186,33 @@ pub fn compute_css_grid_overlay(al: &AutoLayout, frame_size: DV, child_sizes: &[
         }
     }
     let rem_h = (inner_h - row_fixed_used).max(0.0);
-    for r in 0..rows {
+    for (r, row_h) in row_heights.iter_mut().enumerate() {
         if let GridTrack::Flex(fr) = al.grid_row_tracks.get(r).copied().unwrap_or(GridTrack::Flex(1.0)) {
-            if al.counter_sizing != Sizing::Hug || row_heights[r] <= 0.0 {
+            if al.counter_sizing != Sizing::Hug || *row_h <= 0.0 {
                 let share = if row_flex_total > 0.0 { rem_h * (fr.max(0.1) / row_flex_total) } else { rem_h / rows as f32 };
-                row_heights[r] = row_heights[r].max(share).max(1.0);
+                *row_h = row_h.max(share).max(1.0);
             }
         }
     }
 
     let mut col_x = vec![0.0f32; cols];
     let mut cx = pl;
-    for c in 0..cols {
-        col_x[c] = cx;
-        cx += col_widths[c] + col_gap;
+    for (x, &w) in col_x.iter_mut().zip(&col_widths) {
+        *x = cx;
+        cx += w + col_gap;
     }
 
     let mut row_y = vec![0.0f32; rows];
     let mut cy = pt;
-    for r in 0..rows {
-        row_y[r] = cy;
-        cy += row_heights[r] + row_gap;
+    for (y, &h) in row_y.iter_mut().zip(&row_heights) {
+        *y = cy;
+        cy += h + row_gap;
     }
 
     let mut cells = Vec::with_capacity(rows * cols);
-    for r in 0..rows {
-        for c in 0..cols {
-            cells.push(CssGridCell { row: r, col: c, rect: Rect::new(col_x[c], row_y[r], col_widths[c], row_heights[r]) });
+    for (r, (&y, &h)) in row_y.iter().zip(&row_heights).enumerate() {
+        for (c, (&x, &w)) in col_x.iter().zip(&col_widths).enumerate() {
+            cells.push(CssGridCell { row: r, col: c, rect: Rect::new(x, y, w, h) });
         }
     }
 
@@ -325,7 +325,7 @@ fn layout_grids(app: &App, p: &Painter, rect: ERect) {
             }
         } else {
             for &cid in &page.children {
-                if index.bounds_of(cid).map_or(true, overlaps_win) {
+                if index.bounds_of(cid).is_none_or(overlaps_win) {
                     stack.push((cid, Affine::IDENTITY));
                 }
             }
@@ -352,7 +352,7 @@ fn layout_grids(app: &App, p: &Painter, rect: ERect) {
             let descend = if idx.is_none() && n.kind.frame_props().is_some_and(|f| f.clips_content) { own_bb.intersects(&view) } else { true };
             if descend {
                 for &cid in &n.children {
-                    if idx.and_then(|i| i.bounds_of(cid)).map_or(true, overlaps_win) {
+                    if idx.and_then(|i| i.bounds_of(cid)).is_none_or(overlaps_win) {
                         stack.push((cid, w));
                     }
                 }

@@ -224,12 +224,7 @@ fn page_pos(app: &App, rect: ERect, pos: Pos2, axis: GuideAxis) -> f32 {
 }
 
 /// Starts a guide drag when the press hits a ruler (new guide) or, with the move
-/// tool, an existing guide. Returns true when the press was consumed.
-pub fn press(app: &mut App, rect: ERect, pos: Pos2) -> bool {
-    press_with_alt(app, rect, pos, false)
-}
-
-/// Starts a guide drag, duplicating an existing guide when `alt` is held (`#71`).
+/// tool, an existing guide, duplicating an existing guide when `alt` is held (`#71`).
 pub fn press_with_alt(app: &mut App, rect: ERect, pos: Pos2, alt: bool) -> bool {
     if !app.ui.rulers || app.canvas.text.is_some() {
         return false;

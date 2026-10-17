@@ -19,6 +19,9 @@ pub(crate) fn num(v: &Value) -> Option<f32> {
 pub(crate) fn fnum(v: &Value, k: &str) -> Option<f32> {
     v.get(k).and_then(num)
 }
+/// Per-page deferred instances, pages already hydrated, instance targets and expanded instances.
+type DeferredHydration = (HashMap<NodeId, Vec<NodeId>>, HashSet<NodeId>, BTreeMap<NodeId, NodeId>, BTreeSet<NodeId>);
+
 pub(crate) fn fstr<'a>(v: &'a Value, k: &str) -> Option<&'a str> {
     v.get(k).and_then(Value::as_str)
 }
@@ -376,11 +379,13 @@ struct Ctx<'a> {
     blob_cache: HashMap<(usize, bool), Path>,
     /// Components whose nested instances have already been expanded.
     expanded_comps: HashSet<NodeId>,
+    /// Whether any node carries an instance-swap property value (set once before instances are expanded).
+    has_instance_swap_values: bool,
     /// Whether any `CONNECTOR` node was encountered during import.
     has_connectors: bool,
     connectors: Vec<(NodeId, Option<String>, Option<String>)>,
     /// Deferred multi-page hydrator state assembled during `finish`.
-    deferred_pending: Option<(HashMap<NodeId, Vec<NodeId>>, HashSet<NodeId>, BTreeMap<NodeId, NodeId>, BTreeSet<NodeId>)>,
+    deferred_pending: Option<DeferredHydration>,
 }
 
 /// Overrides carried on `.fig` instance JSON as `_overrides` / `_derived`:
@@ -525,6 +530,7 @@ pub(crate) fn import_rest_value_owned<'a>(
         path_cache: HashMap::new(),
         blob_cache: HashMap::with_capacity(blobs.len()),
         expanded_comps: HashSet::new(),
+        has_instance_swap_values: false,
         has_connectors: false,
         connectors: Vec::new(),
         deferred_pending: None,
@@ -557,20 +563,12 @@ pub(crate) fn import_rest_value_owned<'a>(
     for p in pages {
         cx.import_page_owned(p);
     }
-    let library_pages: Vec<Value> = v
-        .get_mut("libraryPages")
-        .and_then(Value::as_array_mut)
-        .map(std::mem::take)
-        .unwrap_or_default();
+    let library_pages: Vec<Value> = v.get_mut("libraryPages").and_then(Value::as_array_mut).map(std::mem::take).unwrap_or_default();
     if !library_pages.is_empty() {
         let lib = ensure_library_page(&mut cx.doc);
         let info = ParentInfo { origin: Vec2::ZERO, layout: None };
         for mut p in library_pages {
-            let children: Vec<Value> = p
-                .get_mut("children")
-                .and_then(Value::as_array_mut)
-                .map(std::mem::take)
-                .unwrap_or_default();
+            let children: Vec<Value> = p.get_mut("children").and_then(Value::as_array_mut).map(std::mem::take).unwrap_or_default();
             drop(p);
             for c in children {
                 cx.import_node_owned(c, lib, info, 0);
@@ -637,6 +635,7 @@ pub(crate) fn import_rest_value_with_blobs<'a>(
         path_cache: HashMap::new(),
         blob_cache: HashMap::with_capacity(blobs.len()),
         expanded_comps: HashSet::new(),
+        has_instance_swap_values: false,
         has_connectors: false,
         connectors: Vec::new(),
         deferred_pending: None,
@@ -714,11 +713,7 @@ impl<'a> Ctx<'a> {
         if !guides.is_empty() {
             self.doc.guides.entry(pid).or_default().extend(guides);
         }
-        let children: Vec<Value> = v
-            .get_mut("children")
-            .and_then(Value::as_array_mut)
-            .map(std::mem::take)
-            .unwrap_or_default();
+        let children: Vec<Value> = v.get_mut("children").and_then(Value::as_array_mut).map(std::mem::take).unwrap_or_default();
         drop(v);
         let info = ParentInfo { origin: Vec2::ZERO, layout: None };
         for c in children {
@@ -735,11 +730,7 @@ impl<'a> Ctx<'a> {
         if ty == "CANVAS" || ty == "DOCUMENT" {
             return;
         }
-        let children: Vec<Value> = v
-            .get_mut("children")
-            .and_then(Value::as_array_mut)
-            .map(std::mem::take)
-            .unwrap_or_default();
+        let children: Vec<Value> = v.get_mut("children").and_then(Value::as_array_mut).map(std::mem::take).unwrap_or_default();
         let id = self.doc.alloc_id();
         let (mut node, my_layout) = self.build_node(id, ty, &v, pinfo);
         node.source_id = fstr(&v, "id").map(String::from);
@@ -792,14 +783,8 @@ impl<'a> Ctx<'a> {
                     self.rest_overrides.push((id, nid.to_string(), fields));
                 }
             }
-            let fast_derived = fstr(&v, "id")
-                .and_then(|sid| self.fast_derived_map.as_deref_mut().and_then(|m| m.remove(sid)))
-                .unwrap_or_default();
-            let ov = Overrides {
-                set: take_override_entries(v.get_mut("_overrides")),
-                derived: take_override_entries(v.get_mut("_derived")),
-                fast_derived,
-            };
+            let fast_derived = fstr(&v, "id").and_then(|sid| self.fast_derived_map.as_deref_mut().and_then(|m| m.remove(sid))).unwrap_or_default();
+            let ov = Overrides { set: take_override_entries(v.get_mut("_overrides")), derived: take_override_entries(v.get_mut("_derived")), fast_derived };
             if !ov.set.is_empty() || !ov.derived.is_empty() || !ov.fast_derived.is_empty() {
                 self.overrides.insert(id, ov);
             }
@@ -896,9 +881,7 @@ impl<'a> Ctx<'a> {
                     self.rest_overrides.push((id, nid.to_string(), fields));
                 }
             }
-            let fast_derived = fstr(v, "id")
-                .and_then(|sid| self.fast_derived_map.as_deref_mut().and_then(|m| m.remove(sid)))
-                .unwrap_or_default();
+            let fast_derived = fstr(v, "id").and_then(|sid| self.fast_derived_map.as_deref_mut().and_then(|m| m.remove(sid))).unwrap_or_default();
             let ov = Overrides { set: parse_override_entries(v.get("_overrides")), derived: parse_override_entries(v.get("_derived")), fast_derived };
             if !ov.set.is_empty() || !ov.derived.is_empty() || !ov.fast_derived.is_empty() {
                 self.overrides.insert(id, ov);
@@ -915,8 +898,7 @@ impl<'a> Ctx<'a> {
     /// Returns the node and, for auto-layout frames, its direction.
     fn build_node(&mut self, id: NodeId, ty: &str, v: &Value, pinfo: ParentInfo) -> (Node, Option<LayoutDirection>) {
         let frame = || frame_props(v);
-        let skip_geo = ty == "TEXT"
-            || (self.large_file && matches!(ty, "FRAME" | "COMPONENT" | "COMPONENT_SET" | "INSTANCE" | "SECTION" | "RECTANGLE"));
+        let skip_geo = ty == "TEXT" || (self.large_file && matches!(ty, "FRAME" | "COMPONENT" | "COMPONENT_SET" | "INSTANCE" | "SECTION" | "RECTANGLE"));
         // Text outlines (glyph paths) are not stored; the renderer lays text out itself.
         let mut fill_geo = (!skip_geo)
             .then(|| parse_geometry_cached(farr(v, "fillGeometry"), &mut self.path_cache, &mut self.blob_cache, self.blobs))
@@ -1274,6 +1256,7 @@ impl<'a> Ctx<'a> {
         // Clone ids are handed out sequentially above every imported id, in
         // instance order, so the same input always yields the same ids.
         self.next_clone = self.doc.nodes.keys().next_back().map(|k| k.0).unwrap_or(0) + 1;
+        self.has_instance_swap_values = self.doc.nodes.values().any(|n| n.component.values.values().any(|v| matches!(v, PropValue::Instance(t) if t.0 != 0)));
         let mut done = BTreeSet::new();
         let defer_inactive = self.large_file && self.doc.nodes.len() > 25_000 && self.doc.pages.len() > 2;
         if defer_inactive {
@@ -1558,19 +1541,51 @@ impl<'a> Ctx<'a> {
 
     /// Expands `inst`, first expanding instances nested inside its component so
     /// their (overridden) children are copied too.
+    ///
+    /// Iterative post-order walk on an explicit stack, so a chain of any depth is expanded completely
+    /// (inner components first, each before it is cloned) without growing the call stack. An instance is
+    /// entered once (`done`) and a component's nested instances are listed once (`expanded_comps`), which
+    /// keeps component cycles finite.
+    ///
+    /// An instance swap needs the new component's nested instances expanded before its contents are copied.
+    /// Those components are known before the swap runs (see [`Self::swap_target_components`]), so their nested
+    /// instances are scheduled on the same stack ahead of the step that applies the swap, instead of being
+    /// expanded from inside it, which would grow the call stack with the length of a swap chain.
     fn expand_rec(&mut self, inst: NodeId, targets: &BTreeMap<NodeId, NodeId>, done: &mut BTreeSet<NodeId>) {
-        if !done.insert(inst) {
-            return;
+        enum Step {
+            Enter(NodeId),
+            Finish(NodeId, NodeId),
+            Apply(NodeId),
         }
-        let Some(&comp) = targets.get(&inst) else { return };
-        self.expand_nested(comp, targets, done);
-        self.expand_instance(inst, comp);
-        if let Some(s) = self.scales.get(&inst).copied() {
-            self.scale_contents(inst, s);
+        let mut stack = vec![Step::Enter(inst)];
+        while let Some(step) = stack.pop() {
+            match step {
+                Step::Enter(inst) => {
+                    if !done.insert(inst) {
+                        continue;
+                    }
+                    let Some(&comp) = targets.get(&inst) else { continue };
+                    stack.push(Step::Finish(inst, comp));
+                    // Reversed so the lowest id is expanded first, which keeps clone ids deterministic.
+                    stack.extend(self.take_nested_instances(comp, targets).into_iter().rev().map(Step::Enter));
+                }
+                Step::Finish(inst, comp) => {
+                    self.expand_instance(inst, comp);
+                    if let Some(s) = self.scales.get(&inst).copied() {
+                        self.scale_contents(inst, s);
+                    }
+                    stack.push(Step::Apply(inst));
+                    let swap_nested_instances: Vec<NodeId> =
+                        self.swap_target_components(inst).into_iter().flat_map(|comp| self.take_nested_instances(comp, targets)).collect();
+                    stack.extend(swap_nested_instances.into_iter().rev().map(Step::Enter));
+                }
+                Step::Apply(inst) => {
+                    // Property values first: an instance swap changes which nodes the overrides address.
+                    self.apply_props(inst, targets, done);
+                    self.apply_overrides(inst, targets, done);
+                }
+            }
         }
-        // Property values first: an instance swap changes which nodes the overrides address.
-        self.apply_props(inst, targets, done);
-        self.apply_overrides(inst, targets, done);
     }
 
     /// Scales the copied children of an instance made with the scale tool
@@ -1633,10 +1648,45 @@ impl<'a> Ctx<'a> {
         }
     }
 
+    /// Components the instance's property values and overrides may swap a nested instance to (a superset is
+    /// harmless: listing a component's nested instances earlier does not change what they expand to).
+    fn swap_target_components(&self, inst: NodeId) -> Vec<NodeId> {
+        let mut out: Vec<NodeId> = Vec::new();
+        if let Some(ov) = self.overrides.get(&inst) {
+            for e in &ov.set {
+                out.extend(fstr(&e.set, "componentId").and_then(|c| self.ids.get(c)).copied());
+                if let Some(props) = e.set.get("componentProperties").and_then(Value::as_object) {
+                    let swapped = props.values().filter(|p| fstr(p, "type") == Some("INSTANCE_SWAP")).filter_map(|p| p.get("value").and_then(Value::as_str));
+                    out.extend(swapped.filter_map(|c| self.ids.get(c)).copied());
+                }
+            }
+        }
+        if self.has_instance_swap_values {
+            let mut stack = vec![inst];
+            while let Some(d) = stack.pop() {
+                let Some(n) = self.doc.get(d) else { continue };
+                stack.extend(n.children.iter().copied());
+                out.extend(n.component.values.values().filter_map(|v| match v {
+                    PropValue::Instance(t) if t.0 != 0 => Some(*t),
+                    _ => None,
+                }));
+            }
+        }
+        out.retain(|t| matches!(self.doc.get(*t).map(|n| &n.kind), Some(NodeKind::Component(_))));
+        out
+    }
+
     /// Expands the instances inside `comp` (innermost first).
     fn expand_nested(&mut self, comp: NodeId, targets: &BTreeMap<NodeId, NodeId>, done: &mut BTreeSet<NodeId>) {
+        for n in self.take_nested_instances(comp, targets) {
+            self.expand_rec(n, targets, done);
+        }
+    }
+
+    /// Instances inside `comp` that still have to be expanded, lowest id first; empty once `comp` was listed.
+    fn take_nested_instances(&mut self, comp: NodeId, targets: &BTreeMap<NodeId, NodeId>) -> Vec<NodeId> {
         if !self.expanded_comps.insert(comp) {
-            return;
+            return Vec::new();
         }
         let mut stack = vec![comp];
         let mut nested = Vec::new();
@@ -1649,9 +1699,7 @@ impl<'a> Ctx<'a> {
             }
         }
         nested.sort();
-        for n in nested {
-            self.expand_rec(n, targets, done);
-        }
+        nested
     }
 
     /// Applies the instance's component property values to the nodes of its
@@ -1747,46 +1795,39 @@ impl<'a> Ctx<'a> {
         let prefix = if fast_clone { String::new() } else { self.doc.get(inst).and_then(|n| n.source_id.clone()).unwrap_or_default() };
         let kids = self.doc.get(comp).map(|n| n.children.clone()).unwrap_or_default();
         let mut budget = 50_000usize;
-        for k in kids {
-            self.clone_subtree(k, inst, &prefix, &mut budget, 0, fast_clone);
-        }
-    }
-
-    fn clone_subtree(&mut self, src: NodeId, parent: NodeId, prefix: &str, budget: &mut usize, depth: usize, fast_clone: bool) {
-        if *budget == 0 || depth > MAX_DEPTH {
-            return;
-        }
-        *budget -= 1;
-        let Some(mut n) = self.doc.get(src).cloned() else { return };
-        let orig_children = std::mem::take(&mut n.children);
-        let id = self.fresh_id();
-        n.id = id;
-        n.parent = Some(parent);
-        if fast_clone {
-            n.fig_metadata.clear();
-            if let Some(sid) = n.source_id.take() {
-                if !self.override_keys.contains_key(&src) {
-                    let tail = sid.rsplit(';').next().unwrap_or(&sid);
-                    self.override_keys.insert(src, std::sync::Arc::from(tail));
+        // Pre-order on an explicit stack: a component of any depth is copied completely without recursion.
+        let mut stack: Vec<(NodeId, NodeId)> = kids.into_iter().rev().map(|k| (k, inst)).collect();
+        while let Some((src, parent)) = stack.pop() {
+            if budget == 0 {
+                return;
+            }
+            budget -= 1;
+            let Some(mut n) = self.doc.get(src).cloned() else { continue };
+            let orig_children = std::mem::take(&mut n.children);
+            let id = self.fresh_id();
+            n.id = id;
+            n.parent = Some(parent);
+            if fast_clone {
+                n.fig_metadata.clear();
+                if let Some(sid) = n.source_id.take() {
+                    self.override_keys.entry(src).or_insert_with(|| std::sync::Arc::from(sid.rsplit(';').next().unwrap_or(&sid)));
+                }
+            } else {
+                n.source_id = n.source_id.as_ref().map(|s| format!("I{prefix};{s}"));
+                if let Some(k) = self.override_keys.get(&src).cloned() {
+                    self.override_keys.insert(id, k);
                 }
             }
-        } else {
-            n.source_id = n.source_id.as_ref().map(|s| format!("I{prefix};{s}"));
-            if let Some(k) = self.override_keys.get(&src).cloned() {
-                self.override_keys.insert(id, k);
+            n.component.source = Some(src);
+            n.component.overrides.clear();
+            n.component.props.clear();
+            let container = n.kind.is_container();
+            self.doc.nodes.insert(id, n);
+            if let Some(p) = self.doc.nodes.get_mut(&parent) {
+                p.children.push(id);
             }
-        }
-        n.component.source = Some(src);
-        n.component.overrides.clear();
-        n.component.props.clear();
-        let container = n.kind.is_container();
-        self.doc.nodes.insert(id, n);
-        if let Some(p) = self.doc.nodes.get_mut(&parent) {
-            p.children.push(id);
-        }
-        if container {
-            for c in orig_children {
-                self.clone_subtree(c, id, prefix, budget, depth + 1, fast_clone);
+            if container {
+                stack.extend(orig_children.into_iter().rev().map(|c| (c, id)));
             }
         }
     }
@@ -1796,9 +1837,7 @@ impl<'a> Ctx<'a> {
             if let Some(k) = self.override_keys.get(&id) {
                 return Some(k);
             }
-            let Some(src) = self.doc.get(id).and_then(|n| n.component.source) else {
-                return None;
-            };
+            let src = self.doc.get(id).and_then(|n| n.component.source)?;
             if src == id {
                 return None;
             }
@@ -1850,44 +1889,48 @@ impl<'a> Ctx<'a> {
             Some(_) => false,
             None => return,
         };
-        let mut fill_geo = (!skip_geo).then(|| {
-            d.fill_geometry.as_ref().map(|arr| {
-                arr.iter()
-                    .filter_map(|&(idx, odd)| {
-                        if let Some(cached) = self.blob_cache.get(&(idx, odd)) {
-                            return Some(cached.clone());
-                        }
-                        let blob = self.blobs.get(idx)?;
-                        let parsed = crate::fig::commands_blob_to_path(blob, odd);
-                        if parsed.cmds.is_empty() {
-                            None
-                        } else {
-                            self.blob_cache.insert((idx, odd), parsed.clone());
-                            Some(parsed)
-                        }
-                    })
-                    .collect::<Vec<Path>>()
+        let mut fill_geo = (!skip_geo)
+            .then(|| {
+                d.fill_geometry.as_ref().map(|arr| {
+                    arr.iter()
+                        .filter_map(|&(idx, odd)| {
+                            if let Some(cached) = self.blob_cache.get(&(idx, odd)) {
+                                return Some(cached.clone());
+                            }
+                            let blob = self.blobs.get(idx)?;
+                            let parsed = crate::fig::commands_blob_to_path(blob, odd);
+                            if parsed.cmds.is_empty() {
+                                None
+                            } else {
+                                self.blob_cache.insert((idx, odd), parsed.clone());
+                                Some(parsed)
+                            }
+                        })
+                        .collect::<Vec<Path>>()
+                })
             })
-        }).flatten();
-        let stroke_geo = (!skip_geo).then(|| {
-            d.stroke_geometry.as_ref().map(|arr| {
-                arr.iter()
-                    .filter_map(|&(idx, odd)| {
-                        if let Some(cached) = self.blob_cache.get(&(idx, odd)) {
-                            return Some(cached.clone());
-                        }
-                        let blob = self.blobs.get(idx)?;
-                        let parsed = crate::fig::commands_blob_to_path(blob, odd);
-                        if parsed.cmds.is_empty() {
-                            None
-                        } else {
-                            self.blob_cache.insert((idx, odd), parsed.clone());
-                            Some(parsed)
-                        }
-                    })
-                    .collect::<Vec<Path>>()
+            .flatten();
+        let stroke_geo = (!skip_geo)
+            .then(|| {
+                d.stroke_geometry.as_ref().map(|arr| {
+                    arr.iter()
+                        .filter_map(|&(idx, odd)| {
+                            if let Some(cached) = self.blob_cache.get(&(idx, odd)) {
+                                return Some(cached.clone());
+                            }
+                            let blob = self.blobs.get(idx)?;
+                            let parsed = crate::fig::commands_blob_to_path(blob, odd);
+                            if parsed.cmds.is_empty() {
+                                None
+                            } else {
+                                self.blob_cache.insert((idx, odd), parsed.clone());
+                                Some(parsed)
+                            }
+                        })
+                        .collect::<Vec<Path>>()
+                })
             })
-        }).flatten();
+            .flatten();
         let Some(n) = self.doc.get_mut(id) else { return };
         let is_vec_or_bool = matches!(n.kind, NodeKind::Vector { .. } | NodeKind::BooleanOp(_));
         if let Some(sz) = d.size {
@@ -2025,19 +2068,17 @@ impl<'a> Ctx<'a> {
         let keep = |k: &str| !derived_only || matches!(k, "size" | "relativeTransform" | "fillGeometry" | "strokeGeometry");
         let has = |k: &str| keep(k) && set.get(k).is_some();
         let is_vec_or_bool = matches!(n.kind, NodeKind::Vector { .. } | NodeKind::BooleanOp(_));
-        let skip_geo = matches!(
-            n.kind,
-            NodeKind::Text(_) | NodeKind::Sticky(_) | NodeKind::ShapeWithText(_) | NodeKind::Connector(_) | NodeKind::Stamp { .. }
-        ) || (self.large_file
-            && matches!(
-                n.kind,
-                NodeKind::Frame(_)
-                    | NodeKind::Component(_)
-                    | NodeKind::ComponentSet(_)
-                    | NodeKind::Instance { .. }
-                    | NodeKind::Section
-                    | NodeKind::Rectangle
-            ));
+        let skip_geo = matches!(n.kind, NodeKind::Text(_) | NodeKind::Sticky(_) | NodeKind::ShapeWithText(_) | NodeKind::Connector(_) | NodeKind::Stamp { .. })
+            || (self.large_file
+                && matches!(
+                    n.kind,
+                    NodeKind::Frame(_)
+                        | NodeKind::Component(_)
+                        | NodeKind::ComponentSet(_)
+                        | NodeKind::Instance { .. }
+                        | NodeKind::Section
+                        | NodeKind::Rectangle
+                ));
         if has("size") {
             if let Some(sz) = set.get("size").and_then(vec2) {
                 if n.size != sz && !is_vec_or_bool {
@@ -2414,10 +2455,7 @@ struct DeferredFigHydrator {
 
 impl std::fmt::Debug for DeferredFigHydrator {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("DeferredFigHydrator")
-            .field("pending_pages", &self.pending_by_page.len())
-            .field("hydrated_pages", &self.hydrated_pages.len())
-            .finish()
+        f.debug_struct("DeferredFigHydrator").field("pending_pages", &self.pending_by_page.len()).field("hydrated_pages", &self.hydrated_pages.len()).finish()
     }
 }
 
@@ -2434,6 +2472,7 @@ impl designos_doc::PageHydrator for DeferredFigHydrator {
         }
         let next_clone = self.next_clone.max(doc.peek_next_id().0);
         let taken_doc = std::mem::take(doc);
+        let has_instance_swap_values = taken_doc.nodes.values().any(|n| n.component.values.values().any(|v| matches!(v, PropValue::Instance(t) if t.0 != 0)));
         let mut cx = Ctx {
             doc: taken_doc,
             ids: std::mem::take(&mut self.ids),
@@ -2456,6 +2495,7 @@ impl designos_doc::PageHydrator for DeferredFigHydrator {
             large_file: true,
             expanded_comps: std::mem::take(&mut self.expanded_comps),
             next_clone,
+            has_instance_swap_values,
             has_connectors: false,
             connectors: Vec::new(),
             deferred_pending: None,
@@ -2698,19 +2738,60 @@ fn parse_grid_sizing(s: &str) -> (u32, [GridTrack; 8]) {
         }
     }
 
-    fn collect_tokens(input: &str, out: &mut Vec<GridTrack>) {
+    /// Tracks seen so far: the first [`KEPT_TRACKS`] are kept, the rest are only counted.
+    #[derive(Default)]
+    struct Tracks {
+        kept: Vec<GridTrack>,
+        count: u32,
+    }
+
+    impl Tracks {
+        fn push(&mut self, t: GridTrack) {
+            if self.kept.len() < KEPT_TRACKS {
+                self.kept.push(t);
+            }
+            self.count = (self.count + 1).min(MAX_TRACK_COUNT);
+        }
+
+        /// Appends `times` copies of `sub` without materialising more than the kept prefix.
+        fn push_repeated(&mut self, sub: &Tracks, times: u32) {
+            if sub.count == 0 {
+                return;
+            }
+            for _ in 0..times {
+                if self.kept.len() >= KEPT_TRACKS {
+                    break;
+                }
+                let room = KEPT_TRACKS - self.kept.len();
+                self.kept.extend(sub.kept.iter().copied().take(room));
+            }
+            self.count = self.count.saturating_add(sub.count.saturating_mul(times)).min(MAX_TRACK_COUNT);
+        }
+    }
+
+    const KEPT_TRACKS: usize = 8;
+    const MAX_TRACK_COUNT: u32 = 1024;
+    const MAX_REPEAT_DEPTH: usize = 8;
+
+    fn starts_with_ignore_case(s: &str, prefix: &str) -> bool {
+        s.as_bytes().get(..prefix.len()).is_some_and(|head| head.eq_ignore_ascii_case(prefix.as_bytes()))
+    }
+
+    fn collect_tokens(input: &str, out: &mut Tracks, depth: usize) {
         let mut rest = input.trim();
         while !rest.is_empty() {
-            let lower = rest.to_ascii_lowercase();
-            if lower.starts_with("repeat(") {
-                let mut depth = 0usize;
+            if starts_with_ignore_case(rest, "repeat(") {
+                if depth >= MAX_REPEAT_DEPTH {
+                    return;
+                }
+                let mut paren_depth = 0usize;
                 let mut end_idx = None;
                 for (i, ch) in rest.char_indices() {
                     match ch {
-                        '(' => depth += 1,
+                        '(' => paren_depth += 1,
                         ')' => {
-                            depth = depth.saturating_sub(1);
-                            if depth == 0 {
+                            paren_depth = paren_depth.saturating_sub(1);
+                            if paren_depth == 0 {
                                 end_idx = Some(i);
                                 break;
                             }
@@ -2718,26 +2799,24 @@ fn parse_grid_sizing(s: &str) -> (u32, [GridTrack; 8]) {
                         _ => {}
                     }
                 }
-                if let Some(end) = end_idx {
-                    let inner = &rest["repeat(".len()..end];
-                    if let Some((cnt_str, pat)) = inner.split_once(',') {
-                        let cnt = cnt_str.trim().parse::<usize>().unwrap_or(1).min(64);
-                        let mut sub = Vec::new();
-                        collect_tokens(pat, &mut sub);
-                        for _ in 0..cnt {
-                            out.extend_from_slice(&sub);
-                        }
-                    }
-                    rest = rest[end + 1..].trim_start();
-                    continue;
+                // An unclosed repeat() has no defined extent; stop rather than rescanning the tail per token.
+                let Some(end) = end_idx else { return };
+                let inner = &rest["repeat(".len()..end];
+                if let Some((cnt_str, pat)) = inner.split_once(',') {
+                    let cnt = cnt_str.trim().parse::<u32>().unwrap_or(1).min(64);
+                    let mut sub = Tracks::default();
+                    collect_tokens(pat, &mut sub, depth + 1);
+                    out.push_repeated(&sub, cnt);
                 }
+                rest = rest[end + 1..].trim_start();
+                continue;
             }
-            if lower.starts_with("minmax(") {
-                if let Some(end) = rest.find(')') {
-                    out.push(parse_one(&rest[..=end]));
-                    rest = rest[end + 1..].trim_start();
-                    continue;
-                }
+            if starts_with_ignore_case(rest, "minmax(") {
+                // An unclosed minmax() has no defined extent; stop rather than rescanning the tail per token.
+                let Some(end) = rest.find(')') else { return };
+                out.push(parse_one(&rest[..=end]));
+                rest = rest[end + 1..].trim_start();
+                continue;
             }
             if let Some(ws) = rest.find(char::is_whitespace) {
                 out.push(parse_one(&rest[..ws]));
@@ -2749,13 +2828,13 @@ fn parse_grid_sizing(s: &str) -> (u32, [GridTrack; 8]) {
         }
     }
 
-    let mut list = Vec::new();
-    collect_tokens(s, &mut list);
-    let mut tracks = [GridTrack::default(); 8];
-    for (i, t) in list.iter().copied().take(8).enumerate() {
-        tracks[i] = t;
+    let mut list = Tracks::default();
+    collect_tokens(s, &mut list, 0);
+    let mut tracks = [GridTrack::default(); KEPT_TRACKS];
+    for (slot, t) in tracks.iter_mut().zip(list.kept.iter().copied()) {
+        *slot = t;
     }
-    (list.len() as u32, tracks)
+    (list.count, tracks)
 }
 
 fn frame_props(v: &Value) -> FrameProps {
@@ -2961,4 +3040,235 @@ pub fn image_refs(doc: &Document) -> Vec<String> {
         }
     }
     set.into_iter().collect()
+}
+
+#[cfg(test)]
+mod expand_depth_tests {
+    use super::*;
+    use serde_json::json;
+
+    /// Component `C{i}` holds an instance of `C{i+1}`; an instance of `C0` sits at the end.
+    fn component_chain(len: usize) -> Value {
+        let mut kids = Vec::new();
+        for i in 0..len {
+            let inner = if i + 1 < len {
+                json!({"id": format!("{}:2", i + 10), "name": "N", "type": "INSTANCE", "componentId": format!("{}:1", i + 11), "size": {"x": 4, "y": 4}})
+            } else {
+                json!({"id": format!("{}:2", i + 10), "name": "Dot", "type": "RECTANGLE", "size": {"x": 4, "y": 4}})
+            };
+            kids.push(json!({"id": format!("{}:1", i + 10), "name": format!("C{i}"), "type": "COMPONENT", "size": {"x": 4, "y": 4}, "children": [inner]}));
+        }
+        kids.push(json!({"id": "1:1", "name": "Use", "type": "INSTANCE", "componentId": "10:1", "size": {"x": 4, "y": 4}}));
+        json!({"document": {"type": "DOCUMENT", "children": [{"id": "0:1", "type": "CANVAS", "children": kids}]}})
+    }
+
+    fn subtree_of_named(doc: &Document, name: &str) -> Vec<String> {
+        let root = doc.nodes.values().find(|n| n.name == name).unwrap_or_else(|| panic!("no node named {name}")).id;
+        let mut out = Vec::new();
+        let mut stack = vec![root];
+        while let Some(id) = stack.pop() {
+            let n = doc.get(id).unwrap();
+            out.push(n.name.clone());
+            stack.extend(n.children.iter().copied());
+        }
+        out
+    }
+
+    #[test]
+    fn deep_component_chain_expands_completely() {
+        // Use -> C0 -> C1 -> ... -> C(len-1) -> Dot: every link must be expanded before it is cloned, however deep.
+        for len in [70usize, 100, 200, 400] {
+            let doc = import_rest_value(&component_chain(len), true).unwrap();
+            let names = subtree_of_named(&doc, "Use");
+            assert_eq!(names.len(), len + 1, "chain of {len}");
+            assert!(names.iter().any(|n| n == "Dot"), "chain of {len} lost its leaf");
+        }
+    }
+
+    #[test]
+    fn component_cycles_still_terminate() {
+        // C0 holds an instance of C1 and C1 an instance of C0.
+        let doc = json!({"document": {"type": "DOCUMENT", "children": [{"id": "0:1", "type": "CANVAS", "children": [
+            {"id": "10:1", "name": "C0", "type": "COMPONENT", "size": {"x": 4, "y": 4}, "children": [
+                {"id": "10:2", "name": "toC1", "type": "INSTANCE", "componentId": "11:1", "size": {"x": 4, "y": 4}}]},
+            {"id": "11:1", "name": "C1", "type": "COMPONENT", "size": {"x": 4, "y": 4}, "children": [
+                {"id": "11:2", "name": "toC0", "type": "INSTANCE", "componentId": "10:1", "size": {"x": 4, "y": 4}}]},
+            {"id": "1:1", "name": "Use", "type": "INSTANCE", "componentId": "10:1", "size": {"x": 4, "y": 4}}]}]}});
+        let imported = import_rest_value(&doc, true).unwrap();
+        assert!(imported.nodes.len() < 50, "{}", imported.nodes.len());
+    }
+
+    #[test]
+    fn long_component_chain_expands_without_exhausting_the_stack() {
+        // A small stack stands in for a very long chain; the old recursion needed a frame pair per link.
+        let handle = std::thread::Builder::new()
+            .stack_size(512 * 1024)
+            .spawn(|| {
+                let doc = import_rest_value(&component_chain(700), true).unwrap();
+                assert!(doc.nodes.len() > 700);
+            })
+            .unwrap();
+        handle.join().expect("import must not overflow the stack");
+    }
+
+    /// `C{i}` holds an instance `X` of the holder `H`, whose own instance `S` is bound to the instance-swap property
+    /// `p`; `X` sets `p` to `C{i+1}` (the last one to the plain component `B`). Expanding `X` therefore swaps `S`
+    /// for `C{i+1}`, which first needs `C{i+1}`'s own `X` expanded, and so on down the whole chain.
+    fn instance_swap_chain(len: usize) -> Value {
+        let size = json!({"x": 4, "y": 4});
+        let mut kids = vec![
+            json!({"id": "4:1", "name": "B", "type": "COMPONENT", "size": size}),
+            json!({"id": "5:1", "name": "H", "type": "COMPONENT", "size": size, "children": [
+                {"id": "5:2", "name": "S", "type": "INSTANCE", "componentId": "4:1", "size": size,
+                 "componentPropertyReferences": {"mainComponent": "p"}}]}),
+        ];
+        for i in 0..len {
+            let next = if i + 1 < len { format!("{}:1", i + 11) } else { "4:1".to_string() };
+            kids.push(json!({"id": format!("{}:1", i + 10), "name": format!("C{i}"), "type": "COMPONENT", "size": size, "children": [
+                {"id": format!("{}:2", i + 10), "name": "X", "type": "INSTANCE", "componentId": "5:1", "size": size,
+                 "componentProperties": {"p": {"type": "INSTANCE_SWAP", "value": next}}}]}));
+        }
+        kids.push(json!({"id": "1:1", "name": "Use", "type": "INSTANCE", "componentId": "10:1", "size": size}));
+        json!({"document": {"type": "DOCUMENT", "children": [{"id": "0:1", "type": "CANVAS", "children": kids}]}})
+    }
+
+    /// Same chain, but each `X` swaps `S` through an instance override (`_overrides` with a `componentId`) rather
+    /// than through a component property.
+    fn override_swap_chain(len: usize) -> Value {
+        let size = json!({"x": 4, "y": 4});
+        let mut kids = vec![
+            json!({"id": "4:1", "name": "B", "type": "COMPONENT", "size": size}),
+            json!({"id": "5:1", "name": "H", "type": "COMPONENT", "size": size, "children": [
+                {"id": "5:2", "name": "S", "type": "INSTANCE", "componentId": "4:1", "size": size}]}),
+        ];
+        for i in 0..len {
+            let next = if i + 1 < len { format!("{}:1", i + 11) } else { "4:1".to_string() };
+            kids.push(json!({"id": format!("{}:1", i + 10), "name": format!("C{i}"), "type": "COMPONENT", "size": size, "children": [
+                {"id": format!("{}:2", i + 10), "name": "X", "type": "INSTANCE", "componentId": "5:1", "size": size,
+                 "_overrides": [{"path": ["5:2"], "set": {"componentId": next}}]}]}));
+        }
+        kids.push(json!({"id": "1:1", "name": "Use", "type": "INSTANCE", "componentId": "10:1", "size": size}));
+        json!({"document": {"type": "DOCUMENT", "children": [{"id": "0:1", "type": "CANVAS", "children": kids}]}})
+    }
+
+    /// Nesting depth of the deepest node below the node named `name` (iterative: the document's own `walk` recurses).
+    fn depth_below_named(doc: &Document, name: &str) -> usize {
+        let root = doc.nodes.values().find(|n| n.name == name).unwrap_or_else(|| panic!("no node named {name}")).id;
+        let (mut deepest, mut stack) = (0, vec![(root, 0usize)]);
+        while let Some((id, depth)) = stack.pop() {
+            deepest = deepest.max(depth);
+            stack.extend(doc.get(id).unwrap().children.iter().map(|&c| (c, depth + 1)));
+        }
+        deepest
+    }
+
+    #[test]
+    fn instance_swap_chain_expands_completely() {
+        // Use -> X -> S(swapped to C1) -> X -> S(swapped to C2) -> ... -> S(swapped to B): two nodes per link.
+        for len in [3usize, 20, 80] {
+            let doc = import_rest_value(&instance_swap_chain(len), true).unwrap();
+            assert_eq!(subtree_of_named(&doc, "Use").len(), 2 * len + 1, "chain of {len}");
+            assert_eq!(depth_below_named(&doc, "Use"), 2 * len, "chain of {len}");
+        }
+    }
+
+    #[test]
+    fn override_swap_chain_expands_completely_and_on_a_small_stack() {
+        for len in [3usize, 20, 80] {
+            let doc = import_rest_value(&override_swap_chain(len), true).unwrap();
+            assert_eq!(subtree_of_named(&doc, "Use").len(), 2 * len + 1, "chain of {len}");
+        }
+        let handle = std::thread::Builder::new()
+            .stack_size(256 * 1024)
+            .spawn(|| {
+                let doc = import_rest_value(&override_swap_chain(300), true).unwrap();
+                assert_eq!(subtree_of_named(&doc, "Use").len(), 2 * 300 + 1);
+            })
+            .unwrap();
+        handle.join().expect("import must not overflow the stack");
+    }
+
+    #[test]
+    fn long_instance_swap_chain_expands_without_exhausting_the_stack() {
+        // Swapping an instance used to expand the new component's contents from inside the swap itself, one
+        // frame group per link, so a long chain of swaps overflowed even though plain nesting no longer did.
+        let handle = std::thread::Builder::new()
+            .stack_size(256 * 1024)
+            .spawn(|| {
+                let doc = import_rest_value(&instance_swap_chain(300), true).unwrap();
+                assert_eq!(subtree_of_named(&doc, "Use").len(), 2 * 300 + 1);
+            })
+            .unwrap();
+        handle.join().expect("import must not overflow the stack");
+    }
+}
+
+#[cfg(test)]
+mod grid_sizing_tests {
+    use super::*;
+
+    #[test]
+    fn plain_and_repeat_tracks_keep_their_meaning() {
+        let (n, t) = parse_grid_sizing("1fr 2fr 120px auto");
+        assert_eq!(n, 4);
+        assert_eq!(t[..4], [GridTrack::Flex(1.0), GridTrack::Flex(2.0), GridTrack::Fixed(120.0), GridTrack::Hug]);
+        let (n, t) = parse_grid_sizing("REPEAT(3, 1fr 50px) auto");
+        assert_eq!(n, 7);
+        assert_eq!(
+            t[..7],
+            [
+                GridTrack::Flex(1.0),
+                GridTrack::Fixed(50.0),
+                GridTrack::Flex(1.0),
+                GridTrack::Fixed(50.0),
+                GridTrack::Flex(1.0),
+                GridTrack::Fixed(50.0),
+                GridTrack::Hug
+            ]
+        );
+        assert_eq!(parse_grid_sizing("minmax(0, 1fr)").0, 1);
+    }
+
+    #[test]
+    fn nested_repeat_bomb_is_counted_not_expanded() {
+        // 64^6 tracks if expanded.
+        let s = format!("{}1fr{}", "repeat(64, ".repeat(6), ")".repeat(6));
+        let (n, t) = parse_grid_sizing(&s);
+        assert_eq!(n, 1024);
+        assert!(t.iter().all(|x| *x == GridTrack::Flex(1.0)));
+    }
+
+    #[test]
+    fn deeply_nested_repeat_stops_at_depth_cap() {
+        let s = format!("{}1fr{}", "repeat(2, ".repeat(20_000), ")".repeat(20_000));
+        let (n, _) = parse_grid_sizing(&s);
+        assert!(n <= 1024);
+    }
+
+    #[test]
+    fn long_track_list_parses_in_linear_time() {
+        let s = "1fr ".repeat(200_000);
+        let started = std::time::Instant::now();
+        let (n, _) = parse_grid_sizing(&s);
+        assert_eq!(n, 1024);
+        assert!(started.elapsed().as_millis() < 900, "took {:?}", started.elapsed());
+        let unclosed = "repeat( ".repeat(100_000);
+        let started = std::time::Instant::now();
+        let _ = parse_grid_sizing(&unclosed);
+        assert!(started.elapsed().as_millis() < 900, "took {:?}", started.elapsed());
+    }
+
+    #[test]
+    fn unclosed_minmax_stops_the_scan_in_linear_time() {
+        // Everything after an unclosed minmax( has no defined extent, like an unclosed repeat(.
+        let (n, t) = parse_grid_sizing("1fr 50px minmax( 2fr 3fr");
+        assert_eq!(n, 2);
+        assert_eq!(t[..2], [GridTrack::Flex(1.0), GridTrack::Fixed(50.0)]);
+        // 80k such tokens rescanned the tail each time (846 ms measured quadratic); linear parsing takes a few ms.
+        let s = "minmax( ".repeat(80_000);
+        let started = std::time::Instant::now();
+        let (n, _) = parse_grid_sizing(&s);
+        assert_eq!(n, 0);
+        assert!(started.elapsed().as_millis() < 250, "took {:?}", started.elapsed());
+    }
 }

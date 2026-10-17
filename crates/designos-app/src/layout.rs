@@ -125,12 +125,12 @@ pub fn compute_grid(al: &AutoLayout, frame: Vec2, kids: &[ChildIn], spans: &[(u1
     let mut flex_total = 0.0f32;
     let mut fixed_used = 0.0f32;
 
-    for c in 0..cols {
+    for (c, col_w) in col_widths.iter_mut().enumerate() {
         let track = al.grid_col_tracks.get(c).copied().unwrap_or(GridTrack::Flex(1.0));
         match track {
             GridTrack::Fixed(w) => {
-                col_widths[c] = w.max(1.0);
-                fixed_used += col_widths[c];
+                *col_w = w.max(1.0);
+                fixed_used += *col_w;
             }
             GridTrack::Hug => {
                 let mut max_w = 0.0f32;
@@ -139,8 +139,8 @@ pub fn compute_grid(al: &AutoLayout, frame: Vec2, kids: &[ChildIn], spans: &[(u1
                         max_w = max_w.max(kids[i].size.x);
                     }
                 }
-                col_widths[c] = max_w.max(1.0);
-                fixed_used += col_widths[c];
+                *col_w = max_w.max(1.0);
+                fixed_used += *col_w;
             }
             GridTrack::Flex(fr) => {
                 flex_total += fr.max(0.1);
@@ -148,9 +148,9 @@ pub fn compute_grid(al: &AutoLayout, frame: Vec2, kids: &[ChildIn], spans: &[(u1
         }
     }
     let rem_w = (inner_w - fixed_used).max(0.0);
-    for c in 0..cols {
+    for (c, col_w) in col_widths.iter_mut().enumerate() {
         if let GridTrack::Flex(fr) = al.grid_col_tracks.get(c).copied().unwrap_or(GridTrack::Flex(1.0)) {
-            col_widths[c] = if al.primary_sizing == Sizing::Hug {
+            *col_w = if al.primary_sizing == Sizing::Hug {
                 let mut max_w = 0.0f32;
                 for (i, &(_, col, _, cs)) in placements.iter().enumerate() {
                     if col == c && cs == 1 {
@@ -179,16 +179,16 @@ pub fn compute_grid(al: &AutoLayout, frame: Vec2, kids: &[ChildIn], spans: &[(u1
 
     let mut col_x = vec![0.0f32; cols];
     let mut cx = pl;
-    for c in 0..cols {
-        col_x[c] = cx;
-        cx += col_widths[c] + col_gap;
+    for (x, &w) in col_x.iter_mut().zip(&col_widths) {
+        *x = cx;
+        cx += w + col_gap;
     }
 
     let mut row_y = vec![0.0f32; rows];
     let mut cy = pt;
-    for r in 0..rows {
-        row_y[r] = cy;
-        cy += row_heights[r] + row_gap;
+    for (y, &h) in row_y.iter_mut().zip(&row_heights) {
+        *y = cy;
+        cy += h + row_gap;
     }
 
     let mut rects = Vec::with_capacity(kids.len());

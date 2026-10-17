@@ -81,11 +81,7 @@ fn median_rounded_gap(mut gaps: Vec<f32>) -> f32 {
     }
     gaps.sort_by(|a, b| a.total_cmp(b));
     let mid = gaps.len() / 2;
-    let raw = if gaps.len() % 2 == 1 {
-        gaps[mid]
-    } else {
-        (gaps[mid - 1] + gaps[mid]) * 0.5
-    };
+    let raw = if gaps.len() % 2 == 1 { gaps[mid] } else { (gaps[mid - 1] + gaps[mid]) * 0.5 };
     raw.max(0.0).round()
 }
 
@@ -225,10 +221,7 @@ pub fn suggest_auto_layout(doc: &mut Document, selected_ids: &[NodeId]) -> Resul
         (first_parent, None, selected_ids.to_vec(), [0.0; 4])
     };
 
-    let items: Vec<ItemBox> = child_ids
-        .iter()
-        .filter_map(|&id| doc.get(id).map(|n| ItemBox { id, rect: node_parent_rect(n) }))
-        .collect();
+    let items: Vec<ItemBox> = child_ids.iter().filter_map(|&id| doc.get(id).map(|n| ItemBox { id, rect: node_parent_rect(n) })).collect();
     if items.is_empty() {
         return Err(DocError::NotFound(selected_ids[0]));
     }
@@ -240,14 +233,7 @@ pub fn suggest_auto_layout(doc: &mut Document, selected_ids: &[NodeId]) -> Resul
     let insert_index = if let Some(existing_frame) = target_frame_opt {
         doc.get(existing_frame).map(|_| 0).unwrap_or(0)
     } else {
-        doc.get(parent_id)
-            .map(|p| {
-                p.children
-                    .iter()
-                    .position(|c| child_ids.contains(c))
-                    .unwrap_or(p.children.len())
-            })
-            .unwrap_or(0)
+        doc.get(parent_id).map(|p| p.children.iter().position(|c| child_ids.contains(c)).unwrap_or(p.children.len())).unwrap_or(0)
     };
 
     let root_frame = if let Some(existing) = target_frame_opt {
@@ -345,13 +331,7 @@ pub fn suggest_auto_layout(doc: &mut Document, selected_ids: &[NodeId]) -> Resul
 
     relayout_subtree(doc, root_frame);
 
-    Ok(SuggestAutoLayoutResult {
-        root_frame,
-        created_row_frames,
-        kind,
-        primary_spacing,
-        padding: inferred_padding,
-    })
+    Ok(SuggestAutoLayoutResult { root_frame, created_row_frames, kind, primary_spacing, padding: inferred_padding })
 }
 
 /// Recomputes Auto-Layout 5.0 child positions and `Hug`/`Fill` dimensions across
@@ -385,12 +365,8 @@ fn relayout_single_container(doc: &mut Document, container_id: NodeId) {
     let Some(container) = doc.get(container_id).cloned() else { return };
     let Some(al) = container.kind.frame_props().and_then(|f| f.auto_layout) else { return };
 
-    let flow_children: Vec<NodeId> = container
-        .children
-        .iter()
-        .copied()
-        .filter(|&cid| doc.get(cid).is_some_and(|c| c.visible && !c.layout_child.absolute))
-        .collect();
+    let flow_children: Vec<NodeId> =
+        container.children.iter().copied().filter(|&cid| doc.get(cid).is_some_and(|c| c.visible && !c.layout_child.absolute)).collect();
 
     let [pad_top, pad_right, pad_bottom, pad_left] = al.padding;
     let is_horiz = !matches!(al.direction, LayoutDirection::Vertical);
@@ -404,11 +380,7 @@ fn relayout_single_container(doc: &mut Document, container_id: NodeId) {
 
     for &cid in &flow_children {
         let Some(c) = doc.get(cid) else { continue };
-        let (p_sizing, p_size, c_size) = if is_horiz {
-            (c.layout_child.horizontal, c.size.x, c.size.y)
-        } else {
-            (c.layout_child.vertical, c.size.y, c.size.x)
-        };
+        let (p_sizing, p_size, c_size) = if is_horiz { (c.layout_child.horizontal, c.size.x, c.size.y) } else { (c.layout_child.vertical, c.size.y, c.size.x) };
         if p_sizing == Sizing::Fill && al.primary_sizing != Sizing::Hug {
             fill_count += 1;
         } else {
@@ -448,11 +420,7 @@ fn relayout_single_container(doc: &mut Document, container_id: NodeId) {
     let inner_primary = ((if is_horiz { container_size.x } else { container_size.y }) - pad_primary).max(0.0);
     let inner_counter = ((if is_horiz { container_size.y } else { container_size.x }) - pad_counter).max(0.0);
 
-    let fill_share = if fill_count > 0 {
-        ((inner_primary - fixed_primary_sum - total_gap).max(0.0)) / (fill_count as f32)
-    } else {
-        0.0
-    };
+    let fill_share = if fill_count > 0 { ((inner_primary - fixed_primary_sum - total_gap).max(0.0)) / (fill_count as f32) } else { 0.0 };
 
     // 3. Apply Fill sizing to children first.
     let mut total_actual_primary = 0.0f32;
@@ -520,11 +488,7 @@ fn relayout_single_container(doc: &mut Document, container_id: NodeId) {
             LayoutAlign::End => counter_pad + (inner_counter - child_c),
         };
 
-        let (x, y) = if is_horiz {
-            (cursor, counter_pos)
-        } else {
-            (counter_pos, cursor)
-        };
+        let (x, y) = if is_horiz { (cursor, counter_pos) } else { (counter_pos, cursor) };
         if let Some(cn) = doc.get_mut(cid) {
             cn.transform.tx = x;
             cn.transform.ty = y;
@@ -557,23 +521,13 @@ fn node_contours_in_parent(doc: &Document, node_id: NodeId) -> Vec<Vec<Vec2>> {
             if let Some(paths) = &n.fill_geometry {
                 paths_to_contours(paths)
             } else {
-                vec![vec![
-                    Vec2::new(0.0, 0.0),
-                    Vec2::new(w, 0.0),
-                    Vec2::new(w, h),
-                    Vec2::new(0.0, h),
-                ]]
+                vec![vec![Vec2::new(0.0, 0.0), Vec2::new(w, 0.0), Vec2::new(w, h), Vec2::new(0.0, h)]]
             }
         }
         NodeKind::Vector { paths, .. } => {
             let cs = paths_to_contours(paths);
             if cs.is_empty() && w > 0.0 && h > 0.0 {
-                vec![vec![
-                    Vec2::new(0.0, 0.0),
-                    Vec2::new(w, 0.0),
-                    Vec2::new(w, h),
-                    Vec2::new(0.0, h),
-                ]]
+                vec![vec![Vec2::new(0.0, 0.0), Vec2::new(w, 0.0), Vec2::new(w, h), Vec2::new(0.0, h)]]
             } else {
                 cs
             }
@@ -623,20 +577,12 @@ fn node_contours_in_parent(doc: &Document, node_id: NodeId) -> Vec<Vec<Vec2>> {
             if w <= 0.0 || h <= 0.0 {
                 Vec::new()
             } else {
-                vec![vec![
-                    Vec2::new(0.0, 0.0),
-                    Vec2::new(w, 0.0),
-                    Vec2::new(w, h),
-                    Vec2::new(0.0, h),
-                ]]
+                vec![vec![Vec2::new(0.0, 0.0), Vec2::new(w, 0.0), Vec2::new(w, h), Vec2::new(0.0, h)]]
             }
         }
     };
 
-    local_contours
-        .into_iter()
-        .map(|c| c.into_iter().map(|p| n.transform.apply(p)).collect())
-        .collect()
+    local_contours.into_iter().map(|c| c.into_iter().map(|p| n.transform.apply(p)).collect()).collect()
 }
 
 fn paths_to_contours(paths: &[Path]) -> Vec<Vec<Vec2>> {
@@ -663,10 +609,7 @@ fn paths_to_contours(paths: &[Path]) -> Vec<Vec<Vec2>> {
                     for step in 1..=4 {
                         let t = (step as f32) / 4.0;
                         let mt = 1.0 - t;
-                        let q = Vec2::new(
-                            mt * mt * p0.x + 2.0 * mt * t * c.x + t * t * p.x,
-                            mt * mt * p0.y + 2.0 * mt * t * c.y + t * t * p.y,
-                        );
+                        let q = Vec2::new(mt * mt * p0.x + 2.0 * mt * t * c.x + t * t * p.x, mt * mt * p0.y + 2.0 * mt * t * c.y + t * t * p.y);
                         cur.push(q);
                     }
                 }
@@ -736,11 +679,7 @@ fn classify_segment_midpoint(a: Vec2, b: Vec2, contours: &[Vec<Vec2>]) -> PointR
                 let proj = Vec2::new(p0.x + t * edx, p0.y + t * edy);
                 if pt_dist(mid, proj) <= 1e-3 {
                     let dot = seg_dx * edx + seg_dy * edy;
-                    return if dot >= 0.0 {
-                        PointRel::BoundarySameDir
-                    } else {
-                        PointRel::BoundaryOppDir
-                    };
+                    return if dot >= 0.0 { PointRel::BoundarySameDir } else { PointRel::BoundaryOppDir };
                 }
             }
         }
@@ -998,10 +937,7 @@ pub fn create_boolean_group(doc: &mut Document, op: BooleanOp, child_ids: &[Node
         }
     }
 
-    let insert_idx = doc
-        .get(parent_id)
-        .map(|p| p.children.iter().position(|c| child_ids.contains(c)).unwrap_or(p.children.len()))
-        .unwrap_or(0);
+    let insert_idx = doc.get(parent_id).map(|p| p.children.iter().position(|c| child_ids.contains(c)).unwrap_or(p.children.len())).unwrap_or(0);
 
     let bool_id = doc.alloc_id();
     let mut bool_node = Node::new(bool_id, NodeKind::BooleanOp(op));
@@ -1043,12 +979,7 @@ pub fn recompute_boolean_group(doc: &mut Document, bool_id: NodeId) -> Result<Re
     }
 
     let group_origin = bool_node.transform.translation();
-    let visible_children: Vec<NodeId> = bool_node
-        .children
-        .iter()
-        .copied()
-        .filter(|&cid| doc.get(cid).is_some_and(|n| n.visible))
-        .collect();
+    let visible_children: Vec<NodeId> = bool_node.children.iter().copied().filter(|&cid| doc.get(cid).is_some_and(|n| n.visible)).collect();
 
     if visible_children.is_empty() {
         if let Some(bn) = doc.get_mut(bool_id) {
@@ -1062,10 +993,8 @@ pub fn recompute_boolean_group(doc: &mut Document, bool_id: NodeId) -> Result<Re
     let mut child_contours_parent: Vec<Vec<Vec<Vec2>>> = Vec::with_capacity(visible_children.len());
     for &cid in &visible_children {
         let local_contours = node_contours_in_parent(doc, cid);
-        let parent_contours: Vec<Vec<Vec2>> = local_contours
-            .into_iter()
-            .map(|poly| poly.into_iter().map(|p| Vec2::new(p.x + group_origin.x, p.y + group_origin.y)).collect())
-            .collect();
+        let parent_contours: Vec<Vec<Vec2>> =
+            local_contours.into_iter().map(|poly| poly.into_iter().map(|p| Vec2::new(p.x + group_origin.x, p.y + group_origin.y)).collect()).collect();
         child_contours_parent.push(parent_contours);
     }
 
@@ -1204,11 +1133,7 @@ pub fn apply_bound_key_to_node(node: &mut Node, key: &str, value: &VariableValue
         if let VariableValue::Number(x) = value {
             if x.is_finite() {
                 // Support both 0..=1 fractional opacity and 0..=100 percentage tokens.
-                node.opacity = if *x <= 1.0 && *x >= 0.0 {
-                    *x
-                } else {
-                    (*x / 100.0).clamp(0.0, 1.0)
-                };
+                node.opacity = if *x <= 1.0 && *x >= 0.0 { *x } else { (*x / 100.0).clamp(0.0, 1.0) };
             }
         }
         return;
@@ -1231,12 +1156,7 @@ pub fn apply_bound_key_to_node(node: &mut Node, key: &str, value: &VariableValue
 
 /// Binds `property` on `node_id` to `variable_id`, resolves the variable in
 /// `node_id`'s current effective mode, and updates the node in-place.
-pub fn bind_node_variable(
-    doc: &mut Document,
-    node_id: NodeId,
-    property: BindableProperty,
-    variable_id: impl Into<String>,
-) -> Result<(), DocError> {
+pub fn bind_node_variable(doc: &mut Document, node_id: NodeId, property: BindableProperty, variable_id: impl Into<String>) -> Result<(), DocError> {
     let var_id = variable_id.into();
     let key = property.key();
     {
@@ -1265,12 +1185,7 @@ pub fn bind_node_variable(
 /// across `root_id`'s entire subtree, and triggers [`relayout_subtree`].
 ///
 /// Returns the number of nodes in the subtree whose bound properties were updated.
-pub fn apply_variable_mode_to_subtree(
-    doc: &mut Document,
-    root_id: NodeId,
-    collection_id: &str,
-    mode_id: &str,
-) -> Result<usize, DocError> {
+pub fn apply_variable_mode_to_subtree(doc: &mut Document, root_id: NodeId, collection_id: &str, mode_id: &str) -> Result<usize, DocError> {
     {
         let root = doc.get_mut(root_id).ok_or(DocError::NotFound(root_id))?;
         root.variables.modes.insert(collection_id.to_string(), mode_id.to_string());
@@ -1356,11 +1271,7 @@ impl PrototypeRuntime {
     }
 
     /// Configures the [`OverflowScrollMode`] on `container_id`.
-    pub fn set_overflow_scroll_mode(
-        doc: &mut Document,
-        container_id: NodeId,
-        mode: OverflowScrollMode,
-    ) -> Result<(), DocError> {
+    pub fn set_overflow_scroll_mode(doc: &mut Document, container_id: NodeId, mode: OverflowScrollMode) -> Result<(), DocError> {
         let node = doc.get_mut(container_id).ok_or(DocError::NotFound(container_id))?;
         node.prototype.overflow = mode;
         Ok(())
@@ -1533,12 +1444,7 @@ impl PrototypeRuntime {
     /// counterpart if `node_id` is an instance) matching `trigger`, executing
     /// `ChangeTo` variant swaps, `SetVariable`, `SetVariableMode`, `Conditional`,
     /// `ScrollTo`, and navigation actions.
-    pub fn trigger_variant_interaction(
-        &mut self,
-        doc: &mut Document,
-        node_id: NodeId,
-        trigger: &Trigger,
-    ) -> Result<Vec<Action>, DocError> {
+    pub fn trigger_variant_interaction(&mut self, doc: &mut Document, node_id: NodeId, trigger: &Trigger) -> Result<Vec<Action>, DocError> {
         let node = doc.get(node_id).cloned().ok_or(DocError::NotFound(node_id))?;
         let mut reactions = node.prototype.reactions.clone();
         if reactions.is_empty() {
@@ -1561,23 +1467,12 @@ impl PrototypeRuntime {
     }
 
     /// Executes a single prototype [`Action`] initiated from `source_node`.
-    pub fn execute_action(
-        &mut self,
-        doc: &mut Document,
-        source_node: NodeId,
-        action: &Action,
-    ) -> Result<(), DocError> {
+    pub fn execute_action(&mut self, doc: &mut Document, source_node: NodeId, action: &Action) -> Result<(), DocError> {
         let mut trace = Vec::new();
         self.execute_action_trace(doc, source_node, action, &mut trace)
     }
 
-    fn execute_action_trace(
-        &mut self,
-        doc: &mut Document,
-        source_node: NodeId,
-        action: &Action,
-        executed: &mut Vec<Action>,
-    ) -> Result<(), DocError> {
+    fn execute_action_trace(&mut self, doc: &mut Document, source_node: NodeId, action: &Action, executed: &mut Vec<Action>) -> Result<(), DocError> {
         executed.push(action.clone());
         match action {
             Action::Navigate { dest, preserve_scroll } => {
@@ -1695,23 +1590,10 @@ pub fn swap_instance_to_component(doc: &mut Document, instance_id: NodeId, dest_
 
 /// Swaps `instance_id` to the sibling variant inside its `ComponentSet` where
 /// `prop_name == variant_value` (e.g. `("State", "Hover")`).
-pub fn swap_instance_variant(
-    doc: &mut Document,
-    instance_id: NodeId,
-    prop_name: &str,
-    variant_value: &str,
-) -> Result<NodeId, DocError> {
-    let cmd = set_instance_prop(
-        doc,
-        instance_id,
-        prop_name,
-        Some(PropValue::Variant(variant_value.to_string())),
-    );
+pub fn swap_instance_variant(doc: &mut Document, instance_id: NodeId, prop_name: &str, variant_value: &str) -> Result<NodeId, DocError> {
+    let cmd = set_instance_prop(doc, instance_id, prop_name, Some(PropValue::Variant(variant_value.to_string())));
     cmd.apply(doc)?;
-    let new_comp = doc
-        .get(instance_id)
-        .and_then(instance_component)
-        .ok_or(DocError::NotFound(instance_id))?;
+    let new_comp = doc.get(instance_id).and_then(instance_component).ok_or(DocError::NotFound(instance_id))?;
     if let Some(comp_size) = doc.get(new_comp).map(|c| c.size) {
         if let Some(inst) = doc.get_mut(instance_id) {
             inst.size = comp_size;
@@ -1743,22 +1625,12 @@ impl Document {
     }
 
     /// Pillar 3 (`FP-03`): Binds a node property to a variable and resolves it immediately.
-    pub fn bind_node_variable(
-        &mut self,
-        node_id: NodeId,
-        property: BindableProperty,
-        variable_id: impl Into<String>,
-    ) -> Result<(), DocError> {
+    pub fn bind_node_variable(&mut self, node_id: NodeId, property: BindableProperty, variable_id: impl Into<String>) -> Result<(), DocError> {
         bind_node_variable(self, node_id, property, variable_id)
     }
 
     /// Pillar 3 (`FP-03`): Switches variable mode on `root_id` and re-evaluates all bound properties in its subtree.
-    pub fn apply_variable_mode_to_subtree(
-        &mut self,
-        root_id: NodeId,
-        collection_id: &str,
-        mode_id: &str,
-    ) -> Result<usize, DocError> {
+    pub fn apply_variable_mode_to_subtree(&mut self, root_id: NodeId, collection_id: &str, mode_id: &str) -> Result<usize, DocError> {
         apply_variable_mode_to_subtree(self, root_id, collection_id, mode_id)
     }
 }

@@ -32,17 +32,13 @@ pub(crate) fn release_os_memory() {
 
 fn decode_inner(bytes: &[u8], for_import: bool) -> Result<Decoded, FigError> {
     let mut archive = container::open(bytes)?;
-    let (schema_bin, msg_bin) = container::read_chunks(&archive.canvas)?;
+    let (schema_bin, msg_bin) = container::read_archive_chunks(&archive)?;
     archive.canvas = Vec::new();
     let schema = Schema::decode(&schema_bin).map_err(|e| FigError::Format(format!("kiwi schema: {e}")))?;
     drop(schema_bin);
     let root = schema.root_message().ok_or_else(|| FigError::Format("schema has no message definition".into()))?;
-    let message = if for_import {
-        schema.decode_message_for_import(root, &msg_bin)
-    } else {
-        schema.decode_message(root, &msg_bin)
-    }
-    .map_err(|e| FigError::Format(format!("kiwi message: {e}")))?;
+    let message = if for_import { schema.decode_message_for_import(root, &msg_bin) } else { schema.decode_message(root, &msg_bin) }
+        .map_err(|e| FigError::Format(format!("kiwi message: {e}")))?;
     drop(msg_bin);
     Ok(Decoded { archive, message })
 }
@@ -104,10 +100,7 @@ fn kiwi_str(v: &KiwiValue) -> Option<&str> {
 fn extract_fast_derived(raw_changes: &mut [KiwiValue], num_blobs: usize) -> HashMap<String, Vec<FastDerivedEntry>> {
     let mut needs_derived_geo = HashSet::new();
     for nc in raw_changes.iter() {
-        if matches!(
-            nc.get("type").and_then(kiwi_str),
-            Some("VECTOR" | "BOOLEAN_OPERATION" | "STAR" | "REGULAR_POLYGON" | "ELLIPSE" | "LINE" | "BRUSH")
-        ) {
+        if matches!(nc.get("type").and_then(kiwi_str), Some("VECTOR" | "BOOLEAN_OPERATION" | "STAR" | "REGULAR_POLYGON" | "ELLIPSE" | "LINE" | "BRUSH")) {
             if let Some(id) = nc.get("guid").and_then(kiwi_guid_str) {
                 needs_derived_geo.insert(id);
             }
@@ -118,9 +111,7 @@ fn extract_fast_derived(raw_changes: &mut [KiwiValue], num_blobs: usize) -> Hash
         if nc.get("type").and_then(kiwi_str) != Some("INSTANCE") {
             continue;
         }
-        let derived_val = nc
-            .take_field("derivedSymbolData")
-            .or_else(|| nc.get_mut("symbolData").and_then(|s| s.take_field("derivedSymbolData")));
+        let derived_val = nc.take_field("derivedSymbolData").or_else(|| nc.get_mut("symbolData").and_then(|s| s.take_field("derivedSymbolData")));
         let Some(KiwiValue::Array(arr)) = derived_val else {
             continue;
         };
@@ -1113,9 +1104,9 @@ fn convert_node(nc: &Value, id: &str, lk: &Lk) -> Option<Map<String, Value>> {
     // Precomputed outlines (text and lowered board items keep none: the renderer lays them out itself).
     // For large files (> 5,000 nodes), skip precomputed outlines on rectangular containers and rectangles
     // so they render analytically and take the GPU unit-quad instancing fast path.
-    if !matches!(ty, "TEXT" | "STICKY" | "SHAPE_WITH_TEXT" | "CONNECTOR" | "STAMP")
-        && !(lk.large_file && matches!(ty, "FRAME" | "COMPONENT" | "COMPONENT_SET" | "INSTANCE" | "SECTION" | "RECTANGLE"))
-    {
+    let has_own_outline = matches!(ty, "TEXT" | "STICKY" | "SHAPE_WITH_TEXT" | "CONNECTOR" | "STAMP");
+    let analytic_fast_path = lk.large_file && matches!(ty, "FRAME" | "COMPONENT" | "COMPONENT_SET" | "INSTANCE" | "SECTION" | "RECTANGLE");
+    if !(has_own_outline || analytic_fast_path) {
         for k in ["fillGeometry", "strokeGeometry"] {
             if let Some(g) = lk.convert_geometry_cached(nc, k) {
                 m.insert(k.into(), g);

@@ -18,6 +18,28 @@ pub enum KiwiError {
 type Result<T> = std::result::Result<T, KiwiError>;
 
 const MAX_DEPTH: usize = 96;
+/// Absolute cap on values one message may decode (every native, enum, struct, message and array element counts one).
+///
+/// It is independent of the input length on purpose: zero-byte elements and zero padding inflate to far more
+/// values than the input holds, so any length-scaled allowance is attacker-controlled.
+/// Sizing: a measured real file (723k-node page, 1,058,895 nodes in total) decodes 54,870,017 values, i.e. ~52 per
+/// node (the figure in `KIWI_VALUES_PER_NODE`). 1.06M nodes therefore need ~55M; the cap is 2^28 = 268M, about 4.9x that.
+const MAX_DECODED_VALUES: usize = 1 << 28;
+/// Absolute cap on decoded instances of zero-wire-size definitions (see `Schema::zero_wire_defs`) per message.
+///
+/// A struct whose fields are all (nested) empty structs encodes to no bytes at all, so unlike every other value it
+/// is free for an attacker: a ~40 KB file can claim 2^28 of them, which is ~8 GiB (empty struct) to ~13 GiB (15-field
+/// empty struct) once materialised. Every other value consumes at least one input byte, so the input length bounds it.
+const MAX_ZERO_WIRE_INSTANCES: usize = 1 << 16;
+/// Values per node measured on a real `.fig` (see [`MAX_DECODED_VALUES`]).
+#[cfg(test)]
+const KIWI_VALUES_PER_NODE: usize = 52;
+/// Vectors reserve at most this many slots up front; they grow only as elements are really decoded (and charged).
+const MAX_PREALLOC: usize = 1024;
+
+fn bounded_capacity(claimed: usize) -> usize {
+    claimed.min(MAX_PREALLOC)
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DefKind {
@@ -173,14 +195,26 @@ impl KiwiValue {
 pub struct Reader<'a> {
     data: &'a [u8],
     pos: usize,
+    values_left: usize,
+    /// Per definition: decoding it consumes no input bytes (empty for a reader not driven by a schema).
+    zero_wire: Vec<bool>,
+    zero_wire_left: usize,
 }
 
 impl<'a> Reader<'a> {
     pub fn new(data: &'a [u8]) -> Self {
-        Self { data, pos: 0 }
+        Self { data, pos: 0, values_left: usize::MAX, zero_wire: Vec::new(), zero_wire_left: usize::MAX }
     }
     pub fn remaining(&self) -> usize {
         self.data.len() - self.pos
+    }
+    fn charge(&mut self) -> Result<()> {
+        self.values_left = self.values_left.checked_sub(1).ok_or_else(|| KiwiError::Bad("decoded value count exceeds budget".into()))?;
+        Ok(())
+    }
+    fn charge_zero_wire(&mut self) -> Result<()> {
+        self.zero_wire_left = self.zero_wire_left.checked_sub(1).ok_or_else(|| KiwiError::Bad("zero-size struct count exceeds budget".into()))?;
+        Ok(())
     }
     pub fn at_end(&self) -> bool {
         self.pos >= self.data.len()
@@ -261,7 +295,7 @@ impl Schema {
         if count > r.remaining() {
             return Err(KiwiError::Bad("definition count exceeds data".into()));
         }
-        let mut defs = Vec::with_capacity(count);
+        let mut defs = Vec::with_capacity(bounded_capacity(count));
         for _ in 0..count {
             let name = r.string()?;
             let kind = match r.byte()? {
@@ -274,7 +308,7 @@ impl Schema {
             if fc > r.remaining() {
                 return Err(KiwiError::Bad("field count exceeds data".into()));
             }
-            let mut fields = Vec::with_capacity(fc);
+            let mut fields = Vec::with_capacity(bounded_capacity(fc));
             for _ in 0..fc {
                 let fname = r.string()?;
                 let tid = r.var_i32()? as i64;
@@ -334,17 +368,57 @@ impl Schema {
 
     /// Decodes a root message of definition `root`.
     pub fn decode_message(&self, root: usize, data: &[u8]) -> Result<KiwiValue> {
+        self.decode_message_with_limits(root, data, MAX_DECODED_VALUES, MAX_ZERO_WIRE_INSTANCES, false)
+    }
+
+    /// Only the value budget applies; zero-size instances are unlimited (tests the value budget in isolation).
+    #[cfg(test)]
+    fn decode_message_with_budget(&self, root: usize, data: &[u8], budget: usize) -> Result<KiwiValue> {
+        self.decode_message_with_limits(root, data, budget, usize::MAX, false)
+    }
+
+    fn decode_message_with_limits(&self, root: usize, data: &[u8], values: usize, zero_wire_instances: usize, skip_heavy: bool) -> Result<KiwiValue> {
         let mut r = Reader::new(data);
-        self.decode_def(root, &mut r, 0, false)
+        r.values_left = values;
+        r.zero_wire = self.zero_wire_defs();
+        r.zero_wire_left = zero_wire_instances;
+        r.charge()?;
+        self.decode_def(root, &mut r, 0, skip_heavy)
     }
 
     /// Decodes a root message for `.fig` import, dropping unused multi-gigabyte
     /// derived fields (`editInfo`, `derivedTextData`, `derivedImmutableFrameData`)
-    /// on the fly when the message payload exceeds 2 MB.
+    /// on the fly when the message payload exceeds 2 MB. The same decode budgets apply.
     pub fn decode_message_for_import(&self, root: usize, data: &[u8]) -> Result<KiwiValue> {
-        let mut r = Reader::new(data);
         let skip_heavy = data.len() > 2_000_000;
-        self.decode_def(root, &mut r, 0, skip_heavy)
+        self.decode_message_with_limits(root, data, MAX_DECODED_VALUES, MAX_ZERO_WIRE_INSTANCES, skip_heavy)
+    }
+
+    /// Per definition: whether one instance occupies zero bytes on the wire. Enums (a varint), messages (a terminator)
+    /// and arrays (a length) always take bytes; a struct takes none only if every field is a non-array zero-size struct.
+    /// A cyclic struct can never finish decoding, so it is not reported as zero-size.
+    fn zero_wire_defs(&self) -> Vec<bool> {
+        #[derive(Clone, Copy, PartialEq)]
+        enum State {
+            Unknown,
+            Visiting,
+            Zero,
+            NonZero,
+        }
+        fn resolve(defs: &[Def], i: usize, state: &mut [State]) -> bool {
+            match state[i] {
+                State::Zero => return true,
+                State::NonZero | State::Visiting => return false,
+                State::Unknown => {}
+            }
+            state[i] = State::Visiting;
+            let zero = defs[i].kind == DefKind::Struct
+                && defs[i].fields.iter().all(|f| !f.is_array && matches!(f.ty, FieldType::Def(d) if d < defs.len() && resolve(defs, d, state)));
+            state[i] = if zero { State::Zero } else { State::NonZero };
+            zero
+        }
+        let mut state = vec![State::Unknown; self.defs.len()];
+        (0..self.defs.len()).map(|i| resolve(&self.defs, i, &mut state)).collect()
     }
 
     /// Picks the `Message` definition (Figma's root), falling back to the last message def.
@@ -497,7 +571,7 @@ impl Schema {
         if n > r.remaining() {
             return Err(KiwiError::Bad(format!("array length {n} exceeds data")));
         }
-        let mut v = Vec::with_capacity(n);
+        let mut v = Vec::with_capacity(bounded_capacity(n));
         for _ in 0..n {
             v.push(self.decode_type(f.ty, r, depth + 1, skip_heavy)?);
         }
@@ -505,6 +579,10 @@ impl Schema {
     }
 
     fn decode_type(&self, ty: FieldType, r: &mut Reader, depth: usize, skip_heavy: bool) -> Result<KiwiValue> {
+        r.charge()?;
+        if matches!(ty, FieldType::Def(i) if r.zero_wire.get(i) == Some(&true)) {
+            r.charge_zero_wire()?;
+        }
         Ok(match ty {
             FieldType::Native(n) => match n {
                 Native::Bool => KiwiValue::Bool(r.byte()? != 0),
@@ -890,6 +968,21 @@ mod tests {
     }
 
     #[test]
+    fn zero_byte_struct_fanout_fails_cleanly() {
+        // 40 levels of structs with two fields each and no wire bytes: 2^40 values from a 2-byte message.
+        let mut b = SchemaBuilder::new();
+        let m = b.define("Message", DefKind::Message);
+        let levels: Vec<usize> = (0..40).map(|i| b.define(&format!("L{i}"), DefKind::Struct)).collect();
+        b.field(m, "root", FieldType::Def(levels[0]), false, 1);
+        for w in levels.windows(2) {
+            b.field(w[0], "a", FieldType::Def(w[1]), false, 1);
+            b.field(w[0], "b", FieldType::Def(w[1]), false, 2);
+        }
+        let s = b.build();
+        assert!(s.decode_message_with_budget(m, &[1, 0], 1 << 20).is_err());
+    }
+
+    #[test]
     fn truncated_never_panics() {
         let mut b = SchemaBuilder::new();
         let m = b.define("Message", DefKind::Message);
@@ -909,6 +1002,56 @@ mod tests {
         for n in 0..bytes.len() {
             assert!(s.decode_message(0, &bytes[..n]).is_err());
         }
+    }
+
+    /// Message with `k` array fields of zero-byte struct elements, each claiming `n` elements, followed by `pad` zero bytes.
+    fn padded_empty_struct_arrays(k: u32, n: u32, pad: usize) -> (Schema, usize, Vec<u8>) {
+        let mut b = SchemaBuilder::new();
+        let m = b.define("Message", DefKind::Message);
+        let e = b.define("Empty", DefKind::Struct);
+        for i in 0..k {
+            b.field(m, &format!("a{i}"), FieldType::Def(e), true, i + 1);
+        }
+        let mut w = Writer::default();
+        for i in 0..k {
+            w.var_u64(u64::from(i) + 1);
+            w.var_u64(u64::from(n));
+        }
+        w.byte(0);
+        let mut buf = w.buf;
+        buf.resize(buf.len() + pad, 0);
+        (b.build(), m, buf)
+    }
+
+    #[test]
+    fn value_budget_ignores_zero_padding() {
+        // 20 arrays x 50k zero-byte elements = 1M values from ~50 KB of padding. A budget that scales with
+        // the input length would grant 8 values per padding byte and let this through.
+        let (s, m, data) = padded_empty_struct_arrays(20, 50_000, 50_000);
+        let err = s.decode_message_with_budget(m, &data, 100_000).unwrap_err();
+        assert!(err.to_string().contains("budget"), "{err}");
+        // The same message fits a budget that really covers it, so zero-byte elements are counted exactly.
+        assert!(s.decode_message_with_budget(m, &data, 1_100_000).is_ok());
+        assert!(s.decode_message_with_budget(m, &data, 1_000_000).is_err());
+    }
+
+    #[test]
+    fn value_budget_covers_real_files_with_margin() {
+        const REAL_NODES: usize = 1_060_000;
+        const { assert!(MAX_DECODED_VALUES >= 4 * REAL_NODES * KIWI_VALUES_PER_NODE) };
+    }
+
+    #[test]
+    fn claimed_counts_reserve_a_bounded_prefix() {
+        assert_eq!(bounded_capacity(usize::MAX), MAX_PREALLOC);
+        assert_eq!(bounded_capacity(7), 7);
+        // Tiny inputs claiming counts up to their own length still decode (or fail) cleanly.
+        let (s, m, data) = padded_empty_struct_arrays(1, 300, 300);
+        assert!(s.decode_message(m, &data).is_ok());
+        let mut huge = vec![1u8, 0xff, 0xff, 0xff, 0xff, 0x0f];
+        huge.resize(64, 0);
+        assert!(s.decode_message(m, &huge).is_err());
+        assert!(Schema::decode(&[0xff, 0xff, 0xff, 0xff, 0x0f]).is_err());
     }
 
     #[test]
@@ -938,10 +1081,7 @@ mod tests {
                 ("name".into(), KiwiValue::String("Button Label".into())),
                 (
                     "editInfo".into(),
-                    KiwiValue::Message(vec![
-                        ("userId".into(), KiwiValue::String("user-999".into())),
-                        ("createdAt".into(), KiwiValue::Uint(1_700_000_000)),
-                    ]),
+                    KiwiValue::Message(vec![("userId".into(), KiwiValue::String("user-999".into())), ("createdAt".into(), KiwiValue::Uint(1_700_000_000))]),
                 ),
                 (
                     "derivedTextData".into(),

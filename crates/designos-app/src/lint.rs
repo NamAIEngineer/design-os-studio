@@ -160,10 +160,10 @@ fn match_forbidden_purple(c: egui::Color32) -> Option<&'static str> {
 /// `#C4A1FF`, `#A855F7`, `#D1A8FF`).
 pub fn check_no_purple_chrome(shapes: &[egui::epaint::ClippedShape], exclude_canvas: Option<Rect>) -> Vec<Finding> {
     let mut out = Vec::new();
-    fn walk(s: &egui::Shape, clip: Rect, exclude_canvas: Option<Rect>, out: &mut Vec<Finding>) {
+    fn walk(s: &egui::Shape, exclude_canvas: Option<Rect>, out: &mut Vec<Finding>) {
         match s {
             egui::Shape::Vec(v) => {
-                v.iter().for_each(|s| walk(s, clip, exclude_canvas, out));
+                v.iter().for_each(|s| walk(s, exclude_canvas, out));
             }
             egui::Shape::Rect(r) => {
                 if exclude_canvas.is_some_and(|cv| cv.contains_rect(r.rect)) {
@@ -196,7 +196,7 @@ pub fn check_no_purple_chrome(shapes: &[egui::epaint::ClippedShape], exclude_can
         }
     }
     for cs in shapes {
-        walk(&cs.shape, cs.clip_rect, exclude_canvas, out.as_mut());
+        walk(&cs.shape, exclude_canvas, out.as_mut());
     }
     out
 }

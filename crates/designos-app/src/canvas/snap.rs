@@ -61,6 +61,7 @@ fn ys(r: &Rect) -> [f32; 3] {
 
 /// Best (smallest |delta|) shift taking any of `mine` onto any of `targets`
 /// within `threshold`. Returns the shift and the target coordinate hit.
+#[cfg(test)]
 pub fn snap_values(mine: &[f32], targets: &[f32], threshold: f32) -> Option<(f32, f32)> {
     let mut best: Option<(f32, f32)> = None;
     for m in mine {

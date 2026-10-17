@@ -98,10 +98,7 @@ fn pillar1_suggest_auto_layout_2d_column_of_rows() {
     assert_eq!(row2.transform.translation(), Vec2::new(0.0, 84.0));
     assert_eq!(row1.size, Vec2::new(220.0, 60.0));
     assert_eq!(row2.size, Vec2::new(220.0, 60.0));
-    assert_eq!(
-        row1.kind.frame_props().unwrap().auto_layout.unwrap().item_spacing,
-        20.0
-    );
+    assert_eq!(row1.kind.frame_props().unwrap().auto_layout.unwrap().item_spacing, 20.0);
 }
 
 #[test]
@@ -122,9 +119,7 @@ fn pillar2_live_non_destructive_boolean_groups() {
     assert!(union_node.fill_geometry.as_ref().is_some_and(|p| !p.is_empty()));
 
     // Move child `b` to (100, 120) with size (80, 80) -> Union group recomputes to (180, 200).
-    let updated_rect = update_boolean_child_rect(&mut doc, b, Rect::new(100.0, 120.0, 80.0, 80.0))
-        .unwrap()
-        .unwrap();
+    let updated_rect = update_boolean_child_rect(&mut doc, b, Rect::new(100.0, 120.0, 80.0, 80.0)).unwrap().unwrap();
     assert_eq!(updated_rect, Rect::new(0.0, 0.0, 180.0, 200.0));
     assert_eq!(doc.get(union_id).unwrap().size, Vec2::new(180.0, 200.0));
 
@@ -138,9 +133,7 @@ fn pillar2_live_non_destructive_boolean_groups() {
     assert_eq!(doc.get(sub_id).unwrap().size, Vec2::new(40.0, 100.0));
 
     // Move cutter to (70, 0) -> remaining base widens to 70x100.
-    let sub_rect = update_boolean_child_rect(&mut doc, s_cut, Rect::new(70.0, 0.0, 60.0, 100.0))
-        .unwrap()
-        .unwrap();
+    let sub_rect = update_boolean_child_rect(&mut doc, s_cut, Rect::new(70.0, 0.0, 60.0, 100.0)).unwrap().unwrap();
     assert_eq!(sub_rect.w, 70.0);
     assert_eq!(sub_rect.h, 100.0);
 
@@ -222,30 +215,15 @@ fn pillar3_variable_bindings_and_subtree_mode_switching() {
     insert_var("v_badge_w", VariableKind::Number, VariableValue::Number(80.0), VariableValue::Number(140.0));
     insert_var("v_badge_h", VariableKind::Number, VariableValue::Number(28.0), VariableValue::Number(44.0));
     insert_var("v_opacity", VariableKind::Number, VariableValue::Number(80.0), VariableValue::Number(100.0));
-    insert_var(
-        "v_title",
-        VariableKind::String,
-        VariableValue::String("Compact Card".into()),
-        VariableValue::String("Spacious Card".into()),
-    );
-    insert_var(
-        "v_bg",
-        VariableKind::Color,
-        VariableValue::Color(Color::WHITE),
-        VariableValue::Color(Color::rgb(0x18, 0x18, 0x1B)),
-    );
+    insert_var("v_title", VariableKind::String, VariableValue::String("Compact Card".into()), VariableValue::String("Spacious Card".into()));
+    insert_var("v_bg", VariableKind::Color, VariableValue::Color(Color::WHITE), VariableValue::Color(Color::rgb(0x18, 0x18, 0x1B)));
 
     // Create an Auto-Layout card frame with a badge rectangle and a title text node.
     let card_id = doc.alloc_id();
     let mut card = Node::frame(card_id, Rect::new(0.0, 0.0, 200.0, 100.0));
     card.kind = NodeKind::Frame(FrameProps {
         clips_content: false,
-        auto_layout: Some(AutoLayout {
-            direction: LayoutDirection::Vertical,
-            primary_sizing: Sizing::Hug,
-            counter_sizing: Sizing::Hug,
-            ..Default::default()
-        }),
+        auto_layout: Some(AutoLayout { direction: LayoutDirection::Vertical, primary_sizing: Sizing::Hug, counter_sizing: Sizing::Hug, ..Default::default() }),
         grids: Vec::new(),
     });
     doc.insert(page, card).unwrap();
@@ -351,11 +329,7 @@ fn pillar4_interactive_prototype_runtime() {
     c_hov.fills = vec![Paint::solid(Color::rgb(0x1D, 0x4E, 0xD8))];
 
     // Attach prototype reaction on default variant: WhileHovering -> ChangeTo(comp_hover).
-    c_def.prototype.reactions.push(Reaction {
-        trigger: Trigger::WhileHovering,
-        actions: vec![Action::ChangeTo { dest: comp_hover }],
-        transition: None,
-    });
+    c_def.prototype.reactions.push(Reaction { trigger: Trigger::WhileHovering, actions: vec![Action::ChangeTo { dest: comp_hover }], transition: None });
 
     doc.insert(page, c_def).unwrap();
     doc.insert(page, c_hov).unwrap();
@@ -372,10 +346,7 @@ fn pillar4_interactive_prototype_runtime() {
     assert_eq!(actions.len(), 1);
     assert_eq!(instance_component(doc.get(inst_id).unwrap()), Some(comp_hover));
     assert_eq!(doc.get(inst_id).unwrap().size, Vec2::new(132.0, 40.0));
-    assert_eq!(
-        doc.get(inst_id).unwrap().component.values.get("State"),
-        Some(&PropValue::Variant("Hover".into()))
-    );
+    assert_eq!(doc.get(inst_id).unwrap().component.values.get("State"), Some(&PropValue::Variant("Hover".into())));
 
     // Swap back to Default via `swap_instance_variant`.
     swap_instance_variant(&mut doc, inst_id, "State", "Default").unwrap();
@@ -415,11 +386,7 @@ fn pillar4_interactive_prototype_runtime() {
     make_proto_var("v_label", VariableKind::String, VariableValue::String("Empty".into()));
 
     let status_text_id = doc.alloc_id();
-    doc.insert(
-        screen_id,
-        Node::text(status_text_id, Rect::new(16.0, 80.0, 120.0, 24.0), "Empty", TextStyle::default()),
-    )
-    .unwrap();
+    doc.insert(screen_id, Node::text(status_text_id, Rect::new(16.0, 80.0, 120.0, 24.0), "Empty", TextStyle::default())).unwrap();
     doc.bind_node_variable(status_text_id, BindableProperty::TextContent, "v_label").unwrap();
 
     // Add OnClick reaction to `inst_id`:
@@ -432,17 +399,8 @@ fn pillar4_interactive_prototype_runtime() {
         actions: vec![
             Action::SetVariable { variable: "v_count".into(), value: inc_expr },
             Action::Conditional {
-                branches: vec![(
-                    cond_expr,
-                    vec![Action::SetVariable {
-                        variable: "v_label".into(),
-                        value: Expression::text("Unlocked"),
-                    }],
-                )],
-                otherwise: vec![Action::SetVariable {
-                    variable: "v_label".into(),
-                    value: Expression::text("Keep clicking"),
-                }],
+                branches: vec![(cond_expr, vec![Action::SetVariable { variable: "v_label".into(), value: Expression::text("Unlocked") }])],
+                otherwise: vec![Action::SetVariable { variable: "v_label".into(), value: Expression::text("Keep clicking") }],
             },
         ],
         transition: None,

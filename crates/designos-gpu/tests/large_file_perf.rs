@@ -183,7 +183,8 @@ fn run_benchmark_suite(suite_name: &str, doc: &mut Document, page: NodeId, defau
 
     // Find the densest artboard-sized container on the page so Working/Detail/Drag viewports
     // always look directly at a dense cluster of visible UI nodes.
-    let mut best_artboard: Option<(NodeId, (f32, f32, f32, f32), usize)> = None;
+    type ArtboardCandidate = (NodeId, (f32, f32, f32, f32), usize);
+    let mut best_artboard: Option<ArtboardCandidate> = None;
     doc.walk(page, |n, depth| {
         if depth == 0 || n.children.len() < 4 {
             return;
@@ -193,7 +194,7 @@ fn run_benchmark_suite(suite_name: &str, doc: &mut Document, page: NodeId, defau
             let h = b.3 - b.1;
             if (300.0..=8000.0).contains(&w) && (300.0..=8000.0).contains(&h) {
                 let score = n.children.len();
-                if best_artboard.map_or(true, |(_, _, s)| score > s) {
+                if best_artboard.is_none_or(|(_, _, s)| score > s) {
                     best_artboard = Some((n.id, b, score));
                 }
             }

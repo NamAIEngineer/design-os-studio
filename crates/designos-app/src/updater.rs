@@ -558,9 +558,18 @@ impl UpdaterState {
     }
 }
 
+/// The update UI (Home sidebar card, update modal, top-bar "Update" entry) stays hidden until
+/// [`UpdaterState::check_for_updates`] fetches a real signed release manifest. Today the
+/// candidate comes from `ReleaseManifest::sample_for_channel` and "staging" writes a
+/// placeholder string, so showing it would claim an update flow that does not exist.
+pub const UPDATER_UI_ENABLED: bool = false;
+
 /// Renders the compact UI3 Auto-Update & Upstream Figma Watchdog card inside a given `rect`
 /// in the Home left sidebar footer.
 pub fn show_sidebar_card_in_rect(ui: &mut Ui, rect: Rect, state: &mut UpdaterState) {
+    if !UPDATER_UI_ENABLED {
+        return;
+    }
     let p = ui.painter().clone();
     let resp = ui.interact(rect, Id::new("home-updater-card"), Sense::click());
     let bg = if resp.hovered() { UI3_BG_HOVER } else { UI3_BG_CARD };
@@ -651,7 +660,7 @@ pub fn show_sidebar_card(ui: &mut Ui, state: &mut UpdaterState) {
 
 /// Renders the Dual-Layer Auto-Update & Upstream Figma Watchdog modal dialog (`US-09`).
 pub fn show_update_modal(ctx: &Context, state: &mut UpdaterState) {
-    if !state.modal_open {
+    if !UPDATER_UI_ENABLED || !state.modal_open {
         return;
     }
 
@@ -884,6 +893,21 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    #[test]
+    fn update_ui_is_hidden_while_the_updater_is_a_stub() {
+        const _: () = assert!(!UPDATER_UI_ENABLED, "enable only after check_for_updates fetches a real signed manifest");
+        let ctx = egui::Context::default();
+        let mut state = UpdaterState::new();
+        state.modal_open = true;
+        let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+            let rect = Rect::from_min_size(Pos2::new(8.0, 8.0), Vec2::new(200.0, 40.0));
+            show_sidebar_card_in_rect(ui, rect, &mut state);
+            show_update_modal(ui.ctx(), &mut state);
+            let recorded = ui.ctx().data(|d| d.get_temp::<Rect>(Id::new(("test-rect", "home-updater-card".to_string()))));
+            assert!(recorded.is_none(), "sidebar update card must not be drawn");
+        });
     }
 
     #[test]

@@ -155,11 +155,9 @@ impl Session {
                     };
                     if is_newer {
                         if let Ok(raw) = fs::read_to_string(&canvas_path) {
-                            if let Ok(doc) = designos_doc::Document::from_json(&raw) {
-                                if validate_document(&doc).is_ok() {
-                                    self.engine.doc = doc;
-                                    self.bridge.last_canvas_mtime = Some(mtime);
-                                }
+                            if let Ok(doc) = parse_unrepaired_native(&raw).and_then(|doc| validate_document(&doc).map(|()| doc)) {
+                                self.engine.doc = doc;
+                                self.bridge.last_canvas_mtime = Some(mtime);
                             }
                         }
                     }
@@ -289,6 +287,17 @@ impl Session {
                 if fs::metadata(&path).map_err(|e| e.to_string())?.len() > 64 * 1024 * 1024 {
                     return Err("Input file exceeds the 64 MiB import limit".into());
                 }
+                // Native files are checked before the loader repairs them, so a broken node graph is
+                // refused instead of silently rewritten.
+                if !matches!(path.extension().and_then(|e| e.to_str()).map(str::to_ascii_lowercase).as_deref(), Some("fig" | "svg")) {
+                    if let Ok(raw) = fs::read_to_string(&path) {
+                        if let Err(e) = parse_unrepaired_native(&raw) {
+                            if e.starts_with(REPAIR_PREFIX) {
+                                return Err(e);
+                            }
+                        }
+                    }
+                }
                 let doc = designos_library::load_external(&path).map_err(|e| format!("Cannot import design: {e}"))?;
                 validate_document(&doc)?;
                 self.engine = Engine::default();
@@ -396,6 +405,18 @@ impl Session {
     }
 }
 
+const REPAIR_PREFIX: &str = "Document node graph is malformed";
+
+/// Parses a native document and refuses one whose node graph needed repair on load. Text that is
+/// not a native document yields a parse error (not prefixed by [`REPAIR_PREFIX`]).
+fn parse_unrepaired_native(raw: &str) -> Result<designos_doc::Document, String> {
+    let (doc, report) = designos_doc::Document::from_json_with_report(raw).map_err(|e| e.to_string())?;
+    match report.structural_summary() {
+        Some(what) => Err(format!("{REPAIR_PREFIX} ({what}); fix the file instead of relying on load-time repair")),
+        None => Ok(doc),
+    }
+}
+
 /// Reject broken graphs before recursive exporters or inherited-mode resolution use them.
 fn validate_document(doc: &designos_doc::Document) -> Result<(), String> {
     use std::collections::BTreeSet;
@@ -493,6 +514,23 @@ impl ServerHandler for DesignOSServer {
 mod tests {
     use super::*;
     use designos_doc::Document;
+
+    #[test]
+    fn repaired_node_graph_is_refused_but_a_stale_id_counter_is_accepted() {
+        let mut doc = Document::new("Graph");
+        let page = doc.add_page("P");
+        assert!(parse_unrepaired_native(&doc.to_json().unwrap()).is_ok());
+
+        let mut cyclic = doc.clone();
+        cyclic.get_mut(page).unwrap().parent = Some(page);
+        let err = parse_unrepaired_native(&cyclic.to_json().unwrap()).unwrap_err();
+        assert!(err.starts_with(REPAIR_PREFIX) && err.contains("wrong parent links"), "{err}");
+
+        let mut stale = serde_json::to_value(&doc).unwrap();
+        stale["next_id"] = serde_json::json!(0);
+        assert!(parse_unrepaired_native(&stale.to_string()).is_ok());
+        assert!(!parse_unrepaired_native("not JSON").unwrap_err().starts_with(REPAIR_PREFIX));
+    }
 
     #[test]
     fn scoped_session_syncs_current_page_and_writes_doc_sync() {

@@ -7,7 +7,7 @@ Every visible button, input bar, scrollbar, tab, menu item, and agent CLI runtim
 `design:os studio` (`crates/designos-app/src/`) must execute real state mutation, real OS
 clipboard/filesystem I/O, or real CLI subprocess execution.
 
-Verifies 12 hard Zero-Fake-UI invariants (`Z01..Z12`):
+Verifies 14 hard Zero-Fake-UI invariants (`Z01..Z14`):
   - Z01: `terminal.rs` has `runtime_binary_available` and real CLI invocation
          (`claude -p`, `codex exec`, `agy -p`, `grok -p`) in `submit_chat_prompt`.
   - Z02: `terminal.rs` `set_active_runtime` mutates `tab.preset` (not just renaming `tab.title`)
@@ -23,9 +23,9 @@ Verifies 12 hard Zero-Fake-UI invariants (`Z01..Z12`):
          `SpecComment` creation/resolution (`comment_draft` + `TextEdit::singleline`).
   - Z07: `specs.rs` `draw_wrapped_prose` does NOT truncate prose at `lines.len() >= 3`,
          and `render_tab_blueprints` renders `pkg.ui_contract`.
-  - Z08: `panels/toolbar.rs` contextual buttons (`ctx-crop`, `ctx-select-area`,
-         `ctx-remove-bg`, `ctx-edit-image`) mutate `app.doc` / `app.tool` instead of only
-         calling `app.show_toast`.
+  - Z08: `panels/toolbar.rs` contextual buttons (`ctx-select-area`, `ctx-edit-prompt`) mutate
+         `app.doc` / `app.tool`; the fake `ctx-crop` / `ctx-remove-bg` stubs and the cmdk
+         "Remove background" entry stay removed (no occurrence in any shipped, non-test Rust code).
   - Z09: `home/mod.rs` `Act::ExportFig` writes `.fig` bytes to disk (`std::fs::write`),
          and `Nav::AllFolders` / `Nav::Templates` / `Nav::Libraries` filter distinctly.
   - Z10: `panels/right.rs` `"Share"` copies to clipboard (`copy_text`), and Dev Mode's 2nd tab
@@ -33,12 +33,22 @@ Verifies 12 hard Zero-Fake-UI invariants (`Z01..Z12`):
   - Z11: `panels/inspect.rs` (`dev-code-connect`, `dev-mcp-btn`, `dev-add-redlines`,
          `inspect_keyframes_section`) and `panels/properties.rs` (`copy-to-slides`) perform
          real clipboard/document mutations.
+  - Z13: `panels/menus.rs` Zoom menu rows are exactly the allow-listed labels, each mapped to its
+         real `Action`; a `checked:` value is `false` or read from `app.` state, never hard-coded true.
+  - Z14: the in-app updater UI stays hidden (`UPDATER_UI_ENABLED = false`) while `updater.rs`
+         still builds its candidate from `ReleaseManifest::sample_for_channel`; the guard must be
+         CODE (comments stripped) in every entry point: the `tabs.rs` button, the Home sidebar card
+         and the update modal.
+
+All source matching runs on shipped code: `//` comments and `#[cfg(test)]` items are stripped first.
+`scripts/zero_fake_ui_gate_selftest.py` re-introduces each fake-UI regression in memory and asserts
+this gate fails.
   - Z12: `widgets/picker.rs` `Mode::Image` creates real `Paint::Image` / `app.doc.images`
          entries, and `panels/mod.rs::scrollbar` + `variables/view.rs::hscrollbar` support
          `Sense::click_and_drag()`.
 
 Exit code:
-  0 when 12/12 invariants pass, 1 if any invariant fails.
+  0 when 14/14 invariants pass, 1 if any invariant fails.
 """
 
 from __future__ import annotations
@@ -48,17 +58,159 @@ import json
 import re
 import sys
 from pathlib import Path
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 APP_SRC = REPO_ROOT / "crates" / "designos-app" / "src"
 
 
-def read_src(rel_path: str) -> str:
-    path = APP_SRC / rel_path
-    if not path.exists():
-        return ""
-    return path.read_text(encoding="utf-8", errors="replace")
+def literal_end(src: str, i: int) -> int:
+    """Returns the exclusive end of the string / raw string / char literal starting at `src[i]`, else 0."""
+    n = len(src)
+    ch = src[i]
+    if ch == '"':
+        j = i + 1
+        while j < n:
+            if src[j] == "\\":
+                j += 2
+            elif src[j] == '"':
+                return j + 1
+            else:
+                j += 1
+        return n
+    if ch in "rb" and (i == 0 or not (src[i - 1].isalnum() or src[i - 1] == "_")):
+        j = i + 1
+        if ch == "b" and j < n and src[j] == "r":
+            j += 1
+        elif ch == "b":
+            return 0
+        hashes = 0
+        while j < n and src[j] == "#":
+            hashes += 1
+            j += 1
+        if j < n and src[j] == '"':
+            close = src.find('"' + "#" * hashes, j + 1)
+            return n if close == -1 else close + 1 + hashes
+        return 0
+    if ch == "'":
+        if i + 1 < n and src[i + 1] == "\\":
+            close = src.find("'", i + 3)
+            return n if close == -1 else close + 1
+        if i + 2 < n and src[i + 2] == "'":
+            return i + 3
+    return 0
+
+
+def strip_rust_comments(src: str) -> str:
+    """Blanks `//` line comments (incl. doc comments) and nested `/* */` blocks, keeping literals and line numbers."""
+    out: List[str] = []
+    i, n = 0, len(src)
+    while i < n:
+        if src.startswith("//", i):
+            nl = src.find("\n", i)
+            i = n if nl == -1 else nl
+            continue
+        if src.startswith("/*", i):
+            depth, j = 1, i + 2
+            while j < n and depth:
+                if src.startswith("/*", j):
+                    depth, j = depth + 1, j + 2
+                elif src.startswith("*/", j):
+                    depth, j = depth - 1, j + 2
+                else:
+                    j += 1
+            out.append(" " + "\n" * src.count("\n", i, j))
+            i = j
+            continue
+        end = literal_end(src, i)
+        if end:
+            out.append(src[i:end])
+            i = end
+            continue
+        out.append(src[i])
+        i += 1
+    return "".join(out)
+
+
+def strip_cfg_test_items(src: str) -> str:
+    """Removes every item annotated `#[cfg(test)]` (module, fn, use) so only shipped code remains."""
+    out: List[str] = []
+    pos = 0
+    marker = re.compile(r"#\[cfg\(test\)\]")
+    while True:
+        m = marker.search(src, pos)
+        if not m:
+            out.append(src[pos:])
+            return "".join(out)
+        out.append(src[pos : m.start()])
+        i, depth, n = m.end(), 0, len(src)
+        while i < n:
+            end = literal_end(src, i)
+            if end:
+                i = end
+                continue
+            ch = src[i]
+            if ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+                if depth <= 0:
+                    i += 1
+                    break
+            elif ch == ";" and depth == 0:
+                i += 1
+                break
+            i += 1
+        pos = i
+
+
+def shipped_code(src: str) -> str:
+    """Rust source as the binary sees it: no comments, no `#[cfg(test)]` items."""
+    return strip_cfg_test_items(strip_rust_comments(src))
+
+
+class SourceSet:
+    """In-memory view of `crates/designos-app/src/**/*.rs`; the self-test mutates copies of it."""
+
+    def __init__(self, files: Dict[str, str]) -> None:
+        self.files = dict(files)
+        self._code: Dict[str, str] = {}
+
+    @classmethod
+    def from_disk(cls) -> "SourceSet":
+        files = {
+            p.relative_to(APP_SRC).as_posix(): p.read_text(encoding="utf-8", errors="replace")
+            for p in sorted(APP_SRC.rglob("*.rs"))
+        }
+        return cls(files)
+
+    def with_replacement(self, rel_path: str, old: str, new: str) -> "SourceSet":
+        """Copy of this set with `old` -> `new` in one file; fails loudly if `old` is absent (a vacuous mutation)."""
+        text = self.files.get(rel_path, "")
+        if old not in text:
+            raise AssertionError(f"mutation anchor not found in {rel_path}: {old!r}")
+        files = dict(self.files)
+        files[rel_path] = text.replace(old, new, 1)
+        return SourceSet(files)
+
+    def raw(self, rel_path: str) -> str:
+        return self.files.get(rel_path, "")
+
+    def code(self, rel_path: str) -> str:
+        if rel_path not in self._code:
+            self._code[rel_path] = shipped_code(self.raw(rel_path))
+        return self._code[rel_path]
+
+    def code_hits(self, pattern: str, only: str = "") -> List[str]:
+        """Files whose shipped code (comments and tests excluded) matches `pattern`."""
+        rx = re.compile(pattern)
+        hits = []
+        for rel in sorted(self.files):
+            if only and rel != only:
+                continue
+            if rx.search(self.raw(rel)) and rx.search(self.code(rel)):  # raw prefilter keeps the scan fast
+                hits.append(rel)
+        return hits
 
 
 def extract_fn_body(src: str, fn_name: str) -> str:
@@ -226,22 +378,31 @@ def check_z07(specs_rs: str) -> Tuple[bool, str]:
     )
 
 
-def check_z08(toolbar_rs: str) -> Tuple[bool, str]:
-    has_crop = "ctx-crop" in toolbar_rs
+RETIRED_ACTION_PATTERN = r"ctx-crop|ctx-remove-bg"
+RETIRED_CMDK_PATTERN = r"(?i)remove[\s_-]*background"
+
+
+def check_z08(sources: "SourceSet") -> Tuple[bool, str]:
+    toolbar_rs = sources.code("panels/toolbar.rs")
     has_select = "ctx-select-area" in toolbar_rs
-    has_remove_bg = "ctx-remove-bg" in toolbar_rs
     has_edit_img = ("ctx-edit-image" in toolbar_rs) or ("ctx-edit-prompt" in toolbar_rs)
+    # Crop / Remove-background had no real implementation (a 5% shrink and "delete first fill").
+    # They may only come back with an honest implementation, which must update this check.
+    retired_actions = sources.code_hits(RETIRED_ACTION_PATTERN)
+    retired_cmdk = sources.code_hits(RETIRED_CMDK_PATTERN, only="cmdk.rs")
+    stubs_gone = not retired_actions and not retired_cmdk
     mutates_state = (
         ("app.doc" in toolbar_rs or "doc." in toolbar_rs)
         and ("app.tool" in toolbar_rs)
         and ("apply_contextual_action" in toolbar_rs or "clips_content" in toolbar_rs)
     )
-    ok = has_crop and has_select and has_remove_bg and has_edit_img and mutates_state
+    ok = has_select and has_edit_img and stubs_gone and mutates_state
     if ok:
-        return True, "`panels/toolbar.rs` contextual buttons (`ctx-crop`, `ctx-select-area`, `ctx-remove-bg`, `ctx-edit-image`) mutate `app.doc` / `app.tool`"
+        return True, "`panels/toolbar.rs` contextual buttons (`ctx-select-area`, `ctx-edit-prompt`) mutate `app.doc` / `app.tool`; no ctx-crop / ctx-remove-bg / cmdk Remove background in shipped code"
     return (
         False,
-        f"crop={has_crop}, select={has_select}, remove_bg={has_remove_bg}, edit_img={has_edit_img}, mutates_state={mutates_state}",
+        f"select={has_select}, edit_img={has_edit_img}, mutates_state={mutates_state}, "
+        f"retired ctx-crop/ctx-remove-bg in shipped code: {retired_actions}, retired cmdk Remove background: {retired_cmdk}",
     )
 
 
@@ -331,10 +492,117 @@ def check_z12(picker_rs: str, panels_mod_rs: str, vars_view_rs: str, properties_
     )
 
 
-def run_all_checks() -> List[Dict[str, Any]]:
+# Exact zoom-menu rows (label -> real action). A new row needs a real feature behind it, so it needs a deliberate edit here.
+ZOOM_MENU_ALLOWED_ROWS: Dict[str, str] = {
+    "Zoom in": "Action::ZoomIn",
+    "Zoom out": "Action::ZoomOut",
+    "Zoom to fit": "Action::FitAll",
+    "Zoom to 50%": "Action::ZoomTo(0.5)",
+    "Zoom to 100%": "Action::Zoom100",
+    "Zoom to 200%": "Action::ZoomTo(2.0)",
+    "Pixel grid": "Action::TogglePixelGrid",
+    "Snap to pixel grid": "Action::ToggleSnapPixel",
+    "Layout guides": "Action::ToggleLayoutGrids",
+    "Rulers": "Action::ToggleRulers",
+    "Comments": "Action::Tool(Tool::Comment)",
+}
+ZOOM_ROW_PATTERN = re.compile(
+    r'ZoomRowSpec\s*\{\s*label:\s*"(?P<label>[^"]*)"\s*,\s*shortcut:\s*"[^"]*"\s*,\s*'
+    r"action:\s*(?P<action>.+?)\s*,\s*checked:\s*(?P<checked>.+?)\s*,\s*sep_after:",
+    re.S,
+)
+
+
+def check_z13(menus_rs: str) -> Tuple[bool, str]:
+    struct_at = menus_rs.find("struct ZoomRowSpec")
+    zoom_src = menus_rs[struct_at : menus_rs.find("fn show_zoom_menu", struct_at)] if struct_at != -1 else ""
+    rows_body = extract_fn_body(menus_rs, "zoom_rows")
+    dead_rows = len(re.findall(r"action:\s*None", zoom_src))
+    fake_check = "Multiplayer cursors" in zoom_src
+    optional_action = bool(re.search(r"action:\s*Option<", zoom_src))
+
+    rows = [m.groupdict() for m in ZOOM_ROW_PATTERN.finditer(rows_body)]
+    constructed = len(re.findall(r"ZoomRowSpec\s*\{", rows_body))
+    unparsed = constructed - len(rows)  # a row written in an unexpected shape cannot be vetted, so it fails
+    unlisted = [r["label"] for r in rows if r["label"] not in ZOOM_MENU_ALLOWED_ROWS]
+    wrong_action = [
+        r["label"] for r in rows if r["label"] in ZOOM_MENU_ALLOWED_ROWS and r["action"].strip() != ZOOM_MENU_ALLOWED_ROWS[r["label"]]
+    ]
+    missing = [label for label in ZOOM_MENU_ALLOWED_ROWS if label not in {r["label"] for r in rows}]
+    hardcoded_checked = [r["label"] for r in rows if r["checked"].strip() != "false" and "app." not in r["checked"]]
+
+    ok = (
+        struct_at != -1
+        and bool(rows_body)
+        and dead_rows == 0
+        and not fake_check
+        and not optional_action
+        and unparsed == 0
+        and not unlisted
+        and not wrong_action
+        and not missing
+        and not hardcoded_checked
+    )
+    if ok:
+        return True, f"Zoom menu = the {len(rows)} allow-listed rows, each on its real `Action`; every `checked:` is `false` or read from `app.` state"
+    return False, (
+        f"found_struct={struct_at != -1}, zoom_rows_fn={bool(rows_body)}, action_none_rows={dead_rows}, multiplayer_cursors={fake_check}, "
+        f"optional_action={optional_action}, unparsed_rows={unparsed}, unlisted_labels={unlisted}, wrong_action={wrong_action}, "
+        f"missing_rows={missing}, hardcoded_checked={hardcoded_checked}"
+    )
+
+
+UPDATER_GUARD_FIRST_STATEMENT = re.compile(r"\{\s*if\s+!\s*(?:\w+::)*UPDATER_UI_ENABLED\b[^{;]*\{\s*return\b")
+UPDATER_GUARD_BLOCK = re.compile(r"\bif\s+(?:\w+::)*UPDATER_UI_ENABLED\s*\{")
+
+
+def matching_brace_end(src: str, open_idx: int) -> int:
+    """Index just past the `}` matching the `{` at `open_idx` (literal-aware)."""
+    depth, i, n = 0, open_idx, len(src)
+    while i < n:
+        end = literal_end(src, i)
+        if end:
+            i = end
+            continue
+        if src[i] == "{":
+            depth += 1
+        elif src[i] == "}":
+            depth -= 1
+            if depth == 0:
+                return i + 1
+        i += 1
+    return n
+
+
+def check_z14(updater_rs: str, tabs_rs: str) -> Tuple[bool, str]:
+    # Both arguments are shipped code: comments and #[cfg(test)] items are already stripped.
+    uses_sample = "sample_for_channel" in updater_rs
+    hidden = bool(re.search(r"pub const UPDATER_UI_ENABLED:\s*bool\s*=\s*false\s*;", updater_rs))
+
+    # Tab-bar entry: every `top-tab-update-btn` / `updater::` use must sit inside `if ...UPDATER_UI_ENABLED { ... }` CODE.
+    guarded_spans = [(m.start(), matching_brace_end(tabs_rs, m.end() - 1)) for m in UPDATER_GUARD_BLOCK.finditer(tabs_rs)]
+    entry_uses = [m.start() for m in re.finditer(r"top-tab-update-btn|updater::UpdaterState|\.check_for_updates\(", tabs_rs)]
+    unguarded_tab_uses = [at for at in entry_uses if not any(lo <= at < hi for lo, hi in guarded_spans)]
+    tab_entry_gated = not unguarded_tab_uses
+
+    # Home sidebar card + update modal: the guard is the first statement of the function body.
+    card_guarded = bool(UPDATER_GUARD_FIRST_STATEMENT.match(extract_fn_body(updater_rs, "show_sidebar_card_in_rect")))
+    modal_guarded = bool(UPDATER_GUARD_FIRST_STATEMENT.match(extract_fn_body(updater_rs, "show_update_modal")))
+
+    ok = (not uses_sample or hidden) and tab_entry_gated and card_guarded and modal_guarded
+    if ok:
+        return True, f"updater UI hidden={hidden}, sample manifest used={uses_sample}; guard is code in tabs.rs button, sidebar card and update modal"
+    return False, (
+        f"updater builds a sample manifest but its UI is reachable: hidden={hidden}, uses_sample={uses_sample}, "
+        f"tabs.rs unguarded updater uses at offsets {unguarded_tab_uses}, sidebar card guard first={card_guarded}, modal guard first={modal_guarded}"
+    )
+
+
+def run_all_checks(sources: Optional["SourceSet"] = None) -> List[Dict[str, Any]]:
+    sources = sources or SourceSet.from_disk()
+    read_src = sources.raw
     terminal_rs = read_src("terminal.rs")
     specs_rs = read_src("specs.rs")
-    toolbar_rs = read_src("panels/toolbar.rs")
     home_rs = read_src("home/mod.rs")
     right_rs = read_src("panels/right.rs")
     inspect_rs = read_src("panels/inspect.rs")
@@ -343,6 +611,9 @@ def run_all_checks() -> List[Dict[str, Any]]:
     picker_rs = read_src("widgets/picker.rs")
     panels_mod_rs = read_src("panels/mod.rs")
     vars_view_rs = read_src("variables/view.rs")
+    menus_code = sources.code("panels/menus.rs")
+    updater_code = sources.code("updater.rs")
+    tabs_code = sources.code("tabs.rs")
 
     specs = [
         ("Z01", "terminal.rs", "Real CLI binary detection & invocation in submit_chat_prompt", lambda: check_z01(terminal_rs)),
@@ -352,11 +623,13 @@ def run_all_checks() -> List[Dict[str, Any]]:
         ("Z05", "specs.rs", "specs-ask-agent-bar hosts editable TextEdit::singleline(ask_input)", lambda: check_z05(specs_rs)),
         ("Z06", "specs.rs", "Right Inspector dynamic active_section_toc & interactive SpecComment", lambda: check_z06(specs_rs)),
         ("Z07", "specs.rs", "Unwrapped draw_wrapped_prose & render_tab_blueprints renders pkg.ui_contract", lambda: check_z07(specs_rs)),
-        ("Z08", "panels/toolbar.rs", "Contextual sub-toolbar buttons mutate app.doc / app.tool", lambda: check_z08(toolbar_rs)),
+        ("Z08", "panels/toolbar.rs + cmdk.rs", "Contextual sub-toolbar buttons mutate app.doc / app.tool; ctx-crop / ctx-remove-bg / cmdk Remove background stay removed", lambda: check_z08(sources)),
         ("Z09", "home/mod.rs", "Act::ExportFig writes .fig to disk & Nav::AllFolders/Templates/Libraries filter distinctly", lambda: check_z09(home_rs)),
         ("Z10", "panels/right.rs", "Share copies to clipboard & Dev Mode 2nd tab renders Dev Plugins inspector", lambda: check_z10(right_rs)),
         ("Z11", "panels/inspect.rs + properties.rs", "Dev Mode Code Connect/MCP/Redlines/Keyframes & Copy to Slides mutate state/clipboard", lambda: check_z11(inspect_rs, properties_rs, dev_sections_rs)),
         ("Z12", "widgets/picker.rs + panels/mod.rs + variables/view.rs", "Mode::Image creates Paint::Image/doc.images & scrollbars support Sense::click_and_drag()", lambda: check_z12(picker_rs, panels_mod_rs, vars_view_rs, properties_rs)),
+        ("Z13", "panels/menus.rs", "Zoom menu rows are the allow-listed set on real Actions; no hard-coded checked state", lambda: check_z13(menus_code)),
+        ("Z14", "updater.rs + tabs.rs", "Sample-manifest updater UI stays hidden (guard is code in tabs, sidebar card, modal) until a real manifest fetch exists", lambda: check_z14(updater_code, tabs_code)),
     ]
 
     results: List[Dict[str, Any]] = []

@@ -101,9 +101,12 @@ fn paint_instance_diamond(p: &Painter, center: Pos2, radius: f32, col: Color32) 
 }
 
 type LabelRectsKey = (u64, NodeId, u64, u32, u32, u32, u32, u32, u32, u32);
+type LabelRectsCacheEntry = (LabelRectsKey, Vec<(NodeId, ERect)>);
+type ChromeNodesKey = (u64, NodeId, u64);
+type ChromeNodesCacheEntry = (ChromeNodesKey, Vec<(NodeId, bool, bool, bool)>);
 thread_local! {
-    static LABEL_RECTS_CACHE: std::cell::RefCell<Option<(LabelRectsKey, Vec<(NodeId, ERect)>)>> = const { std::cell::RefCell::new(None) };
-    static CHROME_NODES_CACHE: std::cell::RefCell<Option<((u64, NodeId, u64), Vec<(NodeId, bool, bool, bool)>)>> = const { std::cell::RefCell::new(None) };
+    static LABEL_RECTS_CACHE: std::cell::RefCell<Option<LabelRectsCacheEntry>> = const { std::cell::RefCell::new(None) };
+    static CHROME_NODES_CACHE: std::cell::RefCell<Option<ChromeNodesCacheEntry>> = const { std::cell::RefCell::new(None) };
 }
 
 /// Screen rects of the name labels above top-level frames, components, instances, and sections.

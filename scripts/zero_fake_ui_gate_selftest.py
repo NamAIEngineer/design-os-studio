@@ -1,0 +1,158 @@
+#!/usr/bin/env python3
+"""
+Self-test for `scripts/zero_fake_ui_gate.py` (pytest-free).
+
+Re-introduces each known fake-UI regression into an in-memory copy of the app source and
+asserts the gate FAILS on exactly the invariant that guards it. The files on disk are never
+touched. Also asserts the gate still PASSES the unmodified tree and ignores comment-only /
+test-only mentions of the retired names.
+
+Run: python3 scripts/zero_fake_ui_gate_selftest.py   (exit 0 = every regression is caught)
+"""
+
+from __future__ import annotations
+
+import importlib.util
+import sys
+from pathlib import Path
+from typing import Dict, List, Optional, Tuple
+
+GATE_PATH = Path(__file__).with_name("zero_fake_ui_gate.py")
+_spec = importlib.util.spec_from_file_location("zero_fake_ui_gate", GATE_PATH)
+assert _spec and _spec.loader
+gate = importlib.util.module_from_spec(_spec)
+sys.modules["zero_fake_ui_gate"] = gate
+_spec.loader.exec_module(gate)
+
+ZOOM_IN_ROW = 'ZoomRowSpec { label: "Zoom in", shortcut: "⌘+", action: Action::ZoomIn, checked: false, sep_after: false },'
+SIDEBAR_GUARD = (
+    "pub fn show_sidebar_card_in_rect(ui: &mut Ui, rect: Rect, state: &mut UpdaterState) {\n"
+    "    if !UPDATER_UI_ENABLED {\n        return;\n    }\n"
+)
+
+# (case label, invariant that must fail, file, anchor in the real source, replacement)
+REGRESSIONS: List[Tuple[str, str, str, str, str]] = [
+    (
+        "1. toast-only ctx-crop (Icon::Rectangle) back in the toolbar",
+        "Z08",
+        "panels/toolbar.rs",
+        '(Icon::Rectangle, "ctx-select-area", "Select area"),',
+        '(Icon::Rectangle, "ctx-select-area", "Select area"), (Icon::Rectangle, "ctx-crop", "Crop"),',
+    ),
+    (
+        '2. "Outlines" zoom row mapped to ZoomIn with a hard-coded check',
+        "Z13",
+        "panels/menus.rs",
+        ZOOM_IN_ROW,
+        ZOOM_IN_ROW + '\n        ZoomRowSpec { label: "Outlines", shortcut: "⌘⇧O", action: Action::ZoomIn, checked: true, sep_after: false },',
+    ),
+    (
+        "3. `if UPDATER_UI_ENABLED` guard removed from tabs.rs (comment still names the constant)",
+        "Z14",
+        "tabs.rs",
+        "if crate::home::updater::UPDATER_UI_ENABLED {",
+        "{",
+    ),
+    (
+        "4. updater modal guard removed",
+        "Z14",
+        "updater.rs",
+        "if !UPDATER_UI_ENABLED || !state.modal_open {",
+        "if !state.modal_open {",
+    ),
+    # Extra coverage of the same hardening rules.
+    ("5. updater sidebar card guard removed", "Z14", "updater.rs", SIDEBAR_GUARD, SIDEBAR_GUARD.split("\n", 1)[0] + "\n"),
+    ("6. cmdk 'Remove background' entry back", "Z08", "cmdk.rs", 'title: "Boost resolution",', 'title: "Remove background",'),
+    ("7. ctx-remove-bg match arm back", "Z08", "panels/toolbar.rs", '"ctx-select-area" => {', '"ctx-remove-bg" => {}\n        "ctx-select-area" => {'),
+    (
+        "8. allow-listed zoom row with a hard-coded checked: true",
+        "Z13",
+        "panels/menus.rs",
+        ZOOM_IN_ROW,
+        ZOOM_IN_ROW.replace("checked: false", "checked: true"),
+    ),
+    (
+        "9. unlisted zoom row even with a state-backed check",
+        "Z13",
+        "panels/menus.rs",
+        ZOOM_IN_ROW,
+        ZOOM_IN_ROW + '\n        ZoomRowSpec { label: "Outlines", shortcut: "", action: Action::ToggleRulers, checked: app.ui.rulers, sep_after: false },',
+    ),
+    (
+        "10. allow-listed label rewired to a different action",
+        "Z13",
+        "panels/menus.rs",
+        ZOOM_IN_ROW,
+        ZOOM_IN_ROW.replace("Action::ZoomIn", "Action::ZoomOut"),
+    ),
+]
+
+
+def verdicts(sources: "gate.SourceSet") -> Dict[str, Dict[str, object]]:
+    return {r["id"]: r for r in gate.run_all_checks(sources)}
+
+
+def main() -> int:
+    base = gate.SourceSet.from_disk()
+    failures: List[str] = []
+
+    baseline = verdicts(base)
+    bad = [cid for cid, r in baseline.items() if not r["passed"]]
+    print(f"baseline (unmodified tree): {len(baseline) - len(bad)}/{len(baseline)} invariants pass")
+    if bad:
+        failures.append(f"baseline already failing: {bad}")
+
+    print("-" * 100)
+    for label, check_id, rel, anchor, replacement in REGRESSIONS:
+        mutated = base.with_replacement(rel, anchor, replacement)
+        result = verdicts(mutated)
+        caught = not result[check_id]["passed"]
+        note = ""
+        if label.startswith("3."):
+            # Old weak check: any mention of the constant in tabs.rs (here, the comment) counted as gated.
+            naive_would_pass = "UPDATER_UI_ENABLED" in mutated.raw("tabs.rs")
+            note = f" (substring check would still pass: {naive_would_pass})"
+            if not naive_would_pass:
+                failures.append(f"{label}: self-test premise broken, the comment no longer names the constant")
+        print(f"{'CAUGHT' if caught else 'MISSED':<7}| gate {check_id} FAIL expected | {label}{note}")
+        if caught:
+            print(f"        evidence: {str(result[check_id]['detail'])[:170]}")
+        else:
+            failures.append(f"{label}: gate {check_id} still passes")
+
+    print("-" * 100)
+    controls: List[Tuple[str, str, str, str, str]] = [
+        (
+            "comment-only mention of every retired name is ignored",
+            "Z08",
+            "cmdk.rs",
+            'title: "Boost resolution",',
+            '// ctx-crop ctx-remove-bg Remove background\n        title: "Boost resolution",',
+        ),
+        (
+            "test-only mention of a retired name is ignored",
+            "Z08",
+            "cmdk.rs",
+            "#[cfg(test)]\nmod tests {",
+            '#[cfg(test)]\nmod tests {\n    const RETIRED: &str = "ctx-crop";',
+        ),
+    ]
+    for label, check_id, rel, anchor, replacement in controls:
+        result = verdicts(base.with_replacement(rel, anchor, replacement))
+        ok = bool(result[check_id]["passed"])
+        print(f"{'OK' if ok else 'WRONG':<7}| gate {check_id} PASS expected | {label}")
+        if not ok:
+            failures.append(f"control failed: {label}: {result[check_id]['detail']}")
+
+    print("-" * 100)
+    if failures:
+        print("SELF-TEST FAIL")
+        for f in failures:
+            print(f"  - {f}")
+        return 1
+    print(f"SELF-TEST PASS: {len(REGRESSIONS)}/{len(REGRESSIONS)} regressions caught, {len(controls)}/{len(controls)} controls clean")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

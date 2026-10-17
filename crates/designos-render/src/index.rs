@@ -270,16 +270,14 @@ impl SceneIndex {
                             if let Some(p) = doc.get(page) {
                                 let id_ts = sk::Transform::identity();
                                 for &cid in &p.children {
-                                    if self.entries.get(&cid).map_or(true, |ce| ce.parent != Some(page)) {
+                                    if self.entries.get(&cid).is_none_or(|ce| ce.parent != Some(page)) {
                                         self.build(doc, cid, id_ts, Some(page));
                                     }
                                 }
                             }
-                        } else if doc.get(id).is_some() {
-                            if doc.page_of(id) == Some(page) && !self.update_subtree(doc, id, rev) {
-                                ok = false;
-                                break;
-                            }
+                        } else if doc.get(id).is_some() && doc.page_of(id) == Some(page) && !self.update_subtree(doc, id, rev) {
+                            ok = false;
+                            break;
                         }
                     }
                     if ok {
@@ -531,7 +529,7 @@ impl SceneIndex {
                                     old_e.children
                                 } else {
                                     for &c in &n.children {
-                                        if self.entries.get(&c).map_or(true, |ce| ce.parent != Some(dirty_id)) {
+                                        if self.entries.get(&c).is_none_or(|ce| ce.parent != Some(dirty_id)) {
                                             self.build(doc, c, ts, Some(dirty_id));
                                         }
                                     }

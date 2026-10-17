@@ -89,11 +89,7 @@ impl Shell {
         }
         // GPU canvas on by default; small test fixture screenshots stay on the deterministic CPU path unless --gpu
         let saved = library.as_deref().and_then(|l| crate::comments::settings::load_flag(l, "use_gpu"));
-        shell.app.canvas.gpu.pref = if screenshot {
-            gpu_flag || shell.app.doc.nodes.len() > 5_000
-        } else {
-            gpu_flag || saved.unwrap_or(true)
-        };
+        shell.app.canvas.gpu.pref = if screenshot { gpu_flag || shell.app.doc.nodes.len() > 5_000 } else { gpu_flag || saved.unwrap_or(true) };
         shell.app.tabs.always_visible = true;
         if shell.app.home.is_none() {
             let mut tabs = std::mem::take(&mut shell.app.tabs);
@@ -313,14 +309,7 @@ impl Shell {
                 }
                 let base_doc = app.doc.clone();
                 let hud = apply_micro_interaction_continuous_frame(&mut app, &base_doc, slug, 0, total);
-                seq_capture = Some(MicroSeqCapture {
-                    slug: slug.to_string(),
-                    cur: 0,
-                    total,
-                    base_doc,
-                    hud,
-                    wait_frames: 0,
-                });
+                seq_capture = Some(MicroSeqCapture { slug: slug.to_string(), cur: 0, total, base_doc, hud, wait_frames: 0 });
             }
         }
         let shot = opts.screenshot.map(|path| Shot {
@@ -1326,7 +1315,8 @@ pub fn apply_micro_interaction_showcase_preset(app: &mut App, preset: &str) {
     };
     match base {
         "micro-autolayout" => {
-            let (gap, pad, primary_sz, width, align_p, cards): (f32, [f32; 4], Sizing, f32, LayoutAlign, Vec<(&str, Color, Sizing)>) = match step {
+            type FlowCards = Vec<(&'static str, Color, Sizing)>;
+            let (gap, pad, primary_sz, width, align_p, cards): (f32, [f32; 4], Sizing, f32, LayoutAlign, FlowCards) = match step {
                 1 => (
                     12.0,
                     [16.0, 16.0, 16.0, 16.0],
@@ -1469,7 +1459,8 @@ pub fn apply_micro_interaction_showcase_preset(app: &mut App, preset: &str) {
             }
         }
         "micro-css-grid" => {
-            let (col1, col2, gap, pad, fw, fh, specs): (GridTrack, GridTrack, f32, f32, f32, f32, Vec<(&str, Color, u16, u16, f32, f32)>) = match step {
+            type GridCellSpecs = Vec<(&'static str, Color, u16, u16, f32, f32)>;
+            let (col1, col2, gap, pad, fw, fh, specs): (GridTrack, GridTrack, f32, f32, f32, f32, GridCellSpecs) = match step {
                 1 => (
                     GridTrack::Flex(1.0),
                     GridTrack::Flex(1.0),
@@ -2049,24 +2040,13 @@ fn lerp_dv(a: designos_doc::Vec2, b: designos_doc::Vec2, t: f32) -> designos_doc
 }
 
 fn lerp_color(a: designos_doc::Color, b: designos_doc::Color, t: f32) -> designos_doc::Color {
-    designos_doc::Color {
-        r: lerp_f32(a.r, b.r, t),
-        g: lerp_f32(a.g, b.g, t),
-        b: lerp_f32(a.b, b.b, t),
-        a: lerp_f32(a.a, b.a, t),
-    }
+    designos_doc::Color { r: lerp_f32(a.r, b.r, t), g: lerp_f32(a.g, b.g, t), b: lerp_f32(a.b, b.b, t), a: lerp_f32(a.a, b.a, t) }
 }
 
 /// Mutates `app` continuously at normalized time `u = cur / (total - 1)` (`0.0..=1.0`)
 /// from a clean `base_doc` snapshot so every frame of `--panel micro-<slug>:seq:<N>`
 /// renders real interpolated canvas geometry, handles, and inspector states.
-pub fn apply_micro_interaction_continuous_frame(
-    app: &mut App,
-    base_doc: &designos_doc::Document,
-    slug: &str,
-    cur: usize,
-    total: usize,
-) -> MicroSeqHud {
+pub fn apply_micro_interaction_continuous_frame(app: &mut App, base_doc: &designos_doc::Document, slug: &str, cur: usize, total: usize) -> MicroSeqHud {
     use designos_doc::vector::End as VEnd;
     use designos_doc::{
         Affine, AutoLayout, Color, DevStatus, GridTrack, HandleMirror, LayoutAlign, LayoutDirection, Node, NodeKind, Paint, Rect as DRect, Sizing,
@@ -2691,11 +2671,7 @@ pub fn apply_micro_interaction_continuous_frame(
         }
         "micro-scale-tool" => {
             app.tool = crate::canvas::tools::Tool::Scale;
-            let mult = if u < 0.72 {
-                lerp_f32(1.00, 1.88, smooth01(u / 0.72))
-            } else {
-                lerp_f32(1.88, 1.50, smooth01((u - 0.72) / 0.28))
-            };
+            let mult = if u < 0.72 { lerp_f32(1.00, 1.88, smooth01(u / 0.72)) } else { lerp_f32(1.88, 1.50, smooth01((u - 0.72) / 0.28)) };
             let ref_id = app.doc.alloc_id();
             let mut ref_card = Node::frame(ref_id, DRect::new(2130.0, 2200.0, 256.0, 160.0));
             ref_card.name = "Baseline · 1.00× (256×160)".into();
@@ -2790,7 +2766,7 @@ pub fn apply_micro_interaction_continuous_frame(
             hud.zoom = 1.34;
             hud.cursor_page = DV::new(2420.0 + w, 2520.0 + h * 0.5);
             hud.dragging = true;
-            hud.accent_orange = u >= 0.35 && u < 0.68;
+            hud.accent_orange = (0.35..0.68).contains(&u);
             hud.badge_text = msg;
             hud.keycap = key.into();
             hud.caption = "Inspector label scrubbing, inline math evaluation & hex shorthand (#1..#9, #50..#54)".into();
@@ -2897,9 +2873,7 @@ pub fn apply_micro_interaction_continuous_frame(
                 selected.push(bid);
 
                 let tid = app.doc.alloc_id();
-                let mut style = TextStyle::default();
-                style.font_size = lerp_f32(15.0, 18.0, t_all);
-                style.letter_spacing = lerp_f32(0.0, 1.4, t_all);
+                let style = TextStyle { font_size: lerp_f32(15.0, 18.0, t_all), letter_spacing: lerp_f32(0.0, 1.4, t_all), ..TextStyle::default() };
                 let txt = Node::text(tid, DRect::new(16.0, 88.0, 144.0, 84.0), format!("Tracking +{:.1}px\nAuto-Height", style.letter_spacing), style);
                 let _ = app.doc.insert(fid, txt);
             }
@@ -2916,9 +2890,9 @@ pub fn apply_micro_interaction_continuous_frame(
         "micro-components-variables" => {
             // M12: Components (`Opt+Cmd+K`), Variables (`=`) Live Mode Switch & Prototype Noodles
             let t = smooth01(u);
-            let is_dark = u >= 0.35 && u < 0.72;
+            let is_dark = (0.35..0.72).contains(&u);
             let is_proto = u >= 0.72;
-            if u >= 0.28 && u < 0.72 {
+            if (0.28..0.72).contains(&u) {
                 app.open_variables();
                 app.vars.full = false;
             }
@@ -2942,11 +2916,8 @@ pub fn apply_micro_interaction_continuous_frame(
                     format!("◇ Instance {:02} · Mode={}", i, if is_dark { "Dark" } else { "Light" })
                 };
                 card.fills = vec![Paint::solid(surf)];
-                card.stroke = DStroke {
-                    paints: vec![Paint::solid(Color::rgb(0x97, 0x47, 0xFF))],
-                    weight: if i == 0 { 2.5 } else { 1.5 },
-                    ..Default::default()
-                };
+                card.stroke =
+                    DStroke { paints: vec![Paint::solid(Color::rgb(0x97, 0x47, 0xFF))], weight: if i == 0 { 2.5 } else { 1.5 }, ..Default::default() };
                 card.corner_radii = [16.0; 4];
                 let cid = app.doc.insert(page, card).unwrap();
 
@@ -2971,7 +2942,13 @@ pub fn apply_micro_interaction_continuous_frame(
             } else {
                 "Prototype Tab · Interactive Variant & Flow Wiring".into()
             };
-            hud.keycap = if u < 0.35 { "⌥⌘K".into() } else if u < 0.72 { "= · Modes".into() } else { "Prototype".into() };
+            hud.keycap = if u < 0.35 {
+                "⌥⌘K".into()
+            } else if u < 0.72 {
+                "= · Modes".into()
+            } else {
+                "Prototype".into()
+            };
             hud.caption = "Master Component propagation, Variables mode switching & Prototype flows (#71..#100)".into();
         }
         _ => {}
@@ -2984,24 +2961,10 @@ pub fn apply_micro_interaction_continuous_frame(
 
 /// Paints the native on-canvas pointer, pulsing drag ring, live metric pill, and bottom shortcut HUD
 /// directly into the `egui` foreground layer during `--panel micro-<slug>:seq:<N>` recording.
-fn paint_micro_seq_hud(
-    ui: &egui::Ui,
-    app: &App,
-    canvas_rect: Rect,
-    _right_rect: Rect,
-    hud: &MicroSeqHud,
-    cur: usize,
-    total: usize,
-) {
+fn paint_micro_seq_hud(ui: &egui::Ui, app: &App, canvas_rect: Rect, _right_rect: Rect, hud: &MicroSeqHud, cur: usize, total: usize) {
     let p = ui.ctx().layer_painter(egui::LayerId::new(egui::Order::Foreground, egui::Id::new("micro-seq-hud")));
-    let cursor_pos = hud
-        .cursor_screen_override
-        .unwrap_or_else(|| app.view.to_screen(canvas_rect.min, hud.cursor_page));
-    let accent = if hud.accent_orange {
-        egui::Color32::from_rgb(0xE3, 0x63, 0x23)
-    } else {
-        egui::Color32::from_rgb(0x0D, 0x99, 0xFF)
-    };
+    let cursor_pos = hud.cursor_screen_override.unwrap_or_else(|| app.view.to_screen(canvas_rect.min, hud.cursor_page));
+    let accent = if hud.accent_orange { egui::Color32::from_rgb(0xE3, 0x63, 0x23) } else { egui::Color32::from_rgb(0x0D, 0x99, 0xFF) };
 
     if let Some(start_page) = hud.drag_start_page {
         let start_pos = app.view.to_screen(canvas_rect.min, start_page);
@@ -3028,11 +2991,7 @@ fn paint_micro_seq_hud(
         Pos2::new(tip.x + 8.5, tip.y + 13.5),
         Pos2::new(tip.x + 15.0, tip.y + 13.5),
     ];
-    p.add(egui::Shape::convex_polygon(
-        arrow.clone(),
-        egui::Color32::from_rgb(0x11, 0x12, 0x16),
-        egui::Stroke::new(2.0, egui::Color32::WHITE),
-    ));
+    p.add(egui::Shape::convex_polygon(arrow.clone(), egui::Color32::from_rgb(0x11, 0x12, 0x16), egui::Stroke::new(2.0, egui::Color32::WHITE)));
 
     // Floating live metric pill near cursor
     if !hud.badge_text.is_empty() {
@@ -3063,33 +3022,16 @@ fn paint_micro_seq_hud(
         let cw = widgets::text_width(&p, &hud.caption, &font_cap);
         let bar_w = (kw + cw + 46.0).min(canvas_rect.width() - 24.0);
         let bar_h = 38.0;
-        let bar_rect = Rect::from_center_size(
-            Pos2::new(canvas_rect.center().x, canvas_rect.top() + 48.0),
-            Vec2::new(bar_w, bar_h),
-        );
+        let bar_rect = Rect::from_center_size(Pos2::new(canvas_rect.center().x, canvas_rect.top() + 48.0), Vec2::new(bar_w, bar_h));
         widgets::elevation_shadow(&p, bar_rect, 10);
         p.rect_filled(bar_rect, 10.0, egui::Color32::from_rgba_unmultiplied(17, 18, 22, 238));
-        p.rect_stroke(
-            bar_rect,
-            10.0,
-            egui::Stroke::new(1.0, egui::Color32::from_rgba_unmultiplied(255, 255, 255, 36)),
-            egui::StrokeKind::Outside,
-        );
+        p.rect_stroke(bar_rect, 10.0, egui::Stroke::new(1.0, egui::Color32::from_rgba_unmultiplied(255, 255, 255, 36)), egui::StrokeKind::Outside);
         let key_rect = Rect::from_min_size(Pos2::new(bar_rect.left() + 10.0, bar_rect.top() + 7.0), Vec2::new(kw, 24.0));
         p.rect_filled(key_rect, 6.0, accent);
         p.text(key_rect.center(), Align2::CENTER_CENTER, &hud.keycap, font_key, egui::Color32::WHITE);
-        p.text(
-            Pos2::new(key_rect.right() + 12.0, bar_rect.center().y),
-            Align2::LEFT_CENTER,
-            &hud.caption,
-            font_cap,
-            egui::Color32::from_rgb(0xF4, 0xF4, 0xF6),
-        );
+        p.text(Pos2::new(key_rect.right() + 12.0, bar_rect.center().y), Align2::LEFT_CENTER, &hud.caption, font_cap, egui::Color32::from_rgb(0xF4, 0xF4, 0xF6));
         let prog = if total <= 1 { 1.0 } else { (cur as f32 + 1.0) / (total as f32) };
-        let prog_rect = Rect::from_min_size(
-            Pos2::new(bar_rect.left() + 8.0, bar_rect.bottom() - 3.0),
-            Vec2::new((bar_w - 16.0) * prog, 2.0),
-        );
+        let prog_rect = Rect::from_min_size(Pos2::new(bar_rect.left() + 8.0, bar_rect.bottom() - 3.0), Vec2::new((bar_w - 16.0) * prog, 2.0));
         p.rect_filled(prog_rect, 1.0, accent);
     }
 }

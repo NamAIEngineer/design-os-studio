@@ -7,6 +7,22 @@ use std::io::{Cursor, Read};
 
 /// Hard cap on any single decompressed chunk / zip entry (zip-bomb guard).
 const MAX_INFLATED: u64 = 2 << 30;
+/// Cap on everything inflated while opening one archive (all entries together).
+const MAX_INFLATED_TOTAL: u64 = 4 << 30;
+/// Cap on zip entries inspected; real files hold one entry per embedded image.
+const MAX_ZIP_ENTRIES: usize = 100_000;
+
+/// Inflate allowance shared by every read of one archive or container.
+struct Budget {
+    per_read: u64,
+    left: u64,
+}
+
+impl Budget {
+    fn new(per_read: u64, total: u64) -> Self {
+        Self { per_read, left: total }
+    }
+}
 
 pub const MAGIC_KIWI: &[u8; 8] = b"fig-kiwi";
 pub const MAGIC_JAM: &[u8; 8] = b"fig-jam.";
@@ -18,6 +34,9 @@ pub struct Archive {
     /// `images/<hash>` entries keyed by file name.
     pub images: BTreeMap<String, Vec<u8>>,
     pub meta: Option<serde_json::Value>,
+    /// Inflate allowance left after opening the zip, so [`read_archive_chunks`] continues the same budget.
+    /// `None` for a bare container (nothing was inflated yet).
+    inflate_left: Option<u64>,
 }
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
@@ -37,17 +56,29 @@ pub fn open(bytes: &[u8]) -> Result<Archive, FigError> {
     Err(FigError::Format("missing fig-kiwi magic or zip header".into()))
 }
 
-fn read_limited(r: impl Read) -> Result<Vec<u8>, FigError> {
+fn read_limited(r: impl Read, budget: &mut Budget) -> Result<Vec<u8>, FigError> {
+    let cap = budget.per_read.min(budget.left);
     let mut out = Vec::new();
-    r.take(MAX_INFLATED + 1).read_to_end(&mut out).map_err(|e| FigError::Format(format!("read error: {e}")))?;
-    if out.len() as u64 > MAX_INFLATED {
+    r.take(cap + 1).read_to_end(&mut out).map_err(|e| FigError::Format(format!("read error: {e}")))?;
+    if out.len() as u64 > cap {
         return Err(FigError::Format("decompressed data too large".into()));
     }
+    budget.left -= out.len() as u64;
     Ok(out)
 }
 
 fn open_zip(bytes: &[u8]) -> Result<Archive, FigError> {
+    let mut budget = Budget::new(MAX_INFLATED, MAX_INFLATED_TOTAL);
+    let mut archive = open_zip_with(bytes, &mut budget, MAX_ZIP_ENTRIES)?;
+    archive.inflate_left = Some(budget.left);
+    Ok(archive)
+}
+
+fn open_zip_with(bytes: &[u8], budget: &mut Budget, max_entries: usize) -> Result<Archive, FigError> {
     let mut zip = zip::ZipArchive::new(Cursor::new(bytes)).map_err(|e| FigError::Format(format!("zip: {e}")))?;
+    if zip.len() > max_entries {
+        return Err(FigError::Format(format!("zip has too many entries ({})", zip.len())));
+    }
     let mut arch = Archive::default();
     let mut have_canvas = false;
     for i in 0..zip.len() {
@@ -57,15 +88,15 @@ fn open_zip(bytes: &[u8]) -> Result<Archive, FigError> {
         }
         let Ok(name) = file.name().map(|n| n.replace('\\', "/")) else { continue };
         if name == "canvas.fig" || name.ends_with("/canvas.fig") {
-            arch.canvas = read_limited(file)?;
+            arch.canvas = read_limited(file, budget)?;
             have_canvas = true;
         } else if name == "meta.json" {
-            if let Ok(data) = read_limited(file) {
+            if let Ok(data) = read_limited(file, budget) {
                 arch.meta = serde_json::from_slice(&data).ok();
             }
         } else if let Some(h) = name.strip_prefix("images/") {
             if !h.is_empty() && !h.contains('/') {
-                if let Ok(data) = read_limited(file) {
+                if let Ok(data) = read_limited(file, budget) {
                     arch.images.insert(h.to_string(), data);
                 }
             }
@@ -78,7 +109,19 @@ fn open_zip(bytes: &[u8]) -> Result<Archive, FigError> {
 }
 
 /// Splits a fig-kiwi container into decompressed `(schema, message)` chunks.
+///
+/// Starts from a fresh inflate allowance; use [`read_archive_chunks`] for an opened [`Archive`] so the zip
+/// entries and the chunks of one file draw on a single budget.
 pub fn read_chunks(canvas: &[u8]) -> Result<(Vec<u8>, Vec<u8>), FigError> {
+    read_chunks_with(canvas, &mut Budget::new(MAX_INFLATED, MAX_INFLATED_TOTAL))
+}
+
+/// Splits the canvas of an opened archive, continuing the inflate budget that opening it already drew on.
+pub fn read_archive_chunks(archive: &Archive) -> Result<(Vec<u8>, Vec<u8>), FigError> {
+    read_chunks_with(&archive.canvas, &mut Budget::new(MAX_INFLATED, archive.inflate_left.unwrap_or(MAX_INFLATED_TOTAL)))
+}
+
+fn read_chunks_with(canvas: &[u8], budget: &mut Budget) -> Result<(Vec<u8>, Vec<u8>), FigError> {
     if canvas.len() < 12 || !(canvas.starts_with(MAGIC_KIWI) || canvas.starts_with(MAGIC_JAM)) {
         return Err(FigError::Format("not a fig-kiwi container".into()));
     }
@@ -97,7 +140,7 @@ pub fn read_chunks(canvas: &[u8]) -> Result<(Vec<u8>, Vec<u8>), FigError> {
     if chunks.len() < 2 {
         return Err(FigError::Format("container has fewer than two chunks".into()));
     }
-    Ok((decompress(chunks[0])?, decompress(chunks[1])?))
+    Ok((decompress_with(chunks[0], budget)?, decompress_with(chunks[1], budget)?))
 }
 
 pub fn container_version(canvas: &[u8]) -> Option<u32> {
@@ -107,15 +150,19 @@ pub fn container_version(canvas: &[u8]) -> Option<u32> {
 
 /// Detects zstd by magic, otherwise raw DEFLATE (falling back to zlib wrapping).
 pub fn decompress(data: &[u8]) -> Result<Vec<u8>, FigError> {
+    decompress_with(data, &mut Budget::new(MAX_INFLATED, MAX_INFLATED_TOTAL))
+}
+
+fn decompress_with(data: &[u8], budget: &mut Budget) -> Result<Vec<u8>, FigError> {
     if data.starts_with(&[0x28, 0xB5, 0x2F, 0xFD]) {
         let dec = ruzstd::decoding::StreamingDecoder::new(data).map_err(|e| FigError::Format(format!("zstd: {e}")))?;
-        return read_limited(dec);
+        return read_limited(dec, budget);
     }
-    match read_limited(flate2::read::DeflateDecoder::new(data)) {
+    match read_limited(flate2::read::DeflateDecoder::new(data), budget) {
         Ok(v) => Ok(v),
         Err(e) => {
             // Some producers use zlib framing.
-            read_limited(flate2::read::ZlibDecoder::new(data)).map_err(|_| e)
+            read_limited(flate2::read::ZlibDecoder::new(data), budget).map_err(|_| e)
         }
     }
 }
@@ -188,6 +235,75 @@ mod tests {
         assert_eq!(a.canvas, c);
         assert_eq!(a.images["abcd"], vec![1, 2, 3]);
         assert_eq!(a.meta.unwrap()["file_name"], "x");
+    }
+
+    fn zip_of(entries: &[(&str, Vec<u8>)]) -> Vec<u8> {
+        use std::io::Write;
+        let mut w = zip::ZipWriter::new(Cursor::new(Vec::new()));
+        let opts = zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+        for (name, data) in entries {
+            w.start_file(*name, opts).unwrap();
+            w.write_all(data).unwrap();
+        }
+        w.finish().unwrap().into_inner()
+    }
+
+    #[test]
+    fn zip_total_inflate_budget_spans_entries() {
+        // Each entry fits the per-read cap, but together they exceed the archive budget.
+        let canvas = write_container(b"s", b"m", Compression::Deflate, 1);
+        let zero = vec![0u8; 3000];
+        let z = zip_of(&[("canvas.fig", canvas), ("images/a", zero.clone()), ("images/b", zero.clone()), ("images/c", zero)]);
+        let mut roomy = Budget::new(4096, 1 << 20);
+        assert_eq!(open_zip_with(&z, &mut roomy, 16).unwrap().images.len(), 3);
+        let mut tight = Budget::new(4096, 7000);
+        let a = open_zip_with(&z, &mut tight, 16).unwrap();
+        assert!(a.images.len() < 3, "images past the shared budget must be dropped, got {}", a.images.len());
+        let mut tiny = Budget::new(4096, 10);
+        assert!(open_zip_with(&z, &mut tiny, 16).is_err(), "canvas over budget is an error");
+    }
+
+    #[test]
+    fn chunk_inflation_shares_the_archive_budget() {
+        // The container's two chunks each fit the per-read cap, but together with the zip entry they exceed
+        // the one budget the whole file is allowed.
+        let zero = vec![0u8; 3000];
+        let canvas = write_container(&zero, &zero, Compression::Deflate, 1);
+        let z = zip_of(&[("canvas.fig", canvas)]);
+
+        let mut shared = Budget::new(4096, 5000);
+        let archive = open_zip_with(&z, &mut shared, 16).unwrap();
+        assert!(read_chunks_with(&archive.canvas, &mut shared).is_err(), "chunks must draw on what the archive left");
+        // A fresh allowance (the old behaviour) would have accepted the same file.
+        assert!(read_chunks(&archive.canvas).is_ok());
+        let mut roomy = Budget::new(4096, 1 << 20);
+        let archive = open_zip_with(&z, &mut roomy, 16).unwrap();
+        assert!(read_chunks_with(&archive.canvas, &mut roomy).is_ok());
+    }
+
+    #[test]
+    fn archive_records_what_opening_it_inflated() {
+        let c = write_container(b"schema", b"message", Compression::Deflate, 15);
+        let z = write_zip(&c, &BTreeMap::new(), None);
+        let a = open(&z).unwrap();
+        assert!(a.inflate_left.is_some_and(|left| left < MAX_INFLATED_TOTAL), "{:?}", a.inflate_left);
+        let (s, m) = read_archive_chunks(&a).unwrap();
+        assert_eq!((s.as_slice(), m.as_slice()), (&b"schema"[..], &b"message"[..]));
+        // A bare container has no archive budget to continue from and starts with the full allowance.
+        let bare = open(&c).unwrap();
+        assert_eq!(bare.inflate_left, None);
+        assert!(read_archive_chunks(&bare).is_ok());
+    }
+
+    #[test]
+    fn zip_entry_count_is_capped() {
+        let canvas = write_container(b"s", b"m", Compression::Deflate, 1);
+        let mut entries = vec![("canvas.fig".to_string(), canvas)];
+        entries.extend((0..20).map(|i| (format!("images/{i}"), vec![1u8])));
+        let refs: Vec<(&str, Vec<u8>)> = entries.iter().map(|(n, d)| (n.as_str(), d.clone())).collect();
+        let z = zip_of(&refs);
+        assert!(open_zip_with(&z, &mut Budget::new(1 << 20, 1 << 20), 10).is_err());
+        assert!(open_zip_with(&z, &mut Budget::new(1 << 20, 1 << 20), 100).is_ok());
     }
 
     #[test]
