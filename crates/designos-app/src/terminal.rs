@@ -140,7 +140,7 @@ impl AgentCliPreset {
     pub fn cli_launch_command(self) -> &'static str {
         match self {
             AgentCliPreset::Claude => {
-                "claude --dangerously-skip-permissions --mcp-config \"$DESIGNOS_MCP_CONFIG\" --append-system-prompt \"You are inside DESIGN:OS Studio bound exclusively to file '$DESIGNOS_DOC_NAME' (session $DESIGNOS_SESSION_DIR). Always read $DESIGNOS_CONTEXT_JSON for the current selected page (current_page_id / current_page_name) and deliver all designs onto that file and page via designos-mcp tools (designos_apply_spec, designos_create_node, designos_update_node) or by writing NodeSpec JSON to $DESIGNOS_LIVE_SPEC.\""
+                "claude --dangerously-skip-permissions --mcp-config \"$DESIGNOS_MCP_CONFIG\" --settings \"$DESIGNOS_SESSION_DIR/hooks.json\" --append-system-prompt \"You are inside DESIGN:OS Studio bound exclusively to file '$DESIGNOS_DOC_NAME' (session $DESIGNOS_SESSION_DIR). Always read $DESIGNOS_CONTEXT_JSON for the current selected page (current_page_id / current_page_name) and deliver all designs onto that file and page via designos-mcp tools (designos_apply_spec, designos_create_node, designos_update_node) or by writing NodeSpec JSON to $DESIGNOS_LIVE_SPEC.\""
             }
             // Codex hands an MCP child only the `env` / `env_vars` entries of its config, never the parent
             // env, so the session variables `designos-mcp` reads are listed in `env_vars` and the
@@ -290,8 +290,9 @@ pub fn build_real_cli_command(preset: AgentCliPreset, prompt: &str, live_spec: &
     let sys_prompt = "You are inside DESIGN:OS Studio bound exclusively to file '$DESIGNOS_DOC_NAME' (session $DESIGNOS_SESSION_DIR). Always read $DESIGNOS_CONTEXT_JSON for the current selected page (current_page_id / current_page_name) and deliver all designs onto that file and page via designos-mcp tools (designos_apply_spec, designos_create_node, designos_update_node) or by writing NodeSpec JSON to $DESIGNOS_LIVE_SPEC.";
     match preset {
         AgentCliPreset::Claude => format!(
-            "{env_prefix} claude --dangerously-skip-permissions -p '{escaped}' --mcp-config \"{}\" --append-system-prompt \"{sys_prompt}\"",
-            mcp_config.display()
+            "{env_prefix} claude --dangerously-skip-permissions -p '{escaped}' --mcp-config \"{}\" --settings '{}' --append-system-prompt \"{sys_prompt}\"",
+            mcp_config.display(),
+            session_dir.join("hooks.json").display()
         ),
         AgentCliPreset::Codex => format!(
             "{env_prefix} codex --dangerously-bypass-approvals-and-sandbox exec '{escaped} (Deliver onto current file/page in $DESIGNOS_CONTEXT_JSON via designos-mcp or write NodeSpec JSON to $DESIGNOS_LIVE_SPEC)'"
@@ -864,77 +865,25 @@ impl TerminalState {
         }
         write_grok_session_config(&self.session_dir, &mcp_config);
 
-        let agent_status_path = self.session_dir.join("agent-status.json");
-        let hooks_json = serde_json::json!({
+        let page_context_path = self.session_dir.join("page-context.json");
+        let page_context = serde_json::json!({
             "session_id": self.session_id,
             "doc_name": self.doc_name,
+            "file_path": file_path.map(|p| p.display().to_string()),
             "current_page_id": self.current_page_id,
             "current_page_name": self.current_page_name,
-            "hooks": {
-                "UserPromptSubmit": [
-                    {
-                        "matcher": "*",
-                        "hooks": [
-                            {
-                                "type": "command",
-                                "command": format!(
-                                    "printf '{{\"state\":\"working\"}}\\n' > '{}' && cat '{}'",
-                                    agent_status_path.display(),
-                                    self.context_json_path.display()
-                                )
-                            }
-                        ]
-                    }
-                ],
-                "PreToolUse": [
-                    {
-                        "matcher": "*",
-                        "hooks": [
-                            {
-                                "type": "command",
-                                "command": format!("printf '{{\"state\":\"working\"}}\\n' > '{}'", agent_status_path.display())
-                            }
-                        ]
-                    }
-                ],
-                "PostToolUse": [
-                    {
-                        "matcher": "*",
-                        "hooks": [
-                            {
-                                "type": "command",
-                                "command": format!("printf '{{\"state\":\"working\"}}\\n' > '{}'", agent_status_path.display())
-                            }
-                        ]
-                    }
-                ],
-                "PermissionRequest": [
-                    {
-                        "matcher": "*",
-                        "hooks": [
-                            {
-                                "type": "command",
-                                "command": format!("printf '{{\"state\":\"waiting\"}}\\n' > '{}'", agent_status_path.display())
-                            }
-                        ]
-                    }
-                ],
-                "Stop": [
-                    {
-                        "matcher": "*",
-                        "hooks": [
-                            {
-                                "type": "command",
-                                "command": format!("printf '{{\"state\":\"done\"}}\\n' > '{}'", agent_status_path.display())
-                            }
-                        ]
-                    }
-                ]
-            }
         });
-        let hooks_path = self.session_dir.join("hooks.json");
-        if let Ok(bytes) = serde_json::to_vec_pretty(&hooks_json) {
-            let _ = atomic_write_session_file(&hooks_path, &bytes);
+        if let Ok(bytes) = serde_json::to_vec_pretty(&page_context) {
+            let _ = atomic_write_session_file(&page_context_path, &bytes);
+        }
+        let status_path = self.session_dir.join("agent-status.json");
+        // Claude `--settings <file>` and Grok's project hook file share one shape: matcher groups under `hooks`.
+        if let Ok(bytes) = serde_json::to_vec_pretty(&session_hooks_settings(&status_path, &page_context_path)) {
+            let _ = atomic_write_session_file(&self.session_dir.join("hooks.json"), &bytes);
+            let _ = atomic_write_session_file(&self.session_dir.join(".grok").join("hooks").join("designos-status.json"), &bytes);
+        }
+        if let Ok(bytes) = serde_json::to_vec_pretty(&agy_session_hooks(&status_path)) {
+            let _ = atomic_write_session_file(&self.session_dir.join(".agents").join("hooks.json"), &bytes);
         }
 
         let skill_md = format!(
@@ -2140,6 +2089,45 @@ fn atomic_write_session_file(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     let tmp = path.with_extension(format!("tmp.{}", std::process::id()));
     std::fs::write(&tmp, bytes)?;
     std::fs::rename(&tmp, path)
+}
+
+/// Shell command that records `state` for the Agents panel (`agent-status.json`, read by `poll_agent_status`).
+fn status_hook_command(status_path: &Path, state: &str) -> String {
+    format!("printf '{{\"state\":\"{state}\"}}\\n' > '{}'", status_path.display())
+}
+
+fn command_handler_group(command: String) -> serde_json::Value {
+    serde_json::json!([{ "matcher": "*", "hooks": [{ "type": "command", "command": command }] }])
+}
+
+/// Session hooks in Claude's settings shape (`{"hooks": {Event: [{matcher, hooks: [...]}]}}`): the
+/// status channel plus a prompt hook that injects the page (never the selection) as context.
+fn session_hooks_settings(status_path: &Path, page_context_path: &Path) -> serde_json::Value {
+    serde_json::json!({
+        "hooks": {
+            "UserPromptSubmit": command_handler_group(format!(
+                "{} && cat '{}'",
+                status_hook_command(status_path, "working"),
+                page_context_path.display()
+            )),
+            "PreToolUse": command_handler_group(status_hook_command(status_path, "working")),
+            "PostToolUse": command_handler_group(status_hook_command(status_path, "working")),
+            "PermissionRequest": command_handler_group(status_hook_command(status_path, "waiting")),
+            "Stop": command_handler_group(status_hook_command(status_path, "done")),
+        }
+    })
+}
+
+/// Antigravity's `<workspace>/.agents/hooks.json`: named hook, flat handlers for the invocation and
+/// stop events. Handlers must answer with a JSON object on stdout.
+fn agy_session_hooks(status_path: &Path) -> serde_json::Value {
+    let handler = |state: &str| serde_json::json!([{ "type": "command", "command": format!("{}; printf '{{}}'", status_hook_command(status_path, state)) }]);
+    serde_json::json!({
+        "designos-status": {
+            "PreInvocation": handler("working"),
+            "Stop": handler("done"),
+        }
+    })
 }
 
 /// `designos-mcp` next to the running Studio binary, or the bare name (resolved through `PATH`) when it is not built there.
@@ -5372,5 +5360,99 @@ Done!
             let text = std::fs::read_to_string(st.session_dir.join(rel)).unwrap_or_else(|e| panic!("{rel}: {e}"));
             assert!(text.contains("designos-studio") && text.contains("Skill Layout File"), "{rel}: {text}");
         }
+    }
+
+    fn read_json(path: &std::path::Path) -> serde_json::Value {
+        serde_json::from_str(&std::fs::read_to_string(path).unwrap_or_else(|e| panic!("{}: {e}", path.display()))).expect("valid json")
+    }
+
+    /// Runs one hook command through `sh -c`, as every CLI does, and returns its stdout.
+    fn run_hook_command(command: &str) -> String {
+        let out = std::process::Command::new("sh").arg("-c").arg(command).output().expect("run hook");
+        assert!(out.status.success(), "hook failed: {command}");
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    }
+
+    fn status_state(session_dir: &std::path::Path) -> Option<String> {
+        let raw = std::fs::read_to_string(session_dir.join("agent-status.json")).ok()?;
+        serde_json::from_str::<serde_json::Value>(&raw).ok()?.get("state")?.as_str().map(str::to_string)
+    }
+
+    fn provisioned_session(tab: u64) -> TerminalState {
+        let mut st = TerminalState::for_tab(tab);
+        let mut doc = Document::new("Hooks File");
+        let page = doc.add_page("Page 1");
+        let a = doc.add_page("Page 2");
+        st.sync_live_file_context(&doc, page, &[a], None);
+        let _ = std::fs::remove_file(st.session_dir.join("agent-status.json"));
+        st
+    }
+
+    #[test]
+    fn claude_hooks_file_is_a_valid_settings_file_and_the_launch_loads_it() {
+        assert!(
+            AgentCliPreset::Claude.cli_launch_command().contains("--settings \"$DESIGNOS_SESSION_DIR/hooks.json\""),
+            "{}",
+            AgentCliPreset::Claude.cli_launch_command()
+        );
+        let live_spec = std::path::Path::new("/tmp/designos-session-x/live-agent-out.spec.json");
+        let sel_json = std::path::Path::new("/tmp/designos-session-x/selection.spec.json");
+        let one_shot = build_real_cli_command(AgentCliPreset::Claude, "hi", live_spec, sel_json);
+        assert!(one_shot.contains("--settings '/tmp/designos-session-x/hooks.json'"), "{one_shot}");
+
+        let st = provisioned_session(741);
+        let settings = read_json(&st.session_dir.join("hooks.json"));
+        let top: Vec<&String> = settings.as_object().unwrap().keys().collect();
+        assert_eq!(top, vec!["hooks"], "a --settings file takes Claude's settings keys only");
+        let hooks = settings["hooks"].as_object().unwrap();
+        for event in ["UserPromptSubmit", "PreToolUse", "PostToolUse", "PermissionRequest", "Stop"] {
+            let groups = hooks.get(event).unwrap_or_else(|| panic!("{event} missing")).as_array().unwrap();
+            let handler = &groups[0]["hooks"][0];
+            assert_eq!(handler["type"].as_str(), Some("command"), "{event}");
+            assert!(handler["command"].as_str().is_some(), "{event}");
+        }
+    }
+
+    #[test]
+    fn session_hooks_drive_agent_status_from_working_to_done_in_every_supported_cli() {
+        let st = provisioned_session(742);
+        let claude = read_json(&st.session_dir.join("hooks.json"));
+        let grok = read_json(&st.session_dir.join(".grok").join("hooks").join("designos-status.json"));
+        assert_eq!(claude, grok, "Grok loads the same matcher groups as Claude");
+        let agy = read_json(&st.session_dir.join(".agents").join("hooks.json"));
+
+        let cmd = |v: &serde_json::Value, event: &str| v["hooks"][event][0]["hooks"][0]["command"].as_str().unwrap().to_string();
+        let agy_flat = |event: &str| agy["designos-status"][event][0]["command"].as_str().unwrap_or_else(|| panic!("agy {event}")).to_string();
+
+        // Claude and Grok: prompt submitted -> working, turn over -> done.
+        for (name, prompt, stop) in
+            [("claude", cmd(&claude, "UserPromptSubmit"), cmd(&claude, "Stop")), ("grok", cmd(&grok, "UserPromptSubmit"), cmd(&grok, "Stop"))]
+        {
+            let _ = std::fs::remove_file(st.session_dir.join("agent-status.json"));
+            run_hook_command(&prompt);
+            assert_eq!(status_state(&st.session_dir).as_deref(), Some("working"), "{name}");
+            run_hook_command(&stop);
+            assert_eq!(status_state(&st.session_dir).as_deref(), Some("done"), "{name}");
+        }
+        // Antigravity: model call -> working, execution loop end -> done; handlers answer with a JSON object.
+        let _ = std::fs::remove_file(st.session_dir.join("agent-status.json"));
+        let reply = run_hook_command(&agy_flat("PreInvocation"));
+        assert!(serde_json::from_str::<serde_json::Value>(reply.trim()).map(|v| v.is_object()).unwrap_or(false), "agy hook reply: {reply:?}");
+        assert_eq!(status_state(&st.session_dir).as_deref(), Some("working"), "agy");
+        run_hook_command(&agy_flat("Stop"));
+        assert_eq!(status_state(&st.session_dir).as_deref(), Some("done"), "agy");
+    }
+
+    #[test]
+    fn prompt_hook_injects_page_context_but_never_the_selection() {
+        let st = provisioned_session(743);
+        let hooks = read_json(&st.session_dir.join("hooks.json"));
+        let injected = run_hook_command(hooks["hooks"]["UserPromptSubmit"][0]["hooks"][0]["command"].as_str().unwrap());
+        let ctx: serde_json::Value = serde_json::from_str(injected.trim()).expect("hook prints the page context json");
+        assert_eq!(ctx["doc_name"].as_str(), Some("Hooks File"));
+        assert_eq!(ctx["current_page_name"].as_str(), Some("Page 1"));
+        assert!(ctx.get("selected_node_ids").is_none(), "owner ruling: the selection is never auto-injected: {injected}");
+        // context.json (with the selection) stays on disk for the agent to read when asked.
+        assert!(read_json(&st.context_json_path).get("selected_node_ids").is_some());
     }
 }
