@@ -2201,6 +2201,7 @@ impl App {
 
     /// Exports the selected frame (or first screen on the active page) to `examples/specs/<slug>.spec.json`.
     pub fn export_active_frame_to_spec(&mut self) {
+        self.settle_pending_relayout();
         let target_id = self.selection.first().copied().or_else(|| self.doc.get(self.page).and_then(|p| p.children.first().copied())).unwrap_or(self.page);
         let node_name = self.doc.get(target_id).map(|n| n.name.clone()).unwrap_or_else(|| "screen".to_string());
         let slug: String = node_name
@@ -2239,6 +2240,7 @@ impl App {
             .as_ref()
             .and_then(|p| p.parent().map(|d| d.join(format!("{stem}.fig"))))
             .unwrap_or_else(|| std::env::temp_dir().join(format!("{stem}.fig")));
+        self.settle_pending_relayout();
         match crate::io::save_path(&self.doc, &default_path) {
             Ok(saved) => self.show_toast(format!("Saved .fig binary to {}", saved.display()), false),
             Err(e) => self.show_toast(e, true),
@@ -2739,7 +2741,6 @@ pub fn show_reader(app: &mut App, ui: &mut Ui, rect: Rect) {
             SpecTab::CanvasScreens => pkg.plan_md.clone(),
         };
         ui.ctx().copy_text(md_body.clone());
-        app.specs.last_ai_copy = Some(md_body);
         app.show_toast("Copied Spec Markdown (.md) to clipboard", false);
     }
 
@@ -2753,7 +2754,6 @@ pub fn show_reader(app: &mut App, ui: &mut Ui, rect: Rect) {
     if share_resp.clicked() {
         let deep_link = format!("designos://specs/{}#{}", pkg.slug, app.specs.active_tab.anchor());
         ui.ctx().copy_text(deep_link.clone());
-        app.specs.last_ai_copy = Some(deep_link);
         app.show_toast("Copied Spec deep-link to clipboard", false);
     }
 
@@ -3140,6 +3140,9 @@ pub fn show_right(app: &mut App, ui: &mut Ui, rect: Rect) {
     });
     scrollbar(ui, body_rect, app.specs.right_scroll, est_h);
 
+    // Reference @spec is an explicit "in Agent" action: `last_ai_copy` is consumed by
+    // `shell.rs` via `send_copy_for_ai`, which pastes only the fixed file-reference
+    // sentence into an already-open agent tab (never auto-Enter, never a shell tab).
     if let Some(payload) = copied_payload {
         ui.ctx().copy_text(payload.clone());
         app.specs.last_ai_copy = Some(payload);
@@ -4069,14 +4072,14 @@ mod tests {
         click_at(&ctx, &mut app, status_r.center());
         assert_eq!(app.specs.packages[app.specs.selected_pkg].status, "in-review");
 
-        // 2. Click Share & Copy .md buttons -> populate last_ai_copy
+        // 2. Click Share & Copy .md buttons -> clipboard only; last_ai_copy stays None
         let share_r = get_rect(&ctx, "specs-share-btn");
         click_at(&ctx, &mut app, share_r.center());
-        assert!(app.specs.last_ai_copy.as_deref().unwrap_or("").starts_with("designos://specs/"));
+        assert!(app.specs.last_ai_copy.is_none());
 
         let copy_md_r = get_rect(&ctx, "specs-copy-md");
         click_at(&ctx, &mut app, copy_md_r.center());
-        assert!(!app.specs.last_ai_copy.as_deref().unwrap_or("").is_empty());
+        assert!(app.specs.last_ai_copy.is_none());
 
         // 3. Click TOC item 1 -> updates scroll
         let toc1_r = get_rect(&ctx, "specs-toc-item-1");

@@ -45,6 +45,12 @@ pub const DEFAULT_REFINE_VRAM_BUDGET_BYTES: u64 = 512 * 1024 * 1024;
 /// programs (~1.28 KB each) inside the 512 MiB byte budget and stall CPU/GPU
 /// pass encoding. 4,096 is >3x the largest real-document refine while bounding
 /// pathological tiny-node pass explosions (`CLAUDE.md` §4.4).
+///
+/// This is a CPU/GPU work bound, not the Metal device limit. What the Metal
+/// backend cannot run is a submission with more than 2,047 render passes (4,096
+/// command buffers, two per pass), and a few hundred programs reach that: a
+/// blurred layer alone is 4 passes. The executor splits such frames into
+/// several submissions (`submit.rs`), so no program count can lose the device.
 pub const DEFAULT_REFINE_MAX_PROGRAMS: usize = 4_096;
 
 /// Compile-time knobs.
@@ -152,6 +158,8 @@ impl SceneCompiler {
             ss,
             vram: root_bytes(out_size, size, ss),
             reserved: (0, 0),
+            stencil_root: None,
+            stencil_children_skipped: false,
         };
         let node = doc.get(root_node).map(|n| resolve_node(doc, n));
         let bg = match node.as_deref().map(|n| &n.kind) {
@@ -305,6 +313,20 @@ fn draws_children(n: &Node) -> bool {
     !n.children.is_empty() && !matches!(n.kind, NodeKind::BooleanOp(_))
 }
 
+/// The opaque box of a mask whose stencil takes its alpha from its children
+/// alone (a frame, component or instance with children and no visible fill, see
+/// `designos_render::mask_stencil`), drawn without those children; `None` for
+/// any other mask.
+fn mask_frame_box(mask: &Node) -> Option<Node> {
+    if !draws_children(mask) || matches!(mask.kind, NodeKind::Text(_) | NodeKind::Group) || has_visible_fills(mask) {
+        return None;
+    }
+    let mut n = designos_render::mask_stencil(mask);
+    n.children.clear();
+    n.fills = vec![d::Paint::solid(d::Color::BLACK)];
+    Some(n)
+}
+
 fn special_blend(b: d::BlendMode) -> bool {
     !matches!(b, d::BlendMode::Normal | d::BlendMode::PassThrough)
 }
@@ -367,6 +389,11 @@ struct Ctx<'a> {
     /// Programs and bytes that effects being drawn have been promised but not
     /// opened yet (see `reserving`); the refine limits count them as used.
     reserved: (usize, u64),
+    /// The mask whose stencil is being drawn (see `draw_mask`).
+    stencil_root: Option<NodeId>,
+    /// The children of `stencil_root` were left out for being too small at this
+    /// zoom.
+    stencil_children_skipped: bool,
 }
 
 impl Ctx<'_> {
@@ -597,6 +624,15 @@ impl Ctx<'_> {
         }
     }
 
+    /// Called where a node leaves its children out for being too small: when
+    /// the node is the mask whose stencil is being drawn, `draw_mask` stands in
+    /// its box.
+    fn note_stencil_children_skipped(&mut self, n: &Node) {
+        if self.stencil_root == Some(n.id) {
+            self.stencil_children_skipped = true;
+        }
+    }
+
     /// A mask node clips the siblings that follow it.
     fn draw_mask(&mut self, mask: &Node, siblings: &[NodeId], i: usize, parent_ts: sk::Transform, ts: sk::Transform, clip: ClipId) {
         let doc = self.doc;
@@ -623,16 +659,24 @@ impl Ctx<'_> {
         let lclip = self.narrow_clip(clip, rect);
         // the mask program below is opened after the siblings: keep its slot
         self.reserving(1, mask_cost, |c| c.with_prog(layer, |c| c.draw_children(rest, parent_ts, lclip)));
-        let mut mask_node = mask.clone();
-        mask_node.blend = d::BlendMode::Normal;
-        mask_node.effects.clear();
-        mask_node.stroke.paints.clear();
-        if !matches!(mask_node.kind, NodeKind::Text(_) | NodeKind::Group) && !mask_node.fills.iter().any(|p| p.visible) {
-            mask_node.fills = vec![d::Paint::solid(d::Color::BLACK)];
-        }
+        let mask_node = designos_render::mask_stencil(mask);
         let mprog = self.new_prog(rect);
         let mclip = self.full_clip(rect);
-        self.with_prog(mprog, |c| c.draw_node(&mask_node, ts, mclip));
+        let deferred = self.geom.deferred_empty;
+        let enclosing = (self.stencil_root.replace(mask.id), std::mem::take(&mut self.stencil_children_skipped));
+        self.with_prog(mprog, |c| {
+            c.draw_node(&mask_node, ts, mclip);
+            // A frame mask takes its alpha from its children. If this frame left
+            // them out (geometry not built yet, or a frame too small for its
+            // children), the stencil is empty and hides every sibling the mask
+            // cuts: stand in the frame's box until the children draw.
+            if c.geom.deferred_empty != deferred || c.stencil_children_skipped {
+                if let Some(frame_box) = mask_frame_box(mask) {
+                    c.draw_node(&frame_box, ts, mclip);
+                }
+            }
+        });
+        (self.stencil_root, self.stencil_children_skipped) = enclosing;
         let pclip = self.full_clip(rect);
         self.push_op(Op::Composite(Box::new(CompositeOp {
             src: layer,
@@ -883,6 +927,7 @@ impl Ctx<'_> {
                 }
                 if draws_children(n) {
                     if zoom_lod && (sw.max(sh) < 6.0 || sw.min(sh) < 2.0) {
+                        self.note_stencil_children_skipped(n);
                         return;
                     }
                     if clips {
@@ -962,6 +1007,7 @@ impl Ctx<'_> {
         if draws_children(n) {
             let clips = n.kind.frame_props().map(|f| f.clips_content).unwrap_or(false);
             if zoom_lod && (sw.max(sh) < 6.0 || ((clips || has_visible_fills(n)) && sw.min(sh) < 2.0)) {
+                self.note_stencil_children_skipped(n);
                 return;
             }
             if clips {
