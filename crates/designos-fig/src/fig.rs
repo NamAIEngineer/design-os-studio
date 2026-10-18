@@ -273,7 +273,8 @@ struct Lk<'a> {
     /// Property definition id (including the `parentPropDefId` aliases that
     /// variants carry) -> (`Name#s:l`, REST type).
     prop_defs: HashMap<String, (String, &'static str)>,
-    /// Component or state-group key (`componentKey` / `key`) -> node guid (`s:l`).
+    /// Component or state-group key (`componentKey` / `key`) -> node guid (`s:l`). Only masters
+    /// are indexed; an instance contributes a key no master carries, mapped to the master it instances.
     comp_by_key: HashMap<String, String>,
     /// Node guid (`s:l`) -> Dev Mode handoff status (`READY_FOR_DEV` / `COMPLETED`)
     /// from `CANVAS.handoffStatusMap`.
@@ -297,6 +298,7 @@ impl<'a> Lk<'a> {
             handoff_status: HashMap::new(),
         };
         let mut aliases: Vec<(String, String)> = Vec::new();
+        let mut instance_keys: Vec<(String, String)> = Vec::new();
         for e in entries {
             let j = &e.json;
             let key = fstr(j, "key").filter(|k| !k.is_empty());
@@ -323,7 +325,11 @@ impl<'a> Lk<'a> {
                     lk.comp_by_key.insert(ck.to_string(), e.id.clone());
                 }
             } else if let Some(ck) = fstr(j, "componentKey").filter(|k| !k.is_empty()) {
-                lk.comp_by_key.insert(ck.to_string(), e.id.clone());
+                // An instance repeats its master's key. It only stands in for the master when
+                // nothing else carries the key, and then it points at the master it instances.
+                if let Some(master) = j.get("symbolData").and_then(|s| s.get("symbolID")).and_then(guid_str) {
+                    instance_keys.push((ck.to_string(), master));
+                }
             }
             match (fstr(j, "type"), key) {
                 (Some("VARIABLE"), Some(k)) => {
@@ -361,6 +367,9 @@ impl<'a> Lk<'a> {
                     }
                 }
             }
+        }
+        for (ck, master) in instance_keys {
+            lk.comp_by_key.entry(ck).or_insert(master);
         }
         for (id, parent) in aliases {
             if let Some(def) = lk.prop_defs.get(&parent).cloned() {
