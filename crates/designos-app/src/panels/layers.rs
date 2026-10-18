@@ -65,14 +65,14 @@ pub struct Row {
 
 const MAX_FLATTENED_ROWS: usize = 20_000;
 
-/// Visible rows, top-most layer first (paint order, so `reverse_z` frames list their children as stored), honoring expansion.
+/// Visible rows, top-most layer first (reverse z-order), honoring expansion.
 pub fn flatten(doc: &Document, page: NodeId, expanded: &HashSet<NodeId>) -> Vec<Row> {
     fn rec(doc: &Document, id: NodeId, depth: usize, expanded: &HashSet<NodeId>, out: &mut Vec<Row>) {
         if out.len() >= MAX_FLATTENED_ROWS {
             return;
         }
         let Some(n) = doc.get(id) else { return };
-        for c in n.children_front_to_back() {
+        for c in n.children.iter().rev() {
             if out.len() >= MAX_FLATTENED_ROWS {
                 return;
             }
@@ -129,20 +129,12 @@ pub fn drop_for(y: f32, rows: &[Row], doc: &Document, dragged: &[NodeId]) -> Opt
 pub fn resolve_drop(doc: &Document, rows: &[Row], drop: Drop, dragged: &[NodeId]) -> Option<(NodeId, usize)> {
     let row = rows.get(drop.row)?;
     let (parent, mut index) = match drop.kind {
-        // The front-most slot: the end of the list, or its start when the frame paints first-on-top.
-        DropKind::Inside => {
-            let host = doc.get(row.id)?;
-            (row.id, if host.paints_children_reversed() { 0 } else { host.children.len() })
-        }
+        DropKind::Inside => (row.id, doc.get(row.id)?.children.len()),
         DropKind::Before | DropKind::After => {
-            let parent_node = doc.get(doc.get(row.id)?.parent?)?;
-            let parent = parent_node.id;
-            let pos = parent_node.children.iter().position(|c| *c == row.id)?;
-            // Layers are listed top-first, so "before" (visually above) means a higher z index,
-            // which is a lower stored index when the parent paints first-on-top.
-            let above = if parent_node.paints_children_reversed() { pos } else { pos + 1 };
-            let below = if parent_node.paints_children_reversed() { pos + 1 } else { pos };
-            (parent, if drop.kind == DropKind::Before { above } else { below })
+            let parent = doc.get(row.id)?.parent?;
+            let pos = doc.get(parent)?.children.iter().position(|c| *c == row.id)?;
+            // Layers are listed top-first, so "before" (visually above) means a higher z index.
+            (parent, if drop.kind == DropKind::Before { pos + 1 } else { pos })
         }
     };
     let siblings = &doc.get(parent)?.children;
@@ -267,8 +259,7 @@ fn structural_hash(app: &App) -> u64 {
         h ^= (page.children.len() as u64).wrapping_mul(0x94D0_49BB_1331_11EB);
         for (i, &cid) in page.children.iter().take(64).enumerate() {
             let child_kids = app.doc.get(cid).map_or(0, |n| n.children.len()) as u64;
-            let reversed = app.doc.get(cid).is_some_and(|n| n.paints_children_reversed()) as u64;
-            h = h.rotate_left(7) ^ cid.0.wrapping_add((i as u64) << 32) ^ (child_kids << 16) ^ (reversed << 63);
+            h = h.rotate_left(7) ^ cid.0.wrapping_add((i as u64) << 32) ^ (child_kids << 16);
         }
         if let Some(&last_cid) = page.children.last() {
             h ^= last_cid.0.rotate_left(19);
@@ -283,8 +274,7 @@ fn structural_hash(app: &App) -> u64 {
                 let item = eid.0.wrapping_mul(0x517C_C1B7_2722_0A95)
                     ^ (en.children.len() as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15)
                     ^ first.rotate_left(13)
-                    ^ last.rotate_left(29)
-                    ^ (en.paints_children_reversed() as u64).wrapping_mul(0xD6E8_FEB8_6659_FD93);
+                    ^ last.rotate_left(29);
                 exp_acc = exp_acc.wrapping_add(item);
             }
         }
@@ -732,104 +722,6 @@ mod tests {
         // moving b above the frame: dragged sibling before index is discounted
         let (p, i) = resolve_drop(&d, &rows, Drop { row: 1, kind: DropKind::Before }, &[b]).unwrap();
         assert_eq!((p, i), (page, 1));
-    }
-
-    /// Page > host frame > [red, blue] (stored order); `reverse_z` puts red in front.
-    fn stacked(reverse_z: bool) -> (Document, NodeId, NodeId, NodeId, NodeId) {
-        use designos_doc::AutoLayout;
-        let mut d = Document::new("t");
-        let page = d.add_page("p");
-        let h = d.alloc_id();
-        let mut host = Node::frame(h, DRect::new(0.0, 0.0, 100.0, 100.0));
-        if let NodeKind::Frame(fp) = &mut host.kind {
-            fp.auto_layout = Some(AutoLayout { reverse_z, ..Default::default() });
-        }
-        let host = d.insert(page, host).unwrap();
-        let r = d.alloc_id();
-        let red = d.insert(host, Node::rectangle(r, DRect::new(0.0, 0.0, 10.0, 10.0))).unwrap();
-        let b = d.alloc_id();
-        let blue = d.insert(host, Node::rectangle(b, DRect::new(0.0, 0.0, 10.0, 10.0))).unwrap();
-        (d, page, host, red, blue)
-    }
-
-    /// Applies a resolved drop the way `App::move_to_parent` does and returns the host's child order.
-    fn children_after_drop(d: &mut Document, host: NodeId, moved: NodeId, index: usize) -> Vec<NodeId> {
-        d.reparent(moved, host, index).unwrap();
-        d.get(host).unwrap().children.clone()
-    }
-
-    #[test]
-    fn flatten_lists_reverse_z_children_front_first() {
-        let (d, page, host, red, blue) = stacked(true);
-        let ex: HashSet<NodeId> = [host].into();
-        assert_eq!(flatten(&d, page, &ex).iter().map(|r| r.id).collect::<Vec<_>>(), vec![host, red, blue], "first child is in front, so it is listed first");
-        let (d, page, host, red, blue) = stacked(false);
-        let ex: HashSet<NodeId> = [host].into();
-        assert_eq!(flatten(&d, page, &ex).iter().map(|r| r.id).collect::<Vec<_>>(), vec![host, blue, red], "control: last child is in front");
-    }
-
-    #[test]
-    fn reverse_z_drop_above_keeps_the_dragged_layer_in_front() {
-        let (mut d, page, host, red, blue) = stacked(true);
-        let ex: HashSet<NodeId> = [host].into();
-        let rows = flatten(&d, page, &ex);
-        // red dragged above blue: red stays in front
-        let blue_row = rows.iter().position(|r| r.id == blue).unwrap();
-        let (p, i) = resolve_drop(&d, &rows, Drop { row: blue_row, kind: DropKind::Before }, &[red]).unwrap();
-        assert_eq!(p, host);
-        assert_eq!(children_after_drop(&mut d, host, red, i), vec![red, blue]);
-        // blue dragged above red: blue moves in front
-        let red_row = rows.iter().position(|r| r.id == red).unwrap();
-        let (p, i) = resolve_drop(&d, &rows, Drop { row: red_row, kind: DropKind::Before }, &[blue]).unwrap();
-        assert_eq!(p, host);
-        assert_eq!(children_after_drop(&mut d, host, blue, i), vec![blue, red]);
-        // red dragged below blue (after its row): red goes behind blue
-        let (p, i) = resolve_drop(&d, &rows, Drop { row: rows.iter().position(|r| r.id == blue).unwrap(), kind: DropKind::After }, &[red]).unwrap();
-        assert_eq!(p, host);
-        assert_eq!(children_after_drop(&mut d, host, red, i), vec![blue, red]);
-    }
-
-    #[test]
-    fn reverse_z_inside_drop_becomes_front_most() {
-        let (mut d, page, host, red, blue) = stacked(true);
-        let ex: HashSet<NodeId> = HashSet::new();
-        let rows = flatten(&d, page, &ex);
-        let id = d.alloc_id();
-        let extra = d.insert(page, Node::rectangle(id, DRect::new(0.0, 0.0, 10.0, 10.0))).unwrap();
-        let (p, i) = resolve_drop(&d, &rows, Drop { row: 0, kind: DropKind::Inside }, &[extra]).unwrap();
-        assert_eq!((p, i), (host, 0));
-        assert_eq!(children_after_drop(&mut d, host, extra, i), vec![extra, red, blue]);
-        // control: a normal frame appends, which is the front-most slot
-        let (mut d, page, host, red, blue) = stacked(false);
-        let rows = flatten(&d, page, &HashSet::new());
-        let id = d.alloc_id();
-        let extra = d.insert(page, Node::rectangle(id, DRect::new(0.0, 0.0, 10.0, 10.0))).unwrap();
-        let (p, i) = resolve_drop(&d, &rows, Drop { row: 0, kind: DropKind::Inside }, &[extra]).unwrap();
-        assert_eq!((p, i), (host, 2));
-        assert_eq!(children_after_drop(&mut d, host, extra, i), vec![red, blue, extra]);
-    }
-
-    #[test]
-    fn non_reverse_z_drop_above_is_unchanged() {
-        let (mut d, page, host, red, blue) = stacked(false);
-        let rows = flatten(&d, page, &[host].into());
-        // rows: host, blue, red. Dragging red above blue puts red in front.
-        let blue_row = rows.iter().position(|r| r.id == blue).unwrap();
-        let (_, i) = resolve_drop(&d, &rows, Drop { row: blue_row, kind: DropKind::Before }, &[red]).unwrap();
-        assert_eq!(children_after_drop(&mut d, host, red, i), vec![blue, red]);
-    }
-
-    #[test]
-    fn rows_cache_follows_a_reverse_z_toggle() {
-        let (d, _page, host, red, blue) = stacked(false);
-        let mut app = App::new(d);
-        app.layers.expanded.insert(host);
-        app.layers.expanded_gen = 1;
-        assert_eq!(visible_rows_cached(&mut app).iter().map(|r| r.id).collect::<Vec<_>>(), vec![host, blue, red]);
-        if let NodeKind::Frame(fp) = &mut app.doc.get_mut(host).unwrap().kind {
-            fp.auto_layout = Some(designos_doc::AutoLayout { reverse_z: true, ..Default::default() });
-        }
-        assert_eq!(visible_rows_cached(&mut app).iter().map(|r| r.id).collect::<Vec<_>>(), vec![host, red, blue]);
     }
 
     #[test]
