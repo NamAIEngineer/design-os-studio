@@ -278,9 +278,12 @@ pub(super) fn bind_is_current(doc: &Document, id: NodeId, key: &str, variable: &
 }
 
 /// Whether applying `style` to `id` is still a pure re-link: the layer is not linked yet and its
-/// own values already equal the style's.
+/// values, as painted in its mode, already equal the style's. This compares on the same resolved
+/// view [`check`] matched on, so a value that equals the style only once a variable resolves in
+/// the layer's mode stays fixable.
 pub(super) fn style_is_current(doc: &Document, id: NodeId, style: &str) -> bool {
-    let (Some(n), Some(s)) = (doc.get(id), doc.styles.get(style)) else { return false };
+    let (Some(resolved), Some(s)) = (designos_doc::resolved_node(doc, id), doc.styles.get(style)) else { return false };
+    let n: &Node = &resolved;
     match s {
         Style::Fill(ps) => {
             let slot = if style_property(doc, style) == StyleProperty::Stroke { Slot::Stroke } else { Slot::Fill };

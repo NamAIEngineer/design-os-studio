@@ -58,6 +58,15 @@ impl Fx {
 
     /// A colour variable with one value per mode of the shared "Theme" collection (light default, dark).
     fn color_var(&mut self, name: &str, light: Color, dark: Color) -> String {
+        self.theme_var(name, VariableKind::Color, VariableValue::Color(light), VariableValue::Color(dark))
+    }
+
+    /// A number variable with one value per mode of the shared "Theme" collection.
+    fn number_var(&mut self, name: &str, light: f32, dark: f32) -> String {
+        self.theme_var(name, VariableKind::Number, VariableValue::Number(light), VariableValue::Number(dark))
+    }
+
+    fn theme_var(&mut self, name: &str, kind: VariableKind, light: VariableValue, dark: VariableValue) -> String {
         let coll = self.doc.variable_collections.entry("theme".into()).or_insert_with(|| VariableCollection {
             id: "theme".into(),
             name: "Theme".into(),
@@ -69,14 +78,14 @@ impl Fx {
         });
         let id = format!("var:{name}");
         coll.variables.push(id.clone());
-        let values = [("light".to_string(), VariableValue::Color(light)), ("dark".to_string(), VariableValue::Color(dark))].into_iter().collect();
+        let values = [("light".to_string(), light), ("dark".to_string(), dark)].into_iter().collect();
         self.doc.variables.insert(
             id.clone(),
             Variable {
                 id: id.clone(),
                 name: name.into(),
                 collection: "theme".into(),
-                kind: VariableKind::Color,
+                kind,
                 values,
                 description: String::new(),
                 scopes: vec![],
@@ -616,6 +625,7 @@ mod instances;
 mod not_painted_as_computed;
 mod outside_the_box;
 mod painted_behind;
+mod resolved_styles;
 mod safety;
 mod subtree_bounds;
 mod text_run_fills;
