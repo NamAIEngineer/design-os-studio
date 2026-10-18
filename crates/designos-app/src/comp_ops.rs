@@ -491,6 +491,7 @@ impl App {
     }
 
     /// Migrates the currently selected layer to a component slot in one undo step.
+    #[cfg(test)]
     pub fn migrate_selection_to_slot(&mut self) -> Result<(), &'static str> {
         let Some(&node) = self.selection.first() else {
             let msg = "Select a layer inside a main component to migrate to a slot";
