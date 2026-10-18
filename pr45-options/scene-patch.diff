@@ -1,0 +1,390 @@
+diff --git a/crates/designos-app/src/check_designs/mod.rs b/crates/designos-app/src/check_designs/mod.rs
+index 895fda8..ff6c4d3 100644
+--- a/crates/designos-app/src/check_designs/mod.rs
++++ b/crates/designos-app/src/check_designs/mod.rs
+@@ -16,6 +16,7 @@ mod detached;
+ mod fix;
+ pub mod fixture;
+ mod hardcoded;
++pub mod scenes;
+ mod state;
+ #[cfg(test)]
+ mod tests;
+diff --git a/crates/designos-app/src/check_designs/scenes.rs b/crates/designos-app/src/check_designs/scenes.rs
+new file mode 100644
+index 0000000..a6c3a06
+--- /dev/null
++++ b/crates/designos-app/src/check_designs/scenes.rs
+@@ -0,0 +1,213 @@
++//! Evidence scenes for the two open Check designs decisions (contrast backdrop, text-run fills).
++//! Selected with `SCENE=<name>` on `--panel present-variables`; `APPLY=1` clicks the panel's Fix for
++//! the scene's finding (and, for the `t*` scenes, then changes the bound variable to white).
++
++use super::{audit, Finding, Rule, Scope};
++use crate::app::App;
++use crate::layout;
++use designos_doc::{
++    Color, Document, Node, NodeId, NodeKind, Paint, Rect, StrokeAlign, TextRun, TextStyle, Variable, VariableCollection, VariableKind, VariableMode,
++    VariableValue,
++};
++
++pub const NAMES: [&str; 9] = ["s1", "s1g", "s2", "s2g", "s3", "s3b", "s4", "t1", "t2"];
++
++/// The colour variable the `t*` scenes bind and then turn white.
++pub const BRAND_VAR: &str = "brand-blue";
++pub const BLUE: Color = Color { r: 26.0 / 255.0, g: 115.0 / 255.0, b: 232.0 / 255.0, a: 1.0 };
++pub const RED: Color = Color { r: 229.0 / 255.0, g: 72.0 / 255.0, b: 77.0 / 255.0, a: 1.0 };
++
++/// One scene: its document and what the Fix step acts on.
++pub struct Scene {
++    pub doc: Document,
++    pub page: NodeId,
++    /// The text layer under test.
++    #[allow(dead_code)]
++    pub text: NodeId,
++    /// The finding the Fix step clicks.
++    pub rule: Rule,
++    /// Colour variable turned white after the fix (`t*` scenes).
++    pub variable: Option<&'static str>,
++}
++
++struct B {
++    doc: Document,
++    page: NodeId,
++}
++
++impl B {
++    fn new(background: Color) -> Self {
++        let mut doc = Document::new("Check designs evidence");
++        let page = doc.add_page("Page 1");
++        doc.get_mut(page).expect("page").kind = NodeKind::Page { background };
++        B { doc, page }
++    }
++
++    fn frame(&mut self, parent: NodeId, name: &str, at: Rect, fill: Option<Color>) -> NodeId {
++        let id = self.doc.alloc_id();
++        let mut n = Node::frame(id, at);
++        n.name = name.into();
++        n.fills = fill.map(Paint::solid).into_iter().collect();
++        if let Some(f) = n.kind.frame_props_mut() {
++            f.clips_content = false;
++        }
++        self.doc.insert(parent, n).expect("parent exists")
++    }
++
++    fn rect(&mut self, parent: NodeId, name: &str, at: Rect, fill: Color) -> NodeId {
++        let id = self.doc.alloc_id();
++        let mut n = Node::rectangle(id, at);
++        n.name = name.into();
++        n.fills = vec![Paint::solid(fill)];
++        self.doc.insert(parent, n).expect("parent exists")
++    }
++
++    fn text(&mut self, parent: NodeId, content: &str, at: (f32, f32), size: f32, color: Color) -> NodeId {
++        let id = self.doc.alloc_id();
++        let style = TextStyle { font_size: size, font_weight: 400, fills: vec![Paint::solid(color)], ..TextStyle::default() };
++        let mut n = Node::text(id, Rect::new(at.0, at.1, 100.0, 20.0), content, style);
++        n.name = content.into();
++        if let NodeKind::Text(t) = &n.kind {
++            n.size = layout::fit_text(t, n.size);
++        }
++        self.doc.insert(parent, n).expect("parent exists")
++    }
++
++    fn stroke(&mut self, id: NodeId, weight: f32, color: Color) {
++        let n = self.doc.get_mut(id).expect("node");
++        n.stroke.paints = vec![Paint::solid(color)];
++        n.stroke.weight = weight;
++        n.stroke.align = StrokeAlign::Inside;
++    }
++
++    fn done(self, text: NodeId, rule: Rule, variable: Option<&'static str>) -> Scene {
++        Scene { doc: self.doc, page: self.page, text, rule, variable }
++    }
++}
++
++/// Page white; an earlier 4 x 4 frame (no fill, no clip) holds a child at (100, 100); a later frame
++/// at (100, 100) holds white text. `child` is what the earlier frame's child paints.
++fn behind_unclipped_child(child: Option<(Rect, Color)>) -> Scene {
++    let mut b = B::new(Color::WHITE);
++    let earlier = b.frame(b.page, "Earlier", Rect::new(0.0, 0.0, 4.0, 4.0), None);
++    if let Some((at, c)) = child {
++        b.rect(earlier, "Child", at, c);
++    }
++    let later = b.frame(b.page, "Later", Rect::new(100.0, 100.0, 80.0, 40.0), None);
++    let text = b.text(later, "White text", (4.0, 10.0), 14.0, Color::WHITE);
++    b.done(text, Rule::Contrast, None)
++}
++
++/// A 100 x 40 white frame with a 30 px inside stroke and text at y = 0.
++fn inside_stroke(color: Color, stroke: Color) -> Scene {
++    let mut b = B::new(Color::rgb(0xED, 0xED, 0xED));
++    let card = b.frame(b.page, "Card", Rect::new(40.0, 40.0, 100.0, 40.0), Some(Color::WHITE));
++    b.stroke(card, 30.0, stroke);
++    let text = b.text(card, "Stroke text", (10.0, 0.0), 14.0, color);
++    b.done(text, Rule::Contrast, None)
++}
++
++/// Text coloured like the brand variable on a black page, with style runs covering the whole text.
++fn brand_text(highlight: bool) -> Scene {
++    let mut b = B::new(Color::BLACK);
++    b.doc.variable_collections.insert(
++        "brand".into(),
++        VariableCollection {
++            id: "brand".into(),
++            name: "Brand".into(),
++            modes: vec![VariableMode { id: "default".into(), name: "Default".into() }],
++            default_mode: "default".into(),
++            variables: vec![BRAND_VAR.into()],
++            key: None,
++            source_library_key: None,
++        },
++    );
++    b.doc.variables.insert(
++        BRAND_VAR.into(),
++        Variable {
++            id: BRAND_VAR.into(),
++            name: "Brand/Blue".into(),
++            collection: "brand".into(),
++            kind: VariableKind::Color,
++            values: [("default".to_string(), VariableValue::Color(BLUE))].into_iter().collect(),
++            description: String::new(),
++            scopes: vec![],
++            hidden_from_publishing: false,
++            key: None,
++            code_syntax: Default::default(),
++        },
++    );
++    let content = if highlight { "Check the highlighted word today" } else { "Brand blue label" };
++    let text = b.text(b.page, content, (40.0, 40.0), 28.0, BLUE);
++    let ranges: Vec<(usize, usize, Color)> = if highlight { vec![(0, 10, BLUE), (10, 21, RED), (21, content.len(), BLUE)] } else { vec![(0, content.len(), BLUE)] };
++    if let NodeKind::Text(t) = &mut b.doc.get_mut(text).expect("text").kind {
++        t.runs = ranges.into_iter().map(|(start, end, c)| TextRun { start, end, style: TextStyle { fills: vec![Paint::solid(c)], ..t.style.clone() } }).collect();
++    }
++    b.done(text, Rule::HardCodedValue, Some(BRAND_VAR))
++}
++
++pub fn build(name: &str) -> Option<Scene> {
++    Some(match name {
++        "s1" => behind_unclipped_child(Some((Rect::new(100.0, 100.0, 80.0, 40.0), Color::BLACK))),
++        // Same as s1 with a mid-grey child: the unneeded recolour then lands on the colour it must not.
++        "s1g" => behind_unclipped_child(Some((Rect::new(100.0, 100.0, 80.0, 40.0), Color::rgb(0x80, 0x80, 0x80)))),
++        "s2" => inside_stroke(Color::rgb(0x77, 0x77, 0x77), Color::BLACK),
++        "s2g" => inside_stroke(Color::WHITE, Color::rgb(0x80, 0x80, 0x80)),
++        "s3" => behind_unclipped_child(Some((Rect::new(400.0, 300.0, 80.0, 40.0), Color::BLACK))),
++        "s3b" => behind_unclipped_child(Some((Rect::new(100.0, 100.0, 80.0, 40.0), Color::rgba(0, 0, 0, 0)))),
++        "s4" => {
++            let mut b = B::new(Color::rgb(0xED, 0xED, 0xED));
++            let card = b.frame(b.page, "Card", Rect::new(40.0, 40.0, 200.0, 80.0), Some(Color::WHITE));
++            b.stroke(card, 1.0, Color::rgb(0xD4, 0xD4, 0xD8));
++            let text = b.text(card, "Light grey caption", (16.0, 30.0), 14.0, Color::rgb(0xBB, 0xBB, 0xBB));
++            b.done(text, Rule::Contrast, None)
++        }
++        "t1" => brand_text(false),
++        "t2" => brand_text(true),
++        _ => return None,
++    })
++}
++
++/// Clicks the Fix of the first fixable finding of `rule`; returns the finding that was fixed.
++pub fn fix_scene(app: &mut App, rule: Rule) -> Option<Finding> {
++    let report = audit(&app.doc, &Scope::Page(app.page));
++    let finding = report.findings.into_iter().find(|f| f.rule == rule && f.fix.is_some())?;
++    let fixed = app.check_designs_fix(&finding);
++    app.check_designs.invalidate();
++    fixed.then_some(finding)
++}
++
++/// Changes the colour variable to white, as editing it in the Variables panel would.
++pub fn turn_variable_white(app: &mut App, variable: &str) {
++    if let Some(v) = app.doc.variables.get_mut(variable) {
++        for value in v.values.values_mut() {
++            *value = VariableValue::Color(Color::WHITE);
++        }
++    }
++    app.changed();
++    app.check_designs.invalidate();
++}
++
++/// Shell hook: with `SCENE` set, replaces the document by the scene and opens the panel. With
++/// `APPLY=1` it clicks the fix (and, for the `t*` scenes, then turns the bound variable white);
++/// `APPLY=bind` clicks the fix only. Without `SCENE` it leaves the app untouched.
++pub fn apply_from_env(app: &mut App) {
++    let Ok(name) = std::env::var("SCENE") else { return };
++    let Some(scene) = build(&name.to_lowercase()) else {
++        eprintln!("designos: unknown SCENE '{name}' (known: {})", NAMES.join(", "));
++        return;
++    };
++    let (rule, variable) = (scene.rule, scene.variable);
++    app.doc = scene.doc;
++    app.page = scene.page;
++    app.selection.clear();
++    app.open_check_designs();
++    let mode = std::env::var("APPLY").unwrap_or_default();
++    if mode == "1" || mode == "bind" {
++        let fixed = fix_scene(app, rule);
++        eprintln!("designos: scene {name} fix applied: {}", fixed.map_or("NONE (no fixable finding)".to_string(), |f| f.fix_label));
++        if let (true, Some(v)) = (mode == "1", variable) {
++            turn_variable_white(app, v);
++        }
++    }
++}
+diff --git a/crates/designos-app/src/check_designs/tests.rs b/crates/designos-app/src/check_designs/tests.rs
+index 10eb9c6..315be14 100644
+--- a/crates/designos-app/src/check_designs/tests.rs
++++ b/crates/designos-app/src/check_designs/tests.rs
+@@ -593,4 +593,5 @@ fn a_fix_for_a_layer_that_changed_since_the_audit_is_refused_and_leaves_no_undo_
+ 
+ mod backdrop;
+ mod fix_all;
++mod probe;
+ mod safety;
+diff --git a/crates/designos-app/src/check_designs/tests/probe.rs b/crates/designos-app/src/check_designs/tests/probe.rs
+new file mode 100644
+index 0000000..1cb55b3
+--- /dev/null
++++ b/crates/designos-app/src/check_designs/tests/probe.rs
+@@ -0,0 +1,130 @@
++//! Evidence probe: per scene, what the audit lists, what the Fix does, and what the CPU renderer
++//! really paints afterwards. Prints one `PROBE` line per scene (`-- probe --nocapture`); asserts
++//! only what holds for every option.
++
++use super::*;
++use crate::check_designs::contrast::contrast_ratio;
++use crate::check_designs::scenes::{self, BLUE, NAMES, RED};
++use designos_doc::{resolved_node, Vec2};
++use designos_render::tiny_skia::Pixmap;
++use designos_render::{render_page, Viewport};
++
++fn render(doc: &Document, page: NodeId) -> Pixmap {
++    let mut pm = Pixmap::new(900, 400).expect("pixmap");
++    render_page(doc, page, &Viewport::default(), &mut pm);
++    pm
++}
++
++fn px(pm: &Pixmap, x: u32, y: u32) -> Color {
++    let p = pm.pixel(x, y).expect("inside the pixmap").demultiply();
++    Color::rgb(p.red(), p.green(), p.blue())
++}
++
++/// The text box in page space as integer pixel bounds.
++fn text_box(doc: &Document, text: NodeId) -> (u32, u32, u32, u32) {
++    let n = doc.get(text).expect("text");
++    let t = doc.world_transform(text);
++    let (a, b) = (t.apply(Vec2::new(0.0, 0.0)), t.apply(Vec2::new(n.size.x, n.size.y)));
++    (a.x.max(0.0) as u32, a.y.max(0.0) as u32, (b.x.ceil() as u32).min(899), (b.y.ceil() as u32).min(399))
++}
++
++/// What the renderer shows behind the text: the page painted without the text layer, at the
++/// middle of its box.
++fn true_backdrop(doc: &Document, page: NodeId, text: NodeId) -> Color {
++    let mut bare = doc.clone();
++    bare.get_mut(text).expect("text").visible = false;
++    let (x0, y0, x1, y1) = text_box(doc, text);
++    px(&render(&bare, page), (x0 + x1) / 2, (y0 + y1) / 2)
++}
++
++fn base_and_runs(doc: &Document, text: NodeId) -> String {
++    let n = resolved_node(doc, text).expect("text");
++    let NodeKind::Text(t) = &n.kind else { return String::new() };
++    let hex = |ps: &[Paint]| match ps.first().map(|p| &p.kind) {
++        Some(PaintKind::Solid(c)) => format!("#{}", c.to_hex()),
++        _ => "-".to_string(),
++    };
++    let runs: Vec<String> = t.runs.iter().map(|r| hex(&r.style.fills)).collect();
++    format!("base={} runs=[{}]", hex(&t.style.fills), runs.join(" "))
++}
++
++/// Rough glyph colour census inside the text box on a black page: blue / red / white pixels.
++fn census(doc: &Document, page: NodeId, text: NodeId) -> String {
++    let pm = render(doc, page);
++    let (x0, y0, x1, y1) = text_box(doc, text);
++    let norm = |c: Color| {
++        let m = c.r.max(c.g).max(c.b).max(1e-3);
++        (c.r / m, c.g / m, c.b / m)
++    };
++    let refs = [("blue", norm(BLUE)), ("red", norm(RED)), ("white", norm(Color::WHITE))];
++    let mut counts = [0u32; 3];
++    for y in y0..y1 {
++        for x in x0..x1 {
++            let c = px(&pm, x, y);
++            if c.r.max(c.g).max(c.b) < 0.45 {
++                continue;
++            }
++            let (r, g, b) = norm(c);
++            let d = |(rr, gg, bb): (f32, f32, f32)| (r - rr).powi(2) + (g - gg).powi(2) + (b - bb).powi(2);
++            let best = (0..3).min_by(|a, b| d(refs[*a].1).total_cmp(&d(refs[*b].1))).unwrap_or(0);
++            counts[best] += 1;
++        }
++    }
++    format!("glyph px blue/red/white = {}/{}/{}", counts[0], counts[1], counts[2])
++}
++
++fn listing(report: &Report) -> String {
++    let rows: Vec<String> = report.findings.iter().map(|f| format!("{:?}:{}{}", f.rule, f.message, f.fix.as_ref().map_or(String::new(), |_| format!(" -> {}", f.fix_label)))).collect();
++    format!("{} [{}]", rows.len(), rows.join(" | "))
++}
++
++#[test]
++fn probe() {
++    for name in NAMES {
++        let scene = scenes::build(name).expect("known scene");
++        let (page, text, rule, variable) = (scene.page, scene.text, scene.rule, scene.variable);
++        let mut app = App::new(scene.doc);
++        app.page = page;
++        let before = audit(&app.doc, &Scope::Page(page));
++        let backdrop = true_backdrop(&app.doc, page, text);
++        let vs = |app: &App| match resolved_node(&app.doc, text).map(|n| n.kind.clone()) {
++            Some(NodeKind::Text(t)) => match t.style.fills.first().map(|p| &p.kind) {
++                Some(PaintKind::Solid(c)) => format!("{:.2}:1", contrast_ratio(*c, backdrop)),
++                _ => "-".into(),
++            },
++            _ => "-".into(),
++        };
++        let ratio_before = vs(&app);
++        let mut lines = vec![format!("PROBE {name}"), format!("  before : findings {}", listing(&before))];
++        if variable.is_some() {
++            lines.push(format!("  start  : {}  ({})", base_and_runs(&app.doc, text), census(&app.doc, page, text)));
++        }
++        let fixed = scenes::fix_scene(&mut app, rule);
++        lines.push(format!("  fix    : {}", fixed.as_ref().map_or("none (no fixable finding)".to_string(), |f| f.fix_label.clone())));
++        if let Some(v) = variable {
++            lines.push(format!("  bound  : {}  ({})", base_and_runs(&app.doc, text), census(&app.doc, page, text)));
++            scenes::turn_variable_white(&mut app, v);
++            lines.push(format!("  white  : {}  ({})", base_and_runs(&app.doc, text), census(&app.doc, page, text)));
++        } else {
++            lines.push(format!("  text   : {}", base_and_runs(&app.doc, text)));
++            lines.push(format!(
++                "  truth  : backdrop behind text #{} | real contrast before {} -> after {} (backdrop after #{})",
++                backdrop.to_hex(),
++                ratio_before,
++                vs(&app),
++                true_backdrop(&app.doc, page, text).to_hex()
++            ));
++        }
++        lines.push(format!("  after  : findings {}", listing(&audit(&app.doc, &Scope::Page(page)))));
++        println!("{}", lines.join("\n"));
++    }
++}
++
++#[test]
++fn the_earlier_frame_of_the_evidence_scenes_really_does_not_clip() {
++    for name in ["s1", "s1g", "s3", "s3b"] {
++        let scene = scenes::build(name).expect("known scene");
++        let earlier = scene.doc.nodes.values().find(|n| n.name == "Earlier").expect("earlier frame");
++        assert!(!earlier.kind.frame_props().expect("a frame").clips_content, "{name}: the earlier frame must not clip its child");
++    }
++}
+diff --git a/crates/designos-app/src/shell.rs b/crates/designos-app/src/shell.rs
+index a8a87b1..83e2cec 100644
+--- a/crates/designos-app/src/shell.rs
++++ b/crates/designos-app/src/shell.rs
+@@ -300,7 +300,7 @@ impl Shell {
+                 app.ui.right_tab = Some(crate::app::RightTab::Prototype);
+                 crate::protovars::open_editor(&mut app);
+             }
+-            Some("present-variables") => {}
++            Some("present-variables") => crate::check_designs::scenes::apply_from_env(&mut app),
+             Some("libraries") => app.open_libraries(),
+             Some(panel @ ("plugins" | "plugin-install")) => {
+                 app.open_plugins();

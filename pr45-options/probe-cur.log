@@ -1,0 +1,56 @@
+PROBE s1
+  before : findings 1 [Contrast:Contrast 1.00:1 is below 4.5:1 (WCAG AA) -> Change text to #767676 (4.54:1)]
+  fix    : Change text to #767676 (4.54:1)
+  text   : base=#767676 runs=[]
+  truth  : backdrop behind text #000000 | real contrast before 21.00:1 -> after 4.62:1 (backdrop after #000000)
+  after  : findings 0 []
+PROBE s1g
+  before : findings 1 [Contrast:Contrast 1.00:1 is below 4.5:1 (WCAG AA) -> Change text to #767676 (4.54:1)]
+  fix    : Change text to #767676 (4.54:1)
+  text   : base=#767676 runs=[]
+  truth  : backdrop behind text #808080 | real contrast before 3.95:1 -> after 1.15:1 (backdrop after #808080)
+  after  : findings 0 []
+PROBE s2
+  before : findings 1 [Contrast:Contrast 4.47:1 is below 4.5:1 (WCAG AA) -> Change text to #767676 (4.54:1)]
+  fix    : Change text to #767676 (4.54:1)
+  text   : base=#767676 runs=[]
+  truth  : backdrop behind text #000000 | real contrast before 4.69:1 -> after 4.62:1 (backdrop after #000000)
+  after  : findings 0 []
+PROBE s2g
+  before : findings 1 [Contrast:Contrast 1.00:1 is below 4.5:1 (WCAG AA) -> Change text to #767676 (4.54:1)]
+  fix    : Change text to #767676 (4.54:1)
+  text   : base=#767676 runs=[]
+  truth  : backdrop behind text #808080 | real contrast before 3.95:1 -> after 1.15:1 (backdrop after #808080)
+  after  : findings 0 []
+PROBE s3
+  before : findings 1 [Contrast:Contrast 1.00:1 is below 4.5:1 (WCAG AA) -> Change text to #767676 (4.54:1)]
+  fix    : Change text to #767676 (4.54:1)
+  text   : base=#767676 runs=[]
+  truth  : backdrop behind text #FFFFFF | real contrast before 1.00:1 -> after 4.54:1 (backdrop after #FFFFFF)
+  after  : findings 0 []
+PROBE s3b
+  before : findings 1 [Contrast:Contrast 1.00:1 is below 4.5:1 (WCAG AA) -> Change text to #767676 (4.54:1)]
+  fix    : Change text to #767676 (4.54:1)
+  text   : base=#767676 runs=[]
+  truth  : backdrop behind text #FFFFFF | real contrast before 1.00:1 -> after 4.54:1 (backdrop after #FFFFFF)
+  after  : findings 0 []
+PROBE s4
+  before : findings 1 [Contrast:Contrast 1.91:1 is below 4.5:1 (WCAG AA) -> Change text to #767676 (4.54:1)]
+  fix    : Change text to #767676 (4.54:1)
+  text   : base=#767676 runs=[]
+  truth  : backdrop behind text #FFFFFF | real contrast before 1.92:1 -> after 4.54:1 (backdrop after #FFFFFF)
+  after  : findings 0 []
+PROBE t1
+  before : findings 1 [HardCodedValue:Fill #1A73E8 matches variable "Brand/Blue" -> Bind to variable Brand/Blue]
+  start  : base=#1A73E8 runs=[#1A73E8]  (glyph px blue/red/white = 1374/0/0)
+  fix    : Bind to variable Brand/Blue
+  bound  : base=#1A73E8 runs=[#1A73E8]  (glyph px blue/red/white = 1374/0/0)
+  white  : base=#FFFFFF runs=[#1A73E8]  (glyph px blue/red/white = 1374/0/0)
+  after  : findings 0 []
+PROBE t2
+  before : findings 1 [HardCodedValue:Fill #1A73E8 matches variable "Brand/Blue" -> Bind to variable Brand/Blue]
+  start  : base=#1A73E8 runs=[#1A73E8 #E5484D #1A73E8]  (glyph px blue/red/white = 1656/1043/0)
+  fix    : Bind to variable Brand/Blue
+  bound  : base=#1A73E8 runs=[#1A73E8 #E5484D #1A73E8]  (glyph px blue/red/white = 1656/1043/0)
+  white  : base=#FFFFFF runs=[#1A73E8 #E5484D #1A73E8]  (glyph px blue/red/white = 1656/1043/0)
+  after  : findings 0 []

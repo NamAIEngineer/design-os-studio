@@ -1,0 +1,62 @@
+diff --git a/crates/designos-app/src/check_designs/contrast.rs b/crates/designos-app/src/check_designs/contrast.rs
+index 8eb781b..6636a5c 100644
+--- a/crates/designos-app/src/check_designs/contrast.rs
++++ b/crates/designos-app/src/check_designs/contrast.rs
+@@ -181,6 +181,11 @@ fn backdrop(doc: &Document, id: NodeId) -> Option<Backdrop> {
+         if blends_as_group(n.blend) {
+             return None;
+         }
++        // A stroke is painted over the fill and under the children; where it lies under the text is
++        // not modelled, so any visible stroke on the chain skips the text.
++        if n.stroke.weight > 0.0 && n.stroke.paints.iter().any(|p| p.visible) {
++            return None;
++        }
+         let mut how = reach(&here, n.size);
+         if raw.kind.frame_props().is_some_and(|f| f.clips_content) {
+             match how {
+@@ -220,18 +225,38 @@ fn page_box(doc: &Document, id: NodeId) -> Option<Rect> {
+     Some(Rect::new(x0, y0, x1 - x0, y1 - y0))
+ }
+ 
+-/// Whether a visible layer painted before `id` (an earlier sibling of it or of any ancestor) covers
+-/// part of it. Such a layer is behind the text and the ancestor chain does not describe it.
++/// Nodes one text check may look at in earlier siblings' subtrees. Past it the backdrop is unknown.
++const SUBTREE_BUDGET: usize = 4096;
++
++/// Whether the box of `id` or of any visible descendant overlaps `text_box`. Geometry only: what the
++/// layers paint is not looked at, so an unpainted overlap counts too. A frame that clips cuts its
++/// children to its own box, so its subtree is skipped when the frame itself misses the text.
++fn subtree_overlaps(doc: &Document, id: NodeId, text_box: &Rect, budget: &mut usize) -> bool {
++    let Some(n) = doc.get(id) else { return false };
++    if !n.visible || n.opacity <= 0.0 {
++        return false;
++    }
++    if *budget == 0 {
++        return true;
++    }
++    *budget -= 1;
++    let Some(own) = page_box(doc, id) else { return true };
++    let hit = own.intersects(text_box);
++    let clips = n.kind.frame_props().is_some_and(|f| f.clips_content);
++    hit || (!clips && n.children.iter().any(|c| subtree_overlaps(doc, *c, text_box, budget)))
++}
++
++/// Whether any visible layer painted before `id` (an earlier sibling of it or of any ancestor), or
++/// anything inside it, overlaps it. Such a layer may be behind the text and the ancestor chain does
++/// not describe it.
+ fn has_layer_behind(doc: &Document, id: NodeId) -> bool {
+     let Some(text_box) = page_box(doc, id) else { return true };
++    let mut budget = SUBTREE_BUDGET;
+     let mut cur = id;
+     while let Some(parent) = doc.get(cur).and_then(|n| n.parent) {
+         let Some(p) = doc.get(parent) else { return true };
+-        for sibling in p.children.iter().take_while(|s| **s != cur) {
+-            let Some(s) = doc.get(*sibling) else { continue };
+-            if s.visible && s.opacity > 0.0 && page_box(doc, *sibling).is_some_and(|b| b.intersects(&text_box)) {
+-                return true;
+-            }
++        if p.children.iter().take_while(|s| **s != cur).any(|s| subtree_overlaps(doc, *s, &text_box, &mut budget)) {
++            return true;
+         }
+         cur = parent;
+     }
