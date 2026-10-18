@@ -368,6 +368,15 @@ impl App {
         self.page
     }
 
+    fn mark_slot_content_override(doc: &mut Document, ed: &mut Edit, parent: NodeId) {
+        let is_inst_slot = is_slot_container(doc, parent) && (doc.get(parent).is_some_and(is_linked) || instance_root_of(doc, parent).is_some());
+        if is_inst_slot {
+            if let Some(sn) = ed.node(doc, parent) {
+                sn.component.overrides.insert(OverrideField::SlotContent);
+            }
+        }
+    }
+
     // ------------------------------------------------------------ delete / duplicate
     pub fn delete_selection(&mut self) {
         let tops = self.top_selection();
@@ -377,14 +386,23 @@ impl App {
         let mut tx = Tx::new();
         let mut parents = Vec::new();
         for id in &tops {
-            // Layers inside an instance cannot be removed, only hidden (like Figma).
-            if self.doc.get(*id).is_some_and(|n| is_linked(n) && !is_top_instance(n)) {
+            let parent = self.doc.get(*id).and_then(|n| n.parent);
+            let in_slot = parent.is_some_and(|p| is_slot_container(&self.doc, p));
+            // Layers inside an instance cannot be removed, only hidden (like Figma) — except direct children of a slot!
+            if !in_slot && self.doc.get(*id).is_some_and(|n| is_linked(n) && !is_top_instance(n)) {
                 if let Some(n) = tx.ed.node(&mut self.doc, *id) {
                     n.visible = false;
                 }
                 continue;
             }
-            if let Some(p) = self.doc.get(*id).and_then(|n| n.parent) {
+            if let Some(p) = parent {
+                if in_slot {
+                    if let Err(err) = check_slot_remove(&self.doc, p, 1) {
+                        self.show_toast(err.to_string(), true);
+                        continue;
+                    }
+                    Self::mark_slot_content_override(&mut self.doc, &mut tx.ed, p);
+                }
                 if !parents.contains(&p) {
                     parents.push(p);
                 }
@@ -413,6 +431,14 @@ impl App {
         let copies = clipboard::capture(&self.doc, &tops).map(|c| clipboard::instantiate(&mut self.doc, &c)).unwrap_or_default();
         for (id, mut nodes) in tops.into_iter().zip(copies) {
             let Some(parent) = self.doc.get(id).and_then(|n| n.parent) else { continue };
+            if is_slot_container(&self.doc, parent) {
+                if let Some(root) = nodes.first() {
+                    if let Err(err) = check_slot_insert(&self.doc, parent, &[root]) {
+                        self.show_toast(err.to_string(), true);
+                        continue;
+                    }
+                }
+            }
             let index = self.doc.get(parent).and_then(|p| p.children.iter().position(|c| *c == id)).map(|i| i + 1).unwrap_or(usize::MAX);
             let in_al = self.doc.get(parent).and_then(|p| p.kind.frame_props()).map(|f| f.auto_layout.is_some()).unwrap_or(false);
             if let Some(root) = nodes.first_mut() {
@@ -424,11 +450,14 @@ impl App {
                 new_sel.push(root.id);
             }
             if tx.cmd(&mut self.doc, Command::Insert { parent, index, nodes }).is_ok() {
+                Self::mark_slot_content_override(&mut self.doc, &mut tx.ed, parent);
                 layout::relayout_around(&mut self.doc, &mut tx.ed, parent);
             }
         }
         self.run_tx(tx);
-        self.selection = new_sel;
+        if !new_sel.is_empty() {
+            self.selection = new_sel;
+        }
     }
 
     // ------------------------------------------------------------ clipboard
@@ -470,6 +499,13 @@ impl App {
         let Some(clip) = clip else { return };
         let parent = self.container_for_insert();
         let lists = clipboard::instantiate(&mut self.doc, &clip);
+        if is_slot_container(&self.doc, parent) {
+            let roots: Vec<&Node> = lists.iter().filter_map(|l| l.first()).collect();
+            if let Err(err) = check_slot_insert(&self.doc, parent, &roots) {
+                self.show_toast(err.to_string(), true);
+                return;
+            }
+        }
         let mut tx = Tx::new();
         let mut new_sel = Vec::new();
         let off = theme::PASTE_OFFSET * self.paste_count as f32;
@@ -482,6 +518,7 @@ impl App {
             let index = self.doc.get(parent).map(|p| p.children.len()).unwrap_or(0);
             let _ = tx.cmd(&mut self.doc, Command::Insert { parent, index, nodes });
         }
+        Self::mark_slot_content_override(&mut self.doc, &mut tx.ed, parent);
         layout::relayout_around(&mut self.doc, &mut tx.ed, parent);
         self.paste_count += 1;
         self.run_tx(tx);
@@ -510,6 +547,13 @@ impl App {
             (v2(0.0, 0.0), self.doc.get(parent).map(|p| p.children.len()).unwrap_or(0))
         };
         let lists = clipboard::instantiate(&mut self.doc, &clip);
+        if is_slot_container(&self.doc, parent) {
+            let roots: Vec<&Node> = lists.iter().filter_map(|l| l.first()).collect();
+            if let Err(err) = check_slot_insert(&self.doc, parent, &roots) {
+                self.show_toast(err.to_string(), true);
+                return;
+            }
+        }
         let first_orig = lists.first().and_then(|l| l.first()).map(|r| v2(r.transform.tx, r.transform.ty)).unwrap_or(v2(0.0, 0.0));
         let delta = v2(target_local.x - first_orig.x, target_local.y - first_orig.y);
         let mut tx = Tx::new();
@@ -523,6 +567,7 @@ impl App {
             let index = (base_idx + k).min(self.doc.get(parent).map(|p| p.children.len()).unwrap_or(0));
             let _ = tx.cmd(&mut self.doc, Command::Insert { parent, index, nodes });
         }
+        Self::mark_slot_content_override(&mut self.doc, &mut tx.ed, parent);
         layout::relayout_around(&mut self.doc, &mut tx.ed, parent);
         self.run_tx(tx);
         self.selection = new_sel;
@@ -1231,6 +1276,7 @@ impl App {
         let len = self.doc.get(parent).map(|p| p.children.len()).unwrap_or(0);
         let mut tx = Tx::new();
         let order: Vec<NodeId> = if forward { tops.iter().rev().copied().collect() } else { tops.clone() };
+        let mut moved = false;
         for (k, id) in order.iter().enumerate() {
             let cur = self.doc.get(parent).and_then(|p| p.children.iter().position(|c| c == id)).unwrap_or(0);
             let target = match (forward, extreme) {
@@ -1241,7 +1287,11 @@ impl App {
             };
             if target != cur {
                 let _ = tx.cmd(&mut self.doc, Command::Reparent { id: *id, parent, index: target });
+                moved = true;
             }
+        }
+        if moved {
+            Self::mark_slot_content_override(&mut self.doc, &mut tx.ed, parent);
         }
         layout::relayout_around(&mut self.doc, &mut tx.ed, parent);
         self.run_tx(tx);
@@ -1257,8 +1307,25 @@ impl App {
             if *id == new_parent || self.doc.is_ancestor(*id, new_parent) {
                 continue;
             }
+            let old_p = self.doc.get(*id).and_then(|n| n.parent);
+            if old_p != Some(new_parent) {
+                if let Some(p) = old_p.filter(|&p| is_slot_container(&self.doc, p)) {
+                    if let Err(err) = check_slot_remove(&self.doc, p, 1) {
+                        self.show_toast(err.to_string(), true);
+                        continue;
+                    }
+                }
+                if is_slot_container(&self.doc, new_parent) {
+                    if let Some(node) = self.doc.get(*id) {
+                        if let Err(err) = check_slot_insert(&self.doc, new_parent, &[node]) {
+                            self.show_toast(err.to_string(), true);
+                            continue;
+                        }
+                    }
+                }
+            }
             let world = self.doc.world_transform(*id);
-            if let Some(p) = self.doc.get(*id).and_then(|n| n.parent) {
+            if let Some(p) = old_p {
                 old_parents.push(p);
             }
             if let Err(e) = tx.cmd(&mut self.doc, Command::Reparent { id: *id, parent: new_parent, index: index + i }) {
@@ -1271,9 +1338,11 @@ impl App {
         }
         for p in old_parents {
             if self.doc.get(p).is_some() {
+                Self::mark_slot_content_override(&mut self.doc, &mut tx.ed, p);
                 layout::relayout_around(&mut self.doc, &mut tx.ed, p);
             }
         }
+        Self::mark_slot_content_override(&mut self.doc, &mut tx.ed, new_parent);
         layout::relayout_around(&mut self.doc, &mut tx.ed, new_parent);
         self.run_tx(tx);
     }
