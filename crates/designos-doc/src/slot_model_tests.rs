@@ -215,3 +215,76 @@ fn editing_instance_slot_adds_reorders_and_removes_without_detaching_and_enforce
     assert_eq!(d.get(inst_body).unwrap().children, vec![c1_id]);
     assert_eq!(crate::remove_from_slot(&mut d, c1_id).unwrap_err(), crate::SlotConstraintError::MinChildren(1));
 }
+
+/// An instance whose slot frame holds the main component's default child "Default".
+fn instance_with_default_slot_child() -> (Document, NodeId, NodeId, NodeId, NodeId, NodeId) {
+    let (mut d, comp, body, _icon) = component_with_slot();
+    let id = d.alloc_id();
+    let mut default_child = Node::frame(id, Rect::new(0.0, 0.0, 10.0, 10.0));
+    default_child.name = "Default".into();
+    let main_default = d.insert(body, default_child).unwrap();
+    d.get_mut(body).unwrap().component.is_slot = true;
+    d.get_mut(body).unwrap().component.bindings.insert(crate::OverrideField::SlotContent, "Body".into());
+    let page = d.pages[0];
+    create_instance(&mut d, comp, page, Vec2::new(400.0, 0.0)).apply(&mut d).unwrap();
+    let inst = instances_of(&d, comp)[0];
+    let inst_body = *d.get(inst).unwrap().children.iter().find(|&&c| d.get(c).unwrap().name == "body").unwrap();
+    let inst_default = d.get(inst_body).unwrap().children[0];
+    assert_eq!(d.get(inst_default).unwrap().component.source, Some(main_default));
+    (d, comp, inst, inst_body, inst_default, main_default)
+}
+
+#[test]
+fn reset_of_slot_content_rebuilds_the_slot_from_the_main_component() {
+    let (mut d, comp, inst, inst_body, inst_default, main_default) = instance_with_default_slot_child();
+
+    // The user adds a plain frame: it has no source, so only the override flag marks it as theirs.
+    let id = d.alloc_id();
+    let mut extra = Node::frame(id, Rect::new(0.0, 0.0, 10.0, 10.0));
+    extra.name = "Extra".into();
+    let extra_id = extra.id;
+    crate::insert_into_slot(&mut d, inst_body, 1, vec![extra]).unwrap().apply(&mut d).unwrap();
+    assert_eq!(d.get(inst_body).unwrap().children, vec![inst_default, extra_id]);
+    assert!(d.get(inst_body).unwrap().component.overrides.contains(&crate::OverrideField::SlotContent));
+
+    crate::reset_overrides(&mut d, inst, &[crate::OverrideField::SlotContent]).apply(&mut d).unwrap();
+
+    let kids = d.get(inst_body).unwrap().children.clone();
+    assert!(d.get(extra_id).is_none(), "the user's frame is gone after Reset");
+    assert_eq!(kids.len(), 1);
+    assert_eq!(d.get(kids[0]).unwrap().component.source, Some(main_default), "the slot mirrors the main's slot children");
+    assert!(!d.get(inst_body).unwrap().component.overrides.contains(&crate::OverrideField::SlotContent));
+    assert!(matches!(d.get(inst).unwrap().kind, NodeKind::Instance { .. }));
+
+    // Once reset, the slot follows the main component again.
+    d.get_mut(main_default).unwrap().opacity = 0.25;
+    sync_instances(&mut d, comp).apply(&mut d).unwrap();
+    assert_eq!(d.get(d.get(inst_body).unwrap().children[0]).unwrap().opacity, 0.25);
+}
+
+#[test]
+fn reset_of_slot_content_brings_back_a_removed_main_slot_child() {
+    let (mut d, _, inst, inst_body, inst_default, main_default) = instance_with_default_slot_child();
+    let id = d.alloc_id();
+    let extra = Node::frame(id, Rect::new(0.0, 0.0, 10.0, 10.0));
+    crate::insert_into_slot(&mut d, inst_body, 1, vec![extra]).unwrap().apply(&mut d).unwrap();
+    crate::remove_from_slot(&mut d, inst_default).unwrap().apply(&mut d).unwrap();
+    assert!(d.get(inst_default).is_none());
+
+    crate::reset_overrides(&mut d, inst, &[crate::OverrideField::SlotContent]).apply(&mut d).unwrap();
+    let kids = d.get(inst_body).unwrap().children.clone();
+    assert_eq!(kids.len(), 1);
+    assert_eq!(d.get(kids[0]).unwrap().component.source, Some(main_default));
+}
+
+#[test]
+fn a_slot_that_still_holds_the_users_content_survives_a_main_sync() {
+    let (mut d, comp, _inst, inst_body, inst_default, main_default) = instance_with_default_slot_child();
+    let id = d.alloc_id();
+    let extra = Node::frame(id, Rect::new(0.0, 0.0, 10.0, 10.0));
+    let extra_id = extra.id;
+    crate::insert_into_slot(&mut d, inst_body, 1, vec![extra]).unwrap().apply(&mut d).unwrap();
+    d.get_mut(main_default).unwrap().opacity = 0.5;
+    sync_instances(&mut d, comp).apply(&mut d).unwrap();
+    assert_eq!(d.get(inst_body).unwrap().children, vec![inst_default, extra_id], "overridden slot content is left alone");
+}

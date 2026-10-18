@@ -163,6 +163,13 @@ pub struct AssetEntry {
     pub variants: usize,
 }
 
+/// True if page point `p` lies inside `id`'s box (honouring rotation and parent transforms).
+fn contains_page_point(doc: &Document, id: NodeId, p: Vec2) -> bool {
+    let (Some(n), Some(inv)) = (doc.get(id), doc.world_transform(id).invert()) else { return false };
+    let l = inv.apply(p);
+    l.x >= 0.0 && l.y >= 0.0 && l.x <= n.size.x && l.y <= n.size.y
+}
+
 impl App {
     fn push_cmd(&mut self, tx: &mut Tx, cmd: Command) -> bool {
         if is_noop(&cmd) {
@@ -330,15 +337,12 @@ impl App {
     pub fn insert_instance(&mut self, comp: NodeId, at: Vec2) -> Option<NodeId> {
         let size = self.doc.get(comp)?.size;
         let target = Vec2::new(at.x - size.x / 2.0, at.y - size.y / 2.0);
-        let mut parent = if let [only] = self.selection.as_slice() {
-            if is_slot_container(&self.doc, *only) {
-                *only
-            } else {
-                container_at(&self.doc, self.page, at, &[])
-            }
-        } else {
-            container_at(&self.doc, self.page, at, &[])
+        // A selected slot takes the instance only when it is dropped on that slot.
+        let selected_slot = match self.selection.as_slice() {
+            [only] if is_slot_container(&self.doc, *only) && contains_page_point(&self.doc, *only, at) => Some(*only),
+            _ => None,
         };
+        let mut parent = selected_slot.unwrap_or_else(|| container_at(&self.doc, self.page, at, &[]));
         let mut tx = Tx::new();
         for attempt in 0..2 {
             let inv = self.doc.world_transform(parent).invert()?;

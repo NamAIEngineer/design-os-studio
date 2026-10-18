@@ -607,6 +607,7 @@ impl App {
             self.show_toast(format!("Edit failed: {e}"), true);
             return None;
         }
+        App::mark_slot_content_override(&mut self.doc, &mut tx.ed, parent);
         layout::relayout_around(&mut self.doc, &mut tx.ed, parent);
         if !self.run_tx(tx) {
             return None;

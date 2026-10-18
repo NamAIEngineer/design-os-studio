@@ -949,23 +949,26 @@ fn sync_pair(c: &mut Ctx, r: NodeId, i: NodeId, top: bool, holder: NodeId) {
     c.update(n);
 
     // --- children ---
-    if inode.component.overrides.contains(&OverrideField::SlotContent)
-        || rn.component.bindings.contains_key(&OverrideField::SlotContent)
-        || is_slot_container(&c.s, i)
-        || is_slot_container(&c.s, ref_id)
-    {
+    // A slot the user has edited keeps its content; once the override is cleared (Reset) the slot
+    // mirrors the main component's children again, including dropping anything the user added.
+    if inode.component.overrides.contains(&OverrideField::SlotContent) {
         return;
     }
+    let in_slot = rn.component.bindings.contains_key(&OverrideField::SlotContent) || is_slot_container(&c.s, i) || is_slot_container(&c.s, ref_id);
     let rkids = c.s.get(ref_id).map(|x| x.children.clone()).unwrap_or_default();
     let ikids = c.s.get(i).map(|x| x.children.clone()).unwrap_or_default();
     let child_holder = if matches!(inode.kind, NodeKind::Instance { .. }) { i } else { holder };
     let by_src: BTreeMap<NodeId, NodeId> = ikids.iter().filter_map(|k| c.s.get(*k).and_then(|x| x.component.source).map(|s| (s, *k))).collect();
     let rset: BTreeSet<NodeId> = rkids.iter().copied().collect();
     for k in &ikids {
-        if let Some(s) = c.s.get(*k).and_then(|x| x.component.source) {
-            if !rset.contains(&s) {
-                c.push(Command::Remove { id: *k });
-            }
+        let stale = match c.s.get(*k).map(|x| x.component.source) {
+            Some(Some(s)) => !rset.contains(&s),
+            // Slot content the user created has no counterpart in the main component.
+            Some(None) => in_slot,
+            None => false,
+        };
+        if stale {
+            c.push(Command::Remove { id: *k });
         }
     }
     let mut desired: Vec<NodeId> = Vec::new();
