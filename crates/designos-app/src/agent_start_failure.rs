@@ -4,7 +4,7 @@
 
 use std::time::Duration;
 
-use egui::{Align2, Color32, Id, Painter, Pos2, Rect, Sense, Ui, Vec2};
+use egui::{Align2, Id, Painter, Pos2, Rect, Sense, Ui, Vec2};
 
 use crate::terminal::{strip_ansi_codes, AgentCliPreset};
 use crate::{theme, widgets};
@@ -266,6 +266,7 @@ pub fn paint(ui: &mut Ui, rect: Rect, failure: &StartFailure, surface_id: &'stat
 #[cfg(test)]
 mod tests {
     use super::*;
+    use egui::Color32;
 
     fn d(preset: AgentCliPreset, installed: bool, code: Option<u32>, out: &str) -> StartFailure {
         diagnose(preset, installed, code, out)

@@ -1202,9 +1202,13 @@ impl TerminalState {
         self.provision_session_agent_files(file_path);
         let env = self.session_env();
         let cmd_override = command.map(|c| {
-            let mut cmd = build_agent_shell_cmd(&default_shell_program(), c);
+            let cmd = build_agent_shell_cmd(&default_shell_program(), c);
             #[cfg(test)]
-            isolate_zsh_from_home(&mut cmd);
+            let cmd = {
+                let mut cmd = cmd;
+                isolate_zsh_from_home(&mut cmd);
+                cmd
+            };
             cmd
         });
         match TerminalTab::spawn_with_session_cmd(id, preset, 28, 100, file_path, Some(&env), cmd_override) {
