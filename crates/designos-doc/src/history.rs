@@ -215,26 +215,21 @@ impl History {
         self.redo.clear();
         Ok(())
     }
-    /// Reverts the latest step. Auto-layout subtrees a relayout deferred are finished first: the
-    /// queue describes the state this step is about to leave, and a lazy pass after the inverse
-    /// would solve them against the reverted frame and write layout nothing can undo. Finishing
-    /// them makes the layout below the edit one whole state, which a redo restores unchanged;
-    /// dropping them would leave it half old and half new.
-    ///
-    /// This does not lay the document out again for the reverted state: what a relayout wrote to
-    /// children is not a step on this stack, so after the undo they still hold the edited layout.
-    /// Callers that need the pre-edit layout back lay the container out again themselves.
+    /// Reverts the latest step. Any deferred auto-layout queue from the superseded edit is dropped
+    /// before applying the inverse command, and affected auto-layout containers are re-solved from
+    /// their restored state so descendants return to the pre-edit layout.
     pub fn undo(&mut self, doc: &mut Document) -> Result<bool, DocError> {
         let Some(c) = self.undo.pop() else { return Ok(false) };
-        doc.flush_pending_relayout();
-        self.redo.push(c.apply(doc)?);
+        let inv = apply_and_relayout(doc, c)?;
+        self.redo.push(inv);
         Ok(true)
     }
-    /// Re-applies the latest undone step; settles deferred layout first, like [`Self::undo`].
+    /// Re-applies the latest undone step, dropping any superseded queue and re-solving affected
+    /// auto-layout containers from their restored state, like [`Self::undo`].
     pub fn redo(&mut self, doc: &mut Document) -> Result<bool, DocError> {
         let Some(c) = self.redo.pop() else { return Ok(false) };
-        doc.flush_pending_relayout();
-        self.undo.push(c.apply(doc)?);
+        let inv = apply_and_relayout(doc, c)?;
+        self.undo.push(inv);
         Ok(true)
     }
     /// The command [`Self::undo`] would apply next.
@@ -270,6 +265,116 @@ impl History {
     }
 }
 
+fn collect_updated_ids(cmd: &Command, out: &mut std::collections::BTreeSet<NodeId>) {
+    match cmd {
+        Command::Update { node } => {
+            out.insert(node.id);
+        }
+        Command::Batch(cmds) => {
+            for c in cmds {
+                collect_updated_ids(c, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn layout_inputs_changed(old: &Node, new: &Node) -> bool {
+    old.size != new.size
+        || old.transform != new.transform
+        || old.visible != new.visible
+        || old.layout_child != new.layout_child
+        || old.stroke != new.stroke
+        || old.variables != new.variables
+        || old.kind.frame_props().and_then(|f| f.auto_layout.as_ref()) != new.kind.frame_props().and_then(|f| f.auto_layout.as_ref())
+}
+
+fn collect_relayout_seeds(doc: &Document, cmd: &Command, updated_ids: &std::collections::BTreeSet<NodeId>, has_cancelled: bool, seeds: &mut Vec<NodeId>) {
+    match cmd {
+        Command::Update { node } => {
+            let Some(cur) = doc.get(node.id) else { return };
+            if !layout_inputs_changed(cur, node) {
+                return;
+            }
+            let is_auto =
+                node.kind.frame_props().and_then(|f| f.auto_layout.as_ref()).is_some() || cur.kind.frame_props().and_then(|f| f.auto_layout.as_ref()).is_some();
+            if is_auto && (has_cancelled || !cur.children.iter().any(|cid| updated_ids.contains(cid))) {
+                seeds.push(node.id);
+            }
+            if let Some(p) = cur.parent {
+                if has_cancelled || !updated_ids.contains(&p) {
+                    seeds.push(p);
+                }
+            }
+        }
+        Command::Insert { parent, nodes, .. } => {
+            if has_cancelled || !updated_ids.contains(parent) {
+                seeds.push(*parent);
+            }
+            if let Some(root) = nodes.first() {
+                if root.kind.frame_props().and_then(|f| f.auto_layout.as_ref()).is_some() {
+                    seeds.push(root.id);
+                }
+            }
+        }
+        Command::Remove { id } => {
+            if let Some(p) = doc.get(*id).and_then(|n| n.parent) {
+                if has_cancelled || !updated_ids.contains(&p) {
+                    seeds.push(p);
+                }
+            }
+        }
+        Command::Reparent { id, parent, .. } => {
+            if let Some(old_p) = doc.get(*id).and_then(|n| n.parent) {
+                if has_cancelled || !updated_ids.contains(&old_p) {
+                    seeds.push(old_p);
+                }
+            }
+            if has_cancelled || !updated_ids.contains(parent) {
+                seeds.push(*parent);
+            }
+        }
+        Command::Batch(cmds) => {
+            for c in cmds {
+                collect_relayout_seeds(doc, c, updated_ids, has_cancelled, seeds);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn apply_and_relayout(doc: &mut Document, c: Command) -> Result<Command, DocError> {
+    let cancelled = std::mem::take(&mut doc.pending_relayout);
+    let mut updated_ids = std::collections::BTreeSet::new();
+    collect_updated_ids(&c, &mut updated_ids);
+    let mut seeds = Vec::new();
+    collect_relayout_seeds(doc, &c, &updated_ids, !cancelled.is_empty(), &mut seeds);
+    seeds.extend(cancelled.iter().copied());
+
+    let inv = c.apply(doc)?;
+
+    let is_auto = |doc: &Document, id: NodeId| doc.get(id).and_then(|n| n.kind.frame_props()).is_some_and(|f| f.auto_layout.is_some());
+    let mut roots: Vec<NodeId> = Vec::new();
+    for id in seeds {
+        let mut top = is_auto(doc, id).then_some(id);
+        let mut cur = doc.get(id).and_then(|n| n.parent);
+        while let Some(p) = cur {
+            if is_auto(doc, p) {
+                top = Some(p);
+            }
+            cur = doc.get(p).and_then(|n| n.parent);
+        }
+        if let Some(t) = top.filter(|t| !roots.contains(t)) {
+            roots.push(t);
+        }
+    }
+    for r in roots {
+        doc.relayout_subtree_skipping(r, &cancelled);
+    }
+    doc.flush_pending_relayout();
+    Ok(inv)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -297,8 +402,9 @@ mod tests {
         assert!(d.get(id).is_none());
     }
 
-    /// 70 nested Fill frames under a page, 200 wide; the outermost is the only one that is not Fill.
-    fn nested_fill_frames() -> (Document, Vec<NodeId>) {
+    /// 70 nested Fill frames under a page, 200 wide; the outermost is the only one that is not Fill,
+    /// and a 10 px leaf hugs the right edge of the innermost frame.
+    fn nested_fill_frames() -> (Document, Vec<NodeId>, NodeId) {
         let mut d = Document::new("t");
         let page = d.add_page("P");
         let mut frames = Vec::new();
@@ -311,6 +417,7 @@ mod tests {
                     direction: LayoutDirection::Horizontal,
                     primary_sizing: Sizing::Fixed,
                     counter_sizing: Sizing::Fixed,
+                    primary_align: LayoutAlign::End,
                     ..AutoLayout::default()
                 });
             }
@@ -321,7 +428,12 @@ mod tests {
             frames.push(id);
             cur = id;
         }
-        (d, frames)
+        let leaf = d.alloc_id();
+        d.insert(cur, Node::rectangle(leaf, Rect::new(0.0, 0.0, 10.0, 10.0))).unwrap();
+        d.relayout_subtree(frames[0]);
+        d.flush_pending_relayout();
+        assert_eq!(d.get(leaf).unwrap().transform.tx, 190.0);
+        (d, frames, leaf)
     }
 
     fn widths(d: &Document, frames: &[NodeId]) -> Vec<f32> {
@@ -330,7 +442,7 @@ mod tests {
 
     #[test]
     fn undo_and_redo_never_leave_a_stale_layout_queue_to_write_later() {
-        let (mut d, frames) = nested_fill_frames();
+        let (mut d, frames, leaf) = nested_fill_frames();
         let mut h = History::default();
         let mut wide = d.get(frames[0]).unwrap().clone();
         wide.size.x = 600.0;
@@ -344,11 +456,13 @@ mod tests {
         let after_undo = widths(&d, &frames);
         d.flush_pending_relayout();
         assert_eq!(widths(&d, &frames), after_undo, "nothing may write layout behind the undo stack after the undo");
-        assert!(after_undo[1..].iter().all(|w| *w == after_undo[1]), "the nest below the outermost frame is one layout, not two: {after_undo:?}");
+        assert!(after_undo.iter().all(|w| *w == 200.0), "undo restores the 200 px layout across all 70 frames: {after_undo:?}");
+        assert_eq!(d.get(leaf).unwrap().transform.tx, 190.0, "undo restores the leaf position inside the innermost frame");
 
         h.redo(&mut d).unwrap();
         assert_eq!(d.relayout_skipped_count(), 0);
         assert!(widths(&d, &frames).iter().all(|w| *w == 600.0), "redo brings back the whole edited layout: {:?}", widths(&d, &frames));
+        assert_eq!(d.get(leaf).unwrap().transform.tx, 590.0, "redo places the leaf at the right edge of the 600 px frame");
     }
 
     #[test]
