@@ -5092,7 +5092,10 @@ Done!
         let agy = build_agent_shell_cmd("/bin/bash", AgentCliPreset::Antigravity.cli_launch_command());
         let agy_args: Vec<String> = agy.get_argv().iter().map(|a| a.to_string_lossy().into_owned()).collect();
         let agy_joined = agy_args.join(" ");
-        assert!(agy_joined.contains("exec agy --dangerously-skip-permissions"), "Antigravity execs agy: {agy_joined}");
+        assert!(agy_joined.contains("agy --dangerously-skip-permissions"), "Antigravity runs agy: {agy_joined}");
+        if !cfg!(windows) {
+            assert!(agy_joined.contains("exec agy"), "Antigravity execs agy so the tab ends with it: {agy_joined}");
+        }
         assert!(!agy_joined.contains("antigravity"), "no antigravity IDE fallback: {agy_joined}");
         assert!(!agy_joined.contains("|| exec"), "Antigravity must not exec a login shell: {agy_joined}");
         assert!(!agy_joined.contains("exec \"/bin/bash\""));
@@ -5486,7 +5489,8 @@ Done!
         let live_spec = std::path::Path::new("/tmp/designos-session-x/live-agent-out.spec.json");
         let sel_json = std::path::Path::new("/tmp/designos-session-x/selection.spec.json");
         let one_shot = build_real_cli_command(AgentCliPreset::Claude, "hi", live_spec, sel_json);
-        assert!(one_shot.contains("--settings '/tmp/designos-session-x/hooks.json'"), "{one_shot}");
+        let hooks_file = live_spec.parent().unwrap().join("hooks.json");
+        assert!(one_shot.contains(&format!("--settings '{}'", hooks_file.display())), "{one_shot}");
 
         let st = provisioned_session(741);
         let settings = read_json(&st.session_dir.join("hooks.json"));
@@ -5554,6 +5558,9 @@ Done!
     #[test]
     fn agent_that_exits_within_the_window_reports_a_start_failure_with_its_last_output() {
         let mut st = exited_stub_state();
+        // A loaded CI runner can take longer than the window to start the shell; the window itself
+        // is covered by the next test and by `counts_as_failed_start`.
+        st.active_tab_mut().unwrap().spawned_at = std::time::Instant::now();
         let _ = st.poll_live_agent_bridge();
         let failure = st.active_tab().and_then(|t| t.start_failure.clone()).expect("start failure recorded");
         assert_eq!(failure.preset, AgentCliPreset::Claude);
@@ -5598,6 +5605,7 @@ Done!
         crate::theme::install_fonts(&ctx);
         crate::theme::apply(&ctx);
         let mut st = exited_stub_state();
+        st.active_tab_mut().unwrap().spawned_at = std::time::Instant::now();
         let _ = st.poll_live_agent_bridge();
         assert!(st.active_tab().unwrap().start_failure.is_some());
         let tabs_before = st.tabs.len();
