@@ -1281,14 +1281,23 @@ impl App {
     }
 
     /// Moves the selection one step (or to the extreme) in z-order.
+    ///
+    /// Works in depth (`z`, 0 = back) rather than stored index: a `reverse_z` auto-layout frame
+    /// stores its children front-first, so there depth `z` lives at stored index `len - 1 - z`.
     pub fn reorder(&mut self, forward: bool, extreme: bool) {
         let tops = self.same_parent_tops();
         let Some(parent) = tops.first().and_then(|t| self.doc.get(*t)).and_then(|n| n.parent) else { return };
-        let len = self.doc.get(parent).map(|p| p.children.len()).unwrap_or(0);
+        let Some(pn) = self.doc.get(parent) else { return };
+        let len = pn.children.len();
+        let reversed = pn.paints_children_reversed();
+        // The depth <-> stored index mapping is its own inverse.
+        let flip = |i: usize| if reversed { len.saturating_sub(1).saturating_sub(i) } else { i };
         let mut tx = Tx::new();
-        let order: Vec<NodeId> = if forward { tops.iter().rev().copied().collect() } else { tops.clone() };
+        // `tops` is sorted by stored index: back to front, or front to back in a reverse_z frame.
+        let back_to_front: Vec<NodeId> = if reversed { tops.iter().rev().copied().collect() } else { tops };
+        let order: Vec<NodeId> = if forward { back_to_front.iter().rev().copied().collect() } else { back_to_front };
         for (k, id) in order.iter().enumerate() {
-            let cur = self.doc.get(parent).and_then(|p| p.children.iter().position(|c| c == id)).unwrap_or(0);
+            let cur = flip(self.doc.get(parent).and_then(|p| p.children.iter().position(|c| c == id)).unwrap_or(0));
             let target = match (forward, extreme) {
                 (true, true) => len.saturating_sub(1),
                 (false, true) => k,
@@ -1296,7 +1305,7 @@ impl App {
                 (false, false) => cur.saturating_sub(1),
             };
             if target != cur {
-                let _ = tx.cmd(&mut self.doc, Command::Reparent { id: *id, parent, index: target });
+                let _ = tx.cmd(&mut self.doc, Command::Reparent { id: *id, parent, index: flip(target) });
             }
         }
         layout::relayout_around(&mut self.doc, &mut tx.ed, parent);
@@ -1817,6 +1826,117 @@ mod tests {
         assert_eq!(app.doc.get(app.page).unwrap().children.last(), Some(&ids[0]));
         app.reorder(false, true);
         assert_eq!(app.doc.get(app.page).unwrap().children.first(), Some(&ids[0]));
+    }
+
+    /// Page > auto-layout frame > `n` absolutely placed, fully overlapping rectangles
+    /// (stored order a, b, c, ...). With `reverse_z` the first child is in front.
+    fn stack_app(reverse_z: bool, n: usize) -> (App, NodeId, Vec<NodeId>) {
+        let mut d = Document::new("t");
+        let page = d.add_page("p");
+        let hid = d.alloc_id();
+        let mut host = Node::frame(hid, Rect::new(0.0, 0.0, 100.0, 100.0));
+        if let NodeKind::Frame(fp) = &mut host.kind {
+            fp.auto_layout = Some(designos_doc::AutoLayout { reverse_z, ..Default::default() });
+        }
+        let host = d.insert(page, host).unwrap();
+        let mut ids = vec![];
+        for _ in 0..n {
+            let id = d.alloc_id();
+            let mut r = Node::rectangle(id, Rect::new(10.0, 10.0, 50.0, 50.0));
+            r.layout_child.absolute = true;
+            ids.push(d.insert(host, r).unwrap());
+        }
+        (App::new(d), host, ids)
+    }
+
+    fn stored(app: &App, host: NodeId) -> Vec<NodeId> {
+        app.doc.get(host).unwrap().children.clone()
+    }
+
+    /// Layers under the point, front-most first, as the canvas picks them.
+    fn front_to_back_at_overlap(app: &App) -> Vec<NodeId> {
+        let hits = crate::canvas::hit::hit_all_under(&app.doc, app.page, v2(30.0, 30.0), None);
+        hits.into_iter().filter(|id| app.doc.get(*id).is_some_and(|n| matches!(n.kind, NodeKind::Rectangle))).collect()
+    }
+
+    #[test]
+    fn reorder_bring_forward_follows_paint_order_in_reverse_z_frames() {
+        let (mut app, host, ids) = stack_app(true, 3);
+        let [a, b, c] = [ids[0], ids[1], ids[2]];
+        assert_eq!(front_to_back_at_overlap(&app), vec![a, b, c], "first child is in front");
+        app.selection = vec![b];
+        app.reorder(true, false);
+        assert_eq!(stored(&app, host), vec![b, a, c]);
+        assert_eq!(front_to_back_at_overlap(&app), vec![b, a, c], "b moved one step toward the front");
+    }
+
+    #[test]
+    fn reorder_send_backward_follows_paint_order_in_reverse_z_frames() {
+        let (mut app, host, ids) = stack_app(true, 3);
+        let [a, b, c] = [ids[0], ids[1], ids[2]];
+        app.selection = vec![b];
+        app.reorder(false, false);
+        assert_eq!(stored(&app, host), vec![a, c, b]);
+        assert_eq!(front_to_back_at_overlap(&app), vec![a, c, b], "b moved one step toward the back");
+    }
+
+    #[test]
+    fn reorder_to_front_and_to_back_follow_paint_order_in_reverse_z_frames() {
+        let (mut app, host, ids) = stack_app(true, 3);
+        let [a, b, c] = [ids[0], ids[1], ids[2]];
+        app.selection = vec![c];
+        app.reorder(true, true);
+        assert_eq!(stored(&app, host), vec![c, a, b]);
+        assert_eq!(front_to_back_at_overlap(&app).first(), Some(&c), "c is now the front-most layer");
+        app.selection = vec![a];
+        app.reorder(false, true);
+        assert_eq!(stored(&app, host), vec![c, b, a]);
+        assert_eq!(front_to_back_at_overlap(&app).last(), Some(&a), "a is now the back-most layer");
+    }
+
+    #[test]
+    fn reorder_is_unchanged_without_reverse_z() {
+        let (mut app, host, ids) = stack_app(false, 3);
+        let [a, b, c] = [ids[0], ids[1], ids[2]];
+        assert_eq!(front_to_back_at_overlap(&app), vec![c, b, a]);
+        app.selection = vec![b];
+        app.reorder(true, false);
+        assert_eq!(stored(&app, host), vec![a, c, b]);
+        app.reorder(false, false);
+        assert_eq!(stored(&app, host), vec![a, b, c]);
+        app.selection = vec![a];
+        app.reorder(true, true);
+        assert_eq!(stored(&app, host), vec![b, c, a]);
+        assert_eq!(front_to_back_at_overlap(&app).first(), Some(&a));
+        app.reorder(false, true);
+        assert_eq!(stored(&app, host), vec![a, b, c]);
+    }
+
+    #[test]
+    fn reorder_multi_select_mirrors_the_plain_frame_result_in_reverse_z_frames() {
+        for (forward, extreme) in [(true, true), (false, true), (true, false), (false, false)] {
+            // select the two middle layers (depth 1 and 2) in both frames
+            let (mut plain, plain_host, p) = stack_app(false, 4);
+            let (mut rev, rev_host, r) = stack_app(true, 4);
+            plain.selection = vec![p[1], p[2]];
+            rev.selection = vec![r[2], r[1]];
+            plain.reorder(forward, extreme);
+            rev.reorder(forward, extreme);
+            let plain_bottom_to_top: Vec<usize> = stored(&plain, plain_host).iter().map(|id| p.iter().position(|x| x == id).unwrap()).collect();
+            // layer p[k] sits at the same depth as r[3 - k]; a reverse_z frame stores its layers top to bottom
+            let rev_bottom_to_top: Vec<usize> = stored(&rev, rev_host).iter().rev().map(|id| 3 - r.iter().position(|x| x == id).unwrap()).collect();
+            assert_eq!(rev_bottom_to_top, plain_bottom_to_top, "forward={forward} extreme={extreme}");
+        }
+    }
+
+    #[test]
+    fn reorder_in_reverse_z_frame_is_one_undo_step() {
+        let (mut app, host, ids) = stack_app(true, 3);
+        app.selection = vec![ids[2]];
+        app.reorder(true, true);
+        assert_eq!(stored(&app, host), vec![ids[2], ids[0], ids[1]]);
+        app.undo();
+        assert_eq!(stored(&app, host), ids, "one undo restores the original order");
     }
 
     #[test]
