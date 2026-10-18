@@ -470,6 +470,9 @@ pub fn figma_like_schema() -> Schema {
     b.field(so, "fontVariantNumericFraction", fvnfr_so, false, 21);
     b.field(so, "fontVariantCaps", fvc_so, false, 22);
     b.field(so, "fontVariantPosition", fvp_so, false, 23);
+    let sidt_so = def(&b, "StyleId");
+    b.field(so, "styleIdForText", sidt_so, false, 24);
+    b.field(so, "styleIdForFill", sidt_so, false, 25);
     let tl = b.define("TextLine", DefKind::Message);
     let t = def(&b, "LineType");
     b.field(tl, "lineType", t, false, 1);
