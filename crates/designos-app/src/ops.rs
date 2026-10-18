@@ -51,9 +51,7 @@ pub fn apply_resize(doc: &mut Document, ed: &mut Edit, id: NodeId, size: Vec2, t
             }
         }
         if let NodeKind::Text(t) = &mut n.kind {
-            if t.auto_resize == TextAutoResize::WidthAndHeight {
-                t.auto_resize = TextAutoResize::None;
-            } else if h_changed && t.auto_resize == TextAutoResize::Height {
+            if t.auto_resize == TextAutoResize::WidthAndHeight || (h_changed && t.auto_resize == TextAutoResize::Height) {
                 t.auto_resize = TextAutoResize::None;
             }
         }
@@ -194,8 +192,20 @@ impl App {
         let mut relayout_roots = Vec::new();
         let mut seen_parents = Vec::new();
         for id in ids {
+            let old_horiz = self.doc.get(*id).and_then(|n| n.kind.frame_props()).and_then(|fp| fp.auto_layout.as_ref()).map(AutoLayout::primary_is_horizontal);
             if let Some(n) = tx.ed.node(&mut self.doc, *id) {
                 f(n);
+            }
+            let new_horiz = self.doc.get(*id).and_then(|n| n.kind.frame_props()).and_then(|fp| fp.auto_layout.as_ref()).map(AutoLayout::primary_is_horizontal);
+            if let (Some(old_h), Some(new_h)) = (old_horiz, new_horiz) {
+                if old_h != new_h {
+                    let children = self.doc.get(*id).map(|n| n.children.clone()).unwrap_or_default();
+                    for cid in children {
+                        if let Some(cn) = tx.ed.node(&mut self.doc, cid) {
+                            cn.layout_child.apply_parent_direction_change(old_h, new_h);
+                        }
+                    }
+                }
             }
             if ids.len() <= 4 {
                 layout::relayout_around(&mut self.doc, &mut tx.ed, *id);

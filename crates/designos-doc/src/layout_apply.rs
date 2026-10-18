@@ -95,6 +95,13 @@ impl Document {
         let own_limits = SizeLimits::from(&root_node.layout_child);
         let stroke = root_node.stroke.clone();
         let horiz = al.direction != LayoutDirection::Vertical;
+        for cid in &children {
+            if let Some(cnode) = self.get_mut(*cid) {
+                if let Some(old_horiz) = cnode.layout_child.stretched.last_parent_horiz {
+                    cnode.layout_child.apply_parent_direction_change(old_horiz, horiz);
+                }
+            }
+        }
         let (flow_ids, kids): (Vec<NodeId>, Vec<ChildIn>) = children.iter().filter_map(|cid| self.flow_child_input(*cid, horiz).map(|k| (*cid, k))).unzip();
 
         let out = compute_with_stroke(&al, frame, own_limits, &stroke, &kids);
@@ -116,9 +123,6 @@ impl Document {
                 cnode.transform.ty = r.y;
                 cnode.size = new_size;
                 cnode.layout_child.record_stretched(kid.size, new_size, horiz, kid.stretches_cross());
-                if cnode.layout_child.align_self == crate::AlignSelf::Stretch && !kid.cross_fill {
-                    cnode.layout_child.align_self = crate::AlignSelf::Auto;
-                }
             }
             if size_changed && is_auto_layout {
                 self.relayout_top_down(*cid, hops + 1, budget);

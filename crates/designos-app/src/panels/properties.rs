@@ -970,6 +970,7 @@ fn selection_ui(app: &mut App, ui: &mut Ui, pane: &mut Pane, sel: &[NodeId]) {
     pane.y += super::export::section(app, ui, pane.x0, pane.oy + pane.y, sel);
 }
 
+#[cfg(test)]
 fn sizing_of(n: &Node, horizontal: bool) -> Sizing {
     sizing_of_with_parent(n, horizontal, Some(false))
 }
@@ -2392,5 +2393,25 @@ mod tests {
         assert_eq!(n.layout_child.vertical, Sizing::Fixed);
         assert_eq!(n.layout_child.align_self, AlignSelf::Auto);
         assert_eq!(n.size, v2(30.0, 45.0), "typed height must stick instead of snapping back to 100");
+    }
+
+    #[test]
+    fn setting_primary_axis_to_fill_on_stretch_plus_fixed_child_keeps_stretch_and_stretches_height() {
+        let (mut app, cid) = app_with_imported_stretch_child(LayoutDirection::Horizontal);
+        app.doc.get_mut(cid).unwrap().layout_child.vertical = Sizing::Fixed;
+        set_sizing(&mut app, &[cid], true, Sizing::Fill);
+        let n = app.doc.get(cid).unwrap();
+        assert_eq!(n.layout_child.horizontal, Sizing::Fill);
+        assert_eq!(n.layout_child.vertical, Sizing::Fixed);
+        assert_eq!(n.layout_child.align_self, AlignSelf::Stretch);
+        assert_eq!(n.size, v2(200.0, 100.0));
+
+        // Flipping the parent direction via update_al does not double-stretch an imported Stretch+Fill child
+        let (mut app2, cid2) = app_with_imported_stretch_child(LayoutDirection::Horizontal);
+        let fid2 = app2.doc.get(cid2).unwrap().parent.unwrap();
+        update_al(&mut app2, &[fid2], |al| al.direction = LayoutDirection::Vertical);
+        let n2 = app2.doc.get(cid2).unwrap();
+        assert_eq!(n2.size, v2(30.0, 100.0));
+        assert_eq!(n2.layout_child.align_self, AlignSelf::Auto);
     }
 }
