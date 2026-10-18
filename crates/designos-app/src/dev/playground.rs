@@ -27,6 +27,8 @@ pub struct PlaygroundState {
     pub rev: u64,
     /// Cached raster preview of the scratch instance for the inspector stage.
     preview_cache: Option<(PreviewCacheKey, Option<TextureHandle>)>,
+    /// File-wide instance-swap choices for `(document, revision, component)`, built while a menu is open.
+    swap_cache: Option<((u64, u64, NodeId), Vec<NodeId>)>,
 }
 
 impl PlaygroundState {
@@ -348,6 +350,103 @@ fn live_text_input(ui: &mut Ui, rect: Rect, key: &str, value: &str) -> Option<St
     (out.changed() && buf != value).then_some(buf)
 }
 
+thread_local! {
+    /// Builds of the file-wide swap list (tests assert it is not rebuilt per frame).
+    #[cfg(test)]
+    static SWAP_LIST_BUILDS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Number of times the file-wide swap list was built on this thread (tests).
+#[cfg(test)]
+pub(crate) fn swap_list_builds() -> usize {
+    SWAP_LIST_BUILDS.with(|c| c.get())
+}
+
+/// The component `comp_id` belongs to: its whole set, or itself.
+fn component_family(doc: &Document, comp_id: NodeId) -> Vec<NodeId> {
+    match doc.get(comp_id).and_then(|c| c.parent).filter(|p| doc.get(*p).is_some_and(|n| matches!(n.kind, NodeKind::ComponentSet(_)))) {
+        Some(set) => components_of(doc, set),
+        None => vec![comp_id],
+    }
+}
+
+/// Main components the playground may swap an instance of `comp_id` to, sorted by label like the
+/// inspector's swap menu: every `Component` in the file except `comp_id`'s own family and the
+/// components that (directly or through other components) contain an instance of it, because
+/// swapping one in would make the component hold itself.
+fn valid_swap_targets(doc: &Document, comp_id: NodeId) -> Vec<NodeId> {
+    let mut holds: BTreeMap<NodeId, Vec<NodeId>> = BTreeMap::new();
+    for n in doc.nodes.values() {
+        if let (Some(inner), Some(outer)) = (instance_component(n), enclosing_component(doc, n.id)) {
+            holds.entry(outer).or_default().push(inner);
+        }
+    }
+    let mut cyclic: BTreeSet<NodeId> = component_family(doc, comp_id).into_iter().collect();
+    loop {
+        let before = cyclic.len();
+        for (outer, inner) in &holds {
+            if inner.iter().any(|c| cyclic.contains(c)) {
+                cyclic.insert(*outer);
+            }
+        }
+        if cyclic.len() == before {
+            break;
+        }
+    }
+    let mut out: Vec<NodeId> = doc.nodes.values().filter(|n| matches!(n.kind, NodeKind::Component(_)) && !cyclic.contains(&n.id)).map(|n| n.id).collect();
+    out.sort_by_key(|id| comp_label(doc, *id));
+    out
+}
+
+/// Choices of an instance-swap prop: its `preferred` components, or, when it names none, the
+/// file's valid swap targets. That list is built only while the menu is `open` and is kept per
+/// document revision, so an open menu does not rescan the file every frame.
+pub(crate) fn swap_choices(app: &mut App, open: bool, preferred: &[NodeId], comp_id: NodeId) -> Vec<NodeId> {
+    if !preferred.is_empty() {
+        return preferred.iter().copied().filter(|cid| app.doc.get(*cid).is_some()).collect();
+    }
+    if !open {
+        return Vec::new();
+    }
+    let key = (app.doc.runtime_id(), app.doc.mutation_epoch(), comp_id);
+    if let Some((k, list)) = &app.dev.playground.swap_cache {
+        if *k == key {
+            return list.clone();
+        }
+    }
+    let list = valid_swap_targets(&app.doc, comp_id);
+    #[cfg(test)]
+    SWAP_LIST_BUILDS.with(|c| c.set(c.get() + 1));
+    app.dev.playground.swap_cache = Some((key, list.clone()));
+    list
+}
+
+/// Whether the file has a component the prop could swap to. Cheap while the menu is closed: it
+/// stops at the first component outside `comp_id`'s family, and reuses the list when one is cached.
+pub(crate) fn swap_target_exists(app: &App, comp_id: NodeId) -> bool {
+    let key = (app.doc.runtime_id(), app.doc.mutation_epoch(), comp_id);
+    if let Some((k, list)) = &app.dev.playground.swap_cache {
+        if *k == key {
+            return !list.is_empty();
+        }
+    }
+    let family = component_family(&app.doc, comp_id);
+    app.doc.nodes.values().any(|n| matches!(n.kind, NodeKind::Component(_)) && !family.contains(&n.id))
+}
+
+fn dropdown_open_id(ui: &Ui, key: &str) -> egui::Id {
+    ui.id().with(("dd", key))
+}
+
+/// A select that cannot be opened, with the reason it shows instead of a menu.
+fn disabled_select(ui: &mut Ui, rect: Rect, reason: &str) {
+    let p = ui.painter();
+    p.rect_filled(rect, theme::cr(theme::RADIUS_MEDIUM), theme::BG_SECONDARY);
+    let font = theme::font_menu();
+    let shown = elide(p, reason, &font, rect.width() - 16.0);
+    p.text(Pos2::new(rect.left() + 8.0, rect.center().y), Align2::LEFT_CENTER, shown, font, theme::TEXT_DISABLED);
+}
+
 /// Renders the read-only Component Playground section in the Dev Mode Inspect panel.
 pub fn playground_section(app: &mut App, ui: &mut Ui, c: &mut Cur, id: NodeId) {
     let Some((target_id, comp_id)) = playground_target(&app.doc, id) else { return };
@@ -446,11 +545,20 @@ pub fn playground_section(app: &mut App, ui: &mut Ui, c: &mut Cur, id: NodeId) {
                     PropValue::Instance(cid) => comp_label(&app.doc, *cid),
                     _ => String::new(),
                 };
-                let candidates: Vec<NodeId> = preferred.iter().copied().filter(|cid| app.doc.get(*cid).is_some()).collect();
-                let names: Vec<String> = candidates.iter().map(|cid| comp_label(&app.doc, *cid)).collect();
-                if let Some(i) = dropdown(ui, ctl, &key, &cur, &names) {
-                    if let Some(&chosen) = candidates.get(i) {
-                        app.dev.playground.set_prop(id, def.name.clone(), PropValue::Instance(chosen));
+                let dd_id = dropdown_open_id(ui, &key);
+                let open = ui.data(|d| d.get_temp::<bool>(dd_id)).unwrap_or(false);
+                let candidates = swap_choices(app, open, preferred, comp_id);
+                if open && candidates.is_empty() {
+                    ui.data_mut(|d| d.insert_temp(dd_id, false));
+                }
+                if candidates.is_empty() && !(preferred.is_empty() && !open && swap_target_exists(app, comp_id)) {
+                    disabled_select(ui, ctl, "No components to swap to");
+                } else {
+                    let names: Vec<String> = candidates.iter().map(|cid| comp_label(&app.doc, *cid)).collect();
+                    if let Some(i) = dropdown(ui, ctl, &key, &cur, &names) {
+                        if let Some(&chosen) = candidates.get(i) {
+                            app.dev.playground.set_prop(id, def.name.clone(), PropValue::Instance(chosen));
+                        }
                     }
                 }
             }
@@ -650,5 +758,17 @@ mod tests {
         let (scratch, code_id, _) = build_scratch_doc(&f.d, f.card_inst, &pg).unwrap();
         assert_eq!(Language::React.generate(&scratch, code_id, false), base);
         assert!(f.d.get(f.page).is_some());
+    }
+
+    #[test]
+    fn swap_targets_exclude_the_component_family_and_components_that_would_hold_themselves() {
+        let f = fixture(0);
+        // The card holds a button instance: swapping the card into the button would make the card hold itself.
+        assert_eq!(valid_swap_targets(&f.d, f.button), vec![f.star]);
+        let mut for_card = valid_swap_targets(&f.d, f.card);
+        for_card.sort();
+        let mut expected = vec![f.button, f.star];
+        expected.sort();
+        assert_eq!(for_card, expected);
     }
 }
