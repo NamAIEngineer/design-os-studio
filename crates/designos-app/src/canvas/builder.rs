@@ -47,7 +47,9 @@ impl Builder {
 
 /// Starts the tool on the current selection. False (with a toast) when fewer than two shapes are selected.
 pub fn start(app: &mut App) -> bool {
-    let ids: Vec<NodeId> = app.same_parent_tops().into_iter().filter(|i| app.doc.get(*i).is_some_and(|n| !matches!(n.kind, NodeKind::Text(_)))).collect();
+    // bottom to top: a merged piece takes the style of its top-most source
+    let ids: Vec<NodeId> =
+        app.bottom_to_top(app.same_parent_tops().into_iter().filter(|i| app.doc.get(*i).is_some_and(|n| !matches!(n.kind, NodeKind::Text(_)))).collect());
     if ids.len() < 2 {
         app.show_toast("Select two or more overlapping shapes to use the shape builder", false);
         return false;
