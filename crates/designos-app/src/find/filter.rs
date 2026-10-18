@@ -28,7 +28,7 @@ pub fn rows(doc: &Document, page: NodeId, m: &Matcher) -> Vec<Row> {
         let Some(n) = doc.get(id) else { return false };
         let at = out.len();
         let mut below = false;
-        for c in n.children.iter().rev() {
+        for c in n.children_front_to_back() {
             below |= rec(doc, *c, depth + 1, m, out);
         }
         let own = !m.find_all(&n.name).is_empty();
@@ -152,6 +152,44 @@ mod tests {
         assert_eq!(ids, vec![footer, logo2, header, logo]);
         assert_eq!(rows.iter().map(|r| r.depth).collect::<Vec<_>>(), vec![0, 1, 0, 1]);
         assert!(rows.iter().all(|r| !r.has_children));
+    }
+
+    /// Page > host frame > [red, blue] (stored order), both named "Layer"; reverse_z puts red in front.
+    fn stacked(reverse_z: bool) -> (Document, NodeId, [NodeId; 3]) {
+        let mut d = Document::new("t");
+        let page = d.add_page("p");
+        let hid = d.alloc_id();
+        let mut host = Node::frame(hid, DRect::new(0.0, 0.0, 100.0, 100.0));
+        host.name = "Host".into();
+        if let designos_doc::NodeKind::Frame(fp) = &mut host.kind {
+            fp.auto_layout = Some(designos_doc::AutoLayout { reverse_z, ..Default::default() });
+        }
+        let host = d.insert(page, host).unwrap();
+        let mut kids = [host; 2];
+        for (slot, name) in kids.iter_mut().zip(["Layer red", "Layer blue"]) {
+            let id = d.alloc_id();
+            let mut n = Node::rectangle(id, DRect::new(0.0, 0.0, 10.0, 10.0));
+            n.name = name.into();
+            *slot = d.insert(host, n).unwrap();
+        }
+        (d, page, [host, kids[0], kids[1]])
+    }
+
+    #[test]
+    fn filter_rows_follow_paint_order_in_reverse_z_frames() {
+        let (d, page, [host, red, blue]) = stacked(true);
+        let ids: Vec<NodeId> = rows(&d, page, &matcher("layer").unwrap()).iter().map(|r| r.id).collect();
+        assert_eq!(ids, vec![host, red, blue], "first child is in front, so it is listed first");
+        // the unfiltered list agrees, so a drop resolved against either list lands in the same place
+        let flat: Vec<NodeId> = crate::panels::layers::flatten(&d, page, &[host].into()).iter().map(|r| r.id).collect();
+        assert_eq!(flat, ids);
+    }
+
+    #[test]
+    fn filter_rows_are_unchanged_without_reverse_z() {
+        let (d, page, [host, red, blue]) = stacked(false);
+        let ids: Vec<NodeId> = rows(&d, page, &matcher("layer").unwrap()).iter().map(|r| r.id).collect();
+        assert_eq!(ids, vec![host, blue, red], "last child is in front");
     }
 
     #[test]
