@@ -1,0 +1,370 @@
+use crate::branch_diff::{diff3, Conflict, ConflictKind, EntityChange, EntityConflict, EntityKey, Group, NodeChange};
+use crate::{
+    Affine, Color, Comment, CommentAnchor, CommentThread, Document, Flow, FrameProps, Node, NodeId, NodeKind, Paint, Rect, Style, Variable, VariableCollection,
+    VariableKind, VariableMode, VariableValue, Vec2,
+};
+use std::collections::{BTreeMap, BTreeSet};
+
+fn base_fixture_with_frame_and_children() -> (Document, NodeId, NodeId, NodeId, NodeId, NodeId, NodeId) {
+    let mut doc = Document::new("Base");
+    let page = doc.add_page("Page 1");
+    let frame_f = doc.alloc_id();
+    let frame_g = doc.alloc_id();
+    let a = doc.alloc_id();
+    let b = doc.alloc_id();
+    let c = doc.alloc_id();
+
+    let mut f_node = Node::frame(frame_f, Rect::new(0.0, 0.0, 400.0, 300.0));
+    f_node.name = "F".into();
+    doc.insert(page, f_node).unwrap();
+
+    let mut g_node = Node::frame(frame_g, Rect::new(500.0, 0.0, 400.0, 300.0));
+    g_node.name = "G".into();
+    doc.insert(page, g_node).unwrap();
+
+    for (id, name, x) in [(a, "a", 10.0), (b, "b", 60.0), (c, "c", 110.0)] {
+        let mut rect = Node::rectangle(id, Rect::new(x, 10.0, 40.0, 40.0));
+        rect.name = name.into();
+        doc.insert(frame_f, rect).unwrap();
+    }
+
+    (doc, page, frame_f, frame_g, a, b, c)
+}
+
+#[test]
+fn classifies_add_remove_move_change() {
+    let (base, _page, frame_f, frame_g, a, b, c) = base_fixture_with_frame_and_children();
+    let mut ours = base.clone();
+    let mut theirs = base.clone();
+
+    // Ours adds `d` under F and removes `b`.
+    let d = ours.alloc_id();
+    let mut d_node = Node::rectangle(d, Rect::new(160.0, 10.0, 40.0, 40.0));
+    d_node.name = "d".into();
+    ours.insert(frame_f, d_node).unwrap();
+    ours.remove(b);
+
+    // Theirs moves `c` to `G` and recolours `a`.
+    theirs.reparent(c, frame_g, None).unwrap();
+    theirs.get_mut(a).unwrap().fills = vec![Paint::solid(Color::rgb(0xFF, 0x00, 0x00))];
+
+    let diff = diff3(&base, &ours, &theirs);
+
+    assert_eq!(diff.ours.nodes.get(&d), Some(&NodeChange::Added));
+    assert_eq!(diff.ours.nodes.get(&b), Some(&NodeChange::Removed));
+    assert_eq!(diff.ours.nodes.len(), 2, "only d and b changed on ours: {:?}", diff.ours.nodes);
+
+    assert_eq!(diff.theirs.nodes.get(&c), Some(&NodeChange::Moved { from: (frame_f, 2), to: (frame_g, 0) }));
+    let mut expected_a_groups = BTreeSet::new();
+    expected_a_groups.insert(Group::Fills);
+    assert_eq!(diff.theirs.nodes.get(&a), Some(&NodeChange::Changed { groups: expected_a_groups }));
+    assert_eq!(diff.theirs.nodes.len(), 2, "only c and a changed on theirs: {:?}", diff.theirs.nodes);
+
+    assert!(diff.conflicts.is_empty(), "expected no conflicts, got {:?}", diff.conflicts);
+    assert!(diff.id_collisions.is_empty());
+}
+
+#[test]
+fn conflict_only_same_property() {
+    let (base, _page, _frame_f, _frame_g, a, _b, _c) = base_fixture_with_frame_and_children();
+
+    // Case 1: both recolour `a` differently -> conflict {a, [fills]}
+    let mut ours = base.clone();
+    let mut theirs = base.clone();
+    ours.get_mut(a).unwrap().fills = vec![Paint::solid(Color::rgb(0xFF, 0x00, 0x00))];
+    theirs.get_mut(a).unwrap().fills = vec![Paint::solid(Color::rgb(0x00, 0x00, 0xFF))];
+
+    let diff = diff3(&base, &ours, &theirs);
+    let mut expected_groups = BTreeSet::new();
+    expected_groups.insert(Group::Fills);
+    assert_eq!(diff.conflicts, vec![Conflict { node: a, groups: expected_groups, kind: ConflictKind::ModifyModify }]);
+
+    // Case 2: ours recolours `a`, theirs renames `a` -> no conflict
+    let mut ours2 = base.clone();
+    let mut theirs2 = base.clone();
+    ours2.get_mut(a).unwrap().fills = vec![Paint::solid(Color::rgb(0xFF, 0x00, 0x00))];
+    theirs2.get_mut(a).unwrap().name = "a-renamed".into();
+
+    let diff2 = diff3(&base, &ours2, &theirs2);
+    assert!(diff2.conflicts.is_empty(), "different groups must not conflict: {:?}", diff2.conflicts);
+}
+
+#[test]
+fn same_change_no_conflict() {
+    let (base, _page, _frame_f, _frame_g, a, _b, _c) = base_fixture_with_frame_and_children();
+    let mut ours = base.clone();
+    let mut theirs = base.clone();
+
+    ours.get_mut(a).unwrap().opacity = 0.5;
+    theirs.get_mut(a).unwrap().opacity = 0.5;
+
+    let diff = diff3(&base, &ours, &theirs);
+    assert!(diff.conflicts.is_empty(), "equal changes on both sides must not conflict");
+    assert!(diff.ours.nodes.contains_key(&a));
+    assert!(diff.theirs.nodes.contains_key(&a));
+}
+
+#[test]
+fn delete_vs_modify_conflict() {
+    let (base, _page, _frame_f, _frame_g, a, _b, _c) = base_fixture_with_frame_and_children();
+    let mut ours = base.clone();
+    let mut theirs = base.clone();
+
+    ours.remove(a);
+    theirs.get_mut(a).unwrap().name = "modified-on-theirs".into();
+
+    let diff = diff3(&base, &ours, &theirs);
+    assert_eq!(diff.conflicts.len(), 1);
+    assert_eq!(diff.conflicts[0].node, a);
+    assert_eq!(diff.conflicts[0].kind, ConflictKind::DeleteModify);
+    assert!(diff.conflicts[0].groups.contains(&Group::Name));
+
+    // Deleting a container on one side while the other side adds a child under it is also DeleteModify.
+    let mut ours_del_f = base.clone();
+    let mut theirs_add_child = base.clone();
+    let frame_f = base.get(a).unwrap().parent.unwrap();
+    ours_del_f.remove(frame_f);
+    let new_child = theirs_add_child.alloc_id();
+    theirs_add_child.insert(frame_f, Node::rectangle(new_child, Rect::new(0.0, 0.0, 20.0, 20.0))).unwrap();
+    let diff_container = diff3(&base, &ours_del_f, &theirs_add_child);
+    assert!(
+        diff_container.conflicts.iter().any(|c| c.node == frame_f && c.kind == ConflictKind::DeleteModify),
+        "removing a container while the other side adds a child under it must report DeleteModify on the container: {:?}",
+        diff_container.conflicts
+    );
+}
+
+#[test]
+fn id_collision_detected() {
+    let (base, _page, frame_f, frame_g, _a, _b, _c) = base_fixture_with_frame_and_children();
+    let mut ours = base.clone();
+    let mut theirs = base.clone();
+
+    let collision_id = NodeId(900);
+    let mut n_ours = Node::rectangle(collision_id, Rect::new(0.0, 0.0, 50.0, 50.0));
+    n_ours.name = "ours-900".into();
+    ours.insert(frame_f, n_ours).unwrap();
+
+    let mut n_theirs = Node::ellipse(collision_id, Rect::new(20.0, 20.0, 80.0, 80.0));
+    n_theirs.name = "theirs-900".into();
+    theirs.insert(frame_g, n_theirs).unwrap();
+
+    let diff = diff3(&base, &ours, &theirs);
+    assert_eq!(diff.id_collisions, vec![NodeId(900)]);
+    assert!(diff.conflicts.is_empty(), "id collisions are resolved by remap in T10.3, not shown as user conflicts: {:?}", diff.conflicts);
+}
+
+#[test]
+fn lcs_avoids_false_moves() {
+    let (base, _page, frame_f, _frame_g, a, b, c) = base_fixture_with_frame_and_children();
+    let mut ours = base.clone();
+    let theirs = base.clone();
+
+    // Insert one new sibling at index 0 of frame_f on `ours`.
+    let inserted = ours.alloc_id();
+    ours.insert(frame_f, Node::rectangle(inserted, Rect::new(0.0, 0.0, 10.0, 10.0))).unwrap();
+    ours.reparent(inserted, frame_f, Some(0)).unwrap();
+    assert_eq!(ours.get(frame_f).unwrap().children, vec![inserted, a, b, c]);
+
+    let diff = diff3(&base, &ours, &theirs);
+    assert_eq!(diff.ours.nodes.get(&inserted), Some(&NodeChange::Added));
+    assert!(
+        !diff.ours.nodes.contains_key(&a) && !diff.ours.nodes.contains_key(&b) && !diff.ours.nodes.contains_key(&c),
+        "inserting a sibling at index 0 must not mark existing siblings as moved: {:?}",
+        diff.ours.nodes
+    );
+}
+
+#[test]
+fn edge_cases_tolerance_kind_reorder_instance_and_variables() {
+    let (mut base, page, frame_f, _frame_g, a, b, c) = base_fixture_with_frame_and_children();
+
+    // Setup a variable with two modes ("light", "dark") and an instance with a mirror node.
+    base.variable_collections.insert(
+        "col-1".into(),
+        VariableCollection {
+            id: "col-1".into(),
+            name: "Tokens".into(),
+            modes: vec![VariableMode { id: "light".into(), name: "Light".into() }, VariableMode { id: "dark".into(), name: "Dark".into() }],
+            default_mode: "light".into(),
+            variables: vec!["var-1".into()],
+            key: None,
+            source_library_key: None,
+        },
+    );
+    let mut values = BTreeMap::new();
+    values.insert("light".into(), VariableValue::Number(8.0));
+    values.insert("dark".into(), VariableValue::Number(8.0));
+    base.variables.insert(
+        "var-1".into(),
+        Variable {
+            id: "var-1".into(),
+            name: "Spacing/Sm".into(),
+            collection: "col-1".into(),
+            kind: VariableKind::Number,
+            values,
+            description: String::new(),
+            scopes: Vec::new(),
+            hidden_from_publishing: false,
+            key: None,
+            code_syntax: BTreeMap::new(),
+        },
+    );
+
+    // Add an instance with a mirror child to verify §8.3 instance conflict grouping.
+    let inst_id = base.alloc_id();
+    let mirror_id = base.alloc_id();
+    let inst_node = Node::new(inst_id, NodeKind::Instance { frame: FrameProps::default(), component: None, component_key: None });
+    base.insert(page, inst_node).unwrap();
+    base.insert(inst_id, Node::rectangle(mirror_id, Rect::new(0.0, 0.0, 30.0, 30.0))).unwrap();
+
+    let mut ours = base.clone();
+    let mut theirs = base.clone();
+
+    // Edge case 1 (§8.1): frame_f -> Component on ours, fills change on frame_f on theirs -> no conflict on frame_f.
+    let fp = ours.get(frame_f).unwrap().kind.frame_props().unwrap().clone();
+    ours.get_mut(frame_f).unwrap().kind = NodeKind::Component(fp);
+    theirs.get_mut(frame_f).unwrap().fills = vec![Paint::solid(Color::rgb(0x11, 0x22, 0x33))];
+
+    // Edge case 4 (§8.4): reordering children `[a, b, c]` differently on both sides -> position conflict.
+    ours.get_mut(frame_f).unwrap().children = vec![c, a, b];
+    theirs.get_mut(frame_f).unwrap().children = vec![b, c, a];
+
+    // Edge case 5 (§8.5): float noise < 1e-3 on `a.transform` and `a.size` -> treated as equal.
+    ours.get_mut(a).unwrap().transform = Affine::translate(10.0004, 10.0);
+    ours.get_mut(a).unwrap().size = Vec2::new(40.0003, 40.0);
+
+    // Edge case 6 (§8.6): variable changed in different modes on each side -> no conflict.
+    ours.variables.get_mut("var-1").unwrap().values.insert("light".into(), VariableValue::Number(12.0));
+    theirs.variables.get_mut("var-1").unwrap().values.insert("dark".into(), VariableValue::Number(16.0));
+
+    // Edge case 3 (§8.3): mirror node inside `inst_id` conflicts on both sides -> grouped under `inst_id` in stats.
+    ours.get_mut(mirror_id).unwrap().opacity = 0.2;
+    theirs.get_mut(mirror_id).unwrap().opacity = 0.8;
+
+    let diff = diff3(&base, &ours, &theirs);
+
+    // 1. frame_f has Kind on ours and Fills on theirs -> no conflict on frame_f.
+    assert!(!diff.conflicts.iter().any(|cf| cf.node == frame_f), "Kind vs Fills on frame_f must not conflict: {:?}", diff.conflicts);
+    // 2. Float drift < 1e-3 on `a` was ignored.
+    assert_eq!(diff.ours.nodes.get(&a), None, "float noise < 1e-3 must not mark `a` as changed");
+    // 3. Reordering children differently produced a `Position` conflict.
+    assert!(
+        diff.conflicts.iter().any(|cf| cf.groups.contains(&Group::Position)),
+        "conflicting sibling reorder must report Group::Position: {:?}",
+        diff.conflicts
+    );
+    // 4. Variable changed in different modes has no entity conflict.
+    assert_eq!(diff.ours.variables.get("var-1"), Some(&EntityChange::Changed));
+    assert_eq!(diff.theirs.variables.get("var-1"), Some(&EntityChange::Changed));
+    assert!(
+        !diff.entity_conflicts.iter().any(|ec| ec.key == EntityKey::Variable("var-1".into())),
+        "variable changes in distinct modes must not conflict: {:?}",
+        diff.entity_conflicts
+    );
+    // 5. Mirror conflict is grouped under `inst_id` in `stats.instance_conflicts`.
+    assert_eq!(diff.stats.instance_conflicts.get(&inst_id), Some(&vec![mirror_id]));
+
+    // Also verify non-node entity conflicts when the same style/flow/comment is edited differently.
+    ours.styles.insert("S:primary".into(), Style::Fill(vec![Paint::solid(Color::rgb(1, 2, 3))]));
+    theirs.styles.insert("S:primary".into(), Style::Fill(vec![Paint::solid(Color::rgb(4, 5, 6))]));
+    ours.flows.push(Flow { name: "Main".into(), page, start: frame_f, description: "A".into() });
+    theirs.flows.push(Flow { name: "Branch".into(), page, start: frame_f, description: "B".into() });
+    ours.comments.push(CommentThread {
+        id: "t1".into(),
+        anchor: CommentAnchor { page, node: Some(frame_f), offset: Vec2::ZERO },
+        messages: vec![Comment {
+            id: "m1".into(),
+            author: "Alice".into(),
+            author_id: None,
+            author_color: None,
+            text: "Ours".into(),
+            created: "2026-10-19T00:00:00Z".into(),
+            edited: None,
+        }],
+        resolved: false,
+    });
+    theirs.comments.push(CommentThread {
+        id: "t1".into(),
+        anchor: CommentAnchor { page, node: Some(frame_f), offset: Vec2::ZERO },
+        messages: vec![Comment {
+            id: "m1".into(),
+            author: "Alice".into(),
+            author_id: None,
+            author_color: None,
+            text: "Theirs".into(),
+            created: "2026-10-19T00:00:00Z".into(),
+            edited: None,
+        }],
+        resolved: false,
+    });
+    let diff_entities = diff3(&base, &ours, &theirs);
+    assert!(diff_entities.entity_conflicts.contains(&EntityConflict { key: EntityKey::Style("S:primary".into()), kind: ConflictKind::ModifyModify }));
+    assert!(diff_entities
+        .entity_conflicts
+        .contains(&EntityConflict { key: EntityKey::Flow(format!("{}:{}", page.0, frame_f.0)), kind: ConflictKind::ModifyModify }));
+    assert!(diff_entities.entity_conflicts.contains(&EntityConflict { key: EntityKey::Comment("t1".into()), kind: ConflictKind::ModifyModify }));
+}
+
+#[test]
+fn large_fixture_within_budget() {
+    // Synthetic large fixture (112,474 scene nodes; T10.2 §10 & §11) with 1% edits per side,
+    // executed off the UI thread on a background thread and verified against the 1.5 s budget.
+    const TOTAL_SCENE_NODES: usize = 112_474;
+    const FRAMES: usize = 100;
+
+    let mut base = Document::new("Synthetic 112k");
+    let page = base.add_page("Page 1");
+
+    let mut frame_ids = Vec::with_capacity(FRAMES);
+    for f_idx in 0..FRAMES {
+        let fid = NodeId((f_idx + 10) as u64);
+        let mut frame = Node::frame(fid, Rect::new((f_idx as f32) * 500.0, 0.0, 480.0, 1000.0));
+        frame.parent = Some(page);
+        frame_ids.push(fid);
+        base.nodes.insert(fid, frame);
+    }
+    base.nodes.get_mut(&page).unwrap().children = frame_ids.clone();
+
+    let remaining = TOTAL_SCENE_NODES - FRAMES;
+    let mut frame_children: Vec<Vec<NodeId>> = vec![Vec::with_capacity(remaining / FRAMES + 2); FRAMES];
+    let first_leaf_id = 1_000u64;
+    for i in 0..remaining {
+        let nid = NodeId(first_leaf_id + i as u64);
+        let f_idx = i % FRAMES;
+        let fid = frame_ids[f_idx];
+        let mut rect = Node::rectangle(nid, Rect::new(0.0, 0.0, 24.0, 24.0));
+        rect.parent = Some(fid);
+        frame_children[f_idx].push(nid);
+        base.nodes.insert(nid, rect);
+    }
+    for (f_idx, fid) in frame_ids.iter().enumerate() {
+        base.nodes.get_mut(fid).unwrap().children = std::mem::take(&mut frame_children[f_idx]);
+    }
+    // 1 page + 112,474 scene nodes = 112,475 total entries in `base.nodes`.
+    assert_eq!(base.nodes.len(), TOTAL_SCENE_NODES + 1);
+
+    let mut ours = base.clone();
+    let mut theirs = base.clone();
+
+    // Apply 1% deterministic edits on `ours` (every 100th leaf node) and `theirs` (offset by 50).
+    let mut edited_ours = 0usize;
+    let mut edited_theirs = 0usize;
+    for i in (0..remaining).step_by(100) {
+        let nid = NodeId(first_leaf_id + i as u64);
+        ours.nodes.get_mut(&nid).unwrap().opacity = 0.75;
+        edited_ours += 1;
+    }
+    for i in (50..remaining).step_by(100) {
+        let nid = NodeId(first_leaf_id + i as u64);
+        theirs.nodes.get_mut(&nid).unwrap().visible = false;
+        edited_theirs += 1;
+    }
+
+    let diff = std::thread::spawn(move || diff3(&base, &ours, &theirs)).join().expect("background diff3 worker panicked");
+
+    assert_eq!(diff.ours.nodes.len(), edited_ours);
+    assert_eq!(diff.theirs.nodes.len(), edited_theirs);
+    assert!(diff.conflicts.is_empty());
+    assert!(diff.stats.elapsed_ms <= 1_500, "112,474-node diff3 took {} ms (budget <= 1,500 ms)", diff.stats.elapsed_ms);
+}
