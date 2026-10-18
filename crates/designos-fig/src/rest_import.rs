@@ -112,43 +112,45 @@ fn parse_effect(v: &Value) -> Option<Effect> {
     let col = v.get("color").and_then(color).unwrap_or(Color::BLACK.with_alpha(0.25));
     let offset = v.get("offset").and_then(vec2).unwrap_or(Vec2::ZERO);
     let spread = fnum(v, "spread").unwrap_or(0.0);
+    let noise_size = |v: &Value| -> Option<f32> { fnum(v, "noiseSize").or_else(|| v.get("noiseSize").and_then(|ns| fnum(ns, "x").or_else(|| fnum(ns, "y")))) };
+    let parse_seed = |v: &Value| -> u32 { v.get("seed").and_then(|s| s.as_u64().map(|n| n as u32).or_else(|| num(s).map(|x| x.max(0.0) as u32))).unwrap_or(1) };
     Some(match fstr(v, "type")? {
         "DROP_SHADOW" => Effect::DropShadow { color: col, offset, radius, spread, visible, show_behind: fbool(v, "showShadowBehindNode").unwrap_or(false) },
         "INNER_SHADOW" => Effect::InnerShadow { color: col, offset, radius, spread, visible },
         "LAYER_BLUR" => Effect::LayerBlur { radius, visible },
         "BACKGROUND_BLUR" => Effect::BackgroundBlur { radius, visible },
         // Noise / texture / glass: every field is optional; missing ones fall back to the
-        // editor defaults. Names match what `export.rs` writes.
+        // editor defaults. Names match what `export.rs` and `fig.rs` write.
         "NOISE" => {
             let primary = v.get("color").and_then(color).unwrap_or(Color::BLACK);
             let mode = match fstr(v, "noiseType").map(str::to_ascii_uppercase).as_deref() {
-                Some("DUOTONE") => NoiseMode::Duo { color: primary, secondary: v.get("secondaryColor").and_then(color).unwrap_or(Color::WHITE) },
-                Some("MULTITONE") => NoiseMode::Multi,
+                Some("DUOTONE" | "DUO") => NoiseMode::Duo { color: primary, secondary: v.get("secondaryColor").and_then(color).unwrap_or(Color::WHITE) },
+                Some("MULTITONE" | "MULTI") => NoiseMode::Multi,
                 _ => NoiseMode::Mono { color: primary },
             };
             Effect::Noise(NoiseEffect {
                 mode,
-                size: fnum(v, "noiseSize").unwrap_or(1.0),
+                size: noise_size(v).unwrap_or(1.0),
                 density: fnum(v, "density").unwrap_or(0.5).clamp(0.0, 1.0),
                 opacity: fnum(v, "opacity").unwrap_or(0.25).clamp(0.0, 1.0),
                 blend: fstr(v, "blendMode").map(blend).unwrap_or(BlendMode::Normal),
-                seed: fnum(v, "seed").unwrap_or(1.0).max(0.0) as u32,
+                seed: parse_seed(v),
                 visible,
             })
         }
-        "TEXTURE" => Effect::Texture(TextureEffect {
-            size: fnum(v, "noiseSize").unwrap_or(2.0),
+        "TEXTURE" | "GRAIN" => Effect::Texture(TextureEffect {
+            size: noise_size(v).unwrap_or(2.0),
             radius: fnum(v, "radius").unwrap_or(2.0),
             clip_to_shape: fbool(v, "clipToShape").unwrap_or(true),
-            seed: fnum(v, "seed").unwrap_or(1.0).max(0.0) as u32,
+            seed: parse_seed(v),
             visible,
         }),
         "GLASS" => Effect::Glass(GlassEffect {
-            light_angle: fnum(v, "lightAngle").unwrap_or(315.0),
-            light_intensity: fnum(v, "lightIntensity").unwrap_or(0.5).clamp(0.0, 1.0),
-            refraction: fnum(v, "refraction").unwrap_or(0.5).clamp(0.0, 1.0),
-            depth: fnum(v, "depth").unwrap_or(10.0),
-            dispersion: fnum(v, "dispersion").unwrap_or(0.25).clamp(0.0, 1.0),
+            light_angle: fnum(v, "lightAngle").or_else(|| fnum(v, "specularAngle")).unwrap_or(315.0),
+            light_intensity: fnum(v, "lightIntensity").or_else(|| fnum(v, "specularIntensity")).unwrap_or(0.5).clamp(0.0, 1.0),
+            refraction: fnum(v, "refraction").or_else(|| fnum(v, "refractionIntensity")).unwrap_or(0.5).clamp(0.0, 1.0),
+            depth: fnum(v, "depth").or_else(|| fnum(v, "refractionRadius")).unwrap_or(10.0),
+            dispersion: fnum(v, "dispersion").or_else(|| fnum(v, "chromaticAberration")).unwrap_or(0.25).clamp(0.0, 1.0),
             frost: fnum(v, "radius").unwrap_or(4.0),
             visible,
         }),
@@ -748,7 +750,7 @@ impl<'a> Ctx<'a> {
         }
         let is_instance = matches!(node.kind, NodeKind::Instance { .. });
         let origin = abs_origin(&v).unwrap_or(pinfo.origin);
-        let container = node.kind.is_container();
+        let container = node.kind.can_hold_children();
         let is_frame = node.kind.frame_props().is_some();
         if self.doc.insert(parent, node).is_err() {
             return;
@@ -846,7 +848,7 @@ impl<'a> Ctx<'a> {
         }
         let is_instance = matches!(node.kind, NodeKind::Instance { .. });
         let origin = abs_origin(v).unwrap_or(pinfo.origin);
-        let container = node.kind.is_container();
+        let container = node.kind.can_hold_children();
         let is_frame = node.kind.frame_props().is_some();
         if self.doc.insert(parent, node).is_err() {
             return;
@@ -964,7 +966,7 @@ impl<'a> Ctx<'a> {
             other => NodeKind::Unknown { type_name: other.to_string() },
         };
         let is_text = matches!(kind, NodeKind::Text(_));
-        let my_layout = kind.frame_props().and_then(|f| f.auto_layout).map(|a| a.direction);
+        let my_layout = kind.frame_props().and_then(|f| f.auto_layout.as_ref()).map(|a| a.direction);
         let default_blend = if matches!(kind, NodeKind::Rectangle | NodeKind::Ellipse(_) | NodeKind::Line | NodeKind::Vector { .. } | NodeKind::Text(_)) {
             BlendMode::Normal
         } else {
@@ -1000,6 +1002,9 @@ impl<'a> Ctx<'a> {
         if let Some(lvl) = v.get("overrideLevel").and_then(Value::as_i64) {
             n.component.override_level = Some(lvl as i32);
         }
+        n.component.is_slot = fbool(v, "isSlot").unwrap_or(false);
+        n.component.is_slot_content = fbool(v, "isSlotContent").unwrap_or(false);
+        n.component.slot_content_id = fstr(v, "slotContentId").filter(|s| !s.is_empty()).map(String::from);
         if let Some(ds) = fstr(v, "detachedSymbolId").filter(|s| !s.is_empty()) {
             n.detached_symbol_id = Some(ds.to_string());
             n.component.detached_symbol_id = Some(ds.to_string());
@@ -1175,7 +1180,28 @@ impl<'a> Ctx<'a> {
                         }
                         (PropKind::InstanceSwap { preferred: Vec::new() }, PropValue::Instance(NodeId(0)))
                     }
-                    Some("SLOT") => (PropKind::Slot, PropValue::Slot(Vec::new())),
+                    Some("SLOT") => {
+                        if let Some(cfg) = d.get("slotPropConfig").and_then(Value::as_object) {
+                            let opt_u32 = |k: &str| cfg.get(k).and_then(Value::as_u64).map(|x| x.min(u64::from(u32::MAX)) as u32);
+                            n.component.slot_configs.insert(
+                                name.clone(),
+                                SlotPropConfig {
+                                    stretch_child_on_insert: cfg.get("stretchChildOnInsert").and_then(Value::as_bool),
+                                    display_by_default: cfg.get("displayByDefault").and_then(Value::as_bool),
+                                    min_children: opt_u32("minChildren"),
+                                    max_children: opt_u32("maxChildren"),
+                                    allow_preferred_values_only: cfg.get("allowPreferredValuesOnly").and_then(Value::as_bool),
+                                    preferred: Vec::new(),
+                                },
+                            );
+                        }
+                        for p in farr(d, "preferredValues") {
+                            if let Some(ps) = p.as_str().or_else(|| fstr(p, "key")) {
+                                self.pending_swaps.push((id, name.clone(), format!("SLOTPREF:{ps}"), true));
+                            }
+                        }
+                        (PropKind::Slot, PropValue::Slot(Vec::new()))
+                    }
                     _ => continue,
                 };
                 n.component.props.push(ComponentPropDef { name, kind, default });
@@ -1490,6 +1516,16 @@ impl<'a> Ctx<'a> {
                 }
                 continue;
             }
+            if let Some(pref_key) = rest_id.strip_prefix("SLOTPREF:") {
+                let Some(&target) = self.ids.get(pref_key) else { continue };
+                let Some(n) = self.doc.get_mut(node) else { continue };
+                // A slot may list preferred components without ever writing a `slotPropConfig`.
+                let cfg = n.component.slot_configs.entry(name).or_default();
+                if !cfg.preferred.contains(&target) {
+                    cfg.preferred.push(target);
+                }
+                continue;
+            }
             if let Some(slot_csv) = rest_id.strip_prefix("SLOT:") {
                 let ids: Vec<NodeId> = if slot_csv.is_empty() {
                     Vec::new()
@@ -1592,7 +1628,7 @@ impl<'a> Ctx<'a> {
 
     /// Scales the copied children of an instance made with the scale tool
     /// (`uniformScaleFactor`): positions, sizes, radii, strokes, text sizes,
-    /// layout spacing and geometry. Overrides and derived data are applied after.
+    /// layout spacing, child margins and geometry. Overrides and derived data are applied after.
     fn scale_contents(&mut self, inst: NodeId, s: f32) {
         fn scale_path(p: &mut Path, s: f32) {
             let f = |v: &mut Vec2| *v = Vec2::new(v.x * s, v.y * s);
@@ -1623,6 +1659,7 @@ impl<'a> Ctx<'a> {
                 *r *= s;
             }
             n.stroke.weight *= s;
+            n.layout_child.margin.iter_mut().for_each(|m| *m *= s);
             for g in n.fill_geometry.iter_mut().chain(n.stroke_geometry.iter_mut()).flatten() {
                 scale_path(g, s);
             }
@@ -2064,7 +2101,7 @@ impl<'a> Ctx<'a> {
             .and_then(|n| n.parent)
             .and_then(|p| self.doc.get(p))
             .and_then(|p| p.kind.frame_props())
-            .and_then(|f| f.auto_layout)
+            .and_then(|f| f.auto_layout.as_ref())
             .map(|a| a.direction);
         let Some(n) = self.doc.get_mut(id) else { return swapped };
         let keep = |k: &str| !derived_only || matches!(k, "size" | "relativeTransform" | "fillGeometry" | "strokeGeometry");
@@ -2279,6 +2316,9 @@ impl<'a> Ctx<'a> {
                 if let Some(r) = set.get("gridRows").and_then(Value::as_u64) {
                     al.grid_rows = r as u32;
                 }
+                if let Some(s) = fstr(set, "gridAutoTracks") {
+                    al.grid_auto_tracks = parse_grid_auto_tracks(s);
+                }
             }
         }
         let non_fill_sizing = |kind: &NodeKind, dir_h: bool| -> Sizing {
@@ -2288,21 +2328,22 @@ impl<'a> Ctx<'a> {
                     TextAutoResize::Height if !dir_h => Sizing::Hug,
                     _ => Sizing::Fixed,
                 },
-                k => k.frame_props().and_then(|f| f.auto_layout).map_or(Sizing::Fixed, |al| al.sizing_along(dir_h)),
+                k => k.frame_props().and_then(|f| f.auto_layout.as_ref()).map_or(Sizing::Fixed, |al| al.sizing_along(dir_h)),
             }
         };
-        if let Some(al) = n.kind.frame_props().and_then(|fp| fp.auto_layout) {
-            let prim_h = al.primary_is_horizontal();
+        if let Some((prim_h, prim_sz, counter_sz)) =
+            n.kind.frame_props().and_then(|fp| fp.auto_layout.as_ref()).map(|al| (al.primary_is_horizontal(), al.primary_sizing, al.counter_sizing))
+        {
             if set.get("primaryAxisSizingMode").is_some() {
                 let slot = if prim_h { &mut n.layout_child.horizontal } else { &mut n.layout_child.vertical };
                 if *slot != Sizing::Fill {
-                    *slot = al.primary_sizing;
+                    *slot = prim_sz;
                 }
             }
             if set.get("counterAxisSizingMode").is_some() {
                 let slot = if prim_h { &mut n.layout_child.vertical } else { &mut n.layout_child.horizontal };
                 if *slot != Sizing::Fill {
-                    *slot = al.counter_sizing;
+                    *slot = counter_sz;
                 }
             }
         }
@@ -2327,6 +2368,7 @@ impl<'a> Ctx<'a> {
             }
         }
         if let Some(a) = fstr(set, "layoutAlign") {
+            n.layout_child.align_self = parse_align_self(Some(a));
             if a == "STRETCH" {
                 match parent_dir {
                     Some(LayoutDirection::Horizontal | LayoutDirection::Grid) => n.layout_child.vertical = Sizing::Fill,
@@ -2348,6 +2390,11 @@ impl<'a> Ctx<'a> {
         if let Some(p) = fstr(set, "layoutPositioning") {
             n.layout_child.absolute = p == "ABSOLUTE";
         }
+        for (idx, key) in [(0, "stackChildMarginTop"), (1, "stackChildMarginRight"), (2, "stackChildMarginBottom"), (3, "stackChildMarginLeft")] {
+            if let Some(m) = fnum(set, key) {
+                n.layout_child.margin[idx] = m;
+            }
+        }
         if let Some(c) = set.get("gridColumnAnchorIndex").and_then(Value::as_u64) {
             n.layout_child.grid_column = Some(c as u16);
         }
@@ -2359,6 +2406,12 @@ impl<'a> Ctx<'a> {
         }
         if let Some(r) = set.get("gridRowSpan").and_then(Value::as_u64) {
             n.layout_child.row_span = (r as u16).max(1);
+        }
+        if let Some(a) = fstr(set, "gridChildHorizontalAlign").and_then(parse_grid_child_align) {
+            n.layout_child.grid_align_h = a;
+        }
+        if let Some(a) = fstr(set, "gridChildVerticalAlign").and_then(parse_grid_child_align) {
+            n.layout_child.grid_align_v = a;
         }
         if let Some(h) = fstr(set, "layoutSizingHorizontal") {
             n.layout_child.horizontal = match h {
@@ -2663,16 +2716,23 @@ pub(crate) fn override_field(key: &str, is_text: bool) -> Option<OverrideField> 
         | "layoutAlign"
         | "layoutGrow"
         | "layoutPositioning"
+        | "stackChildMarginTop"
+        | "stackChildMarginRight"
+        | "stackChildMarginBottom"
+        | "stackChildMarginLeft"
         | "layoutSizingHorizontal"
         | "layoutSizingVertical"
         | "gridColumns"
         | "gridRows"
         | "gridColumnsSizing"
         | "gridRowsSizing"
+        | "gridAutoTracks"
         | "gridColumnSpan"
         | "gridRowSpan"
         | "gridColumnAnchorIndex"
-        | "gridRowAnchorIndex" => OverrideField::Layout,
+        | "gridRowAnchorIndex"
+        | "gridChildHorizontalAlign"
+        | "gridChildVerticalAlign" => OverrideField::Layout,
         "componentId" | "mainComponent" | "overrides" => OverrideField::MainComponent,
         "slotContent" => OverrideField::SlotContent,
         _ => return None,
@@ -2723,8 +2783,8 @@ fn parse_geometry_cached(items: &[Value], cache: &mut HashMap<String, Path>, blo
 }
 
 /// Parses `.fig` v106 CSS-grid track strings (e.g. `"1fr 2fr 120px auto"`,
-/// `"repeat(3, 1fr)"`, `"minmax(0, 1fr)"`) into track count + up to 8 [`GridTrack`]s.
-fn parse_grid_sizing(s: &str) -> (u32, [GridTrack; 8]) {
+/// `"repeat(3, 1fr)"`, `"minmax(0, 1fr)"`) into track count + up to [`MAX_GRID_TRACKS`] [`GridTrack`]s.
+fn parse_grid_sizing(s: &str) -> (u32, GridTracks) {
     fn parse_one(tok: &str) -> GridTrack {
         let t = tok.trim();
         let lower = t.to_ascii_lowercase();
@@ -2733,13 +2793,14 @@ fn parse_grid_sizing(s: &str) -> (u32, [GridTrack; 8]) {
                 return parse_one(max_part);
             }
         }
+        let finite = |s: &str| s.trim().parse::<f32>().ok().filter(|v| v.is_finite());
         if matches!(lower.as_str(), "auto" | "min-content" | "max-content" | "fit-content") {
             GridTrack::Hug
         } else if let Some(fr) = lower.strip_suffix("fr") {
-            GridTrack::Flex(fr.trim().parse::<f32>().unwrap_or(1.0).max(0.01))
+            GridTrack::Flex(finite(fr).unwrap_or(1.0).max(0.01))
         } else if let Some(px) = lower.strip_suffix("px") {
-            GridTrack::Fixed(px.trim().parse::<f32>().unwrap_or(0.0).max(0.0))
-        } else if let Ok(v) = lower.parse::<f32>() {
+            GridTrack::Fixed(finite(px).unwrap_or(0.0).max(0.0))
+        } else if let Some(v) = finite(&lower) {
             GridTrack::Fixed(v.max(0.0))
         } else {
             GridTrack::Flex(1.0)
@@ -2777,7 +2838,7 @@ fn parse_grid_sizing(s: &str) -> (u32, [GridTrack; 8]) {
         }
     }
 
-    const KEPT_TRACKS: usize = 8;
+    const KEPT_TRACKS: usize = MAX_GRID_TRACKS;
     const MAX_TRACK_COUNT: u32 = 1024;
     const MAX_REPEAT_DEPTH: usize = 8;
 
@@ -2838,11 +2899,23 @@ fn parse_grid_sizing(s: &str) -> (u32, [GridTrack; 8]) {
 
     let mut list = Tracks::default();
     collect_tokens(s, &mut list, 0);
-    let mut tracks = [GridTrack::default(); KEPT_TRACKS];
-    for (slot, t) in tracks.iter_mut().zip(list.kept.iter().copied()) {
-        *slot = t;
+    (list.count, GridTracks::from(list.kept))
+}
+
+fn parse_grid_auto_tracks(s: &str) -> GridAutoTracks {
+    let t = s.trim();
+    if t.is_empty() || t.eq_ignore_ascii_case("NONE") {
+        GridAutoTracks::None
+    } else if t.eq_ignore_ascii_case("ROWS") {
+        GridAutoTracks::Rows
+    } else {
+        let (count, tracks) = parse_grid_sizing(t);
+        if count > 0 {
+            GridAutoTracks::Track(tracks[0])
+        } else {
+            GridAutoTracks::Rows
+        }
     }
-    (list.count, tracks)
 }
 
 fn frame_props(v: &Value) -> FrameProps {
@@ -2868,6 +2941,7 @@ fn frame_props(v: &Value) -> FrameProps {
         let (sizing_rows, grid_row_tracks) = fstr(v, "gridRowsSizing").map(parse_grid_sizing).unwrap_or_default();
         let grid_columns = v.get("gridColumns").and_then(Value::as_u64).map(|x| x as u32).filter(|&x| x > 0).unwrap_or(sizing_cols);
         let grid_rows = v.get("gridRows").and_then(Value::as_u64).map(|x| x as u32).filter(|&x| x > 0).unwrap_or(sizing_rows);
+        let grid_auto_tracks = fstr(v, "gridAutoTracks").map(parse_grid_auto_tracks).unwrap_or_default();
         AutoLayout {
             direction,
             wrap: fstr(v, "layoutWrap") == Some("WRAP"),
@@ -2890,6 +2964,7 @@ fn frame_props(v: &Value) -> FrameProps {
             grid_rows,
             grid_col_tracks,
             grid_row_tracks,
+            grid_auto_tracks,
         }
     });
     FrameProps { clips_content: fbool(v, "clipsContent").unwrap_or(false), auto_layout, grids: farr(v, "layoutGrids").iter().filter_map(parse_grid).collect() }
@@ -2958,6 +3033,45 @@ fn build_runs(content: &str, base: &TextStyle, overrides: &[u64], table: Option<
     runs
 }
 
+/// A grid child's alignment key: `MIN` is Start. `None` for a value this model does not know.
+fn parse_grid_child_align(s: &str) -> Option<GridChildAlign> {
+    match s {
+        "MIN" => Some(GridChildAlign::Start),
+        "CENTER" => Some(GridChildAlign::Center),
+        "MAX" | "END" => Some(GridChildAlign::End),
+        "AUTO" => Some(GridChildAlign::Auto),
+        _ => None,
+    }
+}
+
+/// The key value that reads back as `a`. Start is `MIN`, never an omitted key: `AUTO` is enum 0, the schema
+/// default, so a reader that skips an absent key turns an omitted Start into Auto.
+pub(crate) fn grid_child_align_name(a: GridChildAlign) -> &'static str {
+    match a {
+        GridChildAlign::Start => "MIN",
+        GridChildAlign::Center => "CENTER",
+        GridChildAlign::End => "MAX",
+        GridChildAlign::Auto => "AUTO",
+    }
+}
+
+/// Whether a child's alignment keys are written: always under a grid, elsewhere only when they are not the Start
+/// default (a flow child never reads them, so a Start there would only add two enum fields per node).
+pub(crate) fn writes_grid_child_align(a: GridChildAlign, parent: Option<LayoutDirection>) -> bool {
+    a != GridChildAlign::Start || parent == Some(LayoutDirection::Grid)
+}
+
+fn parse_align_self(s: Option<&str>) -> AlignSelf {
+    match s {
+        Some("MIN") => AlignSelf::Start,
+        Some("CENTER") => AlignSelf::Center,
+        Some("MAX") => AlignSelf::End,
+        Some("STRETCH") => AlignSelf::Stretch,
+        Some("BASELINE") => AlignSelf::Baseline,
+        _ => AlignSelf::Auto,
+    }
+}
+
 fn layout_child(v: &Value, parent: Option<LayoutDirection>, kind: &NodeKind) -> LayoutChild {
     let sizing = |s: Option<&str>| match s {
         Some("HUG") => Some(Sizing::Hug),
@@ -2967,9 +3081,15 @@ fn layout_child(v: &Value, parent: Option<LayoutDirection>, kind: &NodeKind) -> 
     };
     let grow = fnum(v, "layoutGrow").unwrap_or(0.0);
     let u = |k: &str| v.get(k).and_then(Value::as_u64).map(|x| x as u16);
+    // An omitted enum is its schema default and `GridChildAlign` defaults to AUTO, so a grid child that never set a
+    // key follows the frame's alignment instead of sitting at the cell origin. Only a grid reads the keys; a child
+    // anywhere else keeps the Start default, which is not saved.
+    let unset_align = if parent == Some(LayoutDirection::Grid) { GridChildAlign::Auto } else { GridChildAlign::Start };
+    let align = |k: &str| fstr(v, k).and_then(parse_grid_child_align).unwrap_or(unset_align);
     let mut lc = LayoutChild {
         absolute: fstr(v, "layoutPositioning") == Some("ABSOLUTE"),
         grow,
+        align_self: parse_align_self(fstr(v, "layoutAlign")),
         min_w: fnum(v, "minWidth"),
         max_w: fnum(v, "maxWidth"),
         min_h: fnum(v, "minHeight"),
@@ -2978,6 +3098,14 @@ fn layout_child(v: &Value, parent: Option<LayoutDirection>, kind: &NodeKind) -> 
         grid_row: u("gridRowAnchorIndex"),
         col_span: u("gridColumnSpan").unwrap_or(1).max(1),
         row_span: u("gridRowSpan").unwrap_or(1).max(1),
+        grid_align_h: align("gridChildHorizontalAlign"),
+        grid_align_v: align("gridChildVerticalAlign"),
+        margin: [
+            fnum(v, "stackChildMarginTop").unwrap_or(0.0),
+            fnum(v, "stackChildMarginRight").unwrap_or(0.0),
+            fnum(v, "stackChildMarginBottom").unwrap_or(0.0),
+            fnum(v, "stackChildMarginLeft").unwrap_or(0.0),
+        ],
         ..Default::default()
     };
     let (sh, sv) = (sizing(fstr(v, "layoutSizingHorizontal")), sizing(fstr(v, "layoutSizingVertical")));
@@ -2991,7 +3119,7 @@ fn layout_child(v: &Value, parent: Option<LayoutDirection>, kind: &NodeKind) -> 
                 TextAutoResize::Height => !dir_h,
                 _ => false,
             },
-            k => k.frame_props().and_then(|f| f.auto_layout).is_some_and(|al| al.sizing_along(dir_h) == Sizing::Hug),
+            k => k.frame_props().and_then(|f| f.auto_layout.as_ref()).is_some_and(|al| al.sizing_along(dir_h) == Sizing::Hug),
         }
     };
     if own_hug(true) {
@@ -3285,5 +3413,24 @@ mod grid_sizing_tests {
         let (n, _) = parse_grid_sizing(&s);
         assert_eq!(n, 0);
         assert!(started.elapsed().as_millis() < 250, "took {:?}", started.elapsed());
+    }
+
+    #[test]
+    fn non_finite_track_tokens_fall_back_to_finite_defaults() {
+        let (n, t) = parse_grid_sizing("NaNfr inffr -inffr NaNpx infpx -infpx inf -inf");
+        assert_eq!(n, 8);
+        assert_eq!(
+            t,
+            [
+                GridTrack::Flex(1.0),
+                GridTrack::Flex(1.0),
+                GridTrack::Flex(1.0),
+                GridTrack::Fixed(0.0),
+                GridTrack::Fixed(0.0),
+                GridTrack::Fixed(0.0),
+                GridTrack::Flex(1.0),
+                GridTrack::Flex(1.0),
+            ]
+        );
     }
 }

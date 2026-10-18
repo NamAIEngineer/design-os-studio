@@ -21,12 +21,14 @@ mod paintconv;
 mod pipelines;
 mod present;
 mod resources;
+mod submit;
 
 pub use canvas::Canvas;
-pub use compile::{CompileOptions, SceneCompiler};
+pub use compile::{CompileOptions, SceneCompiler, DEFAULT_REFINE_MAX_PROGRAMS, DEFAULT_REFINE_VRAM_BUDGET_BYTES};
 pub use context::{GpuContext, GpuError};
 pub use exec::{ExecStats, Output, Renderer};
 pub use frame::{Frame, FrameStats};
 pub use headless::HeadlessGpu;
 pub use present::Presenter;
+pub use submit::{HAL_BUFFERS_PER_COPY, HAL_BUFFERS_PER_PASS, MAX_HAL_COMMAND_BUFFERS, SUBMIT_HAL_BUDGET};
 pub use wgpu;

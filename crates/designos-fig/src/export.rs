@@ -1,7 +1,7 @@
 //! [`Document`] -> Figma REST-shaped JSON (the inverse of `import_rest_json`).
 
 use crate::kiwi::clean_f32;
-use crate::rest_import::utf16_to_byte_offsets;
+use crate::rest_import::{grid_child_align_name, utf16_to_byte_offsets, writes_grid_child_align};
 use crate::svgpath::write_path;
 use designos_doc::*;
 use serde_json::{json, Map, Value};
@@ -269,12 +269,12 @@ fn sizing_name(s: Sizing) -> &'static str {
     }
 }
 
-fn frame_fields(m: &mut Map<String, Value>, f: &FrameProps) {
+fn frame_fields(m: &mut Map<String, Value>, f: &FrameProps, doc: &Document, node: &Node) {
     m.insert("clipsContent".into(), f.clips_content.into());
     if !f.grids.is_empty() {
         m.insert("layoutGrids".into(), Value::Array(f.grids.iter().map(grid).collect()));
     }
-    let Some(al) = f.auto_layout else {
+    let Some(al) = &f.auto_layout else {
         m.insert("layoutMode".into(), "NONE".into());
         return;
     };
@@ -286,9 +286,14 @@ fn frame_fields(m: &mut Map<String, Value>, f: &FrameProps) {
     m.insert("layoutMode".into(), mode.into());
     if al.grid_columns > 0 {
         m.insert("gridColumns".into(), al.grid_columns.into());
+        m.insert("gridColumnsSizing".into(), crate::fig_export::format_grid_tracks(al.grid_columns, &al.grid_col_tracks).into());
     }
-    if al.grid_rows > 0 {
-        m.insert("gridRows".into(), al.grid_rows.into());
+    if let Some((rows, sizing)) = crate::fig_export::grid_rows_for_export(doc, node, al) {
+        m.insert("gridRows".into(), rows.into());
+        m.insert("gridRowsSizing".into(), sizing.into());
+    }
+    if let Some(auto_tracks) = crate::fig_export::format_grid_auto_tracks(al.grid_auto_tracks) {
+        m.insert("gridAutoTracks".into(), auto_tracks.into());
     }
     m.insert("layoutWrap".into(), if al.wrap { "WRAP" } else { "NO_WRAP" }.into());
     m.insert("itemSpacing".into(), n(al.item_spacing));
@@ -484,6 +489,17 @@ fn export_node(doc: &Document, id: NodeId, parent_abs: Option<&Affine>, depth: u
             if lc.grow != 0.0 {
                 m.insert("layoutGrow".into(), n(lc.grow));
             }
+            let align_self_str = match lc.align_self {
+                AlignSelf::Start => Some("MIN"),
+                AlignSelf::Center => Some("CENTER"),
+                AlignSelf::End => Some("MAX"),
+                AlignSelf::Stretch => Some("STRETCH"),
+                AlignSelf::Baseline => Some("BASELINE"),
+                AlignSelf::Auto => None,
+            };
+            if let Some(a) = align_self_str {
+                m.insert("layoutAlign".into(), a.into());
+            }
             if lc.absolute {
                 m.insert("layoutPositioning".into(), "ABSOLUTE".into());
             }
@@ -499,8 +515,24 @@ fn export_node(doc: &Document, id: NodeId, parent_abs: Option<&Affine>, depth: u
             if lc.row_span > 1 {
                 m.insert("gridRowSpan".into(), lc.row_span.into());
             }
+            let parent_dir = node.parent.and_then(|p| doc.get(p)).and_then(|p| p.kind.frame_props()).and_then(|f| f.auto_layout.as_ref()).map(|a| a.direction);
+            for (k, a) in [("gridChildHorizontalAlign", lc.grid_align_h), ("gridChildVerticalAlign", lc.grid_align_v)] {
+                if writes_grid_child_align(a, parent_dir) {
+                    m.insert(k.into(), grid_child_align_name(a).into());
+                }
+            }
             for (k, v) in [("minWidth", lc.min_w), ("maxWidth", lc.max_w), ("minHeight", lc.min_h), ("maxHeight", lc.max_h)] {
                 if let Some(v) = v {
+                    m.insert(k.into(), n(v));
+                }
+            }
+            for (k, v) in [
+                ("stackChildMarginTop", lc.margin[0]),
+                ("stackChildMarginRight", lc.margin[1]),
+                ("stackChildMarginBottom", lc.margin[2]),
+                ("stackChildMarginLeft", lc.margin[3]),
+            ] {
+                if v != 0.0 {
                     m.insert(k.into(), n(v));
                 }
             }
@@ -523,10 +555,10 @@ fn export_node(doc: &Document, id: NodeId, parent_abs: Option<&Affine>, depth: u
 
     match &node.kind {
         NodeKind::Frame(f) | NodeKind::Component(f) | NodeKind::ComponentSet(f) => {
-            frame_fields(&mut m, f);
+            frame_fields(&mut m, f, doc, node);
         }
         NodeKind::Instance { frame, component, component_key } => {
-            frame_fields(&mut m, frame);
+            frame_fields(&mut m, frame, doc, node);
             if let Some(c) = component {
                 m.insert("componentId".into(), figma_id(doc, *c).into());
             } else if let Some(k) = component_key {
