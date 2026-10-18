@@ -269,3 +269,143 @@ fn preferred_components_without_a_slot_config_survive_a_fig_round_trip() {
     let icon = find(&rt, "Icon").id;
     assert_eq!(find(&rt, "Panel").component.slot_configs.get("Body"), Some(&SlotPropConfig { preferred: vec![icon], ..Default::default() }));
 }
+
+#[test]
+fn real_preferred_values_object_round_trips_for_slot_and_instance_swap_and_keeps_legacy_guid_list() {
+    use designos_fig::container;
+    use designos_fig::kiwi::{KiwiValue, Schema};
+
+    let real_fixture = json!([
+        nc((0, 0), (0, 0), "!", "DOCUMENT", "Document", json!({})),
+        nc((0, 1), (0, 0), "a", "CANVAS", "Page", json!({})),
+        nc((0, 2), (0, 0), "b", "CANVAS", "Internal Only Canvas", json!({"internalOnly": true})),
+        nc((6, 1), (0, 2), "a", "SYMBOL", "LibIcon", json!({"componentKey": "K_LIB_ICON", "sourceLibraryKey": "lk-icons"})),
+        nc((6, 2), (0, 1), "a", "FRAME", "BadgeSet", json!({"isStateGroup": true, "componentKey": "K_BADGE_SET"})),
+        nc((6, 3), (6, 2), "a", "SYMBOL", "Variant=Default", json!({"componentKey": "K_BADGE_DEF"})),
+        nc(
+            (5, 1),
+            (0, 1),
+            "b",
+            "SYMBOL",
+            "Panel",
+            json!({
+                "componentKey": "K_PANEL",
+                "componentPropDefs": [
+                    {
+                        "id": g(7, 1),
+                        "name": "LeadIcon",
+                        "type": "INSTANCE_SWAP",
+                        "initialValue": {"guidValue": g(6, 1)},
+                        "preferredValues": {
+                            "stringValues": [],
+                            "instanceSwapValues": [
+                                {"type": "COMPONENT", "key": "K_LIB_ICON"},
+                                {"type": "STATE_GROUP", "key": "K_BADGE_SET"}
+                            ],
+                            "parameterValues": []
+                        }
+                    },
+                    {
+                        "id": g(7, 2),
+                        "name": "Body",
+                        "type": "SLOT",
+                        "preferredValues": {
+                            "stringValues": [],
+                            "instanceSwapValues": [
+                                {"type": "COMPONENT", "key": "K_LIB_ICON"},
+                                {"type": "STATE_GROUP", "key": "K_BADGE_SET"}
+                            ],
+                            "parameterValues": []
+                        },
+                        "slotPropConfig": {"allowPreferredValuesOnly": true}
+                    }
+                ]
+            })
+        )
+    ]);
+
+    // 1. Import the real preferredValues object shape and resolve keys via library-key / componentKey lookup.
+    let doc = import_fig_node_changes(&real_fixture, "t").unwrap();
+    let lib_icon = find(&doc, "LibIcon").id;
+    let badge_set = find(&doc, "BadgeSet").id;
+    let panel = find(&doc, "Panel");
+
+    let swap_prop = panel.component.props.iter().find(|p| p.name == "LeadIcon").expect("LeadIcon prop");
+    assert_eq!(swap_prop.kind, PropKind::InstanceSwap { preferred: vec![lib_icon, badge_set] });
+    assert_eq!(
+        panel.component.slot_configs.get("Body"),
+        Some(&SlotPropConfig { allow_preferred_values_only: Some(true), preferred: vec![lib_icon, badge_set], ..Default::default() })
+    );
+
+    // 2. Export to .fig and verify the binary Kiwi schema + message uses tag 8 ComponentPropPreferredValues object.
+    let exported_bytes = export_fig(&doc).expect("export_fig");
+    let archive = container::open(&exported_bytes).expect("open container");
+    let (schema_bin, msg_bin) = container::read_archive_chunks(&archive).expect("read archive chunks");
+    let schema = Schema::decode(&schema_bin).expect("decode schema");
+    let cpd_def = schema.defs.iter().find(|d| d.name == "ComponentPropDef").expect("ComponentPropDef in schema");
+    let pv_field = cpd_def.fields.iter().find(|f| f.name.as_ref() == "preferredValues").expect("preferredValues field");
+    assert_eq!(pv_field.value, 8, "preferredValues tag is 8 in ComponentPropDef");
+    assert!(!pv_field.is_array, "preferredValues is a single ComponentPropPreferredValues message, not an array");
+
+    let root = schema.root_message().unwrap();
+    let decoded_msg = schema.decode_message(root, &msg_bin).unwrap();
+    let changes = match decoded_msg.get("nodeChanges") {
+        Some(KiwiValue::Array(arr)) => arr,
+        other => panic!("expected nodeChanges array, got {other:?}"),
+    };
+    let panel_nc = changes.iter().find(|nc| nc.get("name") == Some(&KiwiValue::String("Panel".into()))).expect("Panel NodeChange");
+    let defs = match panel_nc.get("componentPropDefs") {
+        Some(KiwiValue::Array(arr)) => arr,
+        other => panic!("expected componentPropDefs array, got {other:?}"),
+    };
+    for def_val in defs {
+        let pv = def_val.get("preferredValues").expect("preferredValues object on exported prop def");
+        let swap_vals = match pv.get("instanceSwapValues") {
+            Some(KiwiValue::Array(arr)) => arr,
+            other => panic!("expected instanceSwapValues array inside preferredValues, got {other:?}"),
+        };
+        assert_eq!(swap_vals.len(), 2);
+        assert_eq!(swap_vals[0].get("type"), Some(&KiwiValue::Enum("COMPONENT".into())));
+        assert_eq!(swap_vals[0].get("key"), Some(&KiwiValue::String("K_LIB_ICON".into())));
+        assert_eq!(swap_vals[1].get("type"), Some(&KiwiValue::Enum("STATE_GROUP".into())));
+        assert_eq!(swap_vals[1].get("key"), Some(&KiwiValue::String("K_BADGE_SET".into())));
+    }
+
+    // 3. Re-import the exported .fig and verify round-trip fidelity of preferred values for both prop types.
+    let rt = import_fig(&exported_bytes).expect("import_fig");
+    let rt_icon = find(&rt, "LibIcon").id;
+    let rt_set = find(&rt, "BadgeSet").id;
+    let rt_panel = find(&rt, "Panel");
+    let rt_swap = rt_panel.component.props.iter().find(|p| p.name == "LeadIcon").expect("LeadIcon after round-trip");
+    assert_eq!(rt_swap.kind, PropKind::InstanceSwap { preferred: vec![rt_icon, rt_set] });
+    assert_eq!(
+        rt_panel.component.slot_configs.get("Body"),
+        Some(&SlotPropConfig { allow_preferred_values_only: Some(true), preferred: vec![rt_icon, rt_set], ..Default::default() })
+    );
+
+    // 4. Legacy guid-list form still imports for both INSTANCE_SWAP and SLOT.
+    let legacy_fixture = json!([
+        nc((0, 0), (0, 0), "!", "DOCUMENT", "Document", json!({})),
+        nc((0, 1), (0, 0), "a", "CANVAS", "Page", json!({})),
+        nc((6, 1), (0, 1), "a", "SYMBOL", "Icon", json!({})),
+        nc(
+            (5, 1),
+            (0, 1),
+            "b",
+            "SYMBOL",
+            "LegacyPanel",
+            json!({
+                "componentPropDefs": [
+                    {"id": g(7, 1), "name": "Swap", "type": "INSTANCE_SWAP", "initialValue": {"guidValue": g(6, 1)}, "preferredValues": [g(6, 1)]},
+                    {"id": g(7, 2), "name": "Body", "type": "SLOT", "preferredValues": [g(6, 1)]}
+                ]
+            })
+        )
+    ]);
+    let legacy_doc = import_fig_node_changes(&legacy_fixture, "t").unwrap();
+    let legacy_icon = find(&legacy_doc, "Icon").id;
+    let legacy_panel = find(&legacy_doc, "LegacyPanel");
+    let legacy_swap = legacy_panel.component.props.iter().find(|p| p.name == "Swap").unwrap();
+    assert_eq!(legacy_swap.kind, PropKind::InstanceSwap { preferred: vec![legacy_icon] });
+    assert_eq!(legacy_panel.component.slot_configs.get("Body"), Some(&SlotPropConfig { preferred: vec![legacy_icon], ..Default::default() }));
+}

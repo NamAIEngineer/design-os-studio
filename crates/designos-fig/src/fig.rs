@@ -273,6 +273,8 @@ struct Lk<'a> {
     /// Property definition id (including the `parentPropDefId` aliases that
     /// variants carry) -> (`Name#s:l`, REST type).
     prop_defs: HashMap<String, (String, &'static str)>,
+    /// Component or state-group key (`componentKey` / `key`) -> node guid (`s:l`).
+    comp_by_key: HashMap<String, String>,
     /// Node guid (`s:l`) -> Dev Mode handoff status (`READY_FOR_DEV` / `COMPLETED`)
     /// from `CANVAS.handoffStatusMap`.
     handoff_status: HashMap<String, &'static str>,
@@ -291,6 +293,7 @@ impl<'a> Lk<'a> {
             style_by_id: HashMap::new(),
             deleted_styles: std::collections::HashSet::new(),
             prop_defs: HashMap::new(),
+            comp_by_key: HashMap::new(),
             handoff_status: HashMap::new(),
         };
         let mut aliases: Vec<(String, String)> = Vec::new();
@@ -314,6 +317,13 @@ impl<'a> Lk<'a> {
                 if let Some(st) = mapped {
                     lk.handoff_status.insert(gid, st);
                 }
+            }
+            if matches!(fstr(j, "type"), Some("SYMBOL")) || rest_import::fbool(j, "isStateGroup") == Some(true) {
+                if let Some(ck) = fstr(j, "componentKey").filter(|k| !k.is_empty()).or(key) {
+                    lk.comp_by_key.insert(ck.to_string(), e.id.clone());
+                }
+            } else if let Some(ck) = fstr(j, "componentKey").filter(|k| !k.is_empty()) {
+                lk.comp_by_key.insert(ck.to_string(), e.id.clone());
             }
             match (fstr(j, "type"), key) {
                 (Some("VARIABLE"), Some(k)) => {
@@ -1318,7 +1328,32 @@ fn component_props(m: &mut Map<String, Value>, nc: &Value, lk: &Lk) {
                 .unwrap_or_default();
             def.insert("variantOptions".into(), Value::Array(options));
         } else if *ty == "INSTANCE_SWAP" || *ty == "SLOT" {
-            let prefs: Vec<Value> = rest_import::farr(d, "preferredValues").iter().filter_map(|p| guid_str(p).map(Value::String)).collect();
+            let mut prefs: Vec<Value> = Vec::new();
+            if let Some(pv) = d.get("preferredValues") {
+                if pv.is_object() {
+                    for entry in rest_import::farr(pv, "instanceSwapValues") {
+                        if let Some(k) = fstr(entry, "key") {
+                            let resolved = lk.comp_by_key.get(k).cloned().unwrap_or_else(|| k.to_string());
+                            prefs.push(Value::String(resolved));
+                        }
+                    }
+                    for s in rest_import::farr(pv, "stringValues") {
+                        if let Some(k) = s.as_str() {
+                            let resolved = lk.comp_by_key.get(k).cloned().unwrap_or_else(|| k.to_string());
+                            prefs.push(Value::String(resolved));
+                        }
+                    }
+                } else {
+                    for p in rest_import::farr(d, "preferredValues") {
+                        if let Some(id_or_key) = guid_str(p)
+                            .or_else(|| p.as_str().map(String::from))
+                            .or_else(|| fstr(p, "key").map(|k| lk.comp_by_key.get(k).cloned().unwrap_or_else(|| k.to_string())))
+                        {
+                            prefs.push(Value::String(id_or_key));
+                        }
+                    }
+                }
+            }
             if !prefs.is_empty() {
                 def.insert("preferredValues".into(), Value::Array(prefs));
             }
