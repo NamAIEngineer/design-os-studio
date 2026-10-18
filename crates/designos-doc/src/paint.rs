@@ -263,6 +263,23 @@ pub struct Stroke {
     pub dashes: Vec<f32>,
 }
 
+impl Stroke {
+    /// Inward border widths `[top, right, bottom, left]` that sit inside the node's box.
+    /// Returns `[0.0; 4]` when the stroke has no visible paint or is aligned `Outside`.
+    pub fn layout_inset(&self) -> [f32; 4] {
+        if !self.paints.iter().any(|p| p.visible && p.opacity > 0.0) {
+            return [0.0; 4];
+        }
+        let factor = match self.align {
+            StrokeAlign::Inside => 1.0,
+            StrokeAlign::Center => 0.5,
+            StrokeAlign::Outside => return [0.0; 4],
+        };
+        let sides = self.side_weights.unwrap_or([self.weight; 4]);
+        sides.map(|w| (w * factor).max(0.0))
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum Effect {
     DropShadow {
@@ -516,11 +533,89 @@ pub struct TextRun {
     pub style: TextStyle,
 }
 
+fn default_true() -> bool {
+    true
+}
+
+fn is_true(v: &bool) -> bool {
+    *v
+}
+
+fn is_default_grid_align(a: &LayoutGridAlign) -> bool {
+    *a == LayoutGridAlign::Stretch
+}
+
+fn is_zero_f32(v: &f32) -> bool {
+    *v == 0.0
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum LayoutGridAlign {
+    #[default]
+    Stretch,
+    Min,
+    Center,
+    Max,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum LayoutGrid {
-    Grid { size: f32, color: Color },
-    Columns { count: u32, gutter: f32, offset: f32, color: Color },
-    Rows { count: u32, gutter: f32, offset: f32, color: Color },
+    Grid {
+        size: f32,
+        color: Color,
+        #[serde(default = "default_true", skip_serializing_if = "is_true")]
+        visible: bool,
+    },
+    Columns {
+        count: u32,
+        gutter: f32,
+        offset: f32,
+        #[serde(default, skip_serializing_if = "is_zero_f32")]
+        section_size: f32,
+        #[serde(default, skip_serializing_if = "is_default_grid_align")]
+        alignment: LayoutGridAlign,
+        color: Color,
+        #[serde(default = "default_true", skip_serializing_if = "is_true")]
+        visible: bool,
+    },
+    Rows {
+        count: u32,
+        gutter: f32,
+        offset: f32,
+        #[serde(default, skip_serializing_if = "is_zero_f32")]
+        section_size: f32,
+        #[serde(default, skip_serializing_if = "is_default_grid_align")]
+        alignment: LayoutGridAlign,
+        color: Color,
+        #[serde(default = "default_true", skip_serializing_if = "is_true")]
+        visible: bool,
+    },
+}
+
+impl LayoutGrid {
+    pub fn grid(size: f32, color: Color) -> Self {
+        Self::Grid { size, color, visible: true }
+    }
+
+    pub fn columns(count: u32, gutter: f32, offset: f32, color: Color) -> Self {
+        Self::Columns { count, gutter, offset, section_size: 0.0, alignment: LayoutGridAlign::Stretch, color, visible: true }
+    }
+
+    pub fn rows(count: u32, gutter: f32, offset: f32, color: Color) -> Self {
+        Self::Rows { count, gutter, offset, section_size: 0.0, alignment: LayoutGridAlign::Stretch, color, visible: true }
+    }
+
+    pub fn is_visible(&self) -> bool {
+        match self {
+            Self::Grid { visible, .. } | Self::Columns { visible, .. } | Self::Rows { visible, .. } => *visible,
+        }
+    }
+
+    pub fn set_visible(&mut self, v: bool) {
+        match self {
+            Self::Grid { visible, .. } | Self::Columns { visible, .. } | Self::Rows { visible, .. } => *visible = v,
+        }
+    }
 }
 
 #[cfg(test)]

@@ -195,6 +195,8 @@ pub struct App {
     pub terminal: crate::terminal::TerminalState,
     /// In-Canvas Cmd+K Agent & Design Gate Bar state.
     pub cmdk: crate::cmdk::CmdKState,
+    /// Check designs panel: hard-coded values, contrast and detached instances.
+    pub check_designs: crate::check_designs::CheckDesignsState,
     /// 1:1 Figma UI3 Multi-Tab Project Workspace state (`US-10`).
     pub tabs: crate::tabs::TabsState,
     /// Two-digit rapid opacity keystroke buffer (`(digit, timestamp)` within 400ms).
@@ -251,6 +253,7 @@ impl App {
             specs: Default::default(),
             terminal: Default::default(),
             cmdk: Default::default(),
+            check_designs: Default::default(),
             tabs: Default::default(),
             opacity_buffer: None,
         }
@@ -276,6 +279,45 @@ impl App {
     /// Marks the document as modified so the canvas texture is re-rendered.
     pub fn changed(&mut self) {
         self.canvas.dirty = true;
+    }
+
+    /// Runs one bounded step of the auto-layout subtrees a relayout deferred past its budget and
+    /// reports the work still queued. True while subtrees remain, so the caller keeps repainting.
+    pub fn step_pending_relayout(&mut self) -> bool {
+        if self.doc.pending_relayout().is_empty() {
+            return false;
+        }
+        let remaining = self.doc.flush_pending_relayout_step();
+        self.relayout_moved_geometry();
+        remaining > 0
+    }
+
+    /// Finishes every deferred auto-layout subtree. Anything that writes the document out (a save,
+    /// a version snapshot, an export) calls this first: the queue is not part of the file, so what
+    /// is still queued would be stored with the stale layout and nothing would finish it on reopen.
+    pub fn settle_pending_relayout(&mut self) {
+        if self.doc.pending_relayout().is_empty() {
+            return;
+        }
+        self.doc.flush_pending_relayout();
+        self.relayout_moved_geometry();
+    }
+
+    /// The deferred layout moved nodes behind the canvas's back: bump the revision (the CPU scene
+    /// index and the autosave watch it), drop the cached tiles and GPU geometry, and tell the
+    /// user how much is still unfinished, or retire that notice once nothing is.
+    fn relayout_moved_geometry(&mut self) {
+        self.changed();
+        self.canvas.tiles.invalidate_all();
+        match self.doc.relayout_notice() {
+            Some(notice) if self.toast.as_ref().is_none_or(|t| !t.error) => self.show_toast(notice, false),
+            Some(_) => {}
+            None => {
+                if self.toast.as_ref().is_some_and(|t| !t.error && t.text.starts_with(designos_doc::RELAYOUT_NOTICE_PREFIX)) {
+                    self.toast = None;
+                }
+            }
+        }
     }
 
     pub fn is_selected(&self, id: NodeId) -> bool {

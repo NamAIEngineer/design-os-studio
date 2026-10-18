@@ -126,6 +126,7 @@ impl Shell {
             Some("variables-library" | "variables-library-open") => demo::variables_library_document(),
             Some(crate::showcase::FIXTURE) => crate::showcase::document(),
             Some(crate::protovars::FIXTURE) => crate::protovars::document(),
+            Some(crate::check_designs::FIXTURE) => crate::check_designs::fixture::document(),
             Some("deck") => crate::decks::demo::document(),
             Some("board") => crate::board::demo::document(),
             Some("board-empty") => crate::board::create::new_document("Untitled"),
@@ -137,7 +138,10 @@ impl Shell {
         // session directory once; bind the terminal to the id the tab bar keeps before any can start.
         let session_id = app.tabs.active_session_id();
         app.terminal.bind_session(&session_id);
-        if !matches!(opts.fixture.as_deref(), Some("variables" | "variables-library" | "variables-library-open" | "deck" | crate::showcase::FIXTURE)) {
+        if !matches!(
+            opts.fixture.as_deref(),
+            Some("variables" | "variables-library" | "variables-library-open" | "deck" | crate::showcase::FIXTURE | crate::check_designs::FIXTURE)
+        ) {
             app.doc.name = "Untitled".into();
         }
         if opts.fixture.as_deref() == Some("deck") {
@@ -288,6 +292,15 @@ impl Shell {
                 app.ui.left_collapsed = false;
                 app.terminal.dock_open = true;
                 app.terminal.ensure_default_tab(app.file_path.as_deref());
+            }
+            Some(p @ ("check-designs" | "check-designs-fixed")) => {
+                app.open_check_designs();
+                if p == "check-designs-fixed" {
+                    app.refresh_check_designs(false);
+                    let findings = app.check_designs.report.findings.clone();
+                    app.check_designs_fix_all(&findings);
+                    app.check_designs.invalidate();
+                }
             }
             Some("cmdk") => {
                 app.cmdk.open = true;
@@ -1037,6 +1050,9 @@ impl Shell {
             self.app.flush_autosave();
         }
         self.app.scrub_sync(&ctx);
+        if self.app.step_pending_relayout() {
+            ctx.request_repaint();
+        }
         let window_full = ui.max_rect();
         let show_title_bar = self.app.tabs.always_visible && self.shot.is_none() && self.app.proto.present.is_none();
         let after_title_rect = if show_title_bar {
@@ -1243,6 +1259,7 @@ impl Shell {
             }
             menus::show(&mut self.app, &ctx);
             panels::context::show(&mut self.app, &ctx);
+            panels::check_designs::show(&mut self.app, &ctx);
             // the floating panel (or only the inspector's binding picker when closed)
             crate::variables::view::show(&mut self.app, ui, full);
             if let Some(seq) = self.shot.as_ref().and_then(|s| s.seq.as_ref()) {
@@ -1365,6 +1382,7 @@ pub fn execute_cmdk_action(app: &mut App, action: crate::cmdk::CmdKAction) {
             app.select_only(id);
             app.fit_selection();
         }
+        crate::cmdk::CmdKAction::OpenCheckDesigns => app.open_check_designs(),
         crate::cmdk::CmdKAction::AutoFixDesignGate => {
             let sel = app.selection.clone();
             let page = app.page;
@@ -1654,8 +1672,8 @@ pub fn apply_micro_interaction_showcase_preset(app: &mut App, preset: &str) {
                     item_spacing: gap,
                     counter_spacing: gap,
                     padding: [pad, pad, pad, pad],
-                    grid_col_tracks: col_tracks,
-                    grid_row_tracks: row_tracks,
+                    grid_col_tracks: col_tracks.into(),
+                    grid_row_tracks: row_tracks.into(),
                     primary_sizing: Sizing::Fixed,
                     counter_sizing: Sizing::Fixed,
                     ..Default::default()
@@ -2330,8 +2348,8 @@ pub fn apply_micro_interaction_continuous_frame(app: &mut App, base_doc: &design
                     item_spacing: gap,
                     counter_spacing: gap,
                     padding: [pad, pad, pad, pad],
-                    grid_col_tracks: col_tracks,
-                    grid_row_tracks: row_tracks,
+                    grid_col_tracks: col_tracks.into(),
+                    grid_row_tracks: row_tracks.into(),
                     primary_sizing: Sizing::Fixed,
                     counter_sizing: Sizing::Fixed,
                     ..Default::default()
