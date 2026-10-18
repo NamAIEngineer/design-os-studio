@@ -388,7 +388,7 @@ pub fn figma_like_schema() -> Schema {
     enum_def(&mut b, "StackCounterAlignContent", &["AUTO", "SPACE_BETWEEN"]);
     enum_def(&mut b, "TextWrapStyle", &["AUTO", "BALANCE", "PRETTY"]);
     enum_def(&mut b, "StackSize", &["FIXED", "RESIZE_TO_FIT", "RESIZE_TO_FIT_WITH_IMPLICIT_SIZE"]);
-    enum_def(&mut b, "StackCounterAlign", &["STRETCH", "AUTO"]);
+    enum_def(&mut b, "StackCounterAlign", &["MIN", "CENTER", "MAX", "STRETCH", "AUTO", "BASELINE"]);
     enum_def(&mut b, "StackPositioning", &["AUTO", "ABSOLUTE"]);
     enum_def(&mut b, "StackWrap", &["NO_WRAP", "WRAP"]);
     enum_def(&mut b, "TextAlignHorizontal", &["LEFT", "CENTER", "RIGHT", "JUSTIFIED"]);
@@ -424,7 +424,8 @@ pub fn figma_like_schema() -> Schema {
     );
     enum_def(&mut b, "TextTruncation", &["DISABLED", "ENDING"]);
     enum_def(&mut b, "StyleType", &["NONE", "FILL", "TEXT", "EFFECT", "EXPORT", "GRID", "STROKE"]);
-    enum_def(&mut b, "GridPattern", &["GRID", "COLUMNS", "ROWS"]);
+    enum_def(&mut b, "GridPattern", &["GRID", "COLUMNS", "ROWS", "STRIPES"]);
+    enum_def(&mut b, "LayoutGridType", &["MIN", "CENTER", "STRETCH", "MAX"]);
     enum_def(&mut b, "ImageScaleMode", &["STRETCH", "FIT", "FILL", "TILE"]);
     enum_def(&mut b, "WindingRule", &["NONZERO", "ODD", "EVENODD"]);
     enum_def(&mut b, "ConstraintType", &["MIN", "CENTER", "MAX", "STRETCH", "SCALE"]);
@@ -608,6 +609,9 @@ pub fn figma_like_schema() -> Schema {
     let ct = def(&b, "Color");
     b.field(lg, "color", ct, false, 6);
     b.field(lg, "visible", nat(Bool), false, 7);
+    let lgt = def(&b, "LayoutGridType");
+    b.field(lg, "type", lgt, false, 8);
+    b.field(lg, "numSections", nat(Int), false, 9);
     let gp = b.define("GuidPath", DefKind::Message);
     let gt = def(&b, "GUID");
     b.field(gp, "guids", gt, true, 1);
@@ -952,6 +956,7 @@ pub fn figma_like_schema() -> Schema {
     f(&mut b, "gridRowGap", nat(Float), false);
     f(&mut b, "gridColumnsSizing", nat(String), false);
     f(&mut b, "gridRowsSizing", nat(String), false);
+    f(&mut b, "gridAutoTracks", nat(String), false);
     f(&mut b, "isSoftDeleted", nat(Bool), false);
     f(&mut b, "sectionStatusInfo", hst_info, false);
     f(&mut b, "shapeWithTextType", nat(String), false);
@@ -1030,6 +1035,11 @@ pub fn figma_like_schema() -> Schema {
     f(&mut b, "inheritEffectStyleID", guid_ty, false);
     f(&mut b, "inheritGridStyleID", guid_ty, false);
     f(&mut b, "isSoftDeletedStyle", nat(Bool), false);
+    // Child margins (rea-findings: stackChildMarginTop/Right/Bottom/Left = 606..609).
+    b.field(nc, "stackChildMarginTop", nat(Float), false, 606);
+    b.field(nc, "stackChildMarginRight", nat(Float), false, 607);
+    b.field(nc, "stackChildMarginBottom", nat(Float), false, 608);
+    b.field(nc, "stackChildMarginLeft", nat(Float), false, 609);
     f(&mut b, "isSlot", nat(Bool), false);
     f(&mut b, "isSlotContent", nat(Bool), false);
 

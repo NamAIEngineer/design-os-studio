@@ -704,7 +704,7 @@ impl App {
         let mut tx = Tx::new();
         if let Some(n) = tx.ed.node(&mut self.doc, fid) {
             if let Some(al) = n.kind.frame_props_mut().and_then(|fp| fp.auto_layout.as_mut()) {
-                al.grid_rows = (al.grid_rows.max(1) + 1).min(8);
+                al.grid_rows = (al.grid_rows.max(1) + 1).min(designos_doc::MAX_GRID_TRACKS as u32);
             }
         }
         layout::relayout_around(&mut self.doc, &mut tx.ed, fid);
@@ -730,7 +730,7 @@ impl App {
         let mut tx = Tx::new();
         if let Some(n) = tx.ed.node(&mut self.doc, fid) {
             if let Some(al) = n.kind.frame_props_mut().and_then(|fp| fp.auto_layout.as_mut()) {
-                al.grid_columns = (al.grid_columns.max(1) + 1).min(8);
+                al.grid_columns = (al.grid_columns.max(1) + 1).min(designos_doc::MAX_GRID_TRACKS as u32);
             }
         }
         layout::relayout_around(&mut self.doc, &mut tx.ed, fid);
@@ -1076,9 +1076,10 @@ impl App {
                 continue;
             }
             let new_size = Vec2::new((old_size.x + dw).max(1.0), (old_size.y + dh).max(1.0));
+            let counter = self.doc.get(id).and_then(|n| n.parent).and_then(|p| self.doc.get(p)).and_then(designos_doc::LayoutChild::counter_axis_is_horizontal);
             if let Some(n) = tx.ed.node(&mut self.doc, id) {
                 if dw.abs() > 1e-4 {
-                    n.layout_child.horizontal = Sizing::Fixed;
+                    n.layout_child.set_axis_sizing(true, Sizing::Fixed, counter);
                     if let Some(al) = n.kind.frame_props_mut().and_then(|fp| fp.auto_layout.as_mut()) {
                         if matches!(al.direction, LayoutDirection::Horizontal | LayoutDirection::Grid) {
                             if al.primary_sizing == Sizing::Hug {
@@ -1090,7 +1091,7 @@ impl App {
                     }
                 }
                 if dh.abs() > 1e-4 {
-                    n.layout_child.vertical = Sizing::Fixed;
+                    n.layout_child.set_axis_sizing(false, Sizing::Fixed, counter);
                     if let Some(al) = n.kind.frame_props_mut().and_then(|fp| fp.auto_layout.as_mut()) {
                         if al.direction == LayoutDirection::Vertical {
                             if al.primary_sizing == Sizing::Hug {
@@ -2058,12 +2059,12 @@ mod tests {
         app.selection = vec![fid];
         app.insert_table_row();
         app.insert_table_column();
-        let al = app.doc.get(fid).unwrap().kind.frame_props().unwrap().auto_layout.unwrap();
+        let al = app.doc.get(fid).unwrap().kind.frame_props().unwrap().auto_layout.as_ref().unwrap();
         assert_eq!(al.grid_rows, 3);
         assert_eq!(al.grid_columns, 3);
         app.delete_table_row();
         app.delete_table_column();
-        let al2 = app.doc.get(fid).unwrap().kind.frame_props().unwrap().auto_layout.unwrap();
+        let al2 = app.doc.get(fid).unwrap().kind.frame_props().unwrap().auto_layout.as_ref().unwrap();
         assert_eq!(al2.grid_rows, 2);
         assert_eq!(al2.grid_columns, 2);
     }
@@ -2110,7 +2111,7 @@ mod tests {
         app.selection = vec![r1, r2];
         app.toggle_auto_layout();
         let wrapped = app.selection[0];
-        let al = app.doc.get(wrapped).unwrap().kind.frame_props().unwrap().auto_layout.unwrap();
+        let al = app.doc.get(wrapped).unwrap().kind.frame_props().unwrap().auto_layout.as_ref().unwrap();
         assert_eq!(al.layout_version, 1);
 
         // Toggling auto-layout onto an existing plain frame in Studio also sets version 1.
@@ -2118,7 +2119,7 @@ mod tests {
         app.doc.insert(page, Node::frame(fid, Rect::new(0.0, 100.0, 120.0, 80.0))).unwrap();
         app.selection = vec![fid];
         app.toggle_auto_layout();
-        let al2 = app.doc.get(fid).unwrap().kind.frame_props().unwrap().auto_layout.unwrap();
+        let al2 = app.doc.get(fid).unwrap().kind.frame_props().unwrap().auto_layout.as_ref().unwrap();
         assert_eq!(al2.layout_version, 1);
     }
 
@@ -2158,7 +2159,7 @@ mod tests {
 
         let mut app = App::new(doc);
         // Imported v0 frame keeps version 0 and includes 4px inside stroke in layout inset.
-        let al0 = app.doc.get(fid).unwrap().kind.frame_props().unwrap().auto_layout.unwrap();
+        let al0 = app.doc.get(fid).unwrap().kind.frame_props().unwrap().auto_layout.as_ref().unwrap();
         assert_eq!(al0.layout_version, 0);
         assert!(al0.stroke_included);
         assert_eq!(app.doc.get(fid).unwrap().size, Vec2::new(116.0, 48.0));
@@ -2168,7 +2169,7 @@ mod tests {
         // Trigger "Update auto layout" on selection: upgrades to v1 and re-lays out as one undo step.
         app.selection = vec![fid];
         assert_eq!(app.upgrade_auto_layout_version(), 1);
-        let al1 = app.doc.get(fid).unwrap().kind.frame_props().unwrap().auto_layout.unwrap();
+        let al1 = app.doc.get(fid).unwrap().kind.frame_props().unwrap().auto_layout.as_ref().unwrap();
         assert_eq!(al1.layout_version, 1);
         assert_eq!(app.doc.get(fid).unwrap().size, Vec2::new(108.0, 40.0));
         assert_eq!((app.doc.get(cid_a).unwrap().transform.tx, app.doc.get(cid_a).unwrap().transform.ty), (10.0, 10.0));
@@ -2176,10 +2177,32 @@ mod tests {
 
         // Single undo restores both version 0 and the version-0 child positions/frame size.
         app.undo();
-        let al_undo = app.doc.get(fid).unwrap().kind.frame_props().unwrap().auto_layout.unwrap();
+        let al_undo = app.doc.get(fid).unwrap().kind.frame_props().unwrap().auto_layout.as_ref().unwrap();
         assert_eq!(al_undo.layout_version, 0);
         assert_eq!(app.doc.get(fid).unwrap().size, Vec2::new(116.0, 48.0));
         assert_eq!((app.doc.get(cid_a).unwrap().transform.tx, app.doc.get(cid_a).unwrap().transform.ty), (14.0, 14.0));
         assert_eq!((app.doc.get(cid_b).unwrap().transform.tx, app.doc.get(cid_b).unwrap().transform.ty), (72.0, 14.0));
+    }
+
+    #[test]
+    fn keyboard_resize_of_an_imported_stretch_child_ends_the_stretch_on_the_counter_axis() {
+        let mut d = Document::new("t");
+        let page = d.add_page("p");
+        let fid = d.alloc_id();
+        let mut frame = Node::frame(fid, Rect::new(0.0, 0.0, 200.0, 100.0));
+        let al = AutoLayout { direction: LayoutDirection::Horizontal, primary_sizing: Sizing::Fixed, counter_sizing: Sizing::Fixed, ..Default::default() };
+        frame.kind = NodeKind::Frame(FrameProps { auto_layout: Some(al), ..Default::default() });
+        let fid = d.insert(page, frame).unwrap();
+        let cid = d.alloc_id();
+        let mut child = Node::rectangle(cid, Rect::new(0.0, 0.0, 30.0, 20.0));
+        child.layout_child.vertical = Sizing::Fill;
+        child.layout_child.align_self = AlignSelf::Stretch;
+        let cid = d.insert(fid, child).unwrap();
+        let mut app = App::new(d);
+        app.selection = vec![cid];
+        app.resize_selection_by(0.0, 10.0);
+        let n = app.doc.get(cid).unwrap();
+        assert_eq!(n.layout_child.align_self, AlignSelf::Auto);
+        assert_eq!(n.size, v2(30.0, 30.0), "the typed height sticks instead of snapping back to the stretched 100");
     }
 }

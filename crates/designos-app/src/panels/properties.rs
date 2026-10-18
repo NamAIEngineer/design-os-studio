@@ -840,7 +840,7 @@ fn selection_ui(app: &mut App, ui: &mut Ui, pane: &mut Pane, sel: &[NodeId]) {
     // ---- Auto layout (carries the dimensions of auto-layout frames)
     if is_frame && !multi {
         section_sep(ui, pane, false);
-        let al = n0.kind.frame_props().and_then(|f| f.auto_layout);
+        let al = n0.kind.frame_props().and_then(|f| f.auto_layout.as_ref());
         if title(ui, pane, "Auto layout", Some(if al.is_some() { Icon::Minus } else { Icon::Plus }), al.is_none()) {
             app.toggle_auto_layout();
         }
@@ -971,7 +971,7 @@ fn selection_ui(app: &mut App, ui: &mut Ui, pane: &mut Pane, sel: &[NodeId]) {
 }
 
 fn sizing_of(n: &Node, horizontal: bool) -> Sizing {
-    if let Some(al) = n.kind.frame_props().and_then(|f| f.auto_layout) {
+    if let Some(al) = n.kind.frame_props().and_then(|f| f.auto_layout.as_ref()) {
         if al.sizing_along(horizontal) == Sizing::Hug {
             return Sizing::Hug;
         }
@@ -989,18 +989,14 @@ fn sizing_of(n: &Node, horizontal: bool) -> Sizing {
 }
 
 fn set_sizing(app: &mut App, sel: &[NodeId], horizontal: bool, s: Sizing) {
+    // the parent flow's counter axis per node: a counter-axis write other than Fill ends an AlignSelf::Stretch
+    let counter_axes: Vec<(NodeId, Option<bool>)> = sel
+        .iter()
+        .map(|id| (*id, app.doc.get(*id).and_then(|n| n.parent).and_then(|p| app.doc.get(p)).and_then(LayoutChild::counter_axis_is_horizontal)))
+        .collect();
     app.edit_nodes(sel, |n| {
-        if s != Sizing::Hug {
-            if horizontal {
-                n.layout_child.horizontal = s;
-            } else {
-                n.layout_child.vertical = s;
-            }
-        } else if horizontal {
-            n.layout_child.horizontal = Sizing::Fixed;
-        } else {
-            n.layout_child.vertical = Sizing::Fixed;
-        }
+        let counter = counter_axes.iter().find(|(id, _)| *id == n.id).and_then(|(_, axis)| *axis);
+        n.layout_child.set_axis_sizing(horizontal, if s == Sizing::Hug { Sizing::Fixed } else { s }, counter);
         if let Some(al) = n.kind.frame_props_mut().and_then(|f| f.auto_layout.as_mut()) {
             let primary_h = al.primary_is_horizontal();
             let target = if horizontal == primary_h { &mut al.primary_sizing } else { &mut al.counter_sizing };
@@ -1052,29 +1048,47 @@ fn resizing_ui(app: &mut App, ui: &mut Ui, pane: &mut Pane, sel: &[NodeId], n0: 
         set_sizing(app, sel, false, order[i]);
     }
     row_end(pane);
-    let parent_grid = n0
-        .parent
-        .and_then(|p| app.doc.get(p))
-        .and_then(|p| p.kind.frame_props())
-        .and_then(|f| f.auto_layout)
-        .is_some_and(|al| al.direction == LayoutDirection::Grid);
+    let parent_al = n0.parent.and_then(|p| app.doc.get(p)).and_then(|p| p.kind.frame_props()).and_then(|f| f.auto_layout.as_ref());
+    let (parent_in_auto_layout, parent_grid) = (parent_al.is_some(), parent_al.is_some_and(|al| al.direction == LayoutDirection::Grid));
     if parent_grid {
         sublabel(ui, pane, "Grid Span");
         let cs = n0.layout_child.col_span.max(1) as f32;
         let rs = n0.layout_child.row_span.max(1) as f32;
         if let Some(v) = field::num_field(ui, pane.col(0, 0.0), "grid-col-span", Prefix::Text("CS"), Some(cs), "") {
-            let span = v.round().clamp(1.0, 12.0) as u16;
+            let span = v.round().clamp(1.0, designos_doc::MAX_GRID_TRACKS as f32) as u16;
             app.edit_nodes(sel, |n| n.layout_child.col_span = span);
         }
         if let Some(v) = field::num_field(ui, pane.col(1, 0.0), "grid-row-span", Prefix::Text("RS"), Some(rs), "") {
-            let span = v.round().clamp(1.0, 12.0) as u16;
+            let span = v.round().clamp(1.0, designos_doc::MAX_GRID_TRACKS as f32) as u16;
             app.edit_nodes(sel, |n| n.layout_child.row_span = span);
+        }
+        row_end(pane);
+    }
+    if parent_in_auto_layout && has_child_margins(n0) {
+        sublabel(ui, pane, "Margin");
+        let [mt, mr, mb, ml] = n0.layout_child.margin;
+        if let Some(v) = field::num_field(ui, pane.col(0, 0.0), "margin-l", Prefix::Text("L"), Some(ml), "") {
+            app.edit_nodes(sel, |n| n.layout_child.margin[3] = v);
+        }
+        if let Some(v) = field::num_field(ui, pane.col(1, 0.0), "margin-r", Prefix::Text("R"), Some(mr), "") {
+            app.edit_nodes(sel, |n| n.layout_child.margin[1] = v);
+        }
+        row_end(pane);
+        if let Some(v) = field::num_field(ui, pane.col(0, 0.0), "margin-t", Prefix::Text("T"), Some(mt), "") {
+            app.edit_nodes(sel, |n| n.layout_child.margin[0] = v);
+        }
+        if let Some(v) = field::num_field(ui, pane.col(1, 0.0), "margin-b", Prefix::Text("B"), Some(mb), "") {
+            app.edit_nodes(sel, |n| n.layout_child.margin[2] = v);
         }
         row_end(pane);
     }
 }
 
-fn auto_layout_ui(app: &mut App, ui: &mut Ui, pane: &mut Pane, sel: &[NodeId], a: AutoLayout, n0: &Node, parent_al: bool) {
+pub fn has_child_margins(n: &Node) -> bool {
+    n.layout_child.margin != [0.0; 4]
+}
+
+fn auto_layout_ui(app: &mut App, ui: &mut Ui, pane: &mut Pane, sel: &[NodeId], a: &AutoLayout, n0: &Node, parent_al: bool) {
     sublabel(ui, pane, "Flow");
     // Horizontal and Vertical are the direction, Wrap is a toggle on top of either, Grid replaces both.
     let grid = a.direction == LayoutDirection::Grid;
@@ -1127,14 +1141,17 @@ fn auto_layout_ui(app: &mut App, ui: &mut Ui, pane: &mut Pane, sel: &[NodeId], a
         let cols = a.grid_columns.max(1) as f32;
         let rows = a.grid_rows as f32;
         if let Some(v) = field::num_field(ui, pane.col(0, 0.0), "grid-cols", Prefix::Text("C"), Some(cols), "") {
-            let c = v.round().clamp(1.0, 12.0) as u32;
+            let c = v.round().clamp(1.0, designos_doc::MAX_GRID_TRACKS as f32) as u32;
             update_al(app, sel, |al| al.grid_columns = c);
         }
         if let Some(v) = field::num_field(ui, pane.col(1, 0.0), "grid-rows", Prefix::Text("R"), Some(rows), "") {
-            let r = v.round().clamp(0.0, 12.0) as u32;
+            let r = v.round().clamp(0.0, designos_doc::MAX_GRID_TRACKS as f32) as u32;
             update_al(app, sel, |al| al.grid_rows = r);
         }
         row_end(pane);
+        if let &[grid_id] = sel {
+            grid_tracks_ui(app, ui, pane, grid_id);
+        }
     }
     dimensions_ui(app, ui, pane, sel, false);
     let _ = parent_al;
@@ -1213,7 +1230,7 @@ fn auto_layout_ui(app: &mut App, ui: &mut Ui, pane: &mut Pane, sel: &[NodeId], a
 }
 
 /// Gap between the wrapped lines and how the lines spread across the counter axis.
-fn wrap_lines_ui(app: &mut App, ui: &mut Ui, pane: &mut Pane, sel: &[NodeId], a: AutoLayout) {
+fn wrap_lines_ui(app: &mut App, ui: &mut Ui, pane: &mut Pane, sel: &[NodeId], a: &AutoLayout) {
     sublabel(ui, pane, "Wrap");
     // horizontal wrap stacks rows (a vertical gap), vertical wrap stacks columns (a horizontal gap)
     let icon = if a.direction == LayoutDirection::Horizontal { Icon::PaddingV } else { Icon::PaddingH };
@@ -1228,8 +1245,113 @@ fn wrap_lines_ui(app: &mut App, ui: &mut Ui, pane: &mut Pane, sel: &[NodeId], a:
     row_end(pane);
 }
 
+/// Rects of the widgets of one grid-track row of the inspector, left to right. The heading row of a track
+/// list uses `label` and `add`; a track row uses `mode`, `value`, `move_btn` and `delete`. Every button is
+/// the panel's 24 px action size, rows are 24 px tall, and nothing overlaps or leaves the section content.
+struct GridTrackRow {
+    label: Rect,
+    add: Rect,
+    mode: Rect,
+    value: Rect,
+    move_btn: Rect,
+    delete: Rect,
+}
+
+fn grid_track_row(pane: &Pane) -> GridTrackRow {
+    const GAP: f32 = 4.0;
+    const MODE_W: f32 = 64.0;
+    let (b, h) = (theme::PANEL_ACTION_BUTTON, theme::FIELD_HEIGHT);
+    let left = theme::SECTION_CONTENT_X;
+    let delete_x = left + theme::SECTION_CONTENT_W - b;
+    let move_x = delete_x - GAP - b;
+    let value_x = left + MODE_W + GAP;
+    GridTrackRow {
+        label: pane.rect(left, 0.0, delete_x - GAP - left, h),
+        add: pane.rect(delete_x, 0.0, b, b),
+        mode: pane.rect(left, 0.0, MODE_W, h),
+        value: pane.rect(value_x, 0.0, move_x - GAP - value_x, h),
+        move_btn: pane.rect(move_x, 0.0, b, b),
+        delete: pane.rect(delete_x, 0.0, b, b),
+    }
+}
+
+/// The move button of track `idx` in a list of `len` tracks (`len > 1`): its icon, tooltip and the track it swaps with.
+fn track_move_button(idx: usize, len: usize) -> (Icon, &'static str, usize) {
+    if idx + 1 < len {
+        (Icon::ChevronDown, "Move down", idx + 1)
+    } else {
+        (Icon::ArrowUp, "Move up", idx - 1)
+    }
+}
+
+/// Column and row track lists of the selected grid: sizing mode, value, move and delete per track, `+` per list.
+/// The rows listed are the ones the canvas draws a header pill for.
+fn grid_tracks_ui(app: &mut App, ui: &mut Ui, pane: &mut Pane, grid_id: NodeId) {
+    use crate::canvas::grids::{
+        delete_grid_track, grid_track_delete_changes_document, insert_grid_track, move_grid_track, node_css_grid_overlay, resize_grid_track,
+    };
+    use designos_doc::GridTrack;
+
+    let Some(ov) = node_css_grid_overlay(&app.doc, grid_id) else { return };
+    let options = ["Flex", "Fixed", "Hug"].map(String::from);
+    for (is_col, heading, tag, tracks) in [(true, "Columns", "col", &ov.col_tracks), (false, "Rows", "row", &ov.row_tracks)] {
+        let head = grid_track_row(pane);
+        ui.painter().text(Pos2::new(head.label.left(), head.label.center().y), Align2::LEFT_CENTER, heading, theme::font_small_medium(), theme::TEXT_SECONDARY);
+        if tracks.len() < MAX_GRID_TRACKS
+            && widgets::icon_button(ui, head.add, format!("grid-{tag}-add"), Icon::Plus, false, &format!("Add {tag} track")).clicked()
+        {
+            insert_grid_track(app, grid_id, is_col, tracks.len(), GridTrack::Flex(1.0));
+        }
+        row_end(pane);
+        for (idx, &track) in tracks.iter().enumerate() {
+            let row = grid_track_row(pane);
+            let mode = match track {
+                GridTrack::Flex(_) => 0,
+                GridTrack::Fixed(_) => 1,
+                GridTrack::Hug => 2,
+            };
+            if let Some(picked) = dropdown(ui, row.mode, format!("grid-{tag}-mode-{idx}"), &options[mode], &options) {
+                if picked != mode {
+                    let next = match picked {
+                        0 => GridTrack::Flex(1.0),
+                        1 => GridTrack::Fixed(120.0),
+                        _ => GridTrack::Hug,
+                    };
+                    resize_grid_track(app, grid_id, is_col, idx, next);
+                }
+            }
+            match track {
+                GridTrack::Flex(fr) => {
+                    if let Some(v) = field::num_field(ui, row.value, format!("grid-{tag}-fr-{idx}"), Prefix::Text("fr"), Some(fr), "") {
+                        resize_grid_track(app, grid_id, is_col, idx, GridTrack::Flex(v.max(0.1)));
+                    }
+                }
+                GridTrack::Fixed(px) => {
+                    if let Some(v) = field::num_field(ui, row.value, format!("grid-{tag}-px-{idx}"), Prefix::Text("px"), Some(px), "") {
+                        resize_grid_track(app, grid_id, is_col, idx, GridTrack::Fixed(v.max(1.0)));
+                    }
+                }
+                GridTrack::Hug => {}
+            }
+            if tracks.len() > 1 {
+                let (icon, tip, next_idx) = track_move_button(idx, tracks.len());
+                if widgets::icon_button(ui, row.move_btn, format!("grid-{tag}-mv-{idx}"), icon, false, tip).clicked() {
+                    move_grid_track(app, grid_id, is_col, idx, next_idx);
+                }
+            }
+            if grid_track_delete_changes_document(&app.doc, grid_id, is_col, idx, tracks.len()) {
+                widgets::record(ui, &format!("grid-{tag}-del-{idx}"), row.delete);
+                if widgets::icon_button(ui, row.delete, format!("grid-{tag}-del-{idx}"), Icon::Minus, false, "Delete track").clicked() {
+                    delete_grid_track(app, grid_id, is_col, idx);
+                }
+            }
+            row_end(pane);
+        }
+    }
+}
+
 /// The Auto spacing popup: Between, Around or Evenly, or back to packed items.
-fn auto_spacing_menu(app: &mut App, ui: &mut Ui, sel: &[NodeId], a: AutoLayout, anchor: Rect, toggle: bool) {
+fn auto_spacing_menu(app: &mut App, ui: &mut Ui, sel: &[NodeId], a: &AutoLayout, anchor: Rect, toggle: bool) {
     let id = ui.id().with("al-auto-spacing-menu");
     let open = ui.data(|d| d.get_temp::<bool>(id)).unwrap_or(false) != toggle;
     ui.data_mut(|d| d.insert_temp(id, open));
@@ -2154,7 +2276,7 @@ pub fn preset_popup(app: &mut App, spec: &str, screen: Vec2) {
             // usual 12 column ones, and with no style yet one is created from the selection.
             let prop = if spec == "grid-styles" { StyleProperty::Grid } else { StyleProperty::Effect };
             if prop == StyleProperty::Grid && app.doc.get(id).and_then(|n| n.kind.frame_props()).is_some_and(|f| f.grids.is_empty()) {
-                let grid = LayoutGrid::Columns { count: 12, gutter: 20.0, offset: 0.0, color: Color::rgba(255, 0, 0, 26) };
+                let grid = LayoutGrid::columns(12, 20.0, 0.0, Color::rgba(255, 0, 0, 26));
                 app.edit_nodes(&[id], |n| {
                     if let Some(f) = n.kind.frame_props_mut() {
                         f.grids.push(grid.clone());
@@ -2184,7 +2306,7 @@ pub fn preset_popup(app: &mut App, spec: &str, screen: Vec2) {
                 app.edit_nodes(&[id], |n| n.effects.push(fx.clone()));
             }
             if kind == StyleKind::Grid && app.doc.get(id).and_then(|n| n.kind.frame_props()).is_some_and(|f| f.grids.is_empty()) {
-                let grid = LayoutGrid::Columns { count: 12, gutter: 20.0, offset: 0.0, color: Color::rgba(255, 0, 0, 26) };
+                let grid = LayoutGrid::columns(12, 20.0, 0.0, Color::rgba(255, 0, 0, 26));
                 app.edit_nodes(&[id], |n| {
                     if let Some(f) = n.kind.frame_props_mut() {
                         f.grids.push(grid.clone());
@@ -2247,6 +2369,19 @@ mod tests {
     use super::*;
 
     #[test]
+    fn the_move_button_icon_and_tip_name_the_direction_the_track_goes() {
+        let (icon, tip, to) = track_move_button(0, 3);
+        assert_eq!((icon, tip, to), (Icon::ChevronDown, "Move down", 1));
+        let (icon, tip, to) = track_move_button(1, 3);
+        assert_eq!((icon, tip, to), (Icon::ChevronDown, "Move down", 2));
+        // the last track has nowhere to go but up, so the button must not point down
+        let (icon, tip, to) = track_move_button(2, 3);
+        assert_eq!((icon, tip, to), (Icon::ArrowUp, "Move up", 1));
+        let (icon, tip, to) = track_move_button(1, 2);
+        assert_eq!((icon, tip, to), (Icon::ArrowUp, "Move up", 0));
+    }
+
+    #[test]
     fn color_conversion_roundtrip() {
         let c = Color::rgba(0x12, 0x34, 0x56, 255);
         let back = from_c32(to_c32(c, 1.0));
@@ -2261,6 +2396,14 @@ mod tests {
         n.kind = NodeKind::Frame(FrameProps { auto_layout: Some(AutoLayout { primary_sizing: Sizing::Hug, ..Default::default() }), ..Default::default() });
         assert_eq!(sizing_of(&n, true), Sizing::Hug);
         assert_eq!(sizing_of(&n, false), Sizing::Fixed);
+    }
+
+    #[test]
+    fn child_margins_hidden_when_zero_and_visible_when_set() {
+        let mut n = Node::rectangle(NodeId(2), designos_doc::Rect::new(0.0, 0.0, 40.0, 20.0));
+        assert!(!has_child_margins(&n));
+        n.layout_child.margin = [4.0, 0.0, 0.0, 0.0];
+        assert!(has_child_margins(&n));
     }
 
     #[test]
@@ -2289,8 +2432,88 @@ mod tests {
         set_sizing(&mut app, &[gid], true, Sizing::Fixed);
         set_sizing(&mut app, &[gid], false, Sizing::Hug);
         let n = app.doc.get(gid).unwrap();
-        let al = n.kind.frame_props().unwrap().auto_layout.unwrap();
+        let al = n.kind.frame_props().unwrap().auto_layout.as_ref().unwrap();
         assert_eq!((al.primary_sizing, al.counter_sizing), (Sizing::Fixed, Sizing::Hug));
         assert_eq!((sizing_of(n, true), sizing_of(n, false)), (Sizing::Fixed, Sizing::Hug));
+    }
+
+    #[test]
+    fn grid_track_rows_fit_the_section_without_overlap_at_the_pointer_floor() {
+        let heading = Pane { x0: 0.0, oy: 0.0, y: 0.0 };
+        let mut below = Pane { x0: 0.0, oy: 0.0, y: 0.0 };
+        row_end(&mut below);
+        let (head, row) = (grid_track_row(&heading), grid_track_row(&below));
+        let named =
+            [("heading label", head.label), ("add", head.add), ("mode", row.mode), ("value", row.value), ("move", row.move_btn), ("delete", row.delete)];
+        let (left, right) = (theme::SECTION_CONTENT_X, theme::SECTION_CONTENT_X + theme::SECTION_CONTENT_W);
+        for (name, r) in named {
+            assert!(r.height() >= 24.0, "{name} is {} px tall", r.height());
+            assert!(r.min.x >= left && r.max.x <= right, "{name} {r:?} leaves the section content {left}..{right}");
+        }
+        for (name, r) in [("add", head.add), ("move", row.move_btn), ("delete", row.delete)] {
+            assert!(r.width() >= 24.0, "{name} button is {} px wide", r.width());
+        }
+        assert!(row.value.width() >= 40.0, "the value field keeps room for a number: {}", row.value.width());
+        for (i, (a_name, a)) in named.iter().enumerate() {
+            for (b_name, b) in &named[i + 1..] {
+                let overlap = a.min.x < b.max.x && b.min.x < a.max.x && a.min.y < b.max.y && b.min.y < a.max.y;
+                assert!(!overlap, "{a_name} {a:?} overlaps {b_name} {b:?}");
+            }
+        }
+    }
+
+    /// A `direction` flow frame of 200x100 holding one 30x20 rectangle imported the way `layoutAlign: STRETCH` is
+    /// stored: Fill on the counter axis plus `AlignSelf::Stretch`. The child has not been laid out yet.
+    fn app_with_imported_stretch_child(direction: LayoutDirection) -> (App, NodeId) {
+        let mut doc = designos_doc::Document::new("test");
+        let page = doc.add_page("Page 1");
+        let mut app = App::new(doc);
+        let fid = app.doc.alloc_id();
+        let mut frame = Node::frame(fid, designos_doc::Rect::new(0.0, 0.0, 200.0, 100.0));
+        let al = AutoLayout { direction, primary_sizing: Sizing::Fixed, counter_sizing: Sizing::Fixed, ..Default::default() };
+        frame.kind = NodeKind::Frame(FrameProps { auto_layout: Some(al), ..Default::default() });
+        let fid = app.doc.insert(page, frame).unwrap();
+        let cid = app.doc.alloc_id();
+        let mut child = Node::rectangle(cid, designos_doc::Rect::new(0.0, 0.0, 30.0, 20.0));
+        match direction {
+            LayoutDirection::Vertical => child.layout_child.horizontal = Sizing::Fill,
+            _ => child.layout_child.vertical = Sizing::Fill,
+        }
+        child.layout_child.align_self = AlignSelf::Stretch;
+        let cid = app.doc.insert(fid, child).unwrap();
+        (app, cid)
+    }
+
+    #[test]
+    fn leaving_fill_on_the_counter_axis_ends_an_imported_stretch() {
+        // horizontal flow: height is the counter axis
+        let (mut app, cid) = app_with_imported_stretch_child(LayoutDirection::Horizontal);
+        set_sizing(&mut app, &[cid], false, Sizing::Fixed);
+        let n = app.doc.get(cid).unwrap();
+        assert_eq!(n.layout_child.align_self, AlignSelf::Auto);
+        assert_eq!((n.size.x, n.size.y), (30.0, 20.0), "Fixed stops the stretch");
+
+        // Hug on the counter axis ends it as well
+        let (mut app, cid) = app_with_imported_stretch_child(LayoutDirection::Horizontal);
+        set_sizing(&mut app, &[cid], false, Sizing::Hug);
+        assert_eq!(app.doc.get(cid).unwrap().layout_child.align_self, AlignSelf::Auto);
+
+        // vertical flow: width is the counter axis
+        let (mut app, cid) = app_with_imported_stretch_child(LayoutDirection::Vertical);
+        set_sizing(&mut app, &[cid], true, Sizing::Fixed);
+        let n = app.doc.get(cid).unwrap();
+        assert_eq!(n.layout_child.align_self, AlignSelf::Auto);
+        assert_eq!((n.size.x, n.size.y), (30.0, 20.0));
+    }
+
+    #[test]
+    fn sizing_writes_that_keep_the_stretch_axis_leave_the_stretch_alone() {
+        // the main axis of a horizontal flow is not stretched, and Fill on the counter axis still is
+        let (mut app, cid) = app_with_imported_stretch_child(LayoutDirection::Horizontal);
+        set_sizing(&mut app, &[cid], true, Sizing::Fixed);
+        set_sizing(&mut app, &[cid], false, Sizing::Fill);
+        let n = app.doc.get(cid).unwrap();
+        assert_eq!(n.layout_child.align_self, AlignSelf::Stretch);
+        assert_eq!(n.size.y, 100.0);
     }
 }
