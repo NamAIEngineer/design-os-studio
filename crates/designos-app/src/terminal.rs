@@ -10,6 +10,7 @@
 
 #![allow(dead_code)]
 
+use crate::agent_start_failure::{self, FixAction, StartFailure};
 use crate::icons::{self, Icon};
 use crate::panels::clipped;
 use crate::theme;
@@ -369,6 +370,10 @@ pub struct TerminalTab {
     pub last_output_at: Arc<Mutex<Option<std::time::Instant>>>,
     /// Set after the agent-exit notice is written into the vt100 parser. Never respawn a shell.
     pub exited_notice_shown: bool,
+    /// When the PTY child was started; an agent that exits within `START_FAILURE_WINDOW` failed to start.
+    pub spawned_at: std::time::Instant,
+    /// Why the agent CLI exited right after it was opened; shown instead of the dead terminal.
+    pub start_failure: Option<StartFailure>,
 }
 
 impl TerminalTab {
@@ -514,6 +519,8 @@ impl TerminalTab {
             agent_status,
             last_output_at,
             exited_notice_shown: false,
+            spawned_at: std::time::Instant::now(),
+            start_failure: None,
         })
     }
 
@@ -644,6 +651,8 @@ pub struct TerminalState {
     pub chat_mode: bool,
     /// Whether the top `+` runtime selector dropdown menu (`claude`, `codex`, `grok`, `antigravity`, `shell`) is open (`DIR-29`).
     pub runtime_dropdown_open: bool,
+    /// Fix clicked on a tab's "failed to start" panel, applied by the surface that knows the open file.
+    pub pending_start_fix: Option<FixAction>,
     /// Which of the Figma Agent categories (`0..3`) is expanded when in legacy chat mode.
     pub expanded_agent_cat: Option<usize>,
     /// Active CLI runtime (`Claude`, `Codex`, `Antigravity`, `Grok`, `Shell`).
@@ -724,6 +733,7 @@ impl TerminalState {
             side_panel_pty_open: true,
             chat_mode: false,
             runtime_dropdown_open: false,
+            pending_start_fix: None,
             expanded_agent_cat: None,
             active_runtime: AgentCliPreset::Shell,
             chat_turns: Vec::new(),
@@ -917,6 +927,46 @@ impl TerminalState {
         let _ = atomic_write_session_file(&self.session_dir.join(".agents/skills/designos-studio/SKILL.md"), skill_md.as_bytes());
         // Codex, Grok and Antigravity read `AGENTS.md` from their cwd (the session dir).
         let _ = atomic_write_session_file(&self.session_dir.join("AGENTS.md"), skill_md.as_bytes());
+    }
+
+    /// Screenshot fixture (`--panel agents-start-failure`): opens an Antigravity tab on a real
+    /// `agy` invocation that exits at once with a usage error, then waits for the failure panel.
+    pub fn open_failed_start_fixture(&mut self, file_path: Option<&Path>) {
+        let command = "agy --dangerously-skip-permissions --mcp-config /nonexistent/mcp.json";
+        if self.spawn_tab_running(AgentCliPreset::Antigravity, file_path, Some(command)).is_err() {
+            return;
+        }
+        let deadline = std::time::Instant::now() + agent_start_failure::START_FAILURE_WINDOW;
+        while std::time::Instant::now() < deadline {
+            let _ = self.poll_live_agent_bridge();
+            if self.active_tab().is_some_and(|t| t.start_failure.is_some()) {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(30));
+        }
+    }
+
+    /// Runs the fix the user clicked on a tab's "failed to start" panel.
+    pub fn apply_start_fix(&mut self, fix: FixAction, file_path: Option<&Path>) {
+        match fix {
+            FixAction::OpenInstallPage(url) => {
+                if let Err(e) = crate::home::open_link(url) {
+                    self.status_msg = Some(e);
+                }
+            }
+            FixAction::RunLogin(command) => {
+                // A login runs as a plain command tab: it is not an agent tab, so a quick
+                // "already signed in" exit is not reported as a failed start.
+                if let Ok(idx) = self.spawn_tab_running(AgentCliPreset::Shell, file_path, Some(command)) {
+                    if let Some(tab) = self.tabs.get_mut(idx) {
+                        tab.title = format!("{command} (login)");
+                    }
+                }
+            }
+            FixAction::OpenShell => {
+                let _ = self.spawn_tab(AgentCliPreset::Shell, file_path);
+            }
+        }
     }
 
     /// Terminates all child PTY processes owned by this file's terminal state.
@@ -1145,12 +1195,19 @@ impl TerminalState {
 
     /// Spawns a new tab with `preset` bound to this file's isolated [`SessionEnv`] and switches `active_tab` to it.
     pub fn spawn_tab(&mut self, preset: AgentCliPreset, file_path: Option<&Path>) -> Result<usize, String> {
+        self.spawn_tab_running(preset, file_path, None)
+    }
+
+    /// Like [`Self::spawn_tab`]; with `command` the tab runs that one shell command (an agent CLI's own
+    /// `login`) instead of the preset's launch command.
+    fn spawn_tab_running(&mut self, preset: AgentCliPreset, file_path: Option<&Path>, command: Option<&str>) -> Result<usize, String> {
         let id = self.next_tab_id.max(1);
         self.next_tab_id = id + 1;
         let _ = std::fs::create_dir_all(&self.session_dir);
         self.provision_session_agent_files(file_path);
         let env = self.session_env();
-        match TerminalTab::spawn_with_session(id, preset, 28, 100, file_path, Some(&env)) {
+        let cmd_override = command.map(|c| build_agent_shell_cmd(&default_shell_program(), c));
+        match TerminalTab::spawn_with_session_cmd(id, preset, 28, 100, file_path, Some(&env), cmd_override) {
             Ok(tab) => {
                 self.tabs.push(tab);
                 self.active_tab = self.tabs.len() - 1;
@@ -1259,6 +1316,11 @@ impl TerminalState {
                 continue;
             }
             if !tab.is_alive() {
+                let exit_code = tab.child.try_wait().ok().flatten().map(|status| status.exit_code());
+                if agent_start_failure::counts_as_failed_start(tab.spawned_at.elapsed(), exit_code) {
+                    let output = tab.raw_log.lock().map(|log| log.clone()).unwrap_or_default();
+                    tab.start_failure = Some(agent_start_failure::diagnose(tab.spawn_preset, tab.spawn_preset.is_installed(), exit_code, &output));
+                }
                 if let Ok(mut parser) = tab.parser.lock() {
                     parser.process("\r\n[design:os] Agent exited — this tab no longer accepts input. Open a new tab to continue.\r\n".as_bytes());
                 }
@@ -2511,6 +2573,9 @@ pub fn show_left(state: &mut TerminalState, ui: &mut Ui, rect: Rect, file_path: 
         let vp_r = Rect::from_min_max(Pos2::new(rect.left(), ctx_r.bottom()), rect.max);
 
         render_vt100_viewport(state, ui, vp_r, "agents-left-pty");
+        if let Some(fix) = state.pending_start_fix.take() {
+            state.apply_start_fix(fix, file_path);
+        }
 
         // Floating `+` Runtime Selector Dropdown (`claude`, `codex`, `grok`, `antigravity`, `shell` — all skipping dangerous permissions)
         if state.runtime_dropdown_open {
@@ -3464,6 +3529,9 @@ fn render_terminal_surface(state: &mut TerminalState, ui: &mut Ui, rect: Rect, f
     // 2. VT100 Screen Grid Renderer + Raw Keyboard Capture (full height)
     let viewport_rect = Rect::from_min_max(Pos2::new(rect.left(), tab_bar_rect.bottom()), rect.max);
     render_vt100_viewport(state, ui, viewport_rect, surface_id);
+    if let Some(fix) = state.pending_start_fix.take() {
+        state.apply_start_fix(fix, file_path);
+    }
 
     ui.ctx().request_repaint_after(std::time::Duration::from_millis(50));
 
@@ -3498,6 +3566,12 @@ fn extract_selected_terminal_text(screen: &vt100::Screen, sel: ((u16, u16), (u16
 }
 
 fn render_vt100_viewport(state: &mut TerminalState, ui: &mut Ui, viewport_rect: Rect, surface_id: &'static str) {
+    if let Some(failure) = state.active_tab().and_then(|t| t.start_failure.clone()) {
+        if let Some(fix) = agent_start_failure::paint(ui, viewport_rect, &failure, surface_id) {
+            state.pending_start_fix = Some(fix);
+        }
+        return;
+    }
     let p = ui.painter().clone();
     p.rect_filled(viewport_rect, 0.0, TERM_BG_VIEWPORT);
 
@@ -5454,5 +5528,84 @@ Done!
         assert!(ctx.get("selected_node_ids").is_none(), "owner ruling: the selection is never auto-injected: {injected}");
         // context.json (with the selection) stays on disk for the agent to read when asked.
         assert!(read_json(&st.context_json_path).get("selected_node_ids").is_some());
+    }
+
+    fn exited_stub_state() -> TerminalState {
+        let mut st = TerminalState::default();
+        spawn_stub_exiting_agent_into(&mut st);
+        assert!(wait_until_tab_exits(&mut st, 8), "stub agent must exit");
+        st
+    }
+
+    #[test]
+    fn agent_that_exits_within_the_window_reports_a_start_failure_with_its_last_output() {
+        let mut st = exited_stub_state();
+        let _ = st.poll_live_agent_bridge();
+        let failure = st.active_tab().and_then(|t| t.start_failure.clone()).expect("start failure recorded");
+        assert_eq!(failure.preset, AgentCliPreset::Claude);
+        assert_eq!(failure.cause, agent_start_failure::StartFailureCause::ExitedEarly);
+        assert_eq!(failure.exit_code, Some(1));
+        assert!(failure.output_tail.iter().any(|l| l.contains("STUB-AGENT-EXIT")), "{:?}", failure.output_tail);
+        assert_eq!(failure.fix, FixAction::OpenShell);
+    }
+
+    #[test]
+    fn agent_that_exits_after_the_window_is_not_a_start_failure() {
+        let mut st = exited_stub_state();
+        st.active_tab_mut().unwrap().spawned_at = std::time::Instant::now() - std::time::Duration::from_secs(10);
+        let _ = st.poll_live_agent_bridge();
+        assert!(st.active_tab().unwrap().start_failure.is_none());
+        assert!(st.active_tab().unwrap().exited_notice_shown, "the ordinary exit notice still shows");
+    }
+
+    #[test]
+    fn start_fixes_open_a_shell_or_run_the_login_command() {
+        let mut st = TerminalState::default();
+        st.apply_start_fix(FixAction::OpenShell, None);
+        assert_eq!(st.tabs.last().map(|t| t.spawn_preset), Some(AgentCliPreset::Shell));
+
+        st.apply_start_fix(FixAction::RunLogin("echo LOGIN-RAN-HERE"), None);
+        let tab = st.tabs.last().expect("login tab");
+        assert_eq!(tab.title, "echo LOGIN-RAN-HERE (login)");
+        assert_eq!(tab.spawn_preset, AgentCliPreset::Shell, "a login is not an agent tab");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(8);
+        let mut shown = false;
+        while std::time::Instant::now() < deadline && !shown {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            shown = st.tabs.last().and_then(|t| t.raw_log.lock().ok().map(|l| l.contains("LOGIN-RAN-HERE"))).unwrap_or(false);
+        }
+        assert!(shown, "login command output never reached the tab");
+        kill_tabs(&mut st);
+    }
+
+    #[test]
+    fn clicking_the_fix_on_the_failed_tab_panel_opens_a_shell_tab() {
+        let ctx = egui::Context::default();
+        crate::theme::install_fonts(&ctx);
+        crate::theme::apply(&ctx);
+        let mut st = exited_stub_state();
+        let _ = st.poll_live_agent_bridge();
+        assert!(st.active_tab().unwrap().start_failure.is_some());
+        let tabs_before = st.tabs.len();
+        let panel_rect = Rect::from_min_size(Pos2::new(48.0, 0.0), Vec2::new(300.0, 800.0));
+        let mut frame = |st: &mut TerminalState, events: Vec<egui::Event>| {
+            let raw = egui::RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1600.0, 900.0))), events, ..Default::default() };
+            let _ = ctx.run_ui(raw, |ui| {
+                let _ = show_left(st, ui, panel_rect, None);
+            });
+        };
+        frame(&mut st, vec![]);
+        let btn: Rect = ctx
+            .data(|d| d.get_temp(Id::new(("test-rect", "agents-start-failure-fix-agents-left-pty".to_string()))))
+            .expect("fix button painted in the Agents panel");
+        let at = btn.center();
+        frame(&mut st, vec![egui::Event::PointerMoved(at)]);
+        for pressed in [true, false] {
+            frame(&mut st, vec![egui::Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed, modifiers: Default::default() }]);
+        }
+        frame(&mut st, vec![]);
+        assert_eq!(st.tabs.len(), tabs_before + 1, "the fix must open a tab");
+        assert_eq!(st.tabs.last().map(|t| t.spawn_preset), Some(AgentCliPreset::Shell));
+        kill_tabs(&mut st);
     }
 }
