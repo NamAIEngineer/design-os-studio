@@ -161,3 +161,48 @@ fn per_side_stroke_renders_with_fill_geometry_and_visible_variable_binding() {
     let pm_off = t.render(100, 80);
     assert_eq!(px(&pm_off, 40, 48), WHITE);
 }
+
+#[test]
+fn white_paint_with_stored_opacity_bound_to_translucent_color_variable_composites_at_twenty_percent() {
+    let mut t = T::new();
+    let page = t.page;
+    t.node(page).kind = NodeKind::Page { background: Color::BLACK };
+    t.add(None, |id| {
+        let mut n = Node::frame(id, Rect::new(0.0, 0.0, 40.0, 40.0));
+        n.fills = vec![Paint { opacity: 0.2, ..Paint::solid(Color::WHITE) }];
+        n.variables.bindings.insert("fills/0".into(), "alpha-white-20".into());
+        n
+    });
+    t.doc.variable_collections.insert(
+        "c".into(),
+        VariableCollection {
+            id: "c".into(),
+            name: "C".into(),
+            modes: vec![VariableMode { id: "m".into(), name: "M".into() }],
+            default_mode: "m".into(),
+            variables: vec!["alpha-white-20".into()],
+            key: None,
+            source_library_key: None,
+        },
+    );
+    let alpha_white_20 = Color { r: 1.0, g: 1.0, b: 1.0, a: 0.2 };
+    t.doc.variables.insert(
+        "alpha-white-20".into(),
+        Variable {
+            id: "alpha-white-20".into(),
+            name: "Component colors/Alpha/alpha-white-20".into(),
+            collection: "c".into(),
+            kind: VariableKind::Color,
+            values: [("m".to_string(), VariableValue::Color(alpha_white_20))].into_iter().collect(),
+            description: String::new(),
+            scopes: vec![],
+            hidden_from_publishing: false,
+            key: None,
+            code_syntax: Default::default(),
+        },
+    );
+
+    let pm = t.render(40, 40);
+    // 20% white over black is ~51, not 4% (~10).
+    assert!(near(px(&pm, 20, 20), [51, 51, 51, 255], 2), "got {:?}", px(&pm, 20, 20));
+}

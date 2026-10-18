@@ -198,3 +198,51 @@ fn board_kinds_through_the_cpu_fallback_match_cpu() {
     let c = compare(&mut g, "board_fallback", &doc, page, vp, (1000, 800), 8);
     assert!(c.report.ratio < 0.02, "mismatch {:.3}%", c.report.ratio * 100.0);
 }
+
+#[test]
+fn translucent_color_variable_with_stored_paint_opacity_matches_cpu() {
+    let Some(mut g) = gpu() else { return };
+    let mut t = T::new();
+    let page = t.page;
+    t.node(page).kind = NodeKind::Page { background: Color::BLACK };
+    t.add(None, |id| {
+        let mut n = Node::frame(id, Rect::new(0.0, 0.0, 40.0, 40.0));
+        n.fills = vec![Paint { opacity: 0.2, ..Paint::solid(Color::WHITE) }];
+        n.variables.bindings.insert("fills/0".into(), "alpha-white-20".into());
+        n
+    });
+    t.doc.variable_collections.insert(
+        "c".into(),
+        VariableCollection {
+            id: "c".into(),
+            name: "C".into(),
+            modes: vec![VariableMode { id: "m".into(), name: "M".into() }],
+            default_mode: "m".into(),
+            variables: vec!["alpha-white-20".into()],
+            key: None,
+            source_library_key: None,
+        },
+    );
+    let alpha_white_20 = Color { r: 1.0, g: 1.0, b: 1.0, a: 0.2 };
+    t.doc.variables.insert(
+        "alpha-white-20".into(),
+        Variable {
+            id: "alpha-white-20".into(),
+            name: "Component colors/Alpha/alpha-white-20".into(),
+            collection: "c".into(),
+            kind: VariableKind::Color,
+            values: [("m".to_string(), VariableValue::Color(alpha_white_20))].into_iter().collect(),
+            description: String::new(),
+            scopes: vec![],
+            hidden_from_publishing: false,
+            key: None,
+            code_syntax: Default::default(),
+        },
+    );
+
+    let vp = Viewport { offset: Vec2::ZERO, zoom: 1.0, dpr: 1.0 };
+    let c = compare(&mut g, "alpha_white_20", &t.doc, page, vp, (40, 40), 2);
+    assert_eq!(c.report.mismatched, 0);
+    let p = c.gpu.pixel(20, 20).unwrap();
+    assert!((p.red() as i32 - 51).abs() <= 2 && (p.green() as i32 - 51).abs() <= 2 && (p.blue() as i32 - 51).abs() <= 2, "got {p:?}");
+}
