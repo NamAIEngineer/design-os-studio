@@ -265,20 +265,6 @@ impl History {
     }
 }
 
-fn collect_updated_ids(cmd: &Command, out: &mut std::collections::BTreeSet<NodeId>) {
-    match cmd {
-        Command::Update { node } => {
-            out.insert(node.id);
-        }
-        Command::Batch(cmds) => {
-            for c in cmds {
-                collect_updated_ids(c, out);
-            }
-        }
-        _ => {}
-    }
-}
-
 fn layout_inputs_changed(old: &Node, new: &Node) -> bool {
     old.size != new.size
         || old.transform != new.transform
@@ -289,7 +275,7 @@ fn layout_inputs_changed(old: &Node, new: &Node) -> bool {
         || old.kind.frame_props().and_then(|f| f.auto_layout.as_ref()) != new.kind.frame_props().and_then(|f| f.auto_layout.as_ref())
 }
 
-fn collect_relayout_seeds(doc: &Document, cmd: &Command, updated_ids: &std::collections::BTreeSet<NodeId>, has_cancelled: bool, seeds: &mut Vec<NodeId>) {
+fn collect_relayout_seeds(doc: &Document, cmd: &Command, seeds: &mut Vec<NodeId>) {
     match cmd {
         Command::Update { node } => {
             let Some(cur) = doc.get(node.id) else { return };
@@ -298,19 +284,15 @@ fn collect_relayout_seeds(doc: &Document, cmd: &Command, updated_ids: &std::coll
             }
             let is_auto =
                 node.kind.frame_props().and_then(|f| f.auto_layout.as_ref()).is_some() || cur.kind.frame_props().and_then(|f| f.auto_layout.as_ref()).is_some();
-            if is_auto && (has_cancelled || !cur.children.iter().any(|cid| updated_ids.contains(cid))) {
+            if is_auto {
                 seeds.push(node.id);
             }
             if let Some(p) = cur.parent {
-                if has_cancelled || !updated_ids.contains(&p) {
-                    seeds.push(p);
-                }
+                seeds.push(p);
             }
         }
         Command::Insert { parent, nodes, .. } => {
-            if has_cancelled || !updated_ids.contains(parent) {
-                seeds.push(*parent);
-            }
+            seeds.push(*parent);
             if let Some(root) = nodes.first() {
                 if root.kind.frame_props().and_then(|f| f.auto_layout.as_ref()).is_some() {
                     seeds.push(root.id);
@@ -319,24 +301,18 @@ fn collect_relayout_seeds(doc: &Document, cmd: &Command, updated_ids: &std::coll
         }
         Command::Remove { id } => {
             if let Some(p) = doc.get(*id).and_then(|n| n.parent) {
-                if has_cancelled || !updated_ids.contains(&p) {
-                    seeds.push(p);
-                }
+                seeds.push(p);
             }
         }
         Command::Reparent { id, parent, .. } => {
             if let Some(old_p) = doc.get(*id).and_then(|n| n.parent) {
-                if has_cancelled || !updated_ids.contains(&old_p) {
-                    seeds.push(old_p);
-                }
+                seeds.push(old_p);
             }
-            if has_cancelled || !updated_ids.contains(parent) {
-                seeds.push(*parent);
-            }
+            seeds.push(*parent);
         }
         Command::Batch(cmds) => {
             for c in cmds {
-                collect_relayout_seeds(doc, c, updated_ids, has_cancelled, seeds);
+                collect_relayout_seeds(doc, c, seeds);
             }
         }
         _ => {}
@@ -344,14 +320,16 @@ fn collect_relayout_seeds(doc: &Document, cmd: &Command, updated_ids: &std::coll
 }
 
 fn apply_and_relayout(doc: &mut Document, c: Command) -> Result<Command, DocError> {
-    let cancelled = std::mem::take(&mut doc.pending_relayout);
-    let mut updated_ids = std::collections::BTreeSet::new();
-    collect_updated_ids(&c, &mut updated_ids);
     let mut seeds = Vec::new();
-    collect_relayout_seeds(doc, &c, &updated_ids, !cancelled.is_empty(), &mut seeds);
-    seeds.extend(cancelled.iter().copied());
+    collect_relayout_seeds(doc, &c, &mut seeds);
 
     let inv = c.apply(doc)?;
+    if seeds.is_empty() {
+        return Ok(inv);
+    }
+
+    let cancelled = std::mem::take(&mut doc.pending_relayout);
+    seeds.extend(cancelled);
 
     let is_auto = |doc: &Document, id: NodeId| doc.get(id).and_then(|n| n.kind.frame_props()).is_some_and(|f| f.auto_layout.is_some());
     let mut roots: Vec<NodeId> = Vec::new();
@@ -369,7 +347,7 @@ fn apply_and_relayout(doc: &mut Document, c: Command) -> Result<Command, DocErro
         }
     }
     for r in roots {
-        doc.relayout_subtree_skipping(r, &cancelled);
+        doc.relayout_subtree(r);
     }
     doc.flush_pending_relayout();
     Ok(inv)
@@ -463,6 +441,105 @@ mod tests {
         assert_eq!(d.relayout_skipped_count(), 0);
         assert!(widths(&d, &frames).iter().all(|w| *w == 600.0), "redo brings back the whole edited layout: {:?}", widths(&d, &frames));
         assert_eq!(d.get(leaf).unwrap().transform.tx, 590.0, "redo places the leaf at the right edge of the 600 px frame");
+    }
+
+    #[test]
+    fn undo_when_second_step_does_not_resize_queued_chain_still_drains_leaf_to_590() {
+        let (mut d, frames, leaf) = nested_fill_frames();
+        let mut h = History::default();
+
+        let mut wide = d.get(frames[0]).unwrap().clone();
+        wide.size.x = 600.0;
+        h.exec(&mut d, Command::Update { node: Box::new(wide) }).unwrap();
+        d.relayout_subtree(frames[0]);
+        let queued_before = d.pending_relayout().to_vec();
+        assert!(!queued_before.is_empty(), "precondition: tail of 70-deep chain is queued");
+
+        assert!(apply_and_relayout(&mut d, Command::Remove { id: NodeId(999_999) }).is_err());
+        assert_eq!(d.pending_relayout(), queued_before.as_slice(), "failed apply must not lose pending_relayout");
+
+        let mut painted = d.get(frames[0]).unwrap().clone();
+        painted.fills = vec![Paint::solid(Color::WHITE)];
+        h.exec(&mut d, Command::Update { node: Box::new(painted) }).unwrap();
+
+        h.undo(&mut d).unwrap();
+        assert_eq!(d.pending_relayout(), queued_before.as_slice(), "non-layout undo must preserve pending_relayout");
+        d.flush_pending_relayout();
+        assert!(widths(&d, &frames).iter().all(|w| *w == 600.0), "undoing the fill step must not drop the queued relayout tail: {:?}", widths(&d, &frames));
+        assert_eq!(d.get(leaf).unwrap().transform.tx, 590.0, "leaf reaches 590 once the queue drains");
+
+        h.undo(&mut d).unwrap();
+        assert_eq!(d.relayout_skipped_count(), 0);
+        assert!(widths(&d, &frames).iter().all(|w| *w == 200.0));
+        assert_eq!(d.get(leaf).unwrap().transform.tx, 190.0);
+
+        // Also verify when the second step DOES touch a layout input (e.g. an absolute badge in frames[0])
+        // without resizing the queued Fill chain: undoing that step re-solves without skipping the tail.
+        let mut wide2 = d.get(frames[0]).unwrap().clone();
+        wide2.size.x = 600.0;
+        h.exec(&mut d, Command::Update { node: Box::new(wide2) }).unwrap();
+        d.relayout_subtree(frames[0]);
+        assert!(d.relayout_skipped_count() > 0);
+
+        let mut moved_outer = d.get(frames[0]).unwrap().clone();
+        moved_outer.transform.tx = 24.0;
+        h.exec(&mut d, Command::Update { node: Box::new(moved_outer) }).unwrap();
+
+        h.undo(&mut d).unwrap();
+        d.flush_pending_relayout();
+        assert!(widths(&d, &frames).iter().all(|w| *w == 600.0));
+        assert_eq!(d.get(leaf).unwrap().transform.tx, 590.0);
+    }
+
+    #[test]
+    fn undo_and_redo_of_batch_updating_stack_and_direct_child_resolves_fill_sibling() {
+        let mut d = Document::new("t");
+        let page = d.add_page("P");
+        let stack = d.alloc_id();
+        let mut stack_node = Node::frame(stack, Rect::new(0.0, 0.0, 200.0, 40.0));
+        if let NodeKind::Frame(fp) = &mut stack_node.kind {
+            fp.auto_layout = Some(AutoLayout {
+                direction: LayoutDirection::Horizontal,
+                primary_sizing: Sizing::Fixed,
+                counter_sizing: Sizing::Fixed,
+                ..AutoLayout::default()
+            });
+        }
+        d.insert(page, stack_node).unwrap();
+
+        let child_b = d.alloc_id();
+        d.insert(stack, Node::rectangle(child_b, Rect::new(0.0, 0.0, 40.0, 40.0))).unwrap();
+
+        let child_c = d.alloc_id();
+        let mut c_node = Node::rectangle(child_c, Rect::new(0.0, 0.0, 10.0, 40.0));
+        c_node.layout_child = LayoutChild { horizontal: Sizing::Fill, vertical: Sizing::Fixed, ..LayoutChild::default() };
+        d.insert(stack, c_node).unwrap();
+
+        d.relayout_subtree(stack);
+        assert_eq!(d.get(child_c).unwrap().size.x, 160.0);
+        assert_eq!(d.get(child_c).unwrap().transform.tx, 40.0);
+
+        let mut h = History::default();
+        let mut stack_wide = d.get(stack).unwrap().clone();
+        stack_wide.size.x = 500.0;
+        let mut b_wide = d.get(child_b).unwrap().clone();
+        b_wide.size.x = 80.0;
+        h.exec(&mut d, Command::Batch(vec![Command::Update { node: Box::new(stack_wide) }, Command::Update { node: Box::new(b_wide) }])).unwrap();
+        d.relayout_subtree(stack);
+        assert_eq!(d.get(child_c).unwrap().size.x, 420.0);
+        assert_eq!(d.get(child_c).unwrap().transform.tx, 80.0);
+
+        h.undo(&mut d).unwrap();
+        assert_eq!(d.get(stack).unwrap().size.x, 200.0);
+        assert_eq!(d.get(child_b).unwrap().size.x, 40.0);
+        assert_eq!(d.get(child_c).unwrap().size.x, 160.0, "undo must re-solve stack so Fill sibling shrinks back to 160");
+        assert_eq!(d.get(child_c).unwrap().transform.tx, 40.0);
+
+        h.redo(&mut d).unwrap();
+        assert_eq!(d.get(stack).unwrap().size.x, 500.0);
+        assert_eq!(d.get(child_b).unwrap().size.x, 80.0);
+        assert_eq!(d.get(child_c).unwrap().size.x, 420.0, "redo must re-solve stack so Fill sibling expands back to 420");
+        assert_eq!(d.get(child_c).unwrap().transform.tx, 80.0);
     }
 
     #[test]

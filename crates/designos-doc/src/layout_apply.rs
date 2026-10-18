@@ -10,12 +10,8 @@ impl Document {
     /// changed node and [`MAX_RELAYOUT_RESOLVES`] total re-solves; any subtree past either limit
     /// is queued in `pending_relayout` so it can be reported and finished lazily.
     pub fn relayout_subtree(&mut self, root: NodeId) {
-        self.relayout_subtree_skipping(root, &[]);
-    }
-
-    pub(crate) fn relayout_subtree_skipping(&mut self, root: NodeId, skip_subtrees: &[NodeId]) {
         let mut budget = MAX_RELAYOUT_RESOLVES;
-        self.relayout_bottom_up(root, skip_subtrees, &mut budget);
+        self.relayout_bottom_up(root, &mut budget);
     }
 
     /// What a flow frame's solver reads of child `id`: `None` when the child sits outside the flow
@@ -38,10 +34,7 @@ impl Document {
         Some(ChildIn::from_layout_child(size, &bound.layout_child, horiz))
     }
 
-    fn relayout_bottom_up(&mut self, root: NodeId, skip_subtrees: &[NodeId], budget: &mut usize) {
-        if skip_subtrees.contains(&root) {
-            return;
-        }
+    fn relayout_bottom_up(&mut self, root: NodeId, budget: &mut usize) {
         let Some(n) = self.get(root) else { return };
         if !n.kind.is_container() {
             return;
@@ -49,7 +42,7 @@ impl Document {
         let children = n.children.clone();
         for c in &children {
             if self.get(*c).is_some_and(|k| k.kind.is_container()) {
-                self.relayout_bottom_up(*c, skip_subtrees, budget);
+                self.relayout_bottom_up(*c, budget);
             }
         }
         // A container queued by an earlier pass is solved here like any other, at the size its
