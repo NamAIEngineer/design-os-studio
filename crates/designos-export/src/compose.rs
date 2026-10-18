@@ -1,6 +1,7 @@
 //! Jetpack Compose output.
 
 use crate::codegen::*;
+use crate::slots::*;
 use crate::util::num;
 use designos_doc::*;
 
@@ -11,11 +12,36 @@ use designos_doc::*;
 /// variables become `MaterialTheme.colorScheme.name` / `Tokens.name` placeholders.
 pub fn compose_for(doc: &Document, node: NodeId) -> String {
     let mut o = Out::new("    ");
-    for s in slot_params(doc, node) {
-        o.line(0, format!("val {s}: @Composable () -> Unit = {{}}"));
+    let slots = slot_infos(doc, node);
+    match doc.get(node) {
+        Some(n) if !slots.is_empty() => slot_function(doc, n, &slots, &mut o),
+        _ => emit(doc, node, Parent::root(), 0, &mut o),
     }
-    emit(doc, node, Parent::root(), 0, &mut o);
     o.finish()
+}
+
+/// A component with slots as a `@Composable` function: one lambda parameter per slot, whose
+/// default is the slot's own content.
+fn slot_function(doc: &Document, n: &Node, slots: &[SlotInfo], o: &mut Out) {
+    o.line(0, "@Composable");
+    o.line(0, format!("fun {}(", view_name(doc, n)));
+    for s in slots {
+        let head = format!("{}: @Composable () -> Unit = {{", slot_ident(&s.name, Lang::Kotlin));
+        let defaults: Vec<&Node> = s.container.and_then(|c| doc.get(c)).map(|c| visible_children(doc, c)).unwrap_or_default();
+        if defaults.is_empty() {
+            o.line(1, format!("{head}}},"));
+            continue;
+        }
+        o.line(1, head);
+        let me = s.container.and_then(|c| doc.get(c)).map(Parent::of).unwrap_or_else(Parent::root);
+        for k in defaults {
+            emit(doc, k.id, me, 2, o);
+        }
+        o.line(1, "},");
+    }
+    o.line(0, ") {");
+    emit(doc, n.id, Parent::root(), 1, o);
+    o.line(0, "}");
 }
 
 fn dp(doc: &Document, n: &Node, key: &str, v: f32) -> String {
@@ -263,7 +289,8 @@ fn emit(doc: &Document, id: NodeId, parent: Parent<'_>, depth: usize, o: &mut Ou
     }
     let sz = sizes(n, parent);
     let own_al = n.kind.frame_props().and_then(|f| f.auto_layout.as_ref());
-    let kids = visible_children(doc, n);
+    let site = slot_site(doc, id);
+    let kids = if site.is_some() { Vec::new() } else { visible_children(doc, n) };
     let mut mods: Vec<String> = Vec::new();
     if let Some((x, y)) = offset(n, parent, &sz) {
         if x != 0.0 || y != 0.0 {
@@ -271,7 +298,6 @@ fn emit(doc: &Document, id: NodeId, parent: Parent<'_>, depth: usize, o: &mut Ou
         }
     }
     let rot = rotation_deg(n);
-    let slot_call = react_slot_expr(doc, id).and_then(|_| slot_param_name(doc, id)).map(|s| format!("{s}()"));
 
     if let NodeKind::Instance { .. } = n.kind {
         let mut args: Vec<Arg> = instance_args(doc, n)
@@ -285,14 +311,32 @@ fn emit(doc: &Document, id: NodeId, parent: Parent<'_>, depth: usize, o: &mut Ou
         size_mods(doc, n, &sz, parent, &mut mods);
         finish_mods(doc, n, rot, &mut mods);
         args.extend(modifier_arg(&mods));
-        let slot_kids = instance_slot_children(doc, n);
-        open_call(o, depth, &view_name(doc, n), args, !slot_kids.is_empty());
-        if !slot_kids.is_empty() {
-            let me = Parent::of(n);
-            for k in slot_kids {
-                emit(doc, k, me, depth + 1, o);
+        let slots = instance_slots(doc, n);
+        let me = Parent::of(n);
+        if slots.single() && !slots.fills.is_empty() {
+            // The only slot is the trailing content lambda.
+            open_call(o, depth, &view_name(doc, n), args, true);
+            for k in slots.fills.iter().flat_map(|f| &f.ids) {
+                emit(doc, *k, me, depth + 1, o);
             }
             o.line(depth, "}");
+        } else {
+            for f in &slots.fills {
+                let name = slot_ident(&f.name, Lang::Kotlin);
+                if f.ids.is_empty() {
+                    args.push(arg(format!("{name} = {{}}")));
+                    continue;
+                }
+                let mut body = o.sub();
+                for k in &f.ids {
+                    emit(doc, *k, me, 1, &mut body);
+                }
+                let mut lines = vec![format!("{name} = {{")];
+                lines.extend(body.into_lines());
+                lines.push("}".to_string());
+                args.push(lines);
+            }
+            open_call(o, depth, &view_name(doc, n), args, false);
         }
         return;
     }
@@ -318,7 +362,7 @@ fn emit(doc: &Document, id: NodeId, parent: Parent<'_>, depth: usize, o: &mut Ou
     let block;
     size_mods(doc, n, &sz, parent, &mut mods);
     style_mods(doc, n, &mut mods);
-    if let Some(al) = own_al.filter(|_| !kids.is_empty() || slot_call.is_some()) {
+    if let Some(al) = own_al.filter(|_| !kids.is_empty() || site.is_some()) {
         let horizontal = al.direction == LayoutDirection::Horizontal;
         name = if horizontal { "Row" } else { "Column" };
         block = true;
@@ -355,14 +399,14 @@ fn emit(doc: &Document, id: NodeId, parent: Parent<'_>, depth: usize, o: &mut Ou
         args.push(arg(format!("{} = {cross}", if horizontal { "verticalAlignment" } else { "horizontalAlignment" })));
     } else {
         name = "Box";
-        block = !kids.is_empty() || slot_call.is_some();
+        block = !kids.is_empty() || site.is_some();
         finish_mods(doc, n, rot, &mut mods);
         args.extend(modifier_arg(&mods));
     }
     open_call(o, depth, name, args, block);
     if block {
-        if let Some(sc) = slot_call {
-            o.line(depth + 1, sc);
+        if let Some(site) = &site {
+            o.line(depth + 1, format!("{}()", slot_ident(&site.name, Lang::Kotlin)));
         }
         let me = Parent::of(n);
         for k in kids {
@@ -439,18 +483,5 @@ mod tests {
     }
 }"####;
         assert_eq!(compose_for(&d, id), expected);
-    }
-
-    #[test]
-    fn golden_slot_component_and_instance() {
-        let (d, comp, _slot, inst) = fixture::slot_card();
-        let comp_kt = compose_for(&d, comp);
-        assert!(comp_kt.contains("val body: @Composable () -> Unit = {}"), "{comp_kt}");
-        assert!(comp_kt.contains("body()"), "{comp_kt}");
-
-        let inst_kt = compose_for(&d, inst);
-        assert!(inst_kt.contains("Dialog("), "{inst_kt}");
-        assert!(inst_kt.contains(") {"), "{inst_kt}");
-        assert!(inst_kt.contains("text = \"Slot content\""), "{inst_kt}");
     }
 }

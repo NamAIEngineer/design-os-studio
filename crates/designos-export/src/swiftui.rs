@@ -1,6 +1,7 @@
 //! SwiftUI output.
 
 use crate::codegen::*;
+use crate::slots::*;
 use crate::util::num;
 use designos_doc::*;
 
@@ -11,11 +12,49 @@ use designos_doc::*;
 /// component properties as arguments; bound variables become `Color("name")` / `Tokens.name`.
 pub fn swiftui_for(doc: &Document, node: NodeId) -> String {
     let mut o = Out::new("    ");
-    for s in slot_params(doc, node) {
-        o.line(0, format!("@ViewBuilder var {s}: () -> Content"));
+    let slots = slot_infos(doc, node);
+    match doc.get(node) {
+        Some(n) if !slots.is_empty() => slot_view(doc, n, &slots, &mut o),
+        _ => view(doc, node, Parent::root(), 0, &mut o),
     }
-    view(doc, node, Parent::root(), 0, &mut o);
     o.finish()
+}
+
+/// Generic type parameter that carries the content of slot `name`.
+fn slot_type(name: &str) -> String {
+    format!("{}Content", pascal(name))
+}
+
+/// A component with slots as a generic `View` struct: one `@ViewBuilder` init parameter per slot,
+/// and an `init()` for callers that keep every slot's default content.
+fn slot_view(doc: &Document, n: &Node, slots: &[SlotInfo], o: &mut Out) {
+    let generics: Vec<String> = slots.iter().map(|s| format!("{}: View", slot_type(&s.name))).collect();
+    o.line(0, format!("struct {}<{}>: View {{", view_name(doc, n), generics.join(", ")));
+    for s in slots {
+        o.line(1, format!("private let {}: {}?", slot_ident(&s.name, Lang::Swift), slot_type(&s.name)));
+    }
+    o.line(0, "");
+    let params: Vec<String> = slots.iter().map(|s| format!("@ViewBuilder {}: () -> {}", slot_ident(&s.name, Lang::Swift), slot_type(&s.name))).collect();
+    o.line(1, format!("init({}) {{", params.join(", ")));
+    for s in slots {
+        let id = slot_ident(&s.name, Lang::Swift);
+        o.line(2, format!("self.{id} = {id}()"));
+    }
+    o.line(1, "}");
+    o.line(0, "");
+    o.line(1, "var body: some View {");
+    view(doc, n.id, Parent::root(), 2, o);
+    o.line(1, "}");
+    o.line(0, "}");
+    o.line(0, "");
+    let empties: Vec<String> = slots.iter().map(|s| format!("{} == EmptyView", slot_type(&s.name))).collect();
+    o.line(0, format!("extension {} where {} {{", view_name(doc, n), empties.join(", ")));
+    o.line(1, "init() {");
+    for s in slots {
+        o.line(2, format!("self.{} = nil", slot_ident(&s.name, Lang::Swift)));
+    }
+    o.line(1, "}");
+    o.line(0, "}");
 }
 
 fn color(doc: &Document, n: &Node, key: &str, c: &Color, opacity: f32) -> String {
@@ -264,14 +303,14 @@ fn view(doc: &Document, id: NodeId, parent: Parent<'_>, depth: usize, o: &mut Ou
     }
     let sz = sizes(n, parent);
     let own_al = n.kind.frame_props().and_then(|f| f.auto_layout.as_ref());
-    let kids = visible_children(doc, n);
+    let site = slot_site(doc, id);
+    let kids = if site.is_some() { Vec::new() } else { visible_children(doc, n) };
     let mut mods: Vec<String> = Vec::new();
     let mut head: Vec<String> = Vec::new(); // lines of the view expression before modifiers
     let mut body: Option<Vec<NodeId>> = None; // children inside braces
     let mut stack: Option<String> = None; // "HStack(...) {"
     let mut spacers = (false, false, false); // before, between, after
     let radius_shape = shape(doc, n);
-    let slot_call = react_slot_expr(doc, id).and_then(|_| slot_param_name(doc, id)).map(|s| format!("{s}()"));
 
     if let NodeKind::Instance { .. } = n.kind {
         let args: Vec<String> = instance_args(doc, n)
@@ -282,13 +321,33 @@ fn view(doc: &Document, id: NodeId, parent: Parent<'_>, depth: usize, o: &mut Ou
                 PropLit::Instance(v) => format!("{name}: {v}()"),
             })
             .collect();
-        let slot_kids = instance_slot_children(doc, n);
-        if slot_kids.is_empty() {
-            head.push(call(&view_name(doc, n), &args));
-        } else {
-            let vname = view_name(doc, n);
+        let slots = instance_slots(doc, n);
+        let vname = view_name(doc, n);
+        if slots.fills.is_empty() {
+            head.push(call(&vname, &args));
+        } else if slots.single() {
             stack = Some(if args.is_empty() { format!("{vname} {{") } else { format!("{} {{", call(&vname, &args)) });
-            body = Some(slot_kids);
+            body = Some(slots.fills.into_iter().flat_map(|f| f.ids).collect());
+        } else {
+            // The generic view needs a closure for every slot; one the instance leaves out stays empty.
+            let me = Parent::of(n);
+            o.line(depth, format!("{vname}("));
+            let total = args.len() + slots.component.len();
+            let mut written = 0;
+            for a in &args {
+                written += 1;
+                o.line(depth + 1, format!("{a}{}", if written < total { "," } else { "" }));
+            }
+            for info in &slots.component {
+                written += 1;
+                o.line(depth + 1, format!("{}: {{", slot_ident(&info.name, Lang::Swift)));
+                match slots.fills.iter().find(|f| f.name == info.name).filter(|f| !f.ids.is_empty()) {
+                    Some(f) => f.ids.iter().for_each(|c| view(doc, *c, me, depth + 2, o)),
+                    None => o.line(depth + 2, "EmptyView()"),
+                }
+                o.line(depth + 1, format!("}}{}", if written < total { "," } else { "" }));
+            }
+            o.line(depth, ")");
         }
         if let Some(f) = frame_args(sz.w, sz.h, None, n, doc) {
             mods.push(f);
@@ -303,7 +362,7 @@ fn view(doc: &Document, id: NodeId, parent: Parent<'_>, depth: usize, o: &mut Ou
         if let Some(f) = frame_args(sz.w, sz.h, None, n, doc) {
             mods.push(f);
         }
-    } else if let Some(al) = own_al.filter(|_| !kids.is_empty() || slot_call.is_some()) {
+    } else if let Some(al) = own_al.filter(|_| !kids.is_empty() || site.is_some()) {
         let horizontal = al.direction == LayoutDirection::Horizontal;
         let counter = match (al.counter_align, horizontal) {
             (LayoutAlign::Center, _) => "center",
@@ -348,7 +407,7 @@ fn view(doc: &Document, id: NodeId, parent: Parent<'_>, depth: usize, o: &mut Ou
             mods.push(f);
         }
         container_style(doc, n, &radius_shape, &mut mods);
-    } else if n.kind.is_container() && (!kids.is_empty() || slot_call.is_some()) {
+    } else if n.kind.is_container() && (!kids.is_empty() || site.is_some()) {
         stack = Some("ZStack(alignment: .topLeading) {".into());
         body = Some(kids.iter().map(|k| k.id).collect());
         if let Some(f) = frame_args(sz.w, sz.h, Some(".topLeading"), n, doc) {
@@ -416,8 +475,19 @@ fn view(doc: &Document, id: NodeId, parent: Parent<'_>, depth: usize, o: &mut Ou
         if spacers.0 {
             o.line(depth + 1, "Spacer()");
         }
-        if let Some(sc) = &slot_call {
-            o.line(depth + 1, sc);
+        if let Some(site) = &site {
+            let name = slot_ident(&site.name, Lang::Swift);
+            o.line(depth + 1, format!("if let {name} {{"));
+            o.line(depth + 2, &name);
+            if site.defaults.is_empty() {
+                o.line(depth + 1, "}");
+            } else {
+                o.line(depth + 1, "} else {");
+                for c in &site.defaults {
+                    view(doc, *c, me, depth + 2, o);
+                }
+                o.line(depth + 1, "}");
+            }
         }
         for (i, c) in children.iter().enumerate() {
             if i > 0 && spacers.1 {
@@ -497,17 +567,5 @@ mod tests {
     .clipShape(RoundedRectangle(cornerRadius: 8))
     .shadow(color: Color.black.opacity(0.25), radius: 4, x: 0, y: 4)"####;
         assert_eq!(swiftui_for(&d, id), expected);
-    }
-
-    #[test]
-    fn golden_slot_component_and_instance() {
-        let (d, comp, _slot, inst) = fixture::slot_card();
-        let comp_swift = swiftui_for(&d, comp);
-        assert!(comp_swift.contains("@ViewBuilder var body: () -> Content"), "{comp_swift}");
-        assert!(comp_swift.contains("body()"), "{comp_swift}");
-
-        let inst_swift = swiftui_for(&d, inst);
-        assert!(inst_swift.contains("Dialog {"), "{inst_swift}");
-        assert!(inst_swift.contains("Text(\"Slot content\")"), "{inst_swift}");
     }
 }

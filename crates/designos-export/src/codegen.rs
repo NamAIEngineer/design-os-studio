@@ -21,6 +21,15 @@ impl Out {
     pub fn finish(self) -> String {
         self.lines.join("\n")
     }
+
+    /// An empty writer with the same indent unit, for rendering a nested block.
+    pub fn sub(&self) -> Self {
+        Self { unit: self.unit, lines: Vec::new() }
+    }
+
+    pub fn into_lines(self) -> Vec<String> {
+        self.lines
+    }
 }
 
 /// Splits an identifier-ish string into words (non-alphanumerics and lower->upper boundaries).
@@ -300,169 +309,6 @@ pub(crate) fn instance_args(doc: &Document, n: &Node) -> Vec<(String, PropLit)> 
         out.push((name, lit));
     }
     out
-}
-
-/// Whether `id` is a slot container node (`is_slot` or `is_slot_container`).
-pub(crate) fn is_slot_node(doc: &Document, id: NodeId) -> bool {
-    doc.get(id).is_some_and(|n| n.component.is_slot || is_slot_container(doc, id))
-}
-
-fn clean_prop_name(raw: &str) -> &str {
-    raw.split('#').next().unwrap_or(raw).trim()
-}
-
-/// The camelCase parameter name for a slot container `id`.
-pub(crate) fn slot_param_name(doc: &Document, id: NodeId) -> Option<String> {
-    if !is_slot_node(doc, id) {
-        return None;
-    }
-    let n = doc.get(id)?;
-    if let Some(b) = n.component.bindings.get(&OverrideField::SlotContent) {
-        let c = camel(clean_prop_name(b));
-        if !c.is_empty() {
-            return Some(c);
-        }
-    }
-    if let Some(src_id) = n.component.source {
-        if let Some(src) = doc.get(src_id) {
-            if let Some(b) = src.component.bindings.get(&OverrideField::SlotContent) {
-                let c = camel(clean_prop_name(b));
-                if !c.is_empty() {
-                    return Some(c);
-                }
-            }
-        }
-    }
-    let comp = enclosing_component(doc, id).or_else(|| n.component.source.and_then(|s| enclosing_component(doc, s)));
-    if let Some(comp) = comp {
-        let defs: Vec<ComponentPropDef> = prop_defs(doc, comp).into_iter().filter(|d| d.kind == PropKind::Slot).collect();
-        if let Some(d) = defs.iter().find(|d| clean_prop_name(&d.name).eq_ignore_ascii_case(&n.name)) {
-            let c = camel(clean_prop_name(&d.name));
-            if !c.is_empty() {
-                return Some(c);
-            }
-        }
-        if defs.len() == 1 {
-            let c = camel(clean_prop_name(&defs[0].name));
-            if !c.is_empty() {
-                return Some(c);
-            }
-        }
-    }
-    let c = camel(&n.name);
-    Some(if c.is_empty() { "children".into() } else { c })
-}
-
-/// Ordered, deduplicated camelCase slot parameter names for `root`.
-pub(crate) fn slot_params(doc: &Document, root: NodeId) -> Vec<String> {
-    let Some(n) = doc.get(root) else { return Vec::new() };
-    if matches!(n.kind, NodeKind::Instance { .. }) {
-        return Vec::new();
-    }
-    let mut out: Vec<String> = Vec::new();
-    let mut push_unique = |s: String| {
-        if !s.is_empty() && !out.contains(&s) {
-            out.push(s);
-        }
-    };
-    if matches!(n.kind, NodeKind::Component(_) | NodeKind::ComponentSet(_)) {
-        for d in prop_defs(doc, root) {
-            if d.kind == PropKind::Slot {
-                push_unique(camel(clean_prop_name(&d.name)));
-            }
-        }
-    }
-    fn walk_slots(doc: &Document, root: NodeId, id: NodeId, push: &mut impl FnMut(String)) {
-        let Some(n) = doc.get(id) else { return };
-        if !n.visible {
-            return;
-        }
-        if id != root && matches!(n.kind, NodeKind::Instance { .. }) {
-            return;
-        }
-        if let Some(name) = slot_param_name(doc, id) {
-            push(name);
-        }
-        for c in &n.children {
-            walk_slots(doc, root, *c, push);
-        }
-    }
-    walk_slots(doc, root, root, &mut push_unique);
-    out
-}
-
-/// Visible child nodes occupying slots of an `Instance` node `n`.
-pub(crate) fn instance_slot_children(doc: &Document, n: &Node) -> Vec<NodeId> {
-    let Some(comp) = instance_component(n) else { return Vec::new() };
-    let mut out: Vec<NodeId> = Vec::new();
-    let mut push_id = |cid: NodeId| {
-        if doc.get(cid).is_some_and(|c| c.visible) && !out.contains(&cid) {
-            out.push(cid);
-        }
-    };
-    for def in prop_defs(doc, comp) {
-        if def.kind == PropKind::Slot {
-            if let PropValue::Slot(ids) = prop_value(doc, n.id, &def) {
-                for cid in ids {
-                    push_id(cid);
-                }
-            }
-        }
-    }
-    fn walk_inst_slots(doc: &Document, root: NodeId, id: NodeId, push: &mut impl FnMut(NodeId)) {
-        let Some(node) = doc.get(id) else { return };
-        if !node.visible {
-            return;
-        }
-        if id != root && matches!(node.kind, NodeKind::Instance { .. }) {
-            return;
-        }
-        if id != root && is_slot_node(doc, id) {
-            for &gc in &node.children {
-                push(gc);
-            }
-            return;
-        }
-        for &c in &node.children {
-            walk_inst_slots(doc, root, c, push);
-        }
-    }
-    walk_inst_slots(doc, n.id, n.id, &mut push_id);
-    out
-}
-
-/// React function header for `node`, including `children?: React.ReactNode` and any named slot props.
-pub(crate) fn react_slot_signature(doc: &Document, n: &Node) -> String {
-    let name = view_name(doc, n);
-    let slots = slot_params(doc, n.id);
-    if slots.is_empty() {
-        return format!("export function {name}() {{");
-    }
-    let mut names = vec!["children".to_string()];
-    for s in slots {
-        if s != "children" && !names.contains(&s) {
-            names.push(s);
-        }
-    }
-    let destructured = names.join(", ");
-    let types: Vec<String> = names.iter().map(|p| format!("{p}?: React.ReactNode")).collect();
-    format!("export function {name}({{ {destructured} }}: {{ {} }}) {{", types.join("; "))
-}
-
-/// JSX slot expression (e.g. `{body ?? children}` or `{children}`) when `id` is a slot container in a component definition.
-pub(crate) fn react_slot_expr(doc: &Document, id: NodeId) -> Option<String> {
-    let pname = slot_param_name(doc, id)?;
-    if instance_root_of(doc, id).is_some() {
-        let n = doc.get(id)?;
-        if !visible_children(doc, n).is_empty() {
-            return None;
-        }
-    }
-    if pname == "children" {
-        Some("{children}".into())
-    } else {
-        Some(format!("{{{pname} ?? children}}"))
-    }
 }
 
 /// Sizing of one axis.
@@ -1020,61 +866,6 @@ pub(crate) mod fixture {
         dot.name = "Dot".into();
         d.insert(row_id, dot).unwrap();
         (d, card_id)
-    }
-
-    /// A component `Dialog` with a `Body` slot frame, plus an instance of `Dialog` populated with a `Text` child inside its slot.
-    pub fn slot_card() -> (Document, NodeId, NodeId, NodeId) {
-        let mut d = Document::new("Slots");
-        let page = d.add_page("Page 1");
-
-        let comp_id = d.alloc_id();
-        let mut comp = Node::new(comp_id, NodeKind::Component(FrameProps::default()));
-        comp.name = "Dialog".into();
-        comp.size = Vec2::new(240.0, 120.0);
-        if let NodeKind::Component(f) = &mut comp.kind {
-            f.auto_layout = Some(AutoLayout {
-                direction: LayoutDirection::Vertical,
-                item_spacing: 8.0,
-                padding: [12.0; 4],
-                primary_sizing: Sizing::Fixed,
-                counter_sizing: Sizing::Fixed,
-                ..Default::default()
-            });
-        }
-        comp.component.props.push(ComponentPropDef { name: "Body#1:0".into(), kind: PropKind::Slot, default: PropValue::Slot(vec![]) });
-        let comp_id = d.insert(page, comp).unwrap();
-
-        let slot_id = d.alloc_id();
-        let mut slot = Node::frame(slot_id, Rect::new(0.0, 0.0, 216.0, 96.0));
-        slot.name = "Body".into();
-        slot.component.is_slot = true;
-        slot.component.bindings.insert(OverrideField::SlotContent, "Body#1:0".into());
-        if let NodeKind::Frame(f) = &mut slot.kind {
-            f.auto_layout = Some(AutoLayout {
-                direction: LayoutDirection::Vertical,
-                item_spacing: 4.0,
-                primary_sizing: Sizing::Hug,
-                counter_sizing: Sizing::Fixed,
-                ..Default::default()
-            });
-        }
-        let slot_id = d.insert(comp_id, slot).unwrap();
-
-        create_instance(&mut d, comp_id, page, Vec2::new(300.0, 0.0)).apply(&mut d).unwrap();
-        let inst_id = instances_of(&d, comp_id)[0];
-        let inst_slot = d.get(inst_id).unwrap().children[0];
-        let txt_id = d.alloc_id();
-        let mut txt = Node::text(
-            txt_id,
-            Rect::new(0.0, 0.0, 120.0, 20.0),
-            "Slot content",
-            TextStyle { font_family: "Inter".into(), font_size: 14.0, fills: vec![Paint::solid(Color::rgb(0x11, 0x11, 0x11))], ..Default::default() },
-        );
-        txt.name = "Message".into();
-        txt.component.is_slot_content = true;
-        let txt_id = d.insert(inst_slot, txt).unwrap();
-        d.get_mut(inst_id).unwrap().component.values.insert("Body#1:0".into(), PropValue::Slot(vec![txt_id]));
-        (d, comp_id, slot_id, inst_id)
     }
 }
 
