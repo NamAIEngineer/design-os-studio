@@ -4,7 +4,7 @@
 //! the main component.
 
 use super::*;
-use designos_doc::{create_instance, sync_instances, OverrideField, Vec2};
+use designos_doc::{create_instance, instance_component, sync_instances, OverrideField, Vec2};
 
 fn spawn_instance(f: &mut Fx, comp: NodeId, x: f32, y: f32) -> NodeId {
     let parent = f.page;
@@ -143,5 +143,100 @@ fn fixing_an_instance_child_records_override_without_mutating_main_component_and
 
     app.undo();
     assert_eq!(snapshot(&app, &[inst_swatch, inst_label]), before_inst);
+    assert!(!app.hist.can_undo());
+}
+
+// ------------------------------------------------- detached layer inside a main component
+
+/// A main component "Card" (`10:1`) that holds a frame detached from the "Button" component
+/// (`12:34`) and still equal to it, plus `copies` instances of the card. Returns
+/// (card, button, detached frame inside the card, the instances).
+fn card_with_detached_button(f: &mut Fx, copies: usize) -> (NodeId, NodeId, NodeId, Vec<NodeId>) {
+    let button = component(f, "12:34");
+    f.text(button, "Button", 14.0, 400, gray(0x10));
+    let card = component(f, "10:1");
+    f.doc.get_mut(card).unwrap().name = "Card".into();
+    f.doc.get_mut(card).unwrap().size = Vec2::new(200.0, 120.0);
+    let detached = detached_copy_in(f, button, card, "Save", "guid:12:34");
+    let instances = (0..copies).map(|i| spawn_instance(f, card, 260.0 * (i as f32 + 1.0), 200.0)).collect();
+    (card, button, detached, instances)
+}
+
+#[test]
+fn a_detached_layer_inside_a_main_component_is_reported_once_on_the_main_not_on_every_instance() {
+    let mut f = fx();
+    let (_card, button, detached, instances) = card_with_detached_button(&mut f, 3);
+    for inst in &instances {
+        let copy = f.doc.get(*inst).unwrap().children[0];
+        assert_eq!(f.doc.get(copy).unwrap().component.source, Some(detached), "fixture: the instance mirrors the detached frame");
+    }
+    let report = f.report();
+    let found: Vec<&Finding> = report.of(Rule::DetachedInstance).collect();
+    assert_eq!(found.len(), 1, "{:#?}", report.findings);
+    assert_eq!(found[0].node, detached);
+    assert_eq!(found[0].fix, Some(Fix::Reconnect { component: button }));
+}
+
+#[test]
+fn a_reconnect_on_the_main_component_survives_a_sync_of_its_instances() {
+    let mut f = fx();
+    let (card, button, detached, instances) = card_with_detached_button(&mut f, 3);
+    let mut app = f.app();
+    let finding = fix_of(&app, Rule::DetachedInstance);
+    assert_eq!(finding.node, detached);
+    assert!(app.check_designs_fix(&finding));
+    sync_instances(&mut app.doc, card).apply(&mut app.doc).unwrap();
+
+    let swapped = app.doc.get(card).unwrap().children.clone();
+    assert_eq!(swapped.len(), 1);
+    let main_inst = app.doc.get(swapped[0]).unwrap();
+    assert_eq!(instance_component(main_inst), Some(button), "{:?}", main_inst.kind);
+    for inst in &instances {
+        let kids = app.doc.get(*inst).unwrap().children.clone();
+        assert_eq!(kids.len(), 1, "each card instance mirrors the reconnected layer");
+        let mirror = app.doc.get(kids[0]).unwrap();
+        assert_eq!(mirror.component.source, Some(swapped[0]));
+        assert_eq!(instance_component(mirror), Some(button));
+    }
+    assert_eq!(audit(&app.doc, &Scope::Page(app.page)).of(Rule::DetachedInstance).count(), 0);
+}
+
+#[test]
+fn fix_all_reconnects_the_detached_layer_once_and_leaves_the_instance_copies_to_the_sync() {
+    let mut f = fx();
+    let (_card, _button, detached, instances) = card_with_detached_button(&mut f, 3);
+    let mut app = f.app();
+    let before: Vec<NodeId> = instances.iter().map(|i| app.doc.get(*i).unwrap().children[0]).collect();
+    let findings = audit(&app.doc, &Scope::Page(app.page)).findings;
+    assert_eq!(findings.iter().filter(|x| x.fix.is_some()).count(), 1, "{findings:#?}");
+    assert_eq!(app.check_designs_fix_all(&findings), 1);
+    assert!(app.doc.get(detached).is_none());
+    // The copies were replaced by the sync that follows the edit to the main, not rewritten in place.
+    for (inst, old_copy) in instances.iter().zip(before) {
+        assert!(app.doc.get(old_copy).is_none(), "the stale mirror of the detached frame is gone");
+        assert_eq!(app.doc.get(*inst).unwrap().children.len(), 1);
+    }
+    assert_eq!(audit(&app.doc, &Scope::Page(app.page)).of(Rule::DetachedInstance).count(), 0);
+    app.undo();
+    assert!(app.doc.get(detached).is_some());
+    assert!(!app.hist.can_undo());
+}
+
+#[test]
+fn a_reconnect_aimed_at_a_mirror_inside_an_instance_is_refused() {
+    let mut f = fx();
+    let (_card, button, _detached, instances) = card_with_detached_button(&mut f, 1);
+    let mut app = f.app();
+    let mirror = app.doc.get(instances[0]).unwrap().children[0];
+    let stale = Finding {
+        node: mirror,
+        node_name: "Save".into(),
+        rule: Rule::DetachedInstance,
+        message: String::new(),
+        fix: Some(Fix::Reconnect { component: button }),
+        fix_label: String::new(),
+    };
+    assert!(!app.check_designs_fix(&stale), "the next sync of the instance would put the mirror back");
+    assert!(app.doc.get(mirror).is_some());
     assert!(!app.hist.can_undo());
 }

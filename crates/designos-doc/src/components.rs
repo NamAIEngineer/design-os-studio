@@ -348,10 +348,8 @@ pub fn record_override(before: &Node, after: &Node) -> BTreeSet<OverrideField> {
                 s.insert(if is_text { OverrideField::TextStyle } else { OverrideField::Fills });
             } else if key.starts_with("strokes/") || key == "strokeWeight" {
                 s.insert(OverrideField::Stroke);
-            } else if matches!(
-                key.as_str(),
-                "fontSize" | "fontFamily" | "fontWeight" | "lineHeight" | "letterSpacing" | "paragraphSpacing" | "paragraphIndent"
-            ) {
+            } else if matches!(key.as_str(), "fontSize" | "fontFamily" | "fontWeight" | "lineHeight" | "letterSpacing" | "paragraphSpacing" | "paragraphIndent")
+            {
                 s.insert(OverrideField::TextStyle);
             } else if matches!(key.as_str(), "topLeftRadius" | "topRightRadius" | "bottomRightRadius" | "bottomLeftRadius" | "cornerRadius") {
                 s.insert(OverrideField::CornerRadii);

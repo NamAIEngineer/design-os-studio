@@ -372,6 +372,11 @@ fn component(f: &mut Fx, source_id: &str) -> NodeId {
 /// A detached copy of `comp` on the page: the same tree with its component bookkeeping replaced by
 /// the `detachedSymbolId` provenance a `.fig` import leaves, named `name`, at (40, 60).
 fn detached_copy(f: &mut Fx, comp: NodeId, name: &str, symbol: &str) -> NodeId {
+    detached_copy_in(f, comp, f.page, name, symbol)
+}
+
+/// [`detached_copy`] placed under `parent`, which may itself be a main component.
+fn detached_copy_in(f: &mut Fx, comp: NodeId, parent: NodeId, name: &str, symbol: &str) -> NodeId {
     fn copy(f: &mut Fx, src: NodeId, parent: NodeId) -> NodeId {
         let mut n = f.doc.get(src).unwrap().clone();
         let kids = std::mem::take(&mut n.children);
@@ -386,7 +391,7 @@ fn detached_copy(f: &mut Fx, comp: NodeId, name: &str, symbol: &str) -> NodeId {
         }
         id
     }
-    let id = copy(f, comp, f.page);
+    let id = copy(f, comp, parent);
     let n = f.doc.get_mut(id).unwrap();
     n.name = name.into();
     n.transform.tx = 40.0;
