@@ -221,3 +221,68 @@ fn old_saved_json_with_single_slot_content_id_migrates_to_per_property_map() {
         "legacy instance slot_content_id migrates into slot_content_ids under its master's slot prop name"
     );
 }
+
+/// A component whose slot properties are declared `Footer` then `Body` (the reverse of alphabetical
+/// order), carrying a legacy single slot content id.
+fn component_with_footer_then_body_and_legacy_id() -> (Document, NodeId) {
+    let (mut d, comp, _, _) = component_with_slot();
+    let node = d.get_mut(comp).unwrap();
+    node.component.props = vec![
+        ComponentPropDef { name: "Footer".into(), kind: PropKind::Slot, default: PropValue::Slot(vec![]) },
+        ComponentPropDef { name: "Body".into(), kind: PropKind::Slot, default: PropValue::Slot(vec![]) },
+    ];
+    node.component.slot_content_id = Some("7:1".into());
+    (d, comp)
+}
+
+#[test]
+fn legacy_instance_id_lands_on_the_masters_first_slot_even_when_slot_values_sort_differently() {
+    let (mut d, comp) = component_with_footer_then_body_and_legacy_id();
+    let page = d.pages[0];
+    create_instance(&mut d, comp, page, Vec2::new(400.0, 0.0)).apply(&mut d).unwrap();
+    let inst = instances_of(&d, comp)[0];
+    {
+        let n = d.get_mut(inst).unwrap();
+        n.component.props.clear();
+        n.component.values.clear();
+        n.component.values.insert("Body".into(), PropValue::Slot(vec![]));
+        n.component.values.insert("Footer".into(), PropValue::Slot(vec![]));
+        n.component.slot_content_ids.clear();
+        n.component.slot_content_id = Some("9:1".into());
+    }
+
+    let loaded = Document::from_json(&d.to_json().unwrap()).unwrap();
+    let ids = |id| loaded.get(id).unwrap().component.slot_content_ids.clone();
+    assert_eq!(ids(comp).into_iter().collect::<Vec<_>>(), vec![("Footer".to_string(), "7:1".to_string())]);
+    assert_eq!(ids(inst).into_iter().collect::<Vec<_>>(), vec![("Footer".to_string(), "9:1".to_string())], "same property as the component");
+}
+
+#[test]
+fn deleting_the_slot_that_took_the_legacy_id_clears_the_legacy_field() {
+    let (d, comp) = component_with_footer_then_body_and_legacy_id();
+    let mut d = Document::from_json(&d.to_json().unwrap()).unwrap();
+    assert_eq!(d.get(comp).unwrap().component.slot_content_ids.get("Footer").map(String::as_str), Some("7:1"));
+
+    delete_prop(&mut d, comp, "Footer").apply(&mut d).unwrap();
+    let n = d.get(comp).unwrap();
+    assert!(n.component.slot_content_ids.is_empty());
+    assert!(n.component.slot_content_id.is_none(), "the legacy id belonged to the deleted property");
+}
+
+#[test]
+fn deleting_a_slot_that_never_held_the_legacy_id_keeps_it() {
+    let (d, comp) = component_with_footer_then_body_and_legacy_id();
+    let mut d = Document::from_json(&d.to_json().unwrap()).unwrap();
+    delete_prop(&mut d, comp, "Body").apply(&mut d).unwrap();
+    let n = d.get(comp).unwrap();
+    assert_eq!(n.component.slot_content_ids.get("Footer").map(String::as_str), Some("7:1"));
+    assert_eq!(n.component.slot_content_id.as_deref(), Some("7:1"));
+}
+
+#[test]
+fn deleting_the_only_slot_clears_an_unmigrated_legacy_id() {
+    let (mut d, comp, _, _) = component_with_slot();
+    d.get_mut(comp).unwrap().component.slot_content_id = Some("7:42".into());
+    delete_prop(&mut d, comp, "Body").apply(&mut d).unwrap();
+    assert!(d.get(comp).unwrap().component.slot_content_id.is_none());
+}

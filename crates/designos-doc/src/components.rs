@@ -1056,9 +1056,14 @@ pub fn rename_prop(doc: &mut Document, owner: NodeId, old: &str, new: &str) -> C
 pub fn delete_prop(doc: &mut Document, owner: NodeId, name: &str) -> Command {
     let mut c = Ctx::new(doc);
     let Some(mut o) = c.s.get(owner).cloned() else { return nothing() };
+    let first_slot = o.component.props.iter().find(|p| p.kind == PropKind::Slot).is_some_and(|p| p.name == name);
+    let held_id = o.component.slot_content_ids.remove(name).is_some();
+    // The legacy single id belongs to the property it migrates onto: the first slot property.
+    if held_id || (first_slot && o.component.slot_content_ids.is_empty()) {
+        o.component.slot_content_id = None;
+    }
     o.component.props.retain(|p| p.name != name);
     o.component.slot_configs.remove(name);
-    o.component.slot_content_ids.remove(name);
     c.update(o);
     for id in subtree_ids(c.s, owner) {
         let Some(mut n) = c.s.get(id).cloned() else { continue };
@@ -1068,8 +1073,12 @@ pub fn delete_prop(doc: &mut Document, owner: NodeId, name: &str) -> Command {
     let comps = components_of(c.s, owner);
     for inst in instances_of_any(c.s, &comps) {
         let Some(mut n) = c.s.get(inst).cloned() else { continue };
+        let slot_values: Vec<&str> = n.component.values.iter().filter(|(_, v)| matches!(v, PropValue::Slot(_))).map(|(k, _)| k.as_str()).collect();
+        let only_slot_value = slot_values == [name];
         n.component.values.remove(name);
-        n.component.slot_content_ids.remove(name);
+        if n.component.slot_content_ids.remove(name).is_some() || (n.component.slot_content_ids.is_empty() && only_slot_value) {
+            n.component.slot_content_id = None;
+        }
         c.update(n);
     }
     sync_component(&mut c, owner);

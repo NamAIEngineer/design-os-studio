@@ -350,3 +350,57 @@ fn two_slot_props_on_one_node_round_trip_separate_slot_content_ids_through_fig()
     assert_eq!(rt_inst.component.slot_content_ids.get("Header").map(String::as_str), Some("9:1"));
     assert_eq!(rt_inst.component.slot_content_ids.get("Body").map(String::as_str), Some("9:2"));
 }
+
+/// A `Panel` component with slot properties `Body` and `Footer` and the legacy single
+/// `slot_content_id`, loaded through the native JSON path so the legacy id is migrated onto `Body`.
+fn migrated_two_slot_panel() -> Document {
+    let mut doc = Document::new("legacy");
+    let page = doc.add_page("Page");
+    let panel_id = doc.alloc_id();
+    let mut panel = Node::new(panel_id, NodeKind::Component(FrameProps::default()));
+    panel.name = "Panel".into();
+    panel.size = Vec2::new(320.0, 200.0);
+    panel.component.props = vec![
+        ComponentPropDef { name: "Body#1:1".into(), kind: PropKind::Slot, default: PropValue::Slot(vec![]) },
+        ComponentPropDef { name: "Footer#1:2".into(), kind: PropKind::Slot, default: PropValue::Slot(vec![]) },
+    ];
+    panel.component.slot_content_id = Some("7:42".into());
+    doc.insert(page, panel).unwrap();
+    let doc = Document::from_json(&doc.to_json().unwrap()).unwrap();
+    let ids = &find(&doc, "Panel").component.slot_content_ids;
+    assert_eq!(ids.len(), 1, "migration fills one slot only: {ids:?}");
+    assert_eq!(ids.get("Body#1:1").map(String::as_str), Some("7:42"));
+    assert_eq!(find(&doc, "Panel").component.slot_content_id.as_deref(), Some("7:42"), "legacy field is still present");
+    doc
+}
+
+fn assert_only_body_has_a_content_id(doc: &Document) {
+    let rt = import_fig(&export_fig(doc).expect("export_fig")).expect("import_fig");
+    let ids = &find(&rt, "Panel").component.slot_content_ids;
+    assert_eq!(ids.get("Body").map(String::as_str), Some("7:42"));
+    assert!(!ids.contains_key("Footer"), "Footer must not inherit the legacy id: {ids:?}");
+    assert_eq!(ids.len(), 1);
+}
+
+#[test]
+fn a_migrated_two_slot_component_with_the_legacy_field_exports_the_id_on_one_slot_only() {
+    assert_only_body_has_a_content_id(&migrated_two_slot_panel());
+}
+
+#[test]
+fn a_slot_added_after_migration_does_not_inherit_the_legacy_id_in_fig() {
+    let mut doc = migrated_two_slot_panel();
+    let id = find(&doc, "Panel").id;
+    let n = doc.get_mut(id).unwrap();
+    n.component.props.push(ComponentPropDef { name: "Header#1:3".into(), kind: PropKind::Slot, default: PropValue::Slot(vec![]) });
+    assert_only_body_has_a_content_id(&doc);
+}
+
+#[test]
+fn deleting_the_slot_that_held_the_legacy_id_leaves_no_id_on_the_survivor_in_fig() {
+    let mut doc = migrated_two_slot_panel();
+    let id = find(&doc, "Panel").id;
+    delete_prop(&mut doc, id, "Body#1:1").apply(&mut doc).unwrap();
+    let rt = import_fig(&export_fig(&doc).expect("export_fig")).expect("import_fig");
+    assert!(find(&rt, "Panel").component.slot_content_ids.is_empty(), "{:?}", find(&rt, "Panel").component.slot_content_ids);
+}

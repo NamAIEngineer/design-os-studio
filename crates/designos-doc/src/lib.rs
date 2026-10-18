@@ -780,9 +780,6 @@ impl Document {
         if let Some(name) = n.component.bindings.get(&OverrideField::SlotContent) {
             return Some(name.clone());
         }
-        if let Some((name, _)) = n.component.values.iter().find(|(_, v)| matches!(v, PropValue::Slot(_))) {
-            return Some(name.clone());
-        }
         let comp_id = match &n.kind {
             NodeKind::Instance { component, .. } => *component,
             _ => None,
@@ -802,7 +799,9 @@ impl Document {
                 }
             }
         }
-        None
+        // No definition to ask: an instance carries no `props`, so the master decides first and a
+        // stored slot value only names the property when no master declares one.
+        n.component.values.iter().find(|(_, v)| matches!(v, PropValue::Slot(_))).map(|(name, _)| name.clone())
     }
 }
 

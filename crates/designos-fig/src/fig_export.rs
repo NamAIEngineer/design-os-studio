@@ -541,6 +541,21 @@ fn export_styles_on_internal(cx: &mut ExportCtx, internal_guid: (u32, u32), idx:
     }
 }
 
+/// Slot content id written on the definition of slot property `prop_name`. The per-property map is
+/// authoritative; the legacy single id is read only while the map is empty and the node declares
+/// exactly one slot property, so it can never be copied onto a second slot.
+fn def_slot_content_id<'a>(link: &'a ComponentLink, prop_name: &str) -> Option<&'a str> {
+    if let Some(id) = link.slot_content_ids.get(prop_name) {
+        return Some(id.as_str());
+    }
+    let single_slot = link.props.iter().filter(|p| p.kind == PropKind::Slot).count() == 1;
+    if link.slot_content_ids.is_empty() && single_slot {
+        link.slot_content_id.as_deref()
+    } else {
+        None
+    }
+}
+
 fn export_node_rec(cx: &mut ExportCtx, id: NodeId, parent_guid: (u32, u32), sibling_idx: usize, parent_dir: Option<LayoutDirection>, in_component: bool) {
     let Some(node) = cx.doc.get(id).cloned() else { return };
     let nguid = cx.node_guids[&id];
@@ -1002,9 +1017,7 @@ fn export_node_rec(cx: &mut ExportCtx, id: NodeId, parent_guid: (u32, u32), sibl
                             df.push(("preferredValues", V::Array(prefs)));
                         }
                     }
-                    if let Some(g) =
-                        node.component.slot_content_ids.get(&p.name).map(String::as_str).or(node.component.slot_content_id.as_deref()).and_then(parse_guid_pair)
-                    {
+                    if let Some(g) = def_slot_content_id(&node.component, &p.name).and_then(parse_guid_pair) {
                         df.push((
                             "varValue",
                             msg(vec![("dataType", en("SLOT_CONTENT_ID")), ("value", msg(vec![("slotContentIdValue", msg(vec![("guid", guid(g.0, g.1))]))]))]),
