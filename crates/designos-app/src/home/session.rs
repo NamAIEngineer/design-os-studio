@@ -502,6 +502,9 @@ impl App {
         let project = lib.project(&entry.project).map(|p| p.name).unwrap_or_default();
         doc.name = entry.name.clone();
         let needs_thumb = lib.thumbnail_path(&entry).is_none();
+        self.exit_version_view();
+        self.flush_autosave();
+        self.release_active_repaired_original(Some(&disk_path));
         self.replace_document(doc, None);
         if let Some(w) = warning.as_deref() {
             self.show_toast(crate::io::opened_toast_text(&entry.name, Some(w)), true);
@@ -589,7 +592,8 @@ impl App {
     /// that replaced non-finite numbers says so, because no later open of the file would.
     pub fn save_library_file(&mut self) -> Result<(), String> {
         if let Some(notice) = self.save_library_file_noticing()? {
-            self.show_toast(notice, true);
+            self.show_toast(&notice, true);
+            self.pending_flush_notice = Some((self.now, notice));
         }
         Ok(())
     }
@@ -610,7 +614,13 @@ impl App {
         if wrote_backup {
             crate::io::clear_pending_repair_backup(&disk_path);
         }
+        if replaced > 0 {
+            self.doc.neutralize_non_finite();
+            self.hist.neutralize_non_finite();
+            self.changed();
+        }
         self.autosave.saved_hash = doc_hash(&self.doc);
+        self.autosave.seen_rev = self.canvas.tiles.rev();
         self.autosave.changed_at = None;
         self.autosave.save_failed_at = None;
         self.autosave.disk_mtime = self.watched_disk_path().and_then(|p| std::fs::metadata(p).ok()).and_then(|m| m.modified().ok());
@@ -643,7 +653,8 @@ impl App {
         self.settle_pending_relayout();
         if self.lib_file.is_some() && doc_hash(&self.doc) != self.autosave.saved_hash {
             if let Err(e) = self.save_library_file() {
-                self.show_toast(e, true);
+                self.show_toast(&e, true);
+                self.pending_flush_notice = Some((self.now, e));
             }
         }
         self.autosave.changed_at = None;
@@ -716,6 +727,10 @@ impl App {
         }
         let new_hash = doc_hash(&new_doc);
         if new_hash == self.autosave.saved_hash {
+            if let Some(w) = warning {
+                self.show_toast(format!("Synced external agent changes ({w})"), true);
+                ctx.request_repaint();
+            }
             return;
         }
         let old_page = self.page;
@@ -810,16 +825,21 @@ impl App {
         doc.name = name.trim().to_string();
         match lib.create_file_counted(project, folder, name, &doc) {
             Ok((e, replaced)) => {
+                if replaced > 0 {
+                    self.doc.neutralize_non_finite();
+                    self.hist.neutralize_non_finite();
+                    self.changed();
+                }
                 self.doc.name = e.name.clone();
                 let project_name = lib.project(project).map(|p| p.name).unwrap_or_default();
-                self.lib_file = Some(LibFile { id: e.id.clone(), project_id: project.to_string(), project: project_name.clone(), name: e.name });
+                let new_lf = LibFile { id: e.id.clone(), project_id: project.to_string(), project: project_name.clone(), name: e.name };
+                let new_disk_path = self.lib_file_disk_path(&new_lf);
+                self.release_active_repaired_original(new_disk_path.as_deref());
+                self.lib_file = Some(new_lf);
                 self.autosave = Autosave { seen_rev: self.canvas.tiles.rev(), saved_hash: doc_hash(&self.doc), ..Default::default() };
                 let disk_path = self.watched_disk_path();
                 self.autosave.disk_mtime = disk_path.as_ref().and_then(|p| std::fs::metadata(p).ok()).and_then(|m| m.modified().ok());
                 self.history_open_file();
-                if let Some(old) = self.file_path.take() {
-                    self.release_repaired_original(&old, None);
-                }
                 thumb::refresh_in_background(lib, e.id, self.export_doc().into_owned());
                 let notice = disk_path.as_deref().and_then(|p| crate::io::non_finite_notice_once(p, replaced));
                 match notice {

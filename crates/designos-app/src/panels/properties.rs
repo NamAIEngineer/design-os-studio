@@ -970,7 +970,12 @@ fn selection_ui(app: &mut App, ui: &mut Ui, pane: &mut Pane, sel: &[NodeId]) {
     pane.y += super::export::section(app, ui, pane.x0, pane.oy + pane.y, sel);
 }
 
+#[cfg(test)]
 fn sizing_of(n: &Node, horizontal: bool) -> Sizing {
+    sizing_of_with_parent(n, horizontal, Some(false))
+}
+
+fn sizing_of_with_parent(n: &Node, horizontal: bool, counter_horizontal: Option<bool>) -> Sizing {
     if let Some(al) = n.kind.frame_props().and_then(|f| f.auto_layout.as_ref()) {
         if al.sizing_along(horizontal) == Sizing::Hug {
             return Sizing::Hug;
@@ -981,11 +986,7 @@ fn sizing_of(n: &Node, horizontal: bool) -> Sizing {
             return Sizing::Hug;
         }
     }
-    if horizontal {
-        n.layout_child.horizontal
-    } else {
-        n.layout_child.vertical
-    }
+    n.layout_child.effective_sizing(horizontal, counter_horizontal)
 }
 
 fn set_sizing(app: &mut App, sel: &[NodeId], horizontal: bool, s: Sizing) {
@@ -1040,7 +1041,8 @@ fn resizing_ui(app: &mut App, ui: &mut Ui, pane: &mut Pane, sel: &[NodeId], n0: 
     sublabel(ui, pane, "Resizing");
     let opts = ["Fixed", "Hug", "Fill"].map(String::from);
     let order = [Sizing::Fixed, Sizing::Hug, Sizing::Fill];
-    let (hs, vs) = (sizing_of(n0, true), sizing_of(n0, false));
+    let counter_horiz = n0.parent.and_then(|p| app.doc.get(p)).and_then(LayoutChild::counter_axis_is_horizontal);
+    let (hs, vs) = (sizing_of_with_parent(n0, true, counter_horiz), sizing_of_with_parent(n0, false, counter_horiz));
     if let Some(i) = dropdown(ui, pane.col(0, 0.0), "rs-h", &format!("W: {}", opts[order.iter().position(|s| *s == hs).unwrap_or(0)]), &opts) {
         set_sizing(app, sel, true, order[i]);
     }
@@ -1280,8 +1282,32 @@ fn track_move_button(idx: usize, len: usize) -> (Icon, &'static str, usize) {
     if idx + 1 < len {
         (Icon::ChevronDown, "Move down", idx + 1)
     } else {
-        (Icon::ArrowUp, "Move up", idx - 1)
+        (Icon::ChevronUp, "Move up", idx - 1)
     }
+}
+
+/// Index of a track's sizing mode in the Flex / Fixed / Hug dropdown.
+fn track_mode_index(track: designos_doc::GridTrack) -> usize {
+    use designos_doc::GridTrack;
+    match track {
+        GridTrack::Flex(_) => 0,
+        GridTrack::Fixed(_) => 1,
+        GridTrack::Hug => 2,
+    }
+}
+
+/// The track a mode-dropdown pick turns `track` into, or `None` when the pick is the mode it already has.
+/// Re-picking the current mode must keep a custom size such as `Flex(2.0)` or `Fixed(80.0)`.
+fn track_after_mode_pick(track: designos_doc::GridTrack, picked: usize) -> Option<designos_doc::GridTrack> {
+    use designos_doc::GridTrack;
+    if picked == track_mode_index(track) {
+        return None;
+    }
+    Some(match picked {
+        0 => GridTrack::Flex(1.0),
+        1 => GridTrack::Fixed(120.0),
+        _ => GridTrack::Hug,
+    })
 }
 
 /// Column and row track lists of the selected grid: sizing mode, value, move and delete per track, `+` per list.
@@ -1305,18 +1331,9 @@ fn grid_tracks_ui(app: &mut App, ui: &mut Ui, pane: &mut Pane, grid_id: NodeId) 
         row_end(pane);
         for (idx, &track) in tracks.iter().enumerate() {
             let row = grid_track_row(pane);
-            let mode = match track {
-                GridTrack::Flex(_) => 0,
-                GridTrack::Fixed(_) => 1,
-                GridTrack::Hug => 2,
-            };
+            let mode = track_mode_index(track);
             if let Some(picked) = dropdown(ui, row.mode, format!("grid-{tag}-mode-{idx}"), &options[mode], &options) {
-                if picked != mode {
-                    let next = match picked {
-                        0 => GridTrack::Flex(1.0),
-                        1 => GridTrack::Fixed(120.0),
-                        _ => GridTrack::Hug,
-                    };
+                if let Some(next) = track_after_mode_pick(track, picked) {
                     resize_grid_track(app, grid_id, is_col, idx, next);
                 }
             }
@@ -2374,11 +2391,24 @@ mod tests {
         assert_eq!((icon, tip, to), (Icon::ChevronDown, "Move down", 1));
         let (icon, tip, to) = track_move_button(1, 3);
         assert_eq!((icon, tip, to), (Icon::ChevronDown, "Move down", 2));
-        // the last track has nowhere to go but up, so the button must not point down
+        // the last track has nowhere to go but up, so the button must point up with ChevronUp
         let (icon, tip, to) = track_move_button(2, 3);
-        assert_eq!((icon, tip, to), (Icon::ArrowUp, "Move up", 1));
+        assert_eq!((icon, tip, to), (Icon::ChevronUp, "Move up", 1));
         let (icon, tip, to) = track_move_button(1, 2);
-        assert_eq!((icon, tip, to), (Icon::ArrowUp, "Move up", 0));
+        assert_eq!((icon, tip, to), (Icon::ChevronUp, "Move up", 0));
+    }
+
+    #[test]
+    fn picking_the_mode_a_track_already_has_keeps_its_custom_size() {
+        use designos_doc::GridTrack;
+        assert_eq!(track_after_mode_pick(GridTrack::Flex(2.0), 0), None);
+        assert_eq!(track_after_mode_pick(GridTrack::Fixed(80.0), 1), None);
+        assert_eq!(track_after_mode_pick(GridTrack::Hug, 2), None);
+        // a different mode still applies its preset
+        assert_eq!(track_after_mode_pick(GridTrack::Flex(2.0), 1), Some(GridTrack::Fixed(120.0)));
+        assert_eq!(track_after_mode_pick(GridTrack::Fixed(80.0), 0), Some(GridTrack::Flex(1.0)));
+        assert_eq!(track_after_mode_pick(GridTrack::Fixed(80.0), 2), Some(GridTrack::Hug));
+        assert_eq!(track_after_mode_pick(GridTrack::Hug, 0), Some(GridTrack::Flex(1.0)));
     }
 
     #[test]
@@ -2515,5 +2545,70 @@ mod tests {
         let n = app.doc.get(cid).unwrap();
         assert_eq!(n.layout_child.align_self, AlignSelf::Stretch);
         assert_eq!(n.size.y, 100.0);
+    }
+
+    #[test]
+    fn margin_inspector_section_renders_in_running_frame_only_when_margins_are_set() {
+        let (mut app, cid) = app_with_imported_stretch_child(LayoutDirection::Horizontal);
+        app.selection = vec![cid];
+        let ctx = egui::Context::default();
+        crate::theme::apply(&ctx);
+        crate::theme::install_fonts(&ctx);
+        let region = Rect::from_min_size(Pos2::new(0.0, 0.0), Vec2::new(240.0, 900.0));
+        let raw = egui::RawInput { screen_rect: Some(region), ..Default::default() };
+
+        // With zero margins, the Margin fields are not drawn.
+        let _ = ctx.run_ui(raw.clone(), |ui| show(&mut app, ui, region));
+        let field_rect = |ctx: &egui::Context, key: &str| ctx.data(|d| d.get_temp::<Rect>(egui::Id::new(("field-rect", format!("{key:?}")))));
+        assert!(field_rect(&ctx, "margin-l").is_none());
+
+        // With non-zero margins on the child, all four margin fields render in the Layout section.
+        app.doc.get_mut(cid).unwrap().layout_child.margin = [4.0, 8.0, 12.0, 16.0];
+        let _ = ctx.run_ui(raw, |ui| show(&mut app, ui, region));
+        for key in ["margin-l", "margin-r", "margin-t", "margin-b"] {
+            assert!(field_rect(&ctx, key).is_some(), "expected {key} field to render in properties panel");
+        }
+    }
+
+    #[test]
+    fn sizing_of_reports_fill_for_a_stretch_plus_fixed_child_on_the_counter_axis() {
+        let mut n = Node::rectangle(NodeId(99), designos_doc::Rect::new(0.0, 0.0, 30.0, 20.0));
+        n.layout_child.align_self = AlignSelf::Stretch;
+        assert_eq!(sizing_of(&n, true), Sizing::Fixed);
+        assert_eq!(sizing_of(&n, false), Sizing::Fill);
+    }
+
+    #[test]
+    fn typing_dimensions_or_apply_resize_on_a_fill_or_stretch_child_ends_the_stretch() {
+        let (mut app, cid) = app_with_imported_stretch_child(LayoutDirection::Horizontal);
+        let fid = app.doc.get(cid).unwrap().parent.unwrap();
+        app.doc.relayout_subtree(fid);
+        assert_eq!(app.doc.get(cid).unwrap().size, v2(30.0, 100.0));
+
+        resize_selection(&mut app, &[cid], None, Some(45.0));
+        let n = app.doc.get(cid).unwrap();
+        assert_eq!(n.layout_child.vertical, Sizing::Fixed);
+        assert_eq!(n.layout_child.align_self, AlignSelf::Auto);
+        assert_eq!(n.size, v2(30.0, 45.0), "typed height must stick instead of snapping back to 100");
+    }
+
+    #[test]
+    fn setting_primary_axis_to_fill_on_stretch_plus_fixed_child_keeps_stretch_and_stretches_height() {
+        let (mut app, cid) = app_with_imported_stretch_child(LayoutDirection::Horizontal);
+        app.doc.get_mut(cid).unwrap().layout_child.vertical = Sizing::Fixed;
+        set_sizing(&mut app, &[cid], true, Sizing::Fill);
+        let n = app.doc.get(cid).unwrap();
+        assert_eq!(n.layout_child.horizontal, Sizing::Fill);
+        assert_eq!(n.layout_child.vertical, Sizing::Fixed);
+        assert_eq!(n.layout_child.align_self, AlignSelf::Stretch);
+        assert_eq!(n.size, v2(200.0, 100.0));
+
+        // Flipping the parent direction via update_al does not double-stretch an imported Stretch+Fill child
+        let (mut app2, cid2) = app_with_imported_stretch_child(LayoutDirection::Horizontal);
+        let fid2 = app2.doc.get(cid2).unwrap().parent.unwrap();
+        update_al(&mut app2, &[fid2], |al| al.direction = LayoutDirection::Vertical);
+        let n2 = app2.doc.get(cid2).unwrap();
+        assert_eq!(n2.size, v2(30.0, 100.0));
+        assert_eq!(n2.layout_child.align_self, AlignSelf::Auto);
     }
 }

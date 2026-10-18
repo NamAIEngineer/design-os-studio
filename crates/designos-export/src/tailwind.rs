@@ -395,25 +395,28 @@ fn classes(doc: &Document, n: &Node, parent: Parent<'_>) -> Vec<String> {
             c.extend(pad_classes(doc, n, al));
         }
     }
-    if sz.in_flow && parent.al.is_some_and(|a| a.direction == LayoutDirection::Grid) {
-        if let Some(col) = n.layout_child.grid_column {
-            c.push(line_class("col-start", u32::from(col) + 1, STOCK_COL_START));
-        }
-        if n.layout_child.col_span > 1 {
-            c.push(span_class("col", n.layout_child.col_span, STOCK_COL_SPAN));
-        }
-        if let Some(row) = n.layout_child.grid_row {
-            c.push(line_class("row-start", u32::from(row) + 1, STOCK_ROW_START));
-        }
-        if n.layout_child.row_span > 1 {
-            c.push(span_class("row", n.layout_child.row_span, STOCK_ROW_SPAN));
-        }
-        // An item sized by its own content keeps that size instead of stretching across its cell.
-        if sz.w == Dim::Hug {
-            c.push("justify-self-start".into());
-        }
-        if sz.h == Dim::Hug {
-            c.push("self-start".into());
+    if sz.in_flow {
+        if let Some(al) = parent.al.filter(|a| a.direction == LayoutDirection::Grid) {
+            let placement = normalise_grid_placement(&n.layout_child, al);
+            if let Some(col) = placement.column {
+                c.push(line_class("col-start", u32::from(col) + 1, STOCK_COL_START));
+            }
+            if placement.col_span > 1 {
+                c.push(span_class("col", placement.col_span, STOCK_COL_SPAN));
+            }
+            if let Some(row) = placement.row {
+                c.push(line_class("row-start", u32::from(row) + 1, STOCK_ROW_START));
+            }
+            if placement.row_span > 1 {
+                c.push(span_class("row", placement.row_span, STOCK_ROW_SPAN));
+            }
+            // An item sized by its own content keeps that size instead of stretching across its cell.
+            if sz.w == Dim::Hug {
+                c.push("justify-self-start".into());
+            }
+            if sz.h == Dim::Hug {
+                c.push("self-start".into());
+            }
         }
     }
     // size
@@ -429,6 +432,9 @@ fn classes(doc: &Document, n: &Node, parent: Parent<'_>) -> Vec<String> {
             Dim::Fill if !grid_parent => c.push("self-stretch".into()),
             _ => {}
         }
+    }
+    if sz.cross_stretch {
+        c.push("self-stretch".into());
     }
     if let Some(w) = size_class("w", sz.w, bound(doc, n, "width")) {
         c.push(w);
@@ -730,5 +736,29 @@ mod tests {
         let t = tokens(&html, 1);
         assert!(t.iter().any(|c| c == "h-10"), "the height stays: {html}");
         assert!(!t.iter().any(|c| c.starts_with("w-")), "the grid stretches the item across its cell: {html}");
+    }
+
+    #[test]
+    fn stretch_child_keeps_its_cross_size_when_the_parent_hugs() {
+        use crate::codegen::fixture::row_with_stretch_children;
+        let (d, row, _) = row_with_stretch_children(Sizing::Hug, &[40.0]);
+        let out = tailwind_for(&d, row);
+        let child = out.lines().find(|l| l.contains("w-[30px]") || l.contains("w-7")).unwrap_or_else(|| panic!("no child line in {out}"));
+        assert!(child.contains("h-10") && child.contains("self-stretch"), "{child}");
+
+        let (d, row, _) = row_with_stretch_children(Sizing::Hug, &[20.0, 100.0]);
+        let out = tailwind_for(&d, row);
+        let children: Vec<&str> = out.lines().filter(|l| l.contains("self-stretch")).collect();
+        assert_eq!(children.len(), 2, "{out}");
+        assert!(children.iter().all(|l| l.contains("h-[100px]")), "all-stretch row must not collapse: {out}");
+    }
+
+    #[test]
+    fn stretch_child_leaves_the_cross_size_to_a_fixed_parent() {
+        use crate::codegen::fixture::row_with_stretch_children;
+        let (d, row, _) = row_with_stretch_children(Sizing::Fixed, &[40.0]);
+        let out = tailwind_for(&d, row);
+        let child = out.lines().find(|l| l.contains("self-stretch")).unwrap_or_else(|| panic!("no stretch child in {out}"));
+        assert!(!child.contains(" h-"), "{child}");
     }
 }
