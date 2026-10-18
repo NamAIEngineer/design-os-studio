@@ -142,9 +142,17 @@ impl AgentCliPreset {
             AgentCliPreset::Claude => {
                 "claude --dangerously-skip-permissions --mcp-config \"$DESIGNOS_MCP_CONFIG\" --append-system-prompt \"You are inside DESIGN:OS Studio bound exclusively to file '$DESIGNOS_DOC_NAME' (session $DESIGNOS_SESSION_DIR). Always read $DESIGNOS_CONTEXT_JSON for the current selected page (current_page_id / current_page_name) and deliver all designs onto that file and page via designos-mcp tools (designos_apply_spec, designos_create_node, designos_update_node) or by writing NodeSpec JSON to $DESIGNOS_LIVE_SPEC.\""
             }
-            AgentCliPreset::Codex => {
-                "codex --dangerously-bypass-approvals-and-sandbox -c 'mcp_servers.designos.command=\"'\"$DESIGNOS_MCP_BIN\"'\"'"
-            }
+            // Codex hands an MCP child only the `env` / `env_vars` entries of its config, never the parent
+            // env, so the session variables `designos-mcp` reads are listed in `env_vars` and the
+            // workspace goes in as an argument (same server config as the other tabs' mcp-config.json).
+            AgentCliPreset::Codex => concat!(
+                "codex --dangerously-bypass-approvals-and-sandbox",
+                " -c 'mcp_servers.designos.command=\"'\"$DESIGNOS_MCP_BIN\"'\"'",
+                " -c 'mcp_servers.designos.args=[\"--workspace\",\"'\"$DESIGNOS_WORKSPACE\"'\"]'",
+                " -c 'mcp_servers.designos.env_vars=[\"DESIGNOS_SESSION_DIR\",\"DESIGNOS_LIVE_CANVAS\",\"DESIGNOS_LIVE_DOC_SYNC\",",
+                "\"DESIGNOS_LIVE_DOC_PATCH\",\"DESIGNOS_LIVE_SPEC\",\"DESIGNOS_CONTEXT_JSON\",\"DESIGNOS_TARGET_PAGE_ID\",",
+                "\"DESIGNOS_TARGET_PAGE_NAME\",\"DESIGNOS_DOC_NAME\",\"DESIGNOS_FILE\"]'"
+            ),
             // `grok` has no `--mcp-config` either. It reads the project config `<cwd>/.grok/config.toml`
             // (see `write_grok_session_config`), so it is started inside the per-file session dir.
             AgentCliPreset::Grok => "grok --always-approve --cwd \"$DESIGNOS_SESSION_DIR\"",
@@ -826,17 +834,8 @@ impl TerminalState {
     }
 
     fn provision_session_agent_files(&self, file_path: Option<&Path>) {
-        let mcp_bin = std::env::current_exe()
-            .ok()
-            .map(|exe| exe.with_file_name(if cfg!(windows) { "designos-mcp.exe" } else { "designos-mcp" }))
-            .filter(|p| p.exists())
-            .unwrap_or_else(|| PathBuf::from("designos-mcp"));
-        let workspace_dir = file_path
-            .and_then(|p| p.parent())
-            .filter(|p| !p.as_os_str().is_empty())
-            .map(|p| p.to_path_buf())
-            .or_else(|| std::env::current_dir().ok())
-            .unwrap_or_else(|| PathBuf::from("."));
+        let mcp_bin = designos_mcp_binary();
+        let workspace_dir = session_workspace_dir(file_path);
 
         let mcp_config = serde_json::json!({
             "mcpServers": {
@@ -2141,6 +2140,25 @@ fn atomic_write_session_file(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     std::fs::rename(&tmp, path)
 }
 
+/// `designos-mcp` next to the running Studio binary, or the bare name (resolved through `PATH`) when it is not built there.
+fn designos_mcp_binary() -> PathBuf {
+    std::env::current_exe()
+        .ok()
+        .map(|exe| exe.with_file_name(if cfg!(windows) { "designos-mcp.exe" } else { "designos-mcp" }))
+        .filter(|p| p.exists())
+        .unwrap_or_else(|| PathBuf::from("designos-mcp"))
+}
+
+/// Folder `designos-mcp --workspace` serves: the open file's folder, else Studio's working directory.
+fn session_workspace_dir(file_path: Option<&Path>) -> PathBuf {
+    file_path
+        .and_then(|p| p.parent())
+        .filter(|p| !p.as_os_str().is_empty())
+        .map(|p| p.to_path_buf())
+        .or_else(|| std::env::current_dir().ok())
+        .unwrap_or_else(|| PathBuf::from("."))
+}
+
 /// Auto-injects `TERM`, `COLORTERM`, `DESIGNOS_AGENT_RUNTIME` (the spawned `preset`), `DESIGNOS_BIN`, `DESIGNOS_MCP_BIN`, `DESIGNOS_LIVE_SPEC`,
 /// `DESIGNOS_SELECTION_JSON`, `DESIGNOS_FILE`, `DESIGNOS_WORKSPACE`, and prepends common CLI directories
 /// (`~/.cargo/bin`, `/opt/homebrew/bin`, `/usr/local/bin`, `~/.local/bin`, `~/.antigravity/bin`) to `PATH`.
@@ -2182,16 +2200,13 @@ pub fn configure_pty_env_with_session(cmd: &mut CommandBuilder, preset: AgentCli
 
     if let Ok(exe) = std::env::current_exe() {
         cmd.env("DESIGNOS_BIN", exe.as_os_str());
-        let mcp_bin = exe.with_file_name(if cfg!(windows) { "designos-mcp.exe" } else { "designos-mcp" });
-        cmd.env("DESIGNOS_MCP_BIN", mcp_bin.as_os_str());
-    } else {
-        cmd.env("DESIGNOS_MCP_BIN", "designos-mcp");
     }
+    cmd.env("DESIGNOS_MCP_BIN", designos_mcp_binary().as_os_str());
     if let Some(fp) = file_path {
         cmd.env("DESIGNOS_FILE", fp.as_os_str());
     }
+    cmd.env("DESIGNOS_WORKSPACE", session_workspace_dir(file_path).as_os_str());
     if let Ok(cwd) = std::env::current_dir() {
-        cmd.env("DESIGNOS_WORKSPACE", cwd.as_os_str());
         cmd.cwd(cwd);
     }
 
@@ -5246,5 +5261,61 @@ Done!
         assert_eq!(grok_env(AgentCliPreset::Grok).as_deref(), Some("0"));
         assert_eq!(grok_env(AgentCliPreset::Claude), None);
         assert_eq!(grok_env(AgentCliPreset::Antigravity), None);
+    }
+
+    /// Quoted items of the TOML list that follows `key=[` in a Codex `-c` override.
+    fn codex_list_override(launch: &str, key: &str) -> Vec<String> {
+        let start = launch.find(&format!("{key}=[")).unwrap_or_else(|| panic!("no {key} override in: {launch}")) + key.len() + 2;
+        let end = start + launch[start..].find(']').expect("closing bracket");
+        launch[start..end].split(',').map(|item| item.trim().trim_matches(|c| c == '"' || c == '\'').to_string()).filter(|item| !item.is_empty()).collect()
+    }
+
+    #[test]
+    fn codex_tab_forwards_the_session_env_and_workspace_to_designos_mcp() {
+        // Codex starts an MCP child with a scrubbed env: only `env` / `env_vars` entries reach it.
+        // Verified against codex 0.163.0 with a stub server that dumps its environment.
+        let launch = AgentCliPreset::Codex.cli_launch_command();
+        let forwarded = codex_list_override(launch, "mcp_servers.designos.env_vars");
+        let args = codex_list_override(launch, "mcp_servers.designos.args");
+        assert_eq!(args.first().map(String::as_str), Some("--workspace"), "{launch}");
+        assert!(launch.contains("$DESIGNOS_WORKSPACE"), "workspace arg must come from the session env: {launch}");
+
+        let mut st = TerminalState::for_tab(734);
+        let mut doc = Document::new("Codex Env File");
+        let page = doc.add_page("Page 1");
+        let file = std::env::temp_dir().join("codex-env-file.designos");
+        st.sync_live_file_context(&doc, page, &[], Some(&file));
+        let env = st.session_env();
+        let mut cmd = CommandBuilder::new("true");
+        configure_pty_env_with_session(&mut cmd, AgentCliPreset::Codex, Some(&file), Some(&env));
+        let pty_env: std::collections::HashMap<String, String> = cmd.iter_extra_env_as_str().map(|(k, v)| (k.to_string(), v.to_string())).collect();
+
+        // Every variable designos-mcp reads to find the live session must be forwarded.
+        for needed in [
+            "DESIGNOS_SESSION_DIR",
+            "DESIGNOS_LIVE_CANVAS",
+            "DESIGNOS_LIVE_DOC_SYNC",
+            "DESIGNOS_LIVE_DOC_PATCH",
+            "DESIGNOS_LIVE_SPEC",
+            "DESIGNOS_CONTEXT_JSON",
+            "DESIGNOS_TARGET_PAGE_ID",
+        ] {
+            assert!(forwarded.iter().any(|f| f == needed), "{needed} not forwarded: {forwarded:?}");
+            assert!(pty_env.contains_key(needed), "{needed} missing from the PTY env");
+        }
+        assert_eq!(pty_env.get("DESIGNOS_WORKSPACE").map(String::as_str), file.parent().and_then(|p| p.to_str()), "workspace is the file's folder");
+
+        // Stub Codex: starts the MCP child with only the forwarded vars, as the real one does.
+        let patch = std::path::PathBuf::from(&pty_env["DESIGNOS_LIVE_DOC_PATCH"]);
+        let _ = std::fs::remove_file(&patch);
+        let status = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(r#"printf '{"edit":1}\n' >> "$DESIGNOS_LIVE_DOC_PATCH""#)
+            .env_clear()
+            .envs(forwarded.iter().filter_map(|k| pty_env.get(k).map(|v| (k.clone(), v.clone()))))
+            .status()
+            .expect("run stub mcp child");
+        assert!(status.success());
+        assert_eq!(std::fs::read_to_string(&patch).expect("doc-patch.jsonl written"), "{\"edit\":1}\n");
     }
 }
