@@ -603,8 +603,8 @@ fn hash_node_props(node: &Node) -> u64 {
     node.locked.hash(&mut h);
     node.opacity.to_bits().hash(&mut h);
     let _ = node.blend.serialize(HashSerializer(&mut h));
-    for m in node.transform.m {
-        m.to_bits().hash(&mut h);
+    for v in [node.transform.a, node.transform.b, node.transform.c, node.transform.d, node.transform.tx, node.transform.ty] {
+        v.to_bits().hash(&mut h);
     }
     node.size.x.to_bits().hash(&mut h);
     node.size.y.to_bits().hash(&mut h);
@@ -733,7 +733,12 @@ fn approx_eq_f32(a: f32, b: f32) -> bool {
 
 #[inline]
 pub fn approx_eq_transform(a: Affine, b: Affine) -> bool {
-    (0..6).all(|i| approx_eq_f32(a.m[i], b.m[i]))
+    approx_eq_f32(a.a, b.a)
+        && approx_eq_f32(a.b, b.b)
+        && approx_eq_f32(a.c, b.c)
+        && approx_eq_f32(a.d, b.d)
+        && approx_eq_f32(a.tx, b.tx)
+        && approx_eq_f32(a.ty, b.ty)
 }
 
 #[inline]
@@ -808,9 +813,9 @@ fn eq_kind_group(a: &NodeKind, b: &NodeKind) -> bool {
         (NodeKind::Component(_), NodeKind::Component(_)) => true,
         (NodeKind::ComponentSet(_), NodeKind::ComponentSet(_)) => true,
         (NodeKind::Instance { .. }, NodeKind::Instance { .. }) => true,
-        (NodeKind::Sticky(sa), NodeKind::Sticky(sb)) => sa.author == sb.author && sa.wide == sb.wide,
+        (NodeKind::Sticky(sa), NodeKind::Sticky(sb)) => sa.color == sb.color && sa.author == sb.author && sa.show_author == sb.show_author,
         (NodeKind::Connector(ca), NodeKind::Connector(cb)) => {
-            ca.start == cb.start && ca.end == cb.end && ca.line_type == cb.line_type && ca.start_cap == cb.start_cap && ca.end_cap == cb.end_cap
+            ca.start == cb.start && ca.end == cb.end && ca.line == cb.line && ca.start_cap == cb.start_cap && ca.end_cap == cb.end_cap
         }
         (NodeKind::ShapeWithText(sa), NodeKind::ShapeWithText(sb)) => sa.shape == sb.shape,
         (NodeKind::Stamp { kind: ka }, NodeKind::Stamp { kind: kb }) => ka == kb,
@@ -952,15 +957,13 @@ fn build_positions(doc: &Document) -> HashMap<NodeId, (NodeId, usize)> {
     pos
 }
 
+type NodePos = (NodeId, usize);
+type NodeMove = (NodePos, NodePos);
+
 /// Computes all moved nodes between `base` and `side`:
 /// - Any node present in both whose `parent` changed.
 /// - Any node present in both under the same `parent` that is not part of the LCS of shared siblings.
-fn detect_moves(
-    base: &Document,
-    side: &Document,
-    base_pos: &HashMap<NodeId, (NodeId, usize)>,
-    side_pos: &HashMap<NodeId, (NodeId, usize)>,
-) -> BTreeMap<NodeId, ((NodeId, usize), (NodeId, usize))> {
+fn detect_moves(base: &Document, side: &Document, base_pos: &HashMap<NodeId, NodePos>, side_pos: &HashMap<NodeId, NodePos>) -> BTreeMap<NodeId, NodeMove> {
     let mut moves = BTreeMap::new();
 
     // 1. Check nodes whose parent changed.
@@ -1134,10 +1137,9 @@ fn comment_threads_conflict(base: &CommentThread, ours: &CommentThread, theirs: 
     {
         return true;
     }
-    let map_msgs = |msgs: &[Comment]| -> BTreeMap<&str, &Comment> { msgs.iter().map(|m| (m.id.as_str(), m)).collect() };
-    let b_msgs = map_msgs(&base.messages);
-    let o_msgs = map_msgs(&ours.messages);
-    let t_msgs = map_msgs(&theirs.messages);
+    let b_msgs: BTreeMap<&str, &Comment> = base.messages.iter().map(|m| (m.id.as_str(), m)).collect();
+    let o_msgs: BTreeMap<&str, &Comment> = ours.messages.iter().map(|m| (m.id.as_str(), m)).collect();
+    let t_msgs: BTreeMap<&str, &Comment> = theirs.messages.iter().map(|m| (m.id.as_str(), m)).collect();
     let all_ids: BTreeSet<&str> = b_msgs.keys().chain(o_msgs.keys()).chain(t_msgs.keys()).copied().collect();
     for id in all_ids {
         let bm = b_msgs.get(id);
@@ -1383,6 +1385,24 @@ pub fn diff3(base: &Document, ours: &Document, theirs: &Document) -> Diff3 {
 
                 if !conflict_groups.is_empty() {
                     conflicts.push(Conflict { node: id, groups: conflict_groups, kind: ConflictKind::ModifyModify });
+                }
+            }
+            (Some(_), None) => {
+                if let Some(&(o_from, o_to)) = ours_moves.get(&id) {
+                    if o_from.0 == o_to.0 && conflicting_reordered_parents.contains(&o_from.0) {
+                        let mut conflict_groups = BTreeSet::new();
+                        conflict_groups.insert(Group::Position);
+                        conflicts.push(Conflict { node: id, groups: conflict_groups, kind: ConflictKind::ModifyModify });
+                    }
+                }
+            }
+            (None, Some(_)) => {
+                if let Some(&(t_from, t_to)) = theirs_moves.get(&id) {
+                    if t_from.0 == t_to.0 && conflicting_reordered_parents.contains(&t_from.0) {
+                        let mut conflict_groups = BTreeSet::new();
+                        conflict_groups.insert(Group::Position);
+                        conflicts.push(Conflict { node: id, groups: conflict_groups, kind: ConflictKind::ModifyModify });
+                    }
                 }
             }
             _ => {}

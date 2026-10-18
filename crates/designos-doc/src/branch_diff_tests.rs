@@ -42,10 +42,10 @@ fn classifies_add_remove_move_change() {
     let mut d_node = Node::rectangle(d, Rect::new(160.0, 10.0, 40.0, 40.0));
     d_node.name = "d".into();
     ours.insert(frame_f, d_node).unwrap();
-    ours.remove(b);
+    ours.remove(b).unwrap();
 
     // Theirs moves `c` to `G` and recolours `a`.
-    theirs.reparent(c, frame_g, None).unwrap();
+    theirs.reparent(c, frame_g, 0).unwrap();
     theirs.get_mut(a).unwrap().fills = vec![Paint::solid(Color::rgb(0xFF, 0x00, 0x00))];
 
     let diff = diff3(&base, &ours, &theirs);
@@ -110,7 +110,7 @@ fn delete_vs_modify_conflict() {
     let mut ours = base.clone();
     let mut theirs = base.clone();
 
-    ours.remove(a);
+    ours.remove(a).unwrap();
     theirs.get_mut(a).unwrap().name = "modified-on-theirs".into();
 
     let diff = diff3(&base, &ours, &theirs);
@@ -123,7 +123,7 @@ fn delete_vs_modify_conflict() {
     let mut ours_del_f = base.clone();
     let mut theirs_add_child = base.clone();
     let frame_f = base.get(a).unwrap().parent.unwrap();
-    ours_del_f.remove(frame_f);
+    ours_del_f.remove(frame_f).unwrap();
     let new_child = theirs_add_child.alloc_id();
     theirs_add_child.insert(frame_f, Node::rectangle(new_child, Rect::new(0.0, 0.0, 20.0, 20.0))).unwrap();
     let diff_container = diff3(&base, &ours_del_f, &theirs_add_child);
@@ -163,7 +163,7 @@ fn lcs_avoids_false_moves() {
     // Insert one new sibling at index 0 of frame_f on `ours`.
     let inserted = ours.alloc_id();
     ours.insert(frame_f, Node::rectangle(inserted, Rect::new(0.0, 0.0, 10.0, 10.0))).unwrap();
-    ours.reparent(inserted, frame_f, Some(0)).unwrap();
+    ours.reparent(inserted, frame_f, 0).unwrap();
     assert_eq!(ours.get(frame_f).unwrap().children, vec![inserted, a, b, c]);
 
     let diff = diff3(&base, &ours, &theirs);
@@ -327,7 +327,7 @@ fn large_fixture_within_budget() {
     base.nodes.get_mut(&page).unwrap().children = frame_ids.clone();
 
     let remaining = TOTAL_SCENE_NODES - FRAMES;
-    let mut frame_children: Vec<Vec<NodeId>> = vec![Vec::with_capacity(remaining / FRAMES + 2); FRAMES];
+    let mut frame_children: Vec<Vec<NodeId>> = (0..FRAMES).map(|_| Vec::with_capacity(remaining / FRAMES + 2)).collect();
     let first_leaf_id = 1_000u64;
     for i in 0..remaining {
         let nid = NodeId(first_leaf_id + i as u64);

@@ -61,7 +61,7 @@ pub mod vector;
 mod vector_fit;
 
 pub use board::*;
-pub use branch_diff::*;
+pub use branch_diff::{diff3, Conflict, ConflictKind, Diff3, DiffStats, EntityChange, EntityConflict, EntityKey, Group, SideChanges};
 pub use changelog_features::*;
 pub use comments::*;
 pub use components::*;
