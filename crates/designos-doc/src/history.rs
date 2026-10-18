@@ -265,14 +265,45 @@ impl History {
     }
 }
 
+/// Variable binding keys whose resolved value the layout solver reads: the box, the paddings and
+/// spacings, visibility, and the border weights and opacity that decide the border inset.
+fn is_layout_binding_key(key: &str) -> bool {
+    matches!(
+        key,
+        "width"
+            | "height"
+            | "visible"
+            | "itemSpacing"
+            | "counterAxisSpacing"
+            | "paddingTop"
+            | "paddingRight"
+            | "paddingBottom"
+            | "paddingLeft"
+            | "strokeWeight"
+            | "strokeTopWeight"
+            | "strokeRightWeight"
+            | "strokeBottomWeight"
+            | "strokeLeftWeight"
+    ) || (key.starts_with("strokes/") && key.ends_with("/opacity"))
+}
+
+/// Whether replacing `old` with `new` can change what the auto-layout solver computes, for the node
+/// itself or for the frame that lays it out. Only what the solver reads counts: the size, the
+/// child sizing and limits, visibility, the frame's own auto-layout settings, a border that takes
+/// space (`bordersTakeSpace`, layout version 0), and variable bindings or modes that feed those.
+/// Paint colours, effects and the like never do, and neither does the transform: the solver reads
+/// a flow child's size only and writes its position, and absolute children stay where they are.
 fn layout_inputs_changed(old: &Node, new: &Node) -> bool {
+    let old_al = old.kind.frame_props().and_then(|f| f.auto_layout.as_ref());
+    let new_al = new.kind.frame_props().and_then(|f| f.auto_layout.as_ref());
     old.size != new.size
-        || old.transform != new.transform
         || old.visible != new.visible
         || old.layout_child != new.layout_child
-        || old.stroke != new.stroke
-        || old.variables != new.variables
-        || old.kind.frame_props().and_then(|f| f.auto_layout.as_ref()) != new.kind.frame_props().and_then(|f| f.auto_layout.as_ref())
+        || std::mem::discriminant(&old.kind) != std::mem::discriminant(&new.kind)
+        || old_al != new_al
+        || new_al.is_some_and(|al| al.effective_padding(&old.stroke) != al.effective_padding(&new.stroke))
+        || old.variables.modes != new.variables.modes
+        || !old.variables.bindings.iter().filter(|(k, _)| is_layout_binding_key(k)).eq(new.variables.bindings.iter().filter(|(k, _)| is_layout_binding_key(k)))
 }
 
 fn collect_relayout_seeds(doc: &Document, cmd: &Command, seeds: &mut Vec<NodeId>) {
@@ -319,37 +350,18 @@ fn collect_relayout_seeds(doc: &Document, cmd: &Command, seeds: &mut Vec<NodeId>
     }
 }
 
+/// Applies `c` and re-solves only the auto-layout frames it changed: each seeded frame is solved on
+/// its own and the walk climbs to a parent only while a frame's size changed. Containers below a
+/// seed are not walked, so untouched siblings keep their positions. `pending_relayout` is left as
+/// it is: a queued subtree is always solved against the tree as it stands when the queue is
+/// drained, so it stays valid across the step, and a tail this solve defers joins the queue to be
+/// finished a bounded step per frame, like any other edit. A command that fails to apply leaves the
+/// document and the queue untouched.
 fn apply_and_relayout(doc: &mut Document, c: Command) -> Result<Command, DocError> {
     let mut seeds = Vec::new();
     collect_relayout_seeds(doc, &c, &mut seeds);
-
     let inv = c.apply(doc)?;
-    if seeds.is_empty() {
-        return Ok(inv);
-    }
-
-    let cancelled = std::mem::take(&mut doc.pending_relayout);
-    seeds.extend(cancelled);
-
-    let is_auto = |doc: &Document, id: NodeId| doc.get(id).and_then(|n| n.kind.frame_props()).is_some_and(|f| f.auto_layout.is_some());
-    let mut roots: Vec<NodeId> = Vec::new();
-    for id in seeds {
-        let mut top = is_auto(doc, id).then_some(id);
-        let mut cur = doc.get(id).and_then(|n| n.parent);
-        while let Some(p) = cur {
-            if is_auto(doc, p) {
-                top = Some(p);
-            }
-            cur = doc.get(p).and_then(|n| n.parent);
-        }
-        if let Some(t) = top.filter(|t| !roots.contains(t)) {
-            roots.push(t);
-        }
-    }
-    for r in roots {
-        doc.relayout_subtree(r);
-    }
-    doc.flush_pending_relayout();
+    doc.relayout_seeds_upward(&seeds);
     Ok(inv)
 }
 
@@ -430,15 +442,20 @@ mod tests {
 
         h.undo(&mut d).unwrap();
         assert_eq!(d.get(frames[0]).unwrap().size.x, 200.0, "the command was undone");
-        assert_eq!(d.relayout_skipped_count(), 0, "the queue was built for the state the undo just left");
-        let after_undo = widths(&d, &frames);
+        // The undo re-solves from the restored size within the usual hop budget and queues the
+        // rest, like any edit; it does not finish the whole 70-deep chain on the calling thread.
+        assert!(d.relayout_skipped_count() > 0, "the tail past the hop budget is queued for later frames, not solved on the undo");
+        let hop_budget = crate::layout_apply::MAX_RELAYOUT_RESOLVE_DEPTH;
+        assert!(widths(&d, &frames)[..hop_budget].iter().all(|w| *w == 200.0), "the frames within the hop budget are restored at once");
         d.flush_pending_relayout();
-        assert_eq!(widths(&d, &frames), after_undo, "nothing may write layout behind the undo stack after the undo");
-        assert!(after_undo.iter().all(|w| *w == 200.0), "undo restores the 200 px layout across all 70 frames: {after_undo:?}");
+        let after_undo = widths(&d, &frames);
+        assert!(after_undo.iter().all(|w| *w == 200.0), "draining the queue restores the 200 px layout across all 70 frames: {after_undo:?}");
         assert_eq!(d.get(leaf).unwrap().transform.tx, 190.0, "undo restores the leaf position inside the innermost frame");
+        assert_eq!(d.relayout_skipped_count(), 0);
 
         h.redo(&mut d).unwrap();
-        assert_eq!(d.relayout_skipped_count(), 0);
+        assert!(d.relayout_skipped_count() > 0);
+        d.flush_pending_relayout();
         assert!(widths(&d, &frames).iter().all(|w| *w == 600.0), "redo brings back the whole edited layout: {:?}", widths(&d, &frames));
         assert_eq!(d.get(leaf).unwrap().transform.tx, 590.0, "redo places the leaf at the right edge of the 600 px frame");
     }
@@ -469,21 +486,24 @@ mod tests {
         assert_eq!(d.get(leaf).unwrap().transform.tx, 590.0, "leaf reaches 590 once the queue drains");
 
         h.undo(&mut d).unwrap();
-        assert_eq!(d.relayout_skipped_count(), 0);
+        assert!(d.relayout_skipped_count() > 0, "the undo defers the tail past its hop budget");
+        d.flush_pending_relayout();
         assert!(widths(&d, &frames).iter().all(|w| *w == 200.0));
         assert_eq!(d.get(leaf).unwrap().transform.tx, 190.0);
 
-        // Also verify when the second step DOES touch a layout input (e.g. an absolute badge in frames[0])
-        // without resizing the queued Fill chain: undoing that step re-solves without skipping the tail.
+        // Also verify when the second step DOES touch a layout input of the outer frame without
+        // resizing the queued Fill chain: undoing that step re-solves the outer frame and keeps the tail.
         let mut wide2 = d.get(frames[0]).unwrap().clone();
         wide2.size.x = 600.0;
         h.exec(&mut d, Command::Update { node: Box::new(wide2) }).unwrap();
         d.relayout_subtree(frames[0]);
         assert!(d.relayout_skipped_count() > 0);
 
-        let mut moved_outer = d.get(frames[0]).unwrap().clone();
-        moved_outer.transform.tx = 24.0;
-        h.exec(&mut d, Command::Update { node: Box::new(moved_outer) }).unwrap();
+        let mut spaced_outer = d.get(frames[0]).unwrap().clone();
+        if let NodeKind::Frame(fp) = &mut spaced_outer.kind {
+            fp.auto_layout.as_mut().unwrap().item_spacing = 6.0;
+        }
+        h.exec(&mut d, Command::Update { node: Box::new(spaced_outer) }).unwrap();
 
         h.undo(&mut d).unwrap();
         d.flush_pending_relayout();
@@ -540,6 +560,159 @@ mod tests {
         assert_eq!(d.get(child_b).unwrap().size.x, 80.0);
         assert_eq!(d.get(child_c).unwrap().size.x, 420.0, "redo must re-solve stack so Fill sibling expands back to 420");
         assert_eq!(d.get(child_c).unwrap().transform.tx, 80.0);
+    }
+
+    fn auto_frame(d: &mut Document, parent: NodeId, size: (f32, f32), sizing: Sizing) -> NodeId {
+        let id = d.alloc_id();
+        let mut f = Node::frame(id, Rect::new(0.0, 0.0, size.0, size.1));
+        if let NodeKind::Frame(fp) = &mut f.kind {
+            fp.auto_layout = Some(AutoLayout {
+                direction: LayoutDirection::Vertical,
+                primary_sizing: sizing,
+                counter_sizing: sizing,
+                layout_version: 1,
+                ..AutoLayout::default()
+            });
+        }
+        d.insert(parent, f).unwrap();
+        id
+    }
+
+    fn visible_stroke(weight: f32, color: Color) -> Stroke {
+        Stroke { paints: vec![Paint::solid(color)], weight, align: StrokeAlign::Inside, ..Stroke::default() }
+    }
+
+    #[test]
+    fn undo_and_redo_of_a_paint_only_stroke_edit_solve_no_frame() {
+        let (mut d, frames, leaf) = nested_fill_frames();
+        d.get_mut(leaf).unwrap().stroke = visible_stroke(1.0, Color::BLACK);
+        d.get_mut(frames[10]).unwrap().stroke = visible_stroke(1.0, Color::BLACK);
+        let mut h = History::default();
+        for id in [leaf, frames[10]] {
+            let mut recoloured = d.get(id).unwrap().clone();
+            recoloured.stroke = visible_stroke(1.0, Color::WHITE);
+            h.exec(&mut d, Command::Update { node: Box::new(recoloured) }).unwrap();
+        }
+        let widths_before = widths(&d, &frames);
+        crate::layout_apply::reset_solve_calls();
+        h.undo(&mut d).unwrap();
+        h.undo(&mut d).unwrap();
+        h.redo(&mut d).unwrap();
+        h.redo(&mut d).unwrap();
+        assert_eq!(crate::layout_apply::solve_calls(), 0, "a stroke colour never reaches the layout solver");
+        assert_eq!(widths(&d, &frames), widths_before);
+        assert_eq!(d.get(leaf).unwrap().transform.tx, 190.0);
+    }
+
+    #[test]
+    fn undo_and_redo_of_a_move_or_effect_edit_solve_no_frame() {
+        let (mut d, _frames, leaf) = nested_fill_frames();
+        let mut h = History::default();
+        let mut moved = d.get(leaf).unwrap().clone();
+        moved.transform.tx = 3.0;
+        moved.effects =
+            vec![Effect::DropShadow { color: Color::BLACK, offset: Vec2::new(0.0, 1.0), radius: 2.0, spread: 0.0, visible: true, show_behind: false }];
+        h.exec(&mut d, Command::Update { node: Box::new(moved) }).unwrap();
+        crate::layout_apply::reset_solve_calls();
+        h.undo(&mut d).unwrap();
+        h.redo(&mut d).unwrap();
+        assert_eq!(crate::layout_apply::solve_calls(), 0, "the solver reads neither a flow child's transform nor its effects");
+    }
+
+    #[test]
+    fn undo_of_a_leaf_resize_solves_only_the_chain_up_to_where_the_size_holds() {
+        let mut d = Document::new("t");
+        let page = d.add_page("P");
+        let top = auto_frame(&mut d, page, (400.0, 400.0), Sizing::Fixed);
+        let h0 = auto_frame(&mut d, top, (0.0, 0.0), Sizing::Hug);
+        let fixed = auto_frame(&mut d, h0, (100.0, 100.0), Sizing::Fixed);
+        let h1 = auto_frame(&mut d, fixed, (0.0, 0.0), Sizing::Hug);
+        let h2 = auto_frame(&mut d, h1, (0.0, 0.0), Sizing::Hug);
+        let leaf = d.alloc_id();
+        d.insert(h2, Node::rectangle(leaf, Rect::new(0.0, 0.0, 10.0, 10.0))).unwrap();
+        let card = auto_frame(&mut d, top, (80.0, 80.0), Sizing::Fixed);
+        let card_child = d.alloc_id();
+        d.insert(card, Node::rectangle(card_child, Rect::new(0.0, 0.0, 20.0, 20.0))).unwrap();
+        d.relayout_subtree(top);
+        assert_eq!(d.get(h2).unwrap().size.y, 10.0);
+        // A position the solver would overwrite if it ever re-solved the untouched sibling card.
+        d.get_mut(card_child).unwrap().transform.tx = 15.0;
+
+        let mut h = History::default();
+        let mut tall = d.get(leaf).unwrap().clone();
+        tall.size.y = 30.0;
+        h.exec(&mut d, Command::Update { node: Box::new(tall) }).unwrap();
+        d.relayout_subtree(top);
+        assert_eq!((d.get(h2).unwrap().size.y, d.get(h1).unwrap().size.y), (30.0, 30.0));
+        d.get_mut(card_child).unwrap().transform.tx = 15.0;
+
+        crate::layout_apply::reset_solve_calls();
+        h.undo(&mut d).unwrap();
+        assert_eq!(crate::layout_apply::solve_calls(), 3, "h2 and h1 changed size; the fixed frame above them held it, so the climb stops there");
+        assert_eq!((d.get(h2).unwrap().size.y, d.get(h1).unwrap().size.y), (10.0, 10.0));
+        assert_eq!(d.get(card_child).unwrap().transform.tx, 15.0, "the untouched sibling card is not re-solved");
+
+        crate::layout_apply::reset_solve_calls();
+        h.redo(&mut d).unwrap();
+        assert_eq!(crate::layout_apply::solve_calls(), 3);
+        assert_eq!((d.get(h2).unwrap().size.y, d.get(h1).unwrap().size.y), (30.0, 30.0));
+        assert_eq!(d.get(card_child).unwrap().transform.tx, 15.0);
+    }
+
+    #[test]
+    fn stroke_weight_undo_re_solves_only_when_borders_take_space() {
+        for (layout_version, stroke_included, expect_solved) in [(0u8, true, true), (1, true, false), (0, false, false)] {
+            let mut d = Document::new("t");
+            let page = d.add_page("P");
+            let stack = auto_frame(&mut d, page, (100.0, 100.0), Sizing::Fixed);
+            if let NodeKind::Frame(fp) = &mut d.get_mut(stack).unwrap().kind {
+                let al = fp.auto_layout.as_mut().unwrap();
+                al.layout_version = layout_version;
+                al.stroke_included = stroke_included;
+            }
+            d.get_mut(stack).unwrap().stroke = visible_stroke(1.0, Color::BLACK);
+            let child = d.alloc_id();
+            d.insert(stack, Node::rectangle(child, Rect::new(0.0, 0.0, 10.0, 10.0))).unwrap();
+            d.relayout_subtree(stack);
+            let at_one = d.get(child).unwrap().transform.tx;
+
+            let mut h = History::default();
+            let mut thick = d.get(stack).unwrap().clone();
+            thick.stroke = visible_stroke(5.0, Color::BLACK);
+            h.exec(&mut d, Command::Update { node: Box::new(thick) }).unwrap();
+            d.relayout_subtree(stack);
+            let at_five = d.get(child).unwrap().transform.tx;
+            assert_eq!(at_five != at_one, expect_solved, "version {layout_version} included {stroke_included}: the solver's reading of the border");
+
+            crate::layout_apply::reset_solve_calls();
+            h.undo(&mut d).unwrap();
+            assert_eq!(crate::layout_apply::solve_calls() > 0, expect_solved, "version {layout_version} included {stroke_included}");
+            if expect_solved {
+                assert_eq!(d.get(child).unwrap().transform.tx, at_one, "the child returns to the 1 px border position");
+            }
+        }
+    }
+
+    #[test]
+    fn undo_with_a_pending_tail_and_an_unrelated_layout_edit_keeps_the_tail_queued() {
+        let (mut d, frames, leaf) = nested_fill_frames();
+        let mut h = History::default();
+        let mut wide = d.get(frames[0]).unwrap().clone();
+        wide.size.x = 600.0;
+        h.exec(&mut d, Command::Update { node: Box::new(wide) }).unwrap();
+        d.relayout_subtree(frames[0]);
+        let queued = d.pending_relayout().to_vec();
+        assert!(!queued.is_empty());
+
+        let mut spaced = d.get(frames[1]).unwrap().clone();
+        if let NodeKind::Frame(fp) = &mut spaced.kind {
+            fp.auto_layout.as_mut().unwrap().item_spacing = 4.0;
+        }
+        h.exec(&mut d, Command::Update { node: Box::new(spaced) }).unwrap();
+        h.undo(&mut d).unwrap();
+        assert!(queued.iter().all(|q| d.pending_relayout().contains(q)), "an undo elsewhere must not drop the queued tail");
+        d.flush_pending_relayout();
+        assert_eq!(d.get(leaf).unwrap().transform.tx, 590.0);
     }
 
     #[test]

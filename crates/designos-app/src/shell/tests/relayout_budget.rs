@@ -252,9 +252,14 @@ fn undo_and_redo_finish_the_queue_and_retire_the_notice() {
     assert!(toast_text(&s).is_some_and(|t| t.starts_with(NOTICE)), "precondition: the user was told");
 
     s.shell.app.undo();
-    assert_eq!(s.app().doc.relayout_skipped_count(), 0, "undo must not leave a queue built for the edit it reverted");
-    assert!(toast_text(&s).is_none_or(|t| !t.starts_with(NOTICE)), "the notice reported work that no longer exists: {:?}", toast_text(&s));
-    s.frame(vec![]);
+    assert_eq!(s.app().doc.get(frames[0]).unwrap().size.x, 200.0, "the undo itself restores the edited frame");
+    assert!(s.app().doc.relayout_skipped_count() > 0, "the undo solves within its hop budget and leaves the deep tail to the next frames");
+    assert!(toast_text(&s).is_some_and(|t| t.starts_with(NOTICE)), "the user is told while the tail is unfinished");
+    for _ in 0..4 {
+        s.frame(vec![]);
+    }
+    assert_eq!(s.app().doc.relayout_skipped_count(), 0, "the lazy steps finish the tail");
+    assert!(toast_text(&s).is_none_or(|t| !t.starts_with(NOTICE)), "the notice goes away with the work it reported: {:?}", toast_text(&s));
     assert!(
         frames.iter().all(|f| s.app().doc.get(*f).unwrap().size.x == 200.0),
         "undo restores every frame in the chain to 200 px: {:?}",
@@ -263,7 +268,9 @@ fn undo_and_redo_finish_the_queue_and_retire_the_notice() {
     assert_eq!(s.app().doc.get(leaf).unwrap().transform.tx, 190.0, "undo restores the leaf position to 190 px");
 
     s.shell.app.redo();
-    s.frame(vec![]);
+    for _ in 0..4 {
+        s.frame(vec![]);
+    }
     assert_eq!(s.app().doc.relayout_skipped_count(), 0);
     assert!(frames.iter().all(|f| s.app().doc.get(*f).unwrap().size.x == 600.0), "redo restores every frame in the chain to 600 px");
     assert_eq!(s.app().doc.get(leaf).unwrap().transform.tx, 590.0);
