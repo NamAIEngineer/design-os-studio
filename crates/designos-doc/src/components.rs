@@ -2547,12 +2547,12 @@ mod tests {
         // Hidden instance keeps its content, including the text override, and stays hidden.
         let fh_node = f.d.get(footer_hidden).unwrap();
         assert!(fh_node.component.is_slot);
-        assert!(!fh_node.visible);
-        assert!(fh_node.component.overrides.contains(&OverrideField::Visible));
-        assert_eq!(fh_node.children.len(), 2);
+        assert_eq!(fh_node.children.len(), 2, "the hidden instance keeps its content");
         assert!(fh_node.children.iter().all(|cid| f.d.get(*cid).unwrap().component.is_slot_content));
         assert_eq!(text_of(&f.d, ftxt_hidden), "Hidden custom footer");
         assert_eq!(f.d.get(inst_hidden).unwrap().component.values.get("Show footer"), Some(&PropValue::Slot(fh_node.children.clone())));
+        assert!(!fh_node.visible);
+        assert!(fh_node.component.overrides.contains(&OverrideField::Visible));
 
         // A sync neither drops the content nor shows the hidden footer again.
         let sync_cmd = sync_instances(&mut f.d, card);
@@ -2761,13 +2761,13 @@ mod tests {
 
         let c = f.d.get(copy).unwrap();
         assert!(c.component.is_slot);
-        assert!(!c.visible, "an instance that hid the region still hides it");
-        assert!(c.component.overrides.contains(&OverrideField::Visible));
-        assert_eq!(c.children.len(), 1);
+        assert_eq!(c.children.len(), 1, "the hidden instance keeps its content");
         let content = c.children[0];
         assert!(f.d.get(content).unwrap().component.is_slot_content);
         assert_eq!(text_of(&f.d, child_named(&f.d, content, "label")), "Hidden icon label");
         assert_eq!(f.d.get(outer).unwrap().component.values.get("Icon"), Some(&PropValue::Slot(vec![content])));
+        assert!(!c.visible, "an instance that hid the region still hides it");
+        assert!(c.component.overrides.contains(&OverrideField::Visible));
 
         let sync_cmd = sync_instances(&mut f.d, card);
         apply(&mut f.d, sync_cmd);
@@ -2799,5 +2799,72 @@ mod tests {
         assert!(f.d.get(set).unwrap().component.props.iter().all(|p| p.name != "Icon"), "no duplicate slot property lands on the set");
         assert!(same_ignoring_tree(f.d.get(large_icon).unwrap(), &large_before));
         assert_eq!(f.d.get(inst_large).unwrap().component.values, inst_large_before.component.values);
+    }
+
+    #[test]
+    fn migrate_wrapped_instance_region_keeps_content_of_instances_that_hide_it() {
+        let mut f = fx();
+        let id = f.d.alloc_id();
+        let card = f.d.insert(f.page, Node::frame(id, Rect::new(0.0, 500.0, 300.0, 100.0))).unwrap();
+        let id = f.d.alloc_id();
+        let mut wrap = Node::frame(id, Rect::new(12.0, 16.0, 100.0, 40.0));
+        wrap.name = "icon wrap".into();
+        let wrap = f.d.insert(card, wrap).unwrap();
+        let c = create_component(&mut f.d, card);
+        apply(&mut f.d, c);
+        let c = create_instance(&mut f.d, f.comp, wrap, Vec2::new(0.0, 0.0));
+        apply(&mut f.d, c);
+        let inner = *f.d.get(wrap).unwrap().children.last().unwrap();
+        let c = add_prop(
+            &mut f.d,
+            card,
+            ComponentPropDef { name: "Icon".into(), kind: PropKind::InstanceSwap { preferred: vec![f.comp] }, default: PropValue::Instance(f.comp) },
+        );
+        apply(&mut f.d, c);
+        let c = add_prop(&mut f.d, card, ComponentPropDef { name: "Show icon".into(), kind: PropKind::Boolean, default: PropValue::Bool(true) });
+        apply(&mut f.d, c);
+        let c = bind_prop(&mut f.d, inner, OverrideField::MainComponent, Some("Icon"));
+        apply(&mut f.d, c);
+        let c = bind_prop(&mut f.d, wrap, OverrideField::Visible, Some("Show icon"));
+        apply(&mut f.d, c);
+        assert_eq!(f.d.get(wrap).unwrap().children.len(), 1);
+
+        let c = create_instance(&mut f.d, card, f.page, Vec2::new(600.0, 0.0));
+        apply(&mut f.d, c);
+        let outer = *f.d.get(f.page).unwrap().children.last().unwrap();
+        let wrap_copy = child_named(&f.d, outer, "icon wrap");
+        let inner_copy = f.d.get(wrap_copy).unwrap().children[0];
+        let label = child_named(&f.d, inner_copy, "label");
+        let before = f.d.get(label).unwrap().clone();
+        set_text(&mut f.d, label, "Hidden wrapped label");
+        let mut after = f.d.get(label).unwrap().clone();
+        after.component.overrides = record_override(&before, &after);
+        apply(&mut f.d, Command::Update { node: Box::new(after) });
+        let c = set_instance_prop(&mut f.d, outer, "Show icon", Some(PropValue::Bool(false)));
+        apply(&mut f.d, c);
+        assert!(!f.d.get(wrap_copy).unwrap().visible);
+        let before_nodes = f.d.nodes.clone();
+
+        assert!(can_migrate_region_to_slot(&f.d, wrap));
+        let cmd = migrate_region_to_slot(&mut f.d, wrap).expect("wrapped instance region should migrate");
+        let inv = apply(&mut f.d, cmd);
+
+        let w = f.d.get(wrap_copy).unwrap();
+        assert!(w.component.is_slot);
+        assert_eq!(w.children, vec![inner_copy], "the hidden instance keeps its content");
+        assert!(f.d.get(inner_copy).unwrap().component.is_slot_content);
+        assert_eq!(text_of(&f.d, child_named(&f.d, inner_copy, "label")), "Hidden wrapped label");
+        assert_eq!(f.d.get(outer).unwrap().component.values.get("Icon"), Some(&PropValue::Slot(vec![inner_copy])));
+        assert!(!w.visible, "an instance that hid the region still hides it");
+        assert!(w.component.overrides.contains(&OverrideField::Visible));
+
+        let sync_cmd = sync_instances(&mut f.d, card);
+        apply(&mut f.d, sync_cmd);
+        assert!(!f.d.get(wrap_copy).unwrap().visible);
+        assert_eq!(f.d.get(wrap_copy).unwrap().children, vec![inner_copy]);
+        assert_eq!(text_of(&f.d, child_named(&f.d, inner_copy, "label")), "Hidden wrapped label");
+
+        apply(&mut f.d, inv);
+        assert!(f.d.nodes == before_nodes, "one undo restores the region and its instances");
     }
 }
