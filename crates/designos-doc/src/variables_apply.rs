@@ -159,6 +159,19 @@ pub fn set_bound_property(n: &mut Node, key: &str, value: &VariableValue) {
     }
     if key.starts_with("fills/") {
         let Some(c) = color_of(value) else { return };
+        // Text is painted from its runs: the bytes a run covers take the run's fills, not the
+        // base's. A run follows the binding while it still has the base's colour; a run the author
+        // coloured differently (a highlighted word) keeps its own.
+        if let (NodeKind::Text(t), Some(i)) = (&mut n.kind, key.strip_prefix("fills/").and_then(|s| s.parse::<usize>().ok())) {
+            if let Some(old) = t.style.fills.get(i).map(|p| p.kind.clone()) {
+                for p in t.runs.iter_mut().filter_map(|r| r.style.fills.get_mut(i)).filter(|p| p.kind == old) {
+                    p.kind = PaintKind::Solid(c);
+                    if c.a < 1.0 {
+                        p.opacity = 1.0;
+                    }
+                }
+            }
+        }
         let paints = match &mut n.kind {
             NodeKind::Text(t) => &mut t.style.fills,
             _ => &mut n.fills,
@@ -580,5 +593,36 @@ mod tests {
         assert!((fc.a * r.fills[0].opacity - 0.2).abs() < 1e-6, "fill effective alpha was {}", fc.a * r.fills[0].opacity);
         let PaintKind::Solid(sc) = r.stroke.paints[0].kind else { panic!() };
         assert!((sc.a * r.stroke.paints[0].opacity - 0.2).abs() < 1e-6, "stroke effective alpha was {}", sc.a * r.stroke.paints[0].opacity);
+    }
+
+    fn text_with_runs(base: Color, runs: &[Color]) -> Node {
+        let style = |c| TextStyle { fills: vec![Paint::solid(c)], ..TextStyle::default() };
+        let mut n = Node::text(NodeId(1), Rect::new(0.0, 0.0, 10.0, 10.0), "abc", style(base));
+        if let NodeKind::Text(t) = &mut n.kind {
+            t.runs = runs.iter().enumerate().map(|(i, c)| TextRun { start: i, end: i + 1, style: style(*c) }).collect();
+        }
+        n
+    }
+
+    /// The base fill, then the fill of each run, as the renderer would read them.
+    fn fills(n: &Node) -> Vec<Color> {
+        let NodeKind::Text(t) = &n.kind else { return vec![] };
+        let solid = |ps: &[Paint]| match ps.first().map(|p| &p.kind) {
+            Some(PaintKind::Solid(c)) => *c,
+            _ => Color::BLACK,
+        };
+        std::iter::once(solid(&t.style.fills)).chain(t.runs.iter().map(|r| solid(&r.style.fills))).collect()
+    }
+
+    #[test]
+    fn text_fill_binding_reaches_the_runs_that_match_the_base_and_keeps_the_others() {
+        let (blue, red) = (Color::rgb(26, 115, 232), Color::rgb(229, 72, 77));
+        let mut n = text_with_runs(blue, &[blue, red, blue]);
+        set_bound_property(&mut n, "fills/0", &VariableValue::Color(Color::WHITE));
+        assert_eq!(fills(&n), vec![Color::WHITE, Color::WHITE, red, Color::WHITE], "the highlighted run keeps its colour");
+        // A paint index the base lacks changes nothing.
+        let mut n = text_with_runs(blue, &[blue, red]);
+        set_bound_property(&mut n, "fills/1", &VariableValue::Color(Color::WHITE));
+        assert_eq!(fills(&n), vec![blue, blue, red]);
     }
 }
