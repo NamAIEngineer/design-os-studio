@@ -393,3 +393,87 @@ fn the_inspector_reset_of_slot_content_restores_the_main_slots_children() {
     r.s.cmd_key(Key::Z);
     assert!(r.s.app().doc.get(added).is_some() && has_slot_override(r.s.app(), r.slot), "Reset is one undo step");
 }
+
+fn mjpeg_mp4() -> Vec<u8> {
+    let jpeg = |c: u8| {
+        let mut out = Vec::new();
+        let img = image::RgbImage::from_pixel(32, 16, image::Rgb([c, 0, 0]));
+        image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, 95).encode_image(&img).unwrap();
+        out
+    };
+    crate::video::build_mjpeg_mp4(&[jpeg(250), jpeg(10)], 32, 16, 10)
+}
+
+#[test]
+fn a_refused_image_or_video_drop_stores_nothing_in_the_file() {
+    let mut r = rig(None, Some(2), true, 0);
+    let at = center(r.s.app(), r.slot);
+    let stored = r.s.app().doc.images.len();
+    assert!(crate::canvas::interact::place_image_bytes(&mut r.s.shell.app, at, "Photo", tiny_png()).is_none());
+    assert_eq!(r.s.app().doc.images.len(), stored, "no image bytes for a refused image");
+    assert!(crate::canvas::interact::place_video_bytes(&mut r.s.shell.app, at, "Clip", mjpeg_mp4()).is_none());
+    assert_eq!(r.s.app().doc.images.len(), stored, "no poster or video bytes for a refused video");
+    assert!(r.s.app().toast.as_ref().is_some_and(|t| t.error && t.text.contains("preferred")));
+}
+
+/// A group of `count` rectangles inside the slot (built directly, as a drop that predates the limits would).
+fn group_in_slot(r: &mut Rig, count: usize) -> NodeId {
+    let app = &mut r.s.shell.app;
+    let gid = app.doc.alloc_id();
+    let mut group = Node::new(gid, NodeKind::Group);
+    group.size = DV::new(40.0, 20.0);
+    let mut tx = crate::edit::Tx::new();
+    tx.cmd(&mut app.doc, Command::Insert { parent: r.slot, index: 0, nodes: vec![group] }).unwrap();
+    for k in 0..count {
+        let id = app.doc.alloc_id();
+        let rect = Node::rectangle(id, designos_doc::Rect::new(4.0 * k as f32, 0.0, 4.0, 4.0));
+        tx.cmd(&mut app.doc, Command::Insert { parent: gid, index: k, nodes: vec![rect] }).unwrap();
+    }
+    app.run_tx(tx);
+    app.toast = None;
+    gid
+}
+
+#[test]
+fn ungrouping_into_a_slot_past_its_max_is_rejected() {
+    let mut r = rig(None, Some(2), false, 0);
+    let group = group_in_slot(&mut r, 3);
+    r.s.shell.app.selection = vec![group];
+    let before = snapshot(r.s.app());
+    r.s.shell.app.ungroup_selection();
+    assert_rejected(&r.s, &before, "maximum");
+}
+
+#[test]
+fn ungrouping_into_a_slot_within_its_max_works_and_marks_the_slot() {
+    let mut r = rig(None, Some(2), false, 0);
+    let group = group_in_slot(&mut r, 2);
+    r.s.shell.app.selection = vec![group];
+    r.s.shell.app.ungroup_selection();
+    assert!(r.s.app().doc.get(group).is_none());
+    assert_eq!(r.s.app().doc.get(r.slot).unwrap().children.len(), 2);
+    assert!(has_slot_override(r.s.app(), r.slot));
+}
+
+#[test]
+fn grouping_the_children_of_a_slot_below_its_min_is_rejected() {
+    let mut r = rig(Some(2), None, false, 2);
+    let kids = r.s.app().doc.get(r.slot).unwrap().children.clone();
+    r.s.shell.app.selection = kids;
+    let before = snapshot(r.s.app());
+    r.s.shell.app.group_selection(false);
+    assert_rejected(&r.s, &before, "at least");
+}
+
+#[test]
+fn grouping_slot_children_when_the_min_still_holds_works_and_marks_the_slot() {
+    let mut r = rig(Some(1), None, false, 2);
+    let kids = r.s.app().doc.get(r.slot).unwrap().children.clone();
+    r.s.shell.app.selection = kids.clone();
+    r.s.shell.app.doc.get_mut(r.slot).unwrap().component.overrides.remove(&OverrideField::SlotContent);
+    r.s.shell.app.group_selection(false);
+    let slot_kids = r.s.app().doc.get(r.slot).unwrap().children.clone();
+    assert_eq!(slot_kids.len(), 1);
+    assert!(!kids.contains(&slot_kids[0]), "the group replaced its members");
+    assert!(has_slot_override(r.s.app(), r.slot));
+}

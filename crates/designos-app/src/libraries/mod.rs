@@ -607,6 +607,14 @@ impl App {
             self.show_toast(format!("Edit failed: {e}"), true);
             return None;
         }
+        // The inserted instance does not exist before the command runs, so the slot limits are judged on
+        // the result; a refusal rolls the whole import back.
+        if let Some(added) = self.doc.get(parent).and_then(|p| p.children.last().copied()).and_then(|c| self.doc.get(c).cloned()) {
+            if !self.slot_swap_allowed(parent, 1, &[&added]) {
+                tx.cancel(&mut self.doc);
+                return None;
+            }
+        }
         App::mark_slot_content_override(&mut self.doc, &mut tx.ed, parent);
         layout::relayout_around(&mut self.doc, &mut tx.ed, parent);
         if !self.run_tx(tx) {

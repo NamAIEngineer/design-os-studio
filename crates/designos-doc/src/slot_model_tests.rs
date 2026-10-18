@@ -288,3 +288,30 @@ fn a_slot_that_still_holds_the_users_content_survives_a_main_sync() {
     sync_instances(&mut d, comp).apply(&mut d).unwrap();
     assert_eq!(d.get(inst_body).unwrap().children, vec![inst_default, extra_id], "overridden slot content is left alone");
 }
+
+#[test]
+fn a_swap_is_judged_on_the_count_the_slot_ends_with() {
+    let (mut d, comp, body, _) = component_with_slot();
+    d.get_mut(body).unwrap().component.is_slot = true;
+    d.get_mut(body).unwrap().component.bindings.insert(crate::OverrideField::SlotContent, "Body".into());
+    d.get_mut(comp)
+        .unwrap()
+        .component
+        .slot_configs
+        .insert("Body".into(), SlotPropConfig { min_children: Some(2), max_children: Some(2), ..Default::default() });
+    for _ in 0..2 {
+        let id = d.alloc_id();
+        d.insert(body, Node::frame(id, Rect::new(0.0, 0.0, 4.0, 4.0))).unwrap();
+    }
+    let ids: Vec<NodeId> = (0..3).map(|_| d.alloc_id()).collect();
+    let nodes: Vec<Node> = ids.iter().map(|id| Node::frame(*id, Rect::new(0.0, 0.0, 4.0, 4.0))).collect();
+    let refs: Vec<&Node> = nodes.iter().collect();
+    // 2 - 1 + 1 = 2: one for one is fine at both limits.
+    assert!(crate::check_slot_replace(&d, body, 1, &refs[..1]).is_ok());
+    // 2 - 1 + 2 = 3 > max.
+    assert_eq!(crate::check_slot_replace(&d, body, 1, &refs[..2]).unwrap_err(), crate::SlotConstraintError::MaxChildren(2));
+    // 2 - 2 + 1 = 1 < min.
+    assert_eq!(crate::check_slot_replace(&d, body, 2, &refs[..1]).unwrap_err(), crate::SlotConstraintError::MinChildren(2));
+    // a plain insert keeps the old rule: 2 + 1 > max.
+    assert_eq!(crate::check_slot_insert(&d, body, &refs[..1]).unwrap_err(), crate::SlotConstraintError::MaxChildren(2));
+}

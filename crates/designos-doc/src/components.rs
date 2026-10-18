@@ -1231,15 +1231,28 @@ fn node_matches_preferred(doc: &Document, node: &Node, preferred: &[NodeId]) -> 
 
 /// Checks whether inserting `root_nodes` as direct children of `slot` respects its [`SlotPropConfig`].
 pub fn check_slot_insert(doc: &Document, slot: NodeId, root_nodes: &[&Node]) -> Result<(), SlotConstraintError> {
+    check_slot_replace(doc, slot, 0, root_nodes)
+}
+
+/// Like [`check_slot_insert`] for an edit that also takes `removing` direct children out of `slot`
+/// (ungroup, wrap in a group, replace): max and min apply to the count the slot ends with.
+pub fn check_slot_replace(doc: &Document, slot: NodeId, removing: usize, root_nodes: &[&Node]) -> Result<(), SlotConstraintError> {
     if !is_slot_container(doc, slot) {
         return Err(SlotConstraintError::NotASlot(slot));
     }
     let cur = doc.get(slot).map(|n| n.children.len()).unwrap_or(0);
-    let next_count = cur + root_nodes.len();
+    let next_count = (cur + root_nodes.len()).saturating_sub(removing);
     if let Some(cfg) = slot_config_of(doc, slot) {
         if let Some(max) = cfg.max_children {
             if next_count > max as usize {
                 return Err(SlotConstraintError::MaxChildren(max));
+            }
+        }
+        if removing > 0 {
+            if let Some(min) = cfg.min_children {
+                if next_count < min as usize {
+                    return Err(SlotConstraintError::MinChildren(min));
+                }
             }
         }
         if cfg.allow_preferred_values_only == Some(true) && !cfg.preferred.is_empty() {

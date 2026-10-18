@@ -81,8 +81,10 @@ fn transform_nodes(doc: &mut Document, ed: &mut Edit, nodes: &[(NodeId, Affine)]
 /// The first slot limit broken by taking `leaving` (slot, count) layers out of their slots and
 /// putting `entering` layers into one. Parents that are not slots are not limited.
 pub(crate) fn slot_edit_error(doc: &Document, leaving: &[(NodeId, usize)], entering: Option<(NodeId, &[&Node])>) -> Option<SlotConstraintError> {
+    let into = entering.map(|(slot, _)| slot);
     for &(slot, count) in leaving {
-        if is_slot_container(doc, slot) {
+        // A slot that is also entered is judged once, on the count it ends with.
+        if Some(slot) != into && is_slot_container(doc, slot) {
             if let Err(err) = check_slot_remove(doc, slot, count) {
                 return Some(err);
             }
@@ -92,7 +94,8 @@ pub(crate) fn slot_edit_error(doc: &Document, leaving: &[(NodeId, usize)], enter
     if roots.is_empty() || !is_slot_container(doc, slot) {
         return None;
     }
-    check_slot_insert(doc, slot, roots).err()
+    let removing = leaving.iter().find(|(s, _)| *s == slot).map_or(0, |(_, n)| *n);
+    check_slot_replace(doc, slot, removing, roots).err()
 }
 
 impl App {
@@ -416,6 +419,13 @@ impl App {
     /// refuses (with a toast) when that breaks the slot's max or preferred-only limit.
     pub(crate) fn slot_insert_allowed(&mut self, into: NodeId, roots: &[&Node]) -> bool {
         let err = slot_edit_error(&self.doc, &[], Some((into, roots)));
+        self.report_slot_error(err)
+    }
+
+    /// `removing` of `slot`'s own children are swapped for the new `roots` in one edit (ungroup,
+    /// wrap in a group): refuses (with a toast) when the slot would end outside its limits.
+    pub(crate) fn slot_swap_allowed(&mut self, slot: NodeId, removing: usize, roots: &[&Node]) -> bool {
+        let err = slot_edit_error(&self.doc, &[(slot, removing)], Some((slot, roots)));
         self.report_slot_error(err)
     }
 
@@ -877,7 +887,12 @@ impl App {
         g.name = self.unique_name(name);
         g.transform = Affine::translate(bb.x, bb.y);
         g.size = v2(bb.w, bb.h);
+        // The wrapped layers leave the parent and one group takes their place.
+        if !self.slot_swap_allowed(parent, ids.len(), &[&g]) {
+            return None;
+        }
         tx.cmd(&mut self.doc, Command::Insert { parent, index: max_index + 1, nodes: vec![g] }).ok()?;
+        Self::mark_slot_content_override(&mut self.doc, &mut tx.ed, parent);
         for (i, (id, in_parent)) in rel.into_iter().enumerate() {
             tx.cmd(&mut self.doc, Command::Reparent { id, parent: gid, index: i }).ok()?;
             if let Some(n) = tx.ed.node(&mut self.doc, id) {
@@ -923,6 +938,12 @@ impl App {
             if !is_group || g.children.is_empty() {
                 continue;
             }
+            // The group leaves its parent and its children take its place: judge the slot on the net count.
+            let kids: Vec<Node> = g.children.iter().filter_map(|c| self.doc.get(*c).cloned()).collect();
+            let kid_refs: Vec<&Node> = kids.iter().collect();
+            if !self.slot_swap_allowed(parent, 1, &kid_refs) {
+                continue;
+            }
             let mut index = self.doc.get(parent).and_then(|p| p.children.iter().position(|c| *c == id)).unwrap_or(0);
             for c in g.children.clone() {
                 let t = self.doc.get(c).map(|n| n.transform).unwrap_or_default();
@@ -935,6 +956,7 @@ impl App {
                 }
             }
             let _ = tx.cmd(&mut self.doc, Command::Remove { id });
+            Self::mark_slot_content_override(&mut self.doc, &mut tx.ed, parent);
             layout::relayout_around(&mut self.doc, &mut tx.ed, parent);
         }
         self.run_tx(tx);

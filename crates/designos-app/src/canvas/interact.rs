@@ -1949,8 +1949,6 @@ pub fn place_video_bytes(app: &mut App, page: DV, name: &str, bytes: Vec<u8>) ->
         n += 1;
     }
     let (poster_key, video_key) = (format!("img-{n}"), format!("video-{n}"));
-    app.doc.images.insert(poster_key.clone(), poster);
-    app.doc.images.insert(video_key.clone(), bytes);
     let parent = create::container_at_with_index(&app.doc, active_index(app), app.page, page, &[]);
     let inv = app.doc.world_transform(parent).invert()?;
     let o = inv.apply(page);
@@ -1960,15 +1958,18 @@ pub fn place_video_bytes(app: &mut App, page: DV, name: &str, bytes: Vec<u8>) ->
     let mut node = designos_doc::Node::rectangle(id, Rect::new(o.x, o.y, w * scale, h * scale));
     node.name = name.to_string();
     node.fills = vec![designos_doc::Paint {
-        kind: designos_doc::PaintKind::Image { image_ref: poster_key, scale_mode: designos_doc::ImageScaleMode::Fill },
+        kind: designos_doc::PaintKind::Image { image_ref: poster_key.clone(), scale_mode: designos_doc::ImageScaleMode::Fill },
         opacity: 1.0,
         visible: true,
         blend: designos_doc::BlendMode::Normal,
     }];
-    node.prototype.videos = vec![designos_doc::VideoFill { paint: 0, source: video_key, autoplay: true, looping: false, muted: true }];
+    node.prototype.videos = vec![designos_doc::VideoFill { paint: 0, source: video_key.clone(), autoplay: true, looping: false, muted: true }];
+    // Nothing is stored in the file for a drop that a slot refuses.
     if !app.slot_insert_allowed(parent, &[&node]) {
         return None;
     }
+    app.doc.images.insert(poster_key, poster);
+    app.doc.images.insert(video_key, bytes);
     let mut tx = Tx::new();
     let index = app.doc.get(parent).map(|p| p.children.len()).unwrap_or(0);
     tx.cmd(&mut app.doc, Command::Insert { parent, index, nodes: vec![node] }).ok()?;
@@ -1989,7 +1990,6 @@ pub fn place_image_bytes(app: &mut App, page: DV, name: &str, bytes: Vec<u8>) ->
         }
     };
     let key = format!("img-{}", app.doc.images.len() + 1);
-    app.doc.images.insert(key.clone(), bytes);
     let parent = create::container_at_with_index(&app.doc, active_index(app), app.page, page, &[]);
     let inv = app.doc.world_transform(parent).invert()?;
     let o = inv.apply(page);
@@ -1999,14 +1999,16 @@ pub fn place_image_bytes(app: &mut App, page: DV, name: &str, bytes: Vec<u8>) ->
     let mut n = designos_doc::Node::rectangle(id, Rect::new(o.x, o.y, w * scale, h * scale));
     n.name = name.to_string();
     n.fills = vec![designos_doc::Paint {
-        kind: designos_doc::PaintKind::Image { image_ref: key, scale_mode: designos_doc::ImageScaleMode::Fill },
+        kind: designos_doc::PaintKind::Image { image_ref: key.clone(), scale_mode: designos_doc::ImageScaleMode::Fill },
         opacity: 1.0,
         visible: true,
         blend: designos_doc::BlendMode::Normal,
     }];
+    // Nothing is stored in the file for a drop that a slot refuses.
     if !app.slot_insert_allowed(parent, &[&n]) {
         return None;
     }
+    app.doc.images.insert(key, bytes);
     let mut tx = Tx::new();
     let index = app.doc.get(parent).map(|p| p.children.len()).unwrap_or(0);
     tx.cmd(&mut app.doc, Command::Insert { parent, index, nodes: vec![n] }).ok()?;
