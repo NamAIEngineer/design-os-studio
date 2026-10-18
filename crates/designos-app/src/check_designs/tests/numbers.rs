@@ -2,7 +2,7 @@
 //! radius, stroke weight, font size and line height, plus scope filtering, ambiguity and undo.
 
 use super::*;
-use designos_doc::{AutoLayout, LayoutDirection, LineHeight, TextRun};
+use designos_doc::{AutoLayout, LineHeight, Paint, TextRun};
 
 impl Fx {
     /// A number variable with one value per mode of the shared "Theme" collection (light default, dark)
@@ -42,7 +42,7 @@ impl Fx {
 }
 
 #[test]
-fn a_sixteen_px_gap_matching_a_number_variable_suggests_binding_it() {
+fn gap_16_matching_space_4_is_flagged_with_bind_fix() {
     let mut f = fx();
     let row = f.frame(f.page, "Row", None);
     f.doc.get_mut(row).unwrap().kind =
@@ -51,7 +51,7 @@ fn a_sixteen_px_gap_matching_a_number_variable_suggests_binding_it() {
     let found = only(&f.report(), Rule::HardCodedValue);
     assert_eq!(found.node, row);
     assert_eq!(found.fix, Some(Fix::BindVariable { key: "itemSpacing".into(), variable: var.clone() }));
-    assert_eq!(found.message, "Gap 16 px matches variable \"space/4\"");
+    assert_eq!(found.message, "Gap 16 matches variable \"space/4\"");
     assert_eq!(found.fix_label, "Bind to variable space/4");
 
     let mut app = f.app();
@@ -65,30 +65,70 @@ fn a_sixteen_px_gap_matching_a_number_variable_suggests_binding_it() {
 }
 
 #[test]
-fn counter_axis_gap_is_checked_on_wrapped_and_grid_frames_only() {
+fn each_number_property_is_covered() {
     let mut f = fx();
-    let plain = f.frame(f.page, "Plain row", None);
-    f.doc.get_mut(plain).unwrap().kind =
-        NodeKind::Frame(FrameProps { auto_layout: Some(AutoLayout { counter_spacing: 12.0, wrap: false, ..AutoLayout::v1() }), ..FrameProps::default() });
-    let wrapped = f.frame(f.page, "Wrapped row", None);
-    f.doc.get_mut(wrapped).unwrap().kind =
-        NodeKind::Frame(FrameProps { auto_layout: Some(AutoLayout { counter_spacing: 12.0, wrap: true, ..AutoLayout::v1() }), ..FrameProps::default() });
-    let grid = f.frame(f.page, "Grid", None);
-    f.doc.get_mut(grid).unwrap().kind = NodeKind::Frame(FrameProps {
-        auto_layout: Some(AutoLayout { direction: LayoutDirection::Grid, counter_spacing: 12.0, grid_columns: 2, ..AutoLayout::v1() }),
-        ..FrameProps::default()
-    });
-    let var = f.num_var("space/3", 12.0, 12.0, &["GAP"]);
-    let report = f.report();
-    let nodes: Vec<NodeId> = report.of(Rule::HardCodedValue).map(|x| x.node).collect();
-    assert_eq!(nodes, vec![wrapped, grid], "counter_spacing is inactive on a non-wrapping flow frame");
-    for found in report.of(Rule::HardCodedValue) {
-        assert_eq!(found.fix, Some(Fix::BindVariable { key: "counterAxisSpacing".into(), variable: var.clone() }));
+    let white = f.frame(f.page, "Surface", Some(Color::WHITE));
+    let card = f.frame(white, "Card", None);
+    {
+        let n = f.doc.get_mut(card).unwrap();
+        n.corner_radii = [8.0, 12.0, 0.0, 0.0];
+        n.stroke.weight = 2.0;
+        n.stroke.paints = vec![Paint::solid(BLUE)];
+        n.kind = NodeKind::Frame(FrameProps {
+            auto_layout: Some(AutoLayout { item_spacing: 16.0, counter_spacing: 10.0, padding: [24.0, 6.0, 0.0, 0.0], ..AutoLayout::v1() }),
+            ..FrameProps::default()
+        });
     }
+    let t = f.text(white, "Heading", 20.0, 600, gray(0x11));
+    if let NodeKind::Text(tp) = &mut f.doc.get_mut(t).unwrap().kind {
+        tp.style.line_height = LineHeight::Pixels(28.0);
+    }
+
+    let v_r8 = f.num_var("radius/md", 8.0, 8.0, &["CORNER_RADIUS"]);
+    let v_r12 = f.num_var("radius/lg", 12.0, 12.0, &["CORNER_RADIUS"]);
+    let v_p24 = f.num_var("space/6", 24.0, 24.0, &["GAP"]);
+    let v_p6 = f.num_var("space/1_5", 6.0, 6.0, &["GAP"]);
+    let v_gap = f.num_var("space/4", 16.0, 16.0, &["GAP"]);
+    let v_rgap = f.num_var("space/2_5", 10.0, 10.0, &["GAP"]);
+    let v_stroke = f.num_var("border/thick", 2.0, 2.0, &["STROKE_FLOAT"]);
+    let v_fs = f.num_var("font/size/lg", 20.0, 20.0, &["FONT_SIZE"]);
+    let v_lh = f.num_var("font/line/lg", 28.0, 28.0, &["LINE_HEIGHT"]);
+
+    let report = f.report();
+    let messages: Vec<&str> = report.of(Rule::HardCodedValue).map(|x| x.message.as_str()).collect();
+    assert_eq!(
+        messages,
+        vec![
+            "Gap 16 matches variable \"space/4\"",
+            "Row gap 10 matches variable \"space/2_5\"",
+            "Top padding 24 matches variable \"space/6\"",
+            "Right padding 6 matches variable \"space/1_5\"",
+            "Top-left radius 8 matches variable \"radius/md\"",
+            "Top-right radius 12 matches variable \"radius/lg\"",
+            "Stroke weight 2 matches variable \"border/thick\"",
+            "Font size 20 matches variable \"font/size/lg\"",
+            "Line height 28 matches variable \"font/line/lg\"",
+        ]
+    );
+
+    let mut app = f.app();
+    assert_eq!(app.check_designs_fix_all(&report.findings), 9);
+    let cn = app.doc.get(card).unwrap();
+    assert_eq!(cn.variables.bindings.get("itemSpacing"), Some(&v_gap));
+    assert_eq!(cn.variables.bindings.get("counterAxisSpacing"), Some(&v_rgap));
+    assert_eq!(cn.variables.bindings.get("paddingTop"), Some(&v_p24));
+    assert_eq!(cn.variables.bindings.get("paddingRight"), Some(&v_p6));
+    assert_eq!(cn.variables.bindings.get("topLeftRadius"), Some(&v_r8));
+    assert_eq!(cn.variables.bindings.get("topRightRadius"), Some(&v_r12));
+    assert_eq!(cn.variables.bindings.get("strokeWeight"), Some(&v_stroke));
+    let tn = app.doc.get(t).unwrap();
+    assert_eq!(tn.variables.bindings.get("fontSize"), Some(&v_fs));
+    assert_eq!(tn.variables.bindings.get("lineHeight"), Some(&v_lh));
+    assert!(audit(&app.doc, &Scope::Page(app.page)).findings.is_empty());
 }
 
 #[test]
-fn uniform_and_per_side_padding_match_number_variables_and_bind_cleanly() {
+fn grouped_padding_fix_binds_four_keys_in_one_undo() {
     let mut f = fx();
     let card = f.frame(f.page, "Card", None);
     f.doc.get_mut(card).unwrap().kind =
@@ -96,7 +136,14 @@ fn uniform_and_per_side_padding_match_number_variables_and_bind_cleanly() {
     let var24 = f.num_var("space/6", 24.0, 24.0, &["GAP"]);
     let found = only(&f.report(), Rule::HardCodedValue);
     assert_eq!(found.node, card);
-    assert_eq!(found.message, "Padding 24 px matches variable \"space/6\"");
+    assert_eq!(found.message, "Padding 24 matches variable \"space/6\"");
+    assert_eq!(
+        found.fix,
+        Some(Fix::BindVariables {
+            keys: vec!["paddingTop".into(), "paddingRight".into(), "paddingBottom".into(), "paddingLeft".into()],
+            variable: var24.clone(),
+        })
+    );
 
     let mut app = f.app();
     let before = snapshot(&app, &[card]);
@@ -108,25 +155,7 @@ fn uniform_and_per_side_padding_match_number_variables_and_bind_cleanly() {
     assert!(audit(&app.doc, &Scope::Page(app.page)).findings.is_empty());
     app.undo();
     assert_eq!(snapshot(&app, &[card]), before);
-
-    // Per-side padding when sides differ.
-    let mut f = fx();
-    let bar = f.frame(f.page, "Bar", None);
-    f.doc.get_mut(bar).unwrap().kind =
-        NodeKind::Frame(FrameProps { auto_layout: Some(AutoLayout { padding: [8.0, 16.0, 0.0, 0.0], ..AutoLayout::v1() }), ..FrameProps::default() });
-    let var8 = f.num_var("space/2", 8.0, 8.0, &["GAP"]);
-    let var16 = f.num_var("space/4", 16.0, 16.0, &["GAP"]);
-    let report = f.report();
-    assert_eq!(report.findings.len(), 2, "{:#?}", report.findings);
-    assert_eq!(report.findings[0].fix, Some(Fix::BindVariable { key: "paddingTop".into(), variable: var8.clone() }));
-    assert_eq!(report.findings[1].fix, Some(Fix::BindVariable { key: "paddingRight".into(), variable: var16.clone() }));
-    let mut app = f.app();
-    assert_eq!(app.check_designs_fix_all(&report.findings), 2);
-    let n = app.doc.get(bar).unwrap();
-    assert_eq!(n.variables.bindings.get("paddingTop"), Some(&var8));
-    assert_eq!(n.variables.bindings.get("paddingRight"), Some(&var16));
-    assert!(!n.variables.bindings.contains_key("paddingBottom"));
-    assert!(audit(&app.doc, &Scope::Page(app.page)).findings.is_empty());
+    assert!(!app.hist.can_undo(), "exactly one undo step");
 }
 
 #[test]
@@ -137,7 +166,14 @@ fn uniform_and_per_corner_radius_match_number_variables_and_bind_cleanly() {
     let var12 = f.num_var("radius/lg", 12.0, 12.0, &["CORNER_RADIUS"]);
     let found = only(&f.report(), Rule::HardCodedValue);
     assert_eq!(found.node, r);
-    assert_eq!(found.message, "Corner radius 12 px matches variable \"radius/lg\"");
+    assert_eq!(found.message, "Corner radius 12 matches variable \"radius/lg\"");
+    assert_eq!(
+        found.fix,
+        Some(Fix::BindVariables {
+            keys: vec!["topLeftRadius".into(), "topRightRadius".into(), "bottomRightRadius".into(), "bottomLeftRadius".into()],
+            variable: var12.clone(),
+        })
+    );
 
     let mut app = f.app();
     let before = snapshot(&app, &[r]);
@@ -149,71 +185,18 @@ fn uniform_and_per_corner_radius_match_number_variables_and_bind_cleanly() {
     assert!(audit(&app.doc, &Scope::Page(app.page)).findings.is_empty());
     app.undo();
     assert_eq!(snapshot(&app, &[r]), before);
-
-    // Per-corner radius when corners differ.
-    let mut f = fx();
-    let tab = f.rect(f.page, "Tab", BLUE);
-    f.doc.get_mut(tab).unwrap().corner_radii = [8.0, 8.0, 0.0, 0.0];
-    let var8 = f.num_var("radius/md", 8.0, 8.0, &["CORNER_RADIUS"]);
-    let report = f.report();
-    assert_eq!(report.findings.len(), 2, "{:#?}", report.findings);
-    assert_eq!(report.findings[0].fix, Some(Fix::BindVariable { key: "topLeftRadius".into(), variable: var8.clone() }));
-    assert_eq!(report.findings[1].fix, Some(Fix::BindVariable { key: "topRightRadius".into(), variable: var8.clone() }));
-    let mut app = f.app();
-    assert_eq!(app.check_designs_fix_all(&report.findings), 2);
-    assert!(audit(&app.doc, &Scope::Page(app.page)).findings.is_empty());
 }
 
 #[test]
-fn uniform_and_per_side_stroke_weights_match_number_variables() {
-    let mut f = fx();
-    let a = f.rect(f.page, "Box", BLUE);
-    f.doc.get_mut(a).unwrap().stroke.weight = 2.0;
-    let b = f.rect(f.page, "Divider", BLUE);
-    f.doc.get_mut(b).unwrap().stroke.side_weights = Some([0.0, 0.0, 2.0, 0.0]);
-    let var = f.num_var("border/thick", 2.0, 2.0, &["STROKE_FLOAT"]);
-    let report = f.report();
-    assert_eq!(report.findings.len(), 2, "{:#?}", report.findings);
-    let fa = report.findings.iter().find(|x| x.node == a).unwrap();
-    assert_eq!(fa.fix, Some(Fix::BindVariable { key: "strokeWeight".into(), variable: var.clone() }));
-    assert_eq!(fa.message, "Stroke weight 2 px matches variable \"border/thick\"");
-    let fb = report.findings.iter().find(|x| x.node == b).unwrap();
-    assert_eq!(fb.fix, Some(Fix::BindVariable { key: "strokeBottomWeight".into(), variable: var.clone() }));
-    assert_eq!(fb.message, "Stroke bottom weight 2 px matches variable \"border/thick\"");
-
-    let mut app = f.app();
-    assert_eq!(app.check_designs_fix_all(&report.findings), 2);
-    assert_eq!(app.doc.get(a).unwrap().variables.bindings.get("strokeWeight"), Some(&var));
-    assert_eq!(app.doc.get(b).unwrap().variables.bindings.get("strokeBottomWeight"), Some(&var));
-    assert!(audit(&app.doc, &Scope::Page(app.page)).findings.is_empty());
-}
-
-#[test]
-fn font_size_and_pixel_line_height_match_number_variables() {
+fn percent_line_height_is_skipped() {
     let mut f = fx();
     let white = f.frame(f.page, "Surface", Some(Color::WHITE));
-    let t = f.text(white, "Title", 20.0, 600, gray(0x11));
+    let t = f.text(white, "Body", 16.0, 400, gray(0x11));
     if let NodeKind::Text(tp) = &mut f.doc.get_mut(t).unwrap().kind {
-        tp.style.line_height = LineHeight::Pixels(28.0);
+        tp.style.line_height = LineHeight::Percent(150.0);
     }
-    let fs_var = f.num_var("font/size/lg", 20.0, 20.0, &["FONT_SIZE"]);
-    let lh_var = f.num_var("font/line/lg", 28.0, 28.0, &["LINE_HEIGHT"]);
-    let report = f.report();
-    assert_eq!(report.findings.len(), 2, "{:#?}", report.findings);
-    assert_eq!(report.findings[0].fix, Some(Fix::BindVariable { key: "fontSize".into(), variable: fs_var.clone() }));
-    assert_eq!(report.findings[0].message, "Font size 20 px matches variable \"font/size/lg\"");
-    assert_eq!(report.findings[1].fix, Some(Fix::BindVariable { key: "lineHeight".into(), variable: lh_var.clone() }));
-    assert_eq!(report.findings[1].message, "Line height 28 px matches variable \"font/line/lg\"");
-
-    let mut app = f.app();
-    let before = snapshot(&app, &[t]);
-    assert_eq!(app.check_designs_fix_all(&report.findings), 2);
-    let bound = &app.doc.get(t).unwrap().variables.bindings;
-    assert_eq!(bound.get("fontSize"), Some(&fs_var));
-    assert_eq!(bound.get("lineHeight"), Some(&lh_var));
-    assert!(audit(&app.doc, &Scope::Page(app.page)).findings.is_empty());
-    app.undo();
-    assert_eq!(snapshot(&app, &[t]), before);
+    f.num_var("line/percent", 150.0, 150.0, &["LINE_HEIGHT"]);
+    assert!(f.report().findings.is_empty(), "{:#?}", f.report().findings);
 }
 
 #[test]
@@ -233,7 +216,7 @@ fn text_linked_to_a_style_or_with_mixed_run_sizes_is_not_flagged_for_number_vari
 }
 
 #[test]
-fn number_variable_scopes_and_exact_value_matching_are_honoured() {
+fn scope_excludes_wrong_property() {
     let mut f = fx();
     let row = f.frame(f.page, "Row", None);
     f.doc.get_mut(row).unwrap().kind =
@@ -245,7 +228,7 @@ fn number_variable_scopes_and_exact_value_matching_are_honoured() {
 }
 
 #[test]
-fn ambiguous_number_variables_report_without_a_fix_and_constant_mode_wins() {
+fn ambiguous_number_match_has_no_fix() {
     let mut f = fx();
     let row = f.frame(f.page, "Row", None);
     f.doc.get_mut(row).unwrap().kind =
@@ -255,7 +238,7 @@ fn ambiguous_number_variables_report_without_a_fix_and_constant_mode_wins() {
     let found = only(&f.report(), Rule::HardCodedValue);
     assert_eq!(found.fix, None);
     assert!(found.fix_label.is_empty());
-    assert_eq!(found.message, "Gap 16 px matches 2 variables: \"space/4\", \"space/md\"");
+    assert_eq!(found.message, "Gap 16 matches 2 variables: \"space/4\", \"space/md\"");
 
     // When one variable holds 16 in every mode and the other changes in dark mode, the constant one wins.
     let mut f = fx();
@@ -269,7 +252,7 @@ fn ambiguous_number_variables_report_without_a_fix_and_constant_mode_wins() {
 }
 
 #[test]
-fn a_number_fix_for_a_property_edited_since_the_audit_is_refused() {
+fn stale_number_fix_is_refused() {
     let mut f = fx();
     let card = f.frame(f.page, "Card", None);
     f.doc.get_mut(card).unwrap().kind =

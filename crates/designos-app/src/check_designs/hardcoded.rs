@@ -8,15 +8,15 @@
 use super::{Finding, Fix, Rule};
 use crate::styles::rgb_key;
 use designos_doc::{
-    scope_allows, style_property, Color, Document, LayoutAlign, LayoutDirection, LineHeight, Node, NodeId, NodeKind, Paint, PaintKind, Style, StyleProperty,
-    TextStyle, Variable, VariableKind, VariableStore, VariableValue,
+    scope_allows, style_property, Color, Document, LayoutAlign, LineHeight, Node, NodeId, NodeKind, Paint, PaintKind, Style, StyleProperty, TextStyle,
+    Variable, VariableKind, VariableStore, VariableValue,
 };
 use std::collections::HashMap;
 
 /// Alpha tolerance when comparing colours: half an 8-bit step.
 const ALPHA_EPS: f32 = 0.002;
-/// Tolerance when comparing exact numbers.
-const NUM_EPS: f32 = 1e-4;
+/// Tolerance when comparing exact numbers (0.0005).
+const NUM_EPS: f32 = 0.0005;
 
 const PADDING_KEYS: [&str; 4] = ["paddingTop", "paddingRight", "paddingBottom", "paddingLeft"];
 const RADIUS_KEYS: [&str; 4] = ["topLeftRadius", "topRightRadius", "bottomRightRadius", "bottomLeftRadius"];
@@ -117,8 +117,20 @@ impl<'a> Index<'a> {
 
     /// The number variable that holds `x` at `node` for property `key`.
     fn find_number(&self, doc: &Document, node: &Node, key: &str, x: f32) -> Match<'a> {
-        let Some(list) = self.by_num.get(&num_key(x)) else { return Match::None };
-        let holding: Vec<&Entry> = list.iter().filter(|e| number_variable_holds(doc, node, key, e.var, x)).collect();
+        let base = num_key(x);
+        let mut seen_ids: Vec<&str> = Vec::new();
+        let mut holding: Vec<&Entry> = Vec::new();
+        for bucket in [base - 1, base, base + 1] {
+            if let Some(list) = self.by_num.get(&bucket) {
+                for e in list {
+                    if !seen_ids.contains(&e.var.id.as_str()) && number_variable_holds(doc, node, key, e.var, x) {
+                        seen_ids.push(e.var.id.as_str());
+                        holding.push(e);
+                    }
+                }
+            }
+        }
+        holding.sort_by(|a, b| (&a.var.name, &a.var.id).cmp(&(&b.var.name, &b.var.id)));
         let steady: Vec<&Entry> = holding.iter().copied().filter(|e| e.constant).collect();
         let pool = if steady.is_empty() { holding } else { steady };
         match pool.as_slice() {
@@ -135,18 +147,18 @@ fn same_colour(a: &Color, b: &Color) -> bool {
 }
 
 fn num_key(x: f32) -> i64 {
-    (x as f64 * 10_000.0).round() as i64
+    (x as f64 * 1000.0).round() as i64
 }
 
 fn same_number(a: f32, b: f32) -> bool {
     a.is_finite() && b.is_finite() && (a - b).abs() <= NUM_EPS
 }
 
-fn fmt_px(x: f32) -> String {
-    let r = (x * 100.0).round() / 100.0;
-    if (r - r.round()).abs() <= NUM_EPS {
-        format!("{}", r.round() as i64)
+fn fmt_num(x: f32) -> String {
+    if (x - x.round()).abs() < NUM_EPS {
+        format!("{}", x.round() as i64)
     } else {
+        let r = (x * 1000.0).round() / 1000.0;
         format!("{r}")
     }
 }
@@ -240,16 +252,22 @@ pub(super) fn check(doc: &Document, index: &Index, n: &Node, out: &mut Vec<Findi
     effects_rule(doc, n, out);
 }
 
-fn check_number_prop(doc: &Document, index: &Index, n: &Node, key: &str, label: &str, val: f32, out: &mut Vec<Finding>) -> bool {
-    match index.find_number(doc, n, key, val) {
+fn check_number_prop(doc: &Document, index: &Index, n: &Node, keys: &[&str], label: &str, val: f32, out: &mut Vec<Finding>) -> bool {
+    let Some(&first_key) = keys.first() else { return false };
+    match index.find_number(doc, n, first_key, val) {
         Match::None => false,
         Match::One(v) => {
-            let message = format!("{label} {} px matches variable \"{}\"", fmt_px(val), v.name);
-            out.push(finding(n, message, Fix::BindVariable { key: key.into(), variable: v.id.clone() }, format!("Bind to variable {}", v.name)));
+            let message = format!("{label} {} matches variable \"{}\"", fmt_num(val), v.name);
+            let fix = if keys.len() == 1 {
+                Fix::BindVariable { key: first_key.into(), variable: v.id.clone() }
+            } else {
+                Fix::BindVariables { keys: keys.iter().map(|k| (*k).to_string()).collect(), variable: v.id.clone() }
+            };
+            out.push(finding(n, message, fix, format!("Bind to variable {}", v.name)));
             true
         }
         Match::Ambiguous(vars) => {
-            let message = format!("{label} {} px matches {} variables: {}", fmt_px(val), vars.len(), name_list(&vars));
+            let message = format!("{label} {} matches {} variables: {}", fmt_num(val), vars.len(), name_list(&vars));
             out.push(report_only(n, message));
             true
         }
@@ -268,9 +286,6 @@ fn number_value_at(n: &Node, key: &str) -> Option<f32> {
         }
         "counterAxisSpacing" => {
             let al = n.kind.frame_props()?.auto_layout.as_ref()?;
-            if !(al.wrap || al.direction == LayoutDirection::Grid) {
-                return None;
-            }
             al.counter_spacing
         }
         "paddingTop" | "paddingRight" | "paddingBottom" | "paddingLeft" => {
@@ -296,12 +311,15 @@ fn number_value_at(n: &Node, key: &str) -> Option<f32> {
             n.corner_radii[i]
         }
         "strokeWeight" => {
-            if n.stroke.side_weights.is_some() {
+            if n.stroke.side_weights.is_some() || !n.stroke.paints.iter().any(|p| p.visible) {
                 return None;
             }
             n.stroke.weight
         }
         "strokeTopWeight" | "strokeRightWeight" | "strokeBottomWeight" | "strokeLeftWeight" => {
+            if !n.stroke.paints.iter().any(|p| p.visible) {
+                return None;
+            }
             let sides = n.stroke.side_weights?;
             let i = match key {
                 "strokeTopWeight" => 0,
@@ -336,15 +354,16 @@ fn check_single_number(doc: &Document, index: &Index, n: &Node, key: &str, label
         return false;
     }
     let Some(val) = number_value_at(n, key) else { return false };
-    check_number_prop(doc, index, n, key, label, val, out)
+    check_number_prop(doc, index, n, &[key], label, val, out)
 }
 
-fn check_quad(doc: &Document, index: &Index, n: &Node, uniform_key: &str, uniform_label: &str, sides: [(&str, &str); 4], out: &mut Vec<Finding>) {
+fn check_quad(doc: &Document, index: &Index, n: &Node, uniform_label: &str, sides: [(&str, &str); 4], out: &mut Vec<Finding>) {
     let all_unbound = sides.iter().all(|(k, _)| !n.variables.bindings.contains_key(*k));
     if all_unbound {
         if let Some(v0) = number_value_at(n, sides[0].0) {
             if sides[1..].iter().all(|(k, _)| number_value_at(n, k).is_some_and(|v| same_number(v, v0))) {
-                check_number_prop(doc, index, n, uniform_key, uniform_label, v0, out);
+                let keys = [sides[0].0, sides[1].0, sides[2].0, sides[3].0];
+                check_number_prop(doc, index, n, &keys, uniform_label, v0, out);
                 return;
             }
         }
@@ -359,21 +378,19 @@ fn numbers_rule(doc: &Document, index: &Index, n: &Node, out: &mut Vec<Finding>)
         return;
     }
     check_single_number(doc, index, n, "itemSpacing", "Gap", out);
-    check_single_number(doc, index, n, "counterAxisSpacing", "Counter gap", out);
+    check_single_number(doc, index, n, "counterAxisSpacing", "Row gap", out);
     check_quad(
         doc,
         index,
         n,
-        "padding",
         "Padding",
-        [("paddingTop", "Padding top"), ("paddingRight", "Padding right"), ("paddingBottom", "Padding bottom"), ("paddingLeft", "Padding left")],
+        [("paddingTop", "Top padding"), ("paddingRight", "Right padding"), ("paddingBottom", "Bottom padding"), ("paddingLeft", "Left padding")],
         out,
     );
     check_quad(
         doc,
         index,
         n,
-        "cornerRadius",
         "Corner radius",
         [
             ("topLeftRadius", "Top-left radius"),

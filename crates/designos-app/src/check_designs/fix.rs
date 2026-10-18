@@ -16,7 +16,7 @@ use designos_doc::{set_bound_property, set_text_fills_everywhere, Command, NodeI
 fn priority(fix: &Fix) -> u8 {
     match fix {
         Fix::SetTextColor { .. } => 0,
-        Fix::BindVariable { .. } | Fix::ApplyStyle { .. } => 1,
+        Fix::BindVariable { .. } | Fix::BindVariables { .. } | Fix::ApplyStyle { .. } => 1,
         Fix::Reconnect { .. } => 2,
     }
 }
@@ -62,6 +62,18 @@ impl App {
                 let Some(n) = tx.ed.node(&mut self.doc, id) else { return false };
                 for k in keys {
                     n.variables.bindings.insert(k.to_string(), variable.clone());
+                    set_bound_property(n, k, &value);
+                }
+                true
+            }
+            Fix::BindVariables { keys, variable } => {
+                if keys.is_empty() || !keys.iter().all(|k| hardcoded::bind_is_current(&self.doc, id, k, variable)) {
+                    return false;
+                }
+                let Some(value) = self.doc.resolve_variable(id, variable) else { return false };
+                let Some(n) = tx.ed.node(&mut self.doc, id) else { return false };
+                for k in keys {
+                    n.variables.bindings.insert(k.clone(), variable.clone());
                     set_bound_property(n, k, &value);
                 }
                 true
