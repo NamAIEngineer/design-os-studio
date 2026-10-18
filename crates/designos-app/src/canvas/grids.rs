@@ -4,7 +4,8 @@
 use super::*;
 use crate::theme;
 use crate::util::*;
-use designos_doc::{AutoLayout, Color, Document, GridTrack, LayoutDirection, LayoutGrid, NodeKind, Sizing};
+use designos_doc::layout_solver::{place_children, ChildIn};
+use designos_doc::{AutoLayout, Color, Document, GridTrack, LayoutDirection, LayoutGrid, NodeKind, Sizing, MAX_GRID_TRACKS};
 use egui::{Color32, Painter, Pos2, Shape, Stroke};
 
 /// One resolved `(row, col)` cell in a `LayoutDirection::Grid` container (frame-local coordinates).
@@ -48,59 +49,220 @@ pub fn format_grid_track(track: GridTrack) -> String {
     }
 }
 
+/// How many tracks the canvas shows on one axis of `grid_id`; 0 when it is not a grid. The children are placed exactly
+/// as the layout solver places them (explicit rows and columns included), so the rows are the ones it lays out
+/// (`grid_rows`, or more when children fill more rows) and a pill, a `+` button, an inspector row and a track edit
+/// all name the same index.
+pub fn grid_track_count(doc: &Document, grid_id: NodeId, is_col: bool) -> usize {
+    node_css_grid_overlay(doc, grid_id).map_or(0, |ov| if is_col { ov.cols } else { ov.rows })
+}
+
+/// One edit of the tracks on one axis of a grid.
+#[derive(Clone, Copy, Debug)]
+enum TrackEdit {
+    Insert { at: usize, track: GridTrack },
+    Delete { at: usize },
+    Move { from: usize, to: usize },
+    Resize { at: usize, track: GridTrack },
+}
+
+/// Track slots of one axis. A list is never shorter than `MAX_GRID_TRACKS`, so every laid-out track has a slot.
+fn slots_of(al: &mut AutoLayout, is_col: bool) -> &mut Vec<GridTrack> {
+    let tracks = if is_col { &mut al.grid_col_tracks } else { &mut al.grid_row_tracks };
+    tracks.resize_with_default(MAX_GRID_TRACKS);
+    &mut tracks.0
+}
+
+/// Drops the default slots an insert pushed past `MAX_GRID_TRACKS` and pads a delete back up to it.
+fn trim_slots(slots: &mut Vec<GridTrack>) {
+    let used = slots.iter().rposition(|&t| t != GridTrack::default()).map_or(0, |i| i + 1);
+    slots.truncate(used.max(MAX_GRID_TRACKS));
+    if slots.len() < MAX_GRID_TRACKS {
+        slots.resize(MAX_GRID_TRACKS, GridTrack::default());
+    }
+}
+
+fn remap_reordered_track(idx: usize, from: usize, to: usize) -> usize {
+    if idx == from {
+        to
+    } else if from < to && (from + 1..=to).contains(&idx) {
+        idx - 1
+    } else if to < from && (to..from).contains(&idx) {
+        idx + 1
+    } else {
+        idx
+    }
+}
+
+impl TrackEdit {
+    /// Whether the edit fits a `count`-track axis; `is_col` axes keep at least one track.
+    fn fits(self, count: usize, is_col: bool) -> bool {
+        match self {
+            TrackEdit::Insert { .. } => count < MAX_GRID_TRACKS,
+            TrackEdit::Delete { at } => at < count && !(is_col && count <= 1),
+            TrackEdit::Move { from, to } => from < count && to < count && from != to,
+            TrackEdit::Resize { at, .. } => at < count,
+        }
+    }
+
+    /// Writes this edit into the layout. Only the slots it changes are touched: a resize sets one slot, a
+    /// move turns the slots between its ends, an insert or delete shifts the slots after it. The track
+    /// counts change only when a track is added or removed.
+    fn write(self, al: &mut AutoLayout, is_col: bool, count: usize) {
+        let slots = slots_of(al, is_col);
+        match self {
+            TrackEdit::Insert { at, track } => {
+                slots.insert(at, track);
+                trim_slots(slots);
+            }
+            TrackEdit::Delete { at } => {
+                slots.remove(at);
+                trim_slots(slots);
+            }
+            TrackEdit::Move { from, to } if from < to => slots[from..=to].rotate_left(1),
+            TrackEdit::Move { from, to } => slots[to..=from].rotate_right(1),
+            TrackEdit::Resize { at, track } => slots[at] = track,
+        }
+        match (self, is_col) {
+            (TrackEdit::Insert { .. }, true) => al.grid_columns = count as u32 + 1,
+            (TrackEdit::Insert { .. }, false) => al.grid_rows = count as u32 + 1,
+            (TrackEdit::Delete { .. }, true) => al.grid_columns = count as u32 - 1,
+            // rows past `grid_rows` come from children, so removing one does not shrink the explicit count
+            (TrackEdit::Delete { at }, false) if (at as u32) < al.grid_rows => al.grid_rows -= 1,
+            _ => {}
+        }
+    }
+
+    /// Where a child pinned to track `pin` goes (`None`: the pin is dropped). Pins are not limited to the
+    /// tracks that exist, so every pin at or after the edit moves, whatever its value.
+    fn remap_pin(self, pin: u16) -> Option<u16> {
+        match self {
+            TrackEdit::Insert { at, .. } if pin as usize >= at => Some(pin.saturating_add(1)),
+            TrackEdit::Delete { at } => match (pin as usize).cmp(&at) {
+                std::cmp::Ordering::Less => Some(pin),
+                std::cmp::Ordering::Equal => None,
+                std::cmp::Ordering::Greater => Some(pin - 1),
+            },
+            TrackEdit::Move { from, to } => Some(remap_reordered_track(pin as usize, from, to) as u16),
+            _ => Some(pin),
+        }
+    }
+}
+
+/// Applies `edit` to one axis of the grid frame `grid_id` and re-flows its children in one undo step.
+fn edit_grid_tracks(app: &mut App, grid_id: NodeId, is_col: bool, edit: TrackEdit) -> bool {
+    let Some(ov) = node_css_grid_overlay(&app.doc, grid_id) else { return false };
+    let count = if is_col { ov.cols } else { ov.rows };
+    let edit = match edit {
+        TrackEdit::Insert { at, track } => TrackEdit::Insert { at: at.min(count), track },
+        other => other,
+    };
+    if !edit.fits(count, is_col) {
+        return false;
+    }
+    let Some(children) = app.doc.get(grid_id).map(|n| n.children.clone()) else { return false };
+
+    let new_count = match edit {
+        TrackEdit::Insert { .. } => count + 1,
+        TrackEdit::Delete { .. } => count - 1,
+        TrackEdit::Move { .. } | TrackEdit::Resize { .. } => count,
+    };
+    let mut tx = crate::edit::Tx::new();
+    if let Some(gn) = tx.ed.node(&mut app.doc, grid_id) {
+        if let Some(gal) = gn.kind.frame_props_mut().and_then(|fp| fp.auto_layout.as_mut()) {
+            edit.write(gal, is_col, count);
+        }
+    }
+    for cid in children {
+        let Some(c) = app.doc.get(cid) else { continue };
+        let Some(pin) = (if is_col { c.layout_child.grid_column } else { c.layout_child.grid_row }) else { continue };
+        let next = edit.remap_pin(pin);
+        let old_span = c.layout_child.col_span;
+        let mut next_span = old_span;
+        if is_col && old_span > 1 {
+            let mut span = old_span as usize;
+            if let TrackEdit::Delete { at } = edit {
+                let start = pin as usize;
+                if (start..start.saturating_add(span)).contains(&at) {
+                    span = span.saturating_sub(1).max(1);
+                }
+            }
+            if let Some(p) = next {
+                let p = p as usize;
+                if p < new_count && p.saturating_add(span) > new_count {
+                    span = (new_count - p).max(1);
+                }
+            }
+            next_span = span as u16;
+        }
+        if next != Some(pin) || next_span != old_span {
+            if let Some(cn) = tx.ed.node(&mut app.doc, cid) {
+                *(if is_col { &mut cn.layout_child.grid_column } else { &mut cn.layout_child.grid_row }) = next;
+                if is_col {
+                    cn.layout_child.col_span = next_span;
+                }
+            }
+        }
+    }
+    crate::layout::relayout_around(&mut app.doc, &mut tx.ed, grid_id);
+    app.run_tx(tx)
+}
+
+/// Whether deleting track `at` of one axis of `grid_id` (which has `count` tracks there) would change the document.
+/// A row only the children make (past `grid_rows`, with default sizing, no child pinned at or after it) is rebuilt
+/// by the same children, so deleting it does nothing and the inspector must not offer a button for it.
+pub fn grid_track_delete_changes_document(doc: &Document, grid_id: NodeId, is_col: bool, at: usize, count: usize) -> bool {
+    let edit = TrackEdit::Delete { at };
+    if !edit.fits(count, is_col) {
+        return false;
+    }
+    let Some(node) = doc.get(grid_id) else { return false };
+    let Some(al) = node.kind.frame_props().and_then(|fp| fp.auto_layout.as_ref()) else { return false };
+    let mut after = al.clone();
+    edit.write(&mut after, is_col, count);
+    if after != *al {
+        return true;
+    }
+    node.children.iter().filter_map(|&cid| doc.get(cid)).any(|c| {
+        let pin = if is_col { c.layout_child.grid_column } else { c.layout_child.grid_row };
+        pin.is_some_and(|p| edit.remap_pin(p) != Some(p))
+    })
+}
+
+/// Inserts a column (`is_col = true`) or row (`is_col = false`) track at `at` in one undo step, moving
+/// the children pinned at or after it. `at` counts tracks as [`grid_track_count`] does.
+pub fn insert_grid_track(app: &mut App, grid_id: NodeId, is_col: bool, at: usize, track: GridTrack) -> bool {
+    edit_grid_tracks(app, grid_id, is_col, TrackEdit::Insert { at, track })
+}
+
+/// Deletes column (`is_col = true`) or row (`is_col = false`) track `at` and re-flows children in one undo step.
+pub fn delete_grid_track(app: &mut App, grid_id: NodeId, is_col: bool, at: usize) -> bool {
+    edit_grid_tracks(app, grid_id, is_col, TrackEdit::Delete { at })
+}
+
+/// Resizes/updates column (`is_col = true`) or row (`is_col = false`) track `idx` in one undo step.
+pub fn resize_grid_track(app: &mut App, grid_id: NodeId, is_col: bool, idx: usize, track: GridTrack) -> bool {
+    edit_grid_tracks(app, grid_id, is_col, TrackEdit::Resize { at: idx, track })
+}
+
+/// Moves column (`is_col = true`) or row (`is_col = false`) track `from` to `to`, carrying anchored items in one undo step.
+pub fn move_grid_track(app: &mut App, grid_id: NodeId, is_col: bool, from: usize, to: usize) -> bool {
+    edit_grid_tracks(app, grid_id, is_col, TrackEdit::Move { from, to })
+}
+
 /// Computes the 2D CSS Grid cell rects, column/row tracks, padding, and gaps for `LayoutDirection::Grid`.
-pub fn compute_css_grid_overlay(al: &AutoLayout, frame_size: DV, child_sizes: &[DV], spans: &[(u16, u16)]) -> CssGridOverlay {
+/// `kids` are the flow children as the solver sees them.
+pub fn compute_css_grid_overlay(al: &AutoLayout, frame_size: DV, kids: &[ChildIn]) -> CssGridOverlay {
     let [pt, pr, pb, pl] = al.padding;
     let cols = (if al.grid_columns > 0 { al.grid_columns as usize } else { 3 }).clamp(1, designos_doc::MAX_GRID_TRACKS);
     let col_gap = al.item_spacing.max(0.0);
     let row_gap = if al.counter_spacing > 0.0 { al.counter_spacing } else { col_gap };
 
-    // Place children into a 2D occupancy grid respecting col_span and row_span.
-    let mut occupied: Vec<Vec<bool>> = Vec::new();
-    let mut placements: Vec<(usize, usize, usize, usize)> = Vec::with_capacity(child_sizes.len());
-    let mut max_row = 0usize;
-
-    for idx in 0..child_sizes.len() {
-        let (cs, rs) = spans.get(idx).copied().unwrap_or((1, 1));
-        let c_span = (cs.max(1) as usize).min(cols);
-        let r_span = (rs.max(1) as usize).min(designos_doc::MAX_GRID_TRACKS);
-        let mut r = 0usize;
-        let placed = loop {
-            while occupied.len() < r + r_span {
-                occupied.push(vec![false; cols]);
-            }
-            let mut found_c = None;
-            for c in 0..=(cols - c_span) {
-                let mut fits = true;
-                for dr in 0..r_span {
-                    for dc in 0..c_span {
-                        if occupied[r + dr][c + dc] {
-                            fits = false;
-                            break;
-                        }
-                    }
-                    if !fits {
-                        break;
-                    }
-                }
-                if fits {
-                    found_c = Some(c);
-                    break;
-                }
-            }
-            if let Some(c) = found_c {
-                for dr in 0..r_span {
-                    for dc in 0..c_span {
-                        occupied[r + dr][c + dc] = true;
-                    }
-                }
-                break (r, c, r_span, c_span);
-            }
-            r += 1;
-        };
-        max_row = max_row.max(placed.0 + placed.2);
-        placements.push(placed);
-    }
+    // Place the children exactly as the solver does (explicit rows and columns, spans, then auto flow), so the
+    // rows and cells drawn here are the ones the layout lays out.
+    let child_sizes: Vec<DV> = kids.iter().map(|k| k.size).collect();
+    let placements: Vec<(usize, usize, usize, usize)> = place_children(kids, cols).iter().map(|p| (p.row, p.col, p.row_span, p.col_span)).collect();
+    let max_row = placements.iter().map(|&(r, _, rs, _)| r + rs).max().unwrap_or(0);
 
     let default_rows = if child_sizes.is_empty() { 2 } else { 1 };
     let rows = max_row.max(al.grid_rows as usize).max(default_rows).clamp(1, designos_doc::MAX_GRID_TRACKS);
@@ -229,17 +391,8 @@ pub fn node_css_grid_overlay(doc: &Document, id: NodeId) -> Option<CssGridOverla
     if al.direction != LayoutDirection::Grid {
         return None;
     }
-    let mut child_sizes = Vec::new();
-    let mut spans = Vec::new();
-    for &cid in &n.children {
-        let Some(c) = doc.get(cid) else { continue };
-        if !c.visible || c.layout_child.absolute {
-            continue;
-        }
-        child_sizes.push(c.size);
-        spans.push((c.layout_child.col_span.max(1), c.layout_child.row_span.max(1)));
-    }
-    Some(compute_css_grid_overlay(al, n.size, &child_sizes, &spans))
+    let kids: Vec<ChildIn> = n.children.iter().filter_map(|&cid| doc.flow_child_input(cid, true)).collect();
+    Some(compute_css_grid_overlay(al, n.size, &kids))
 }
 
 /// Start and length of each stripe of a columns / rows grid along an extent.
@@ -573,7 +726,16 @@ mod tests {
         // Frame width = 24 + 120 + 16 + 100 + 16 + 200 + 24 = 500
         let child_sizes = [v2(120.0, 80.0), v2(100.0, 80.0), v2(200.0, 80.0), v2(200.0, 100.0)];
         let spans = [(1, 1), (1, 1), (1, 1), (2, 1)];
-        let ov = compute_css_grid_overlay(&al, v2(500.0, 232.0), &child_sizes, &spans);
+        let kids: Vec<ChildIn> = child_sizes
+            .iter()
+            .zip(spans)
+            .map(|(&size, (col_span, row_span))| ChildIn {
+                size,
+                cell: designos_doc::layout_solver::GridCell { col_span, row_span, ..Default::default() },
+                ..Default::default()
+            })
+            .collect();
+        let ov = compute_css_grid_overlay(&al, v2(500.0, 232.0), &kids);
         assert_eq!(ov.cols, 3);
         assert_eq!(ov.rows, 2);
         assert_eq!(ov.cells.len(), 6);
