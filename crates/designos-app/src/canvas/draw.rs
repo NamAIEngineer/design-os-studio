@@ -226,15 +226,51 @@ fn collect_page_chrome_nodes(doc: &designos_doc::Document, page_id: NodeId) -> V
     out
 }
 
-/// Paints persistent dashed borders for `ComponentSet`, component slots, and `Slice` nodes on the active page.
-fn draw_component_slot_and_slice_chrome(app: &App, p: &Painter, rect: ERect) {
-    if app.view.zoom < 0.15 {
-        return;
-    }
+/// Page-space window (x0, y0, x1, y1) the canvas shows, with a 64 unit margin.
+fn chrome_window(app: &App, rect: ERect) -> (f32, f32, f32, f32) {
     let z = app.view.zoom.max(1e-3);
-    let win = (app.view.offset.x - 64.0, app.view.offset.y - 64.0, app.view.offset.x + rect.width() / z + 64.0, app.view.offset.y + rect.height() / z + 64.0);
-    let overlaps_win = |(x0, y0, x1, y1): (f32, f32, f32, f32)| x0 <= win.2 && win.0 <= x1 && y0 <= win.3 && win.1 <= y1;
-    let idx = super::interact::active_index(app);
+    (app.view.offset.x - 64.0, app.view.offset.y - 64.0, app.view.offset.x + rect.width() / z + 64.0, app.view.offset.y + rect.height() / z + 64.0)
+}
+
+fn chrome_flags(doc: &designos_doc::Document, id: NodeId) -> Option<(NodeId, bool, bool, bool)> {
+    let n = doc.get(id)?;
+    let is_comp_set = matches!(n.kind, NodeKind::ComponentSet(_));
+    let is_slot = fast_is_slot_container(doc, n, id);
+    let is_slice = is_slice_node(n);
+    (n.visible && (is_comp_set || is_slot || is_slice)).then_some((id, is_comp_set, is_slot, is_slice))
+}
+
+/// True when a node above `id` is hidden, so nothing of `id` is drawn.
+fn under_hidden_ancestor(doc: &designos_doc::Document, id: NodeId) -> bool {
+    let mut cur = doc.get(id).and_then(|n| n.parent);
+    while let Some(c) = cur {
+        let Some(n) = doc.get(c) else { return false };
+        if !n.visible {
+            return true;
+        }
+        cur = n.parent;
+    }
+    false
+}
+
+/// ComponentSet / slot / slice nodes to draw chrome for and to hit-test (`+` buttons), shared by the
+/// painter and the overlay so a painted button is always a clickable one.
+///
+/// With a scene index the list is the index's own incrementally kept chrome list: no tree walk and no
+/// depth limit, filtered to the window by its stored bounds. Without one (the index is rebuilding) it
+/// falls back to the cached tree walk, which stops at depth 3 on documents above 10,000 nodes; the
+/// selection and hover are added to that so they keep their chrome.
+fn page_chrome_nodes(app: &App, win: (f32, f32, f32, f32)) -> Vec<(NodeId, bool, bool, bool)> {
+    let overlaps = |(x0, y0, x1, y1): (f32, f32, f32, f32)| x0 <= win.2 && win.0 <= x1 && y0 <= win.3 && win.1 <= y1;
+    if let Some(idx) = super::interact::active_index(app) {
+        return idx
+            .chrome_nodes()
+            .iter()
+            .filter(|&&id| idx.bounds_of(id).is_some_and(overlaps))
+            .filter_map(|&id| chrome_flags(&app.doc, id))
+            .filter(|&(id, ..)| !under_hidden_ancestor(&app.doc, id))
+            .collect();
+    }
     let key = (app.doc.runtime_id(), app.page, app.doc.mutation_epoch());
     let in_transform_drag = matches!(
         app.canvas.inter,
@@ -257,19 +293,27 @@ fn draw_component_slot_and_slice_chrome(app: &App, p: &Painter, rect: ERect) {
         *borrow = Some((key, built.clone()));
         built
     });
-
     if app.doc.nodes.len() > 10_000 {
         for &extra in app.selection.iter().chain(app.hover.iter()).chain(app.hover_layer.iter()) {
-            if let Some(n) = app.doc.get(extra) {
-                let is_comp_set = matches!(n.kind, NodeKind::ComponentSet(_));
-                let is_slot = fast_is_slot_container(&app.doc, n, extra);
-                let is_slice = is_slice_node(n);
-                if (is_comp_set || is_slot || is_slice) && !chrome_nodes.iter().any(|(cid, ..)| *cid == extra) {
-                    chrome_nodes.push((extra, is_comp_set, is_slot, is_slice));
+            if let Some(entry) = chrome_flags(&app.doc, extra) {
+                if !chrome_nodes.iter().any(|(cid, ..)| *cid == extra) {
+                    chrome_nodes.push(entry);
                 }
             }
         }
     }
+    chrome_nodes
+}
+
+/// Paints persistent dashed borders for `ComponentSet`, component slots, and `Slice` nodes on the active page.
+fn draw_component_slot_and_slice_chrome(app: &App, p: &Painter, rect: ERect) {
+    if app.view.zoom < 0.15 {
+        return;
+    }
+    let win = chrome_window(app, rect);
+    let overlaps_win = |(x0, y0, x1, y1): (f32, f32, f32, f32)| x0 <= win.2 && win.0 <= x1 && y0 <= win.3 && win.1 <= y1;
+    let idx = super::interact::active_index(app);
+    let chrome_nodes = page_chrome_nodes(app, win);
 
     for (id, is_comp_set, is_slot, is_slice) in chrome_nodes {
         let Some(n) = app.doc.get(id) else { continue };
@@ -352,7 +396,7 @@ pub fn empty_slot_plus_button_rect(app: &App, rect: ERect, id: NodeId) -> Option
 /// and renders the active preferred-instance picker popup.
 pub fn empty_slot_picker_overlay(app: &mut App, ui: &mut Ui, rect: ERect) {
     if app.view.zoom >= 0.15 && app.history.viewing.is_none() {
-        let chrome_nodes = collect_page_chrome_nodes(&app.doc, app.page);
+        let chrome_nodes = page_chrome_nodes(app, chrome_window(app, rect));
         let blocked = crate::widgets::pointer_over_popup(ui.ctx());
         let mut clicked_slot: Option<(NodeId, ERect)> = None;
         for (id, _, is_slot, _) in chrome_nodes {

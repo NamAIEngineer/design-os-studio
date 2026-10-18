@@ -252,32 +252,49 @@ pub fn enclosing_instance_slot(doc: &Document, id: NodeId) -> Option<NodeId> {
     None
 }
 
-/// Resolves the [`SlotPropConfig`] governing `slot` (either a main-component slot or an instance copy).
+/// Follows `component.source` from `slot` to the slot node of the main component that defines it
+/// (the node itself for a main-component slot). A slot inside a nested instance therefore resolves
+/// to the nested component's slot, not to the component that merely contains the nested instance.
+fn slot_definition(doc: &Document, slot: NodeId) -> Option<NodeId> {
+    let mut cur = slot;
+    // The hop limit only guards against a corrupt `source` cycle.
+    for _ in 0..doc.nodes.len().max(1) {
+        match doc.get(cur)?.component.source.filter(|s| doc.get(*s).is_some()) {
+            Some(src) => cur = src,
+            None => return Some(cur),
+        }
+    }
+    None
+}
+
+/// Resolves the [`SlotPropConfig`] governing `slot` (a main-component slot, an instance copy, or a
+/// copy inside a nested instance). The settings live on the component that defines the slot and are
+/// found by the slot's `SlotContent` binding; a slot without a binding falls back to its own name.
 pub fn slot_config_of(doc: &Document, slot: NodeId) -> Option<SlotPropConfig> {
     if !is_slot_container(doc, slot) {
         return None;
     }
-    let n = doc.get(slot)?;
-    let src = n.component.source.and_then(|s| doc.get(s));
+    let def = slot_definition(doc, slot)?;
+    let dn = doc.get(def)?;
     let prop_name =
-        n.component.bindings.get(&OverrideField::SlotContent).or_else(|| src.and_then(|sn| sn.component.bindings.get(&OverrideField::SlotContent))).cloned();
-    let comp = enclosing_component(doc, slot)
-        .or_else(|| n.component.source.and_then(|s| enclosing_component(doc, s)))
-        .or_else(|| instance_root_of(doc, slot).and_then(|i| doc.get(i)).and_then(instance_component))?;
+        dn.component.bindings.get(&OverrideField::SlotContent).or_else(|| doc.get(slot)?.component.bindings.get(&OverrideField::SlotContent)).cloned();
+    let comp = enclosing_component(doc, def)?;
     let owner = doc.get(comp).and_then(|c| c.parent).filter(|p| matches!(doc.get(*p).map(|x| &x.kind), Some(NodeKind::ComponentSet(_)))).unwrap_or(comp);
 
     for holder_id in [owner, comp] {
         let Some(holder) = doc.get(holder_id) else { continue };
-        if let Some(ref pname) = prop_name {
-            if let Some(cfg) = holder.component.slot_configs.get(pname) {
-                return Some(cfg.clone());
+        let configs = &holder.component.slot_configs;
+        match &prop_name {
+            Some(pname) => {
+                if let Some(cfg) = configs.get(pname) {
+                    return Some(cfg.clone());
+                }
             }
-        }
-        if let Some((_, cfg)) = holder.component.slot_configs.iter().find(|(k, _)| k.eq_ignore_ascii_case(&n.name)) {
-            return Some(cfg.clone());
-        }
-        if holder.component.slot_configs.len() == 1 {
-            return holder.component.slot_configs.values().next().cloned();
+            None => {
+                if let Some((_, cfg)) = configs.iter().find(|(k, _)| k.eq_ignore_ascii_case(&dn.name)) {
+                    return Some(cfg.clone());
+                }
+            }
         }
     }
     None
@@ -307,16 +324,17 @@ pub fn preferred_slot_components(doc: &Document, slot: NodeId) -> Vec<NodeId> {
     if !is_slot_container(doc, slot) {
         return Vec::new();
     }
-    let own_comp = enclosing_component(doc, slot).or_else(|| doc.get(slot).and_then(|n| n.component.source).and_then(|s| enclosing_component(doc, s)));
+    // A component cannot hold itself: leave out the component the slot sits in and the one that defines it.
+    let own: Vec<NodeId> = [Some(slot), slot_definition(doc, slot)].into_iter().flatten().filter_map(|id| enclosing_component(doc, id)).collect();
     if let Some(cfg) = slot_config_of(doc, slot).filter(|c| !c.preferred.is_empty()) {
         let mut out = Vec::new();
         for pid in cfg.preferred {
             let Some(pn) = doc.get(pid) else { continue };
             match &pn.kind {
-                NodeKind::Component(_) if Some(pid) != own_comp && !out.contains(&pid) => out.push(pid),
+                NodeKind::Component(_) if !own.contains(&pid) && !out.contains(&pid) => out.push(pid),
                 NodeKind::ComponentSet(_) => {
                     for &cid in &pn.children {
-                        if Some(cid) != own_comp && matches!(doc.get(cid).map(|c| &c.kind), Some(NodeKind::Component(_))) && !out.contains(&cid) {
+                        if !own.contains(&cid) && matches!(doc.get(cid).map(|c| &c.kind), Some(NodeKind::Component(_))) && !out.contains(&cid) {
                             out.push(cid);
                         }
                     }
@@ -326,7 +344,7 @@ pub fn preferred_slot_components(doc: &Document, slot: NodeId) -> Vec<NodeId> {
         }
         return out;
     }
-    let mut all: Vec<NodeId> = doc.nodes.values().filter(|n| matches!(n.kind, NodeKind::Component(_)) && Some(n.id) != own_comp).map(|n| n.id).collect();
+    let mut all: Vec<NodeId> = doc.nodes.values().filter(|n| matches!(n.kind, NodeKind::Component(_)) && !own.contains(&n.id)).map(|n| n.id).collect();
     all.sort_by(|a, b| {
         let na = doc.get(*a).map(|n| n.name.as_str()).unwrap_or("");
         let nb = doc.get(*b).map(|n| n.name.as_str()).unwrap_or("");

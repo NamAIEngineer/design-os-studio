@@ -373,3 +373,88 @@ fn a_swap_is_judged_on_the_count_the_slot_ends_with() {
     // a plain insert keeps the old rule: 2 + 1 > max.
     assert_eq!(crate::check_slot_insert(&d, body, &refs[..1]).unwrap_err(), crate::SlotConstraintError::MaxChildren(2));
 }
+
+/// A Card component holding its own "Content" slot and a nested Button instance whose "Icon" slot
+/// has different settings. Returns (doc, card, button, button_icon_preferred, nested_icon_slot).
+fn card_with_nested_button_slot() -> (Document, NodeId, NodeId, NodeId, NodeId) {
+    let mut d = Document::new("nested-slots");
+    let page = d.add_page("P");
+    let frame = |d: &mut Document, parent: NodeId, name: &str, r: Rect| {
+        let id = d.alloc_id();
+        let mut n = Node::frame(id, r);
+        n.name = name.into();
+        d.insert(parent, n).unwrap()
+    };
+
+    let preferred = frame(&mut d, page, "Glyph", Rect::new(0.0, 0.0, 8.0, 8.0));
+    create_component(&mut d, preferred).apply(&mut d).unwrap();
+
+    let button = frame(&mut d, page, "Button", Rect::new(0.0, 20.0, 120.0, 40.0));
+    let icon = frame(&mut d, button, "Icon", Rect::new(0.0, 0.0, 120.0, 40.0));
+    create_component(&mut d, button).apply(&mut d).unwrap();
+    crate::convert_to_slot(&mut d, icon).apply(&mut d).unwrap();
+    crate::set_slot_config(
+        &mut d,
+        button,
+        "Icon",
+        SlotPropConfig {
+            display_by_default: Some(false),
+            stretch_child_on_insert: Some(true),
+            max_children: Some(1),
+            preferred: vec![preferred],
+            ..Default::default()
+        },
+    )
+    .apply(&mut d)
+    .unwrap();
+
+    let card = frame(&mut d, page, "Card", Rect::new(0.0, 100.0, 300.0, 200.0));
+    let content = frame(&mut d, card, "Content", Rect::new(0.0, 0.0, 300.0, 100.0));
+    create_component(&mut d, card).apply(&mut d).unwrap();
+    crate::convert_to_slot(&mut d, content).apply(&mut d).unwrap();
+    crate::set_slot_config(&mut d, card, "Content", SlotPropConfig { max_children: Some(5), ..Default::default() }).apply(&mut d).unwrap();
+    create_instance(&mut d, button, card, Vec2::new(0.0, 120.0)).apply(&mut d).unwrap();
+    sync_instances(&mut d, card).apply(&mut d).unwrap();
+
+    let nested_button = *d.get(card).unwrap().children.iter().find(|c| d.get(**c).unwrap().name == "Button").unwrap();
+    let nested_icon = d.get(nested_button).unwrap().children[0];
+    (d, card, button, preferred, nested_icon)
+}
+
+#[test]
+fn a_slot_in_a_nested_instance_takes_its_settings_from_the_nested_component() {
+    let (mut d, card, button, preferred, nested_icon) = card_with_nested_button_slot();
+    let want = d.get(button).unwrap().component.slot_configs.get("Icon").cloned().unwrap();
+
+    // Inside the Card component, the nested Button's Icon slot is governed by Button's settings,
+    // not by the Card's single "Content" entry.
+    assert_eq!(crate::slot_config_of(&d, nested_icon), Some(want.clone()));
+    assert!(!crate::should_show_empty_slot_placeholder(&d, nested_icon), "Button hides the empty Icon slot in instances");
+    assert_eq!(crate::preferred_slot_components(&d, nested_icon), vec![preferred]);
+
+    // The same holds in an instance of the Card.
+    let page = d.pages[0];
+    create_instance(&mut d, card, page, Vec2::new(500.0, 0.0)).apply(&mut d).unwrap();
+    let card_inst = instances_of(&d, card)[0];
+    let inst_button = *d.get(card_inst).unwrap().children.iter().find(|c| d.get(**c).unwrap().name == "Button").unwrap();
+    let inst_icon = d.get(inst_button).unwrap().children[0];
+    assert_eq!(crate::slot_config_of(&d, inst_icon), Some(want));
+    assert!(!crate::should_show_empty_slot_placeholder(&d, inst_icon));
+    assert_eq!(crate::preferred_slot_components(&d, inst_icon), vec![preferred]);
+
+    // Card's own slot still resolves to Card's settings.
+    let card_content = *d.get(card).unwrap().children.iter().find(|c| d.get(**c).unwrap().name == "Content").unwrap();
+    assert_eq!(crate::slot_config_of(&d, card_content).and_then(|c| c.max_children), Some(5));
+}
+
+#[test]
+fn a_bound_slot_without_settings_resolves_to_none_instead_of_the_only_entry_of_another_slot() {
+    let (mut d, card, _, _, nested_icon) = card_with_nested_button_slot();
+    // Button keeps a single entry, but for another slot: it must not stand in for the bound "Icon" slot.
+    let button = crate::enclosing_component(&d, d.get(nested_icon).unwrap().component.source.unwrap()).unwrap();
+    let configs = &mut d.get_mut(button).unwrap().component.slot_configs;
+    let only = configs.remove("Icon").unwrap();
+    configs.insert("Other".into(), only);
+    assert_eq!(crate::slot_config_of(&d, nested_icon), None);
+    assert_eq!(d.get(card).unwrap().component.slot_configs.len(), 1);
+}
