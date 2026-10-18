@@ -862,6 +862,13 @@ fn convert_node(nc: &Value, id: &str, lk: &Lk) -> Option<Map<String, Value>> {
     }
     copy(&mut m, nc, "name", "name");
     copy(&mut m, nc, "componentKey", "componentKey");
+    // A symbol or state group indexed by its publish `key` (see `Lk::new`) keeps that key the way
+    // `componentKey` is kept, so export writes it back. An explicit `componentKey` wins.
+    if !m.contains_key("componentKey") && matches!(ty, "COMPONENT" | "COMPONENT_SET") {
+        if let Some(k) = fstr(nc, "key").filter(|k| !k.is_empty()) {
+            m.insert("componentKey".into(), Value::String(k.to_string()));
+        }
+    }
     copy(&mut m, nc, "sourceLibraryKey", "sourceLibraryKey");
     if let Some(desc) = fstr(nc, "symbolDescription").or_else(|| fstr(nc, "description")).filter(|s| !s.is_empty()) {
         m.insert("symbolDescription".into(), Value::String(desc.to_string()));

@@ -749,9 +749,14 @@ impl<'a> Ctx<'a> {
         if let Some(k) = fstr(&v, "_overrideKey") {
             self.override_keys.insert(id, std::sync::Arc::from(k));
         }
-        if let (Some(k), true) = (fstr(&v, "componentKey"), matches!(node.kind, NodeKind::Component(_) | NodeKind::ComponentSet(_))) {
-            node.fig_metadata.insert("componentKey".into(), k.to_string());
-            self.library_keys.insert(id, (k.to_string(), fstr(&v, "sourceLibraryKey").map(String::from)));
+        if matches!(node.kind, NodeKind::Component(_) | NodeKind::ComponentSet(_)) {
+            // The file's `components` / `componentSets` maps carry the publish key of a component
+            // that has no `componentKey` field of its own; keep it the same way.
+            let map_key = node.source_id.as_deref().and_then(|s| self.component_keys.get(s)).map(String::as_str);
+            if let Some(k) = fstr(&v, "componentKey").or(map_key) {
+                node.fig_metadata.entry("componentKey".into()).or_insert_with(|| k.to_string());
+                self.library_keys.insert(id, (k.to_string(), fstr(&v, "sourceLibraryKey").map(String::from)));
+            }
         }
         let is_instance = matches!(node.kind, NodeKind::Instance { .. });
         let origin = abs_origin(&v).unwrap_or(pinfo.origin);
@@ -848,9 +853,14 @@ impl<'a> Ctx<'a> {
         if let Some(k) = fstr(v, "_overrideKey") {
             self.override_keys.insert(id, std::sync::Arc::from(k));
         }
-        if let (Some(k), true) = (fstr(v, "componentKey"), matches!(node.kind, NodeKind::Component(_) | NodeKind::ComponentSet(_))) {
-            node.fig_metadata.insert("componentKey".into(), k.to_string());
-            self.library_keys.insert(id, (k.to_string(), fstr(v, "sourceLibraryKey").map(String::from)));
+        if matches!(node.kind, NodeKind::Component(_) | NodeKind::ComponentSet(_)) {
+            // The file's `components` / `componentSets` maps carry the publish key of a component
+            // that has no `componentKey` field of its own; keep it the same way.
+            let map_key = node.source_id.as_deref().and_then(|s| self.component_keys.get(s)).map(String::as_str);
+            if let Some(k) = fstr(v, "componentKey").or(map_key) {
+                node.fig_metadata.entry("componentKey".into()).or_insert_with(|| k.to_string());
+                self.library_keys.insert(id, (k.to_string(), fstr(v, "sourceLibraryKey").map(String::from)));
+            }
         }
         let is_instance = matches!(node.kind, NodeKind::Instance { .. });
         let origin = abs_origin(v).unwrap_or(pinfo.origin);

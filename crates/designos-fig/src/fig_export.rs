@@ -243,21 +243,30 @@ impl<'a> ExportCtx<'a> {
                 }
             }
         }
-        for n in doc.nodes.values() {
-            if let NodeKind::Instance { component: Some(cid), component_key: Some(ck), .. } = &n.kind {
-                if !ck.is_empty() {
-                    cx.comp_keys.entry(*cid).or_insert_with(|| ck.clone());
-                }
-            }
-        }
+        // Keys flow from a component to its instances, never the other way. Owners first: the
+        // component's stored key (`componentKey` metadata) and the library assets that point at it.
         for (&id, n) in &doc.nodes {
             if matches!(n.kind, NodeKind::Component(_) | NodeKind::ComponentSet(_)) {
                 if let Some(ck) = n.fig_metadata.get("componentKey").filter(|s| !s.is_empty()) {
                     cx.comp_keys.insert(id, ck.clone());
-                } else if !cx.comp_keys.contains_key(&id) {
-                    let g = cx.node_guids[&id];
-                    cx.comp_keys.insert(id, format!("comp:{}:{}", g.0, g.1));
                 }
+            }
+        }
+        // An instance only names a component that has no key yet, and only with a key no other
+        // component owns. Otherwise its key would make a second component claim the same key.
+        let mut owned: std::collections::HashSet<String> = cx.comp_keys.values().cloned().collect();
+        for n in doc.nodes.values() {
+            if let NodeKind::Instance { component: Some(cid), component_key: Some(ck), .. } = &n.kind {
+                if !ck.is_empty() && !cx.comp_keys.contains_key(cid) && !owned.contains(ck) {
+                    cx.comp_keys.insert(*cid, ck.clone());
+                    owned.insert(ck.clone());
+                }
+            }
+        }
+        for (&id, n) in &doc.nodes {
+            if matches!(n.kind, NodeKind::Component(_) | NodeKind::ComponentSet(_)) && !cx.comp_keys.contains_key(&id) {
+                let g = cx.node_guids[&id];
+                cx.comp_keys.insert(id, format!("comp:{}:{}", g.0, g.1));
             }
         }
         cx

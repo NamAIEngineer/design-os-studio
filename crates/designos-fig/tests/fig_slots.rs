@@ -3,7 +3,7 @@
 //! `slot-content-id`. Fixtures are hand-written; nothing here comes from a real file with slots.
 
 use designos_doc::*;
-use designos_fig::{export_fig, import_fig, import_fig_node_changes};
+use designos_fig::{export_fig, import_fig, import_fig_node_changes, import_rest_json};
 use serde_json::{json, Value};
 
 fn find<'a>(doc: &'a Document, name: &str) -> &'a Node {
@@ -531,4 +531,141 @@ fn an_instance_never_overrides_the_component_that_owns_the_key() {
     let doc = import_fig_node_changes(&fixture, "t").unwrap();
     let swap = find(&doc, "Panel").component.props.iter().find(|p| p.name == "LeadIcon").cloned().expect("LeadIcon prop");
     assert_eq!(swap.kind, PropKind::InstanceSwap { preferred: vec![find(&doc, "Icon").id] });
+}
+
+fn component_key(doc: &Document, name: &str) -> Option<String> {
+    find(doc, name).fig_metadata.get("componentKey").cloned()
+}
+
+/// Preferred entries of the `Panel` swap prop and of its slot, by node id.
+fn panel_preferred(doc: &Document) -> (Vec<NodeId>, Vec<NodeId>) {
+    let panel = find(doc, "Panel");
+    let swap = match &panel.component.props.iter().find(|p| p.name == "LeadIcon").expect("LeadIcon prop").kind {
+        PropKind::InstanceSwap { preferred } => preferred.clone(),
+        other => panic!("LeadIcon is {other:?}"),
+    };
+    let slot = panel.component.slot_configs.get("Body").map(|c| c.preferred.clone()).unwrap_or_default();
+    (swap, slot)
+}
+
+fn assert_keys_and_targets_survive(doc: &Document) {
+    let (icon, set) = (find(doc, "Icon").id, find(doc, "BadgeSet").id);
+    assert_eq!(component_key(doc, "Icon").as_deref(), Some("K_ICON"));
+    assert_eq!(component_key(doc, "BadgeSet").as_deref(), Some("K_SET"));
+    let (swap, slot) = panel_preferred(doc);
+    assert_eq!(swap, vec![icon, set]);
+    assert_eq!(slot, vec![icon, set]);
+}
+
+#[test]
+fn a_key_carried_only_by_the_symbol_key_field_round_trips_through_fig_export() {
+    let prefs = json!({"stringValues": [], "instanceSwapValues": [
+        {"type": "COMPONENT", "key": "K_ICON"}, {"type": "STATE_GROUP", "key": "K_SET"}]});
+    let fixture = json!([
+        nc((0, 0), (0, 0), "!", "DOCUMENT", "Document", json!({})),
+        nc((0, 1), (0, 0), "a", "CANVAS", "Page", json!({})),
+        nc((6, 1), (0, 1), "a", "SYMBOL", "Icon", json!({"key": "K_ICON"})),
+        nc((6, 2), (0, 1), "b", "FRAME", "BadgeSet", json!({"isStateGroup": true, "key": "K_SET"})),
+        nc((6, 3), (6, 2), "a", "SYMBOL", "Variant=Default", json!({})),
+        nc(
+            (5, 1),
+            (0, 1),
+            "c",
+            "SYMBOL",
+            "Panel",
+            json!({"componentPropDefs": [
+                {"id": g(7, 1), "name": "LeadIcon", "type": "INSTANCE_SWAP", "preferredValues": prefs},
+                {"id": g(7, 2), "name": "Body", "type": "SLOT", "preferredValues": prefs}
+            ]})
+        )
+    ]);
+    let doc = import_fig_node_changes(&fixture, "t").unwrap();
+    assert_keys_and_targets_survive(&doc);
+
+    let rt = import_fig(&export_fig(&doc).expect("export_fig")).expect("import_fig");
+    assert_keys_and_targets_survive(&rt);
+    let twice = import_fig(&export_fig(&rt).expect("export_fig")).expect("import_fig");
+    assert_keys_and_targets_survive(&twice);
+}
+
+#[test]
+fn a_key_from_the_rest_component_maps_round_trips_through_fig_export() {
+    let prefs = json!({"stringValues": [], "instanceSwapValues": [
+        {"type": "COMPONENT", "key": "K_ICON"}, {"type": "STATE_GROUP", "key": "K_SET"}]});
+    let file = json!({
+        "name": "rest",
+        "document": {"id": "0:0", "type": "DOCUMENT", "children": [{"id": "0:1", "type": "CANVAS", "name": "Page", "children": [
+            {"id": "1:1", "name": "Icon", "type": "COMPONENT", "size": {"x": 16, "y": 16}},
+            {"id": "1:3", "name": "BadgeSet", "type": "COMPONENT_SET", "size": {"x": 40, "y": 16}, "children": [
+                {"id": "1:4", "name": "Variant=Default", "type": "COMPONENT", "size": {"x": 40, "y": 16}}
+            ]},
+            {"id": "1:2", "name": "Panel", "type": "COMPONENT", "size": {"x": 100, "y": 100},
+             "componentPropertyDefinitions": {
+                "LeadIcon#7:1": {"type": "INSTANCE_SWAP", "defaultValue": "1:1", "preferredValues": prefs},
+                "Body#7:2": {"type": "SLOT", "preferredValues": prefs}
+             }}
+        ]}]},
+        "components": {"1:1": {"key": "K_ICON", "name": "Icon"}, "1:4": {"key": "K_DEF", "name": "Variant=Default"}},
+        "componentSets": {"1:3": {"key": "K_SET", "name": "BadgeSet"}}
+    });
+    let doc = import_rest_json(&file.to_string()).unwrap();
+    assert_keys_and_targets_survive(&doc);
+
+    let rt = import_fig(&export_fig(&doc).expect("export_fig")).expect("import_fig");
+    assert_keys_and_targets_survive(&rt);
+}
+
+#[test]
+fn an_instance_key_is_not_written_onto_a_component_that_does_not_own_it() {
+    // `Nested` repeats `K_ICON` but its symbolID is the stand-in; Icon owns the key.
+    let fixture = json!([
+        nc((0, 0), (0, 0), "!", "DOCUMENT", "Document", json!({})),
+        nc((0, 1), (0, 0), "a", "CANVAS", "Page", json!({})),
+        nc((6, 1), (0, 1), "a", "SYMBOL", "Icon", json!({"componentKey": "K_ICON"})),
+        nc((6, 2), (0, 1), "b", "SYMBOL", "StandIn", json!({})),
+        nc((6, 3), (6, 2), "a", "INSTANCE", "Nested", json!({"componentKey": "K_ICON", "symbolData": {"symbolID": g(6, 2)}})),
+        nc(
+            (5, 1),
+            (0, 1),
+            "c",
+            "SYMBOL",
+            "Panel",
+            json!({"componentPropDefs": [{
+                "id": g(7, 1), "name": "LeadIcon", "type": "INSTANCE_SWAP",
+                "preferredValues": {"stringValues": [], "instanceSwapValues": [{"type": "COMPONENT", "key": "K_ICON"}]}
+            }]})
+        )
+    ]);
+    let doc = import_fig_node_changes(&fixture, "t").unwrap();
+    let rt = import_fig(&export_fig(&doc).expect("export_fig")).expect("import_fig");
+    let (swap, _) = panel_preferred(&rt);
+    assert_eq!(swap, vec![find(&rt, "Icon").id], "preferred target stays the owner of the key");
+    assert_eq!(component_key(&rt, "Icon").as_deref(), Some("K_ICON"));
+    assert_ne!(component_key(&rt, "StandIn").as_deref(), Some("K_ICON"), "StandIn must not take Icon's key");
+}
+
+#[test]
+fn an_instance_key_never_replaces_the_key_its_component_already_has() {
+    // `Inst` instances Icon but carries a different key than the one Icon owns.
+    let fixture = json!([
+        nc((0, 0), (0, 0), "!", "DOCUMENT", "Document", json!({})),
+        nc((0, 1), (0, 0), "a", "CANVAS", "Page", json!({})),
+        nc((6, 1), (0, 1), "a", "SYMBOL", "Icon", json!({"componentKey": "K_ICON"})),
+        nc((6, 2), (0, 1), "b", "INSTANCE", "Inst", json!({"componentKey": "K_OTHER", "symbolData": {"symbolID": g(6, 1)}})),
+        nc(
+            (5, 1),
+            (0, 1),
+            "c",
+            "SYMBOL",
+            "Panel",
+            json!({"componentPropDefs": [{
+                "id": g(7, 1), "name": "LeadIcon", "type": "INSTANCE_SWAP",
+                "preferredValues": {"stringValues": [], "instanceSwapValues": [{"type": "COMPONENT", "key": "K_ICON"}]}
+            }]})
+        )
+    ]);
+    let doc = import_fig_node_changes(&fixture, "t").unwrap();
+    let rt = import_fig(&export_fig(&doc).expect("export_fig")).expect("import_fig");
+    assert_eq!(component_key(&rt, "Icon").as_deref(), Some("K_ICON"));
+    assert_eq!(panel_preferred(&rt).0, vec![find(&rt, "Icon").id]);
 }
