@@ -861,4 +861,19 @@ mod tests {
         let b = ink(&layout(&props("short", TextAutoResize::Height, None), size));
         assert_eq!(a.points(), b.points(), "no ellipsis when everything fits");
     }
+
+    #[test]
+    fn soft_line_break_u2028_breaks_line_without_paragraph_spacing() {
+        let mut p = props("Still thinking\u{2028}about it?", TextAutoResize::WidthAndHeight, None);
+        p.style.paragraph_spacing = 30.0;
+        let g = text_geometry(&p, Vec2::ZERO);
+        assert_eq!(g.lines.len(), 2, "U+2028 must break into two lines");
+        assert_eq!(g.lines[0].para, 0);
+        assert_eq!(g.lines[1].para, 0);
+        assert_eq!(&p.content[g.lines[0].start..g.lines[0].end], "Still thinking");
+        assert_eq!(&p.content[g.lines[1].start..g.lines[1].end], "about it?");
+        assert!((g.lines[1].top - g.lines[0].top - 20.0).abs() < 0.5, "no paragraph spacing added at U+2028: {}", g.lines[1].top - g.lines[0].top);
+        let bounds = ink(&layout(&p, Vec2::ZERO)).bounds();
+        assert!(bounds.bottom() > 25.0 && bounds.bottom() <= 40.5, "two 20px lines without 30px paragraph gap: {:?}", bounds);
+    }
 }
