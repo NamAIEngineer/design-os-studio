@@ -169,6 +169,20 @@ pub fn cr_each(nw: u8, ne: u8, se: u8, sw: u8) -> CornerRadius {
     CornerRadius { nw, ne, se, sw }
 }
 
+/// Radius of a shape inset `inset` px inside a frame of radius `outer_radius`, so both
+/// corner arcs share one centre (concentric). Clamped at 0 when the inset swallows the arc.
+/// Pass the stroke width in `inset` when the frame strokes `StrokeKind::Inside`.
+#[allow(dead_code)] // no call site yet: later changes derive nested radii through it
+pub fn concentric(outer_radius: f32, inset: f32) -> f32 {
+    (outer_radius - inset).max(0.0)
+}
+
+/// Radius that rounds both ends of a control of the given height into a half circle.
+#[allow(dead_code)] // no call site yet: pills are adopted per surface in later changes
+pub fn radius_full(height: f32) -> f32 {
+    (height * 0.5).max(0.0)
+}
+
 // ---------------------------------------------------------------- spacing
 
 // ---------------------------------------------------------------- shell layout
@@ -673,3 +687,43 @@ pub const BOARD_BAR_GAP: f32 = 12.0;
 pub const BOARD_BAR_BTN: f32 = 28.0;
 pub const BOARD_SWATCH: f32 = 18.0;
 pub const BOARD_BAR_SEP: f32 = 8.0;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn concentric_subtracts_the_inset() {
+        assert_eq!(concentric(14.0, 8.0), 6.0);
+        assert_eq!(concentric(6.0, 2.0), 4.0);
+        assert_eq!(concentric(5.0, 0.0), 5.0);
+    }
+
+    #[test]
+    fn concentric_clamps_at_zero_when_the_inset_reaches_the_arc() {
+        assert_eq!(concentric(6.0, 6.0), 0.0);
+        assert_eq!(concentric(6.0, 16.0), 0.0);
+    }
+
+    #[test]
+    fn concentric_grows_for_a_negative_inset() {
+        assert_eq!(concentric(6.0, -2.0), 8.0);
+    }
+
+    #[test]
+    fn concentric_never_returns_nan() {
+        assert_eq!(concentric(f32::NAN, 4.0), 0.0);
+    }
+
+    #[test]
+    fn radius_full_is_half_the_height() {
+        assert_eq!(radius_full(24.0), 12.0);
+        assert_eq!(radius_full(28.0), 14.0);
+        assert_eq!(radius_full(0.0), 0.0);
+    }
+
+    #[test]
+    fn radius_full_clamps_a_negative_height() {
+        assert_eq!(radius_full(-8.0), 0.0);
+    }
+}
