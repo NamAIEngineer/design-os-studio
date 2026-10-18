@@ -6,7 +6,7 @@
 //! 3. Centre the full margin box when child margins exceed the cell size, matching the flow solver.
 
 use designos_doc::*;
-use designos_fig::{export_fig, import_fig, import_fig_node_changes};
+use designos_fig::{export_fig, import_fig, import_fig_node_changes, import_rest_json};
 use serde_json::{json, Value};
 
 fn find<'a>(doc: &'a Document, name: &str) -> &'a Node {
@@ -270,4 +270,165 @@ fn grid_cell_offset_with_margins_larger_than_cell_centres_margin_box_like_flow_s
     let (fx, fy) = (d.get(fc).unwrap().transform.tx, d.get(fc).unwrap().transform.ty);
     assert_eq!((fx, fy), (50.0, 30.0));
     assert_eq!((gx, gy), (fx, fy), "grid child with margins larger than the cell must centre its margin box at (50, 30) like the flow solver");
+}
+
+fn rest_grid_file() -> Value {
+    let child = |id: &str, h: &str, v: &str| {
+        json!({"id": id, "name": "AlignedChild", "type": "RECTANGLE", "size": {"x": 40, "y": 20},
+               "gridChildHorizontalAlign": h, "gridChildVerticalAlign": v})
+    };
+    let grid = |id: &str, name: &str, ty: &str, kids: Value| {
+        let mut v = json!({"id": id, "name": name, "type": ty, "layoutMode": "GRID", "size": {"x": 100, "y": 100},
+                           "gridColumnCount": 1, "gridRowCount": 1, "children": kids});
+        v["x"] = json!(0);
+        v
+    };
+    let mut inst = grid("2:1", "RestOverriddenInst", "INSTANCE", json!([child("I2:1;1:3", "MAX", "CENTER")]));
+    inst["componentId"] = json!("1:2");
+    inst["overrides"] = json!([{"id": "I2:1;1:3", "overriddenFields": ["gridChildHorizontalAlign"]}]);
+    json!({
+        "name": "rest-align",
+        "document": {"type": "DOCUMENT", "children": [{"id": "0:1", "type": "CANVAS", "name": "P", "children": [
+            grid("1:2", "RestComp", "COMPONENT", json!([child("1:3", "CENTER", "CENTER")])),
+            inst
+        ]}]}
+    })
+}
+
+#[test]
+fn rest_overridden_fields_grid_align_keep_the_overridden_axis_through_component_sync() {
+    let mut doc = import_rest_json(&rest_grid_file().to_string()).expect("import_rest_json");
+    let comp = find(&doc, "RestComp").id;
+    let inst = find(&doc, "RestOverriddenInst");
+    let ch_id = inst.children[0];
+    let ch = doc.get(ch_id).unwrap();
+    assert!(ch.component.overrides.contains(&OverrideField::Layout));
+    assert_eq!(ch.component.grid_align_overrides, [true, false], "gridChildHorizontalAlign marks only the horizontal axis");
+    assert_eq!((ch.layout_child.grid_align_h, ch.layout_child.grid_align_v), (GridChildAlign::End, GridChildAlign::Center));
+
+    let main_child = doc.get(comp).unwrap().children[0];
+    {
+        let mc = doc.get_mut(main_child).unwrap();
+        mc.layout_child.grid_align_h = GridChildAlign::Start;
+        mc.layout_child.grid_align_v = GridChildAlign::End;
+    }
+    sync_instances(&mut doc, comp).apply(&mut doc).unwrap();
+    let ch = doc.get(ch_id).unwrap();
+    assert_eq!(
+        (ch.layout_child.grid_align_h, ch.layout_child.grid_align_v),
+        (GridChildAlign::End, GridChildAlign::End),
+        "REST-overridden horizontal axis stays End; vertical follows the main"
+    );
+}
+
+/// Removes every `grid_align_overrides` key, the shape of a `.designos` saved before the key existed.
+fn strip_grid_align_overrides(v: &mut Value) {
+    match v {
+        Value::Object(m) => {
+            m.remove("grid_align_overrides");
+            m.values_mut().for_each(strip_grid_align_overrides);
+        }
+        Value::Array(a) => a.iter_mut().for_each(strip_grid_align_overrides),
+        _ => {}
+    }
+}
+
+#[test]
+fn designos_saved_without_axis_flags_infers_them_from_the_layout_override_on_load() {
+    let g = |s: u64, l: u64| -> Value { json!({"sessionID": s, "localID": l}) };
+    let node = |id: (u64, u64), parent: (u64, u64), ty: &str, name: &str, extra: Value| -> Value {
+        let mut v = json!({
+            "guid": g(id.0, id.1), "parentIndex": {"guid": g(parent.0, parent.1), "position": "a"},
+            "type": ty, "name": name, "phase": "CREATED", "visible": true, "opacity": 1.0,
+            "size": {"x": 40.0, "y": 20.0},
+            "transform": {"m00": 1.0, "m01": 0.0, "m02": 0.0, "m10": 0.0, "m11": 1.0, "m12": 0.0}
+        });
+        for (k, x) in extra.as_object().unwrap() {
+            v[k] = x.clone();
+        }
+        v
+    };
+    let changes = json!([
+        {"guid": g(0, 0), "type": "DOCUMENT", "name": "PrePatchDoc"},
+        {"guid": g(0, 1), "parentIndex": {"guid": g(0, 0), "position": "a"}, "type": "CANVAS", "name": "Page 1"},
+        node((1, 10), (0, 1), "SYMBOL", "AlignComp", json!({
+            "size": {"x": 100.0, "y": 100.0}, "stackMode": "GRID", "gridColumns": 1, "gridRows": 1,
+            "gridColumnsSizing": "100px", "gridRowsSizing": "100px"})),
+        node((1, 11), (1, 10), "RECTANGLE", "AlignedChild", json!({
+            "overrideKey": g(9, 11), "gridChildHorizontalAlign": "CENTER", "gridChildVerticalAlign": "CENTER"})),
+        node((1, 12), (0, 1), "INSTANCE", "OlderInst", json!({
+            "size": {"x": 100.0, "y": 100.0},
+            "symbolData": {"symbolID": g(1, 10), "symbolOverrides": [
+                {"guidPath": {"guids": [g(9, 11)]}, "gridChildHorizontalAlign": "MAX"}]}}))
+    ]);
+    let doc = import_fig_node_changes(&changes, "PrePatchDoc").expect("import");
+    let inst_id = find(&doc, "OlderInst").id;
+    let ch_id = doc.get(inst_id).unwrap().children[0];
+    assert!(doc.get(ch_id).unwrap().component.overrides.contains(&OverrideField::Layout));
+
+    let mut json_value: Value = serde_json::from_str(&doc.to_json().unwrap()).unwrap();
+    strip_grid_align_overrides(&mut json_value);
+    let mut doc = Document::from_json(&json_value.to_string()).expect("from_json");
+
+    let ch = doc.get(ch_id).unwrap();
+    assert_eq!(ch.component.grid_align_overrides, [true, false], "only the axis that differs from the main child is flagged");
+
+    let comp = find(&doc, "AlignComp").id;
+    let main_child = doc.get(comp).unwrap().children[0];
+    {
+        let mc = doc.get_mut(main_child).unwrap();
+        mc.layout_child.grid_align_h = GridChildAlign::Start;
+        mc.layout_child.grid_align_v = GridChildAlign::End;
+    }
+    sync_instances(&mut doc, comp).apply(&mut doc).unwrap();
+    let ch = doc.get(ch_id).unwrap();
+    assert_eq!(
+        (ch.layout_child.grid_align_h, ch.layout_child.grid_align_v),
+        (GridChildAlign::End, GridChildAlign::End),
+        "inferred horizontal override stays End; vertical follows the main"
+    );
+}
+
+#[test]
+fn instance_expansion_clears_axis_flags_copied_from_the_component_subtree() {
+    let g = |s: u64, l: u64| -> Value { json!({"sessionID": s, "localID": l}) };
+    let node = |id: (u64, u64), parent: (u64, u64), ty: &str, name: &str, extra: Value| -> Value {
+        let mut v = json!({
+            "guid": g(id.0, id.1), "parentIndex": {"guid": g(parent.0, parent.1), "position": "a"},
+            "type": ty, "name": name, "phase": "CREATED", "visible": true, "opacity": 1.0,
+            "size": {"x": 40.0, "y": 20.0},
+            "transform": {"m00": 1.0, "m01": 0.0, "m02": 0.0, "m10": 0.0, "m11": 1.0, "m12": 0.0}
+        });
+        for (k, x) in extra.as_object().unwrap() {
+            v[k] = x.clone();
+        }
+        v
+    };
+    let changes = json!([
+        {"guid": g(0, 0), "type": "DOCUMENT", "name": "ExpandDoc"},
+        {"guid": g(0, 1), "parentIndex": {"guid": g(0, 0), "position": "a"}, "type": "CANVAS", "name": "Page 1"},
+        node((1, 10), (0, 1), "SYMBOL", "InnerComp", json!({
+            "stackMode": "GRID", "gridColumns": 1, "gridRows": 1, "gridColumnsSizing": "100px", "gridRowsSizing": "100px"})),
+        node((1, 11), (1, 10), "RECTANGLE", "AlignedChild", json!({
+            "overrideKey": g(9, 11), "gridChildHorizontalAlign": "CENTER", "gridChildVerticalAlign": "CENTER"})),
+        node((1, 20), (0, 1), "SYMBOL", "OuterComp", json!({"size": {"x": 100.0, "y": 100.0}})),
+        node((1, 21), (1, 20), "INSTANCE", "NestedInst", json!({
+            "symbolData": {"symbolID": g(1, 10), "symbolOverrides": [
+                {"guidPath": {"guids": [g(9, 11)]}, "gridChildHorizontalAlign": "MAX"}]}})),
+        node((1, 30), (0, 1), "INSTANCE", "OuterInst", json!({
+            "size": {"x": 100.0, "y": 100.0}, "symbolData": {"symbolID": g(1, 20), "symbolOverrides": []}}))
+    ]);
+    let doc = import_fig_node_changes(&changes, "ExpandDoc").expect("import");
+    let leaf = |root: &str| {
+        let n = find(&doc, root);
+        let nested = doc.get(n.children[0]).expect("nested instance");
+        doc.get(nested.children[0]).expect("nested child")
+    };
+    let in_comp = leaf("OuterComp");
+    assert_eq!(in_comp.component.grid_align_overrides, [true, false], "the nested override lives on the component's own nested child");
+    assert_eq!(in_comp.layout_child.grid_align_h, GridChildAlign::End);
+    let cloned = leaf("OuterInst");
+    assert_eq!(cloned.component.source, Some(in_comp.id));
+    assert!(cloned.component.overrides.is_empty());
+    assert_eq!(cloned.component.grid_align_overrides, [false, false], "a fresh clone starts with no axis overrides, like copy_rec");
 }

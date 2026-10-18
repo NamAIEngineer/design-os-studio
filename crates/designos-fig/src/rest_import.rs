@@ -1567,6 +1567,12 @@ impl<'a> Ctx<'a> {
                 if let Some(of) = override_field(f, is_text) {
                     n.component.overrides.insert(of);
                 }
+                // Sync keeps a grid alignment axis only when that axis is flagged, so name the axis here too.
+                match f.as_str() {
+                    "gridChildHorizontalAlign" => n.component.grid_align_overrides[0] = true,
+                    "gridChildVerticalAlign" => n.component.grid_align_overrides[1] = true,
+                    _ => {}
+                }
             }
         }
     }
@@ -1859,6 +1865,7 @@ impl<'a> Ctx<'a> {
             }
             n.component.source = Some(src);
             n.component.overrides.clear();
+            n.component.grid_align_overrides = [false, false];
             n.component.props.clear();
             let container = n.kind.is_container();
             self.doc.nodes.insert(id, n);

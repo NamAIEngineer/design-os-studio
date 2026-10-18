@@ -751,7 +751,30 @@ impl Document {
             }
             node.migrate_grid_child_align_metadata();
         }
+        self.infer_grid_align_axis_overrides();
         self.mark_full_dirty();
+    }
+
+    /// Files saved before per-axis grid alignment overrides existed carry a `Layout` override with both axis
+    /// flags clear, which component sync read as "nothing on these axes is overridden". Flags each axis whose
+    /// value differs from the linked main child, so an overridden alignment survives the next sync. Nodes that
+    /// already have a flag set are left alone, so the pass is idempotent.
+    fn infer_grid_align_axis_overrides(&mut self) {
+        let inferred: Vec<(NodeId, [bool; 2])> = self
+            .nodes
+            .values()
+            .filter(|n| n.component.grid_align_overrides == [false, false] && n.component.overrides.contains(&OverrideField::Layout))
+            .filter_map(|n| {
+                let main = self.nodes.get(&n.component.source?)?;
+                let axes = components::record_grid_align_overrides(main, n);
+                (axes != [false, false]).then_some((n.id, axes))
+            })
+            .collect();
+        for (id, axes) in inferred {
+            if let Some(n) = self.nodes.get_mut(&id) {
+                n.component.grid_align_overrides = axes;
+            }
+        }
     }
 }
 
