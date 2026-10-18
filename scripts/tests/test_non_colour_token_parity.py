@@ -70,6 +70,24 @@ class NonColourParityTest(unittest.TestCase):
         self.assertNotIn("typography.font-size-title", TOKEN_TO_RUST)
         self.assertEqual(TOKEN_TO_RUST["typography.font-size-hero"], ["FONT_SIZE_TITLE"])
 
+    def test_a_new_role_constant_without_a_token_or_a_reason_fails(self):
+        src = SRC + "pub const SPACE_NEW: f32 = 20.0;\n"
+        r = check_non_colour_parity(src, tokens(), MAP, {})
+        self.assertFalse(r["ok"])
+        self.assertEqual(r["unguarded_role_constants"], ["SPACE_NEW"])
+
+    def test_every_ladder_inset_and_control_constant_is_guarded_by_a_primitive(self):
+        guarded = {n for names in TOKEN_TO_RUST.values() for n in names}
+        for name in ("SPACE_FACT", "SPACE_REGION", "INSET_PANEL", "INSET_MODAL", "CONTROL_STANDARD", "CONTROL_ROW", "RADIUS_CONTROL", "FONT_SIZE_CAPTION"):
+            self.assertIn(name, guarded)
+
+    def test_a_drifted_ladder_rung_in_the_real_theme_fails(self):
+        drifted = THEME.replace("pub const SPACE_BLOCK: f32 = 16.0;", "pub const SPACE_BLOCK: f32 = 20.0;")
+        self.assertNotEqual(drifted, THEME)
+        r = check_non_colour_parity(drifted, TOKENS)
+        self.assertFalse(r["ok"])
+        self.assertTrue(any("SPACE_BLOCK (20)" in d for d in r["drifts"]))
+
     def test_repository_is_in_parity_with_the_pinned_drift_only(self):
         r = check_non_colour_parity(THEME, TOKENS)
         self.assertTrue(r["ok"], r)

@@ -17,31 +17,52 @@ from typing import Any, Dict, List, Optional
 
 from rust_literal_scan import parse_theme_consts
 
-# (token group, token name) -> Rust constants that must all equal the token value.
+# Token path -> Rust constants that must all equal the token value. Relationship aliases share the
+# primitive they are built on (P3): the ladder rung, the inset and the control height each name a
+# different relationship, so each is checked against its primitive separately.
 TOKEN_TO_RUST: Dict[str, List[str]] = {
-    "radius.radius-xs": ["RADIUS_SMALL"],
-    "radius.radius-md": ["RADIUS_MEDIUM"],
-    "radius.radius-pill": ["RADIUS_LARGE"],
-    "typography.font-size-small": ["FONT_SIZE_SMALL"],
+    "radius.radius-xs": ["RADIUS_MARK"],
+    "radius.radius-sm": ["RADIUS_SEGMENT"],
+    "radius.radius-md": ["RADIUS_CONTROL"],
+    "typography.font-size-small": ["FONT_SIZE_CANVAS"],
+    "typography.font-size-caption": ["FONT_SIZE_CAPTION"],
     "typography.font-size-body": ["FONT_SIZE_BODY"],
     "typography.font-size-heading": ["FONT_SIZE_LARGE"],
-    # The token is named hero; the constant is still called TITLE (it is 20 px).
+    # The token is named hero; the constant is still called TITLE (it is 20 px). The token
+    # `font-size-title` is 12 and belongs to no constant, so names are never matched by similarity.
     "typography.font-size-hero": ["FONT_SIZE_TITLE"],
     "spacing.rail-width": ["RAIL_WIDTH"],
     "spacing.panel-width": ["LEFT_PANEL_WIDTH", "RIGHT_PANEL_WIDTH"],
+    "spacing.space-1": ["SPACE_FACT", "SPACE_ROW"],
+    "spacing.space-2": ["SPACE_INLINE", "INSET_FRAME", "INSET_CONTROL"],
+    "spacing.space-3": ["SPACE_GROUP", "INSET_BUTTON"],
+    "spacing.space-4": ["SPACE_BLOCK", "INSET_PANEL", "INSET_POPOVER"],
+    "spacing.space-6": ["SPACE_SECTION", "INSET_MODAL"],
+    "spacing.space-7": ["CONTROL_STANDARD"],
+    "spacing.space-8": ["CONTROL_TOOL"],
+    "spacing.space-10": ["CONTROL_ROW"],
+    "spacing.space-12": ["SPACE_REGION"],
+}
+
+# Role constants with no token to compare against, and why. A new SPACE_/INSET_/CONTROL_/RADIUS_/
+# FONT_SIZE_ constant must be mapped above or listed here, so no role value goes unguarded.
+RUST_ONLY: Dict[str, str] = {
+    "RADIUS_FRAME": "frame radius 14 has no token; the sealed store cannot add one (design/principles.md P1)",
+    "INSET_SEGMENT": "2px tile inset inside a segmented control; no 2px spacing token exists",
+    "TARGET_MIN": "24px pointer floor (WCAG 2.5.8), a floor rather than a spacing value",
+    "CONTROL_DENSE": "24px dense control height, equal to the floor, not to a spacing step",
+    "SWATCH_RADIUS": "alias of RADIUS_MARK",
+    "CANVAS_BADGE_RADIUS": "alias of RADIUS_MARK",
+    "RULER_FONT_SIZE": "alias of FONT_SIZE_CANVAS",
+    "FONT_SIZE_LABEL_CANVAS": "11px canvas label, document scale",
 }
 
 # Drift that exists today and is fixed by a later, separately ruled change.
 # An entry passes only while both sides still hold exactly the recorded values,
 # and fails as stale once they agree, so the entry has to be deleted with the fix.
-KNOWN_DRIFT: Dict[str, Dict[str, Any]] = {
-    "radius.radius-md": {
-        "constant": "RADIUS_MEDIUM",
-        "rust": 5.0,
-        "token": 6.0,
-        "reason": "control radius is 6 in the tokens and 5 in theme.rs; the pixel change ships with the radius standard",
-    },
-}
+KNOWN_DRIFT: Dict[str, Dict[str, Any]] = {}
+
+_ROLE_CONST = re.compile(r"^(SPACE|INSET|CONTROL|RADIUS|FONT_SIZE)_[A-Z0-9_]+$")
 
 _PX = re.compile(r"^\s*(-?\d+(?:\.\d+)?)\s*(?:px)?\s*$")
 
@@ -109,9 +130,15 @@ def check_non_colour_parity(
         if path not in mapping:
             stale.append(f"{path}: KNOWN_DRIFT entry has no mapping row")
 
+    guarded = {name for names in mapping.values() for name in names} | set(RUST_ONLY)
+    unguarded = sorted(c for c in consts if _ROLE_CONST.match(c) and c not in guarded)
+    for name in unguarded:
+        problems.append(f"{name} is a role constant with no token and no RUST_ONLY entry")
+
     mapped = set(mapping)
     return {
         "ok": not (drifts or stale or problems),
+        "unguarded_role_constants": unguarded,
         "verified": verified,
         "drifts": drifts,
         "known_drift": known,

@@ -47,9 +47,8 @@
       "offset_literals": 2
     },
     "cmdk.rs": {
-      "nonconcentric_pairs": 1,
       "offset_literals": 35,
-      "radius_literals": 11
+      "radius_literals": 9
     },
     "comments/panel.rs": {
       "offset_literals": 20
@@ -88,13 +87,13 @@
     },
     "dev/sections.rs": {
       "offset_literals": 64,
-      "radius_literals": 10
+      "radius_literals": 7
     },
     "find/filter.rs": {
       "offset_literals": 10
     },
     "find/panel.rs": {
-      "offset_literals": 18
+      "offset_literals": 11
     },
     "history/banner.rs": {
       "offset_literals": 2
@@ -117,7 +116,7 @@
     "home/mod.rs": {
       "font_literals": 2,
       "offset_literals": 162,
-      "radius_literals": 60
+      "radius_literals": 43
     },
     "home/sidebar.rs": {
       "offset_literals": 14
@@ -143,8 +142,7 @@
     },
     "panels/assets.rs": {
       "inset_literals": 2,
-      "offset_literals": 38,
-      "radius_literals": 9
+      "offset_literals": 29
     },
     "panels/check_designs.rs": {
       "offset_literals": 11
@@ -176,13 +174,12 @@
       "radius_literals": 1
     },
     "panels/left.rs": {
-      "offset_literals": 21,
-      "radius_literals": 1
+      "offset_literals": 21
     },
     "panels/menus.rs": {
       "inset_literals": 1,
       "offset_literals": 26,
-      "radius_literals": 6
+      "radius_literals": 2
     },
     "panels/mod.rs": {
       "offset_literals": 3,
@@ -191,7 +188,7 @@
     "panels/properties.rs": {
       "inset_literals": 2,
       "offset_literals": 37,
-      "radius_literals": 12
+      "radius_literals": 10
     },
     "panels/proto_actions.rs": {
       "offset_literals": 11
@@ -235,8 +232,7 @@
       "offset_literals": 25
     },
     "present.rs": {
-      "offset_literals": 48,
-      "radius_literals": 1
+      "offset_literals": 48
     },
     "shell.rs": {
       "nonconcentric_pairs": 2,
@@ -260,13 +256,13 @@
     },
     "tabs.rs": {
       "offset_literals": 30,
-      "radius_literals": 11
+      "radius_literals": 6
     },
     "terminal.rs": {
       "font_literals": 1,
       "nonconcentric_pairs": 1,
       "offset_literals": 180,
-      "radius_literals": 52
+      "radius_literals": 43
     },
     "updater.rs": {
       "offset_literals": 55,
@@ -281,7 +277,7 @@
     },
     "variables/view.rs": {
       "inset_literals": 4,
-      "offset_literals": 50,
+      "offset_literals": 49,
       "radius_literals": 3
     },
     "variables/widgets.rs": {
@@ -302,7 +298,7 @@
     "widgets/picker.rs": {
       "inset_literals": 3,
       "offset_literals": 47,
-      "radius_literals": 11
+      "radius_literals": 6
     },
     "widgets/popover.rs": {
       "offset_literals": 7
@@ -312,16 +308,16 @@
   "totals": {
     "font_literals": 25,
     "inset_literals": 45,
-    "nonconcentric_pairs": 6,
-    "offset_literals": 1824,
-    "radius_literals": 343
+    "nonconcentric_pairs": 5,
+    "offset_literals": 1807,
+    "radius_literals": 285
   },
   "totals_excluding_own_palette": {
     "font_literals": 4,
     "inset_literals": 45,
-    "nonconcentric_pairs": 4,
-    "offset_literals": 1405,
-    "radius_literals": 212
+    "nonconcentric_pairs": 3,
+    "offset_literals": 1388,
+    "radius_literals": 163
   },
   "version": 1
 }
