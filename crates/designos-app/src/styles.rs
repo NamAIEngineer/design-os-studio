@@ -89,10 +89,10 @@ impl App {
             Style::Fill(paints) => {
                 match &mut n.kind {
                     NodeKind::Text(t) => {
-                        // Runs are what is painted: a run that had the old base fills follows the
-                        // style, a run coloured differently (a highlighted word) keeps its own.
-                        let old = std::mem::replace(&mut t.style.fills, paints.clone());
-                        for r in t.runs.iter_mut().filter(|r| r.style.fills == old) {
+                        // Runs carry their own colour; a colour style recolours them all, as
+                        // `apply_style_values` does when the linked style is edited.
+                        t.style.fills = paints.clone();
+                        for r in &mut t.runs {
                             r.style.fills = paints.clone();
                         }
                     }
@@ -416,7 +416,7 @@ mod tests {
                 assert_eq!(tp.style.fills, primary);
                 assert_eq!(tp.runs[0].style.fills, primary, "bold run with base fill follows the style");
                 assert_eq!(tp.runs[1].style.fills, primary, "italic run with base fill follows the style");
-                assert_eq!(tp.runs[2].style.fills, highlight_fill, "highlighted run keeps its own colour");
+                assert_eq!(tp.runs[2].style.fills, primary, "highlighted run takes the style too");
             }
             _ => unreachable!(),
         }
