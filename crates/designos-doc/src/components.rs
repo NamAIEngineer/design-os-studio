@@ -1028,11 +1028,23 @@ fn sync_pair(c: &mut Ctx, r: NodeId, i: NodeId, top: bool, holder: NodeId) {
     let rkids = c.s.get(ref_id).map(|x| x.children.clone()).unwrap_or_default();
     let ikids = c.s.get(i).map(|x| x.children.clone()).unwrap_or_default();
     let child_holder = if matches!(inode.kind, NodeKind::Instance { .. }) { i } else { holder };
-    let by_src: BTreeMap<NodeId, NodeId> = ikids.iter().filter_map(|k| c.s.get(*k).and_then(|x| x.component.source).map(|s| (s, *k))).collect();
+    let mut by_src: BTreeMap<NodeId, NodeId> = BTreeMap::new();
+    for k in &ikids {
+        if let Some(s) = c.s.get(*k).and_then(|x| x.component.source) {
+            // In a slot the first mirror of a main child is the one kept; elsewhere the last one wins.
+            if in_slot {
+                by_src.entry(s).or_insert(*k);
+            } else {
+                by_src.insert(s, *k);
+            }
+        }
+    }
     let rset: BTreeSet<NodeId> = rkids.iter().copied().collect();
     for k in &ikids {
         let stale = match c.s.get(*k).map(|x| x.component.source) {
-            Some(Some(s)) => !rset.contains(&s),
+            // A slot without its own content mirrors the main slot exactly: a second node for a source
+            // that is already represented (a duplicated child keeps its `source`) is extra.
+            Some(Some(s)) => !rset.contains(&s) || (in_slot && by_src.get(&s) != Some(k)),
             // Slot content the user created has no counterpart in the main component.
             Some(None) => in_slot,
             None => false,

@@ -458,3 +458,32 @@ fn a_bound_slot_without_settings_resolves_to_none_instead_of_the_only_entry_of_a
     assert_eq!(crate::slot_config_of(&d, nested_icon), None);
     assert_eq!(d.get(card).unwrap().component.slot_configs.len(), 1);
 }
+
+#[test]
+fn reset_drops_a_duplicate_of_a_mirrored_slot_child_and_a_main_sync_keeps_it_gone() {
+    let (mut d, comp, inst, inst_body, inst_default, main_default) = instance_with_default_slot_child();
+
+    // Duplicating a mirrored child keeps its `source`, so the copy points at the same main child.
+    let copy = crate::duplicate_subtree(&mut d, inst_default);
+    let copy_id = copy[0].id;
+    assert_eq!(copy[0].component.source, Some(main_default));
+    crate::insert_into_slot(&mut d, inst_body, 1, copy).unwrap().apply(&mut d).unwrap();
+    assert_eq!(d.get(inst_body).unwrap().children, vec![inst_default, copy_id]);
+
+    // While the slot overrides its content, a main-component sync leaves both children alone.
+    sync_instances(&mut d, comp).apply(&mut d).unwrap();
+    assert_eq!(d.get(inst_body).unwrap().children, vec![inst_default, copy_id], "edited slot content is kept");
+
+    // Reset: the slot holds exactly the main slot's children, with no second node for the same source.
+    crate::reset_overrides(&mut d, inst, &[crate::OverrideField::SlotContent]).apply(&mut d).unwrap();
+    let kids = d.get(inst_body).unwrap().children.clone();
+    let sources: Vec<Option<NodeId>> = kids.iter().map(|k| d.get(*k).unwrap().component.source).collect();
+    assert_eq!(sources, vec![Some(main_default)], "one mirrored child per main child, nothing extra");
+    assert!(d.get(copy_id).is_none(), "the duplicate is removed");
+    assert!(!d.get(inst_body).unwrap().component.overrides.contains(&crate::OverrideField::SlotContent));
+
+    // A later main-component sync keeps it that way.
+    sync_instances(&mut d, comp).apply(&mut d).unwrap();
+    let sources: Vec<Option<NodeId>> = d.get(inst_body).unwrap().children.iter().map(|k| d.get(*k).unwrap().component.source).collect();
+    assert_eq!(sources, vec![Some(main_default)]);
+}

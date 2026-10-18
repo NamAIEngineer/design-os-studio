@@ -144,3 +144,32 @@ fn an_empty_slot_deep_in_a_huge_document_still_gets_a_placeholder_and_a_working_
     r.s.click(plus.center());
     assert_eq!(r.s.app().ui.slot_picker.map(|(slot, _)| slot), Some(deep_slot), "the + opens the picker for that slot");
 }
+
+#[test]
+fn reset_after_duplicating_a_mirrored_slot_child_leaves_exactly_the_main_slots_children() {
+    let mut r = rig(None);
+    let main_slot = child_of(&r.s.app().doc, r.main, "Extra");
+    let id = r.s.shell.app.doc.alloc_id();
+    let mut default_child = Node::frame(id, DRect::new(0.0, 0.0, 10.0, 10.0));
+    default_child.name = "Default".into();
+    run(&mut r.s.shell.app, Command::Insert { parent: main_slot, index: 0, nodes: vec![default_child] });
+    let mirrored = r.s.app().doc.get(r.slot).unwrap().children.clone();
+    assert_eq!(mirrored.len(), 1, "an untouched slot follows the main component");
+
+    // Duplicate the mirrored child in the instance slot (Ctrl+D), then press Reset.
+    r.s.shell.app.selection = mirrored.clone();
+    r.s.shell.app.duplicate_selection();
+    assert_eq!(r.s.app().doc.get(r.slot).unwrap().children.len(), 2);
+    assert!(has_slot_override(r.s.app(), r.slot));
+    r.s.shell.app.reset_node_overrides(r.slot, &[OverrideField::SlotContent]);
+
+    let kids = r.s.app().doc.get(r.slot).unwrap().children.clone();
+    let sources: Vec<_> = kids.iter().map(|k| r.s.app().doc.get(*k).unwrap().component.source).collect();
+    assert_eq!(sources, vec![Some(id)], "the slot holds the main slot's child once");
+    assert!(!has_slot_override(r.s.app(), r.slot));
+
+    // A later edit of the main component keeps it that way.
+    let cmd = designos_doc::sync_instances(&mut r.s.shell.app.doc, r.main);
+    run(&mut r.s.shell.app, cmd);
+    assert_eq!(r.s.app().doc.get(r.slot).unwrap().children.len(), 1);
+}
