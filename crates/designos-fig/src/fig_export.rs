@@ -157,9 +157,7 @@ impl<'a> ExportCtx<'a> {
         };
         // First pass: reserve explicit `s:l` GUIDs so generated ones never collide.
         for (&id, n) in &doc.nodes {
-            if doc.library_page.is_some_and(|lp| n.parent == Some(lp))
-                && n.source_id.as_deref().is_some_and(|sid| doc.styles.contains_key(sid))
-            {
+            if doc.library_page.is_some_and(|lp| n.parent == Some(lp)) && n.source_id.as_deref().is_some_and(|sid| doc.styles.contains_key(sid)) {
                 continue;
             }
             if let Some(g) = n.source_id.as_deref().and_then(parse_guid_pair) {
