@@ -25,13 +25,14 @@ mod text_styles;
 pub use fixture::FIXTURE;
 pub use state::CheckDesignsState;
 
-use designos_doc::{Color, Document, IgnoreKey, LibraryRef, LibrarySnapshot, NodeId, NodeKind};
+use designos_doc::{CheckDesignsSettings, Color, Document, IgnoreKey, LibraryRef, LibrarySnapshot, NodeId, NodeKind};
 use std::collections::HashMap;
+use std::ops::Bound;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
-/// Layers scanned per audit. A page of several hundred thousand layers must never stall the UI
-/// thread, so the audit stops here and the panel says so.
-pub const MAX_SCANNED_LAYERS: usize = 20_000;
+/// Default per-frame time slice budget (2.0 ms) for incremental page scanning.
+pub const SLICE_BUDGET: Duration = Duration::from_millis(2);
 
 /// The kind of problem a [`Finding`] reports; also the group it is listed under.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -162,8 +163,8 @@ pub struct Report {
     pub ignored: Vec<Finding>,
     /// Layers examined.
     pub scanned: usize,
-    /// The scan stopped at [`MAX_SCANNED_LAYERS`].
-    pub truncated: bool,
+    /// Whether the scan has finished visiting every layer in the scope.
+    pub complete: bool,
     /// Display names of enabled libraries whose pinned snapshot could not be read.
     pub unreadable_libraries: Vec<String>,
 }
@@ -180,64 +181,198 @@ impl Report {
     }
 }
 
-/// Scans `scope` with the document's own variables and styles only (the app always audits with
-/// its enabled libraries through [`audit_with_libraries`]). Hidden layers are skipped; layers inside
-/// an instance are audited only where their effective properties or backdrop diverge from their
-/// main component.
+/// Phase of an incremental scan.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Phase {
+    Prepare,
+    Walk,
+    Done,
+}
+
+/// Incremental, time-sliced audit cursor.
+pub struct ScanCursor {
+    pub phase: Phase,
+    pub stack: Vec<NodeId>,
+    pub node_iter_from: Option<NodeId>,
+    pub total: usize,
+    /// Layers the walk has visited so far, out of `total`; drives the progress bar.
+    pub scanned: usize,
+    /// Layers counted into [`Report::scanned`]: those of an instance that match their main component and have no finding are not.
+    pub(super) examined: usize,
+    pub partial: Vec<Finding>,
+    prep_stack: Vec<NodeId>,
+    components_done: bool,
+    components: detached::Components,
+    index: Option<hardcoded::Index>,
+    bounds: contrast::SubtreeBounds,
+    libs: LibrarySources,
+    pub(super) unreadable_libraries: Vec<String>,
+    pub(super) full_key: Option<(u64, Scope, Vec<LibraryRef>, CheckDesignsSettings)>,
+    pub(super) updating: bool,
+}
+
+impl ScanCursor {
+    #[cfg(test)]
+    pub fn new(doc: &Document, scope: Scope) -> Self {
+        Self::with_libraries(doc, scope, LibrarySources::default())
+    }
+
+    pub fn with_libraries(doc: &Document, scope: Scope, libs: LibrarySources) -> Self {
+        let roots: Vec<NodeId> = match &scope {
+            Scope::Page(page) => doc.get(*page).map(|p| p.children.clone()).unwrap_or_default(),
+            Scope::Layers(ids) => ids.clone(),
+        };
+        let rev_roots: Vec<NodeId> = roots.into_iter().rev().collect();
+        Self {
+            phase: Phase::Prepare,
+            stack: rev_roots.clone(),
+            node_iter_from: None,
+            total: 0,
+            scanned: 0,
+            examined: 0,
+            partial: Vec::new(),
+            prep_stack: rev_roots,
+            components_done: false,
+            components: detached::Components::default(),
+            index: None,
+            bounds: contrast::SubtreeBounds::default(),
+            libs,
+            unreadable_libraries: Vec::new(),
+            full_key: None,
+            updating: false,
+        }
+    }
+
+    /// Converts the finished (or partial) cursor into a [`Report`], partitioning ignored findings.
+    pub fn into_report(self, doc: &Document) -> Report {
+        let mut report = Report {
+            findings: Vec::new(),
+            ignored: Vec::new(),
+            scanned: self.examined,
+            complete: self.phase == Phase::Done,
+            unreadable_libraries: self.unreadable_libraries,
+        };
+        for f in self.partial {
+            if doc.check_designs.ignored.contains(&f.ignore_key()) {
+                report.ignored.push(f);
+            } else {
+                report.findings.push(f);
+            }
+        }
+        report
+    }
+}
+
+/// Advances `cur` for up to `budget` and returns `true` when the scan reaches [`Phase::Done`].
+pub fn audit_step(doc: &Document, cur: &mut ScanCursor, budget: Duration) -> bool {
+    if cur.phase == Phase::Done {
+        return true;
+    }
+    let start = Instant::now();
+    // Small fixtures (<= 32 nodes) under the normal >=1ms frame budget always finish in one slice
+    // even if the OS scheduler preempts the test thread; sub-millisecond budgets yield immediately.
+    let min_steps = if budget >= Duration::from_millis(1) { 32 } else { 1 };
+    let prep_mask = if budget >= Duration::from_millis(1) { 31 } else { 0 };
+    let mut steps = 0usize;
+
+    if cur.phase == Phase::Prepare {
+        if !cur.components_done {
+            let iter = match cur.node_iter_from {
+                Some(after) => doc.nodes.range((Bound::Excluded(after), Bound::Unbounded)),
+                None => doc.nodes.range(..),
+            };
+            let mut last_seen = None;
+            let mut exhausted = true;
+            for (&id, node) in iter {
+                cur.components.insert_node(node);
+                last_seen = Some(id);
+                steps += 1;
+                if steps >= min_steps && (steps & prep_mask) == 0 && start.elapsed() >= budget {
+                    exhausted = false;
+                    break;
+                }
+            }
+            if exhausted {
+                cur.components_done = true;
+                cur.node_iter_from = None;
+            } else {
+                cur.node_iter_from = last_seen;
+                return false;
+            }
+        }
+
+        while let Some(id) = cur.prep_stack.pop() {
+            if steps >= min_steps && (steps & prep_mask) == 0 && start.elapsed() >= budget {
+                cur.prep_stack.push(id);
+                return false;
+            }
+            steps += 1;
+            let Some(n) = doc.get(id) else { continue };
+            if !n.visible || matches!(n.kind, NodeKind::Page { .. }) {
+                continue;
+            }
+            cur.total += 1;
+            cur.prep_stack.extend(n.children.iter().rev().copied());
+        }
+
+        cur.index = Some(hardcoded::Index::with_libraries(doc, &cur.libs));
+        cur.phase = Phase::Walk;
+        if !cur.stack.is_empty() && steps >= min_steps && start.elapsed() >= budget {
+            return false;
+        }
+    }
+
+    if cur.phase == Phase::Walk {
+        let contrast_on = !doc.check_designs.disabled_rules.contains(Rule::Contrast.figma_id());
+        let detached_on = !doc.check_designs.disabled_rules.contains(Rule::DetachedInstance.figma_id());
+        let lib_assets_on = !doc.check_designs.disabled_rules.contains(Rule::LibraryAssets.figma_id());
+        while let Some(id) = cur.stack.pop() {
+            let Some(n) = doc.get(id) else { continue };
+            if !n.visible || matches!(n.kind, NodeKind::Page { .. }) {
+                continue;
+            }
+            cur.scanned += 1;
+            steps += 1;
+            let before = cur.partial.len();
+            if let Some(index) = cur.index.as_ref() {
+                hardcoded::check(doc, index, n, &mut cur.partial);
+            }
+            if contrast_on {
+                contrast::check(doc, &cur.bounds, n, &mut cur.partial);
+            }
+            if detached_on {
+                detached::check(doc, &cur.components, n, &mut cur.partial);
+            }
+            if lib_assets_on {
+                library_assets::check(doc, &cur.libs, n, n.component.source.and_then(|s| doc.get(s)), &mut cur.partial);
+            }
+            if n.component.source.is_none() || !n.component.overrides.is_empty() || cur.partial.len() > before {
+                cur.examined += 1;
+            }
+            cur.stack.extend(n.children.iter().rev().copied());
+            if !cur.stack.is_empty() && steps >= min_steps && start.elapsed() >= budget {
+                return false;
+            }
+        }
+        cur.phase = Phase::Done;
+    }
+
+    cur.phase == Phase::Done
+}
+
+/// Scans `scope` to the end in one go, with the document's own variables and styles only (the app
+/// audits incrementally with its enabled libraries through [`ScanCursor`] and [`audit_step`]).
+/// Hidden layers are skipped; layers inside an instance are audited only where their effective
+/// properties or backdrop diverge from their main component.
 #[cfg(test)]
 pub fn audit(doc: &Document, scope: &Scope) -> Report {
     audit_with_libraries(doc, scope, &LibrarySources::default())
 }
 
-/// Scans `scope` and includes variables and styles from enabled `libs` snapshots.
+/// Scans `scope` to the end in one go and includes variables and styles from enabled `libs` snapshots.
+#[cfg(test)]
 pub fn audit_with_libraries(doc: &Document, scope: &Scope, libs: &LibrarySources) -> Report {
-    let roots: Vec<NodeId> = match scope {
-        Scope::Page(page) => doc.get(*page).map(|p| p.children.clone()).unwrap_or_default(),
-        Scope::Layers(ids) => ids.clone(),
-    };
-    let index = hardcoded::Index::with_libraries(doc, libs);
-    let components = detached::Components::new(doc);
-    let bounds = contrast::SubtreeBounds::default();
-    let contrast_on = !doc.check_designs.disabled_rules.contains(Rule::Contrast.figma_id());
-    let detached_on = !doc.check_designs.disabled_rules.contains(Rule::DetachedInstance.figma_id());
-    let lib_assets_on = !doc.check_designs.disabled_rules.contains(Rule::LibraryAssets.figma_id());
-    let mut all_findings = Vec::new();
-    let mut report = Report::default();
-    let mut visited = 0usize;
-    let mut stack: Vec<NodeId> = roots.into_iter().rev().collect();
-    while let Some(id) = stack.pop() {
-        let Some(n) = doc.get(id) else { continue };
-        if !n.visible || matches!(n.kind, NodeKind::Page { .. }) {
-            continue;
-        }
-        if visited >= MAX_SCANNED_LAYERS {
-            report.scanned = visited;
-            report.truncated = true;
-            break;
-        }
-        visited += 1;
-        let before = all_findings.len();
-        hardcoded::check(doc, &index, n, &mut all_findings);
-        if contrast_on {
-            contrast::check(doc, &bounds, n, &mut all_findings);
-        }
-        if detached_on {
-            detached::check(doc, &components, n, &mut all_findings);
-        }
-        if lib_assets_on {
-            library_assets::check(doc, libs, n, n.component.source.and_then(|s| doc.get(s)), &mut all_findings);
-        }
-        if n.component.source.is_none() || !n.component.overrides.is_empty() || all_findings.len() > before {
-            report.scanned += 1;
-        }
-        stack.extend(n.children.iter().rev().copied());
-    }
-    for f in all_findings {
-        if doc.check_designs.ignored.contains(&f.ignore_key()) {
-            report.ignored.push(f);
-        } else {
-            report.findings.push(f);
-        }
-    }
-    report
+    let mut cur = ScanCursor::with_libraries(doc, scope.clone(), libs.clone());
+    while !audit_step(doc, &mut cur, Duration::from_secs(3600)) {}
+    cur.into_report(doc)
 }

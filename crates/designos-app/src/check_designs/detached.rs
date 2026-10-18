@@ -22,19 +22,28 @@ fn local_source_id(symbol: &str) -> Option<&str> {
 
 /// Main components of the file by imported `source_id`, built once per audit so resolving a
 /// detached frame is a lookup instead of a scan of the whole document.
+#[derive(Clone, Debug, Default)]
 pub(super) struct Components {
     by_source_id: HashMap<String, NodeId>,
 }
 
 impl Components {
+    #[cfg(test)]
     pub(super) fn new(doc: &Document) -> Self {
-        let mut by_source_id: HashMap<String, NodeId> = HashMap::new();
-        for c in doc.nodes.values().filter(|c| matches!(c.kind, NodeKind::Component(_))) {
-            let Some(source) = c.source_id.as_deref() else { continue };
-            // Two components can share a source id after a paste; the lowest id wins, deterministically.
-            by_source_id.entry(source.to_string()).and_modify(|id| *id = (*id).min(c.id)).or_insert(c.id);
+        let mut out = Self::default();
+        for c in doc.nodes.values() {
+            out.insert_node(c);
         }
-        Components { by_source_id }
+        out
+    }
+
+    pub(super) fn insert_node(&mut self, c: &Node) {
+        if !matches!(c.kind, NodeKind::Component(_)) {
+            return;
+        }
+        let Some(source) = c.source_id.as_deref() else { return };
+        // Two components can share a source id after a paste; the lowest id wins, deterministically.
+        self.by_source_id.entry(source.to_string()).and_modify(|id| *id = (*id).min(c.id)).or_insert(c.id);
     }
 
     /// The main component in this file that `symbol` points at.

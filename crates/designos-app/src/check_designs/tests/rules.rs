@@ -206,7 +206,7 @@ fn dismiss_hides_for_session_without_touching_document_or_undo_stack() {
     f.color_var("Color/Primary", BLUE, BLUE);
     let mut app = f.app();
     app.open_check_designs();
-    app.refresh_check_designs(false);
+    app.refresh_check_designs(false, &egui::Context::default());
     assert_eq!(app.check_designs.report.findings.len(), 1);
     let finding = app.check_designs.report.findings[0].clone();
 
@@ -217,12 +217,12 @@ fn dismiss_hides_for_session_without_touching_document_or_undo_stack() {
 
     // Re-refreshing in the same session keeps it dismissed.
     app.check_designs.invalidate();
-    app.refresh_check_designs(false);
+    app.refresh_check_designs(false, &egui::Context::default());
     assert!(app.check_designs.report.findings.is_empty());
 
     // Reopening the panel clears session dismissals.
     app.open_check_designs();
-    app.refresh_check_designs(false);
+    app.refresh_check_designs(false, &egui::Context::default());
     assert_eq!(app.check_designs.report.findings.len(), 1);
 }
 
