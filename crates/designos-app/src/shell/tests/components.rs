@@ -359,15 +359,15 @@ fn convert_frame_to_slot_and_edit_slot_settings_persists_and_undoes() {
     s.key(Key::Enter);
     s.frame(vec![]);
 
-    let pref_toggle = s.rect_of("toggle:slot-preferred-only");
+    let pref_toggle = s.rect_of("toggle:slot-preferred-only:Leading slot");
     s.click(pref_toggle.left_center() + Vec2::new(10.0, 0.0));
     s.frame(vec![]);
 
-    let stretch_toggle = s.rect_of("toggle:slot-stretch-on-insert");
+    let stretch_toggle = s.rect_of("toggle:slot-stretch-on-insert:Leading slot");
     s.click(stretch_toggle.left_center() + Vec2::new(10.0, 0.0));
     s.frame(vec![]);
 
-    let empty_toggle = s.rect_of("toggle:slot-show-empty");
+    let empty_toggle = s.rect_of("toggle:slot-show-empty:Leading slot");
     s.click(empty_toggle.left_center() + Vec2::new(10.0, 0.0));
     s.frame(vec![]);
 
@@ -377,4 +377,52 @@ fn convert_frame_to_slot_and_edit_slot_settings_persists_and_undoes() {
     assert_eq!(cfg.allow_preferred_values_only, Some(true));
     assert_eq!(cfg.stretch_child_on_insert, Some(true));
     assert_eq!(cfg.display_by_default, Some(true));
+}
+
+#[test]
+fn slot_toggles_of_a_second_slot_change_only_that_slot() {
+    let mut s = Sim::with(Options { select: Some("Primary button".into()), ..Default::default() });
+    let main = s.by_name("Primary button");
+    let mut slot_frames = Vec::new();
+    for (i, name) in ["Leading slot", "Trailing slot"].into_iter().enumerate() {
+        let id = s.shell.app.doc.alloc_id();
+        let mut f = designos_doc::Node::frame(id, designos_doc::Rect::new(8.0 + 30.0 * i as f32, 8.0, 24.0, 24.0));
+        f.name = name.into();
+        slot_frames.push(s.shell.app.doc.insert(main, f).unwrap());
+    }
+    for frame in slot_frames {
+        s.shell.app.selection = vec![frame];
+        s.frame(vec![]);
+        s.frame(vec![]);
+        let btn = s.rect_of("convert-to-slot");
+        s.click(btn.center());
+        s.frame(vec![]);
+        s.frame(vec![]);
+    }
+
+    // Select the main component: both slot properties are listed with their settings.
+    s.shell.app.selection = vec![main];
+    s.frame(vec![]);
+    s.frame(vec![]);
+    s.shell.app.props.scroll = 0.0;
+    s.frame(vec![]);
+    s.frame(vec![]);
+    let screen = Rect::from_min_size(Pos2::ZERO, Vec2::new(1600.0, 1088.0));
+    let cfg_of = |s: &Sim, name: &str| s.app().doc.get(main).unwrap().component.slot_configs.get(name).cloned().unwrap_or_default();
+
+    for (rec, field) in [("slot-preferred-only", 0), ("slot-stretch-on-insert", 1), ("slot-show-empty", 2)] {
+        let pick = |c: &designos_doc::SlotPropConfig| match field {
+            0 => c.allow_preferred_values_only,
+            1 => c.stretch_child_on_insert,
+            _ => c.display_by_default,
+        };
+        let before_first = pick(&cfg_of(&s, "Leading slot"));
+        let toggle = s.rect_of(&format!("toggle:{rec}:Trailing slot"));
+        assert!(screen.contains_rect(toggle), "{rec} of the second slot is on screen: {toggle:?}");
+        s.click(toggle.left_center() + Vec2::new(10.0, 0.0));
+        s.frame(vec![]);
+        s.frame(vec![]);
+        assert_eq!(pick(&cfg_of(&s, "Trailing slot")), Some(true), "{rec}: second slot toggled");
+        assert_eq!(pick(&cfg_of(&s, "Leading slot")), before_first, "{rec}: first slot untouched");
+    }
 }

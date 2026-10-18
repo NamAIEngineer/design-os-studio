@@ -430,7 +430,7 @@ fn slot_settings_rows(app: &mut App, ui: &mut Ui, pane: &mut Pane, owner: NodeId
     );
     let pref_ctl = pane.rect(theme::SECTION_TRAILING_X - 4.0, 0.0, 28.0, theme::FIELD_HEIGHT);
     let pref_on = cfg.allow_preferred_values_only.unwrap_or(false);
-    if let Some(v) = toggle(ui, pref_ctl, "slot-preferred-only", pref_on) {
+    if let Some(v) = toggle(ui, pref_ctl, &format!("slot-preferred-only:{prop_name}"), pref_on) {
         let mut next = cfg.clone();
         next.allow_preferred_values_only = Some(v);
         app.set_slot_config(owner, prop_name, next);
@@ -472,7 +472,7 @@ fn slot_settings_rows(app: &mut App, ui: &mut Ui, pane: &mut Pane, owner: NodeId
     );
     let stretch_ctl = pane.rect(theme::SECTION_TRAILING_X - 4.0, 0.0, 28.0, theme::FIELD_HEIGHT);
     let stretch_on = cfg.stretch_child_on_insert.unwrap_or(false);
-    if let Some(v) = toggle(ui, stretch_ctl, "slot-stretch-on-insert", stretch_on) {
+    if let Some(v) = toggle(ui, stretch_ctl, &format!("slot-stretch-on-insert:{prop_name}"), stretch_on) {
         let mut next = cfg.clone();
         next.stretch_child_on_insert = Some(v);
         app.set_slot_config(owner, prop_name, next);
@@ -490,7 +490,7 @@ fn slot_settings_rows(app: &mut App, ui: &mut Ui, pane: &mut Pane, owner: NodeId
     );
     let empty_ctl = pane.rect(theme::SECTION_TRAILING_X - 4.0, 0.0, 28.0, theme::FIELD_HEIGHT);
     let empty_on = cfg.display_by_default.unwrap_or(false);
-    if let Some(v) = toggle(ui, empty_ctl, "slot-show-empty", empty_on) {
+    if let Some(v) = toggle(ui, empty_ctl, &format!("slot-show-empty:{prop_name}"), empty_on) {
         let mut next = cfg.clone();
         next.display_by_default = Some(v);
         app.set_slot_config(owner, prop_name, next);
