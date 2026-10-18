@@ -2267,13 +2267,23 @@ impl<'a> Ctx<'a> {
             if set.get("layoutGrids").is_some() {
                 fp.grids = farr(set, "layoutGrids").iter().filter_map(parse_grid).collect();
             }
-            if set.get("layoutMode").is_some() {
+            if fstr(set, "layoutMode") == Some("NONE") {
+                fp.auto_layout = None;
+            } else if fp.auto_layout.is_none() && set.get("layoutMode").is_some() {
                 fp.auto_layout = frame_props(set).auto_layout;
             } else if let Some(al) = fp.auto_layout.as_mut() {
+                match fstr(set, "layoutMode") {
+                    Some("HORIZONTAL") => al.direction = LayoutDirection::Horizontal,
+                    Some("VERTICAL") => al.direction = LayoutDirection::Vertical,
+                    Some("GRID") => al.direction = LayoutDirection::Grid,
+                    _ => {}
+                }
                 let align = |s: &str| match s {
                     "CENTER" => LayoutAlign::Center,
                     "MAX" => LayoutAlign::End,
                     "SPACE_BETWEEN" => LayoutAlign::SpaceBetween,
+                    "SPACE_AROUND" => LayoutAlign::SpaceAround,
+                    "SPACE_EVENLY" => LayoutAlign::SpaceEvenly,
                     "BASELINE" => LayoutAlign::Baseline,
                     _ => LayoutAlign::Start,
                 };
@@ -2294,6 +2304,12 @@ impl<'a> Ctx<'a> {
                 }
                 if let Some(s) = fstr(set, "counterAxisAlignItems") {
                     al.counter_align = align(s);
+                }
+                if let Some(s) = fstr(set, "counterAxisAlignContent") {
+                    al.counter_align_content = if s == "SPACE_BETWEEN" { CounterAlignContent::SpaceBetween } else { CounterAlignContent::Auto };
+                }
+                if let Some(n) = fnum(set, "stackLayoutVersion") {
+                    al.layout_version = n.clamp(0.0, u8::MAX as f32) as u8;
                 }
                 if let Some(s) = fstr(set, "primaryAxisSizingMode") {
                     al.primary_sizing = sizing(s);
