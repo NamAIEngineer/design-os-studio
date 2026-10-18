@@ -473,8 +473,13 @@ fn shared_libraries_follow_the_projects_library_root_and_open_its_files() {
     let _ = std::fs::remove_dir_all(root);
 }
 
-/// File B holds an instance whose slot (limit `max`) already has one child; returns (slot, centre of the slot).
+/// File B holds an instance whose slot (limits `min`/`max`) already has one child; returns (slot, centre of the slot).
 fn slot_with_one_child_in_b(b: &mut Sim, max: u32) -> (NodeId, designos_doc::Vec2) {
+    slot_in_b(b, None, max, 1)
+}
+
+/// File B holds an instance whose slot has `fill` children; returns (slot, centre of the slot).
+fn slot_in_b(b: &mut Sim, min: Option<u32>, max: u32, fill: usize) -> (NodeId, designos_doc::Vec2) {
     use designos_doc::{Node, Rect, SlotPropConfig, Vec2};
     let app = &mut b.shell.app;
     let page = app.page;
@@ -493,16 +498,18 @@ fn slot_with_one_child_in_b(b: &mut Sim, max: u32) -> (NodeId, designos_doc::Vec
     run(app, cmd);
     let cmd = designos_doc::convert_to_slot(&mut app.doc, slot_frame);
     run(app, cmd);
-    let cmd = designos_doc::set_slot_config(&mut app.doc, host, "Body", SlotPropConfig { max_children: Some(max), ..Default::default() });
+    let cmd = designos_doc::set_slot_config(&mut app.doc, host, "Body", SlotPropConfig { min_children: min, max_children: Some(max), ..Default::default() });
     run(app, cmd);
     let cmd = designos_doc::create_instance(&mut app.doc, host, page, Vec2::new(900.0, 300.0));
     run(app, cmd);
     let inst = designos_doc::instances_of(&app.doc, host)[0];
     let slot = *app.doc.get(inst).unwrap().children.iter().find(|c| app.doc.get(**c).unwrap().name == "Body").unwrap();
-    let id = app.doc.alloc_id();
-    let child = Node::frame(id, Rect::new(0.0, 0.0, 20.0, 20.0));
-    let cmd = designos_doc::insert_into_slot(&mut app.doc, slot, 0, vec![child]).unwrap();
-    run(app, cmd);
+    for _ in 0..fill {
+        let id = app.doc.alloc_id();
+        let child = Node::frame(id, Rect::new(0.0, 0.0, 20.0, 20.0));
+        let cmd = designos_doc::insert_into_slot(&mut app.doc, slot, 0, vec![child]).unwrap();
+        run(app, cmd);
+    }
     app.toast = None;
     let c = crate::util::rect_center(&crate::util::world_aabb(&app.doc, slot));
     (slot, c)
@@ -546,5 +553,76 @@ fn a_library_drop_on_a_slot_with_room_joins_it_and_marks_the_slot() {
     assert_eq!(b.app().doc.get(dropped).unwrap().parent, Some(slot));
     assert_eq!(b.app().doc.get(slot).unwrap().children.len(), 2);
     assert!(b.app().doc.get(slot).unwrap().component.overrides.contains(&OverrideField::SlotContent));
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn a_library_drop_into_an_empty_slot_below_its_min_is_allowed() {
+    let root = tmp("slot-drop-min");
+    let _a = publish_from_a(&root);
+    let mut b = enable_in_b(&root);
+    let (slot, at) = slot_in_b(&mut b, Some(2), 4, 0);
+    let (lib_id, key) = primary_button_key(&mut b);
+    let dropped = b.shell.app.drop_library_asset(&lib_id, &key, at).expect("the first of the two required children can be added");
+    assert_eq!(b.app().doc.get(slot).unwrap().children, vec![dropped]);
+    assert!(b.app().toast.as_ref().is_none_or(|t| !t.error), "no refusal toast");
+    let _ = std::fs::remove_dir_all(root);
+}
+
+fn tiny_png() -> Vec<u8> {
+    let mut out = std::io::Cursor::new(Vec::new());
+    image::RgbaImage::new(4, 4).write_to(&mut out, image::ImageFormat::Png).expect("encode png");
+    out.into_inner()
+}
+
+/// File A publishes a button whose background is an image fill.
+fn publish_image_button_from_a(root: &Path) -> Sim {
+    let mut a = sim(root);
+    let main = a.by_name("Primary button");
+    let bg = *a.app().doc.get(main).unwrap().children.iter().find(|c| a.app().doc.get(**c).unwrap().name == "Bg").unwrap();
+    a.shell.app.doc.images.insert("pic".into(), tiny_png());
+    a.shell.app.edit_nodes(&[bg], |n| {
+        n.fills = vec![designos_doc::Paint {
+            kind: designos_doc::PaintKind::Image { image_ref: "pic".into(), scale_mode: designos_doc::ImageScaleMode::Fill },
+            opacity: 1.0,
+            visible: true,
+            blend: designos_doc::BlendMode::Normal,
+        }]
+    });
+    a.shell.app.open_libraries();
+    frames(&mut a, 3);
+    let b = a.rect_of("lib-publish");
+    a.click(b.center());
+    frames(&mut a, 2);
+    a
+}
+
+#[test]
+fn a_refused_first_library_drop_stores_no_image_bytes() {
+    let root = tmp("slot-drop-images");
+    let _a = publish_image_button_from_a(&root);
+    let mut b = enable_in_b(&root);
+    let (slot, at) = slot_with_one_child_in_b(&mut b, 1);
+    let (lib_id, key) = primary_button_key(&mut b);
+    let snap = b.shell.app.latest_snapshot(&lib_id).unwrap();
+    assert!(!snap.images.is_empty(), "the published component carries its image");
+    let stored = b.app().doc.images.keys().cloned().collect::<Vec<_>>();
+    let kids = b.app().doc.get(slot).unwrap().children.clone();
+    assert!(b.shell.app.drop_library_asset(&lib_id, &key, at).is_none());
+    assert_eq!(b.app().doc.get(slot).unwrap().children, kids);
+    assert_eq!(b.app().doc.images.keys().cloned().collect::<Vec<_>>(), stored, "the refused import left no bytes in the file");
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn an_allowed_first_library_drop_keeps_its_image_bytes() {
+    let root = tmp("slot-drop-images-ok");
+    let _a = publish_image_button_from_a(&root);
+    let mut b = enable_in_b(&root);
+    let (slot, at) = slot_in_b(&mut b, None, 2, 0);
+    let (lib_id, key) = primary_button_key(&mut b);
+    let dropped = b.shell.app.drop_library_asset(&lib_id, &key, at).expect("dropped");
+    assert_eq!(b.app().doc.get(dropped).unwrap().parent, Some(slot));
+    assert!(!b.app().doc.images.is_empty(), "the imported component keeps the image its fill refers to");
     let _ = std::fs::remove_dir_all(root);
 }
