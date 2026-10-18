@@ -408,6 +408,8 @@ pub fn create_instance(doc: &mut Document, component: NodeId, parent: NodeId, at
     root.component.source = Some(component);
     root.component.bindings.clear();
     root.component.values.clear();
+    // The master's ids define its slots; an instance only has them once it assigns its own.
+    root.component.slot_content_ids.clear();
     let index = doc.get(parent).map(|p| p.children.len()).unwrap_or(0);
     Command::Insert { parent, index, nodes }
 }
@@ -495,6 +497,7 @@ pub fn reset_instance(doc: &mut Document, instance: NodeId) -> Command {
     let mut c = Ctx::new(doc);
     if let Some(mut n) = c.s.get(instance).cloned() {
         n.component.values.clear();
+        n.component.slot_content_ids.clear();
         c.update(n);
     }
     for id in ids {

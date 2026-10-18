@@ -1,8 +1,8 @@
 //! Slot data on [`ComponentLink`]: compact serialization, instance copies and garbage collection.
 
 use crate::{
-    create_component, create_instance, delete_prop, instances_of, rename_prop, sync_instances, ComponentPropDef, Document, Node, NodeId, NodeKind, PropKind,
-    PropValue, Rect, SlotPropConfig, Vec2,
+    create_component, create_instance, delete_prop, instances_of, rename_prop, reset_instance, sync_instances, ComponentPropDef, Document, Node, NodeId,
+    NodeKind, PropKind, PropValue, Rect, SlotPropConfig, Vec2,
 };
 
 /// A component frame holding a slot frame, with a slot property, its settings and a preferred component.
@@ -286,4 +286,42 @@ fn deleting_a_property_leaves_the_slot_content_id_on_instances_alone() {
     let n = &d.get(inst).unwrap().component;
     assert_eq!(n.slot_content_id.as_deref(), Some("9:1"));
     assert_eq!(n.slot_content_ids.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect::<Vec<_>>(), vec![("Body", "9:2")]);
+}
+
+fn component_with_slot_definition_ids() -> (Document, NodeId) {
+    let (mut d, comp) = component_with_two_slots_and_a_node_id();
+    let n = d.get_mut(comp).unwrap();
+    n.component.slot_content_ids.insert("Header".into(), "8:1".into());
+    n.component.slot_content_ids.insert("Body".into(), "8:2".into());
+    (d, comp)
+}
+
+#[test]
+fn a_new_instance_starts_with_no_slot_assignments() {
+    let (mut d, comp) = component_with_slot_definition_ids();
+    let page = d.pages[0];
+    create_instance(&mut d, comp, page, Vec2::new(400.0, 0.0)).apply(&mut d).unwrap();
+    let inst = instances_of(&d, comp)[0];
+    assert!(d.get(inst).unwrap().component.slot_content_ids.is_empty(), "the master's definition ids are not assignments");
+    assert_eq!(d.get(comp).unwrap().component.slot_content_ids.len(), 2, "the master keeps its own");
+    assert_eq!(d.get(inst).unwrap().component.slot_content_id.as_deref(), Some("7:1"), "the node's own id is not touched");
+}
+
+#[test]
+fn resetting_an_instance_drops_its_slot_assignments_and_undo_brings_them_back() {
+    let (mut d, comp) = component_with_slot_definition_ids();
+    let page = d.pages[0];
+    create_instance(&mut d, comp, page, Vec2::new(400.0, 0.0)).apply(&mut d).unwrap();
+    let inst = instances_of(&d, comp)[0];
+    {
+        let n = d.get_mut(inst).unwrap();
+        n.component.slot_content_ids.insert("Header".into(), "9:1".into());
+        n.component.slot_content_id = Some("9:7".into());
+    }
+    let inverse = reset_instance(&mut d, inst).apply(&mut d).unwrap();
+    let n = &d.get(inst).unwrap().component;
+    assert!(n.slot_content_ids.is_empty());
+    assert_eq!(n.slot_content_id.as_deref(), Some("9:7"), "the node's own id is not touched");
+    inverse.apply(&mut d).unwrap();
+    assert_eq!(d.get(inst).unwrap().component.slot_content_ids.get("Header").map(String::as_str), Some("9:1"));
 }

@@ -477,3 +477,39 @@ fn per_property_slot_assignments_and_the_node_field_stay_separate_through_fig() 
         assert!(find(d, "Panel").component.slot_content_id.is_none());
     }
 }
+
+#[test]
+fn a_fresh_instance_of_a_two_slot_component_adds_no_slot_assignments_through_fig() {
+    let fixture = json!([
+        nc((0, 0), (0, 0), "!", "DOCUMENT", "Document", json!({})),
+        nc((0, 1), (0, 0), "a", "CANVAS", "Page", json!({})),
+        nc(
+            (5, 1),
+            (0, 1),
+            "a",
+            "SYMBOL",
+            "Panel",
+            json!({
+                "componentPropDefs": [
+                    { "id": g(7, 1), "name": "Header", "type": "SLOT",
+                      "varValue": { "dataType": "SLOT_CONTENT_ID", "value": { "slotContentIdValue": { "guid": g(8, 1) } } } },
+                    { "id": g(7, 2), "name": "Body", "type": "SLOT",
+                      "varValue": { "dataType": "SLOT_CONTENT_ID", "value": { "slotContentIdValue": { "guid": g(8, 2) } } } }
+                ]
+            })
+        )
+    ]);
+    let mut doc = import_fig_node_changes(&fixture, "t").unwrap();
+    let panel_id = find(&doc, "Panel").id;
+    let page = doc.pages[0];
+    create_instance(&mut doc, panel_id, page, Vec2::new(400.0, 0.0)).apply(&mut doc).unwrap();
+    let inst_id = instances_of(&doc, panel_id)[0];
+    doc.get_mut(inst_id).unwrap().name = "Fresh".into();
+
+    let rt = import_fig(&export_fig(&doc).unwrap()).unwrap();
+    let panel = find(&rt, "Panel");
+    assert_eq!(panel.component.slot_content_ids.get("Header").map(String::as_str), Some("8:1"));
+    assert_eq!(panel.component.slot_content_ids.get("Body").map(String::as_str), Some("8:2"));
+    let fresh = find(&rt, "Fresh");
+    assert!(fresh.component.slot_content_ids.is_empty(), "{:?}", fresh.component.slot_content_ids);
+}
