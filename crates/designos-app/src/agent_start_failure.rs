@@ -89,11 +89,6 @@ fn clean_lines(raw: &str) -> Vec<String> {
         .collect()
 }
 
-/// The last [`TAIL_LINES`] non-empty lines of raw PTY output.
-pub fn output_tail(raw: &str) -> Vec<String> {
-    output_excerpt(raw, &[])
-}
-
 /// The last [`TAIL_LINES`] lines. When the line that explains the failure (the first one containing
 /// any of `cause_needles`) scrolled out of them, as the error above a long usage dump does, it is
 /// kept on top, followed by an ellipsis line.
@@ -350,13 +345,13 @@ mod tests {
     #[test]
     fn tail_is_clean_short_and_capped() {
         let raw = "\x1b[31mred line\x1b[0m\r\n\r\nprogress 10%\rprogress 90%\r\n";
-        assert_eq!(output_tail(raw), vec!["red line".to_string(), "progress 90%".to_string()]);
+        assert_eq!(output_excerpt(raw, &[]), vec!["red line".to_string(), "progress 90%".to_string()]);
         let many: String = (1..=20).map(|i| format!("line {i}\n")).collect();
-        let tail = output_tail(&many);
+        let tail = output_excerpt(&many, &[]);
         assert_eq!(tail.len(), TAIL_LINES);
         assert_eq!(tail.last().map(String::as_str), Some("line 20"));
         let long = "x".repeat(400);
-        let cut = output_tail(&long);
+        let cut = output_excerpt(&long, &[]);
         assert_eq!(cut[0].chars().count(), 160);
         assert!(cut[0].ends_with('…'));
     }

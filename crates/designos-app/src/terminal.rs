@@ -5417,11 +5417,11 @@ Done!
         let env = st.session_env();
         let mut agent = CommandBuilder::new("true");
         configure_pty_env_with_session(&mut agent, AgentCliPreset::Claude, None, Some(&env));
-        assert_eq!(agent.get_cwd().map(|c| std::path::PathBuf::from(c)), Some(st.session_dir.clone()));
+        assert_eq!(agent.get_cwd().map(std::path::PathBuf::from), Some(st.session_dir.clone()));
         let file = std::env::temp_dir().join("cwd-case-file.designos");
         let mut shell = CommandBuilder::new("true");
         configure_pty_env_with_session(&mut shell, AgentCliPreset::Shell, Some(&file), Some(&env));
-        assert_eq!(shell.get_cwd().map(|c| std::path::PathBuf::from(c)), Some(std::env::temp_dir()));
+        assert_eq!(shell.get_cwd().map(std::path::PathBuf::from), Some(std::env::temp_dir()));
     }
 
     #[test]
@@ -5588,7 +5588,7 @@ Done!
         assert!(st.active_tab().unwrap().start_failure.is_some());
         let tabs_before = st.tabs.len();
         let panel_rect = Rect::from_min_size(Pos2::new(48.0, 0.0), Vec2::new(300.0, 800.0));
-        let mut frame = |st: &mut TerminalState, events: Vec<egui::Event>| {
+        let frame = |st: &mut TerminalState, events: Vec<egui::Event>| {
             let raw = egui::RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1600.0, 900.0))), events, ..Default::default() };
             let _ = ctx.run_ui(raw, |ui| {
                 let _ = show_left(st, ui, panel_rect, None);
