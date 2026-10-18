@@ -5570,10 +5570,16 @@ Done!
         let _ = st.poll_live_agent_bridge();
         let failure = st.active_tab().and_then(|t| t.start_failure.clone()).expect("start failure recorded");
         assert_eq!(failure.preset, AgentCliPreset::Claude);
-        assert_eq!(failure.cause, agent_start_failure::StartFailureCause::ExitedEarly);
         assert_eq!(failure.exit_code, Some(1));
         assert!(failure.output_tail.iter().any(|l| l.contains("STUB-AGENT-EXIT")), "{:?}", failure.output_tail);
-        assert_eq!(failure.fix, FixAction::OpenShell);
+        // The stub stands in for `claude`: whether the real binary is on this machine's PATH decides the cause.
+        if AgentCliPreset::Claude.is_installed() {
+            assert_eq!(failure.cause, agent_start_failure::StartFailureCause::ExitedEarly);
+            assert_eq!(failure.fix, FixAction::OpenShell);
+        } else {
+            assert_eq!(failure.cause, agent_start_failure::StartFailureCause::NotInstalled);
+            assert!(matches!(failure.fix, FixAction::OpenInstallPage(_)));
+        }
     }
 
     #[test]
@@ -5611,9 +5617,9 @@ Done!
         crate::theme::install_fonts(&ctx);
         crate::theme::apply(&ctx);
         let mut st = exited_stub_state();
-        st.active_tab_mut().unwrap().spawned_at = std::time::Instant::now();
-        let _ = st.poll_live_agent_bridge();
-        assert!(st.active_tab().unwrap().start_failure.is_some());
+        // A fixed diagnosis whose fix is `Open a shell`; the install-page fix would open a browser.
+        st.active_tab_mut().unwrap().start_failure =
+            Some(agent_start_failure::diagnose(AgentCliPreset::Claude, true, Some(1), "error: unexpected argument '--x' found\n"));
         let tabs_before = st.tabs.len();
         let panel_rect = Rect::from_min_size(Pos2::new(48.0, 0.0), Vec2::new(300.0, 800.0));
         let frame = |st: &mut TerminalState, events: Vec<egui::Event>| {
