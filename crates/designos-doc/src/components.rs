@@ -1511,6 +1511,16 @@ fn migrate_slot_region(c: &mut Ctx, insts: &[NodeId], region: &SlotMigrationRegi
                         }
                         c.update(cn);
                     }
+                    // The slot content now mirrors the inner component itself, so its descendants must follow
+                    // that component's nodes rather than the ones expanded inside the main's inner instance.
+                    for desc_id in subtree_ids(c.s, *cid).into_iter().filter(|d| d != cid) {
+                        let Some(mut dn) = c.s.get(desc_id).cloned() else { continue };
+                        let Some(src) = dn.component.source.filter(|src| c.s.is_ancestor(*child_inst, *src)) else { continue };
+                        if let Some(grand) = c.s.get(src).and_then(|m| m.component.source) {
+                            dn.component.source = Some(grand);
+                            c.update(dn);
+                        }
+                    }
                 }
                 let target = InstanceRegionCopy { inst, copy_id, was_vis, prop_name, dropped_vis_prop };
                 convert_instance_region_to_slot(c, &target, copy_children, group_to_frame);
@@ -2801,8 +2811,18 @@ mod tests {
         assert_eq!(f.d.get(inst_large).unwrap().component.values, inst_large_before.component.values);
     }
 
-    #[test]
-    fn migrate_wrapped_instance_region_keeps_content_of_instances_that_hide_it() {
+    /// `card` holds a frame "icon wrap" with one instance of `f.comp` bound to the instance-swap prop "Icon"
+    /// (the frame to the boolean "Show icon"). One instance of `card` overrides the inner label.
+    struct WrappedFx {
+        f: Fx,
+        card: NodeId,
+        wrap: NodeId,
+        outer: NodeId,
+        wrap_copy: NodeId,
+        inner_copy: NodeId,
+    }
+
+    fn wrapped_icon_card_with_overridden_label(text: &str) -> WrappedFx {
         let mut f = fx();
         let id = f.d.alloc_id();
         let card = f.d.insert(f.page, Node::frame(id, Rect::new(0.0, 500.0, 300.0, 100.0))).unwrap();
@@ -2836,10 +2856,16 @@ mod tests {
         let inner_copy = f.d.get(wrap_copy).unwrap().children[0];
         let label = child_named(&f.d, inner_copy, "label");
         let before = f.d.get(label).unwrap().clone();
-        set_text(&mut f.d, label, "Hidden wrapped label");
+        set_text(&mut f.d, label, text);
         let mut after = f.d.get(label).unwrap().clone();
         after.component.overrides = record_override(&before, &after);
         apply(&mut f.d, Command::Update { node: Box::new(after) });
+        WrappedFx { f, card, wrap, outer, wrap_copy, inner_copy }
+    }
+
+    #[test]
+    fn migrate_wrapped_instance_region_keeps_content_of_instances_that_hide_it() {
+        let WrappedFx { mut f, card, wrap, outer, wrap_copy, inner_copy } = wrapped_icon_card_with_overridden_label("Hidden wrapped label");
         let c = set_instance_prop(&mut f.d, outer, "Show icon", Some(PropValue::Bool(false)));
         apply(&mut f.d, c);
         assert!(!f.d.get(wrap_copy).unwrap().visible);
@@ -2866,5 +2892,27 @@ mod tests {
 
         apply(&mut f.d, inv);
         assert!(f.d.nodes == before_nodes, "one undo restores the region and its instances");
+    }
+
+    #[test]
+    fn migrate_wrapped_instance_region_keeps_overridden_label_linked_when_the_inner_component_syncs() {
+        let WrappedFx { mut f, wrap, outer, wrap_copy, inner_copy, .. } = wrapped_icon_card_with_overridden_label("Wrapped override");
+        let label_copy = child_named(&f.d, inner_copy, "label");
+        let bg_copy = child_named(&f.d, inner_copy, "bg");
+
+        let cmd = migrate_region_to_slot(&mut f.d, wrap).expect("wrapped instance region should migrate");
+        apply(&mut f.d, cmd);
+        assert_eq!(f.d.get(wrap_copy).unwrap().children, vec![inner_copy]);
+
+        // Editing the inner main component and syncing it must reach the slot content without replacing the override.
+        set_fill(&mut f.d, f.bg, Color::rgb(255, 0, 0));
+        let sync_cmd = sync_instances(&mut f.d, f.comp);
+        apply(&mut f.d, sync_cmd);
+
+        let kids = f.d.get(inner_copy).unwrap().children.clone();
+        assert!(kids.contains(&label_copy) && kids.contains(&bg_copy), "slot content keeps its nodes instead of getting fresh copies");
+        assert_eq!(text_of(&f.d, label_copy), "Wrapped override");
+        assert_eq!(f.d.get(bg_copy).unwrap().fills, f.d.get(f.bg).unwrap().fills, "the slot content still follows its main component");
+        assert_eq!(f.d.get(outer).unwrap().component.values.get("Icon"), Some(&PropValue::Slot(vec![inner_copy])));
     }
 }
