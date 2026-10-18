@@ -392,6 +392,17 @@ impl Node {
     pub fn local_bounds(&self) -> Rect {
         Rect::new(0.0, 0.0, self.size.x, self.size.y)
     }
+
+    /// Children in bottom-to-top paint order: reversed when an auto-layout
+    /// frame sets `reverse_z` ("First on top"), otherwise `self.children`.
+    pub fn paint_children(&self) -> std::borrow::Cow<'_, [NodeId]> {
+        let rev = self.kind.frame_props().and_then(|f| f.auto_layout.as_ref()).is_some_and(|al| al.reverse_z);
+        if rev && self.children.len() > 1 {
+            std::borrow::Cow::Owned(self.children.iter().copied().rev().collect())
+        } else {
+            std::borrow::Cow::Borrowed(&self.children)
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

@@ -141,7 +141,7 @@ fn paint_path(doc: &Document, id: NodeId) -> Vec<usize> {
     let mut path = Vec::new();
     let mut cur = id;
     while let Some(parent) = doc.get(cur).and_then(|n| n.parent) {
-        path.push(doc.get(parent).and_then(|p| p.children.iter().position(|&c| c == cur)).unwrap_or(usize::MAX));
+        path.push(doc.get(parent).and_then(|p| p.paint_children().iter().position(|&c| c == cur)).unwrap_or(usize::MAX));
         cur = parent;
     }
     path.reverse();
@@ -979,7 +979,8 @@ impl Differ {
                 let Some(e) = new.entries.get(&id).or_else(|| old.get(&id)) else { continue };
                 if e.mask {
                     // a mask clips every sibling that follows it
-                    if let Some(sibs) = e.parent.and_then(|p| doc.get(p)).map(|p| &p.children) {
+                    if let Some(pnode) = e.parent.and_then(|p| doc.get(p)) {
+                        let sibs = pnode.paint_children();
                         if let Some(pos) = sibs.iter().position(|c| *c == id) {
                             for c in &sibs[pos + 1..] {
                                 extra.push(obounds(c));
