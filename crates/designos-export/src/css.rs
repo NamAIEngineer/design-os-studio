@@ -79,6 +79,9 @@ pub fn css_for(doc: &Document, node: NodeId) -> String {
             }
         }
     }
+    if sz.cross_stretch {
+        stretch = true;
+    }
     let width_skipped = !matches!(sz.w, Dim::Fixed(_));
     let height_skipped = !matches!(sz.h, Dim::Fixed(_));
     if !width_skipped {
@@ -968,5 +971,29 @@ mod tests {
                 assert!(css.contains("height: 20px;"), "{align:?} child should keep height: 20px in:\n{css}");
             }
         }
+    }
+
+    #[test]
+    fn stretch_child_keeps_its_cross_size_when_the_parent_hugs() {
+        use crate::codegen::fixture::row_with_stretch_children;
+        let (d, row, kids) = row_with_stretch_children(Sizing::Hug, &[40.0]);
+        assert_eq!(d.get(row).unwrap().size.y, 40.0, "the solver hugs the row around the stretch child");
+        let css = css_for(&d, kids[0]);
+        assert!(css.contains("height: 40px;") && css.contains("align-self: stretch;"), "{css}");
+
+        let (d, row, kids) = row_with_stretch_children(Sizing::Hug, &[20.0, 100.0]);
+        assert_eq!(d.get(row).unwrap().size.y, 100.0);
+        for k in kids {
+            let css = css_for(&d, k);
+            assert!(css.contains("height: 100px;") && css.contains("align-self: stretch;"), "all-stretch row must not collapse: {css}");
+        }
+    }
+
+    #[test]
+    fn stretch_child_leaves_the_cross_size_to_a_fixed_parent() {
+        use crate::codegen::fixture::row_with_stretch_children;
+        let (d, _, kids) = row_with_stretch_children(Sizing::Fixed, &[40.0]);
+        let css = css_for(&d, kids[0]);
+        assert!(css.contains("align-self: stretch;") && !css.contains("height:"), "{css}");
     }
 }

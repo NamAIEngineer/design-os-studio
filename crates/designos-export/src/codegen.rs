@@ -334,6 +334,10 @@ pub(crate) struct Sizes {
     pub in_flow: bool,
     /// Whether the parent lays out in a row (main axis horizontal).
     pub row_parent: bool,
+    /// A child that stretches across a parent hugging its counter axis (`AlignSelf::Stretch` on a
+    /// non-Fill child). The parent has nothing to stretch against, so the cross axis keeps the child's
+    /// own size (`w`/`h` are never `Fill` there); web output also keeps the stretch declaration.
+    pub cross_stretch: bool,
 }
 
 /// Sizing as the stack-based generators (SwiftUI, UIKit, Compose, Android XML) need it. They emit a
@@ -371,8 +375,17 @@ fn sizes_along(n: &Node, parent: Parent<'_>, row_parent: bool) -> Sizes {
     let text_h = matches!(&n.kind, NodeKind::Text(t) if matches!(t.auto_resize, TextAutoResize::WidthAndHeight | TextAutoResize::Height));
     let grows = in_flow && n.layout_child.grow > 0.0;
     let counter_horiz = in_flow.then_some(!row_parent);
-    let fill_w = in_flow && (n.layout_child.effective_sizing(true, counter_horiz) == Sizing::Fill || (grows && row_parent));
-    let fill_h = in_flow && (n.layout_child.effective_sizing(false, counter_horiz) == Sizing::Fill || (grows && !row_parent));
+    let lc = &n.layout_child;
+    // The solver sizes a stretch child to the line, and a hugging counter axis derives that line from
+    // the children, so the child's own size is what keeps the frame from collapsing.
+    let cross_stretch = in_flow
+        && lc.align_self == AlignSelf::Stretch
+        && parent.al.is_some_and(|a| a.direction != LayoutDirection::Grid && a.counter_sizing == Sizing::Hug)
+        && (if row_parent { lc.vertical } else { lc.horizontal }) != Sizing::Fill;
+    let keeps_w = cross_stretch && !row_parent;
+    let keeps_h = cross_stretch && row_parent;
+    let fill_w = in_flow && ((lc.effective_sizing(true, counter_horiz) == Sizing::Fill && !keeps_w) || (grows && row_parent));
+    let fill_h = in_flow && ((lc.effective_sizing(false, counter_horiz) == Sizing::Fill && !keeps_h) || (grows && !row_parent));
     let w = if fill_w {
         Dim::Fill
     } else if hug_w || text_w {
@@ -389,7 +402,7 @@ fn sizes_along(n: &Node, parent: Parent<'_>, row_parent: bool) -> Sizes {
     } else {
         Dim::Fixed(n.size.y)
     };
-    Sizes { w, h, in_flow, row_parent }
+    Sizes { w, h, in_flow, row_parent, cross_stretch }
 }
 
 /// Position offset for children that are not placed by auto layout.
@@ -693,6 +706,36 @@ pub(crate) mod fixture {
     pub fn add_rect(d: &mut Document, parent: NodeId, size: Vec2) -> NodeId {
         let id = d.alloc_id();
         d.insert(parent, Node::rectangle(id, Rect::new(0.0, 0.0, size.x, size.y))).unwrap()
+    }
+
+    /// A horizontal 200x100 auto-layout row whose counter axis is `counter_sizing`, holding one
+    /// `AlignSelf::Stretch` rectangle per entry of `heights` (each 30 wide, fixed height), already solved.
+    pub fn row_with_stretch_children(counter_sizing: Sizing, heights: &[f32]) -> (Document, NodeId, Vec<NodeId>) {
+        let mut d = Document::new("t");
+        let page = d.add_page("p");
+        let fid = d.alloc_id();
+        let mut row = Node::frame(fid, Rect::new(0.0, 0.0, 200.0, 100.0));
+        row.fills.clear();
+        if let NodeKind::Frame(fp) = &mut row.kind {
+            fp.auto_layout = Some(AutoLayout {
+                direction: LayoutDirection::Horizontal,
+                counter_align: LayoutAlign::Start,
+                primary_sizing: Sizing::Fixed,
+                counter_sizing,
+                ..Default::default()
+            });
+        }
+        let fid = d.insert(page, row).unwrap();
+        let kids = heights
+            .iter()
+            .map(|h| {
+                let id = add_rect(&mut d, fid, Vec2::new(30.0, *h));
+                d.get_mut(id).unwrap().layout_child.align_self = AlignSelf::Stretch;
+                id
+            })
+            .collect();
+        d.relayout_subtree(fid);
+        (d, fid, kids)
     }
 
     pub fn card() -> (Document, NodeId) {

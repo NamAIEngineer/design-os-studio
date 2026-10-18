@@ -425,4 +425,15 @@ mod tests {
 }"####;
         assert_eq!(compose_for(&d, id), expected);
     }
+
+    #[test]
+    fn stretch_child_keeps_its_cross_size_when_the_parent_hugs() {
+        let (d, row, _) = fixture::row_with_stretch_children(Sizing::Hug, &[40.0]);
+        let out = compose_for(&d, row);
+        assert!(out.contains("height = 40.dp") && !out.contains("fillMaxHeight"), "{out}");
+
+        let (d, row, _) = fixture::row_with_stretch_children(Sizing::Fixed, &[40.0]);
+        let out = compose_for(&d, row);
+        assert!(out.contains("fillMaxHeight"), "a fixed parent still stretches the child: {out}");
+    }
 }

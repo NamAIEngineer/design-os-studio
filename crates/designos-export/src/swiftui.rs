@@ -484,4 +484,15 @@ mod tests {
     .shadow(color: Color.black.opacity(0.25), radius: 4, x: 0, y: 4)"####;
         assert_eq!(swiftui_for(&d, id), expected);
     }
+
+    #[test]
+    fn stretch_child_keeps_its_cross_size_when_the_parent_hugs() {
+        let (d, row, _) = fixture::row_with_stretch_children(Sizing::Hug, &[40.0]);
+        let out = swiftui_for(&d, row);
+        assert!(out.contains("height: 40") && !out.contains("maxHeight"), "{out}");
+
+        let (d, row, _) = fixture::row_with_stretch_children(Sizing::Fixed, &[40.0]);
+        let out = swiftui_for(&d, row);
+        assert!(out.contains("maxHeight"), "a fixed parent still stretches the child: {out}");
+    }
 }
