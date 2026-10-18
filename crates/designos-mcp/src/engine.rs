@@ -263,7 +263,7 @@ impl Engine {
                 let root_id = trial.apply_spec(parent, &a.spec)?;
                 let mut nodes = Vec::new();
                 trial.walk(root_id, |n, _| nodes.push(n.clone()));
-                let index = self.doc.get(parent).ok_or("parent not found")?.children.len();
+                let index = self.doc.get(parent).ok_or("parent not found")?.front_insert_index();
                 self.exec(Command::Insert { parent, index, nodes })?;
                 self.relayout(parent);
                 Ok(json!({"root_node_id": root_id, "parent_id": parent.0, "node": self.doc.get(root_id), "changed": true}))
@@ -448,7 +448,7 @@ impl Engine {
         if !parent.kind.is_container() {
             return Err("parent_id must identify a container".into());
         }
-        let index = parent.children.len();
+        let index = parent.front_insert_index();
         geometry(a.x, a.y, a.width, a.height)?;
         if let Some(name) = &a.name {
             bounded_text("name", name, 1024)?;
@@ -1190,5 +1190,49 @@ mod tests {
             assert_settled(&e, last, tool);
         }
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A 100x100 auto-layout frame on the first page holding one absolutely placed rectangle.
+    fn stack_frame(e: &mut Engine, reverse_z: bool) -> (NodeId, NodeId) {
+        let page = e.resolve_default_page().unwrap();
+        let frame = e.doc.alloc_id();
+        let mut f = Node::frame(frame, Rect::new(0.0, 0.0, 100.0, 100.0));
+        if let NodeKind::Frame(fp) = &mut f.kind {
+            fp.auto_layout = Some(designos_doc::AutoLayout { reverse_z, ..designos_doc::AutoLayout::default() });
+        }
+        e.doc.insert(page, f).unwrap();
+        let existing = e.doc.alloc_id();
+        let mut r = Node::rectangle(existing, Rect::new(0.0, 0.0, 100.0, 100.0));
+        r.layout_child.absolute = true;
+        e.doc.insert(frame, r).unwrap();
+        (frame, existing)
+    }
+
+    fn front_most(e: &Engine, frame: NodeId) -> NodeId {
+        *e.doc.get(frame).unwrap().children_front_to_back().next().unwrap()
+    }
+
+    #[test]
+    fn create_node_in_a_first_on_top_frame_paints_in_front() {
+        for reverse_z in [true, false] {
+            let mut e = Engine::default();
+            let (frame, existing) = stack_frame(&mut e, reverse_z);
+            let out = e.call("designos_create_node", json!({"parent_id":frame.0,"kind":"rectangle","name":"New","width":100,"height":100})).unwrap();
+            let id = NodeId(out["node"]["id"].as_u64().unwrap());
+            assert_ne!(id, existing);
+            assert_eq!(front_most(&e, frame), id, "reverse_z={reverse_z}");
+        }
+    }
+
+    #[test]
+    fn apply_spec_in_a_first_on_top_frame_paints_in_front() {
+        for reverse_z in [true, false] {
+            let mut e = Engine::default();
+            let (frame, existing) = stack_frame(&mut e, reverse_z);
+            let out = e.call("designos_apply_spec", json!({"parent_id":frame.0,"spec":{"kind":"rectangle","name":"New","width":100,"height":100}})).unwrap();
+            let id = NodeId(out["root_node_id"].as_u64().unwrap());
+            assert_ne!(id, existing);
+            assert_eq!(front_most(&e, frame), id, "reverse_z={reverse_z}");
+        }
     }
 }

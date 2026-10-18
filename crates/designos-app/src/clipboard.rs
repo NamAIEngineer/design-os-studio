@@ -143,7 +143,7 @@ fn place_figma(app: &mut App, html: &str) -> Result<Vec<NodeId>, String> {
         }
     }
     for nodes in lists {
-        let index = app.doc.get(parent).map(|p| p.children.len()).unwrap_or(0);
+        let index = crate::ops::front_index(&app.doc, parent);
         if let Err(e) = tx.cmd(&mut app.doc, Command::Insert { parent, index, nodes }) {
             tx.cancel(&mut app.doc);
             return Err(format!("Cannot paste from Figma: {e}"));
@@ -211,7 +211,7 @@ pub fn place_svg(app: &mut App, svg: &str, name: &str, center: Vec2, parent: Nod
     out.nodes[0].transform = Affine::translate((c.x - size.x / 2.0).round(), (c.y - size.y / 2.0).round());
     app.doc.images.append(&mut out.images);
     let root = out.nodes[0].id;
-    let index = app.doc.get(parent).map(|p| p.children.len()).unwrap_or(0);
+    let index = crate::ops::front_index(&app.doc, parent);
     let mut tx = Tx::new();
     tx.cmd(&mut app.doc, Command::Insert { parent, index, nodes: out.nodes }).map_err(|e| e.to_string())?;
     layout::relayout_around(&mut app.doc, &mut tx.ed, parent);
@@ -508,5 +508,69 @@ pub(crate) mod tests {
         assert!(legacy_json.contains("null"));
         let repaired = from_json(&legacy_json).expect("from_json repairs legacy null floats");
         assert_eq!((repaired.nodes[0].size.x, repaired.nodes[0].opacity), (0.0, 1.0));
+    }
+
+    // ---- pasted layers land in front in a "First on top" frame
+
+    /// Page > auto-layout frame (selected, so it receives the paste) > one absolutely placed rectangle.
+    fn app_with_selected_stack(reverse_z: bool) -> (App, NodeId, NodeId) {
+        let mut d = Document::new("t");
+        let page = d.add_page("p");
+        let hid = d.alloc_id();
+        let mut host = Node::frame(hid, Rect::new(0.0, 0.0, 100.0, 100.0));
+        if let NodeKind::Frame(fp) = &mut host.kind {
+            fp.auto_layout = Some(designos_doc::AutoLayout { reverse_z, ..Default::default() });
+        }
+        let host = d.insert(page, host).unwrap();
+        let rid = d.alloc_id();
+        let mut r = Node::rectangle(rid, Rect::new(0.0, 0.0, 100.0, 100.0));
+        r.layout_child.absolute = true;
+        r.name = "existing".into();
+        let rect = d.insert(host, r).unwrap();
+        let mut app = App::new(d);
+        app.selection = vec![host];
+        (app, host, rect)
+    }
+
+    fn front_to_back_names(app: &App, host: NodeId) -> Vec<String> {
+        let h = app.doc.get(host).unwrap();
+        h.children_front_to_back().map(|c| app.doc.get(*c).unwrap().name.clone()).collect()
+    }
+
+    #[test]
+    fn figma_paste_into_a_first_on_top_frame_lands_in_front_in_the_same_order_as_a_plain_frame() {
+        let html = figma_html(&designos_fig::testkit::sample_fig(Compression::Zstd, true));
+        let (mut app, host, existing) = app_with_selected_stack(true);
+        assert!(paste_figma(&mut app, &html));
+        assert!(app.toast.is_none(), "{:?}", app.toast.as_ref().map(|t| &t.text));
+        let pasted = app.selection.clone();
+        assert_eq!(pasted.len(), 4);
+        assert!(pasted.iter().all(|id| app.doc.get(*id).unwrap().parent == Some(host)));
+        let stored = app.doc.get(host).unwrap().children.clone();
+        assert_eq!(stored.last(), Some(&existing), "the existing layer is now behind every pasted one");
+        assert!(stored[..4].iter().all(|c| pasted.contains(c)), "pasted layers are stored first: {stored:?}");
+        let reversed_order = front_to_back_names(&app, host);
+
+        let (mut plain, host, _) = app_with_selected_stack(false);
+        assert!(paste_figma(&mut plain, &html));
+        let plain_order = front_to_back_names(&plain, host);
+        assert_eq!(reversed_order, plain_order, "same paint order as in a plain frame");
+        assert_eq!(reversed_order.last().map(String::as_str), Some("existing"));
+
+        app.undo();
+        assert_eq!(app.doc.get(host).unwrap().children, vec![existing], "one undo removes every pasted layer");
+    }
+
+    #[test]
+    fn svg_paste_into_a_first_on_top_frame_lands_in_front() {
+        const SVG: &str =
+            r##"<svg xmlns="http://www.w3.org/2000/svg" width="48" height="32" viewBox="0 0 48 32"><rect width="48" height="32" fill="#ff0000"/></svg>"##;
+        for reverse_z in [true, false] {
+            let (mut app, host, _) = app_with_selected_stack(reverse_z);
+            assert!(paste_svg(&mut app, SVG));
+            let pasted = app.selection[0];
+            assert_eq!(app.doc.get(pasted).unwrap().parent, Some(host));
+            assert_eq!(app.doc.get(host).unwrap().children_front_to_back().next(), Some(&pasted), "reverse_z={reverse_z}");
+        }
     }
 }

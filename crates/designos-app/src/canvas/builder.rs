@@ -154,8 +154,8 @@ pub fn finish(app: &mut App) {
         return;
     }
     let res = resolve_builder(&b.originals, &b.cells, &b.group, &b.deleted);
-    let Some(&top) = b.ids.last() else { return };
-    let Some(parent) = app.doc.get(top).and_then(|n| n.parent) else { return };
+    let Some(&sibling) = b.ids.first() else { return };
+    let Some(parent) = app.doc.get(sibling).and_then(|n| n.parent) else { return };
     let Some(inv) = app.doc.world_transform(parent).invert() else { return };
     let mut tx = Tx::new();
     let mut made: Vec<NodeId> = vec![];
@@ -180,13 +180,14 @@ pub fn finish(app: &mut App) {
     // merged shapes go on top of everything they came from
     for (shapes, style) in &res.pieces {
         let Some(node) = build(app, shapes, b.ids[*style], false) else { continue };
-        let Some(top_index) = index_of(app, top) else { continue };
+        let Some(above_index) = crate::ops::index_above_front_most(&app.doc, parent, &b.ids) else { continue };
         let id = node.id;
-        if tx.cmd(&mut app.doc, Command::Insert { parent, index: top_index + 1, nodes: vec![node] }).is_ok() {
+        if tx.cmd(&mut app.doc, Command::Insert { parent, index: above_index, nodes: vec![node] }).is_ok() {
             made.push(id);
         }
     }
-    // what is left of each touched shape replaces it
+    // what is left of each touched shape replaces it: inserted next to the original, which is removed right after,
+    // so the remainder takes its slot whichever way the parent stores its children
     for (i, rest) in res.remainders.iter().enumerate() {
         let Some(rest) = rest else { continue };
         let orig = b.ids[i];

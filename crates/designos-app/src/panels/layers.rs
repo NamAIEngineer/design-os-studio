@@ -274,22 +274,25 @@ fn structural_hash(app: &App) -> u64 {
             h ^= last_cid.0.rotate_left(19);
         }
     }
-    if app.layers.expanded.len() <= 64 {
-        let mut exp_acc = 0u64;
-        for &eid in &app.layers.expanded {
-            if let Some(en) = app.doc.get(eid) {
-                let first = en.children.first().map_or(0, |c| c.0);
-                let last = en.children.last().map_or(0, |c| c.0);
-                let item = eid.0.wrapping_mul(0x517C_C1B7_2722_0A95)
-                    ^ (en.children.len() as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15)
-                    ^ first.rotate_left(13)
-                    ^ last.rotate_left(29)
-                    ^ (en.paints_children_reversed() as u64).wrapping_mul(0xD6E8_FEB8_6659_FD93);
-                exp_acc = exp_acc.wrapping_add(item);
-            }
+    // Order-independent sums over the expanded set (a `HashSet` iterates in arbitrary order).
+    let small = app.layers.expanded.len() <= 64;
+    let (mut exp_acc, mut flag_acc) = (0u64, 0u64);
+    for &eid in &app.layers.expanded {
+        let Some(en) = app.doc.get(eid) else { continue };
+        // Whether a row lists its children front first changes the order of every expanded row, however many are open.
+        flag_acc =
+            flag_acc.wrapping_add(eid.0.wrapping_mul(0xD6E8_FEB8_6659_FD93) ^ (en.paints_children_reversed() as u64).wrapping_mul(0xA24B_AED4_963E_E407));
+        if small {
+            let first = en.children.first().map_or(0, |c| c.0);
+            let last = en.children.last().map_or(0, |c| c.0);
+            let item = eid.0.wrapping_mul(0x517C_C1B7_2722_0A95)
+                ^ (en.children.len() as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15)
+                ^ first.rotate_left(13)
+                ^ last.rotate_left(29);
+            exp_acc = exp_acc.wrapping_add(item);
         }
-        h ^= exp_acc;
     }
+    h ^= exp_acc ^ flag_acc.rotate_left(31);
     if app.layers.filter_open && !app.layers.filter.is_empty() {
         h ^= app.canvas.tiles.rev().wrapping_mul(0x94D0_49BB_1331_11EB);
     }
@@ -830,6 +833,45 @@ mod tests {
             fp.auto_layout = Some(designos_doc::AutoLayout { reverse_z: true, ..Default::default() });
         }
         assert_eq!(visible_rows_cached(&mut app).iter().map(|r| r.id).collect::<Vec<_>>(), vec![host, red, blue]);
+    }
+
+    #[test]
+    fn rows_cache_follows_a_reverse_z_toggle_with_more_than_64_expanded_rows() {
+        use designos_doc::AutoLayout;
+        let mut d = Document::new("many");
+        let page = d.add_page("p");
+        let rid = d.alloc_id();
+        let root = d.insert(page, Node::frame(rid, DRect::new(0.0, 0.0, 100.0, 100.0))).unwrap();
+        let mut expanded = vec![root];
+        let mut stacks = Vec::new();
+        for _ in 0..66 {
+            let fid = d.alloc_id();
+            let mut f = Node::frame(fid, DRect::new(0.0, 0.0, 50.0, 50.0));
+            if let NodeKind::Frame(fp) = &mut f.kind {
+                fp.auto_layout = Some(AutoLayout::default());
+            }
+            let f = d.insert(root, f).unwrap();
+            for _ in 0..2 {
+                let id = d.alloc_id();
+                d.insert(f, Node::rectangle(id, DRect::new(0.0, 0.0, 10.0, 10.0))).unwrap();
+            }
+            expanded.push(f);
+            stacks.push(f);
+        }
+        let mut app = App::new(d);
+        app.layers.expanded.extend(expanded);
+        assert!(app.layers.expanded.len() > 64);
+        app.layers.expanded_gen = 1;
+        let before = visible_rows_cached(&mut app).iter().map(|r| r.id).collect::<Vec<_>>();
+        // A frame that is neither a page child nor first or last in its parent: only the expanded set can notice it.
+        let toggled = stacks[30];
+        if let NodeKind::Frame(fp) = &mut app.doc.get_mut(toggled).unwrap().kind {
+            fp.auto_layout = Some(AutoLayout { reverse_z: true, ..Default::default() });
+        }
+        let after = visible_rows_cached(&mut app).iter().map(|r| r.id).collect::<Vec<_>>();
+        assert!(before != after, "the cached rows were refreshed after the toggle");
+        let fresh = flatten(&app.doc, app.page, &app.layers.expanded).iter().map(|r| r.id).collect::<Vec<_>>();
+        assert!(after == fresh, "the refreshed rows match a fresh walk");
     }
 
     #[test]

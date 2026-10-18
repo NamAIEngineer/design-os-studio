@@ -409,6 +409,28 @@ impl Node {
         self.kind.frame_props().and_then(|f| f.auto_layout.as_ref()).is_some_and(|al| al.reverse_z)
     }
 
+    /// Index in `children` at which an inserted node paints in front of every
+    /// existing child: `0` when the children are stored front-first (see
+    /// [`Node::paints_children_reversed`]), else the end of the list.
+    pub fn front_insert_index(&self) -> usize {
+        if self.paints_children_reversed() {
+            0
+        } else {
+            self.children.len()
+        }
+    }
+
+    /// Index for `Command::Insert` that places a new node directly in front of the
+    /// child stored at `pos`. The index is read before the insertion, so it is
+    /// `pos` when the children are stored front-first and `pos + 1` otherwise.
+    pub fn insert_index_above(&self, pos: usize) -> usize {
+        if self.paints_children_reversed() {
+            pos
+        } else {
+            pos + 1
+        }
+    }
+
     /// Children in top-most-first order (the reverse of [`Node::paint_children`]),
     /// for picking. Allocation-free.
     pub fn children_front_to_back(&self) -> impl Iterator<Item = &NodeId> + '_ {
@@ -1115,5 +1137,49 @@ mod grid_child_align_compat_tests {
         let child = back.nodes.values().find(|n| matches!(n.kind, NodeKind::Rectangle)).map(|n| n.id).unwrap();
         let frame = back.get(child).and_then(|n| n.parent).unwrap();
         assert_eq!(solved_origin(&mut back, frame, child), (30.0, 80.0));
+    }
+}
+
+#[cfg(test)]
+mod insert_index_tests {
+    use super::*;
+
+    fn frame_with_children(reverse_z: bool, children: usize, auto_layout: bool) -> Node {
+        let mut f = Node::frame(NodeId(1), Rect::new(0.0, 0.0, 100.0, 100.0));
+        if let NodeKind::Frame(fp) = &mut f.kind {
+            fp.auto_layout = auto_layout.then(|| AutoLayout { reverse_z, ..Default::default() });
+        }
+        f.children = (0..children as u64).map(|i| NodeId(10 + i)).collect();
+        f
+    }
+
+    #[test]
+    fn front_insert_index_is_the_start_of_a_first_on_top_frame_and_the_end_otherwise() {
+        assert_eq!(frame_with_children(true, 3, true).front_insert_index(), 0);
+        assert_eq!(frame_with_children(false, 3, true).front_insert_index(), 3);
+        assert_eq!(frame_with_children(true, 3, false).front_insert_index(), 3, "reverse_z needs auto layout");
+        assert_eq!(frame_with_children(true, 0, true).front_insert_index(), 0);
+        assert_eq!(frame_with_children(false, 0, true).front_insert_index(), 0);
+        assert_eq!(Node::rectangle(NodeId(2), Rect::new(0.0, 0.0, 1.0, 1.0)).front_insert_index(), 0);
+    }
+
+    #[test]
+    fn insert_index_above_puts_the_node_in_front_of_the_child_at_pos() {
+        let rev = frame_with_children(true, 3, true);
+        let plain = frame_with_children(false, 3, true);
+        for pos in 0..3 {
+            let mut stored = rev.children.clone();
+            stored.insert(rev.insert_index_above(pos), NodeId(99));
+            let above = stored.iter().position(|c| *c == NodeId(99)).unwrap();
+            let target = stored.iter().position(|c| *c == rev.children[pos]).unwrap();
+            assert_eq!(above + 1, target, "first-on-top: stored just before the target is in front of it (pos {pos})");
+
+            let mut stored = plain.children.clone();
+            stored.insert(plain.insert_index_above(pos), NodeId(99));
+            let above = stored.iter().position(|c| *c == NodeId(99)).unwrap();
+            let target = stored.iter().position(|c| *c == plain.children[pos]).unwrap();
+            assert_eq!(above, target + 1, "plain: stored just after the target is in front of it (pos {pos})");
+        }
+        assert_eq!((rev.insert_index_above(1), plain.insert_index_above(1)), (1, 2));
     }
 }
