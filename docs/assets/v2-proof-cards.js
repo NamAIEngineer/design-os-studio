@@ -5,7 +5,7 @@
 (function () {
   'use strict';
   var V2 = window.V2 = window.V2 || {};
-  var TRAVEL = 130;                 // pinned scroll distance, in percent of the viewport height
+  var TRAVEL = 100;                 // pinned scroll distance, in percent of the viewport height; all pins together stay near 4,000 px at 900 px tall
   var TILT = [14, 0, -14], ROLL = [-4, 0, 4], DROP = [18, 0, 18], SPREAD = [-20, 0, 20];
   var FLIP_AT = [0.38, 0.54, 0.70]; // each card turns over a 0.30 window of progress
 
