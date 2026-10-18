@@ -157,24 +157,44 @@ pub(super) fn check(doc: &Document, index: &Index, n: &Node, out: &mut Vec<Findi
     if matches!(n.kind, NodeKind::Unknown { .. }) {
         return;
     }
-    paints_rule(doc, index, n, Slot::Fill, out);
-    if n.stroke.weight > 0.0 {
-        paints_rule(doc, index, n, Slot::Stroke, out);
+    let resolved = designos_doc::resolved_node(doc, n.id);
+    let rn = resolved.as_deref().unwrap_or(n);
+    let src_resolved = n.component.source.and_then(|s| designos_doc::resolved_node(doc, s));
+    if n.component.source.is_some() && src_resolved.is_none() {
+        return;
     }
-    text_rule(doc, n, out);
-    effects_rule(doc, n, out);
+    let src = src_resolved.as_deref();
+    paints_rule(doc, index, rn, src, Slot::Fill, out);
+    if rn.stroke.weight > 0.0 {
+        paints_rule(doc, index, rn, src, Slot::Stroke, out);
+    }
+    text_rule(doc, rn, src, out);
+    effects_rule(doc, rn, src, out);
 }
 
-fn paints_rule(doc: &Document, index: &Index, n: &Node, slot: Slot, out: &mut Vec<Finding>) {
+fn paints_rule(doc: &Document, index: &Index, n: &Node, src: Option<&Node>, slot: Slot, out: &mut Vec<Finding>) {
     let paints = slot.paints(n);
     if paints.is_empty() || n.style_refs.contains_key(slot.ref_key()) {
         return;
+    }
+    if let Some(s) = src {
+        let same_paints = slot.paints(s) == paints && s.style_refs.get(slot.ref_key()) == n.style_refs.get(slot.ref_key());
+        let same_bindings = (0..paints.len()).all(|i| {
+            let key = format!("{}/{i}", slot.prefix());
+            s.variables.bindings.get(&key) == n.variables.bindings.get(&key)
+        });
+        if same_paints && same_bindings {
+            return;
+        }
     }
     let mut matched_variable = false;
     for (i, p) in paints.iter().enumerate() {
         let PaintKind::Solid(c) = &p.kind else { continue };
         let key = format!("{}/{i}", slot.prefix());
         if !p.visible || n.variables.bindings.contains_key(&key) {
+            continue;
+        }
+        if src.is_some_and(|s| slot.paints(s).get(i) == Some(p) && s.variables.bindings.get(&key) == n.variables.bindings.get(&key)) {
             continue;
         }
         match index.find(doc, n, &key, c) {
@@ -208,10 +228,18 @@ fn same_text_style(own: &TextStyle, style: &TextStyle) -> bool {
     TextStyle { fills: own.fills.clone(), ..style.clone() } == *own
 }
 
-fn text_rule(doc: &Document, n: &Node, out: &mut Vec<Finding>) {
+fn text_rule(doc: &Document, n: &Node, src: Option<&Node>, out: &mut Vec<Finding>) {
     let NodeKind::Text(t) = &n.kind else { return };
     if n.style_refs.contains_key("text") {
         return;
+    }
+    if let Some(NodeKind::Text(st)) = src.map(|s| &s.kind) {
+        if same_text_style(&t.style, &st.style)
+            && t.runs.len() == st.runs.len()
+            && t.runs.iter().zip(&st.runs).all(|(a, b)| same_text_style(&a.style, &b.style))
+        {
+            return;
+        }
     }
     let style =
         doc.styles.iter().find(|(_, s)| matches!(s, Style::Text(ts) if same_text_style(&t.style, ts) && t.runs.iter().all(|r| same_text_style(&r.style, ts))));
@@ -221,8 +249,11 @@ fn text_rule(doc: &Document, n: &Node, out: &mut Vec<Finding>) {
     }
 }
 
-fn effects_rule(doc: &Document, n: &Node, out: &mut Vec<Finding>) {
+fn effects_rule(doc: &Document, n: &Node, src: Option<&Node>, out: &mut Vec<Finding>) {
     if n.effects.is_empty() || n.style_refs.contains_key("effect") {
+        return;
+    }
+    if src.is_some_and(|s| s.effects == n.effects) {
         return;
     }
     let style = doc.styles.iter().find(|(_, s)| matches!(s, Style::Effect(fx) if *fx == n.effects));
