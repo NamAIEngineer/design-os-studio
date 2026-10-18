@@ -293,7 +293,10 @@ impl Renderer<'_> {
         if !n.visible {
             return false;
         }
-        n.effects.iter().any(|e| matches!(e, Effect::BackgroundBlur { visible: true, radius } if *radius > 0.0) || matches!(e, Effect::Glass(g) if g.visible))
+        (!matches!(n.kind, NodeKind::Unknown { .. })
+            && n.effects
+                .iter()
+                .any(|e| matches!(e, Effect::BackgroundBlur { visible: true, radius } if *radius > 0.0) || matches!(e, Effect::Glass(g) if g.visible)))
             || (Self::draws_children(n) && n.children.iter().any(|c| self.doc.get(*c).is_some_and(|c| self.has_bg_blur(c))))
     }
 
@@ -312,7 +315,13 @@ impl Renderer<'_> {
     }
 
     fn draw_node(&self, n: &Node, ts: sk::Transform, target: &mut sk::Pixmap, clip: Option<&sk::Mask>, back: Back) {
-        if !n.visible || matches!(n.kind, NodeKind::Unknown { .. } | NodeKind::Page { .. }) {
+        if !n.visible || matches!(n.kind, NodeKind::Page { .. }) {
+            return;
+        }
+        if matches!(n.kind, NodeKind::Unknown { .. }) {
+            if !n.children.is_empty() {
+                self.draw_children(&n.children, ts, target, clip, back);
+            }
             return;
         }
         if n.kind.is_board_item() {
@@ -484,6 +493,7 @@ impl Renderer<'_> {
 
         // 5. children
         if Self::draws_children(n) {
+            let kids = n.paint_children();
             let clips = n.kind.frame_props().map(|f| f.clips_content).unwrap_or(false);
             if clips {
                 let (w, h) = (target.width(), target.height());
@@ -492,9 +502,9 @@ impl Renderer<'_> {
                 if let Some(c) = clip {
                     mask_mul(&mut m, c);
                 }
-                self.draw_children(&n.children, ts, target, Some(&m), back);
+                self.draw_children(&kids, ts, target, Some(&m), back);
             } else {
-                self.draw_children(&n.children, ts, target, clip, back);
+                self.draw_children(&kids, ts, target, clip, back);
             }
         }
     }
@@ -518,7 +528,11 @@ impl Renderer<'_> {
         if let Some(tl) = tl {
             for (i, path) in tl.paths.iter().enumerate() {
                 if let Some(path) = path {
-                    let a = if opaque { 1.0 } else { tl.styles[i].fills.iter().filter(|p| p.visible).map(|p| p.opacity).fold(0.0, f32::max) };
+                    let a = if opaque {
+                        1.0
+                    } else {
+                        tl.styles[i].fills.iter().filter(|p| p.visible).map(designos_doc::Paint::silhouette_alpha).fold(0.0, f32::max)
+                    };
                     pm.fill_path(path, &black_paint(a), sk::FillRule::Winding, ts2, None);
                 }
             }
@@ -532,15 +546,7 @@ impl Renderer<'_> {
                     }
                 } else if sh.fillable {
                     for p in &fills {
-                        let a = if opaque {
-                            1.0
-                        } else {
-                            let base = match &p.kind {
-                                designos_doc::PaintKind::Solid(c) => c.a,
-                                _ => 1.0,
-                            };
-                            base * p.opacity
-                        };
+                        let a = if opaque { 1.0 } else { p.silhouette_alpha() };
                         let paint = black_paint(a);
                         for (path, rule) in sh.fill_paths() {
                             pm.fill_path(path, &paint, *rule, ts2, None);
@@ -578,8 +584,9 @@ impl Renderer<'_> {
             }
         }
         if Self::draws_children(n) {
+            let kids = n.paint_children();
             // silhouettes are drawn offset from the page grid, so no culling
-            Renderer { doc: self.doc, env: PaintEnv { doc: self.doc }, cull: None }.draw_children(&n.children, ts2, pm, None, None);
+            Renderer { doc: self.doc, env: PaintEnv { doc: self.doc }, cull: None }.draw_children(&kids, ts2, pm, None, None);
         }
     }
 
@@ -657,36 +664,11 @@ impl Renderer<'_> {
         }
 
         // per-side weights on rectangles
-        if let (Some(sw), true) = (n.stroke.side_weights, sh.is_rect) {
-            let [t, r, b, l] = sw;
-            let f = match align {
-                designos_doc::StrokeAlign::Inside => 0.0,
-                designos_doc::StrokeAlign::Center => 0.5,
-                designos_doc::StrokeAlign::Outside => 1.0,
-            };
-            let (w, h) = (n.size.x, n.size.y);
-            let mut pb = sk::PathBuilder::new();
-            let mut rect = |x: f32, y: f32, rw: f32, rh: f32| {
-                if let Some(rc) = sk::Rect::from_xywh(x, y, rw, rh) {
-                    pb.push_rect(rc);
-                }
-            };
-            if t > 0.0 {
-                rect(-f * l, -f * t, w + f * l + f * r, t);
-            }
-            if b > 0.0 {
-                rect(-f * l, h - (1.0 - f) * b, w + f * l + f * r, b);
-            }
-            if l > 0.0 {
-                rect(-f * l, -f * t, l, h + f * t + f * b);
-            }
-            if r > 0.0 {
-                rect(w - (1.0 - f) * r, -f * t, r, h + f * t + f * b);
-            }
-            if let Some(path) = pb.finish() {
+        if sh.is_rect && n.stroke.side_weights.is_some() {
+            if let Some(path) = outline::per_side_stroke_path(n, align) {
                 let rounded = n.corner_radii.iter().any(|v| *v > 0.0);
                 let paths = [(path, sk::FillRule::Winding)];
-                let mask = if rounded && align == designos_doc::StrokeAlign::Inside {
+                let mask = if rounded && n.corner_smoothing > 0.0 && align == designos_doc::StrokeAlign::Inside {
                     shape_mask(tw, th, sh.fill_paths(), ts).map(|mut m| {
                         if let Some(c) = clip {
                             mask_mul(&mut m, c);

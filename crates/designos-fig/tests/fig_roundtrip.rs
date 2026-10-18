@@ -29,6 +29,139 @@ fn commands_blob_roundtrip_preserves_all_verbs_and_winding_rules() {
 }
 
 #[test]
+fn roundtrip_preserves_node_count_across_saves_and_keeps_instance_child_alignment() {
+    let g = |s: u32, l: u32| json!({"sessionID": s, "localID": l});
+    let node = |guid: (u32, u32), parent: (u32, u32), pos: &str, ty: &str, name: &str, extra: Value| -> Value {
+        let mut m = json!({
+            "guid": g(guid.0, guid.1),
+            "phase": "CREATED",
+            "parentIndex": {"guid": g(parent.0, parent.1), "position": pos},
+            "type": ty,
+            "name": name,
+            "visible": true,
+            "opacity": 1.0,
+            "size": {"x": 100.0, "y": 40.0},
+            "transform": {"m00": 1.0, "m01": 0.0, "m02": 0.0, "m10": 0.0, "m11": 1.0, "m12": 0.0}
+        });
+        if let (Some(dst), Some(src)) = (m.as_object_mut(), extra.as_object()) {
+            for (k, v) in src {
+                dst.insert(k.clone(), v.clone());
+            }
+        }
+        m
+    };
+
+    // Document with:
+    // - 2 shared styles on Internal Only Canvas (and an external component so library_page exists)
+    // - A main component `Calendar` containing a nested auto-layout child `_Button group base`
+    //   with `stackPrimaryAlignItems: "CENTER"` and `stackCounterAlignItems: "CENTER"`.
+    // - An instance `CalendarInst` whose `symbolOverrides` overrides `stackPrimarySizing: "FIXED"`
+    //   (or `stackChildPrimaryGrow: 1.0`) on `_Button group base` without overriding its alignment.
+    let changes = json!([
+        node((0, 0), (0, 0), "!", "DOCUMENT", "RoundtripDoc", json!({})),
+        node((0, 1), (0, 0), "a", "CANVAS", "↳ Calendars", json!({})),
+        node((0, 2), (0, 0), "b", "CANVAS", "Internal Only Canvas", json!({"internalOnly": true})),
+        node((5, 1), (0, 2), "a", "SYMBOL", "LibComp", json!({"componentKey": "LIB_COMP_1", "sourceLibraryKey": "lib_ext"})),
+        node(
+            (7, 1),
+            (0, 2),
+            "b",
+            "RECTANGLE",
+            "Brand/Primary",
+            json!({
+                "styleType": "FILL",
+                "key": "STYLE_FILL_1",
+                "fillPaints": [{"type": "SOLID", "color": {"r": 0.1, "g": 0.2, "b": 0.8, "a": 1.0}, "opacity": 1.0, "visible": true}]
+            })
+        ),
+        node(
+            (7, 2),
+            (0, 2),
+            "c",
+            "RECTANGLE",
+            "Shadow/Sm",
+            json!({
+                "styleType": "EFFECT",
+                "key": "STYLE_FX_1",
+                "effects": [{"type": "DROP_SHADOW", "color": {"r": 0.0, "g": 0.0, "b": 0.0, "a": 0.2}, "offset": {"x": 0.0, "y": 2.0}, "radius": 4.0, "spread": 0.0, "visible": true}]
+            })
+        ),
+        node(
+            (1, 10),
+            (0, 1),
+            "a",
+            "SYMBOL",
+            "Calendar",
+            json!({
+                "size": {"x": 300.0, "y": 300.0},
+                "stackMode": "VERTICAL",
+                "stackPrimarySizing": "FIXED",
+                "stackCounterSizing": "FIXED"
+            })
+        ),
+        node(
+            (1, 11),
+            (1, 10),
+            "a",
+            "FRAME",
+            "_Button group base",
+            json!({
+                "overrideKey": g(9, 11),
+                "size": {"x": 263.0, "y": 36.0},
+                "styleIdForFill": {"guid": g(7, 1)},
+                "styleIdForEffect": {"guid": g(7, 2)},
+                "stackMode": "HORIZONTAL",
+                "stackPrimaryAlignItems": "CENTER",
+                "stackCounterAlignItems": "CENTER",
+                "stackPrimarySizing": "RESIZE_TO_FIT",
+                "stackCounterSizing": "FIXED"
+            })
+        ),
+        node(
+            (1, 20),
+            (0, 1),
+            "b",
+            "INSTANCE",
+            "CalendarInst",
+            json!({
+                "size": {"x": 300.0, "y": 300.0},
+                "symbolData": {
+                    "symbolID": g(1, 10),
+                    "symbolOverrides": [
+                        {
+                            "guidPath": {"guids": [g(9, 11)]},
+                            "stackPrimarySizing": "FIXED",
+                            "stackChildPrimaryGrow": 1.0
+                        }
+                    ]
+                }
+            })
+        )
+    ]);
+
+    let doc1 = import_fig_node_changes(&changes, "RoundtripDoc").expect("import 1");
+    let inst_btn_align = |doc: &Document| -> (LayoutAlign, LayoutAlign) {
+        let inst = find(doc, "CalendarInst");
+        let btn_id = inst.children[0];
+        let btn = doc.get(btn_id).expect("_Button group base in instance");
+        let al = btn.kind.frame_props().and_then(|f| f.auto_layout.as_ref()).expect("auto_layout on _Button group base");
+        (al.primary_align, al.counter_align)
+    };
+    assert_eq!(inst_btn_align(&doc1), (LayoutAlign::Center, LayoutAlign::Center));
+    assert_eq!(doc1.styles.len(), 2);
+
+    let bytes1 = export_fig(&doc1).expect("export 1");
+    let doc2 = import_fig(&bytes1).expect("import 2");
+    assert_eq!(doc2.nodes.len(), doc1.nodes.len(), "save-and-reopen cycle 1 must not add extra nodes");
+    assert_eq!(inst_btn_align(&doc2), (LayoutAlign::Center, LayoutAlign::Center), "_Button group base alignment must stay Center/Center after roundtrip 1");
+
+    let bytes2 = export_fig(&doc2).expect("export 2");
+    let doc3 = import_fig(&bytes2).expect("import 3");
+    assert_eq!(doc3.nodes.len(), doc1.nodes.len(), "save-and-reopen cycle 2 must not add extra nodes");
+    assert_eq!(inst_btn_align(&doc3), (LayoutAlign::Center, LayoutAlign::Center), "_Button group base alignment must stay Center/Center after roundtrip 2");
+}
+
+#[test]
 fn export_fig_then_import_fig_roundtrips_sample_and_rich_documents() {
     // 1. Roundtrip the canonical sample_fig fixture through export_fig -> import_fig
     let raw = sample_fig(designos_fig::container::Compression::Zstd, true);
@@ -2948,6 +3081,57 @@ fn wire_instance_override(bytes: &[u8], instance_name: &str, main_edit: Option<(
 }
 
 #[test]
+fn passthrough_color_struct_array_and_quoted_string_roundtrip() {
+    let g = |s: u64, l: u64| -> Value { json!({"sessionID": s, "localID": l}) };
+    let changes = json!([
+        {"guid": g(0, 0), "type": "DOCUMENT", "name": "PassthroughHardeningDoc"},
+        {"guid": g(0, 1), "parentIndex": {"guid": g(0, 0), "position": "a"}, "type": "CANVAS", "name": "Page 1"},
+        {
+            "guid": g(1, 10),
+            "parentIndex": {"guid": g(0, 1), "position": "a"},
+            "type": "SLIDE",
+            "name": "SlideNode",
+            "phase": "CREATED",
+            "visible": true,
+            "opacity": 1.0,
+            "size": {"x": 200.0, "y": 100.0},
+            "transform": {"m00": 1.0, "m01": 0.0, "m02": 0.0, "m10": 0.0, "m11": 1.0, "m12": 0.0},
+            "slideSpeakerNotes": "\"quoted\"",
+            "keyframeValue": {
+                "colorValue": {"r": 1.0, "g": 0.0, "b": 0.0}
+            },
+            "variableWidthPoints": [
+                {"asymmetricStroke": false, "position": 0.25, "leadingWidth": 2.0, "trailingWidth": 4.0},
+                {"position": "nope"}
+            ]
+        }
+    ]);
+
+    let doc = import_fig_node_changes(&changes, "PassthroughHardeningDoc").expect("import PassthroughHardeningDoc");
+    let bytes = export_fig(&doc).expect("export_fig PassthroughHardeningDoc");
+    let rt = import_fig(&bytes).expect("re-import PassthroughHardeningDoc");
+    let slide = find(&rt, "SlideNode");
+
+    // 1. A speaker note stored as `"quoted"` must keep its leading and trailing quotes.
+    assert_eq!(slide.fig_metadata.get("slideSpeakerNotes").map(String::as_str), Some("\"quoted\""));
+
+    // 2. A passthrough Color struct without `a` defaults `a` to 1.0 (opaque), not 0.0.
+    let kf_raw = slide.fig_metadata.get("keyframeValue").expect("keyframeValue in fig_metadata");
+    let kf_json: Value = serde_json::from_str(kf_raw).expect("parse keyframeValue JSON");
+    assert_eq!(kf_json["colorValue"]["r"].as_f64(), Some(1.0));
+    assert_eq!(kf_json["colorValue"]["a"].as_f64(), Some(1.0), "Color.a must default to 1.0 when omitted: {kf_json}");
+
+    // 3. One malformed element in an array must be skipped without dropping the valid elements.
+    let vwp_raw = slide.fig_metadata.get("variableWidthPoints").expect("variableWidthPoints kept in fig_metadata");
+    let vwp_json: Value = serde_json::from_str(vwp_raw).expect("parse variableWidthPoints JSON");
+    let arr = vwp_json.as_array().expect("variableWidthPoints array");
+    assert_eq!(arr.len(), 1, "valid element must survive when a sibling element is malformed: {arr:?}");
+    assert_eq!(arr[0]["position"].as_f64(), Some(0.25));
+    assert_eq!(arr[0]["leadingWidth"].as_f64(), Some(2.0));
+    assert_eq!(arr[0]["trailingWidth"].as_f64(), Some(4.0));
+}
+
+#[test]
 fn per_side_stroke_weights_ignore_stale_borders_and_merge_partial_overrides() {
     let g = |s: u64, l: u64| -> Value { json!({"sessionID": s, "localID": l}) };
     let node = |id: (u64, u64), parent: (u64, u64), pos: &str, ty: &str, name: &str, extra: Value| -> Value {
@@ -3059,4 +3243,78 @@ fn per_side_stroke_weights_ignore_stale_borders_and_merge_partial_overrides() {
     let inst = find(&doc, "CalendarHeaderInst");
     let cell = inst.children.iter().filter_map(|id| doc.get(*id)).find(|n| n.name == "CellDivider").expect("CellDivider in CalendarHeaderInst");
     assert_eq!(cell.stroke.side_weights, Some([0.0, 1.0, 0.0, 0.0]), "partial borderBottomWeight override must preserve borderRightWeight");
+}
+
+#[test]
+fn radial_gradient_transform_imports_centred_handles_and_roundtrips() {
+    let g = |s: u64, l: u64| -> Value { json!({"sessionID": s, "localID": l}) };
+    // 90° clockwise gradient-space transform from Untitled UI `_Background mask` (4932:396988):
+    // centered at (0.5, 0.5) with radius 0.5 in normalized node coordinates.
+    let rot90 = json!({"m00": 0.0, "m01": 1.0, "m02": 0.0, "m10": -1.0, "m11": 0.0, "m12": 1.0});
+    let stops = json!([
+        {"position": 0.0, "color": {"r": 0.0, "g": 0.0, "b": 0.0, "a": 1.0}},
+        {"position": 1.0, "color": {"r": 0.0, "g": 0.0, "b": 0.0, "a": 0.0}}
+    ]);
+    let changes = json!([
+        {"guid": g(0, 0), "type": "DOCUMENT", "name": "RadialDoc"},
+        {"guid": g(0, 1), "parentIndex": {"guid": g(0, 0), "position": "!"}, "type": "CANVAS", "name": "Page 1"},
+        {
+            "guid": g(1, 10),
+            "parentIndex": {"guid": g(0, 1), "position": "!"},
+            "type": "RECTANGLE",
+            "name": "BackgroundMask",
+            "phase": "CREATED",
+            "visible": true,
+            "opacity": 1.0,
+            "size": {"x": 200.0, "y": 100.0},
+            "transform": {"m00": 1.0, "m01": 0.0, "m02": 0.0, "m10": 0.0, "m11": 1.0, "m12": 0.0},
+            "fillPaints": [
+                {
+                    "type": "GRADIENT_RADIAL",
+                    "opacity": 1.0,
+                    "visible": true,
+                    "blendMode": "NORMAL",
+                    "transform": rot90,
+                    "stops": stops
+                },
+                {
+                    "type": "GRADIENT_ANGULAR",
+                    "opacity": 1.0,
+                    "visible": true,
+                    "blendMode": "NORMAL",
+                    "transform": rot90,
+                    "stops": stops
+                },
+                {
+                    "type": "GRADIENT_DIAMOND",
+                    "opacity": 1.0,
+                    "visible": true,
+                    "blendMode": "NORMAL",
+                    "transform": rot90,
+                    "stops": stops
+                }
+            ]
+        }
+    ]);
+
+    let doc = import_fig_node_changes(&changes, "RadialDoc").expect("import RadialDoc");
+    let check = |doc: &Document| {
+        let mask = find(doc, "BackgroundMask");
+        assert_eq!(mask.fills.len(), 3);
+        let expected = [Vec2::new(0.5, 0.5), Vec2::new(0.5, 1.0), Vec2::new(0.0, 0.5)];
+        for (i, fill) in mask.fills.iter().enumerate() {
+            let handles = match &fill.kind {
+                PaintKind::RadialGradient { handles, .. } | PaintKind::AngularGradient { handles, .. } | PaintKind::DiamondGradient { handles, .. } => handles,
+                other => panic!("fill {i}: expected radial/angular/diamond gradient, got {other:?}"),
+            };
+            for (h, e) in handles.iter().zip(expected.iter()) {
+                assert!((h.x - e.x).abs() < 1e-5 && (h.y - e.y).abs() < 1e-5, "fill {i}: got {handles:?}, expected {expected:?}");
+            }
+        }
+    };
+    check(&doc);
+
+    let bytes = export_fig(&doc).expect("export_fig RadialDoc");
+    let rt = import_fig(&bytes).expect("re-import RadialDoc");
+    check(&rt);
 }

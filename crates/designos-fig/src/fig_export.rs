@@ -157,6 +157,9 @@ impl<'a> ExportCtx<'a> {
         };
         // First pass: reserve explicit `s:l` GUIDs so generated ones never collide.
         for (&id, n) in &doc.nodes {
+            if doc.library_page.is_some_and(|lp| n.parent == Some(lp)) && n.source_id.as_deref().is_some_and(|sid| doc.styles.contains_key(sid)) {
+                continue;
+            }
             if let Some(g) = n.source_id.as_deref().and_then(parse_guid_pair) {
                 if cx.used_guids.insert(g) {
                     cx.next_local = cx.next_local.max(g.1.saturating_add(1));
@@ -375,6 +378,9 @@ fn build_message(doc: &Document, schema: &crate::kiwi::Schema) -> V {
             if let Some(lib_page) = doc.get(lp) {
                 let kids = lib_page.children.clone();
                 for cid in kids {
+                    if doc.get(cid).and_then(|n| n.source_id.as_deref()).is_some_and(|sid| doc.styles.contains_key(sid)) {
+                        continue;
+                    }
                     export_node_rec(&mut cx, cid, iguid, internal_idx, None, false);
                     internal_idx += 1;
                 }
@@ -833,6 +839,10 @@ fn export_node_rec(cx: &mut ExportCtx, id: NodeId, parent_guid: (u32, u32), sibl
             fields.push(("stackWrap", en(if al.wrap { "WRAP" } else { "NO_WRAP" })));
             fields.push(("bordersTakeSpace", V::Bool(al.stroke_included)));
             fields.push(("stackReverseZIndex", V::Bool(al.reverse_z)));
+        } else if clears_inherited_auto_layout(&node) {
+            // An instance without auto layout over a component that has it must say so, or an importer
+            // would hand the component's layout back to it.
+            fields.push(("stackMode", en("NONE")));
         }
     }
 
@@ -885,8 +895,9 @@ fn export_node_rec(cx: &mut ExportCtx, id: NodeId, parent_guid: (u32, u32), sibl
         fields.push(("gridRowSpan", V::Uint(u32::from(lc.row_span))));
     }
     for (k, a) in [("gridChildHorizontalAlign", lc.grid_align_h), ("gridChildVerticalAlign", lc.grid_align_v)] {
-        if writes_grid_child_align(a, parent_dir) {
-            fields.push((k, en(grid_child_align_name(a))));
+        let eff = if a == GridChildAlign::Start { node.fig_metadata.get(k).and_then(|s| GridChildAlign::from_figma_name(s)).unwrap_or(a) } else { a };
+        if writes_grid_child_align(eff, parent_dir) {
+            fields.push((k, en(grid_child_align_name(eff))));
         }
     }
     if lc.min_w.is_some() || lc.min_h.is_some() {
@@ -1292,6 +1303,13 @@ pub(crate) fn format_grid_auto_tracks(gat: GridAutoTracks) -> Option<String> {
     }
 }
 
+/// True for a frame or instance whose auto layout was removed on purpose (`layout_cleared`): the file needs
+/// an explicit `stackMode: NONE` to keep it that way. A node that merely lacks auto layout, or only has
+/// some other layout field overridden, must not be written with it.
+fn clears_inherited_auto_layout(n: &Node) -> bool {
+    n.component.layout_cleared && n.kind.frame_props().is_some_and(|fp| fp.auto_layout.is_none())
+}
+
 fn encode_node_var_entries(cx: &ExportCtx, vars: &NodeVariables) -> Vec<V> {
     let mut var_entries = Vec::new();
     for (k, vid) in &vars.bindings {
@@ -1499,8 +1517,37 @@ fn collect_instance_overrides(cx: &ExportCtx, inst_id: NodeId) -> Vec<V> {
                         ov.push(("stackPaddingRight", fl(al.padding[1])));
                         ov.push(("stackPaddingBottom", fl(al.padding[2])));
                         ov.push(("stackPaddingLeft", fl(al.padding[3])));
+                        ov.push(("stackHorizontalPadding", fl(al.padding[3])));
+                        ov.push(("stackVerticalPadding", fl(al.padding[0])));
+                        let align_name = |a: LayoutAlign| match a {
+                            LayoutAlign::Start => "MIN",
+                            LayoutAlign::Center => "CENTER",
+                            LayoutAlign::End => "MAX",
+                            LayoutAlign::SpaceBetween => "SPACE_BETWEEN",
+                            LayoutAlign::Baseline => "BASELINE",
+                            LayoutAlign::SpaceAround | LayoutAlign::SpaceEvenly => "SPACE_BETWEEN",
+                        };
+                        let justify_name = match al.primary_align {
+                            LayoutAlign::SpaceAround => "SPACE_AROUND",
+                            LayoutAlign::SpaceEvenly => "SPACE_EVENLY_CSS",
+                            LayoutAlign::Baseline => "MIN",
+                            other => align_name(other),
+                        };
+                        ov.push(("stackPrimaryAlignItems", en(justify_name)));
+                        ov.push(("stackCounterAlignItems", en(align_name(al.counter_align))));
+                        if al.counter_align_content == CounterAlignContent::SpaceBetween {
+                            ov.push(("stackCounterAlignContent", en("SPACE_BETWEEN")));
+                        }
+                        if al.layout_version > 0 {
+                            ov.push(("stackLayoutVersion", V::Uint(al.layout_version as u32)));
+                        }
                         ov.push(("stackPrimarySizing", en(if al.primary_sizing == Sizing::Hug { "RESIZE_TO_FIT" } else { "FIXED" })));
                         ov.push(("stackCounterSizing", en(if al.counter_sizing == Sizing::Hug { "RESIZE_TO_FIT_WITH_IMPLICIT_SIZE" } else { "FIXED" })));
+                        ov.push(("stackWrap", en(if al.wrap { "WRAP" } else { "NO_WRAP" })));
+                        ov.push(("bordersTakeSpace", V::Bool(al.stroke_included)));
+                        ov.push(("stackReverseZIndex", V::Bool(al.reverse_z)));
+                    } else if clears_inherited_auto_layout(n) {
+                        ov.push(("stackMode", en("NONE")));
                     }
                 }
                 let parent_dir =
@@ -1550,11 +1597,11 @@ fn collect_instance_overrides(cx: &ExportCtx, inst_id: NodeId) -> Vec<V> {
                 // both axes are written.
                 let main_lc = n.component.source.and_then(|s| cx.doc.get(s)).map(|s| s.layout_child);
                 let axes = [
-                    ("gridChildHorizontalAlign", lc.grid_align_h, main_lc.map(|m| m.grid_align_h)),
-                    ("gridChildVerticalAlign", lc.grid_align_v, main_lc.map(|m| m.grid_align_v)),
+                    ("gridChildHorizontalAlign", lc.grid_align_h, main_lc.map(|m| m.grid_align_h), n.component.grid_align_overrides[0]),
+                    ("gridChildVerticalAlign", lc.grid_align_v, main_lc.map(|m| m.grid_align_v), n.component.grid_align_overrides[1]),
                 ];
-                for (k, a, main) in axes {
-                    if main != Some(a) {
+                for (k, a, main, axis_overridden) in axes {
+                    if axis_overridden || main != Some(a) {
                         ov.push((k, en(grid_child_align_name(a))));
                     }
                 }
@@ -1686,15 +1733,28 @@ fn encode_matrix(xf: &Affine) -> V {
     st(vec![("m00", fl_one(xf.a)), ("m01", fl(xf.c)), ("m02", fl(xf.tx)), ("m10", fl(xf.b)), ("m11", fl_one(xf.d)), ("m12", fl(xf.ty))])
 }
 
-fn gradient_matrix_from_handles(h: &[Vec2; 3]) -> V {
-    // Inverse of `fig.rs` `convert_paint`: `inv` maps `(0, 0.5) -> h[0]`, `(1, 0.5) -> h[1]`, `(0, 1.0) -> h[2]`.
-    let inv = Affine {
-        a: h[1].x - h[0].x,
-        b: h[1].y - h[0].y,
-        c: 2.0 * (h[2].x - h[0].x),
-        d: 2.0 * (h[2].y - h[0].y),
-        tx: 2.0 * h[0].x - h[2].x,
-        ty: 2.0 * h[0].y - h[2].y,
+fn gradient_matrix_from_handles(ty: &str, h: &[Vec2; 3]) -> V {
+    // Inverse of `fig.rs` `convert_paint`:
+    // - `GRADIENT_LINEAR`: `inv` maps `(0, 0.5) -> h[0]`, `(1, 0.5) -> h[1]`, `(0, 1.0) -> h[2]`.
+    // - `GRADIENT_RADIAL` / `GRADIENT_ANGULAR` / `GRADIENT_DIAMOND`: `inv` maps `(0.5, 0.5) -> h[0]`, `(1, 0.5) -> h[1]`, `(0.5, 1.0) -> h[2]`.
+    let inv = if ty == "GRADIENT_LINEAR" {
+        Affine {
+            a: h[1].x - h[0].x,
+            b: h[1].y - h[0].y,
+            c: 2.0 * (h[2].x - h[0].x),
+            d: 2.0 * (h[2].y - h[0].y),
+            tx: 2.0 * h[0].x - h[2].x,
+            ty: 2.0 * h[0].y - h[2].y,
+        }
+    } else {
+        Affine {
+            a: 2.0 * (h[1].x - h[0].x),
+            b: 2.0 * (h[1].y - h[0].y),
+            c: 2.0 * (h[2].x - h[0].x),
+            d: 2.0 * (h[2].y - h[0].y),
+            tx: 3.0 * h[0].x - h[1].x - h[2].x,
+            ty: 3.0 * h[0].y - h[1].y - h[2].y,
+        }
     };
     let xf = inv.invert().unwrap_or(Affine::IDENTITY);
     encode_matrix(&xf)
@@ -1713,7 +1773,7 @@ fn encode_paint(p: &Paint, color_var: Option<V>, opacity_var: Option<V>) -> V {
         fields.push(("type", en(ty)));
         let st_list: Vec<V> = stops.iter().map(|s| st(vec![("color", color(s.color.r, s.color.g, s.color.b, s.color.a)), ("position", fl(s.pos))])).collect();
         fields.push(("stops", V::Array(st_list)));
-        fields.push(("transform", gradient_matrix_from_handles(handles)));
+        fields.push(("transform", gradient_matrix_from_handles(ty, handles)));
     };
     match &p.kind {
         PaintKind::Solid(c) => {

@@ -199,6 +199,9 @@ pub struct App {
     pub tabs: crate::tabs::TabsState,
     /// Two-digit rapid opacity keystroke buffer (`(digit, timestamp)` within 400ms).
     pub opacity_buffer: Option<(u8, f64)>,
+    /// Non-finite or save warning produced by `save_library_file` / `flush_autosave` during a document
+    /// switch, carried into an immediate follow-up `show_toast` so `"Opened X"` does not overwrite it.
+    pub(crate) pending_flush_notice: Option<(f64, String)>,
 }
 
 impl App {
@@ -254,6 +257,7 @@ impl App {
             check_designs: Default::default(),
             tabs: Default::default(),
             opacity_buffer: None,
+            pending_flush_notice: None,
         }
     }
 
@@ -271,7 +275,15 @@ impl App {
     }
 
     pub fn show_toast(&mut self, text: impl Into<String>, error: bool) {
-        self.toast = Some(Toast { text: text.into(), until: self.now + theme::TOAST_SECONDS, error });
+        let mut text = text.into();
+        let mut error = error;
+        if let Some((at, prev)) = self.pending_flush_notice.take() {
+            if (at - self.now).abs() < f64::EPSILON && self.toast.as_ref().is_some_and(|t| t.text == prev) && text != prev {
+                text = format!("{text} ({prev})");
+                error = true;
+            }
+        }
+        self.toast = Some(Toast { text, until: self.now + theme::TOAST_SECONDS, error });
     }
 
     /// Marks the document as modified so the canvas texture is re-rendered.
@@ -304,7 +316,7 @@ impl App {
     /// The deferred layout moved nodes behind the canvas's back: bump the revision (the CPU scene
     /// index and the autosave watch it), drop the cached tiles and GPU geometry, and tell the
     /// user how much is still unfinished, or retire that notice once nothing is.
-    fn relayout_moved_geometry(&mut self) {
+    pub(crate) fn relayout_moved_geometry(&mut self) {
         self.changed();
         self.canvas.tiles.invalidate_all();
         match self.doc.relayout_notice() {

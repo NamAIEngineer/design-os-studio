@@ -691,7 +691,10 @@ impl Ctx<'_> {
         if !n.visible {
             return false;
         }
-        n.effects.iter().any(|e| matches!(e, Effect::BackgroundBlur { visible: true, radius } if *radius > 0.0) || matches!(e, Effect::Glass(g) if g.visible))
+        (!matches!(n.kind, NodeKind::Unknown { .. })
+            && n.effects
+                .iter()
+                .any(|e| matches!(e, Effect::BackgroundBlur { visible: true, radius } if *radius > 0.0) || matches!(e, Effect::Glass(g) if g.visible)))
             || (draws_children(n) && n.children.iter().any(|c| self.doc.get(*c).is_some_and(|c| self.has_bg_blur(c))))
     }
 
@@ -722,7 +725,13 @@ impl Ctx<'_> {
     }
 
     fn draw_node(&mut self, n: &Node, ts: sk::Transform, clip: ClipId) {
-        if !n.visible || matches!(n.kind, NodeKind::Unknown { .. } | NodeKind::Page { .. }) {
+        if !n.visible || matches!(n.kind, NodeKind::Page { .. }) {
+            return;
+        }
+        if matches!(n.kind, NodeKind::Unknown { .. }) {
+            if !n.children.is_empty() {
+                self.draw_children(&n.children, ts, clip);
+            }
             return;
         }
         if n.kind.is_board_item() {
@@ -933,10 +942,10 @@ impl Ctx<'_> {
                         let r = IRect::new(x0.round() as i32, y0.round() as i32, x1.round() as i32, y1.round() as i32);
                         let cc = self.narrow_clip(clip, r);
                         if !self.visible(cc).is_empty() {
-                            self.draw_children(&n.children, ts, cc);
+                            self.draw_children(&n.paint_children(), ts, cc);
                         }
                     } else {
-                        self.draw_children(&n.children, ts, clip);
+                        self.draw_children(&n.paint_children(), ts, clip);
                     }
                 }
                 return;
@@ -1030,9 +1039,9 @@ impl Ctx<'_> {
                 if self.visible(cc).is_empty() {
                     return;
                 }
-                self.draw_children(&n.children, ts, cc);
+                self.draw_children(&n.paint_children(), ts, cc);
             } else {
-                self.draw_children(&n.children, ts, clip);
+                self.draw_children(&n.paint_children(), ts, clip);
             }
         }
     }
@@ -1130,7 +1139,7 @@ impl Ctx<'_> {
         if matches!(n.kind, NodeKind::Text(_)) {
             for (i, t) in g.text.iter().enumerate() {
                 let _ = i;
-                let a = if opaque { 1.0 } else { t.fills.iter().filter(|p| p.visible).map(|p| p.opacity).fold(0.0, f32::max) };
+                let a = if opaque { 1.0 } else { t.fills.iter().filter(|p| p.visible).map(d::Paint::silhouette_alpha).fold(0.0, f32::max) };
                 self.draw_mesh(&t.mesh, ts2, black(a), DrawBlend::Over, clip);
             }
             return;
@@ -1142,15 +1151,7 @@ impl Ctx<'_> {
                         self.draw_mesh(fill, ts2, black(1.0), DrawBlend::Over, clip);
                     } else if sh.fillable {
                         for p in visible_fills(n) {
-                            let a = if opaque {
-                                1.0
-                            } else {
-                                let base = match &p.kind {
-                                    d::PaintKind::Solid(c) => c.a,
-                                    _ => 1.0,
-                                };
-                                base * p.opacity
-                            };
+                            let a = if opaque { 1.0 } else { p.silhouette_alpha() };
                             self.draw_mesh(fill, ts2, black(a), DrawBlend::Over, clip);
                         }
                     }
@@ -1182,7 +1183,7 @@ impl Ctx<'_> {
         if draws_children(n) {
             // silhouettes are drawn offset from the page grid: no index culling
             let was = std::mem::replace(&mut self.cull, false);
-            self.draw_children(&n.children, ts2, clip);
+            self.draw_children(&n.paint_children(), ts2, clip);
             self.cull = was;
         }
     }

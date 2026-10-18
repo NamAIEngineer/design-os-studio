@@ -14,6 +14,55 @@ impl Document {
         self.relayout_bottom_up(root, &mut budget);
     }
 
+    /// Re-solves only the auto-layout frames in `seeds`, each once, deepest first, and then climbs:
+    /// after a frame is solved, its auto-layout parent is solved too only when the frame's own size
+    /// changed (a hugging frame bubbling a new size up). The climb stops at the first frame whose
+    /// size held, or at the first ancestor that is not auto layout. Unlike [`Self::relayout_subtree`]
+    /// this never walks the containers below a seed, so untouched siblings keep the positions they
+    /// have. One [`MAX_RELAYOUT_RESOLVES`] budget covers the whole call; a subtree past it is
+    /// queued in `pending_relayout` exactly as for [`Self::relayout_subtree`].
+    pub(crate) fn relayout_seeds_upward(&mut self, seeds: &[NodeId]) {
+        let depth = |doc: &Document, id: NodeId| {
+            let mut d = 0usize;
+            let mut cur = doc.get(id).and_then(|n| n.parent);
+            while let Some(p) = cur {
+                d += 1;
+                cur = doc.get(p).and_then(|n| n.parent);
+            }
+            d
+        };
+        let mut order: Vec<(usize, NodeId)> = Vec::with_capacity(seeds.len());
+        for &id in seeds {
+            if self.is_auto_layout_frame(id) && !order.iter().any(|(_, o)| *o == id) {
+                order.push((depth(self, id), id));
+            }
+        }
+        // Deepest first, so a container is solved after the children whose new sizes it reads.
+        order.sort_by_key(|(d, _)| std::cmp::Reverse(*d));
+
+        let mut budget = MAX_RELAYOUT_RESOLVES;
+        for (_, seed) in order {
+            let mut cur = seed;
+            loop {
+                let before = self.get(cur).map(|n| n.size);
+                self.solve_auto_layout_node(cur, 0, &mut budget);
+                let moved = match (before, self.get(cur).map(|n| n.size)) {
+                    (Some(b), Some(a)) => (b.x - a.x).abs() > 1e-3 || (b.y - a.y).abs() > 1e-3,
+                    _ => false,
+                };
+                let parent = self.get(cur).and_then(|n| n.parent);
+                match parent.filter(|p| moved && self.is_auto_layout_frame(*p)) {
+                    Some(p) => cur = p,
+                    None => break,
+                }
+            }
+        }
+    }
+
+    fn is_auto_layout_frame(&self, id: NodeId) -> bool {
+        self.get(id).and_then(|n| n.kind.frame_props()).is_some_and(|f| f.auto_layout.is_some())
+    }
+
     /// What a flow frame's solver reads of child `id`: `None` when the child sits outside the flow
     /// (hidden by its visibility or variable, or absolutely positioned), otherwise its box with
     /// variable bindings applied for the mode in effect. The editor and the headless relayout both
@@ -30,7 +79,25 @@ impl Document {
             return None;
         }
         let (fit_w, fit_h) = content_sized_axes(raw);
-        let size = Vec2::new(if fit_w { raw.size.x } else { bound.size.x }, if fit_h { raw.size.y } else { bound.size.y });
+        let natural = raw.layout_child.natural_size(raw.size, horiz);
+        let has_w_bind = raw.variables.bindings.contains_key("width");
+        let has_h_bind = raw.variables.bindings.contains_key("height");
+        let size = Vec2::new(
+            if fit_w {
+                raw.size.x
+            } else if has_w_bind {
+                bound.size.x
+            } else {
+                natural.x
+            },
+            if fit_h {
+                raw.size.y
+            } else if has_h_bind {
+                bound.size.y
+            } else {
+                natural.y
+            },
+        );
         Some(ChildIn::from_layout_child(size, &bound.layout_child, horiz))
     }
 
@@ -65,25 +132,35 @@ impl Document {
     }
 
     fn solve_auto_layout_node(&mut self, root: NodeId, hops: usize, budget: &mut usize) {
+        #[cfg(test)]
+        SOLVE_CALLS.with(|c| c.set(c.get() + 1));
         if !self.pending_relayout.is_empty() {
             self.pending_relayout.retain(|&id| id != root);
         }
         let Some(root_node) = self.get(root) else { return };
-        let Some(al) = crate::resolve_node(self, root_node).kind.frame_props().and_then(|f| f.auto_layout.clone()) else {
+        let resolved = crate::resolve_node(self, root_node);
+        let Some(al) = resolved.kind.frame_props().and_then(|f| f.auto_layout.clone()) else {
             return;
         };
         let children = root_node.children.clone();
         let frame = root_node.size;
         let own_limits = SizeLimits::from(&root_node.layout_child);
-        let stroke = root_node.stroke.clone();
+        let stroke = resolved.stroke.clone();
         let horiz = al.direction != LayoutDirection::Vertical;
+        for cid in &children {
+            if let Some(cnode) = self.get_mut(*cid) {
+                if let Some(old_horiz) = cnode.layout_child.stretched.last_parent_horiz {
+                    cnode.layout_child.apply_parent_direction_change(old_horiz, horiz);
+                }
+            }
+        }
         let (flow_ids, kids): (Vec<NodeId>, Vec<ChildIn>) = children.iter().filter_map(|cid| self.flow_child_input(*cid, horiz).map(|k| (*cid, k))).unzip();
 
         let out = compute_with_stroke(&al, frame, own_limits, &stroke, &kids);
         if let Some(fnode) = self.get_mut(root) {
             fnode.size = out.frame;
         }
-        for (cid, r) in flow_ids.iter().zip(&out.rects) {
+        for ((cid, kid), r) in flow_ids.iter().zip(&kids).zip(&out.rects) {
             let new_size = Vec2::new(r.w, r.h);
             let (size_changed, is_auto_layout) = self
                 .get(*cid)
@@ -97,6 +174,7 @@ impl Document {
                 cnode.transform.tx = r.x;
                 cnode.transform.ty = r.y;
                 cnode.size = new_size;
+                cnode.layout_child.record_stretched(kid.size, new_size, horiz, kid.stretches_cross());
             }
             if size_changed && is_auto_layout {
                 self.relayout_top_down(*cid, hops + 1, budget);
@@ -196,6 +274,20 @@ pub const MAX_RELAYOUT_RESOLVES: usize = 4_096;
 #[cfg(test)]
 thread_local! {
     static RESOLVE_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// Every `solve_auto_layout_node` entry: bottom-up, top-down and the undo climb alike.
+    static SOLVE_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Resets the per-thread count of auto-layout frames solved.
+#[cfg(test)]
+pub(crate) fn reset_solve_calls() {
+    SOLVE_CALLS.with(|c| c.set(0));
+}
+
+/// Auto-layout frames solved on this thread since [`reset_solve_calls`].
+#[cfg(test)]
+pub(crate) fn solve_calls() -> usize {
+    SOLVE_CALLS.with(std::cell::Cell::get)
 }
 
 #[cfg(test)]
@@ -571,5 +663,72 @@ mod tests {
         assert_eq!(doc.relayout_skipped_count(), 0, "a flush that returns must leave nothing queued");
         assert!(doc.relayout_notice().is_none());
         assert_eq!(doc.get(*frames.last().unwrap()).unwrap().size.x, 600.0, "the innermost frame follows the outermost");
+    }
+
+    #[test]
+    fn relayout_subtree_uses_resolved_bound_stroke_weight_and_side_weights_in_version_0() {
+        use crate::{Color, Paint, Stroke, StrokeAlign};
+
+        let mut doc = Document::new("bound-stroke-relayout");
+        let page = doc.add_page("Page 1");
+        doc.variable_collections.insert(
+            "col".into(),
+            VariableCollection {
+                id: "col".into(),
+                name: "Border".into(),
+                modes: vec![VariableMode { id: "compact".into(), name: "Compact".into() }, VariableMode { id: "spacious".into(), name: "Spacious".into() }],
+                default_mode: "compact".into(),
+                variables: vec!["v-stroke".into()],
+                key: None,
+                source_library_key: None,
+            },
+        );
+        doc.variables.insert(
+            "v-stroke".into(),
+            Variable {
+                id: "v-stroke".into(),
+                name: "border/weight".into(),
+                collection: "col".into(),
+                kind: VariableKind::Number,
+                values: [("compact".to_string(), VariableValue::Number(1.0)), ("spacious".to_string(), VariableValue::Number(20.0))].into_iter().collect(),
+                description: String::new(),
+                scopes: vec![],
+                code_syntax: Default::default(),
+                hidden_from_publishing: false,
+                key: None,
+            },
+        );
+
+        let fid = doc.alloc_id();
+        let mut f = Node::frame(fid, Rect::new(0.0, 0.0, 100.0, 100.0));
+        f.kind = NodeKind::Frame(FrameProps {
+            auto_layout: Some(AutoLayout {
+                direction: LayoutDirection::Horizontal,
+                item_spacing: 8.0,
+                padding: [10.0, 12.0, 14.0, 16.0],
+                primary_sizing: Sizing::Hug,
+                counter_sizing: Sizing::Hug,
+                stroke_included: true,
+                layout_version: 0,
+                ..AutoLayout::default()
+            }),
+            ..FrameProps::default()
+        });
+        f.stroke = Stroke { paints: vec![Paint::solid(Color::BLACK)], weight: 1.0, align: StrokeAlign::Inside, ..Stroke::default() };
+        f.variables.bindings.insert("strokeWeight".into(), "v-stroke".into());
+        f.variables.modes.insert("col".into(), "spacious".into());
+        let f = doc.insert(page, f).unwrap();
+
+        let c0 = doc.alloc_id();
+        let c1 = doc.alloc_id();
+        let c0 = doc.insert(f, Node::rectangle(c0, Rect::new(0.0, 0.0, 50.0, 20.0))).unwrap();
+        let c1 = doc.insert(f, Node::rectangle(c1, Rect::new(0.0, 0.0, 30.0, 20.0))).unwrap();
+
+        // Stored stroke weight is 1, but the active mode resolves `strokeWeight` to 20:
+        // padding [10, 12, 14, 16] + 20 on every side = [30, 32, 34, 36].
+        doc.relayout_subtree(f);
+        assert_eq!(doc.get(f).unwrap().size, Vec2::new(156.0, 84.0));
+        assert_eq!((doc.get(c0).unwrap().transform.tx, doc.get(c0).unwrap().transform.ty), (36.0, 30.0));
+        assert_eq!((doc.get(c1).unwrap().transform.tx, doc.get(c1).unwrap().transform.ty), (94.0, 30.0));
     }
 }
