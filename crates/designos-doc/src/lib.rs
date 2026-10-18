@@ -742,12 +742,14 @@ impl Document {
         Ok((doc, report))
     }
 
-    /// Converts literal list prefixes of every text node to real lists (see [`migrate_literal_lists`]).
+    /// Converts literal list prefixes of every text node to real lists (see [`migrate_literal_lists`])
+    /// and migrates legacy `gridChildHorizontalAlign` / `gridChildVerticalAlign` metadata keys onto [`LayoutChild`].
     pub fn migrate_text(&mut self) {
         for node in self.nodes.values_mut() {
             if let NodeKind::Text(t) = &mut node.kind {
                 migrate_literal_lists(t);
             }
+            node.migrate_grid_child_align_metadata();
         }
         self.mark_full_dirty();
     }

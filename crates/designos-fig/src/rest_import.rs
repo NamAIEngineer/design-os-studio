@@ -2409,9 +2409,11 @@ impl<'a> Ctx<'a> {
         }
         if let Some(a) = fstr(set, "gridChildHorizontalAlign").and_then(parse_grid_child_align) {
             n.layout_child.grid_align_h = a;
+            n.component.grid_align_overrides[0] = true;
         }
         if let Some(a) = fstr(set, "gridChildVerticalAlign").and_then(parse_grid_child_align) {
             n.layout_child.grid_align_v = a;
+            n.component.grid_align_overrides[1] = true;
         }
         if let Some(h) = fstr(set, "layoutSizingHorizontal") {
             n.layout_child.horizontal = match h {
