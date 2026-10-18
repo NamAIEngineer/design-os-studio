@@ -213,10 +213,11 @@ pub fn per_side_stroke_path(n: &Node, align: d::StrokeAlign) -> Option<sk::Path>
 /// Stroke geometry of a node with a shape, mirroring the CPU renderer's
 /// handling of precomputed outlines, per-side weights and the three alignments.
 pub fn stroke_plan(n: &Node, sh: &Shape, res_scale: f32) -> Option<StrokePlan> {
-    if let Some(sp) = &sh.stroke_paths {
-        return Some(StrokePlan { outline: sp.clone(), clip: StrokeClip::None });
-    }
     let align = if sh.closed { n.stroke.align } else { d::StrokeAlign::Center };
+    if let Some(sp) = &sh.stroke_paths {
+        let clip = if align == d::StrokeAlign::Outside { StrokeClip::Outside } else { StrokeClip::None };
+        return Some(StrokePlan { outline: sp.clone(), clip });
+    }
     if sh.is_rect && n.stroke.side_weights.is_some() {
         let path = per_side_stroke_path(n, align)?;
         let rounded = n.corner_radii.iter().any(|v| *v > 0.0);
