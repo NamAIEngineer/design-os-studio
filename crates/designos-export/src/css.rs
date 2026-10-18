@@ -61,7 +61,9 @@ pub fn css_for(doc: &Document, node: NodeId) -> String {
         if sz.w == Dim::Hug {
             push("justify-self", "start".into());
         }
-        if sz.h == Dim::Hug {
+        if n.layout_child.align_self == AlignSelf::Stretch {
+            push("align-self", "stretch".into());
+        } else if sz.h == Dim::Hug {
             push("align-self", "start".into());
         }
     } else {
@@ -995,5 +997,18 @@ mod tests {
         let (d, _, kids) = row_with_stretch_children(Sizing::Fixed, &[40.0]);
         let css = css_for(&d, kids[0]);
         assert!(css.contains("align-self: stretch;") && !css.contains("height:"), "{css}");
+    }
+
+    #[test]
+    fn grid_stretch_child_exports_its_solved_size() {
+        use crate::codegen::fixture;
+        // (row track, solved height): an auto row is sized by the child, a taller row is filled.
+        for (track, height) in [(None, "20px"), (Some(GridTrack::Fixed(100.0)), "100px")] {
+            let (d, _, rect) = fixture::grid_stretch_child(track, false);
+            let css = css_for(&d, rect);
+            assert!(css.contains("width: 30px;") && css.contains(&format!("height: {height};")), "{track:?}: {css}");
+            assert!(css.contains("align-self: stretch;"), "{track:?}: {css}");
+            assert!(!css.contains("flex"), "{track:?}: {css}");
+        }
     }
 }

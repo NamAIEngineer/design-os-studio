@@ -496,27 +496,17 @@ mod tests {
         assert!(out.contains("maxHeight"), "a fixed parent still stretches the child: {out}");
     }
 
-    fn grid_stretch_child(vertical_fill: bool) -> (Document, NodeId) {
-        // Returns the grid: a node exported on its own has no flow parent.
-        let al = AutoLayout { grid_columns: 2, primary_sizing: Sizing::Fixed, counter_sizing: Sizing::Fixed, ..Default::default() };
-        let (mut d, grid) = fixture::grid_frame(al, Vec2::new(400.0, 300.0));
-        let rect = fixture::add_rect(&mut d, grid, Vec2::new(30.0, 20.0));
-        let lc = &mut d.get_mut(rect).unwrap().layout_child;
-        lc.align_self = AlignSelf::Stretch;
-        if vertical_fill {
-            lc.vertical = Sizing::Fill;
-        }
-        d.relayout_subtree(grid);
-        (d, grid)
-    }
-
     #[test]
-    fn grid_stretch_child_stretches_height_and_keeps_its_width() {
-        for vertical_fill in [false, true] {
-            let (d, grid) = grid_stretch_child(vertical_fill);
+    fn grid_stretch_child_exports_its_solved_size() {
+        // (row track, solved height): an auto row is sized by the child, a taller row is filled.
+        for (track, height) in [(None, 20), (Some(GridTrack::Fixed(100.0)), 100)] {
+            // Export the grid: a node exported on its own has no flow parent.
+            let (d, grid, _) = fixture::grid_stretch_child(track, false);
             let out = swiftui_for(&d, grid);
-            assert!(out.contains("width: 30") && !out.contains("maxWidth"), "vertical_fill={vertical_fill}: {out}");
-            assert!(out.contains("maxHeight: .infinity"), "vertical_fill={vertical_fill}: {out}");
+            assert!(out.contains(&format!("width: 30, height: {height}")), "{track:?}: {out}");
+            for banned in ["maxWidth", "maxHeight"] {
+                assert!(!out.contains(banned), "{track:?} has {banned}: {out}");
+            }
         }
     }
 }
