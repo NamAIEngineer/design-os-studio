@@ -397,6 +397,44 @@ mod tests {
     }
 
     #[test]
+    fn applying_fill_style_to_rich_text_recolours_runs_and_undoes_in_one_step() {
+        let (mut app, _f, _r, t) = app();
+        let base_fill = vec![Paint::solid(Color::rgb(0, 0, 255))];
+        let highlight_fill = vec![Paint::solid(Color::rgb(229, 72, 77))];
+        if let NodeKind::Text(tp) = &mut app.doc.get_mut(t).unwrap().kind {
+            tp.content = "Rich text runs".into();
+            tp.runs = vec![
+                TextRun { start: 0, end: 4, style: TextStyle { font_weight: 700, fills: base_fill.clone(), ..Default::default() } },
+                TextRun { start: 5, end: 9, style: TextStyle { italic: true, fills: base_fill.clone(), ..Default::default() } },
+                TextRun { start: 10, end: 14, style: TextStyle { fills: highlight_fill.clone(), ..Default::default() } },
+            ];
+        }
+        app.apply_style(&[t], "Brand/Primary");
+        let primary = vec![Paint::solid(Color::rgb(1, 2, 3))];
+        match &app.doc.get(t).unwrap().kind {
+            NodeKind::Text(tp) => {
+                assert_eq!(tp.style.fills, primary);
+                assert_eq!(tp.runs[0].style.fills, primary, "bold run with base fill follows the style");
+                assert_eq!(tp.runs[1].style.fills, primary, "italic run with base fill follows the style");
+                assert_eq!(tp.runs[2].style.fills, highlight_fill, "highlighted run keeps its own colour");
+            }
+            _ => unreachable!(),
+        }
+        app.undo();
+        let tn = app.doc.get(t).unwrap();
+        assert!(tn.style_refs.is_empty());
+        match &tn.kind {
+            NodeKind::Text(tp) => {
+                assert_eq!(tp.style.fills, base_fill);
+                assert_eq!(tp.runs[0].style.fills, base_fill);
+                assert_eq!(tp.runs[1].style.fills, base_fill);
+                assert_eq!(tp.runs[2].style.fills, highlight_fill);
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    #[test]
     fn applying_text_style_keeps_color_and_skips_shapes() {
         let (mut app, _f, r, t) = app();
         app.apply_style(&[r, t], "s2");
