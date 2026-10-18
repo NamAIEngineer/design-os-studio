@@ -90,3 +90,61 @@ fn shadcn_ui_imports_with_local_components() {
         assert_eq!(t.style.font_weight, weight);
     }
 }
+
+#[test]
+#[ignore = "needs the private reference/untitled-ui.fig"]
+fn untitled_ui_swapped_link_and_secondary_buttons_match_variant_shell() {
+    let Some(bytes) = reference("untitled-ui.fig").or_else(|| reference("❖ Untitled UI Figma – PRO VARIABLES (v8.0) gKXp7LqFY2NV (Copy).fig")) else {
+        eprintln!("untitled-ui.fig not found: skipped");
+        return;
+    };
+    let mut doc = import_fig(&bytes).expect("import untitled-ui.fig");
+    let mobile = doc.nodes.values().find(|n| n.source_id.as_deref() == Some("1685:415210")).expect("Settings pages 01 Mobile (1685:415210)").id;
+    let page_of_mobile = doc.page_of(mobile).expect("page of mobile");
+    doc.ensure_page_hydrated(page_of_mobile);
+
+    // Detector across all hydrated instances: every instance pointing at a Link color / Link gray
+    // button variant (`Hierarchy=Link`) must have an empty fill/stroke shell matching its variant.
+    let mut link_buttons = 0usize;
+    for inst in doc.nodes.values().filter(|n| matches!(n.kind, NodeKind::Instance { .. })) {
+        let Some(comp_id) = instance_component(inst) else { continue };
+        let Some(comp) = doc.get(comp_id) else { continue };
+        if comp.name.contains("Hierarchy=Link") && comp.fills.is_empty() && !inst.component.overrides.contains(&OverrideField::Fills) {
+            link_buttons += 1;
+            assert!(inst.fills.is_empty(), "instance {:?} ({:?}) of {:?} kept stale fills: {:?}", inst.name, inst.source_id, comp.name, inst.fills);
+            assert!(
+                inst.stroke.paints.is_empty(),
+                "instance {:?} ({:?}) of {:?} kept stale stroke: {:?}",
+                inst.name,
+                inst.source_id,
+                comp.name,
+                inst.stroke.paints
+            );
+        }
+    }
+    assert!(link_buttons >= 50, "expected >= 50 Link button instances, found {link_buttons}");
+
+    // Specifically verify all 9 "View integration" buttons in Settings pages 01 Mobile (1685:415210).
+    let mut view_integration_buttons = 0usize;
+    for n in subtree(&doc, mobile) {
+        if let NodeKind::Text(tp) = &n.kind {
+            if tp.content == "View integration" {
+                let mut cur = n.parent;
+                while let Some(pid) = cur {
+                    let p = doc.get(pid).unwrap();
+                    if matches!(p.kind, NodeKind::Instance { .. }) && p.name.contains("Button") {
+                        view_integration_buttons += 1;
+                        let comp = doc.get(instance_component(p).expect("Button component")).unwrap();
+                        assert!(comp.name.contains("Hierarchy=Link color"), "expected Hierarchy=Link color, got {:?}", comp.name);
+                        assert!(p.fills.is_empty(), "View integration Button must have no fill");
+                        assert!(p.stroke.paints.is_empty(), "View integration Button must have no stroke");
+                        assert!(p.effects.is_empty(), "View integration Button must have no shadow");
+                        break;
+                    }
+                    cur = p.parent;
+                }
+            }
+        }
+    }
+    assert_eq!(view_integration_buttons, 9, "expected all 9 View integration link buttons in 1685:415210");
+}
