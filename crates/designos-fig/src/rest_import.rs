@@ -2327,6 +2327,9 @@ impl<'a> Ctx<'a> {
                 if let Some(r) = set.get("gridRows").and_then(Value::as_u64) {
                     al.grid_rows = r as u32;
                 }
+                if let Some(s) = fstr(set, "gridAutoTracks") {
+                    al.grid_auto_tracks = parse_grid_auto_tracks(s);
+                }
             }
         }
         let non_fill_sizing = |kind: &NodeKind, dir_h: bool| -> Sizing {
@@ -2376,6 +2379,7 @@ impl<'a> Ctx<'a> {
             }
         }
         if let Some(a) = fstr(set, "layoutAlign") {
+            n.layout_child.align_self = parse_align_self(Some(a));
             if a == "STRETCH" {
                 match parent_dir {
                     Some(LayoutDirection::Horizontal | LayoutDirection::Grid) => n.layout_child.vertical = Sizing::Fill,
@@ -2413,6 +2417,12 @@ impl<'a> Ctx<'a> {
         }
         if let Some(r) = set.get("gridRowSpan").and_then(Value::as_u64) {
             n.layout_child.row_span = (r as u16).max(1);
+        }
+        if let Some(a) = fstr(set, "gridChildHorizontalAlign").and_then(parse_grid_child_align) {
+            n.layout_child.grid_align_h = a;
+        }
+        if let Some(a) = fstr(set, "gridChildVerticalAlign").and_then(parse_grid_child_align) {
+            n.layout_child.grid_align_v = a;
         }
         if let Some(h) = fstr(set, "layoutSizingHorizontal") {
             n.layout_child.horizontal = match h {
@@ -2727,10 +2737,13 @@ pub(crate) fn override_field(key: &str, is_text: bool) -> Option<OverrideField> 
         | "gridRows"
         | "gridColumnsSizing"
         | "gridRowsSizing"
+        | "gridAutoTracks"
         | "gridColumnSpan"
         | "gridRowSpan"
         | "gridColumnAnchorIndex"
-        | "gridRowAnchorIndex" => OverrideField::Layout,
+        | "gridRowAnchorIndex"
+        | "gridChildHorizontalAlign"
+        | "gridChildVerticalAlign" => OverrideField::Layout,
         "componentId" | "mainComponent" | "overrides" => OverrideField::MainComponent,
         "slotContent" => OverrideField::SlotContent,
         _ => return None,
@@ -2900,6 +2913,22 @@ fn parse_grid_sizing(s: &str) -> (u32, GridTracks) {
     (list.count, GridTracks::from(list.kept))
 }
 
+fn parse_grid_auto_tracks(s: &str) -> GridAutoTracks {
+    let t = s.trim();
+    if t.is_empty() || t.eq_ignore_ascii_case("NONE") {
+        GridAutoTracks::None
+    } else if t.eq_ignore_ascii_case("ROWS") {
+        GridAutoTracks::Rows
+    } else {
+        let (count, tracks) = parse_grid_sizing(t);
+        if count > 0 {
+            GridAutoTracks::Track(tracks[0])
+        } else {
+            GridAutoTracks::Rows
+        }
+    }
+}
+
 fn frame_props(v: &Value) -> FrameProps {
     let dir = match fstr(v, "layoutMode") {
         Some("HORIZONTAL") => Some(LayoutDirection::Horizontal),
@@ -2923,6 +2952,7 @@ fn frame_props(v: &Value) -> FrameProps {
         let (sizing_rows, grid_row_tracks) = fstr(v, "gridRowsSizing").map(parse_grid_sizing).unwrap_or_default();
         let grid_columns = v.get("gridColumns").and_then(Value::as_u64).map(|x| x as u32).filter(|&x| x > 0).unwrap_or(sizing_cols);
         let grid_rows = v.get("gridRows").and_then(Value::as_u64).map(|x| x as u32).filter(|&x| x > 0).unwrap_or(sizing_rows);
+        let grid_auto_tracks = fstr(v, "gridAutoTracks").map(parse_grid_auto_tracks).unwrap_or_default();
         AutoLayout {
             direction,
             wrap: fstr(v, "layoutWrap") == Some("WRAP"),
@@ -2945,6 +2975,7 @@ fn frame_props(v: &Value) -> FrameProps {
             grid_rows,
             grid_col_tracks,
             grid_row_tracks,
+            grid_auto_tracks,
         }
     });
     FrameProps { clips_content: fbool(v, "clipsContent").unwrap_or(false), auto_layout, grids: farr(v, "layoutGrids").iter().filter_map(parse_grid).collect() }
@@ -3013,6 +3044,45 @@ fn build_runs(content: &str, base: &TextStyle, overrides: &[u64], table: Option<
     runs
 }
 
+/// A grid child's alignment key: `MIN` is Start. `None` for a value this model does not know.
+fn parse_grid_child_align(s: &str) -> Option<GridChildAlign> {
+    match s {
+        "MIN" => Some(GridChildAlign::Start),
+        "CENTER" => Some(GridChildAlign::Center),
+        "MAX" | "END" => Some(GridChildAlign::End),
+        "AUTO" => Some(GridChildAlign::Auto),
+        _ => None,
+    }
+}
+
+/// The key value that reads back as `a`. Start is `MIN`, never an omitted key: `AUTO` is enum 0, the schema
+/// default, so a reader that skips an absent key turns an omitted Start into Auto.
+pub(crate) fn grid_child_align_name(a: GridChildAlign) -> &'static str {
+    match a {
+        GridChildAlign::Start => "MIN",
+        GridChildAlign::Center => "CENTER",
+        GridChildAlign::End => "MAX",
+        GridChildAlign::Auto => "AUTO",
+    }
+}
+
+/// Whether a child's alignment keys are written: always under a grid, elsewhere only when they are not the Start
+/// default (a flow child never reads them, so a Start there would only add two enum fields per node).
+pub(crate) fn writes_grid_child_align(a: GridChildAlign, parent: Option<LayoutDirection>) -> bool {
+    a != GridChildAlign::Start || parent == Some(LayoutDirection::Grid)
+}
+
+fn parse_align_self(s: Option<&str>) -> AlignSelf {
+    match s {
+        Some("MIN") => AlignSelf::Start,
+        Some("CENTER") => AlignSelf::Center,
+        Some("MAX") => AlignSelf::End,
+        Some("STRETCH") => AlignSelf::Stretch,
+        Some("BASELINE") => AlignSelf::Baseline,
+        _ => AlignSelf::Auto,
+    }
+}
+
 fn layout_child(v: &Value, parent: Option<LayoutDirection>, kind: &NodeKind) -> LayoutChild {
     let sizing = |s: Option<&str>| match s {
         Some("HUG") => Some(Sizing::Hug),
@@ -3022,9 +3092,15 @@ fn layout_child(v: &Value, parent: Option<LayoutDirection>, kind: &NodeKind) -> 
     };
     let grow = fnum(v, "layoutGrow").unwrap_or(0.0);
     let u = |k: &str| v.get(k).and_then(Value::as_u64).map(|x| x as u16);
+    // An omitted enum is its schema default and `GridChildAlign` defaults to AUTO, so a grid child that never set a
+    // key follows the frame's alignment instead of sitting at the cell origin. Only a grid reads the keys; a child
+    // anywhere else keeps the Start default, which is not saved.
+    let unset_align = if parent == Some(LayoutDirection::Grid) { GridChildAlign::Auto } else { GridChildAlign::Start };
+    let align = |k: &str| fstr(v, k).and_then(parse_grid_child_align).unwrap_or(unset_align);
     let mut lc = LayoutChild {
         absolute: fstr(v, "layoutPositioning") == Some("ABSOLUTE"),
         grow,
+        align_self: parse_align_self(fstr(v, "layoutAlign")),
         min_w: fnum(v, "minWidth"),
         max_w: fnum(v, "maxWidth"),
         min_h: fnum(v, "minHeight"),
@@ -3033,6 +3109,8 @@ fn layout_child(v: &Value, parent: Option<LayoutDirection>, kind: &NodeKind) -> 
         grid_row: u("gridRowAnchorIndex"),
         col_span: u("gridColumnSpan").unwrap_or(1).max(1),
         row_span: u("gridRowSpan").unwrap_or(1).max(1),
+        grid_align_h: align("gridChildHorizontalAlign"),
+        grid_align_v: align("gridChildVerticalAlign"),
         margin: [
             fnum(v, "stackChildMarginTop").unwrap_or(0.0),
             fnum(v, "stackChildMarginRight").unwrap_or(0.0),
