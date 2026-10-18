@@ -58,6 +58,20 @@ const CHAR_W: f32 = 7.8;
 const ROW_H: f32 = 16.0;
 const MAX_RAW_LOG_BYTES: usize = 128 * 1024;
 
+/// The `-c` overrides that register `designos-mcp` with Codex (leading space included), shared by the
+/// interactive tab and the Agent Chat one-shot so both start the same server.
+macro_rules! codex_mcp_overrides {
+    () => {
+        concat!(
+            " -c 'mcp_servers.designos.command=\"'\"$DESIGNOS_MCP_BIN\"'\"'",
+            " -c 'mcp_servers.designos.args=[\"--workspace\",\"'\"$DESIGNOS_WORKSPACE\"'\"]'",
+            " -c 'mcp_servers.designos.env_vars=[\"DESIGNOS_SESSION_DIR\",\"DESIGNOS_LIVE_CANVAS\",\"DESIGNOS_LIVE_DOC_SYNC\",",
+            "\"DESIGNOS_LIVE_DOC_PATCH\",\"DESIGNOS_LIVE_SPEC\",\"DESIGNOS_CONTEXT_JSON\",\"DESIGNOS_TARGET_PAGE_ID\",",
+            "\"DESIGNOS_TARGET_PAGE_NAME\",\"DESIGNOS_DOC_NAME\",\"DESIGNOS_FILE\"]'"
+        )
+    };
+}
+
 /// Presets for launching an interactive PTY session inside DESIGN:OS Studio.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AgentCliPreset {
@@ -146,14 +160,14 @@ impl AgentCliPreset {
             // Codex hands an MCP child only the `env` / `env_vars` entries of its config, never the parent
             // env, so the session variables `designos-mcp` reads are listed in `env_vars` and the
             // workspace goes in as an argument (same server config as the other tabs' mcp-config.json).
-            AgentCliPreset::Codex => concat!(
-                "codex --dangerously-bypass-approvals-and-sandbox",
-                " -c 'mcp_servers.designos.command=\"'\"$DESIGNOS_MCP_BIN\"'\"'",
-                " -c 'mcp_servers.designos.args=[\"--workspace\",\"'\"$DESIGNOS_WORKSPACE\"'\"]'",
-                " -c 'mcp_servers.designos.env_vars=[\"DESIGNOS_SESSION_DIR\",\"DESIGNOS_LIVE_CANVAS\",\"DESIGNOS_LIVE_DOC_SYNC\",",
-                "\"DESIGNOS_LIVE_DOC_PATCH\",\"DESIGNOS_LIVE_SPEC\",\"DESIGNOS_CONTEXT_JSON\",\"DESIGNOS_TARGET_PAGE_ID\",",
-                "\"DESIGNOS_TARGET_PAGE_NAME\",\"DESIGNOS_DOC_NAME\",\"DESIGNOS_FILE\"]'"
-            ),
+            //
+            // Status: Codex tabs keep the OSC / PTY-heuristic status path (`parse_osc_agent_status_and_strip`,
+            // `agent_status`); no session hooks are loaded here. Codex runs only hooks the user has reviewed
+            // (`hooks.state.*.trusted_hash` in `~/.codex/config.toml`), and Studio must not write or forge that
+            // trust, so hooks passed through `-c` were not run (checked on codex 0.163). `notify` is not used
+            // either: it would replace the user's own `notify` program in this tab, and it fires only when a
+            // turn ends, so it could never report `working`.
+            AgentCliPreset::Codex => concat!("codex --dangerously-bypass-approvals-and-sandbox", codex_mcp_overrides!()),
             // `grok` has no `--mcp-config` either. It reads the project config `<cwd>/.grok/config.toml`
             // (see `write_grok_session_config`), so it is started inside the per-file session dir.
             AgentCliPreset::Grok => "grok --always-approve --cwd \"$DESIGNOS_SESSION_DIR\"",
@@ -296,7 +310,8 @@ pub fn build_real_cli_command(preset: AgentCliPreset, prompt: &str, live_spec: &
             session_dir.join("hooks.json").display()
         ),
         AgentCliPreset::Codex => format!(
-            "{env_prefix} codex --dangerously-bypass-approvals-and-sandbox exec '{escaped} (Deliver onto current file/page in $DESIGNOS_CONTEXT_JSON via designos-mcp or write NodeSpec JSON to $DESIGNOS_LIVE_SPEC)'"
+            "{env_prefix} codex --dangerously-bypass-approvals-and-sandbox exec{} '{escaped} (Deliver onto current file/page in $DESIGNOS_CONTEXT_JSON via designos-mcp or write NodeSpec JSON to $DESIGNOS_LIVE_SPEC)'",
+            codex_mcp_overrides!()
         ),
         AgentCliPreset::Antigravity => format!(
             "{env_prefix} agy --dangerously-skip-permissions -p '{escaped}' --add-dir '{}'",
@@ -870,7 +885,6 @@ impl TerminalState {
         }
         write_grok_session_config(&self.session_dir, &mcp_config);
 
-        let page_context_path = self.session_dir.join("page-context.json");
         let page_context = serde_json::json!({
             "session_id": self.session_id,
             "doc_name": self.doc_name,
@@ -878,13 +892,22 @@ impl TerminalState {
             "current_page_id": self.current_page_id,
             "current_page_name": self.current_page_name,
         });
-        if let Ok(bytes) = serde_json::to_vec_pretty(&page_context) {
-            let _ = atomic_write_session_file(&page_context_path, &bytes);
+        // Claude's reply to a prompt hook: the page as `additionalContext`, nothing that could block the prompt.
+        let context_reply_path = self.session_dir.join("page-context-reply.json");
+        let context_reply = serde_json::json!({
+            "hookSpecificOutput": {
+                "hookEventName": "UserPromptSubmit",
+                "additionalContext": format!("DESIGN:OS Studio page context: {page_context}"),
+            }
+        });
+        if let Ok(bytes) = serde_json::to_vec_pretty(&context_reply) {
+            let _ = atomic_write_session_file(&context_reply_path, &bytes);
         }
         let status_path = self.session_dir.join("agent-status.json");
-        // Claude `--settings <file>` and Grok's project hook file share one shape: matcher groups under `hooks`.
-        if let Ok(bytes) = serde_json::to_vec_pretty(&session_hooks_settings(&status_path, &page_context_path)) {
+        if let Ok(bytes) = serde_json::to_vec_pretty(&session_hooks_settings(&status_path, Some(&context_reply_path))) {
             let _ = atomic_write_session_file(&self.session_dir.join("hooks.json"), &bytes);
+        }
+        if let Ok(bytes) = serde_json::to_vec_pretty(&session_hooks_settings(&status_path, None)) {
             let _ = atomic_write_session_file(&self.session_dir.join(".grok").join("hooks").join("designos-status.json"), &bytes);
         }
         if let Ok(bytes) = serde_json::to_vec_pretty(&agy_session_hooks(&status_path)) {
@@ -2176,16 +2199,19 @@ fn command_handler_group(command: String) -> serde_json::Value {
     serde_json::json!([{ "matcher": "*", "hooks": [{ "type": "command", "command": command }] }])
 }
 
-/// Session hooks in Claude's settings shape (`{"hooks": {Event: [{matcher, hooks: [...]}]}}`): the
-/// status channel plus a prompt hook that injects the page (never the selection) as context.
-fn session_hooks_settings(status_path: &Path, page_context_path: &Path) -> serde_json::Value {
+/// Session hooks in Claude's settings shape (`{"hooks": {Event: [{matcher, hooks: [...]}]}}`) for the
+/// status channel. With `context_reply` the prompt hook also prints that file, a Claude
+/// `additionalContext` reply carrying the page (never the selection). Without it the prompt hook prints
+/// nothing: Grok reads any stdout that starts with `{` as a decision (a context reply shows as a
+/// failed hook) and discards an allowing hook's context anyway.
+fn session_hooks_settings(status_path: &Path, context_reply: Option<&Path>) -> serde_json::Value {
+    let prompt = match context_reply {
+        Some(reply) => format!("{} && cat '{}'", status_hook_command(status_path, "working"), reply.display()),
+        None => status_hook_command(status_path, "working"),
+    };
     serde_json::json!({
         "hooks": {
-            "UserPromptSubmit": command_handler_group(format!(
-                "{} && cat '{}'",
-                status_hook_command(status_path, "working"),
-                page_context_path.display()
-            )),
+            "UserPromptSubmit": command_handler_group(prompt),
             "PreToolUse": command_handler_group(status_hook_command(status_path, "working")),
             "PostToolUse": command_handler_group(status_hook_command(status_path, "working")),
             "PermissionRequest": command_handler_group(status_hook_command(status_path, "waiting")),
@@ -5510,7 +5536,11 @@ Done!
         let st = provisioned_session(742);
         let claude = read_json(&st.session_dir.join("hooks.json"));
         let grok = read_json(&st.session_dir.join(".grok").join("hooks").join("designos-status.json"));
-        assert_eq!(claude, grok, "Grok loads the same matcher groups as Claude");
+        assert_eq!(
+            claude["hooks"].as_object().unwrap().keys().collect::<Vec<_>>(),
+            grok["hooks"].as_object().unwrap().keys().collect::<Vec<_>>(),
+            "Grok loads the same events as Claude"
+        );
         let agy = read_json(&st.session_dir.join(".agents").join("hooks.json"));
 
         let cmd = |v: &serde_json::Value, event: &str| v["hooks"][event][0]["hooks"][0]["command"].as_str().unwrap().to_string();
@@ -5536,16 +5566,41 @@ Done!
     }
 
     #[test]
-    fn prompt_hook_injects_page_context_but_never_the_selection() {
+    fn prompt_hooks_print_only_what_each_cli_can_read_and_never_the_selection() {
         let st = provisioned_session(743);
-        let hooks = read_json(&st.session_dir.join("hooks.json"));
-        let injected = run_hook_command(hooks["hooks"]["UserPromptSubmit"][0]["hooks"][0]["command"].as_str().unwrap());
-        let ctx: serde_json::Value = serde_json::from_str(injected.trim()).expect("hook prints the page context json");
-        assert_eq!(ctx["doc_name"].as_str(), Some("Hooks File"));
-        assert_eq!(ctx["current_page_name"].as_str(), Some("Page 1"));
-        assert!(ctx.get("selected_node_ids").is_none(), "owner ruling: the selection is never auto-injected: {injected}");
+        let prompt_command = |v: &serde_json::Value| v["hooks"]["UserPromptSubmit"][0]["hooks"][0]["command"].as_str().unwrap().to_string();
+
+        // Grok parses any stdout starting with `{` as a hook decision and discards an allowing
+        // hook's context, so its prompt hook must print nothing.
+        let grok = read_json(&st.session_dir.join(".grok").join("hooks").join("designos-status.json"));
+        assert_eq!(run_hook_command(&prompt_command(&grok)), "", "a Grok prompt hook must not print");
+
+        // Claude reads `hookSpecificOutput.additionalContext`: the page, never the selection.
+        let claude = read_json(&st.session_dir.join("hooks.json"));
+        let printed = run_hook_command(&prompt_command(&claude));
+        let reply: serde_json::Value = serde_json::from_str(printed.trim()).expect("Claude hook prints decision json");
+        let out = &reply["hookSpecificOutput"];
+        assert_eq!(out["hookEventName"].as_str(), Some("UserPromptSubmit"));
+        let context = out["additionalContext"].as_str().expect("additionalContext");
+        assert!(context.contains("Hooks File") && context.contains("Page 1"), "{context}");
+        assert!(!context.contains("selected_node_ids"), "owner ruling: the selection is never auto-injected: {context}");
+        assert_eq!(reply.as_object().unwrap().len(), 1, "no decision keys that could block the prompt: {printed}");
         // context.json (with the selection) stays on disk for the agent to read when asked.
         assert!(read_json(&st.context_json_path).get("selected_node_ids").is_some());
+    }
+
+    #[test]
+    fn agent_chat_codex_command_carries_the_same_mcp_overrides_as_the_tab() {
+        let tab = AgentCliPreset::Codex.cli_launch_command();
+        let live_spec = std::path::Path::new("/tmp/designos-session-x/live-agent-out.spec.json");
+        let sel_json = std::path::Path::new("/tmp/designos-session-x/selection.spec.json");
+        let chat = build_real_cli_command(AgentCliPreset::Codex, "Audit layout", live_spec, sel_json);
+        assert!(chat.contains("codex --dangerously-bypass-approvals-and-sandbox exec"), "{chat}");
+        for key in ["mcp_servers.designos.args", "mcp_servers.designos.env_vars"] {
+            assert_eq!(codex_list_override(&chat, key), codex_list_override(tab, key), "{key} differs between tab and chat: {chat}");
+        }
+        assert!(chat.contains("mcp_servers.designos.command=\"'\"$DESIGNOS_MCP_BIN\"'\""), "{chat}");
+        assert!(chat.contains("--workspace") && chat.contains("$DESIGNOS_WORKSPACE"), "{chat}");
     }
 
     /// A state whose stub agent has exited but whose exit the terminal has not yet observed: the
