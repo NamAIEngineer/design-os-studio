@@ -7,22 +7,19 @@
 
 use designos_doc::*;
 use designos_fig::kiwi::{self, KiwiValue, Schema};
-use designos_fig::testkit::{figma_like_schema, node_change_tag, real_node_change_tag};
+use designos_fig::testkit::{figma_like_schema, real_node_change_tag};
 use designos_fig::{container, export_fig, import_fig, import_fig_node_changes};
 use serde_json::{json, Value};
 
-const STUDIO_PLUGIN_ID: &str = "designos-studio";
-
-fn find<'a>(doc: &'a Document, name: &str) -> &'a Node {
-    doc.nodes.values().find(|n| n.name == name).unwrap_or_else(|| panic!("no node named {name}"))
-}
+mod common;
+use common::{find, rich_document, STUDIO_PLUGIN_ID};
 
 fn child<'a>(doc: &'a Document, parent: &Node, name: &str) -> &'a Node {
     parent.children.iter().filter_map(|id| doc.get(*id)).find(|n| n.name == name).unwrap_or_else(|| panic!("{} has no child {name}", parent.name))
 }
 
 fn padding_of(n: &Node) -> [f32; 4] {
-    n.kind.frame_props().and_then(|f| f.auto_layout).unwrap_or_else(|| panic!("{} has no auto layout", n.name)).padding
+    n.kind.frame_props().and_then(|f| f.auto_layout.as_ref()).unwrap_or_else(|| panic!("{} has no auto layout", n.name)).padding
 }
 
 /// The file's own schema and the encoded message, read back out of an exported archive.
@@ -50,110 +47,12 @@ fn import_through_real_fields(bytes: &[u8]) -> Document {
     import_fig_node_changes(&kiwi::to_json(&decoded), "real-fields").expect("import from real fields")
 }
 
-fn component_with_padded_children(doc: &mut Document, page: NodeId) -> NodeId {
-    let card_id = doc.alloc_id();
-    let layout = |padding: [f32; 4], direction: LayoutDirection| FrameProps {
-        auto_layout: Some(AutoLayout { direction, item_spacing: 4.0, padding, ..AutoLayout::default() }),
-        ..FrameProps::default()
-    };
-    let mut card = Node::new(card_id, NodeKind::Component(layout([10.0, 20.0, 30.0, 40.0], LayoutDirection::Vertical)));
-    card.name = "Card".into();
-    card.size = Vec2::new(300.0, 200.0);
-    doc.insert(page, card).unwrap();
-
-    let inner_id = doc.alloc_id();
-    let mut inner = Node::new(inner_id, NodeKind::Frame(layout([1.0, 2.0, 3.0, 4.0], LayoutDirection::Horizontal)));
-    inner.name = "Inner".into();
-    inner.size = Vec2::new(100.0, 50.0);
-    doc.insert(card_id, inner).unwrap();
-    card_id
-}
-
-/// Auto-layout component with an instance that overrides a child's padding, a grid child, a board with a
-/// connector and stickies, an instance carrying a slot content id, and plugin data under foreign ids.
-fn rich_document() -> Document {
-    let mut doc = Document::new("real-tags");
-    let page = doc.add_page("Page");
-
-    let card_id = component_with_padded_children(&mut doc, page);
-    doc.get_mut(card_id).unwrap().plugin_data.extend([
-        ("12345:note".to_string(), "ünï ✓ value".to_string()),
-        ("12345:other".to_string(), String::new()),
-        ("bare-key".to_string(), "no plugin id".to_string()),
-        (format!("{STUDIO_PLUGIN_ID}:custom"), "kept".to_string()),
-    ]);
-
-    create_instance(&mut doc, card_id, page, Vec2::new(400.0, 0.0)).apply(&mut doc).expect("create_instance");
-    let inst_id = instances_of(&doc, card_id)[0];
-    doc.get_mut(inst_id).unwrap().name = "CardInstance".into();
-    let inner_in_instance =
-        doc.get(inst_id).unwrap().children.iter().copied().find(|c| doc.get(*c).is_some_and(|n| n.name == "Inner")).expect("Inner in instance");
-    let inner = doc.get_mut(inner_in_instance).unwrap();
-    let NodeKind::Frame(fp) = &mut inner.kind else { panic!("Inner is a frame") };
-    fp.auto_layout.as_mut().unwrap().padding = [5.0, 6.0, 7.0, 8.0];
-    inner.component.overrides.insert(OverrideField::Layout);
-
-    create_instance(&mut doc, card_id, page, Vec2::new(800.0, 0.0)).apply(&mut doc).expect("create_instance");
-    let slot_inst = *instances_of(&doc, card_id).iter().find(|i| **i != inst_id).expect("second instance");
-    let slot_inst_node = doc.get_mut(slot_inst).unwrap();
-    slot_inst_node.name = "SlotInstance".into();
-    slot_inst_node.component.slot_content_id = Some("7:42".into());
-
-    let grid_id = doc.alloc_id();
-    let grid_props = FrameProps {
-        auto_layout: Some(AutoLayout {
-            direction: LayoutDirection::Grid,
-            grid_columns: 3,
-            grid_rows: 2,
-            padding: [9.0, 8.0, 7.0, 6.0],
-            ..AutoLayout::default()
-        }),
-        ..FrameProps::default()
-    };
-    let mut grid = Node::new(grid_id, NodeKind::Frame(grid_props));
-    grid.name = "Grid".into();
-    grid.size = Vec2::new(600.0, 400.0);
-    doc.insert(page, grid).unwrap();
-    let cell_id = doc.alloc_id();
-    let mut cell = Node::new(cell_id, NodeKind::Rectangle);
-    cell.name = "Cell".into();
-    cell.size = Vec2::new(100.0, 100.0);
-    cell.layout_child.grid_column = Some(2);
-    cell.layout_child.grid_row = Some(1);
-    cell.layout_child.col_span = 2;
-    doc.insert(grid_id, cell).unwrap();
-
-    let a = doc.alloc_id();
-    let a = doc.insert(page, Node::sticky(a, Rect::new(0.0, 500.0, 200.0, 200.0), "shown")).unwrap();
-    let b = doc.alloc_id();
-    let b = doc.insert(page, Node::sticky(b, Rect::new(400.0, 500.0, 200.0, 200.0), "hidden")).unwrap();
-    for (id, name, show) in [(a, "AuthorShown", true), (b, "AuthorHidden", false)] {
-        let n = doc.get_mut(id).unwrap();
-        n.name = name.into();
-        let NodeKind::Sticky(sp) = &mut n.kind else { panic!("sticky") };
-        sp.show_author = show;
-    }
-    let c = doc.alloc_id();
-    let props = ConnectorProps {
-        start: ConnectorEnd::attached(a, Magnet::Right),
-        end: ConnectorEnd::attached(b, Magnet::Left),
-        line: ConnectorLine::Straight,
-        start_cap: ConnectorCap::Arrow,
-        end_cap: ConnectorCap::Triangle,
-        label: None,
-    };
-    doc.insert(page, Node::connector(c, props)).unwrap();
-    sync_connector(&mut doc, c);
-    doc
-}
-
 #[test]
-fn an_unmapped_node_change_name_fails_the_schema_build_instead_of_getting_a_tag() {
-    assert_eq!(node_change_tag("stackVerticalPadding"), 210);
-    assert_eq!(node_change_tag("connectorEndCap"), 246);
-    let err = std::panic::catch_unwind(|| node_change_tag("stackPaddingTop")).expect_err("an unmapped name must not get a tag");
-    let text = err.downcast_ref::<String>().map(String::as_str).or_else(|| err.downcast_ref::<&str>().copied()).unwrap_or_default();
-    assert!(text.contains("stackPaddingTop"), "the failure names the field: {text}");
+fn a_name_figma_does_not_know_has_no_tag() {
+    assert_eq!(real_node_change_tag("stackVerticalPadding"), Some(210));
+    assert_eq!(real_node_change_tag("connectorEndCap"), Some(246));
+    assert_eq!(real_node_change_tag("stackPaddingTop"), None);
+    assert_eq!(real_node_change_tag("gridColumnAnchorIndex"), None);
 }
 
 #[test]
