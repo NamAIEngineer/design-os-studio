@@ -1,8 +1,8 @@
 //! Tests for suggesting variables and styles from enabled libraries (Issue #155, Task E3-11).
 
 use super::*;
-use designos_doc::{AutoLayout, Effect, LibraryRef, LineHeight};
-use std::path::PathBuf;
+use designos_doc::{AutoLayout, Effect, ExternalAsset, LibraryAssetKind, LibraryRef, LineHeight};
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 fn tmp_lib_root(tag: &str) -> PathBuf {
@@ -14,10 +14,15 @@ fn tmp_lib_root(tag: &str) -> PathBuf {
     dir
 }
 
-fn publish_design_system(root: &PathBuf, name: &str) -> String {
+fn publish_design_system(root: &Path, name: &str) -> String {
+    publish_design_system_with_dark(root, name, BLUE)
+}
+
+/// A library whose `Brand/Primary` is BLUE in the light (default) mode and `dark` in the dark mode.
+fn publish_design_system_with_dark(root: &Path, name: &str, dark: Color) -> String {
     let mut f = fx();
     f.doc.name = name.into();
-    f.color_var("Brand/Primary", BLUE, BLUE);
+    f.color_var("Brand/Primary", BLUE, dark);
     let coll = f.doc.variable_collections.get_mut("theme").unwrap();
     let num_id = "var:space/4".to_string();
     coll.variables.push(num_id.clone());
@@ -38,7 +43,7 @@ fn publish_design_system(root: &PathBuf, name: &str) -> String {
         },
     );
     let mut app = f.app();
-    app.libs.set_root(root.clone());
+    app.libs.set_root(root.to_path_buf());
     assert!(app.publish_file());
     app.doc.library.published.as_ref().unwrap().library_id.clone()
 }
@@ -325,6 +330,113 @@ fn unreadable_library_is_reported_and_skipped() {
     app.refresh_check_designs(false);
     assert_eq!(app.check_designs.report.unreadable_libraries, vec!["Missing Kit".to_string()]);
     assert!(app.check_designs.report.findings.is_empty());
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn figma_keyed_collection_is_still_suggested_and_fixable() {
+    // A `.fig` import stores Figma's own `sourceLibraryKey` on the collection. That key names no
+    // Studio library, so the variable stays a local candidate.
+    let mut f = fx();
+    let card = f.rect(f.page, "Card", BLUE);
+    let var = f.color_var("Brand/Primary", BLUE, BLUE);
+    f.doc.variable_collections.get_mut("theme").unwrap().source_library_key = Some("lk-83c0".into());
+    let mut app = f.app();
+
+    app.open_check_designs();
+    app.refresh_check_designs(false);
+    let found = only(&app.check_designs.report, Rule::HardCodedValue);
+    assert_eq!(found.node, card);
+    assert_eq!(found.message, "Fill #1A73E8 matches variable \"Brand/Primary\"");
+    assert_eq!(found.fix, Some(Fix::BindVariable { key: "fills/0".into(), variable: var.clone() }));
+
+    assert!(app.check_designs_fix(&found));
+    assert_eq!(app.doc.get(card).unwrap().variables.bindings.get("fills/0"), Some(&var));
+}
+
+#[test]
+fn collection_of_a_disabled_studio_library_is_not_suggested_even_when_keyed_by_its_id() {
+    let mut f = fx();
+    f.rect(f.page, "Card", BLUE);
+    f.color_var("Brand/Primary", BLUE, BLUE);
+    f.doc.variable_collections.get_mut("theme").unwrap().source_library_key = Some("studio-lib".into());
+    // The library was enabled once: an import recorded it.
+    f.doc.library.external.insert(
+        "studio-lib/var:other".into(),
+        ExternalAsset { library_id: "studio-lib".into(), version: 1, kind: LibraryAssetKind::Variable, node: None, local_key: Some("var:other".into()) },
+    );
+    let mut app = f.app();
+
+    app.open_check_designs();
+    app.refresh_check_designs(false);
+    assert!(app.check_designs.report.of(Rule::HardCodedValue).next().is_none());
+}
+
+#[test]
+fn library_default_mode_that_is_not_first_decides_the_suggestion() {
+    let root = tmp_lib_root("default-mode");
+    let red = Color::rgb(220, 38, 38);
+    let mut lib_fx = fx();
+    lib_fx.doc.name = "Modes DS".into();
+    lib_fx.color_var("Brand/Primary", red, BLUE);
+    lib_fx.doc.variable_collections.get_mut("theme").unwrap().default_mode = "dark".into();
+    let mut lib_app = lib_fx.app();
+    lib_app.libs.set_root(root.clone());
+    assert!(lib_app.publish_file());
+    let lib_id = lib_app.doc.library.published.as_ref().unwrap().library_id.clone();
+
+    let mut f = fx();
+    let in_default = f.rect(f.page, "Default mode colour", BLUE);
+    f.rect(f.page, "First mode colour", red);
+    let mut app = f.app();
+    app.libs.set_root(root.clone());
+    app.set_library_enabled(&lib_id, true);
+
+    app.open_check_designs();
+    app.refresh_check_designs(false);
+    let found = only(&app.check_designs.report, Rule::HardCodedValue);
+    assert_eq!(found.node, in_default, "only the default-mode colour is suggested");
+    assert_eq!(found.message, "Fill #1A73E8 matches variable \"Brand/Primary\" from library \"Modes DS\"");
+
+    assert!(app.check_designs_fix(&found));
+    let local = format!("{lib_id}/var:Brand/Primary");
+    assert_eq!(app.doc.get(in_default).unwrap().variables.bindings.get("fills/0"), Some(&local));
+    assert_eq!(app.doc.resolve_variable(in_default, &local), Some(VariableValue::Color(BLUE)));
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn refused_library_bind_in_fix_all_leaves_no_imported_variable() {
+    let root = tmp_lib_root("refused");
+    let lib_id = publish_design_system_with_dark(&root, "Brand DS", Color::rgb(220, 38, 38));
+
+    let mut f = fx();
+    let group = f.frame(f.page, "Group", None);
+    let stale = f.rect(group, "Stale", BLUE);
+    let row = f.frame(f.page, "Row", None);
+    f.doc.get_mut(row).unwrap().kind =
+        NodeKind::Frame(FrameProps { auto_layout: Some(AutoLayout { item_spacing: 16.0, ..AutoLayout::v1() }), ..FrameProps::default() });
+    let mut app = f.app();
+    app.libs.set_root(root.clone());
+    app.set_library_enabled(&lib_id, true);
+    app.open_check_designs();
+    app.refresh_check_designs(false);
+    let findings: Vec<Finding> = app.check_designs.report.of(Rule::HardCodedValue).cloned().collect();
+    assert_eq!(findings.len(), 2, "{findings:#?}");
+
+    // The group switches the library collection to dark mode after the audit, so once imported the
+    // variable resolves to red there and the bind is refused.
+    app.doc.get_mut(group).unwrap().variables.modes.insert(format!("{lib_id}/theme"), "dark".into());
+
+    // The gap fix lands and imports its own variable (and the collection). The refused fill fix
+    // must leave nothing of its import behind.
+    assert_eq!(app.check_designs_fix_all(&findings), 1, "only the gap fix lands");
+    assert!(app.doc.get(stale).unwrap().variables.bindings.is_empty());
+    assert!(!app.doc.variables.contains_key(&format!("{lib_id}/var:Brand/Primary")), "refused bind must not leave the imported variable");
+    assert!(!app.doc.library.external.contains_key(&format!("{lib_id}/var:var:Brand/Primary")));
+    assert_eq!(app.doc.get(row).unwrap().variables.bindings.get("itemSpacing"), Some(&format!("{lib_id}/var:space/4")));
 
     let _ = std::fs::remove_dir_all(root);
 }

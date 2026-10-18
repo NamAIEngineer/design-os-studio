@@ -6,7 +6,8 @@ use super::{contrast, detached, hardcoded, Finding, Fix};
 use crate::app::App;
 use crate::edit::Tx;
 use crate::layout;
-use designos_doc::{import_asset, is_noop, local_key, set_bound_property, set_text_fills_everywhere, Command, NodeId, NodeKind, OverrideField, PaintKind, Vec2};
+use crate::libraries::is_noop;
+use designos_doc::{import_asset, local_key, set_bound_property, set_text_fills_everywhere, Command, NodeId, NodeKind, OverrideField, PaintKind, Vec2};
 
 /// Order fixes run in within "Fix all": recolouring first, then links to variables and styles, and
 /// the swap of a detached frame for an instance last. The swap only proceeds while the frame still
@@ -53,46 +54,17 @@ impl App {
         let Some(fix) = &finding.fix else { return false };
         let id = finding.node;
         match fix {
-            Fix::BindVariable { key, variable } => {
-                if !self.doc.variables.contains_key(variable) && !self.import_library_variable_for_fix(tx, id, std::slice::from_ref(key), variable) {
-                    return false;
+            // A library asset is imported and then bound. When the bind is refused, the import goes
+            // with it, so "Fix all" never commits an imported asset that nothing uses.
+            Fix::BindVariable { .. } | Fix::BindVariables { .. } | Fix::ApplyStyle { .. } => {
+                let mark = tx.mark();
+                if self.import_and_link(tx, id, fix) {
+                    return true;
                 }
-                let keys = hardcoded::keys_to_bind(&self.doc, id, key, variable);
-                if keys.is_empty() {
-                    return false;
+                if tx.rollback_to(&mut self.doc, mark).is_err() {
+                    self.show_toast("Couldn't undo a partial import".to_string(), true);
                 }
-                let Some(value) = self.doc.resolve_variable(id, variable) else { return false };
-                let Some(n) = tx.ed.node(&mut self.doc, id) else { return false };
-                for k in keys {
-                    n.variables.bindings.insert(k.to_string(), variable.clone());
-                    set_bound_property(n, k, &value);
-                }
-                true
-            }
-            Fix::BindVariables { keys, variable } => {
-                if !self.doc.variables.contains_key(variable) && !self.import_library_variable_for_fix(tx, id, keys, variable) {
-                    return false;
-                }
-                if keys.is_empty() || !keys.iter().all(|k| hardcoded::bind_is_current(&self.doc, id, k, variable)) {
-                    return false;
-                }
-                let Some(value) = self.doc.resolve_variable(id, variable) else { return false };
-                let Some(n) = tx.ed.node(&mut self.doc, id) else { return false };
-                for k in keys {
-                    n.variables.bindings.insert(k.clone(), variable.clone());
-                    set_bound_property(n, k, &value);
-                }
-                true
-            }
-            Fix::ApplyStyle { style } => {
-                if !self.doc.styles.contains_key(style) && !self.import_library_style_for_fix(tx, id, style) {
-                    return false;
-                }
-                if !hardcoded::style_is_current(&self.doc, id, style) {
-                    return false;
-                }
-                self.apply_style_in(tx, &[id], style);
-                true
+                false
             }
             Fix::SetTextColor { color } => {
                 // The stored colour is what the user was shown; apply it only while the audit would
@@ -104,6 +76,53 @@ impl App {
             }
             Fix::Reconnect { component } => self.reconnect_detached(tx, id, *component),
         }
+    }
+
+    /// Imports the library asset a variable or style fix needs (when it is not in the document yet),
+    /// then links the layer. False when either step is refused; the caller rolls back the import.
+    fn import_and_link(&mut self, tx: &mut Tx, id: NodeId, fix: &Fix) -> bool {
+        match fix {
+            Fix::BindVariable { key, variable } => {
+                if !self.doc.variables.contains_key(variable) && !self.import_library_variable_for_fix(tx, id, std::slice::from_ref(key), variable) {
+                    return false;
+                }
+                let keys = hardcoded::keys_to_bind(&self.doc, id, key, variable);
+                self.bind_keys(tx, id, keys.into_iter().map(str::to_string).collect(), variable)
+            }
+            Fix::BindVariables { keys, variable } => {
+                if !self.doc.variables.contains_key(variable) && !self.import_library_variable_for_fix(tx, id, keys, variable) {
+                    return false;
+                }
+                if !keys.iter().all(|k| hardcoded::bind_is_current(&self.doc, id, k, variable)) {
+                    return false;
+                }
+                self.bind_keys(tx, id, keys.clone(), variable)
+            }
+            Fix::ApplyStyle { style } => {
+                if !self.doc.styles.contains_key(style) && !self.import_library_style_for_fix(tx, id, style) {
+                    return false;
+                }
+                if !hardcoded::style_is_current(&self.doc, id, style) {
+                    return false;
+                }
+                self.apply_style_in(tx, &[id], style);
+                true
+            }
+            _ => false,
+        }
+    }
+
+    fn bind_keys(&mut self, tx: &mut Tx, id: NodeId, keys: Vec<String>, variable: &str) -> bool {
+        if keys.is_empty() {
+            return false;
+        }
+        let Some(value) = self.doc.resolve_variable(id, variable) else { return false };
+        let Some(n) = tx.ed.node(&mut self.doc, id) else { return false };
+        for k in &keys {
+            n.variables.bindings.insert(k.clone(), variable.to_string());
+            set_bound_property(n, k, &value);
+        }
+        true
     }
 
     fn import_pinned_asset_in(&mut self, tx: &mut Tx, library_id: &str, version: u32, key: &str) -> Option<String> {

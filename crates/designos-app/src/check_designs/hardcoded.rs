@@ -64,13 +64,22 @@ pub(super) struct Index<'a> {
     styles: Vec<StyleEntry<'a>>,
 }
 
+/// The Studio library a variable came from, when it is a library asset. An imported variable is
+/// named by its `library.external` entry; its collection's `source_library_key` counts only when it
+/// equals a Studio library id (enabled now or recorded by an earlier import). Figma's own
+/// `sourceLibraryKey`, which `.fig` and REST import store in the same field, names no Studio
+/// library, so such a variable stays a local candidate.
 fn variable_library_id<'a>(doc: &'a Document, v: &Variable) -> Option<&'a str> {
-    doc.variable_collections.get(&v.collection).and_then(|c| c.source_library_key.as_deref()).or_else(|| {
-        doc.library
-            .external
-            .values()
-            .find(|e| e.kind == LibraryAssetKind::Variable && e.local_key.as_deref() == Some(v.id.as_str()))
-            .map(|e| e.library_id.as_str())
+    let imported = doc
+        .library
+        .external
+        .values()
+        .find(|e| e.kind == LibraryAssetKind::Variable && e.local_key.as_deref() == Some(v.id.as_str()))
+        .map(|e| e.library_id.as_str());
+    imported.or_else(|| {
+        let key = doc.variable_collections.get(&v.collection)?.source_library_key.as_deref()?;
+        let known = doc.library.enabled.iter().any(|r| r.id == key) || doc.library.external.values().any(|e| e.library_id == key);
+        known.then_some(key)
     })
 }
 
@@ -305,7 +314,8 @@ fn scope_key_for_number(key: &str) -> &str {
 fn resolve_in_snapshot(doc: &Document, snap: &LibrarySnapshot, store: &VariableStore, node: NodeId, v: &Variable) -> Option<VariableValue> {
     let coll = snap.variable_collections.get(&v.collection)?;
     let imported_coll = local_key(&snap.library_id, &v.collection);
-    let default_mode = coll.modes.first().map(|m| m.id.as_str()).unwrap_or(coll.default_mode.as_str());
+    // The collection's own default mode, as `Document::resolve_variable` uses once it is imported.
+    let default_mode = if coll.default_mode.is_empty() { coll.modes.first().map(|m| m.id.as_str()).unwrap_or_default() } else { coll.default_mode.as_str() };
     let mode = doc.variable_mode(node, &imported_coll).unwrap_or_else(|| default_mode.to_string());
     store.resolve(&v.id, &mode).or_else(|| store.resolve(&v.id, default_mode))
 }

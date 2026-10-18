@@ -126,7 +126,9 @@ impl Report {
     }
 }
 
-/// Scans `scope` and lists every finding. Hidden layers and instance contents are skipped.
+/// Scans `scope` with the document's own variables and styles only (the app always audits with
+/// its enabled libraries through [`audit_with_libraries`]).
+#[cfg(test)]
 pub fn audit(doc: &Document, scope: &Scope) -> Report {
     audit_with_libraries(doc, scope, &LibrarySources::default())
 }
