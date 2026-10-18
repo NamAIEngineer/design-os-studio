@@ -1,0 +1,1 @@
+chrome-only-1440.png: violet 0 px of 15992640 counted = 0.000000% (masked rects: 0)
