@@ -5618,8 +5618,10 @@ Done!
         crate::theme::apply(&ctx);
         let mut st = exited_stub_state();
         // A fixed diagnosis whose fix is `Open a shell`; the install-page fix would open a browser.
-        st.active_tab_mut().unwrap().start_failure =
-            Some(agent_start_failure::diagnose(AgentCliPreset::Claude, true, Some(1), "error: unexpected argument '--x' found\n"));
+        let tab = st.active_tab_mut().unwrap();
+        tab.start_failure = Some(agent_start_failure::diagnose(AgentCliPreset::Claude, true, Some(1), "error: unexpected argument '--x' found\n"));
+        // The exit is already handled, so the next poll keeps this diagnosis instead of making its own.
+        tab.exited_notice_shown = true;
         let tabs_before = st.tabs.len();
         let panel_rect = Rect::from_min_size(Pos2::new(48.0, 0.0), Vec2::new(300.0, 800.0));
         let frame = |st: &mut TerminalState, events: Vec<egui::Event>| {
