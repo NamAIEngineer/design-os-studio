@@ -145,7 +145,9 @@ impl AgentCliPreset {
             AgentCliPreset::Codex => {
                 "codex --dangerously-bypass-approvals-and-sandbox -c 'mcp_servers.designos.command=\"'\"$DESIGNOS_MCP_BIN\"'\"'"
             }
-            AgentCliPreset::Grok => "grok --always-approve --mcp-config \"$DESIGNOS_MCP_CONFIG\"",
+            // `grok` has no `--mcp-config` either. It reads the project config `<cwd>/.grok/config.toml`
+            // (see `write_grok_session_config`), so it is started inside the per-file session dir.
+            AgentCliPreset::Grok => "grok --always-approve --cwd \"$DESIGNOS_SESSION_DIR\"",
             // `agy` has no `--mcp-config`. It discovers `<dir>/.agents/plugins/<name>/mcp_config.json` in every
             // `--add-dir`, so the per-file session dir carries the `designos` server (see
             // `write_agy_session_plugin`) without touching the user's global `~/.gemini/config/mcp_config.json`.
@@ -291,8 +293,8 @@ pub fn build_real_cli_command(preset: AgentCliPreset, prompt: &str, live_spec: &
             session_dir.display()
         ),
         AgentCliPreset::Grok => format!(
-            "{env_prefix} grok --always-approve -p '{escaped}' --mcp-config \"{}\"",
-            mcp_config.display()
+            "{env_prefix} GROK_FOLDER_TRUST='0' grok --always-approve -p '{escaped}' --cwd '{}'",
+            session_dir.display()
         ),
         AgentCliPreset::Shell | AgentCliPreset::DesignOsHelp => clean,
     }
@@ -861,6 +863,7 @@ impl TerminalState {
             let _ = atomic_write_session_file(&mcp_config_path, &bytes);
             write_agy_session_plugin(&self.session_dir, &bytes);
         }
+        write_grok_session_config(&self.session_dir, &mcp_config);
 
         let agent_status_path = self.session_dir.join("agent-status.json");
         let hooks_json = serde_json::json!({
@@ -2085,6 +2088,50 @@ fn write_agy_session_plugin(session_dir: &Path, mcp_config_bytes: &[u8]) {
     let _ = atomic_write_session_file(&plugin_dir.join("mcp_config.json"), mcp_config_bytes);
 }
 
+/// Renders `s` as a TOML basic string. JSON string escapes are a valid subset of TOML's.
+fn toml_string(s: &str) -> String {
+    serde_json::to_string(s).unwrap_or_else(|_| "\"\"".into())
+}
+
+/// Renders a TOML key, quoting it unless it is a valid bare key.
+fn toml_key(k: &str) -> String {
+    if !k.is_empty() && k.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-') {
+        k.to_string()
+    } else {
+        toml_string(k)
+    }
+}
+
+/// Publishes the session's `mcpServers` as Grok's project config `<session_dir>/.grok/config.toml`.
+/// Grok 1.0.62 has no per-session MCP flag; it merges the project layer of its cwd, so the tab is
+/// started with `--cwd <session_dir>` and the user's `~/.grok/config.toml` is never written.
+fn write_grok_session_config(session_dir: &Path, mcp_config: &serde_json::Value) {
+    let Some(servers) = mcp_config.get("mcpServers").and_then(|v| v.as_object()) else { return };
+    let mut toml = String::new();
+    for (name, server) in servers {
+        let key = toml_key(name);
+        toml.push_str(&format!("[mcp_servers.{key}]\n"));
+        if let Some(command) = server.get("command").and_then(|v| v.as_str()) {
+            toml.push_str(&format!("command = {}\n", toml_string(command)));
+        }
+        if let Some(args) = server.get("args").and_then(|v| v.as_array()) {
+            let items: Vec<String> = args.iter().filter_map(|a| a.as_str()).map(toml_string).collect();
+            toml.push_str(&format!("args = [{}]\n", items.join(", ")));
+        }
+        toml.push_str("enabled = true\n");
+        if let Some(env) = server.get("env").and_then(|v| v.as_object()) {
+            toml.push_str(&format!("\n[mcp_servers.{key}.env]\n"));
+            for (k, v) in env {
+                if let Some(v) = v.as_str() {
+                    toml.push_str(&format!("{} = {}\n", toml_key(k), toml_string(v)));
+                }
+            }
+        }
+        toml.push('\n');
+    }
+    let _ = atomic_write_session_file(&session_dir.join(".grok").join("config.toml"), toml.as_bytes());
+}
+
 fn atomic_write_session_file(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
@@ -2109,6 +2156,12 @@ pub fn configure_pty_env_with_session(cmd: &mut CommandBuilder, preset: AgentCli
     cmd.env("TERM", "xterm-256color");
     cmd.env("COLORTERM", "truecolor");
     cmd.env("DESIGNOS_AGENT_RUNTIME", preset.binary_name());
+    if preset == AgentCliPreset::Grok {
+        // Grok starts repo-local MCP servers, hooks and skills only in a trusted folder. The tab's
+        // cwd is Studio's own session dir, so skip the prompt for this process instead of writing
+        // `~/.grok/trusted_folders.toml`.
+        cmd.env("GROK_FOLDER_TRUST", "0");
+    }
 
     if let Some(sess) = session {
         cmd.env("DESIGNOS_SESSION_DIR", sess.session_dir.as_os_str());
@@ -5047,14 +5100,71 @@ Done!
         "--sandbox",
     ];
 
-    fn unknown_agy_flags(command: &str) -> Vec<String> {
+    /// Every option `grok --help` lists in Grok Build 1.0.62.
+    const GROK_1_0_62_FLAGS: &[&str] = &[
+        "--agent",
+        "--agents",
+        "--allow",
+        "--always-approve",
+        "-c",
+        "--continue",
+        "--cwd",
+        "--debug",
+        "--debug-file",
+        "--deny",
+        "--disable-web-search",
+        "--disallowed-tools",
+        "--fork-session",
+        "--fullscreen",
+        "-h",
+        "--help",
+        "--include-partial-messages",
+        "--json-schema",
+        "--leader-socket",
+        "-m",
+        "--model",
+        "--max-turns",
+        "--minimal",
+        "--no-alt-screen",
+        "--no-plan",
+        "--no-subagents",
+        "--oauth",
+        "--output-format",
+        "-p",
+        "--single",
+        "--permission-mode",
+        "--prompt-file",
+        "--prompt-json",
+        "-r",
+        "--resume",
+        "--reasoning-effort",
+        "--restore-code",
+        "--rules",
+        "-s",
+        "--session-id",
+        "--sandbox",
+        "--system-prompt-override",
+        "--tools",
+        "-v",
+        "--version",
+        "--verbatim",
+        "-w",
+        "--worktree",
+        "--worktree-ref",
+    ];
+
+    fn unknown_flags(command: &str, allowed: &[&str]) -> Vec<String> {
         command
             .split_whitespace()
             .map(|t| t.trim_matches(|c| c == '"' || c == '\''))
             .filter(|t| t.starts_with('-'))
-            .filter(|t| !AGY_1_4_2_FLAGS.contains(t))
+            .filter(|t| !allowed.contains(t))
             .map(str::to_string)
             .collect()
+    }
+
+    fn unknown_agy_flags(command: &str) -> Vec<String> {
+        unknown_flags(command, AGY_1_4_2_FLAGS)
     }
 
     #[test]
@@ -5090,5 +5200,51 @@ Done!
         let parsed: serde_json::Value = serde_json::from_str(&plugin_mcp).expect("parse");
         assert!(parsed["mcpServers"]["designos"]["command"].as_str().is_some());
         assert_eq!(parsed["mcpServers"]["designos"]["env"]["DESIGNOS_FILE"].as_str(), Some("/tmp/agy-plugin-file.designos"));
+    }
+
+    #[test]
+    fn grok_launch_uses_only_flags_grok_1_0_62_accepts() {
+        let interactive = AgentCliPreset::Grok.cli_launch_command();
+        assert_eq!(unknown_flags(interactive, GROK_1_0_62_FLAGS), Vec::<String>::new(), "tab launch: {interactive}");
+        assert!(!interactive.contains("--mcp-config"), "grok has no --mcp-config: {interactive}");
+        assert!(interactive.contains("--cwd \"$DESIGNOS_SESSION_DIR\""), "grok reads the session project config from its cwd: {interactive}");
+
+        let live_spec = std::path::Path::new("/tmp/designos-session-x/live-agent-out.spec.json");
+        let sel_json = std::path::Path::new("/tmp/designos-session-x/selection.spec.json");
+        let one_shot = build_real_cli_command(AgentCliPreset::Grok, "Build card", live_spec, sel_json);
+        assert_eq!(unknown_flags(&one_shot, GROK_1_0_62_FLAGS), Vec::<String>::new(), "one-shot launch: {one_shot}");
+        assert!(!one_shot.contains("--mcp-config"), "grok has no --mcp-config: {one_shot}");
+        assert!(one_shot.contains("--cwd '/tmp/designos-session-x'"), "{one_shot}");
+        assert!(one_shot.contains("GROK_FOLDER_TRUST='0'"), "{one_shot}");
+    }
+
+    #[test]
+    fn grok_session_gets_a_project_config_with_the_designos_mcp_server() {
+        let mut st = TerminalState::for_tab(732);
+        let mut doc = Document::new("Grok Project Config File");
+        let page = doc.add_page("Page 1");
+        st.sync_live_file_context(&doc, page, &[], Some(std::path::Path::new("/tmp/grok \"quoted\" file.designos")));
+
+        let toml = std::fs::read_to_string(st.session_dir.join(".grok").join("config.toml")).expect(".grok/config.toml");
+        assert!(toml.contains("[mcp_servers.designos]\n"), "{toml}");
+        assert!(toml.contains("[mcp_servers.designos.env]\n"), "{toml}");
+        assert!(toml.contains("command = \""), "{toml}");
+        assert!(toml.contains("args = [\"--workspace\", \""), "{toml}");
+        assert!(toml.contains(&format!("DESIGNOS_SESSION_DIR = {}", serde_json::to_string(&st.session_dir.display().to_string()).unwrap())), "{toml}");
+        assert!(toml.contains(r#"DESIGNOS_FILE = "/tmp/grok \"quoted\" file.designos""#), "{toml}");
+    }
+
+    #[test]
+    fn grok_pty_env_disables_folder_trust_only_for_grok() {
+        let st = TerminalState::for_tab(733);
+        let env = st.session_env();
+        let grok_env = |preset| {
+            let mut cmd = CommandBuilder::new("true");
+            configure_pty_env_with_session(&mut cmd, preset, None, Some(&env));
+            cmd.get_env("GROK_FOLDER_TRUST").map(|v| v.to_string_lossy().into_owned())
+        };
+        assert_eq!(grok_env(AgentCliPreset::Grok).as_deref(), Some("0"));
+        assert_eq!(grok_env(AgentCliPreset::Claude), None);
+        assert_eq!(grok_env(AgentCliPreset::Antigravity), None);
     }
 }
