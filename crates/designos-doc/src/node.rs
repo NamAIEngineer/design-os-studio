@@ -271,6 +271,9 @@ pub struct ComponentLink {
     /// slot content that need not be a node of this document.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub slot_content_id: Option<String>,
+    /// Per-property slot content guid (`session:local`), keyed by slot property name.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub slot_content_ids: BTreeMap<String, String>,
     /// Binds a node property to a component property, e.g.
     /// `Visible -> "Show icon"`, `Characters -> "Label"`, `MainComponent -> "Icon"`.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -302,6 +305,7 @@ impl ComponentLink {
             && !self.is_slot
             && !self.is_slot_content
             && self.slot_content_id.is_none()
+            && self.slot_content_ids.is_empty()
             && self.bindings.is_empty()
             && self.description.is_empty()
             && !self.expose_nested_instances

@@ -147,3 +147,77 @@ fn settings_of_the_other_slot_properties_are_not_touched() {
     assert_eq!(n.component.slot_configs.get("Footer"), Some(&SlotPropConfig { min_children: Some(1), ..Default::default() }));
     assert!(n.component.slot_configs.values().all(|c| !c.preferred.contains(&icon)));
 }
+
+#[test]
+fn two_slot_props_on_one_node_keep_separate_slot_content_ids_and_rename_or_delete_cleanly() {
+    let (mut d, comp, _, _) = component_with_slot();
+    let page = d.pages[0];
+    let c1 = d.alloc_id();
+    let c1 = d.insert(page, Node::frame(c1, Rect::new(0.0, 0.0, 40.0, 20.0))).unwrap();
+    let c2 = d.alloc_id();
+    let c2 = d.insert(page, Node::frame(c2, Rect::new(0.0, 30.0, 40.0, 20.0))).unwrap();
+
+    {
+        let node = d.get_mut(comp).unwrap();
+        node.component.props.push(ComponentPropDef { name: "Footer".into(), kind: PropKind::Slot, default: PropValue::Slot(vec![]) });
+        node.component.slot_content_ids.insert("Body".into(), "7:10".into());
+        node.component.slot_content_ids.insert("Footer".into(), "7:20".into());
+    }
+    create_instance(&mut d, comp, page, Vec2::new(400.0, 0.0)).apply(&mut d).unwrap();
+    let inst = instances_of(&d, comp)[0];
+    {
+        let inst_node = d.get_mut(inst).unwrap();
+        inst_node.component.values.insert("Body".into(), PropValue::Slot(vec![c1]));
+        inst_node.component.values.insert("Footer".into(), PropValue::Slot(vec![c2]));
+        inst_node.component.slot_content_ids.insert("Body".into(), "9:10".into());
+        inst_node.component.slot_content_ids.insert("Footer".into(), "9:20".into());
+    }
+
+    let loaded = Document::from_json(&d.to_json().unwrap()).unwrap();
+    assert_eq!(loaded.get(comp).unwrap().component.slot_content_ids.get("Body").map(String::as_str), Some("7:10"));
+    assert_eq!(loaded.get(comp).unwrap().component.slot_content_ids.get("Footer").map(String::as_str), Some("7:20"));
+    assert_eq!(loaded.get(inst).unwrap().component.slot_content_ids.get("Body").map(String::as_str), Some("9:10"));
+    assert_eq!(loaded.get(inst).unwrap().component.slot_content_ids.get("Footer").map(String::as_str), Some("9:20"));
+
+    // Renaming "Body" -> "Header" moves its slot_content_id on both component and instance without disturbing "Footer".
+    rename_prop(&mut d, comp, "Body", "Header").apply(&mut d).unwrap();
+    assert_eq!(d.get(comp).unwrap().component.slot_content_ids.get("Header").map(String::as_str), Some("7:10"));
+    assert_eq!(d.get(comp).unwrap().component.slot_content_ids.get("Footer").map(String::as_str), Some("7:20"));
+    assert!(!d.get(comp).unwrap().component.slot_content_ids.contains_key("Body"));
+    assert_eq!(d.get(inst).unwrap().component.slot_content_ids.get("Header").map(String::as_str), Some("9:10"));
+    assert_eq!(d.get(inst).unwrap().component.slot_content_ids.get("Footer").map(String::as_str), Some("9:20"));
+    assert!(!d.get(inst).unwrap().component.slot_content_ids.contains_key("Body"));
+
+    // Deleting "Header" removes only "Header"'s slot_content_id and leaves "Footer" intact.
+    delete_prop(&mut d, comp, "Header").apply(&mut d).unwrap();
+    assert!(!d.get(comp).unwrap().component.slot_content_ids.contains_key("Header"));
+    assert_eq!(d.get(comp).unwrap().component.slot_content_ids.get("Footer").map(String::as_str), Some("7:20"));
+    assert!(!d.get(inst).unwrap().component.slot_content_ids.contains_key("Header"));
+    assert_eq!(d.get(inst).unwrap().component.slot_content_ids.get("Footer").map(String::as_str), Some("9:20"));
+}
+
+#[test]
+fn old_saved_json_with_single_slot_content_id_migrates_to_per_property_map() {
+    let (mut d, comp, _, _) = component_with_slot();
+    let page = d.pages[0];
+    create_instance(&mut d, comp, page, Vec2::new(400.0, 0.0)).apply(&mut d).unwrap();
+    let inst = instances_of(&d, comp)[0];
+    d.get_mut(comp).unwrap().component.slot_content_id = Some("7:42".into());
+    d.get_mut(inst).unwrap().component.slot_content_id = Some("9:88".into());
+
+    let legacy_json = d.to_json().unwrap();
+    assert!(legacy_json.contains("\"slot_content_id\""));
+    assert!(!legacy_json.contains("\"slot_content_ids\""));
+
+    let migrated = Document::from_json(&legacy_json).unwrap();
+    assert_eq!(
+        migrated.get(comp).unwrap().component.slot_content_ids.get("Body").map(String::as_str),
+        Some("7:42"),
+        "legacy component slot_content_id migrates into slot_content_ids under its slot prop name"
+    );
+    assert_eq!(
+        migrated.get(inst).unwrap().component.slot_content_ids.get("Body").map(String::as_str),
+        Some("9:88"),
+        "legacy instance slot_content_id migrates into slot_content_ids under its master's slot prop name"
+    );
+}

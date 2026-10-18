@@ -269,3 +269,84 @@ fn preferred_components_without_a_slot_config_survive_a_fig_round_trip() {
     let icon = find(&rt, "Icon").id;
     assert_eq!(find(&rt, "Panel").component.slot_configs.get("Body"), Some(&SlotPropConfig { preferred: vec![icon], ..Default::default() }));
 }
+
+#[test]
+fn two_slot_props_on_one_node_round_trip_separate_slot_content_ids_through_fig() {
+    let fixture = json!([
+        nc((0, 0), (0, 0), "!", "DOCUMENT", "Document", json!({})),
+        nc((0, 1), (0, 0), "a", "CANVAS", "Page", json!({})),
+        nc(
+            (5, 1),
+            (0, 1),
+            "a",
+            "SYMBOL",
+            "Panel",
+            json!({
+                "componentPropDefs": [
+                    {
+                        "id": g(7, 1),
+                        "name": "Header",
+                        "type": "SLOT",
+                        "varValue": {
+                            "dataType": "SLOT_CONTENT_ID",
+                            "value": { "slotContentIdValue": { "guid": g(8, 1) } }
+                        }
+                    },
+                    {
+                        "id": g(7, 2),
+                        "name": "Body",
+                        "type": "SLOT",
+                        "varValue": {
+                            "dataType": "SLOT_CONTENT_ID",
+                            "value": { "slotContentIdValue": { "guid": g(8, 2) } }
+                        }
+                    }
+                ]
+            })
+        ),
+        nc(
+            (1, 2),
+            (0, 1),
+            "b",
+            "INSTANCE",
+            "Panel copy",
+            json!({
+                "symbolData": { "symbolID": g(5, 1), "symbolOverrides": [], "uniformScaleFactor": 1.0 },
+                "componentPropAssignments": [
+                    {
+                        "defID": g(7, 1),
+                        "varValue": {
+                            "dataType": "SLOT_CONTENT_ID",
+                            "value": { "slotContentIdValue": { "guid": g(9, 1) } }
+                        }
+                    },
+                    {
+                        "defID": g(7, 2),
+                        "varValue": {
+                            "dataType": "SLOT_CONTENT_ID",
+                            "value": { "slotContentIdValue": { "guid": g(9, 2) } }
+                        }
+                    }
+                ]
+            })
+        )
+    ]);
+
+    let doc = import_fig_node_changes(&fixture, "t").unwrap();
+    let panel = find(&doc, "Panel");
+    assert_eq!(panel.component.slot_content_ids.get("Header").map(String::as_str), Some("8:1"));
+    assert_eq!(panel.component.slot_content_ids.get("Body").map(String::as_str), Some("8:2"));
+
+    let inst = find(&doc, "Panel copy");
+    assert_eq!(inst.component.slot_content_ids.get("Header").map(String::as_str), Some("9:1"));
+    assert_eq!(inst.component.slot_content_ids.get("Body").map(String::as_str), Some("9:2"));
+
+    let rt = import_fig(&export_fig(&doc).unwrap()).unwrap();
+    let rt_panel = find(&rt, "Panel");
+    assert_eq!(rt_panel.component.slot_content_ids.get("Header").map(String::as_str), Some("8:1"));
+    assert_eq!(rt_panel.component.slot_content_ids.get("Body").map(String::as_str), Some("8:2"));
+
+    let rt_inst = find(&rt, "Panel copy");
+    assert_eq!(rt_inst.component.slot_content_ids.get("Header").map(String::as_str), Some("9:1"));
+    assert_eq!(rt_inst.component.slot_content_ids.get("Body").map(String::as_str), Some("9:2"));
+}

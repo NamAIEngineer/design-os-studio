@@ -1200,6 +1200,9 @@ impl<'a> Ctx<'a> {
                                 self.pending_swaps.push((id, name.clone(), format!("SLOTPREF:{ps}"), true));
                             }
                         }
+                        if let Some(scid) = fstr(d, "slotContentId").filter(|s| !s.is_empty()) {
+                            n.component.slot_content_ids.insert(name.clone(), scid.to_string());
+                        }
                         (PropKind::Slot, PropValue::Slot(Vec::new()))
                     }
                     _ => continue,
@@ -1221,9 +1224,16 @@ impl<'a> Ctx<'a> {
                         PropValue::Instance(NodeId(0))
                     }
                     Some("SLOT") => {
-                        let s = text();
-                        self.pending_swaps.push((id, name.clone(), format!("SLOT:{s}"), false));
-                        PropValue::Slot(Vec::new())
+                        if let Some(scid) = fstr(d, "slotContentId").filter(|s| !s.is_empty()) {
+                            n.component.slot_content_ids.insert(name.clone(), scid.to_string());
+                        }
+                        if val.is_some() {
+                            let s = text();
+                            self.pending_swaps.push((id, name.clone(), format!("SLOT:{s}"), false));
+                            PropValue::Slot(Vec::new())
+                        } else {
+                            continue;
+                        }
                     }
                     _ => continue,
                 };
@@ -1276,6 +1286,7 @@ impl<'a> Ctx<'a> {
         }
         self.link_sources(&targets);
         self.resolve_swaps();
+        self.doc.migrate_legacy_slot_content_ids();
         if !expand_instances {
             self.apply_rest_overrides();
             self.resolve_proto();

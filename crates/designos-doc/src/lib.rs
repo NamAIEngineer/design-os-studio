@@ -734,6 +734,7 @@ impl Document {
         let mut report = doc.validate_and_repair();
         report.non_finite_numbers = non_finite_numbers;
         doc.migrate_text();
+        doc.migrate_legacy_slot_content_ids();
         Ok((doc, report))
     }
 
@@ -745,6 +746,63 @@ impl Document {
             }
         }
         self.mark_full_dirty();
+    }
+
+    /// Populates `component.slot_content_ids` from legacy single `component.slot_content_id`
+    /// values using the owning component's slot property name.
+    pub fn migrate_legacy_slot_content_ids(&mut self) {
+        let ids: Vec<NodeId> = self.nodes.keys().copied().collect();
+        for id in ids {
+            let (legacy_id, needs_migration) = match self.nodes.get(&id) {
+                Some(n) => (n.component.slot_content_id.clone(), n.component.slot_content_ids.is_empty()),
+                None => continue,
+            };
+            let Some(scid) = legacy_id else { continue };
+            if !needs_migration {
+                continue;
+            }
+            if let Some(prop_name) = self.first_slot_prop_name_for(id) {
+                if let Some(n) = self.nodes.get_mut(&id) {
+                    n.component.slot_content_ids.insert(prop_name, scid);
+                }
+            }
+        }
+    }
+
+    fn first_slot_prop_name_for(&self, id: NodeId) -> Option<String> {
+        let n = self.nodes.get(&id)?;
+        if let Some(p) = n.component.props.iter().find(|p| p.kind == PropKind::Slot) {
+            return Some(p.name.clone());
+        }
+        if let Some(name) = n.component.slot_configs.keys().next() {
+            return Some(name.clone());
+        }
+        if let Some(name) = n.component.bindings.get(&OverrideField::SlotContent) {
+            return Some(name.clone());
+        }
+        if let Some((name, _)) = n.component.values.iter().find(|(_, v)| matches!(v, PropValue::Slot(_))) {
+            return Some(name.clone());
+        }
+        let comp_id = match &n.kind {
+            NodeKind::Instance { component, .. } => *component,
+            _ => None,
+        }
+        .or(n.component.source);
+        if let Some(comp_id) = comp_id.filter(|&c| c != id) {
+            if let Some(name) = self.first_slot_prop_name_for(comp_id) {
+                return Some(name);
+            }
+        }
+        if let Some(parent_id) = n.parent {
+            if let Some(parent) = self.nodes.get(&parent_id) {
+                if matches!(parent.kind, NodeKind::ComponentSet(_)) {
+                    if let Some(name) = self.first_slot_prop_name_for(parent_id) {
+                        return Some(name);
+                    }
+                }
+            }
+        }
+        None
     }
 }
 

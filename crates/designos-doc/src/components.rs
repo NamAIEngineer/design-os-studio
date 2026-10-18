@@ -1025,6 +1025,9 @@ pub fn rename_prop(doc: &mut Document, owner: NodeId, old: &str, new: &str) -> C
     if let Some(cfg) = o.component.slot_configs.remove(old) {
         o.component.slot_configs.insert(new.to_string(), cfg);
     }
+    if let Some(scid) = o.component.slot_content_ids.remove(old) {
+        o.component.slot_content_ids.insert(new.to_string(), scid);
+    }
     c.update(o);
     for id in subtree_ids(c.s, owner) {
         let Some(mut n) = c.s.get(id).cloned() else { continue };
@@ -1041,6 +1044,9 @@ pub fn rename_prop(doc: &mut Document, owner: NodeId, old: &str, new: &str) -> C
         if let Some(v) = n.component.values.remove(old) {
             n.component.values.insert(new.to_string(), v);
         }
+        if let Some(scid) = n.component.slot_content_ids.remove(old) {
+            n.component.slot_content_ids.insert(new.to_string(), scid);
+        }
         c.update(n);
     }
     c.finish()
@@ -1052,6 +1058,7 @@ pub fn delete_prop(doc: &mut Document, owner: NodeId, name: &str) -> Command {
     let Some(mut o) = c.s.get(owner).cloned() else { return nothing() };
     o.component.props.retain(|p| p.name != name);
     o.component.slot_configs.remove(name);
+    o.component.slot_content_ids.remove(name);
     c.update(o);
     for id in subtree_ids(c.s, owner) {
         let Some(mut n) = c.s.get(id).cloned() else { continue };
@@ -1062,6 +1069,7 @@ pub fn delete_prop(doc: &mut Document, owner: NodeId, name: &str) -> Command {
     for inst in instances_of_any(c.s, &comps) {
         let Some(mut n) = c.s.get(inst).cloned() else { continue };
         n.component.values.remove(name);
+        n.component.slot_content_ids.remove(name);
         c.update(n);
     }
     sync_component(&mut c, owner);
