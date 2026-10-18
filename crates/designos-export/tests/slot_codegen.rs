@@ -265,6 +265,139 @@ fn reserved_slot_names_are_renamed_in_every_language() {
     assert!(compose_for(&d, inst).contains("modifierSlot = {"));
 }
 
+/// Adds a text, a boolean, a variant and an instance-swap property to `comp` and sets them on `inst`.
+fn add_props(d: &mut Document, comp: NodeId, inst: NodeId) {
+    let page = d.get(comp).unwrap().parent.unwrap();
+    let mut icons = Vec::new();
+    for name in ["Star", "Heart"] {
+        let id = d.alloc_id();
+        let mut c = Node::new(id, NodeKind::Component(FrameProps::default()));
+        c.name = name.into();
+        c.size = Vec2::new(16.0, 16.0);
+        icons.push(d.insert(page, c).unwrap());
+    }
+    let defs = [
+        ("Label#2:0", PropKind::Text, PropValue::Text("Save".into())),
+        ("Disabled#2:1", PropKind::Boolean, PropValue::Bool(false)),
+        ("Size#2:2", PropKind::Variant { options: vec!["S".into(), "L".into()] }, PropValue::Variant("S".into())),
+        ("Icon#2:3", PropKind::InstanceSwap { preferred: vec![] }, PropValue::Instance(icons[0])),
+    ];
+    for (name, kind, default) in defs {
+        d.get_mut(comp).unwrap().component.props.push(ComponentPropDef { name: name.into(), kind, default });
+    }
+    let values = &mut d.get_mut(inst).unwrap().component.values;
+    values.insert("Label#2:0".into(), PropValue::Text("Go".into()));
+    values.insert("Disabled#2:1".into(), PropValue::Bool(true));
+    values.insert("Size#2:2".into(), PropValue::Variant("L".into()));
+    values.insert("Icon#2:3".into(), PropValue::Instance(icons[1]));
+}
+
+/// Names of the named arguments the instance call passes at its own nesting level (`name = ...`).
+fn kotlin_call_args(call: &str) -> Vec<String> {
+    call.lines()
+        .filter_map(|l| l.strip_prefix("    "))
+        .filter(|l| !l.starts_with(' '))
+        .filter_map(|l| l.split_once(" = ").map(|(n, _)| n.to_string()))
+        .collect()
+}
+
+#[test]
+fn compose_function_declares_every_argument_its_instance_passes() {
+    let (mut d, comp, inst) = two_slot_dialog();
+    add_props(&mut d, comp, inst);
+    let def = compose_for(&d, comp);
+    let call = compose_for(&d, inst);
+    let args = kotlin_call_args(&call);
+    for name in ["modifier", "label", "disabled", "size", "icon", "header", "body"] {
+        assert!(args.contains(&name.to_string()), "instance passes {name}:\n{call}");
+        assert!(def.contains(&format!("    {name}: ")), "definition declares {name}:\n{def}");
+    }
+    in_order(
+        &def,
+        &[
+            "fun Dialog(",
+            "modifier: Modifier = Modifier,",
+            "label: String = \"Save\",",
+            "disabled: Boolean = false,",
+            "size: String = \"S\",",
+            "icon: @Composable () -> Unit = { Star() },",
+            "header: @Composable () -> Unit = {",
+            "body: @Composable () -> Unit = {},",
+            ") {",
+        ],
+    );
+    // The passed modifier styles the root layout.
+    assert_eq!(count(&def, "modifier = modifier"), 1, "{def}");
+    let body = &def[def.find(") {").unwrap()..];
+    assert!(body[body.find("modifier = ").unwrap()..].starts_with("modifier = modifier"), "the root's own modifier chains onto the parameter:\n{def}");
+}
+
+#[test]
+fn compose_function_without_root_styling_still_applies_the_modifier() {
+    let (d, comp, _) = dialog(&[("Body", None)]);
+    let def = compose_for(&d, comp);
+    assert!(def.contains("modifier: Modifier = Modifier,"), "{def}");
+    assert!(def.contains("modifier = modifier"), "{def}");
+}
+
+#[test]
+fn swiftui_init_declares_every_argument_its_instance_passes() {
+    let (mut d, comp, inst) = two_slot_dialog();
+    add_props(&mut d, comp, inst);
+    let def = swiftui_for(&d, comp);
+    let call = swiftui_for(&d, inst);
+    in_order(&call, &["Dialog(", "label: \"Go\",", "disabled: true,", "size: \"L\",", "icon: AnyView(Heart()),", "header: {", "bodySlot: {", ")"]);
+    in_order(
+        &def,
+        &[
+            "init(label: String = \"Save\", disabled: Bool = false, size: String = \"S\", icon: AnyView = AnyView(Star()), @ViewBuilder header: () -> HeaderContent, @ViewBuilder bodySlot: () -> BodyContent) {",
+            "extension Dialog where",
+            "init(label: String = \"Save\", disabled: Bool = false, size: String = \"S\", icon: AnyView = AnyView(Star())) {",
+        ],
+    );
+}
+
+#[test]
+fn react_slot_props_are_single_brace_jsx_expressions() {
+    let (d, _, inst) = two_slot_dialog();
+    for out in [react_for(&d, inst), react_with(&d, inst, &ReactOptions { tailwind: true })] {
+        assert!(!out.contains("header={{") && !out.contains("body={{"), "{out}");
+        assert!(out.contains("header={\n") && out.contains("body={\n"), "{out}");
+    }
+}
+
+/// Parses the generated React (TSX) with esbuild. Needs `npx` and network on first use, so it is
+/// opt-in: `cargo test -p designos-export -- --ignored`.
+#[test]
+#[ignore = "needs npx and esbuild"]
+fn generated_react_parses() {
+    use std::io::Write;
+    use std::process::{Command as Proc, Stdio};
+    let (mut d, comp, inst) = two_slot_dialog();
+    add_props(&mut d, comp, inst);
+    let mut failures = Vec::new();
+    for (label, src) in [
+        ("inline def", react_for(&d, comp)),
+        ("inline inst", react_for(&d, inst)),
+        ("tailwind def", react_with(&d, comp, &ReactOptions { tailwind: true })),
+        ("tailwind inst", react_with(&d, inst, &ReactOptions { tailwind: true })),
+    ] {
+        let mut child = Proc::new("npx")
+            .args(["--yes", "esbuild", "--loader=tsx"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("npx runs");
+        child.stdin.take().unwrap().write_all(src.as_bytes()).unwrap();
+        let out = child.wait_with_output().unwrap();
+        if !out.status.success() {
+            failures.push(format!("{label}:\n{src}\n{}", String::from_utf8_lossy(&out.stderr)));
+        }
+    }
+    assert!(failures.is_empty(), "esbuild rejected:\n{}", failures.join("\n---\n"));
+}
+
 /// Type-checks the SwiftUI the generator writes for each slot shape: a component and an instance of it.
 /// Needs `swiftc` and the macOS SDK, so it is opt-in: `cargo test -p designos-export -- --ignored`.
 #[test]
@@ -282,13 +415,18 @@ fn generated_swiftui_type_checks() {
     let (mut d, comp, inst) = dialog(&[("Body", Some("A")), ("Class", None), ("Self", None)]);
     fill(&mut d, inst, 0, "Body#1:0", &["x"]);
     cases.push(("reserved names", (d, comp, inst)));
+    let (mut d, comp, inst) = two_slot_dialog();
+    add_props(&mut d, comp, inst);
+    cases.push(("props and slots", (d, comp, inst)));
 
     let dir = std::env::temp_dir().join(format!("designos-slot-swift-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let mut failures = Vec::new();
+    // The icon components the swap property refers to.
+    const STUBS: &str = "struct Star: View { var body: some View { EmptyView() } }\nstruct Heart: View { var body: some View { EmptyView() } }";
     for (label, (d, comp, inst)) in &cases {
         let src = format!(
-            "import SwiftUI\n\n{}\n\nstruct Screen: View {{\n    var body: some View {{\n{}\n    }}\n}}\n",
+            "import SwiftUI\n\n{STUBS}\n\n{}\n\nstruct Screen: View {{\n    var body: some View {{\n{}\n    }}\n}}\n",
             swiftui_for(d, *comp),
             swiftui_for(d, *inst)
         );

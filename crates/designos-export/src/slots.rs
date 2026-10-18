@@ -294,6 +294,49 @@ pub(crate) fn slot_site(doc: &Document, id: NodeId) -> Option<SlotSite> {
     Some(SlotSite { name, single: count == 1, defaults: visible_children(doc, n).iter().map(|c| c.id).collect() })
 }
 
+/// A non-slot component property, as a parameter of a generated slot component.
+pub(crate) struct PropParam {
+    /// camelCase name, as `instance_args` passes it.
+    pub name: String,
+    pub default: PropDefault,
+}
+
+pub(crate) enum PropDefault {
+    Bool(bool),
+    /// Text, or the selected option of a variant property.
+    Text(String),
+    /// Swapped-in component: its view name, if the default names one.
+    Instance(Option<String>),
+}
+
+/// The non-slot properties of component definition `root` with their defaults, in declaration
+/// order. A generated component with slots declares these so every argument an instance passes
+/// resolves. Empty for anything but a component or component set.
+pub(crate) fn prop_params(doc: &Document, root: NodeId) -> Vec<PropParam> {
+    let Some(n) = doc.get(root) else { return Vec::new() };
+    if !matches!(n.kind, NodeKind::Component(_) | NodeKind::ComponentSet(_)) {
+        return Vec::new();
+    }
+    let mut out: Vec<PropParam> = Vec::new();
+    for def in prop_defs(doc, root) {
+        let default = match (&def.kind, &def.default) {
+            (PropKind::Slot, _) => continue,
+            (_, PropValue::Bool(b)) => PropDefault::Bool(*b),
+            (_, PropValue::Text(t) | PropValue::Variant(t)) => PropDefault::Text(t.clone()),
+            (_, PropValue::Instance(c)) => PropDefault::Instance(doc.get(*c).map(|c| pascal(&c.name))),
+            (PropKind::Boolean, _) => PropDefault::Bool(false),
+            (PropKind::Variant { options }, _) => PropDefault::Text(options.first().cloned().unwrap_or_default()),
+            (PropKind::InstanceSwap { .. }, _) => PropDefault::Instance(None),
+            _ => PropDefault::Text(String::new()),
+        };
+        let name = camel(clean_prop_name(&def.name));
+        if !name.is_empty() && !out.iter().any(|p| p.name == name) {
+            out.push(PropParam { name, default });
+        }
+    }
+    out
+}
+
 /// Content an instance passes to one slot. An empty `ids` suppresses the slot's default content.
 pub(crate) struct SlotFill {
     pub name: String,

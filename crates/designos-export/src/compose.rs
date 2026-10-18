@@ -25,6 +25,19 @@ pub fn compose_for(doc: &Document, node: NodeId) -> String {
 fn slot_function(doc: &Document, n: &Node, slots: &[SlotInfo], o: &mut Out) {
     o.line(0, "@Composable");
     o.line(0, format!("fun {}(", view_name(doc, n)));
+    o.line(1, "modifier: Modifier = Modifier,");
+    for p in prop_params(doc, n.id) {
+        let name = &p.name;
+        o.line(
+            1,
+            match &p.default {
+                PropDefault::Bool(b) => format!("{name}: Boolean = {b},"),
+                PropDefault::Text(t) => format!("{name}: String = {},", quote(t)),
+                PropDefault::Instance(Some(v)) => format!("{name}: @Composable () -> Unit = {{ {v}() }},"),
+                PropDefault::Instance(None) => format!("{name}: @Composable () -> Unit = {{}},"),
+            },
+        );
+    }
     for s in slots {
         let head = format!("{}: @Composable () -> Unit = {{", slot_ident(&s.name, Lang::Kotlin));
         let defaults: Vec<&Node> = s.container.and_then(|c| doc.get(c)).map(|c| visible_children(doc, c)).unwrap_or_default();
@@ -40,7 +53,9 @@ fn slot_function(doc: &Document, n: &Node, slots: &[SlotInfo], o: &mut Out) {
         o.line(1, "},");
     }
     o.line(0, ") {");
+    o.root_takes_modifier = true;
     emit(doc, n.id, Parent::root(), 1, o);
+    o.root_takes_modifier = false;
     o.line(0, "}");
 }
 
@@ -121,14 +136,17 @@ fn arg(s: impl Into<String>) -> Arg {
     vec![s.into()]
 }
 
-fn modifier_arg(mods: &[String]) -> Option<Arg> {
+/// The `modifier` argument of a call. The exported root of a function with a `modifier`
+/// parameter chains onto that parameter, so a caller's modifier styles the root layout.
+fn modifier_arg(o: &Out, parent: Parent<'_>, mods: &[String]) -> Option<Arg> {
+    let base = if o.root_takes_modifier && parent.root { "modifier" } else { "Modifier" };
     if mods.is_empty() {
-        return None;
+        return (base == "modifier").then(|| arg("modifier = modifier"));
     }
     if mods.len() == 1 {
-        return Some(arg(format!("modifier = Modifier{}", mods[0])));
+        return Some(arg(format!("modifier = {base}{}", mods[0])));
     }
-    let mut v = vec!["modifier = Modifier".to_string()];
+    let mut v = vec![format!("modifier = {base}")];
     v.extend(mods.iter().map(|m| format!("    {m}")));
     Some(v)
 }
@@ -310,7 +328,7 @@ fn emit(doc: &Document, id: NodeId, parent: Parent<'_>, depth: usize, o: &mut Ou
             .collect();
         size_mods(doc, n, &sz, parent, &mut mods);
         finish_mods(doc, n, rot, &mut mods);
-        args.extend(modifier_arg(&mods));
+        args.extend(modifier_arg(o, parent, &mods));
         let slots = instance_slots(doc, n);
         let me = Parent::of(n);
         if slots.single() && !slots.fills.is_empty() {
@@ -344,7 +362,7 @@ fn emit(doc: &Document, id: NodeId, parent: Parent<'_>, depth: usize, o: &mut Ou
         size_mods(doc, n, &sz, parent, &mut mods);
         finish_mods(doc, n, rot, &mut mods);
         let mut args = vec![arg(format!("painter = painterResource(R.drawable.{})", snake(&n.name))), arg("contentDescription = null")];
-        args.extend(modifier_arg(&mods));
+        args.extend(modifier_arg(o, parent, &mods));
         open_call(o, depth, "Icon", args, false);
         return;
     }
@@ -353,7 +371,7 @@ fn emit(doc: &Document, id: NodeId, parent: Parent<'_>, depth: usize, o: &mut Ou
         text_args(doc, n, t, &mut args);
         size_mods(doc, n, &sz, parent, &mut mods);
         finish_mods(doc, n, rot, &mut mods);
-        args.extend(modifier_arg(&mods));
+        args.extend(modifier_arg(o, parent, &mods));
         open_call(o, depth, "Text", args, false);
         return;
     }
@@ -368,7 +386,7 @@ fn emit(doc: &Document, id: NodeId, parent: Parent<'_>, depth: usize, o: &mut Ou
         block = true;
         padding_mods(doc, n, al, &mut mods);
         finish_mods(doc, n, rot, &mut mods);
-        args.extend(modifier_arg(&mods));
+        args.extend(modifier_arg(o, parent, &mods));
         let spacing = (al.item_spacing > 0.0 || bound(doc, n, "itemSpacing").is_some()).then(|| dp(doc, n, "itemSpacing", al.item_spacing));
         let (start, center, end) = if horizontal {
             ("Alignment.Start", "Alignment.CenterHorizontally", "Alignment.End")
@@ -401,7 +419,7 @@ fn emit(doc: &Document, id: NodeId, parent: Parent<'_>, depth: usize, o: &mut Ou
         name = "Box";
         block = !kids.is_empty() || site.is_some();
         finish_mods(doc, n, rot, &mut mods);
-        args.extend(modifier_arg(&mods));
+        args.extend(modifier_arg(o, parent, &mods));
     }
     open_call(o, depth, name, args, block);
     if block {
