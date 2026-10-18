@@ -59,11 +59,11 @@ class TestCheckEvalLicences(unittest.TestCase):
         text = reg.read_text(encoding="utf-8")
         # Change transitions-dev (which has licence = "NONE") to use = "eval-only-cache"
         bad = text.replace(
-            '| `transitions-dev` | transitions.dev skills | `skills` | `NONE` | `excluded` |',
-            '| `transitions-dev` | transitions.dev skills | `skills` | `NONE` | `eval-only-cache` |',
+            "| `transitions-dev` | `NONE` | `excluded` |",
+            "| `transitions-dev` | `NONE` | `eval-only-cache` |",
         ).replace(
-            'id = "transitions-dev"\nname = "transitions.dev skills"\nkind = "skills"\nurl = "https://transitions.dev"\npinned = ""\nlicence = "NONE"\nuse = "excluded"',
-            'id = "transitions-dev"\nname = "transitions.dev skills"\nkind = "skills"\nurl = "https://transitions.dev"\npinned = ""\nlicence = "NONE"\nuse = "eval-only-cache"',
+            'id = "transitions-dev"\nname = "transitions.dev skills (no licence published)"\nkind = "skills"\nurl = "https://transitions.dev"\npinned = ""\nlicence = "NONE"\nuse = "excluded"',
+            'id = "transitions-dev"\nname = "transitions.dev skills (no licence published)"\nkind = "skills"\nurl = "https://transitions.dev"\npinned = ""\nlicence = "NONE"\nuse = "eval-only-cache"',
         )
         reg.write_text(bad, encoding="utf-8")
         code, findings = cel.check_repo(self.root)

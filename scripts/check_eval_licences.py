@@ -98,22 +98,29 @@ def extract_register(md_text: str) -> tuple[dict[str, Any], list[tuple[str, str,
         raise ValueError(f"Expected exactly 1 fenced ```toml block, found {len(matches)}")
     parsed = parse_toml_str(matches[0])
 
-    # Parse Markdown summary table rows: | `id` | Name | `kind` | `licence` | `use` | ...
+    # Parse Markdown summary table rows by resolving ID, Licence, and Use column indices from header
     before_toml = md_text.split("```toml", 1)[0]
     table_rows: list[tuple[str, str, str]] = []
     in_table = False
+    col_id, col_licence, col_use = 0, 3, 4
     for line in before_toml.splitlines():
         s = line.strip()
         if not s.startswith("|") or not s.endswith("|"):
             continue
         cells = [c.strip().strip("`") for c in s.strip("|").split("|")]
-        if len(cells) < 5:
+        if len(cells) < 3:
             continue
-        if cells[0].lower() == "id" or set(cells[0]) <= {"-", ":"}:
+        lower_cells = [c.lower() for c in cells]
+        if lower_cells[0] == "id":
             in_table = True
+            col_id = lower_cells.index("id")
+            col_licence = lower_cells.index("licence") if "licence" in lower_cells else 3
+            col_use = lower_cells.index("use") if "use" in lower_cells else 4
+            continue
+        if set(cells[0]) <= {"-", ":"}:
             continue
         if in_table:
-            table_rows.append((cells[0], cells[3], cells[4]))
+            table_rows.append((cells[col_id], cells[col_licence], cells[col_use]))
     return parsed, table_rows
 
 

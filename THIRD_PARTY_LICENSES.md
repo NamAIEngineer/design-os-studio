@@ -10,7 +10,7 @@ Do not edit by hand.
 - **SPDX Licence:** `MIT`
 - **Upstream URL:** https://github.com/jakubkrehel/skills
 - **Pinned Revision:** `4c66b1fa86e9ab70187b43d7da9b6fdb29f2ef63`
-- **Attribution:** Copyright (c) 2026 Jakub Krehel (MIT License).
+- **Attribution:** Portions of this folder are copied from or derived from jakubkrehel/skills (https://github.com/jakubkrehel/skills), commit 4c66b1fa86e9ab70187b43d7da9b6fdb29f2ef63, Copyright (c) 2026 Jakub Krehel, MIT License (see LICENSE).
 
 ## ease-design first-party knowledge (`ease-design`)
 
