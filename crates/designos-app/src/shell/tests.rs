@@ -952,6 +952,7 @@ mod live_agent_edits;
 mod menus;
 mod proto;
 mod proto_vars;
+mod slot_canvas_edits;
 mod style_edit;
 mod svg;
 mod typography;
