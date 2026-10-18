@@ -528,12 +528,7 @@ impl TerminalTab {
     #[cfg(test)]
     fn spawn_exiting_stub_agent(id: usize, rows: u16, cols: u16, file_path: Option<&Path>, session: Option<&SessionEnv>) -> Result<Self, String> {
         let mut cmd = build_agent_shell_cmd(&default_shell_program(), "sh -c 'echo STUB-AGENT-EXIT; exit 1'");
-        // Isolate zsh from the real HOME: `zsh -l -i -c ...` in a PTY otherwise starts
-        // zsh-newuser-install when ~/.zshrc is missing and the stub never runs.
-        let zdotdir = std::env::temp_dir().join(format!("dos-p0-zdotdir-{}", std::process::id()));
-        let _ = std::fs::create_dir_all(&zdotdir);
-        let _ = std::fs::write(zdotdir.join(".zshrc"), b"");
-        cmd.env("ZDOTDIR", &zdotdir);
+        isolate_zsh_from_home(&mut cmd);
         Self::spawn_with_session_cmd(id, AgentCliPreset::Claude, rows, cols, file_path, session, Some(cmd))
     }
 
@@ -1206,7 +1201,12 @@ impl TerminalState {
         let _ = std::fs::create_dir_all(&self.session_dir);
         self.provision_session_agent_files(file_path);
         let env = self.session_env();
-        let cmd_override = command.map(|c| build_agent_shell_cmd(&default_shell_program(), c));
+        let cmd_override = command.map(|c| {
+            let mut cmd = build_agent_shell_cmd(&default_shell_program(), c);
+            #[cfg(test)]
+            isolate_zsh_from_home(&mut cmd);
+            cmd
+        });
         match TerminalTab::spawn_with_session_cmd(id, preset, 28, 100, file_path, Some(&env), cmd_override) {
             Ok(tab) => {
                 self.tabs.push(tab);
@@ -2070,6 +2070,16 @@ fn default_shell_program() -> String {
             }
         })
     }
+}
+
+/// Test-only: starts zsh with an empty `ZDOTDIR` instead of the real HOME. `zsh -l -i -c ...` in a PTY
+/// otherwise runs zsh-newuser-install when `~/.zshrc` is missing (a CI runner) and the command never runs.
+#[cfg(test)]
+fn isolate_zsh_from_home(cmd: &mut CommandBuilder) {
+    let zdotdir = std::env::temp_dir().join(format!("dos-p0-zdotdir-{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&zdotdir);
+    let _ = std::fs::write(zdotdir.join(".zshrc"), b"");
+    cmd.env("ZDOTDIR", &zdotdir);
 }
 
 fn build_agent_shell_cmd(shell_bin: &str, agent_cli: &str) -> CommandBuilder {

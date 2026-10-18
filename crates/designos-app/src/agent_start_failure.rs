@@ -207,7 +207,7 @@ pub fn paint(ui: &mut Ui, rect: Rect, failure: &StartFailure, surface_id: &'stat
         failure.output_tail.iter().map(|l| p.layout(l.clone(), theme::font_mono(), theme::TEXT_SECONDARY, inner_w - 2.0 * CODE_PAD)).collect();
     let code_h = if code_lines.is_empty() { 0.0 } else { code_lines.iter().map(|g| g.size().y).sum::<f32>() + 2.0 * CODE_PAD };
     let fix_label = failure.fix_label();
-    let fix_galley = p.layout_no_wrap(fix_label, theme::font_body_medium(), Color32::WHITE);
+    let fix_galley = p.layout_no_wrap(fix_label, theme::font_body_medium(), theme::TEXT_BRAND);
     let btn_w = (fix_galley.size().x + 32.0).clamp(96.0, inner_w);
 
     let gap = 8.0;
@@ -255,9 +255,11 @@ pub fn paint(ui: &mut Ui, rect: Rect, failure: &StartFailure, surface_id: &'stat
     let name = format!("agents-start-failure-fix-{surface_id}");
     widgets::record(ui, &name, btn);
     let resp = ui.interact(btn, Id::new((surface_id, "agents-start-failure-fix")), Sense::click());
-    let bg = if resp.hovered() { theme::BG_BRAND_HOVER } else { theme::BG_BRAND };
+    // Brand text on the brand-tinted surface (8.1:1), not white on `BG_BRAND` (3.5:1).
+    let bg = if resp.hovered() { theme::BG_SELECTED_HOVER } else { theme::BG_SELECTED };
     p.rect_filled(btn, theme::cr(theme::RADIUS_MEDIUM), bg);
-    p.text(btn.center(), Align2::CENTER_CENTER, failure.fix_label(), theme::font_body_medium(), Color32::WHITE);
+    p.rect_stroke(btn, theme::cr(theme::RADIUS_MEDIUM), egui::Stroke::new(1.0, theme::BORDER_SELECTED), egui::StrokeKind::Inside);
+    p.text(btn.center(), Align2::CENTER_CENTER, failure.fix_label(), theme::font_body_medium(), theme::TEXT_BRAND);
     resp.clicked().then(|| failure.fix.clone())
 }
 
@@ -313,6 +315,45 @@ mod tests {
         assert_eq!(f.headline(), "grok exited with code 3");
         assert_eq!(f.fix, FixAction::OpenShell);
         assert_eq!(d(AgentCliPreset::Grok, true, None, "").headline(), "grok exited right after it started");
+    }
+
+    fn luminance(c: Color32) -> f32 {
+        let f = |v: u8| {
+            let v = v as f32 / 255.0;
+            if v <= 0.03928 {
+                v / 12.92
+            } else {
+                ((v + 0.055) / 1.055).powf(2.4)
+            }
+        };
+        0.2126 * f(c.r()) + 0.7152 * f(c.g()) + 0.0722 * f(c.b())
+    }
+
+    /// `fg` (with its alpha) composited over the opaque `bg`, in sRGB like the renderer.
+    fn over(fg: Color32, bg: Color32) -> Color32 {
+        let [r, g, b, a] = fg.to_srgba_unmultiplied();
+        let mix = |f: u8, back: u8| ((f as f32 * a as f32 + back as f32 * (255.0 - a as f32)) / 255.0).round() as u8;
+        Color32::from_rgb(mix(r, bg.r()), mix(g, bg.g()), mix(b, bg.b()))
+    }
+
+    fn contrast(a: Color32, b: Color32) -> f32 {
+        let (la, lb) = (luminance(a), luminance(b));
+        (la.max(lb) + 0.05) / (la.min(lb) + 0.05)
+    }
+
+    #[test]
+    fn panel_text_meets_the_contrast_floor_on_its_surfaces() {
+        let on_card = [("headline", theme::DANGER), ("explanation", over(theme::TEXT_SECONDARY, theme::BG_SECONDARY)), ("title", theme::TEXT)];
+        for (what, fg) in on_card {
+            let ratio = contrast(fg, theme::BG_SECONDARY);
+            assert!(ratio >= 4.5, "{what} on the card is {ratio:.2}:1");
+        }
+        for state in [theme::BG_SELECTED, theme::BG_SELECTED_HOVER] {
+            let ratio = contrast(theme::TEXT_BRAND, state);
+            assert!(ratio >= 4.5, "fix button text is {ratio:.2}:1 on {state:?}");
+        }
+        let ratio = contrast(over(theme::TEXT_SECONDARY, theme::BG), theme::BG);
+        assert!(ratio >= 4.5, "output block text is {ratio:.2}:1");
     }
 
     #[test]
