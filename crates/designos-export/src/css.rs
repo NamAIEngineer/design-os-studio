@@ -45,8 +45,8 @@ pub fn css_for(doc: &Document, node: NodeId) -> String {
     // never Hug here: it prints the size the solver gave it.
     let sz = web_sizes(n, Parent { al: parent_al, root: false });
     let row_parent = sz.row_parent;
-    let fill_w = in_flow && (n.layout_child.horizontal == Sizing::Fill);
-    let fill_h = in_flow && (n.layout_child.vertical == Sizing::Fill);
+    let fill_w = in_flow && sz.w == Dim::Fill;
+    let fill_h = in_flow && sz.h == Dim::Fill;
     let grows = in_flow && n.layout_child.grow > 0.0;
     let mut flex_done = false;
     let mut stretch = false;
@@ -87,8 +87,18 @@ pub fn css_for(doc: &Document, node: NodeId) -> String {
     if !height_skipped || matches!(n.kind, NodeKind::Line) {
         push("height", format!("{}px", num(if matches!(n.kind, NodeKind::Line) { 0.0 } else { n.size.y })));
     }
-    if stretch {
-        push("align-self", "stretch".into());
+    if in_flow && !grid_parent {
+        let align_self_css = match n.layout_child.align_self {
+            AlignSelf::Start => Some("flex-start"),
+            AlignSelf::Center => Some("center"),
+            AlignSelf::End => Some("flex-end"),
+            AlignSelf::Baseline => Some("baseline"),
+            AlignSelf::Stretch | AlignSelf::Auto if stretch => Some("stretch"),
+            AlignSelf::Stretch | AlignSelf::Auto => None,
+        };
+        if let Some(a) = align_self_css {
+            push("align-self", a.into());
+        }
     }
     if in_flow && !grid_parent && !flex_done && (!width_skipped || !height_skipped) {
         push("flex-shrink", "0".into());
@@ -914,5 +924,49 @@ mod tests {
         let css = css_for(&d, rect);
         assert!(css.contains("width: 80px;") && css.contains("height: 40px;"), "a rectangle has no intrinsic size to fall back on: {css}");
         assert!(!css.contains("justify-self") && !css.contains("align-self"), "only content-sized items align to the start: {css}");
+    }
+
+    #[test]
+    fn flex_child_align_self_exports_css_align_self_for_all_variants() {
+        let mut d = Document::new("t");
+        let page = d.add_page("p");
+        let fid = d.alloc_id();
+        let mut row = Node::frame(fid, Rect::new(0.0, 0.0, 200.0, 100.0));
+        row.kind = NodeKind::Frame(FrameProps {
+            auto_layout: Some(AutoLayout {
+                direction: LayoutDirection::Horizontal,
+                counter_align: LayoutAlign::Start,
+                primary_sizing: Sizing::Fixed,
+                counter_sizing: Sizing::Fixed,
+                ..Default::default()
+            }),
+            ..Default::default()
+        });
+        let fid = d.insert(page, row).unwrap();
+
+        for (align, expected) in [
+            (AlignSelf::Start, Some("align-self: flex-start;")),
+            (AlignSelf::Center, Some("align-self: center;")),
+            (AlignSelf::End, Some("align-self: flex-end;")),
+            (AlignSelf::Stretch, Some("align-self: stretch;")),
+            (AlignSelf::Baseline, Some("align-self: baseline;")),
+            (AlignSelf::Auto, None),
+        ] {
+            let cid = d.alloc_id();
+            let mut child = Node::rectangle(cid, Rect::new(0.0, 0.0, 30.0, 20.0));
+            child.layout_child.align_self = align;
+            let cid = d.insert(fid, child).unwrap();
+            d.relayout_subtree(fid);
+            let css = css_for(&d, cid);
+            match expected {
+                Some(decl) => assert!(css.contains(decl), "{align:?} missing {decl:?} in:\n{css}"),
+                None => assert!(!css.contains("align-self:"), "Auto should not emit align-self in:\n{css}"),
+            }
+            if align == AlignSelf::Stretch {
+                assert!(!css.contains("height:"), "Stretch child should omit fixed height in:\n{css}");
+            } else {
+                assert!(css.contains("height: 20px;"), "{align:?} child should keep height: 20px in:\n{css}");
+            }
+        }
     }
 }

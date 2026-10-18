@@ -957,6 +957,22 @@ fn is_default_align_self(a: &AlignSelf) -> bool {
     *a == AlignSelf::default()
 }
 
+/// Transient record of `(natural_size, solved_size)` along an axis that was last stretched by the
+/// auto-layout solver. Excluded from serialization and equality comparisons.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct StretchedAxes {
+    pub w: Option<(f32, f32)>,
+    pub h: Option<(f32, f32)>,
+}
+
+impl PartialEq for StretchedAxes {
+    fn eq(&self, _other: &Self) -> bool {
+        true
+    }
+}
+
+impl Eq for StretchedAxes {}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct LayoutChild {
     pub absolute: bool,
@@ -984,6 +1000,10 @@ pub struct LayoutChild {
     /// Per-child margins `[top, right, bottom, left]` in an auto-layout parent (`stackChildMarginTop/Right/Bottom/Left`, Kiwi 606..609).
     #[serde(default, skip_serializing_if = "is_zero_radii")]
     pub margin: [f32; 4],
+    /// Transient pre-stretch and solved dimensions so all-stretching lines can shrink back when a
+    /// sibling shrinks or is edited.
+    #[serde(skip)]
+    pub stretched: StretchedAxes,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]

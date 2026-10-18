@@ -30,7 +30,25 @@ impl Document {
             return None;
         }
         let (fit_w, fit_h) = content_sized_axes(raw);
-        let size = Vec2::new(if fit_w { raw.size.x } else { bound.size.x }, if fit_h { raw.size.y } else { bound.size.y });
+        let natural = raw.layout_child.natural_size(raw.size, horiz);
+        let has_w_bind = raw.variables.bindings.contains_key("width");
+        let has_h_bind = raw.variables.bindings.contains_key("height");
+        let size = Vec2::new(
+            if fit_w {
+                raw.size.x
+            } else if has_w_bind {
+                bound.size.x
+            } else {
+                natural.x
+            },
+            if fit_h {
+                raw.size.y
+            } else if has_h_bind {
+                bound.size.y
+            } else {
+                natural.y
+            },
+        );
         Some(ChildIn::from_layout_child(size, &bound.layout_child, horiz))
     }
 
@@ -83,7 +101,7 @@ impl Document {
         if let Some(fnode) = self.get_mut(root) {
             fnode.size = out.frame;
         }
-        for (cid, r) in flow_ids.iter().zip(&out.rects) {
+        for ((cid, kid), r) in flow_ids.iter().zip(&kids).zip(&out.rects) {
             let new_size = Vec2::new(r.w, r.h);
             let (size_changed, is_auto_layout) = self
                 .get(*cid)
@@ -97,6 +115,10 @@ impl Document {
                 cnode.transform.tx = r.x;
                 cnode.transform.ty = r.y;
                 cnode.size = new_size;
+                cnode.layout_child.record_stretched(kid.size, new_size, horiz, kid.stretches_cross());
+                if cnode.layout_child.align_self == crate::AlignSelf::Stretch && !kid.cross_fill {
+                    cnode.layout_child.align_self = crate::AlignSelf::Auto;
+                }
             }
             if size_changed && is_auto_layout {
                 self.relayout_top_down(*cid, hops + 1, budget);

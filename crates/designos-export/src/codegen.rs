@@ -370,8 +370,9 @@ fn sizes_along(n: &Node, parent: Parent<'_>, row_parent: bool) -> Sizes {
     let text_w = matches!(&n.kind, NodeKind::Text(t) if t.auto_resize == TextAutoResize::WidthAndHeight);
     let text_h = matches!(&n.kind, NodeKind::Text(t) if matches!(t.auto_resize, TextAutoResize::WidthAndHeight | TextAutoResize::Height));
     let grows = in_flow && n.layout_child.grow > 0.0;
-    let fill_w = in_flow && (n.layout_child.horizontal == Sizing::Fill || (grows && row_parent));
-    let fill_h = in_flow && (n.layout_child.vertical == Sizing::Fill || (grows && !row_parent));
+    let counter_horiz = in_flow.then_some(!row_parent);
+    let fill_w = in_flow && (n.layout_child.effective_sizing(true, counter_horiz) == Sizing::Fill || (grows && row_parent));
+    let fill_h = in_flow && (n.layout_child.effective_sizing(false, counter_horiz) == Sizing::Fill || (grows && !row_parent));
     let w = if fill_w {
         Dim::Fill
     } else if hug_w || text_w {

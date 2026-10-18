@@ -74,13 +74,16 @@ pub struct ChildIn {
 impl ChildIn {
     /// Reads a child's layout properties. `horiz` is the flow's primary axis (grids count as horizontal).
     pub fn from_layout_child(size: Vec2, lc: &LayoutChild, horiz: bool) -> Self {
-        let (main_s, cross_s) = if horiz { (lc.horizontal, lc.vertical) } else { (lc.vertical, lc.horizontal) };
+        let counter_horiz = Some(!horiz);
+        let (main_s, cross_s) = (lc.effective_sizing(horiz, counter_horiz), lc.effective_sizing(!horiz, counter_horiz));
+        let cross_fill = cross_s == Sizing::Fill;
+        let align_self = if lc.align_self == AlignSelf::Stretch && !cross_fill { AlignSelf::Auto } else { lc.align_self };
         Self {
             size,
             main_fill: main_s == Sizing::Fill || lc.grow > 0.0,
-            cross_fill: cross_s == Sizing::Fill || lc.align_self == AlignSelf::Stretch,
+            cross_fill,
             grow: lc.grow,
-            align_self: lc.align_self,
+            align_self,
             limits: SizeLimits::from(lc),
             cell: GridCell {
                 column: lc.grid_column,
@@ -108,6 +111,24 @@ impl LayoutChild {
         Some(al.direction == LayoutDirection::Vertical)
     }
 
+    /// Effective sizing along `horizontal` (width when `true`, height when `false`), given the
+    /// parent's counter axis (`counter_horizontal`, see [`Self::counter_axis_is_horizontal`]).
+    ///
+    /// `AlignSelf::Stretch` and `Sizing::Fill` on the counter axis represent the same stretch;
+    /// however, if the primary axis (`other`) already has `Sizing::Fill`, the child was stretched in
+    /// the previous direction before the parent flipped axes and `AlignSelf::Stretch` must not also
+    /// stretch the new counter axis.
+    pub fn effective_sizing(&self, horizontal: bool, counter_horizontal: Option<bool>) -> Sizing {
+        let (own, other) = if horizontal { (self.horizontal, self.vertical) } else { (self.vertical, self.horizontal) };
+        if own == Sizing::Fill {
+            Sizing::Fill
+        } else if self.align_self == AlignSelf::Stretch && counter_horizontal == Some(horizontal) && other != Sizing::Fill {
+            Sizing::Fill
+        } else {
+            own
+        }
+    }
+
     /// Sets the sizing of one axis (`horizontal` = width). Stretching along the parent's counter axis
     /// (`counter_horizontal`, see [`Self::counter_axis_is_horizontal`]) is Fill on that axis, so any other
     /// sizing there also ends an `AlignSelf::Stretch` override, which would otherwise keep stretching a
@@ -115,11 +136,52 @@ impl LayoutChild {
     pub fn set_axis_sizing(&mut self, horizontal: bool, sizing: Sizing, counter_horizontal: Option<bool>) {
         if horizontal {
             self.horizontal = sizing;
+            if sizing != Sizing::Fill {
+                self.stretched.w = None;
+            }
         } else {
             self.vertical = sizing;
+            if sizing != Sizing::Fill {
+                self.stretched.h = None;
+            }
         }
         if sizing != Sizing::Fill && counter_horizontal == Some(horizontal) && self.align_self == AlignSelf::Stretch {
             self.align_self = AlignSelf::Auto;
+        }
+    }
+
+    /// Returns the pre-stretch natural size along the parent's counter axis (`horiz` = parent's
+    /// primary axis is horizontal) when `stored` still matches the last solved size recorded in
+    /// [`Self::stretched`]. If `stored` was edited externally since the last solve, returns `stored`
+    /// as the new natural size.
+    pub fn natural_size(&self, stored: Vec2, horiz: bool) -> Vec2 {
+        if self.effective_sizing(!horiz, Some(!horiz)) != Sizing::Fill {
+            return stored;
+        }
+        if horiz {
+            if let Some((nat_h, solved_h)) = self.stretched.h {
+                if (stored.y - solved_h).abs() <= 1e-3 {
+                    return Vec2::new(stored.x, nat_h);
+                }
+            }
+        } else if let Some((nat_w, solved_w)) = self.stretched.w {
+            if (stored.x - solved_w).abs() <= 1e-3 {
+                return Vec2::new(nat_w, stored.y);
+            }
+        }
+        stored
+    }
+
+    /// Updates [`Self::stretched`] after solving a child along a parent whose primary axis is
+    /// `horiz`: stores `Some((natural, solved))` on the counter axis when `stretches_cross` is true
+    /// and `solved` differs from `natural`, or clears it otherwise.
+    pub fn record_stretched(&mut self, natural: Vec2, solved: Vec2, horiz: bool, stretches_cross: bool) {
+        if horiz {
+            self.stretched.w = None;
+            self.stretched.h = if stretches_cross && (solved.y - natural.y).abs() > 1e-3 { Some((natural.y, solved.y)) } else { None };
+        } else {
+            self.stretched.h = None;
+            self.stretched.w = if stretches_cross && (solved.x - natural.x).abs() > 1e-3 { Some((natural.x, solved.x)) } else { None };
         }
     }
 }
@@ -249,10 +311,116 @@ mod tests {
     }
 
     #[test]
-    fn stretch_children_all_take_the_tallest_natural_height() {
+    fn stretch_children_all_take_the_tallest_natural_height_and_shrink_back_when_edited() {
         let (mut d, frame, kids) = hugging_row(&[(30.0, 20.0, AlignSelf::Stretch), (30.0, 100.0, AlignSelf::Stretch)]);
         d.relayout_subtree(frame);
         assert_eq!(heights(&d, frame, &kids), (100.0, vec![100.0, 100.0]));
+
+        // editing the tall stretch child down to 50 must shrink the line and both children to 50
+        d.get_mut(kids[1]).unwrap().size.y = 50.0;
+        d.relayout_subtree(frame);
+        assert_eq!(heights(&d, frame, &kids), (50.0, vec![50.0, 50.0]));
+    }
+
+    #[test]
+    fn flipping_frame_direction_does_not_double_stretch_an_imported_stretch_child() {
+        // Horizontal 200x100 frame, child 30x20 with vertical = Fill and align_self = Stretch:
+        // first solve is 30x100; flipping to Vertical must keep width 30 (30x100), not 200x100.
+        let mut d = Document::new("t");
+        let page = d.add_page("p");
+        let fid = d.alloc_id();
+        let mut frame = Node::frame(fid, Rect::new(0.0, 0.0, 200.0, 100.0));
+        frame.kind = NodeKind::Frame(FrameProps {
+            auto_layout: Some(AutoLayout {
+                direction: LayoutDirection::Horizontal,
+                primary_sizing: Sizing::Fixed,
+                counter_sizing: Sizing::Fixed,
+                ..Default::default()
+            }),
+            ..Default::default()
+        });
+        let fid = d.insert(page, frame).unwrap();
+        let cid = d.alloc_id();
+        let mut child = Node::rectangle(cid, Rect::new(0.0, 0.0, 30.0, 20.0));
+        child.layout_child.vertical = Sizing::Fill;
+        child.layout_child.align_self = AlignSelf::Stretch;
+        let cid = d.insert(fid, child).unwrap();
+
+        d.relayout_subtree(fid);
+        assert_eq!(d.get(cid).unwrap().size, Vec2::new(30.0, 100.0));
+
+        if let Some(al) = d.get_mut(fid).and_then(|n| n.kind.frame_props_mut()).and_then(|f| f.auto_layout.as_mut()) {
+            al.direction = LayoutDirection::Vertical;
+        }
+        d.relayout_subtree(fid);
+        assert_eq!(d.get(cid).unwrap().size, Vec2::new(30.0, 100.0), "width must stay 30 after flipping Horizontal -> Vertical");
+
+        // Same for Vertical -> Horizontal and Vertical -> Grid:
+        for target_dir in [LayoutDirection::Horizontal, LayoutDirection::Grid] {
+            let mut d = Document::new("t");
+            let page = d.add_page("p");
+            let fid = d.alloc_id();
+            let mut frame = Node::frame(fid, Rect::new(0.0, 0.0, 200.0, 100.0));
+            frame.kind = NodeKind::Frame(FrameProps {
+                auto_layout: Some(AutoLayout {
+                    direction: LayoutDirection::Vertical,
+                    primary_sizing: Sizing::Fixed,
+                    counter_sizing: Sizing::Fixed,
+                    grid_columns: 1,
+                    ..Default::default()
+                }),
+                ..Default::default()
+            });
+            let fid = d.insert(page, frame).unwrap();
+            let cid = d.alloc_id();
+            let mut child = Node::rectangle(cid, Rect::new(0.0, 0.0, 30.0, 20.0));
+            child.layout_child.horizontal = Sizing::Fill;
+            child.layout_child.align_self = AlignSelf::Stretch;
+            let cid = d.insert(fid, child).unwrap();
+
+            d.relayout_subtree(fid);
+            assert_eq!(d.get(cid).unwrap().size, Vec2::new(200.0, 20.0));
+
+            if let Some(al) = d.get_mut(fid).and_then(|n| n.kind.frame_props_mut()).and_then(|f| f.auto_layout.as_mut()) {
+                al.direction = target_dir;
+            }
+            d.relayout_subtree(fid);
+            assert_eq!(d.get(cid).unwrap().size, Vec2::new(200.0, 20.0), "height must stay 20 after flipping Vertical -> {target_dir:?}");
+        }
+    }
+
+    #[test]
+    fn grid_parent_stretches_children_along_its_vertical_counter_axis_and_shrinks_back() {
+        let mut d = Document::new("t");
+        let page = d.add_page("p");
+        let fid = d.alloc_id();
+        let mut frame = Node::frame(fid, Rect::new(0.0, 0.0, 200.0, 1.0));
+        frame.kind = NodeKind::Frame(FrameProps {
+            auto_layout: Some(AutoLayout {
+                direction: LayoutDirection::Grid,
+                grid_columns: 2,
+                primary_sizing: Sizing::Fixed,
+                counter_sizing: Sizing::Hug,
+                ..Default::default()
+            }),
+            ..Default::default()
+        });
+        let fid = d.insert(page, frame).unwrap();
+        let c0 = d.alloc_id();
+        let mut n0 = Node::rectangle(c0, Rect::new(0.0, 0.0, 30.0, 20.0));
+        n0.layout_child.align_self = AlignSelf::Stretch;
+        let c0 = d.insert(fid, n0).unwrap();
+        let c1 = d.alloc_id();
+        let mut n1 = Node::rectangle(c1, Rect::new(0.0, 0.0, 30.0, 100.0));
+        n1.layout_child.align_self = AlignSelf::Stretch;
+        let c1 = d.insert(fid, n1).unwrap();
+
+        d.relayout_subtree(fid);
+        assert_eq!(heights(&d, fid, &[c0, c1]), (100.0, vec![100.0, 100.0]));
+
+        d.get_mut(c1).unwrap().size.y = 50.0;
+        d.relayout_subtree(fid);
+        assert_eq!(heights(&d, fid, &[c0, c1]), (50.0, vec![50.0, 50.0]));
     }
 
     #[test]

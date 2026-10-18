@@ -26,11 +26,34 @@ pub enum Align {
 /// content and fixing ancestors. Shared by canvas resizing and the inspector.
 pub fn apply_resize(doc: &mut Document, ed: &mut Edit, id: NodeId, size: Vec2, transform: Affine, relayout: bool) {
     let Some(old) = doc.get(id).map(|n| n.size) else { return };
+    let counter_horiz = doc.get(id).and_then(|n| n.parent).and_then(|p| doc.get(p)).and_then(LayoutChild::counter_axis_is_horizontal);
+    let w_changed = (size.x - old.x).abs() > 1e-4;
+    let h_changed = (size.y - old.y).abs() > 1e-4;
     if let Some(n) = ed.node(doc, id) {
         n.size = size;
         n.transform = transform;
+        if w_changed {
+            n.layout_child.set_axis_sizing(true, Sizing::Fixed, counter_horiz);
+            if let Some(al) = n.kind.frame_props_mut().and_then(|f| f.auto_layout.as_mut()) {
+                let target = if al.primary_is_horizontal() { &mut al.primary_sizing } else { &mut al.counter_sizing };
+                if *target == Sizing::Hug {
+                    *target = Sizing::Fixed;
+                }
+            }
+        }
+        if h_changed {
+            n.layout_child.set_axis_sizing(false, Sizing::Fixed, counter_horiz);
+            if let Some(al) = n.kind.frame_props_mut().and_then(|f| f.auto_layout.as_mut()) {
+                let target = if al.primary_is_horizontal() { &mut al.counter_sizing } else { &mut al.primary_sizing };
+                if *target == Sizing::Hug {
+                    *target = Sizing::Fixed;
+                }
+            }
+        }
         if let NodeKind::Text(t) = &mut n.kind {
             if t.auto_resize == TextAutoResize::WidthAndHeight {
+                t.auto_resize = TextAutoResize::None;
+            } else if h_changed && t.auto_resize == TextAutoResize::Height {
                 t.auto_resize = TextAutoResize::None;
             }
         }

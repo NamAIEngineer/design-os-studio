@@ -6,7 +6,7 @@
 
 use crate::edit::Edit;
 use crate::util::{aabb_of, rect_corners, v2};
-use designos_doc::{resolve_node, Constraint, Document, LayoutDirection, NodeId, NodeKind, Rect, Sizing, TextAutoResize, TextProps, Vec2};
+use designos_doc::{resolve_node, AlignSelf, Constraint, Document, LayoutDirection, NodeId, NodeKind, Rect, Sizing, TextAutoResize, TextProps, Vec2};
 
 use designos_doc::layout_solver::{compute_with_stroke, ChildIn, SizeLimits};
 
@@ -81,17 +81,24 @@ fn layout_self(doc: &mut Document, ed: &mut Edit, id: NodeId) -> bool {
             n.size = new_frame;
         }
     }
-    for (cid, r) in ids.iter().zip(out.rects.iter()) {
+    for ((cid, kid), r) in ids.iter().zip(kids.iter()).zip(out.rects.iter()) {
         let n = doc.get(*cid).unwrap();
         let new_size = v2(r.w, r.h);
         let size_changed = (n.size.x - new_size.x).abs() > 1e-3 || (n.size.y - new_size.y).abs() > 1e-3;
         let pos_changed = (n.transform.tx - r.x).abs() > 1e-3 || (n.transform.ty - r.y).abs() > 1e-3;
-        if size_changed || pos_changed {
+        let stale_stretch = n.layout_child.align_self == AlignSelf::Stretch && !kid.cross_fill;
+        if size_changed || pos_changed || stale_stretch {
             if let Some(n) = ed.node(doc, *cid) {
                 n.transform.tx = r.x;
                 n.transform.ty = r.y;
                 n.size = new_size;
+                if stale_stretch {
+                    n.layout_child.align_self = AlignSelf::Auto;
+                }
             }
+        }
+        if let Some(cnode) = doc.get_mut(*cid) {
+            cnode.layout_child.record_stretched(kid.size, new_size, horiz, kid.stretches_cross());
         }
         if size_changed && doc.get(*cid).map(|n| n.kind.is_container()).unwrap_or(false) {
             layout_node(doc, ed, *cid);
