@@ -1,7 +1,7 @@
 //! Tests for suggesting variables and styles from enabled libraries (Issue #155, Task E3-11).
 
 use super::*;
-use designos_doc::{AutoLayout, Effect, LineHeight};
+use designos_doc::{AutoLayout, Effect, LibraryRef, LineHeight};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -44,9 +44,9 @@ fn publish_design_system(root: &PathBuf, name: &str) -> String {
 }
 
 #[test]
-fn a_library_colour_and_number_variable_are_suggested_with_their_library_name_and_bound_in_one_undo_step() {
+fn library_variable_is_suggested_with_its_library_name() {
     let root = tmp_lib_root("vars");
-    let lib_id = publish_design_system(&root, "Design System");
+    let lib_id = publish_design_system(&root, "Brand DS");
 
     let mut f = fx();
     let card = f.rect(f.page, "Card", BLUE);
@@ -65,18 +65,43 @@ fn a_library_colour_and_number_variable_are_suggested_with_their_library_name_an
     assert_eq!(findings.len(), 2);
 
     let fill_finding = findings.iter().find(|x| x.node == card).unwrap();
-    assert_eq!(fill_finding.message, "Fill #1A73E8 matches variable \"Brand/Primary\" (Design System)");
-    assert_eq!(fill_finding.fix_label, "Bind to variable Brand/Primary (Design System)");
+    assert_eq!(fill_finding.message, "Fill #1A73E8 matches variable \"Brand/Primary\" from library \"Brand DS\"");
+    assert_eq!(fill_finding.fix_label, "Bind to variable Brand/Primary from library Brand DS");
+    assert!(fill_finding.is_from_library());
 
     let gap_finding = findings.iter().find(|x| x.node == row).unwrap();
-    assert_eq!(gap_finding.message, "Gap 16 px matches variable \"space/4\" (Design System)");
-    assert_eq!(gap_finding.fix_label, "Bind to variable space/4 (Design System)");
+    assert_eq!(gap_finding.message, "Gap 16 matches variable \"space/4\" from library \"Brand DS\"");
+    assert_eq!(gap_finding.fix_label, "Bind to variable space/4 from library Brand DS");
+    assert!(gap_finding.is_from_library());
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn library_fix_imports_and_binds_in_one_undo_step() {
+    let root = tmp_lib_root("fix");
+    let lib_id = publish_design_system(&root, "Brand DS");
+
+    let mut f = fx();
+    let card = f.rect(f.page, "Card", BLUE);
+    let row = f.frame(f.page, "Row", None);
+    f.doc.get_mut(row).unwrap().kind =
+        NodeKind::Frame(FrameProps { auto_layout: Some(AutoLayout { item_spacing: 16.0, ..AutoLayout::v1() }), ..FrameProps::default() });
+
+    let mut app = f.app();
+    app.libs.set_root(root.clone());
+    app.set_library_enabled(&lib_id, true);
+    app.open_check_designs();
+    app.refresh_check_designs(false);
+    let findings: Vec<Finding> = app.check_designs.report.of(Rule::HardCodedValue).cloned().collect();
+    let fill_finding = findings.iter().find(|x| x.node == card).unwrap();
 
     // Single finding fix imports + binds in one undo step.
     assert!(app.check_designs_fix(fill_finding));
     let local_color = format!("{lib_id}/var:Brand/Primary");
     assert_eq!(app.doc.get(card).unwrap().variables.bindings.get("fills/0"), Some(&local_color));
     assert!(app.doc.variables.contains_key(&local_color));
+    assert!(app.doc.library.external.contains_key(&format!("{lib_id}/var:var:Brand/Primary")));
 
     app.undo();
     assert!(app.doc.get(card).unwrap().variables.bindings.is_empty());
@@ -136,16 +161,16 @@ fn library_fill_text_and_effect_styles_are_suggested_with_their_library_name_and
     assert_eq!(findings.len(), 3);
 
     let fill_f = findings.iter().find(|x| x.node == card && x.message.starts_with("Fill ")).unwrap();
-    assert_eq!(fill_f.message, "Fill matches style \"Surface/Card\" (Brand Styles)");
-    assert_eq!(fill_f.fix_label, "Apply style Surface/Card (Brand Styles)");
+    assert_eq!(fill_f.message, "Fill matches style \"Surface/Card\" from library \"Brand Styles\"");
+    assert_eq!(fill_f.fix_label, "Apply style Surface/Card from library Brand Styles");
 
     let fx_f = findings.iter().find(|x| x.node == card && x.message.starts_with("Effects ")).unwrap();
-    assert_eq!(fx_f.message, "Effects match style \"Elevation/Low\" (Brand Styles)");
-    assert_eq!(fx_f.fix_label, "Apply style Elevation/Low (Brand Styles)");
+    assert_eq!(fx_f.message, "Effects match style \"Elevation/Low\" from library \"Brand Styles\"");
+    assert_eq!(fx_f.fix_label, "Apply style Elevation/Low from library Brand Styles");
 
     let text_f = findings.iter().find(|x| x.node == label).unwrap();
-    assert_eq!(text_f.message, "Text matches style \"Body/Lead\" (Brand Styles)");
-    assert_eq!(text_f.fix_label, "Apply style Body/Lead (Brand Styles)");
+    assert_eq!(text_f.message, "Text matches style \"Body/Lead\" from library \"Brand Styles\"");
+    assert_eq!(text_f.fix_label, "Apply style Body/Lead from library Brand Styles");
 
     assert_eq!(app.check_designs_fix_all(&findings), 3);
     assert_eq!(app.doc.get(card).unwrap().style_refs.get("fill"), Some(&format!("{lib_id}/s_fill")));
@@ -162,7 +187,7 @@ fn library_fill_text_and_effect_styles_are_suggested_with_their_library_name_and
 }
 
 #[test]
-fn disabled_libraries_are_never_suggested_even_after_an_asset_was_previously_imported() {
+fn disabled_library_is_never_suggested() {
     let root = tmp_lib_root("disabled");
     let lib_id = publish_design_system(&root, "Optional Kit");
 
@@ -202,33 +227,30 @@ fn disabled_libraries_are_never_suggested_even_after_an_asset_was_previously_imp
 }
 
 #[test]
-fn a_stale_library_fix_is_refused_without_importing_the_asset() {
-    let root = tmp_lib_root("stale");
-    let lib_id = publish_design_system(&root, "Design System");
+fn local_candidate_beats_library_candidate() {
+    let root = tmp_lib_root("local_wins");
+    let lib_id = publish_design_system(&root, "Brand DS");
 
     let mut f = fx();
     let card = f.rect(f.page, "Card", BLUE);
+    let local_var = f.color_var("blue/500", BLUE, BLUE);
     let mut app = f.app();
     app.libs.set_root(root.clone());
     app.set_library_enabled(&lib_id, true);
 
     app.open_check_designs();
     app.refresh_check_designs(false);
-    let finding = app.check_designs.report.of(Rule::HardCodedValue).next().cloned().unwrap();
-
-    // Edit the layer before applying the fix.
-    app.doc.get_mut(card).unwrap().fills = vec![Paint::solid(gray(0x20))];
-    app.hist = Default::default();
-    assert!(!app.check_designs_fix(&finding));
-    assert!(app.doc.variables.is_empty(), "stale fix must not import library variable");
-    assert!(app.doc.library.external.is_empty());
-    assert!(!app.hist.can_undo());
+    let found = only(&app.check_designs.report, Rule::HardCodedValue);
+    assert_eq!(found.node, card);
+    assert_eq!(found.message, "Fill #1A73E8 matches variable \"blue/500\"");
+    assert_eq!(found.fix, Some(Fix::BindVariable { key: "fills/0".into(), variable: local_var }));
+    assert!(!found.is_from_library());
 
     let _ = std::fs::remove_dir_all(root);
 }
 
 #[test]
-fn ambiguous_variables_across_enabled_libraries_report_with_library_names_and_no_fix() {
+fn two_libraries_with_same_value_are_ambiguous() {
     let root = tmp_lib_root("ambig");
     let lib_a = publish_design_system(&root, "Alpha UI");
     let lib_b = publish_design_system(&root, "Beta UI");
@@ -244,7 +266,65 @@ fn ambiguous_variables_across_enabled_libraries_report_with_library_names_and_no
     app.refresh_check_designs(false);
     let found = only(&app.check_designs.report, Rule::HardCodedValue);
     assert_eq!(found.fix, None);
-    assert_eq!(found.message, "Fill #1A73E8 matches 2 variables: \"Brand/Primary\" (Alpha UI), \"Brand/Primary\" (Beta UI)");
+    assert_eq!(found.message, "Fill #1A73E8 matches 2 variables: \"Brand/Primary\" from library \"Alpha UI\", \"Brand/Primary\" from library \"Beta UI\"");
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn pinned_version_is_used_not_latest() {
+    let root = tmp_lib_root("pinned");
+    // Publish v1 with Brand/Primary = BLUE.
+    let mut lib_fx = fx();
+    lib_fx.doc.name = "Brand DS".into();
+    let var_id = lib_fx.color_var("Brand/Primary", BLUE, BLUE);
+    let mut lib_app = lib_fx.app();
+    lib_app.libs.set_root(root.clone());
+    assert!(lib_app.publish_file());
+    let lib_id = lib_app.doc.library.published.as_ref().unwrap().library_id.clone();
+
+    // Consumer enables v1.
+    let mut f = fx();
+    let card = f.rect(f.page, "Card", BLUE);
+    let mut app = f.app();
+    app.libs.set_root(root.clone());
+    app.set_library_enabled(&lib_id, true);
+    assert_eq!(app.doc.library.enabled[0].version, 1);
+
+    // Library publishes v2 where Brand/Primary changes to RED.
+    lib_app.doc.variables.get_mut(&var_id).unwrap().values =
+        [("light".to_string(), VariableValue::Color(Color::rgb(220, 38, 38))), ("dark".to_string(), VariableValue::Color(Color::rgb(220, 38, 38)))]
+            .into_iter()
+            .collect();
+    assert!(lib_app.publish_file());
+    assert_eq!(lib_app.doc.library.published.as_ref().unwrap().version, 2);
+
+    // Consumer is still pinned at v1 (BLUE), so BLUE card still matches Brand/Primary at v1!
+    app.open_check_designs();
+    app.refresh_check_designs(false);
+    let found = only(&app.check_designs.report, Rule::HardCodedValue);
+    assert_eq!(found.node, card);
+    assert_eq!(found.message, "Fill #1A73E8 matches variable \"Brand/Primary\" from library \"Brand DS\"");
+    assert!(app.check_designs_fix(&found));
+    assert_eq!(app.doc.resolve_variable(card, &format!("{lib_id}/var:Brand/Primary")), Some(VariableValue::Color(BLUE)));
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn unreadable_library_is_reported_and_skipped() {
+    let root = tmp_lib_root("unreadable");
+    let mut f = fx();
+    f.rect(f.page, "Card", BLUE);
+    let mut app = f.app();
+    app.libs.set_root(root.clone());
+    // Enable a library whose snapshot does not exist on disk.
+    app.doc.library.enabled.push(LibraryRef { id: "missing-lib".into(), name: "Missing Kit".into(), version: 1 });
+
+    app.open_check_designs();
+    app.refresh_check_designs(false);
+    assert_eq!(app.check_designs.report.unreadable_libraries, vec!["Missing Kit".to_string()]);
+    assert!(app.check_designs.report.findings.is_empty());
 
     let _ = std::fs::remove_dir_all(root);
 }

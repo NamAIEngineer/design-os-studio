@@ -23,7 +23,8 @@ mod tests;
 pub use fixture::FIXTURE;
 pub use state::CheckDesignsState;
 
-use designos_doc::{Color, Document, NodeId, NodeKind};
+use designos_doc::{Color, Document, LibraryRef, LibrarySnapshot, NodeId, NodeKind};
+use std::sync::Arc;
 
 /// Layers scanned per audit. A page of several hundred thousand layers must never stall the UI
 /// thread, so the audit stops here and the panel says so.
@@ -53,8 +54,10 @@ impl Rule {
 /// The edit that resolves a finding.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Fix {
-    /// Bind the property `key` (`fills/0`, `strokes/1`) to a variable.
+    /// Bind the property `key` (`fills/0`, `strokes/1`, `itemSpacing`, …) to a variable.
     BindVariable { key: String, variable: String },
+    /// Bind several properties at once (uniform corner radius or uniform padding) to a variable.
+    BindVariables { keys: Vec<String>, variable: String },
     /// Link the layer to a shared style (fill, stroke, text or effect: the style knows which).
     ApplyStyle { style: String },
     /// Replace the text colour with `color` (alpha is kept).
@@ -77,6 +80,13 @@ pub struct Finding {
     pub fix_label: String,
 }
 
+impl Finding {
+    /// Whether this finding suggests an asset from an enabled library.
+    pub fn is_from_library(&self) -> bool {
+        self.message.contains(" from library \"")
+    }
+}
+
 /// What an audit looks at.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Scope {
@@ -84,6 +94,12 @@ pub enum Scope {
     Page(NodeId),
     /// These layers and everything below them.
     Layers(Vec<NodeId>),
+}
+
+/// Enabled library snapshots collected from the app cache before an audit.
+#[derive(Clone, Debug, Default)]
+pub struct LibrarySources {
+    pub(super) libs: Vec<(LibraryRef, Arc<LibrarySnapshot>)>,
 }
 
 /// Result of one audit.
@@ -94,6 +110,8 @@ pub struct Report {
     pub scanned: usize,
     /// The scan stopped at [`MAX_SCANNED_LAYERS`].
     pub truncated: bool,
+    /// Display names of enabled libraries whose pinned snapshot could not be read.
+    pub unreadable_libraries: Vec<String>,
 }
 
 impl Report {
@@ -110,16 +128,16 @@ impl Report {
 
 /// Scans `scope` and lists every finding. Hidden layers and instance contents are skipped.
 pub fn audit(doc: &Document, scope: &Scope) -> Report {
-    audit_with_libraries(doc, scope, &[])
+    audit_with_libraries(doc, scope, &LibrarySources::default())
 }
 
-/// Scans `scope` and includes variables and styles from enabled `libraries` snapshots.
-pub fn audit_with_libraries(doc: &Document, scope: &Scope, libraries: &[&designos_doc::LibrarySnapshot]) -> Report {
+/// Scans `scope` and includes variables and styles from enabled `libs` snapshots.
+pub fn audit_with_libraries(doc: &Document, scope: &Scope, libs: &LibrarySources) -> Report {
     let roots: Vec<NodeId> = match scope {
         Scope::Page(page) => doc.get(*page).map(|p| p.children.clone()).unwrap_or_default(),
         Scope::Layers(ids) => ids.clone(),
     };
-    let index = hardcoded::Index::with_libraries(doc, libraries);
+    let index = hardcoded::Index::with_libraries(doc, libs);
     let components = detached::Components::new(doc);
     let bounds = contrast::SubtreeBounds::default();
     let mut report = Report::default();

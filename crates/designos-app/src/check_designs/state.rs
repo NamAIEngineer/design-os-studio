@@ -1,8 +1,25 @@
 //! Panel state: what is being checked and the cached report.
 
-use super::{audit_with_libraries, Report, Scope};
+use super::{audit_with_libraries, LibrarySources, Report, Scope};
 use crate::app::App;
-use designos_doc::{LibraryRef, LibrarySnapshot};
+use designos_doc::{LibraryRef, REMOTE_LIBRARY_PREFIX};
+
+impl LibrarySources {
+    /// Collects pinned snapshots for every enabled library in `app.doc.library.enabled`, plus the
+    /// display names of any enabled library whose snapshot could not be read.
+    pub(super) fn collect(app: &mut App) -> (Self, Vec<String>) {
+        let enabled = app.doc.library.enabled.clone();
+        let mut libs = Vec::new();
+        let mut unreadable = Vec::new();
+        for r in enabled.into_iter().filter(|r| !r.id.starts_with(REMOTE_LIBRARY_PREFIX)) {
+            match app.snapshot_of(&r.id, r.version) {
+                Some(snap) => libs.push((r, snap)),
+                None => unreadable.push(r.name),
+            }
+        }
+        (Self { libs }, unreadable)
+    }
+}
 
 /// Check designs panel state. The scope is fixed when the panel opens, so selecting a finding's
 /// layer does not change what is being listed.
@@ -54,9 +71,10 @@ impl App {
         if self.check_designs.audited.as_ref() == Some(&key) || (interacting && self.check_designs.audited.is_some()) {
             return;
         }
-        let snaps = self.enabled_library_snapshots();
-        let snap_refs: Vec<&LibrarySnapshot> = snaps.iter().map(|s| s.as_ref()).collect();
-        self.check_designs.report = audit_with_libraries(&self.doc, &key.1, &snap_refs);
+        let (libs, unreadable) = LibrarySources::collect(self);
+        let mut report = audit_with_libraries(&self.doc, &key.1, &libs);
+        report.unreadable_libraries = unreadable;
+        self.check_designs.report = report;
         self.check_designs.audited = Some(key);
     }
 }

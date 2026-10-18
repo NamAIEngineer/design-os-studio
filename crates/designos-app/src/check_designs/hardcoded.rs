@@ -6,18 +6,18 @@
 //! on the whole list: a layer whose paints, text properties or effects equal a style's values
 //! exactly.
 
-use super::{Finding, Fix, Rule};
+use super::{Finding, Fix, LibrarySources, Rule};
 use crate::styles::rgb_key;
 use designos_doc::{
-    local_key, scope_allows, style_property, Color, Document, LayoutAlign, LayoutDirection, LibraryAssetKind, LibrarySnapshot, LineHeight, Node, NodeId,
-    NodeKind, Paint, PaintKind, Style, StyleProperty, TextStyle, Variable, VariableKind, VariableStore, VariableValue, REMOTE_LIBRARY_PREFIX,
+    local_key, scope_allows, style_property, Color, Document, LayoutAlign, LibraryAssetKind, LibrarySnapshot, LineHeight, Node, NodeId, NodeKind, Paint,
+    PaintKind, Style, StyleProperty, TextStyle, Variable, VariableKind, VariableStore, VariableValue, REMOTE_LIBRARY_PREFIX,
 };
 use std::collections::HashMap;
 
 /// Alpha tolerance when comparing colours: half an 8-bit step.
 const ALPHA_EPS: f32 = 0.002;
-/// Tolerance when comparing exact numbers.
-const NUM_EPS: f32 = 1e-4;
+/// Tolerance when comparing exact numbers (0.0005).
+const NUM_EPS: f32 = 0.0005;
 
 const PADDING_KEYS: [&str; 4] = ["paddingTop", "paddingRight", "paddingBottom", "paddingLeft"];
 const RADIUS_KEYS: [&str; 4] = ["topLeftRadius", "topRightRadius", "bottomRightRadius", "bottomLeftRadius"];
@@ -33,7 +33,7 @@ pub(super) struct Entry<'a> {
     pub var: &'a Variable,
     /// Variable id to write on fix (`v.id` when local/imported, `<lib_id>/<v.id>` when in a snapshot).
     pub fix_id: String,
-    /// Library display name when the variable comes from an enabled library.
+    /// Library display name when the variable comes from an enabled library (not yet imported).
     pub library_name: Option<&'a str>,
     constant: bool,
     source: VarSource<'a>,
@@ -92,7 +92,7 @@ fn default_style_property(style: &Style) -> StyleProperty {
 }
 
 impl<'a> Index<'a> {
-    pub(super) fn with_libraries(doc: &'a Document, libraries: &[&'a LibrarySnapshot]) -> Self {
+    pub(super) fn with_libraries(doc: &'a Document, libraries: &'a LibrarySources) -> Self {
         let store = VariableStore::from_doc(doc);
         let mut lib_stores = Vec::new();
         let mut by_rgb: HashMap<u32, Vec<Entry<'a>>> = HashMap::new();
@@ -100,49 +100,59 @@ impl<'a> Index<'a> {
         let mut styles: Vec<StyleEntry<'a>> = Vec::new();
 
         for v in doc.variables.values() {
-            let library_name = match variable_library_id(doc, v) {
-                Some(lib_id) => match enabled_library_name(doc, lib_id) {
-                    Some(name) => Some(name),
-                    None => continue, // Disabled library: never suggest even if previously imported.
-                },
-                None => None,
-            };
+            if let Some(lib_id) = variable_library_id(doc, v) {
+                if enabled_library_name(doc, lib_id).is_none() {
+                    continue; // Disabled library: never suggest even if previously imported.
+                }
+            }
             let Some(coll) = doc.variable_collections.get(&v.collection) else { continue };
-            Self::insert_variable(&store, v, coll, v.id.clone(), library_name, VarSource::Local, &mut by_rgb, &mut by_num);
+            // Per §3.2: a library asset that already has a local copy counts as a local candidate.
+            Self::insert_variable(&store, v, coll, v.id.clone(), None, VarSource::Local, &mut by_rgb, &mut by_num);
         }
 
         for (k, s) in &doc.styles {
-            let library_name = match style_library_id(doc, k) {
-                Some(lib_id) => match enabled_library_name(doc, lib_id) {
-                    Some(name) => Some(name),
-                    None => continue, // Disabled library: never suggest.
-                },
-                None => None,
-            };
-            styles.push(StyleEntry { fix_key: k.clone(), name: doc.style_name(k), property: style_property(doc, k), style: s, library_name });
+            if let Some(lib_id) = style_library_id(doc, k) {
+                if enabled_library_name(doc, lib_id).is_none() {
+                    continue; // Disabled library: never suggest.
+                }
+            }
+            styles.push(StyleEntry { fix_key: k.clone(), name: doc.style_name(k), property: style_property(doc, k), style: s, library_name: None });
         }
 
-        for &snap in libraries {
-            let Some(lib_name) = enabled_library_name(doc, &snap.library_id) else { continue };
+        for (lib_ref, snap) in &libraries.libs {
+            let lib_name = lib_ref.name.as_str();
             let store_idx = lib_stores.len();
             lib_stores.push(VariableStore { variables: snap.variables.clone(), collections: snap.variable_collections.clone() });
             let snap_store = &lib_stores[store_idx];
 
             for asset in &snap.assets {
+                let ext_key = local_key(&lib_ref.id, &asset.key);
+                if doc.library.external.contains_key(&ext_key) {
+                    continue;
+                }
                 match asset.kind {
                     LibraryAssetKind::Variable => {
                         let Some(raw) = asset.key.strip_prefix("var:") else { continue };
-                        let fix_id = local_key(&snap.library_id, raw);
+                        let fix_id = local_key(&lib_ref.id, raw);
                         if doc.variables.contains_key(&fix_id) {
                             continue;
                         }
                         let Some(v) = snap.variables.get(raw) else { continue };
                         let Some(coll) = snap.variable_collections.get(&v.collection) else { continue };
-                        Self::insert_variable(snap_store, v, coll, fix_id, Some(lib_name), VarSource::Library { snap, store_idx }, &mut by_rgb, &mut by_num);
+                        Self::insert_variable(
+                            snap_store,
+                            v,
+                            coll,
+                            fix_id,
+                            Some(lib_name),
+                            VarSource::Library { snap: snap.as_ref(), store_idx },
+                            &mut by_rgb,
+                            &mut by_num,
+                        );
                     }
                     LibraryAssetKind::Style => {
                         let Some(raw) = asset.key.strip_prefix("style:") else { continue };
-                        let fix_key = local_key(&snap.library_id, raw);
+                        let fix_key = local_key(&lib_ref.id, raw);
                         if doc.styles.contains_key(&fix_key) {
                             continue;
                         }
@@ -228,9 +238,9 @@ impl<'a> Index<'a> {
         }
     }
 
-    /// The variable that holds `c` at `node` for property `key`. A variable with the same value in
-    /// every mode is preferred over one that only matches in the mode in effect here, since the
-    /// latter would change colour when the mode switches. Several equally good ones are ambiguous.
+    /// The variable that holds `c` at `node` for property `key`. Local candidates take priority
+    /// over library candidates (§3.4). A variable with the same value in every mode is preferred
+    /// over one that only matches in the mode in effect here.
     fn find<'b>(&'b self, doc: &Document, node: &Node, key: &str, c: &Color) -> Match<'a, 'b> {
         let Some(list) = self.by_rgb.get(&rgb_key(c)) else { return Match::None };
         let holding: Vec<&'b Entry<'a>> = list
@@ -240,8 +250,10 @@ impl<'a> Index<'a> {
                     && matches!(self.resolve_entry(doc, node.id, e), Some(VariableValue::Color(vc)) if same_colour(&vc, c))
             })
             .collect();
-        let steady: Vec<&'b Entry<'a>> = holding.iter().copied().filter(|e| e.constant).collect();
-        let pool = if steady.is_empty() { holding } else { steady };
+        let locals: Vec<&'b Entry<'a>> = holding.iter().copied().filter(|e| e.library_name.is_none()).collect();
+        let candidates = if locals.is_empty() { holding } else { locals };
+        let steady: Vec<&'b Entry<'a>> = candidates.iter().copied().filter(|e| e.constant).collect();
+        let pool = if steady.is_empty() { candidates } else { steady };
         match pool.as_slice() {
             [] => Match::None,
             [only] => Match::One(only),
@@ -249,19 +261,31 @@ impl<'a> Index<'a> {
         }
     }
 
-    /// The number variable that holds `x` at `node` for property `key`.
+    /// The number variable that holds `x` at `node` for property `key`. Local candidates take
+    /// priority over library candidates (§3.4).
     fn find_number<'b>(&'b self, doc: &Document, node: &Node, key: &str, x: f32) -> Match<'a, 'b> {
-        let Some(list) = self.by_num.get(&num_key(x)) else { return Match::None };
+        let base = num_key(x);
         let scope_key = scope_key_for_number(key);
-        let holding: Vec<&'b Entry<'a>> = list
-            .iter()
-            .filter(|e| {
-                scope_allows(&e.var.scopes, scope_key, &node.kind)
-                    && matches!(self.resolve_entry(doc, node.id, e), Some(VariableValue::Number(vx)) if same_number(vx, x))
-            })
-            .collect();
-        let steady: Vec<&'b Entry<'a>> = holding.iter().copied().filter(|e| e.constant).collect();
-        let pool = if steady.is_empty() { holding } else { steady };
+        let mut seen_ids: Vec<&str> = Vec::new();
+        let mut holding: Vec<&'b Entry<'a>> = Vec::new();
+        for bucket in [base - 1, base, base + 1] {
+            if let Some(list) = self.by_num.get(&bucket) {
+                for e in list {
+                    if !seen_ids.contains(&e.fix_id.as_str())
+                        && scope_allows(&e.var.scopes, scope_key, &node.kind)
+                        && matches!(self.resolve_entry(doc, node.id, e), Some(VariableValue::Number(vx)) if same_number(vx, x))
+                    {
+                        seen_ids.push(e.fix_id.as_str());
+                        holding.push(e);
+                    }
+                }
+            }
+        }
+        holding.sort_by(|a, b| (&a.var.name, a.library_name, &a.fix_id).cmp(&(&b.var.name, b.library_name, &b.fix_id)));
+        let locals: Vec<&'b Entry<'a>> = holding.iter().copied().filter(|e| e.library_name.is_none()).collect();
+        let candidates = if locals.is_empty() { holding } else { locals };
+        let steady: Vec<&'b Entry<'a>> = candidates.iter().copied().filter(|e| e.constant).collect();
+        let pool = if steady.is_empty() { candidates } else { steady };
         match pool.as_slice() {
             [] => Match::None,
             [only] => Match::One(only),
@@ -281,8 +305,9 @@ fn scope_key_for_number(key: &str) -> &str {
 fn resolve_in_snapshot(doc: &Document, snap: &LibrarySnapshot, store: &VariableStore, node: NodeId, v: &Variable) -> Option<VariableValue> {
     let coll = snap.variable_collections.get(&v.collection)?;
     let imported_coll = local_key(&snap.library_id, &v.collection);
-    let mode = doc.variable_mode(node, &imported_coll).unwrap_or_else(|| coll.default_mode.clone());
-    store.resolve(&v.id, &mode).or_else(|| store.resolve(&v.id, &coll.default_mode))
+    let default_mode = coll.modes.first().map(|m| m.id.as_str()).unwrap_or(coll.default_mode.as_str());
+    let mode = doc.variable_mode(node, &imported_coll).unwrap_or_else(|| default_mode.to_string());
+    store.resolve(&v.id, &mode).or_else(|| store.resolve(&v.id, default_mode))
 }
 
 /// Same colour to the 8-bit step, and the same alpha within [`ALPHA_EPS`].
@@ -291,18 +316,18 @@ fn same_colour(a: &Color, b: &Color) -> bool {
 }
 
 fn num_key(x: f32) -> i64 {
-    (x as f64 * 10_000.0).round() as i64
+    (x as f64 * 1000.0).round() as i64
 }
 
 fn same_number(a: f32, b: f32) -> bool {
     a.is_finite() && b.is_finite() && (a - b).abs() <= NUM_EPS
 }
 
-fn fmt_px(x: f32) -> String {
-    let r = (x * 100.0).round() / 100.0;
-    if (r - r.round()).abs() <= NUM_EPS {
-        format!("{}", r.round() as i64)
+fn fmt_num(x: f32) -> String {
+    if (x - x.round()).abs() < NUM_EPS {
+        format!("{}", x.round() as i64)
     } else {
+        let r = (x * 1000.0).round() / 1000.0;
         format!("{r}")
     }
 }
@@ -372,28 +397,28 @@ fn report_only(n: &Node, message: String) -> Finding {
 
 fn fmt_var_quoted(e: &Entry) -> String {
     match e.library_name {
-        Some(lib) => format!("\"{}\" ({lib})", e.var.name),
+        Some(lib) => format!("\"{}\" from library \"{lib}\"", e.var.name),
         None => format!("\"{}\"", e.var.name),
     }
 }
 
 fn fmt_var_bind_label(e: &Entry) -> String {
     match e.library_name {
-        Some(lib) => format!("Bind to variable {} ({lib})", e.var.name),
+        Some(lib) => format!("Bind to variable {} from library {}", e.var.name, lib),
         None => format!("Bind to variable {}", e.var.name),
     }
 }
 
 fn fmt_style_quoted(s: &StyleEntry) -> String {
     match s.library_name {
-        Some(lib) => format!("\"{}\" ({lib})", s.name),
+        Some(lib) => format!("\"{}\" from library \"{lib}\"", s.name),
         None => format!("\"{}\"", s.name),
     }
 }
 
 fn fmt_style_apply_label(s: &StyleEntry) -> String {
     match s.library_name {
-        Some(lib) => format!("Apply style {} ({lib})", s.name),
+        Some(lib) => format!("Apply style {} from library {}", s.name, lib),
         None => format!("Apply style {}", s.name),
     }
 }
@@ -420,16 +445,22 @@ pub(super) fn check(doc: &Document, index: &Index, n: &Node, out: &mut Vec<Findi
     effects_rule(index, n, out);
 }
 
-fn check_number_prop(doc: &Document, index: &Index, n: &Node, key: &str, label: &str, val: f32, out: &mut Vec<Finding>) -> bool {
-    match index.find_number(doc, n, key, val) {
+fn check_number_prop(doc: &Document, index: &Index, n: &Node, keys: &[&str], label: &str, val: f32, out: &mut Vec<Finding>) -> bool {
+    let Some(&first_key) = keys.first() else { return false };
+    match index.find_number(doc, n, first_key, val) {
         Match::None => false,
         Match::One(e) => {
-            let message = format!("{label} {} px matches variable {}", fmt_px(val), fmt_var_quoted(e));
-            out.push(finding(n, message, Fix::BindVariable { key: key.into(), variable: e.fix_id.clone() }, fmt_var_bind_label(e)));
+            let message = format!("{label} {} matches variable {}", fmt_num(val), fmt_var_quoted(e));
+            let fix = if keys.len() == 1 {
+                Fix::BindVariable { key: first_key.into(), variable: e.fix_id.clone() }
+            } else {
+                Fix::BindVariables { keys: keys.iter().map(|k| (*k).to_string()).collect(), variable: e.fix_id.clone() }
+            };
+            out.push(finding(n, message, fix, fmt_var_bind_label(e)));
             true
         }
         Match::Ambiguous(vars) => {
-            let message = format!("{label} {} px matches {} variables: {}", fmt_px(val), vars.len(), name_list(&vars));
+            let message = format!("{label} {} matches {} variables: {}", fmt_num(val), vars.len(), name_list(&vars));
             out.push(report_only(n, message));
             true
         }
@@ -448,9 +479,6 @@ fn number_value_at(n: &Node, key: &str) -> Option<f32> {
         }
         "counterAxisSpacing" => {
             let al = n.kind.frame_props()?.auto_layout.as_ref()?;
-            if !(al.wrap || al.direction == LayoutDirection::Grid) {
-                return None;
-            }
             al.counter_spacing
         }
         "paddingTop" | "paddingRight" | "paddingBottom" | "paddingLeft" => {
@@ -476,12 +504,15 @@ fn number_value_at(n: &Node, key: &str) -> Option<f32> {
             n.corner_radii[i]
         }
         "strokeWeight" => {
-            if n.stroke.side_weights.is_some() {
+            if n.stroke.side_weights.is_some() || !n.stroke.paints.iter().any(|p| p.visible) {
                 return None;
             }
             n.stroke.weight
         }
         "strokeTopWeight" | "strokeRightWeight" | "strokeBottomWeight" | "strokeLeftWeight" => {
+            if !n.stroke.paints.iter().any(|p| p.visible) {
+                return None;
+            }
             let sides = n.stroke.side_weights?;
             let i = match key {
                 "strokeTopWeight" => 0,
@@ -516,16 +547,17 @@ fn check_single_number(doc: &Document, index: &Index, n: &Node, key: &str, label
         return false;
     }
     let Some(val) = number_value_at(n, key) else { return false };
-    check_number_prop(doc, index, n, key, label, val, out)
+    check_number_prop(doc, index, n, &[key], label, val, out)
 }
 
-fn check_quad(doc: &Document, index: &Index, n: &Node, uniform_key: &str, uniform_label: &str, sides: [(&str, &str); 4], out: &mut Vec<Finding>) {
+fn check_quad(doc: &Document, index: &Index, n: &Node, uniform_label: &str, sides: [(&str, &str); 4], out: &mut Vec<Finding>) {
     let all_unbound = sides.iter().all(|(k, _)| !n.variables.bindings.contains_key(*k));
     if all_unbound {
         if let Some(v0) = number_value_at(n, sides[0].0) {
             let all_equal = sides[1..].iter().all(|(k, _)| number_value_at(n, k).is_some_and(|v| same_number(v, v0)));
             if all_equal {
-                check_number_prop(doc, index, n, uniform_key, uniform_label, v0, out);
+                let keys = [sides[0].0, sides[1].0, sides[2].0, sides[3].0];
+                check_number_prop(doc, index, n, &keys, uniform_label, v0, out);
                 return;
             }
         }
@@ -540,21 +572,19 @@ fn numbers_rule(doc: &Document, index: &Index, n: &Node, out: &mut Vec<Finding>)
         return;
     }
     check_single_number(doc, index, n, "itemSpacing", "Gap", out);
-    check_single_number(doc, index, n, "counterAxisSpacing", "Counter gap", out);
+    check_single_number(doc, index, n, "counterAxisSpacing", "Row gap", out);
     check_quad(
         doc,
         index,
         n,
-        "padding",
         "Padding",
-        [("paddingTop", "Padding top"), ("paddingRight", "Padding right"), ("paddingBottom", "Padding bottom"), ("paddingLeft", "Padding left")],
+        [("paddingTop", "Top padding"), ("paddingRight", "Right padding"), ("paddingBottom", "Bottom padding"), ("paddingLeft", "Left padding")],
         out,
     );
     check_quad(
         doc,
         index,
         n,
-        "cornerRadius",
         "Corner radius",
         [
             ("topLeftRadius", "Top-left radius"),

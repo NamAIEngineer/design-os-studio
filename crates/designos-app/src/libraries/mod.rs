@@ -266,18 +266,6 @@ impl App {
         self.snapshot_of(id, v)
     }
 
-    /// Snapshots for all enabled libraries in `self.doc.library.enabled`.
-    pub fn enabled_library_snapshots(&mut self) -> Vec<Arc<LibrarySnapshot>> {
-        let enabled = self.doc.library.enabled.clone();
-        let mut out = Vec::new();
-        for r in enabled.into_iter().filter(|r| !r.id.starts_with(REMOTE_LIBRARY_PREFIX)) {
-            if let Some(snap) = self.latest_snapshot(&r.id).or_else(|| self.snapshot_of(&r.id, r.version)) {
-                out.push(snap);
-            }
-        }
-        out
-    }
-
     /// Document used to render thumbnails of a library's components.
     pub fn library_render_doc(&mut self, id: &str) -> Option<Arc<Document>> {
         let v = self.latest_version_of(id)?;

@@ -6,7 +6,7 @@ use super::{contrast, detached, hardcoded, Finding, Fix};
 use crate::app::App;
 use crate::edit::Tx;
 use crate::layout;
-use designos_doc::{set_bound_property, set_text_fills_everywhere, Command, NodeId, NodeKind, OverrideField, PaintKind, Vec2};
+use designos_doc::{import_asset, is_noop, local_key, set_bound_property, set_text_fills_everywhere, Command, NodeId, NodeKind, OverrideField, PaintKind, Vec2};
 
 /// Order fixes run in within "Fix all": recolouring first, then links to variables and styles, and
 /// the swap of a detached frame for an instance last. The swap only proceeds while the frame still
@@ -16,7 +16,7 @@ use designos_doc::{set_bound_property, set_text_fills_everywhere, Command, NodeI
 fn priority(fix: &Fix) -> u8 {
     match fix {
         Fix::SetTextColor { .. } => 0,
-        Fix::BindVariable { .. } | Fix::ApplyStyle { .. } => 1,
+        Fix::BindVariable { .. } | Fix::BindVariables { .. } | Fix::ApplyStyle { .. } => 1,
         Fix::Reconnect { .. } => 2,
     }
 }
@@ -54,7 +54,7 @@ impl App {
         let id = finding.node;
         match fix {
             Fix::BindVariable { key, variable } => {
-                if !self.doc.variables.contains_key(variable) && !self.import_library_variable_for_fix(tx, id, key, variable) {
+                if !self.doc.variables.contains_key(variable) && !self.import_library_variable_for_fix(tx, id, std::slice::from_ref(key), variable) {
                     return false;
                 }
                 let keys = hardcoded::keys_to_bind(&self.doc, id, key, variable);
@@ -65,6 +65,21 @@ impl App {
                 let Some(n) = tx.ed.node(&mut self.doc, id) else { return false };
                 for k in keys {
                     n.variables.bindings.insert(k.to_string(), variable.clone());
+                    set_bound_property(n, k, &value);
+                }
+                true
+            }
+            Fix::BindVariables { keys, variable } => {
+                if !self.doc.variables.contains_key(variable) && !self.import_library_variable_for_fix(tx, id, keys, variable) {
+                    return false;
+                }
+                if keys.is_empty() || !keys.iter().all(|k| hardcoded::bind_is_current(&self.doc, id, k, variable)) {
+                    return false;
+                }
+                let Some(value) = self.doc.resolve_variable(id, variable) else { return false };
+                let Some(n) = tx.ed.node(&mut self.doc, id) else { return false };
+                for k in keys {
+                    n.variables.bindings.insert(k.clone(), variable.clone());
                     set_bound_property(n, k, &value);
                 }
                 true
@@ -91,18 +106,37 @@ impl App {
         }
     }
 
-    fn import_library_variable_for_fix(&mut self, tx: &mut Tx, id: NodeId, key: &str, variable: &str) -> bool {
+    fn import_pinned_asset_in(&mut self, tx: &mut Tx, library_id: &str, version: u32, key: &str) -> Option<String> {
+        let ekey = local_key(library_id, key);
+        if let Some(l) = self.doc.library.external.get(&ekey).and_then(|e| e.local_key.clone()) {
+            return Some(l);
+        }
+        let snap = self.snapshot_of(library_id, version)?;
+        let cmd = import_asset(&mut self.doc, &snap, key, None);
+        if !is_noop(&cmd) && tx.cmd(&mut self.doc, cmd).is_err() {
+            return None;
+        }
+        self.doc.library.external.get(&ekey).and_then(|e| e.local_key.clone())
+    }
+
+    fn import_library_variable_for_fix(&mut self, tx: &mut Tx, id: NodeId, keys: &[String], variable: &str) -> bool {
         let enabled = self.doc.library.enabled.clone();
         for r in enabled {
             let prefix = format!("{}/", r.id);
             let Some(raw) = variable.strip_prefix(&prefix) else { continue };
-            let Some(snap) = self.latest_snapshot(&r.id).or_else(|| self.snapshot_of(&r.id, r.version)) else { return false };
-            if !hardcoded::library_bind_is_current(&self.doc, &snap, id, key, raw) {
+            let Some(snap) = self.snapshot_of(&r.id, r.version) else {
+                self.show_toast(format!("Couldn't import \"{raw}\" from {}", r.name), true);
+                return false;
+            };
+            if keys.is_empty() || !keys.iter().all(|k| hardcoded::library_bind_is_current(&self.doc, &snap, id, k, raw)) {
                 return false;
             }
-            let imported = self.import_asset_in(tx, &r.id, &format!("var:{raw}")).is_some();
+            let asset_name = snap.variables.get(raw).map(|v| v.name.clone()).unwrap_or_else(|| raw.to_string());
+            let imported = self.import_pinned_asset_in(tx, &r.id, r.version, &format!("var:{raw}")).is_some();
             if imported {
                 self.libs.invalidate();
+            } else {
+                self.show_toast(format!("Couldn't import \"{asset_name}\" from {}", r.name), true);
             }
             return imported;
         }
@@ -114,13 +148,19 @@ impl App {
         for r in enabled {
             let prefix = format!("{}/", r.id);
             let Some(raw) = style.strip_prefix(&prefix) else { continue };
-            let Some(snap) = self.latest_snapshot(&r.id).or_else(|| self.snapshot_of(&r.id, r.version)) else { return false };
+            let Some(snap) = self.snapshot_of(&r.id, r.version) else {
+                self.show_toast(format!("Couldn't import \"{raw}\" from {}", r.name), true);
+                return false;
+            };
             if !hardcoded::library_style_is_current(&self.doc, &snap, id, raw) {
                 return false;
             }
-            let imported = self.import_asset_in(tx, &r.id, &format!("style:{raw}")).is_some();
+            let asset_name = snap.style_meta.get(raw).map(|m| m.name.clone()).unwrap_or_else(|| raw.to_string());
+            let imported = self.import_pinned_asset_in(tx, &r.id, r.version, &format!("style:{raw}")).is_some();
             if imported {
                 self.libs.invalidate();
+            } else {
+                self.show_toast(format!("Couldn't import \"{asset_name}\" from {}", r.name), true);
             }
             return imported;
         }
