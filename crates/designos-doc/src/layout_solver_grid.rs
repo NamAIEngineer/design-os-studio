@@ -2,7 +2,7 @@
 
 use crate::layout_solver_grid_placement::{place_children, Placed, MAX_GRID_TRACKS};
 use crate::layout_solver_types::{ChildIn, LayoutOut, SizeLimits};
-use crate::{AutoLayout, GridTrack, Rect, Sizing, Vec2};
+use crate::{AutoLayout, GridAutoTracks, GridChildAlign, GridTrack, LayoutAlign, Rect, Sizing, Vec2};
 
 /// The width `k` asks of an auto column: its clamped width and margins. A child that fills the width and has margins on it
 /// is stretched to its column minus those margins, so its stored width is that stretched one and counting it would pin the
@@ -63,6 +63,23 @@ fn level_span_rows(heights: &mut [f32], mut frozen: Vec<bool>, mut rem: f32) {
     }
 }
 
+/// Columns a grid solves: the explicit count, three when none is set, at most [`MAX_GRID_TRACKS`].
+fn grid_columns(al: &AutoLayout) -> usize {
+    let cols = if al.grid_columns > 0 { al.grid_columns as usize } else { 3 };
+    cols.clamp(1, MAX_GRID_TRACKS)
+}
+
+/// Rows the placed children cover.
+fn rows_covered(placements: &[Placed]) -> usize {
+    placements.iter().map(|p| p.row + p.row_span).max().unwrap_or(0)
+}
+
+/// Rows the children of a grid fill on their own, placed exactly as [`compute_grid`] places them:
+/// the rows it creates before `grid_rows` adds empty ones. A row track past this count is unused.
+pub fn placed_grid_rows(al: &AutoLayout, kids: &[ChildIn]) -> usize {
+    rows_covered(&place_children(kids, grid_columns(al)))
+}
+
 /// Solves a 2D CSS Grid auto-layout frame (`LayoutDirection::Grid`). Columns are the primary axis
 /// (the width, as in Figma), rows the counter axis (the height). A child keeps its own size unless
 /// it is Fill: a main Fill stretches across its cell's width, a cross Fill across the cell's height.
@@ -70,8 +87,7 @@ fn level_span_rows(heights: &mut [f32], mut frozen: Vec<bool>, mut rem: f32) {
 pub fn compute_grid(al: &AutoLayout, frame: Vec2, own: SizeLimits, kids: &[ChildIn]) -> LayoutOut {
     let frame = own.clamp(frame);
     let [pt, pr, pb, pl] = al.padding;
-    let cols = if al.grid_columns > 0 { al.grid_columns as usize } else { 3 };
-    let cols = cols.clamp(1, MAX_GRID_TRACKS);
+    let cols = grid_columns(al);
     let col_gap = al.item_spacing.max(0.0);
     let row_gap = if al.counter_spacing > 0.0 { al.counter_spacing } else { col_gap };
 
@@ -82,8 +98,7 @@ pub fn compute_grid(al: &AutoLayout, frame: Vec2, own: SizeLimits, kids: &[Child
     }
 
     let placements = place_children(kids, cols);
-    let max_row = placements.iter().map(|p| p.row + p.row_span).max().unwrap_or(0);
-    let rows = max_row.max(al.grid_rows as usize).max(1);
+    let rows = rows_covered(&placements).max(al.grid_rows as usize).max(1);
 
     // Resolve column widths from `grid_col_tracks` + `frame.x`.
     let inner_w = (frame.x - pl - pr - col_gap * (cols.saturating_sub(1) as f32)).max(0.0);
@@ -133,11 +148,29 @@ pub fn compute_grid(al: &AutoLayout, frame: Vec2, own: SizeLimits, kids: &[Child
         }
     }
 
-    // Row heights: a Fixed row track wins; single-row items size their row from clamped height,
-    // then spanning items distribute only the remaining needed height across shorter auto rows.
-    let fixed_row = |r: usize| match al.grid_row_tracks.get(r) {
-        Some(GridTrack::Fixed(h)) => Some(h.max(0.0)),
-        _ => None,
+    // Row heights: an explicit Fixed row track wins (or an explicit Fixed auto-track size for
+    // implicit overflow rows `r >= al.grid_rows`); single-row items size their row from clamped
+    // height, then spanning items distribute only the remaining needed height across shorter auto rows.
+    let explicit_rows = al.grid_rows as usize;
+    let fixed_row = |r: usize| -> Option<f32> {
+        if explicit_rows > 0 && r < explicit_rows {
+            match al.grid_row_tracks.get(r) {
+                Some(GridTrack::Fixed(h)) => Some(h.max(0.0)),
+                _ => None,
+            }
+        } else if explicit_rows == 0 {
+            if let Some(GridTrack::Fixed(h)) = al.grid_row_tracks.get(r) {
+                Some(h.max(0.0))
+            } else if let GridAutoTracks::Track(GridTrack::Fixed(h)) = al.grid_auto_tracks {
+                Some(h.max(0.0))
+            } else {
+                None
+            }
+        } else if let GridAutoTracks::Track(GridTrack::Fixed(h)) = al.grid_auto_tracks {
+            Some(h.max(0.0))
+        } else {
+            None
+        }
     };
     let mut row_heights = vec![0.0f32; rows];
     for (r, h) in row_heights.iter_mut().enumerate() {
@@ -186,9 +219,13 @@ pub fn compute_grid(al: &AutoLayout, frame: Vec2, own: SizeLimits, kids: &[Child
         let [mt, mr, mb, ml] = k.margin;
         let cell_w: f32 = (0..p.col_span).map(|dc| col_widths[p.col + dc]).sum::<f32>() + col_gap * (p.col_span.saturating_sub(1) as f32);
         let cell_h: f32 = (0..p.row_span).map(|dr| row_heights[p.row + dr]).sum::<f32>() + row_gap * (p.row_span.saturating_sub(1) as f32);
-        let w = k.limits.clamp_w(if k.main_fill { (cell_w - ml - mr).max(0.0) } else { k.size.x });
-        let h = k.limits.clamp_h(if k.cross_fill { (cell_h - mt - mb).max(0.0) } else { k.size.y });
-        rects.push(Rect::new(col_x[p.col] + ml, row_y[p.row] + mt, w, h));
+        let (area_w, area_h) = ((cell_w - ml - mr).max(0.0), (cell_h - mt - mb).max(0.0));
+        let w = k.limits.clamp_w(if k.main_fill { area_w } else { k.size.x });
+        let h = k.limits.clamp_h(if k.cross_fill { area_h } else { k.size.y });
+        // The child aligns inside its cell inset by its margins, so a centred child centres its margin box.
+        let dx = cell_offset(k.cell.align_h, al.primary_align, area_w, w);
+        let dy = cell_offset(k.cell.align_v, al.counter_align, area_h, h);
+        rects.push(Rect::new(col_x[p.col] + ml + dx, row_y[p.row] + mt + dy, w, h));
     }
 
     let total_w = col_widths.iter().sum::<f32>() + col_gap * (cols.saturating_sub(1) as f32) + pl + pr;
@@ -197,6 +234,24 @@ pub fn compute_grid(al: &AutoLayout, frame: Vec2, own: SizeLimits, kids: &[Child
     let out_h = if al.counter_sizing == Sizing::Hug { own.clamp_h(total_h) } else { frame.y };
 
     LayoutOut { frame: Vec2::new(out_w, out_h), rects }
+}
+
+/// Offset of a child from the near edge of its cell's area (the cell less the child's margins) on one
+/// axis. `Auto` follows the frame's alignment on that axis. The slack is negative when the child is
+/// larger than that area, so Center overflows both sides evenly and End overflows past the near edge,
+/// as the flow solver does across its lines.
+fn cell_offset(child_align: GridChildAlign, container_align: LayoutAlign, cell_extent: f32, child_extent: f32) -> f32 {
+    let slack = cell_extent - child_extent;
+    match child_align {
+        GridChildAlign::Start => 0.0,
+        GridChildAlign::Center => slack * 0.5,
+        GridChildAlign::End => slack,
+        GridChildAlign::Auto => match container_align {
+            LayoutAlign::Center => slack * 0.5,
+            LayoutAlign::End => slack,
+            _ => 0.0,
+        },
+    }
 }
 
 #[cfg(test)]
@@ -221,6 +276,25 @@ mod tests {
         edit(&mut kids);
         let second = compute_grid(al, first.frame, SizeLimits::default(), &kids);
         (first, second)
+    }
+
+    #[test]
+    fn placed_rows_follow_the_placement_the_solver_uses() {
+        use crate::layout_solver_types::GridCell;
+        let al = grid(2, Sizing::Fixed, Sizing::Hug);
+        assert_eq!(placed_grid_rows(&al, &[]), 0);
+        // five auto children in two columns fill three rows, however many rows the frame asks for
+        let five: Vec<ChildIn> = (0..5).map(|_| child(10.0, 10.0)).collect();
+        assert_eq!(placed_grid_rows(&al, &five), 3);
+        assert_eq!(placed_grid_rows(&AutoLayout { grid_rows: 9, ..al.clone() }, &five), 3);
+        // a pinned child and a spanning child reach their last row
+        let pinned = ChildIn { cell: GridCell { row: Some(4), ..Default::default() }, ..child(10.0, 10.0) };
+        let tall = ChildIn { cell: GridCell { row_span: 3, ..Default::default() }, ..child(10.0, 10.0) };
+        assert_eq!(placed_grid_rows(&al, &[child(10.0, 10.0), pinned]), 5);
+        assert_eq!(placed_grid_rows(&al, &[tall]), 3);
+        // the same rows the solver lays out: the frame grows by one gap per row that `grid_rows` does not add
+        let out = compute_grid(&AutoLayout { counter_spacing: 5.0, ..al.clone() }, Vec2::new(100.0, 10.0), SizeLimits::default(), &five);
+        assert_eq!(out.frame.y, 3.0 * 10.0 + 2.0 * 5.0);
     }
 
     #[test]
