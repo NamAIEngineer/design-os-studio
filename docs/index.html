@@ -320,6 +320,7 @@ kbd{padding:2px 8px;border-radius:var(--r-sm);background:var(--surface);box-shad
 </style>
 <link rel="stylesheet" href="assets/v2-story.css">
 <link rel="stylesheet" href="assets/v2-new.css">
+<link rel="stylesheet" href="assets/v2-anatomy.css">
 </head>
 <body>
 <svg class="sprite" aria-hidden="true" focusable="false">
@@ -338,7 +339,7 @@ kbd{padding:2px 8px;border-radius:var(--r-sm);background:var(--surface);box-shad
   <nav class="wrap" aria-label="Primary">
     <a class="brand" href="#top">DESIGN:OS Studio</a>
     <ul class="navlinks">
-      <li><a href="#figma">Figma</a></li>
+      <li><a href="#anatomy">Inside</a></li>
       <li><a href="#agents">Agents</a></li>
       <li><a href="#scale">Big files</a></li>
       <li><a href="#new">What’s new</a></li>
@@ -439,6 +440,32 @@ kbd{padding:2px 8px;border-radius:var(--r-sm);background:var(--surface);box-shad
           </li>
         </ul>
       </div>
+    </div>
+  </section>
+
+  <!-- 2a. Anatomy. The markup below is the final state: copy, the real Studio render and the five labels,
+       no JS needed. In motion mode the Tenant engine pins it, the six layer drawings (traced from this same
+       render, images/v2/anatomy/*.svg) draw on, lift apart with leader lines to the labels, and settle back.
+       Source ledger:
+         208,610  node_count from `designos --inspect-json` on the Untitled UI PRO v8.0 kit (113 pages)
+         7        css, tailwind, swiftui, uikit, compose, android-xml, react: golden tests in crates/designos-export/src/*.rs
+         quarter second  IDLE_REFINE_DELAY = 0.25 s in crates/designos-app/src/canvas/gpu.rs -->
+  <section id="anatomy" class="anatomy" aria-labelledby="anatomy-h">
+    <div class="anatomy-grid sec wrap">
+      <h2 id="anatomy-h">Five layers, one window.</h2>
+      <p class="anatomy__lede">Studio opens your .fig file in a native window. The canvas draws it on the GPU, the Layers panel and the inspector edit it, and the Agents rail lets a coding agent work on it with you.</p>
+      <figure class="anatomy__frame">
+        <div class="anatomy__stack">
+          <img class="anatomy__render" src="images/v2/anatomy/studio-window-030.webp" width="1600" height="1000" loading="lazy" decoding="async" alt="DESIGN:OS Studio 0.3.0 with the Untitled UI PRO v8.0 kit open: the Agents rail and the Layers panel on the left, the Input field frame selected on the canvas at 4888 by 2584, the inspector on the right and the tool bar along the bottom">
+        </div>
+      </figure>
+      <ol class="anatomy__labels" aria-label="The five layers">
+        <li class="anatomy__label" data-layer="file"><strong>The .fig file</strong><span>Read and written natively. This one, the Untitled UI PRO v8.0 kit, has 208,610 nodes.</span></li>
+        <li class="anatomy__label" data-layer="canvas"><strong>Canvas</strong><span>Drawn on the GPU with wgpu. When nothing changes for a quarter second, it draws one full-quality frame.</span></li>
+        <li class="anatomy__label" data-layer="layers"><strong>Layers</strong><span>Pages and layers, as the file has them.</span></li>
+        <li class="anatomy__label" data-layer="inspector"><strong>Inspector</strong><span>Design, Prototype and Dev Mode, with code in 7 targets.</span></li>
+        <li class="anatomy__label" data-layer="rail"><strong>Agents rail</strong><span>Claude Code, Codex and Antigravity in a terminal beside the canvas.</span></li>
+      </ol>
     </div>
   </section>
 
@@ -678,6 +705,7 @@ rm -rf /tmp/design-os-studio</code></pre></div>
 <script defer src="assets/v2-narrator.js"></script>
 <script defer src="assets/v2-proof-cards.js"></script>
 <script defer src="assets/v2-new.js"></script>
+<script defer src="assets/v2-anatomy.js"></script>
 <script>
 (function () {
   'use strict';
