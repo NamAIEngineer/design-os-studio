@@ -54,13 +54,16 @@ impl App {
         let id = finding.node;
         match fix {
             Fix::BindVariable { key, variable } => {
-                if !hardcoded::bind_is_current(&self.doc, id, key, variable) {
+                let keys = hardcoded::keys_to_bind(&self.doc, id, key, variable);
+                if keys.is_empty() {
                     return false;
                 }
                 let Some(value) = self.doc.resolve_variable(id, variable) else { return false };
                 let Some(n) = tx.ed.node(&mut self.doc, id) else { return false };
-                n.variables.bindings.insert(key.clone(), variable.clone());
-                set_bound_property(n, key, &value);
+                for k in keys {
+                    n.variables.bindings.insert(k.to_string(), variable.clone());
+                    set_bound_property(n, k, &value);
+                }
                 true
             }
             Fix::ApplyStyle { style } => {
