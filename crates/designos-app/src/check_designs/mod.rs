@@ -16,14 +16,17 @@ mod detached;
 mod fix;
 pub mod fixture;
 mod hardcoded;
+mod library_assets;
 mod state;
 #[cfg(test)]
 mod tests;
+mod text_styles;
 
 pub use fixture::FIXTURE;
 pub use state::CheckDesignsState;
 
-use designos_doc::{Color, Document, LibraryRef, LibrarySnapshot, NodeId, NodeKind};
+use designos_doc::{Color, Document, IgnoreKey, LibraryRef, LibrarySnapshot, NodeId, NodeKind};
+use std::collections::HashMap;
 use std::sync::Arc;
 
 /// Layers scanned per audit. A page of several hundred thousand layers must never stall the UI
@@ -31,22 +34,63 @@ use std::sync::Arc;
 pub const MAX_SCANNED_LAYERS: usize = 20_000;
 
 /// The kind of problem a [`Finding`] reports; also the group it is listed under.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Rule {
     HardCodedValue,
     Contrast,
     DetachedInstance,
+    LibraryAssets,
+    TextStyles,
+    CornerRadius,
+    Padding,
+    HorizontalSpacing,
+    VerticalSpacing,
+    TypographyAndStroke,
 }
 
 impl Rule {
-    pub const ALL: [Rule; 3] = [Rule::HardCodedValue, Rule::Contrast, Rule::DetachedInstance];
+    pub const ALL: [Rule; 10] = [
+        Rule::HardCodedValue,
+        Rule::Contrast,
+        Rule::DetachedInstance,
+        Rule::LibraryAssets,
+        Rule::TextStyles,
+        Rule::CornerRadius,
+        Rule::Padding,
+        Rule::HorizontalSpacing,
+        Rule::VerticalSpacing,
+        Rule::TypographyAndStroke,
+    ];
 
     /// Group heading in the panel.
     pub fn title(self) -> &'static str {
         match self {
-            Rule::HardCodedValue => "Hard-coded values",
+            Rule::HardCodedValue => "Colours",
             Rule::Contrast => "Contrast",
             Rule::DetachedInstance => "Detached instances",
+            Rule::LibraryAssets => "Library assets",
+            Rule::TextStyles => "Text styles",
+            Rule::CornerRadius => "Corner radius",
+            Rule::Padding => "Padding",
+            Rule::HorizontalSpacing => "Horizontal spacing",
+            Rule::VerticalSpacing => "Vertical spacing",
+            Rule::TypographyAndStroke => "Typography and stroke",
+        }
+    }
+
+    /// Stable Figma design-linter rule identifier used in `CheckDesignsSettings::disabled_rules`
+    /// and `IgnoreKey::rule`.
+    pub fn figma_id(self) -> &'static str {
+        match self {
+            Rule::HardCodedValue | Rule::Contrast => "RECOMMEND_VARIABLES",
+            Rule::DetachedInstance => "REQUIRE_NO_DETACHED_COMPONENTS",
+            Rule::LibraryAssets => "REQUIRE_ASSETS_FROM_SELECTED_LIBRARIES",
+            Rule::TextStyles => "REQUIRE_TEXT_STYLES",
+            Rule::CornerRadius => "REQUIRE_CORNER_RADIUS_VARIABLES",
+            Rule::Padding => "REQUIRE_PADDING_VARIABLES",
+            Rule::HorizontalSpacing => "REQUIRE_HORIZONTAL_SPACING_VARIABLES",
+            Rule::VerticalSpacing => "REQUIRE_VERTICAL_SPACING_VARIABLES",
+            Rule::TypographyAndStroke => "REQUIRE_TYPOGRAPHY_AND_STROKE_VARIABLES",
         }
     }
 }
@@ -72,6 +116,8 @@ pub struct Finding {
     pub node: NodeId,
     pub node_name: String,
     pub rule: Rule,
+    /// Property key within the rule (`"fills/0"`, `"paddingTop"`, `""` for whole-node rules).
+    pub property: String,
     /// What is wrong, as shown in the row.
     pub message: String,
     /// The one-click fix, when there is one.
@@ -84,6 +130,11 @@ impl Finding {
     /// Whether this finding suggests an asset from an enabled library.
     pub fn is_from_library(&self) -> bool {
         self.message.contains(" from library \"")
+    }
+
+    /// Persistent ignore key for this finding.
+    pub fn ignore_key(&self) -> IgnoreKey {
+        IgnoreKey { node: self.node, rule: self.rule.figma_id().to_string(), property: self.property.clone() }
     }
 }
 
@@ -100,12 +151,15 @@ pub enum Scope {
 #[derive(Clone, Debug, Default)]
 pub struct LibrarySources {
     pub(super) libs: Vec<(LibraryRef, Arc<LibrarySnapshot>)>,
+    pub(super) known_names: HashMap<String, String>,
 }
 
 /// Result of one audit.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Report {
     pub findings: Vec<Finding>,
+    /// Findings in the audited scope that were suppressed by `doc.check_designs.ignored`.
+    pub ignored: Vec<Finding>,
     /// Layers examined.
     pub scanned: usize,
     /// The scan stopped at [`MAX_SCANNED_LAYERS`].
@@ -144,6 +198,10 @@ pub fn audit_with_libraries(doc: &Document, scope: &Scope, libs: &LibrarySources
     let index = hardcoded::Index::with_libraries(doc, libs);
     let components = detached::Components::new(doc);
     let bounds = contrast::SubtreeBounds::default();
+    let contrast_on = !doc.check_designs.disabled_rules.contains(Rule::Contrast.figma_id());
+    let detached_on = !doc.check_designs.disabled_rules.contains(Rule::DetachedInstance.figma_id());
+    let lib_assets_on = !doc.check_designs.disabled_rules.contains(Rule::LibraryAssets.figma_id());
+    let mut all_findings = Vec::new();
     let mut report = Report::default();
     let mut visited = 0usize;
     let mut stack: Vec<NodeId> = roots.into_iter().rev().collect();
@@ -158,14 +216,28 @@ pub fn audit_with_libraries(doc: &Document, scope: &Scope, libs: &LibrarySources
             break;
         }
         visited += 1;
-        let before = report.findings.len();
-        hardcoded::check(doc, &index, n, &mut report.findings);
-        contrast::check(doc, &bounds, n, &mut report.findings);
-        detached::check(doc, &components, n, &mut report.findings);
-        if n.component.source.is_none() || !n.component.overrides.is_empty() || report.findings.len() > before {
+        let before = all_findings.len();
+        hardcoded::check(doc, &index, n, &mut all_findings);
+        if contrast_on {
+            contrast::check(doc, &bounds, n, &mut all_findings);
+        }
+        if detached_on {
+            detached::check(doc, &components, n, &mut all_findings);
+        }
+        if lib_assets_on && (n.component.source.is_none() || matches!(n.kind, NodeKind::Instance { .. })) {
+            library_assets::check(doc, libs, n, &mut all_findings);
+        }
+        if n.component.source.is_none() || !n.component.overrides.is_empty() || all_findings.len() > before {
             report.scanned += 1;
         }
         stack.extend(n.children.iter().rev().copied());
+    }
+    for f in all_findings {
+        if doc.check_designs.ignored.contains(&f.ignore_key()) {
+            report.ignored.push(f);
+        } else {
+            report.findings.push(f);
+        }
     }
     report
 }

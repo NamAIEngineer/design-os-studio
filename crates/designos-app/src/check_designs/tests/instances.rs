@@ -232,6 +232,7 @@ fn a_reconnect_aimed_at_a_mirror_inside_an_instance_is_refused() {
         node: mirror,
         node_name: "Save".into(),
         rule: Rule::DetachedInstance,
+        property: String::new(),
         message: String::new(),
         fix: Some(Fix::Reconnect { component: button }),
         fix_label: String::new(),

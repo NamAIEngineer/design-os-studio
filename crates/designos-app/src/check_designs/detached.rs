@@ -122,5 +122,5 @@ pub(super) fn check(doc: &Document, components: &Components, n: &Node, out: &mut
         }
         None => ("Detached from a component that is not in this file".to_string(), None, String::new()),
     };
-    out.push(Finding { node: n.id, node_name: n.name.clone(), rule: Rule::DetachedInstance, message, fix, fix_label });
+    out.push(Finding { node: n.id, node_name: n.name.clone(), rule: Rule::DetachedInstance, property: String::new(), message, fix, fix_label });
 }
