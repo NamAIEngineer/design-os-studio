@@ -146,9 +146,10 @@ impl AgentCliPreset {
                 "codex --dangerously-bypass-approvals-and-sandbox -c 'mcp_servers.designos.command=\"'\"$DESIGNOS_MCP_BIN\"'\"'"
             }
             AgentCliPreset::Grok => "grok --always-approve --mcp-config \"$DESIGNOS_MCP_CONFIG\"",
-            AgentCliPreset::Antigravity => {
-                "agy --dangerously-skip-permissions --mcp-config \"$DESIGNOS_MCP_CONFIG\" || antigravity --dangerously-skip-permissions --mcp-config \"$DESIGNOS_MCP_CONFIG\""
-            }
+            // `agy` has no `--mcp-config`. It discovers `<dir>/.agents/plugins/<name>/mcp_config.json` in every
+            // `--add-dir`, so the per-file session dir carries the `designos` server (see
+            // `write_agy_session_plugin`) without touching the user's global `~/.gemini/config/mcp_config.json`.
+            AgentCliPreset::Antigravity => "agy --dangerously-skip-permissions --add-dir \"$DESIGNOS_SESSION_DIR\"",
             AgentCliPreset::Shell | AgentCliPreset::DesignOsHelp => "",
         }
     }
@@ -167,7 +168,6 @@ impl AgentCliPreset {
     pub fn is_installed(self) -> bool {
         match self {
             AgentCliPreset::Shell | AgentCliPreset::DesignOsHelp => true,
-            AgentCliPreset::Antigravity => runtime_binary_available("agy") || runtime_binary_available("antigravity"),
             other => runtime_binary_available(other.binary_name()),
         }
     }
@@ -287,8 +287,8 @@ pub fn build_real_cli_command(preset: AgentCliPreset, prompt: &str, live_spec: &
             "{env_prefix} codex --dangerously-bypass-approvals-and-sandbox exec '{escaped} (Deliver onto current file/page in $DESIGNOS_CONTEXT_JSON via designos-mcp or write NodeSpec JSON to $DESIGNOS_LIVE_SPEC)'"
         ),
         AgentCliPreset::Antigravity => format!(
-            "{env_prefix} agy --dangerously-skip-permissions -p '{escaped}' --mcp-config \"{}\"",
-            mcp_config.display()
+            "{env_prefix} agy --dangerously-skip-permissions -p '{escaped}' --add-dir '{}'",
+            session_dir.display()
         ),
         AgentCliPreset::Grok => format!(
             "{env_prefix} grok --always-approve -p '{escaped}' --mcp-config \"{}\"",
@@ -859,6 +859,7 @@ impl TerminalState {
         let mcp_config_path = self.session_dir.join("mcp-config.json");
         if let Ok(bytes) = serde_json::to_vec_pretty(&mcp_config) {
             let _ = atomic_write_session_file(&mcp_config_path, &bytes);
+            write_agy_session_plugin(&self.session_dir, &bytes);
         }
 
         let agent_status_path = self.session_dir.join("agent-status.json");
@@ -2066,12 +2067,22 @@ fn build_agent_shell_cmd(shell_bin: &str, agent_cli: &str) -> CommandBuilder {
         c.arg("-i");
         c.arg("-c");
         // Single command: `exec` so the agent is the PTY child; when it exits the child exits.
-        // Compound commands (Antigravity's `agy ... || antigravity ...`) keep their own fallback,
-        // with no `|| exec $SHELL`.
+        // Compound commands keep their own fallback, with no `|| exec $SHELL`.
         let inner = if agent_cli.contains("||") { agent_cli.to_string() } else { format!("exec {agent_cli}") };
         c.arg(inner);
     }
     c
+}
+
+/// Publishes the session's MCP server config as an `agy` workspace plugin at
+/// `<session_dir>/.agents/plugins/designos/` (`plugin.json` + `mcp_config.json`, same bytes as
+/// `mcp-config.json`). `agy` 1.4.2 has no per-session MCP flag; launching with `--add-dir <session_dir>`
+/// makes it discover this plugin for that session only, leaving the user's global agy config untouched.
+fn write_agy_session_plugin(session_dir: &Path, mcp_config_bytes: &[u8]) {
+    let plugin_dir = session_dir.join(".agents").join("plugins").join("designos");
+    let manifest = br#"{"name":"designos"}"#;
+    let _ = atomic_write_session_file(&plugin_dir.join("plugin.json"), manifest);
+    let _ = atomic_write_session_file(&plugin_dir.join("mcp_config.json"), mcp_config_bytes);
 }
 
 fn atomic_write_session_file(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
@@ -4924,10 +4935,8 @@ Done!
         let agy = build_agent_shell_cmd("/bin/bash", AgentCliPreset::Antigravity.cli_launch_command());
         let agy_args: Vec<String> = agy.get_argv().iter().map(|a| a.to_string_lossy().into_owned()).collect();
         let agy_joined = agy_args.join(" ");
-        assert!(
-            agy_joined.contains("agy") && agy_joined.contains("||") && agy_joined.contains("antigravity"),
-            "Antigravity keeps agy||antigravity: {agy_joined}"
-        );
+        assert!(agy_joined.contains("exec agy --dangerously-skip-permissions"), "Antigravity execs agy: {agy_joined}");
+        assert!(!agy_joined.contains("antigravity"), "no antigravity IDE fallback: {agy_joined}");
         assert!(!agy_joined.contains("|| exec"), "Antigravity must not exec a login shell: {agy_joined}");
         assert!(!agy_joined.contains("exec \"/bin/bash\""));
     }
@@ -5008,5 +5017,78 @@ Done!
         let cr_positions: Vec<usize> = bytes.iter().enumerate().filter(|(_, b)| **b == b'\r').map(|(i, _)| i).collect();
         assert_eq!(cr_positions, vec![bytes.len().saturating_sub(1)], "no '\\r' except the final Enter: {bytes:?}");
         kill_tabs(&mut st);
+    }
+
+    /// Every flag `agy --help` lists in Antigravity CLI 1.4.2 (`agy mcp` is a subcommand, not a flag).
+    const AGY_1_4_2_FLAGS: &[&str] = &[
+        "--add-dir",
+        "--agent",
+        "-c",
+        "--continue",
+        "--conversation",
+        "--dangerously-skip-permissions",
+        "--disable-slash-commands",
+        "--effort",
+        "-i",
+        "--input-format",
+        "--json-schema",
+        "--log-file",
+        "--mode",
+        "--model",
+        "--new-project",
+        "--output-format",
+        "-p",
+        "--print",
+        "--print-timeout",
+        "--project",
+        "--prompt",
+        "--prompt-interactive",
+        "--remote-control",
+        "--sandbox",
+    ];
+
+    fn unknown_agy_flags(command: &str) -> Vec<String> {
+        command
+            .split_whitespace()
+            .map(|t| t.trim_matches(|c| c == '"' || c == '\''))
+            .filter(|t| t.starts_with('-'))
+            .filter(|t| !AGY_1_4_2_FLAGS.contains(t))
+            .map(str::to_string)
+            .collect()
+    }
+
+    #[test]
+    fn antigravity_launch_uses_only_flags_agy_1_4_2_accepts() {
+        let interactive = AgentCliPreset::Antigravity.cli_launch_command();
+        assert_eq!(unknown_agy_flags(interactive), Vec::<String>::new(), "tab launch: {interactive}");
+        assert!(!interactive.contains("--mcp-config"), "agy has no --mcp-config: {interactive}");
+        assert!(interactive.contains("--add-dir \"$DESIGNOS_SESSION_DIR\""), "session plugin dir must be added: {interactive}");
+
+        let live_spec = std::path::Path::new("/tmp/designos-session-x/live-agent-out.spec.json");
+        let sel_json = std::path::Path::new("/tmp/designos-session-x/selection.spec.json");
+        let one_shot = build_real_cli_command(AgentCliPreset::Antigravity, "Check parity", live_spec, sel_json);
+        assert_eq!(unknown_agy_flags(&one_shot), Vec::<String>::new(), "one-shot launch: {one_shot}");
+        assert!(!one_shot.contains("--mcp-config"), "agy has no --mcp-config: {one_shot}");
+        assert!(one_shot.contains("--add-dir '/tmp/designos-session-x'"), "session plugin dir must be added: {one_shot}");
+    }
+
+    #[test]
+    fn antigravity_session_gets_a_workspace_plugin_carrying_the_designos_mcp_server() {
+        let mut st = TerminalState::for_tab(731);
+        let mut doc = Document::new("Agy Plugin File");
+        let page = doc.add_page("Page 1");
+        st.sync_live_file_context(&doc, page, &[], Some(std::path::Path::new("/tmp/agy-plugin-file.designos")));
+
+        let plugin_dir = st.session_dir.join(".agents").join("plugins").join("designos");
+        let manifest: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(plugin_dir.join("plugin.json")).expect("plugin.json")).expect("parse plugin.json");
+        assert_eq!(manifest["name"].as_str(), Some("designos"));
+
+        let plugin_mcp = std::fs::read_to_string(plugin_dir.join("mcp_config.json")).expect("plugin mcp_config.json");
+        let shared_mcp = std::fs::read_to_string(st.session_dir.join("mcp-config.json")).expect("mcp-config.json");
+        assert_eq!(plugin_mcp, shared_mcp, "plugin and --mcp-config consumers must see the same server");
+        let parsed: serde_json::Value = serde_json::from_str(&plugin_mcp).expect("parse");
+        assert!(parsed["mcpServers"]["designos"]["command"].as_str().is_some());
+        assert_eq!(parsed["mcpServers"]["designos"]["env"]["DESIGNOS_FILE"].as_str(), Some("/tmp/agy-plugin-file.designos"));
     }
 }
