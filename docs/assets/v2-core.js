@@ -25,15 +25,17 @@
   // Pin a scene with the Tenant engine (emitted verbatim by ui tenant-scaffold): the engine builds a
   // position:sticky stage inside `section`, subscribes to the shared ticker and arms/disarms on
   // IntersectionObserver. The pre-authored `content` (static, final-state markup) moves into its stage.
-  // Progress is read from the section's own bounding box only.
-  V2.pinScene = function (section, content, travelVh) {
-    var unmountEngine = window.mountScrubSection(section, { beats: [] });
+  // Progress is read from the section's own bounding box only. `engineConfig` is optional: a scene that
+  // scrubs a frame sequence passes { frames, framesLQ, frameCount, beats } and gets the engine's canvas back.
+  V2.pinScene = function (section, content, travelVh, engineConfig) {
+    var unmountEngine = window.mountScrubSection(section, engineConfig || { beats: [] });
     var story = section.querySelector('.scrub__story');
     var stage = section.querySelector('.scrub__stage');
     story.style.minHeight = (100 + travelVh) + 'dvh'; // section height = stage + travel
     stage.appendChild(content);
     return {
       stage: stage,
+      canvas: stage.querySelector('.scrub__canvas'), // null unless the config has frames
       armed: function () { return section.getAttribute('data-armed') === 'true'; },
       progress: function () {
         var r = section.getBoundingClientRect(), travel = r.height - window.innerHeight;
@@ -52,6 +54,34 @@
       }
     };
   };
+
+  // The engine sizes its canvas to the stage and cover-crops each frame to that shape. A scene that shows
+  // the sequence in a box of its own keeps the frames' own shape instead: after the engine resizes the
+  // backing store (on arm and on window resize) this puts it back to w x h before anything is drawn.
+  V2.lockCanvas = function (section, canvas, w, h) {
+    if (!canvas) return function () {};
+    var fix = function () { if (canvas.width !== w) canvas.width = w; if (canvas.height !== h) canvas.height = h; };
+    var watcher = window.MutationObserver ? new MutationObserver(fix) : null;
+    if (watcher) watcher.observe(section, { attributes: true, attributeFilter: ['data-armed'] });
+    window.addEventListener('resize', fix);
+    fix();
+    return function () { if (watcher) watcher.disconnect(); window.removeEventListener('resize', fix); };
+  };
+
+  // Links a pinned scene owns: id -> { el, offset() }. In motion mode a click on #id scrolls to the point
+  // in the pin that offset() names (the target element itself sits inside a sticky stage, so the browser's
+  // and Lenis's own anchor scroll would aim at the wrong place). Capture phase, so it runs before Lenis.
+  V2.anchors = {};
+  document.addEventListener('click', function (e) {
+    var a = e.target.closest && e.target.closest('a[href^="#"]');
+    if (!a || e.defaultPrevented || e.button || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+    var id = a.getAttribute('href').slice(1), t = V2.anchors[id];
+    if (!t || !V2.lenis || !V2.motion()) return;
+    e.preventDefault();
+    e.stopPropagation();
+    V2.lenis.scrollTo(t.el, { offset: t.offset(), duration: 1.2 });
+    if (history.pushState) history.pushState(null, '', '#' + id);
+  }, true);
 
   var mqReduce = matchMedia('(prefers-reduced-motion: reduce)');
   var mqWide = matchMedia('(min-width: 800px)');
@@ -101,6 +131,19 @@
     }
   }
 
+  // A page opened on one of those anchors lands on the scene's own point in the pin, once.
+  var landed = false;
+  function landOnHash() {
+    if (landed) return;
+    landed = true;
+    var t = V2.anchors[location.hash.slice(1)];
+    if (!t || !V2.lenis) return;
+    requestAnimationFrame(function () {
+      V2.lenis.resize(); // the pins just changed the page height; Lenis would clamp the jump to the old one
+      V2.lenis.scrollTo(t.el, { offset: t.offset(), immediate: true, force: true });
+    });
+  }
+
   var mounted = false;
   function apply() {
     var on = V2.motion();
@@ -110,6 +153,7 @@
     if (on) {
       lenisOn();
       V2.scenes.forEach(function (s) { if (s.mount) s.mount(); });
+      landOnHash();
       entrance();
     } else {
       V2.scenes.slice().reverse().forEach(function (s) { if (s.unmount) s.unmount(); });
