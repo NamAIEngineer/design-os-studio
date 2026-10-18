@@ -226,18 +226,6 @@ kbd{padding:2px 8px;border-radius:var(--r-sm);background:var(--surface);box-shad
 .scale-copy a{display:inline-flex;align-items:center;min-height:44px;font-weight:600}
 
 /* 5. new in 0.3.0: gallery rows share one height per row */
-.gallery{display:grid;gap:28px;margin-top:40px}
-.row{display:flex;gap:16px;align-items:flex-start}
-.row figure{flex:var(--ar) 1 0;min-width:0}
-.row .shot img{aspect-ratio:var(--ar)}
-.row figcaption{margin-top:16px;max-width:64ch;color:var(--muted);font-size:.9375rem;line-height:1.5;text-wrap:pretty}
-.row figcaption strong{display:block;color:var(--text);font-weight:600}
-.also{flex:1.4 1 0;min-width:0;align-self:center;padding-left:clamp(0px,2vw,32px)}
-.also h3{font-size:1.25rem;line-height:1.3;letter-spacing:-.01em;font-weight:600}
-.also ul{display:grid;gap:10px;margin-top:16px;color:var(--muted)}
-.also li{position:relative;padding-left:20px;text-wrap:pretty}
-.also li::before{content:"";position:absolute;left:0;top:.62em;width:8px;height:8px;border-radius:2px;background:var(--blue)}
-.also a{display:inline-flex;align-items:center;min-height:44px;margin-top:8px;font-weight:600}
 
 
 /* 6. install */
@@ -321,10 +309,6 @@ kbd{padding:2px 8px;border-radius:var(--r-sm);background:var(--surface);box-shad
   .facts{grid-template-columns:minmax(0,1fr)}
 }
 @media (max-width:760px){
-  .row{flex-direction:column;gap:32px}
-  .row figure{flex:none;width:100%}
-  .gallery{gap:32px}
-  .also{flex:none;width:100%;padding-left:0}
   .dl li{grid-template-columns:minmax(0,1fr)}
   .hero .sub{margin-top:56px}
 }
@@ -335,6 +319,7 @@ kbd{padding:2px 8px;border-radius:var(--r-sm);background:var(--surface);box-shad
 }
 </style>
 <link rel="stylesheet" href="assets/v2-story.css">
+<link rel="stylesheet" href="assets/v2-new.css">
 </head>
 <body>
 <svg class="sprite" aria-hidden="true" focusable="false">
@@ -515,56 +500,61 @@ kbd{padding:2px 8px;border-radius:var(--r-sm);background:var(--surface);box-shad
     </div>
   </section>
 
-  <!-- 5. New in 0.3.0 -->
-  <section id="new" class="sec" aria-labelledby="new-h">
+  <!-- 5. New in 0.3.0: active list + render swap. The markup below is the no-JS state: every title and line
+       is visible, the panel shows the first render, and each item links to its full-size image.
+       v2-new.js turns the list into a tablist and swaps the render. Renders: Studio 0.3.0 headless captures
+       of Untitled UI PRO v8.0 kit frames (see CHANGELOG 0.3.0 for each claim). -->
+  <section id="new" class="sec new" aria-labelledby="new-h">
     <div class="wrap">
-      <h2 id="new-h">New in 0.3.0.</h2>
-      <p class="lead">Real captures from the editor, taken headlessly with <code>--screenshot</code>. Click an image for full size.</p>
-      <div class="gallery">
-        <div class="row">
-          <figure style="--ar:1.6">
-            <a class="shot" href="images/v0.3/styles-effect-and-grid-styles.png" data-size="2880 × 1800"><img src="images/v0.3/styles-effect-and-grid-styles.png" width="2880" height="1800" loading="lazy" alt="DESIGN:OS Studio inspector on the page with no layer selected, listing the file's local Effect styles (Shadow: Card, Floating) and Grid styles (Grid: 12 columns, 8 px) beside three pricing cards (two use the Card shadow, one the Floating shadow) and a 12-column grid frame"></a>
-            <figcaption><strong>Effect and grid styles</strong>Local styles list with two effect styles and two grid styles.</figcaption>
-          </figure>
-          <figure style="--ar:1.6">
-            <a class="shot" href="images/v0.3/styles-edit-effect-style.png" data-size="2880 × 1800"><img src="images/v0.3/styles-edit-effect-style.png" width="2880" height="1800" loading="lazy" alt="DESIGN:OS Studio Edit style panel for the Shadow/Card effect style showing X, Y, blur, spread and color, for a selected pricing card whose Effects section links to that style"></a>
-            <figcaption><strong>Edit a style</strong>The Edit style panel for the Shadow/Card effect style that the selected card uses.</figcaption>
-          </figure>
-          <figure style="--ar:1.6">
-            <a class="shot" href="images/v0.3/auto-layout-space-evenly-vertical-wrap.png" data-size="2880 × 1800"><img src="images/v0.3/auto-layout-space-evenly-vertical-wrap.png" width="2880" height="1800" loading="lazy" alt="DESIGN:OS Studio frame with vertical wrap and Space evenly auto layout: six chips split into two columns, each column spreading its chips evenly top to bottom, with the Auto layout inspector open"></a>
-            <figcaption><strong>Auto layout: Space evenly and vertical wrap</strong>Each wrapped column spreads its own items evenly.</figcaption>
-          </figure>
+      <div class="new-head">
+        <h2 id="new-h">New in 0.3.0.</h2>
+        <p class="lead">Real renders from Studio 0.3.0, on frames from the Untitled UI kit.</p>
+      </div>
+      <div class="new-grid">
+        <ul class="new-list" id="new-list" aria-label="New in 0.3.0">
+          <li class="new-item" data-w="1600" data-h="900" data-alt="DESIGN:OS Studio with a frame pasted from Figma onto an empty Page 1: the Untitled UI Split image section, 1440 by 862, is selected in the middle of the canvas, showing the headline People first. Design later. beside an image of glass blocks">
+            <h3 class="new-item__title">Paste from Figma</h3>
+            <p class="new-item__line">Copy layers in Figma desktop and press Cmd+V. They land centered in the view, images included, as one undo step.</p>
+            <a class="new-item__full" href="images/v2/new/paste-from-figma.webp" aria-label="Full-size render: Paste from Figma">Full-size render</a>
+          </li>
+          <li class="new-item" data-w="1600" data-h="900" data-alt="DESIGN:OS Studio with the Untitled UI PRO v8.0 kit open on the Header sections page: a Pricing Section frame that a coding agent added sits under a purple header, with a monthly and annual billing toggle and three plan cards priced $10, $20 and $40 per month">
+            <h3 class="new-item__title">Agents edit the open file</h3>
+            <p class="new-item__line">Agent edits replay as node operations into the document you have open, and wait while you drag.</p>
+            <a class="new-item__full" href="images/v2/new/agent-edits-open-file.webp" aria-label="Full-size render: Agents edit the open file">Full-size render</a>
+          </li>
+          <li class="new-item" data-w="1600" data-h="900" data-alt="DESIGN:OS Studio at 100% zoom on the Pricing sections page: the Business plan card at $20 per month with a pink column grid laid over it, and the Styles list open in the inspector">
+            <h3 class="new-item__title">Effect and grid styles</h3>
+            <p class="new-item__line">A .fig file brings its effect and grid styles with it.</p>
+            <a class="new-item__full" href="images/v2/new/effect-and-grid-styles.webp" aria-label="Full-size render: Effect and grid styles">Full-size render</a>
+          </li>
+          <li class="new-item" data-w="1600" data-h="900" data-alt="DESIGN:OS Studio with three pricing cards from the Untitled UI kit on the canvas, the middle one selected at 360 by 589, and an Edit style panel open for a drop shadow style set to X 0, Y 4, blur 4 and spread -1">
+            <h3 class="new-item__title">Edit a style everywhere</h3>
+            <p class="new-item__line">Change a style once and every layer that uses it updates, in one undo step.</p>
+            <a class="new-item__full" href="images/v2/new/edit-style-everywhere.webp" aria-label="Full-size render: Edit a style everywhere">Full-size render</a>
+          </li>
+          <li class="new-item" data-w="1600" data-h="900" data-alt="DESIGN:OS Studio with a Simple logos frame from the Untitled UI kit: the heading Start your free trial, two buttons and six client logos wrapped into three rows of two">
+            <h3 class="new-item__title">Space evenly and wrap</h3>
+            <p class="new-item__line">Auto layout adds Space around and Space evenly, and wrapped lines can spread.</p>
+            <a class="new-item__full" href="images/v2/new/space-evenly-and-wrap.webp" aria-label="Full-size render: Space evenly and wrap">Full-size render</a>
+          </li>
+          <li class="new-item" data-w="1600" data-h="900" data-alt="The same Simple logos frame in DESIGN:OS Studio with the heading Start your free trial broken into two even lines and the six logos spread out with more space between the rows">
+            <h3 class="new-item__title">Text wrap Balance</h3>
+            <p class="new-item__line">Balance evens out the lines of a wrapping heading.</p>
+            <a class="new-item__full" href="images/v2/new/text-wrap-balance.webp" aria-label="Full-size render: Text wrap Balance">Full-size render</a>
+          </li>
+          <li class="new-item" data-w="1200" data-h="1083" data-alt="DESIGN:OS Studio in Dev Mode with the Heading text layer of the Simple logos frame selected, 250 by 88, and the Code panel set to Android XML, printing a TextView whose android:textColor is a @color resource">
+            <h3 class="new-item__title">UIKit and Android XML</h3>
+            <p class="new-item__line">Dev Mode now prints UIKit and Android XML, with variables in their code syntax. Shown: Android XML.</p>
+            <a class="new-item__full" href="images/v2/new/dev-mode-android-xml.webp" aria-label="Full-size render: UIKit and Android XML">Full-size render</a>
+          </li>
+        </ul>
+        <div class="new-frame" id="new-panel">
+          <img class="new-img" src="images/v2/new/paste-from-figma.webp" width="1600" height="900" loading="lazy" decoding="async" alt="DESIGN:OS Studio with a frame pasted from Figma onto an empty Page 1: the Untitled UI Split image section, 1440 by 862, is selected in the middle of the canvas, showing the headline People first. Design later. beside an image of glass blocks">
         </div>
-        <div class="row">
-          <figure style="--ar:1.6">
-            <a class="shot" href="images/v0.3/text-wrap-balance.png" data-size="2880 × 1800"><img src="images/v0.3/text-wrap-balance.png" width="2880" height="1800" loading="lazy" alt="DESIGN:OS Studio canvas with two cards holding the same headline, wrapped Auto on the left, which ends on a single word, and Balance on the right, which evens out the lines, with the Type settings panel showing Wrap style Balance"></a>
-            <figcaption><strong>Text wrap: Balance next to Auto</strong>Balance (right) evens out the lines that Auto (left) leaves with a one-word last line.</figcaption>
-          </figure>
-          <figure style="--ar:1.1077">
-            <a class="shot" href="images/v0.3/dev-mode-uikit.png" data-size="2160 × 1950"><img src="images/v0.3/dev-mode-uikit.png" width="2160" height="1950" loading="lazy" alt="DESIGN:OS Studio Dev Mode with UIKit selected: the Code panel for a text layer prints its color as Theme.Color.textPrimary, the variable's iOS code syntax, with the Variables used list below"></a>
-            <figcaption><strong>Dev Mode: UIKit</strong>A variable prints as its iOS code syntax, <code>Theme.Color.textPrimary</code>.</figcaption>
-          </figure>
-          <figure style="--ar:1.1077">
-            <a class="shot" href="images/v0.3/dev-mode-android-xml.png" data-size="2160 × 1950"><img src="images/v0.3/dev-mode-android-xml.png" width="2160" height="1950" loading="lazy" alt="DESIGN:OS Studio Dev Mode with Android XML selected: the Code panel for the same text layer prints android:textColor as @color/text_primary, the variable's Android code syntax"></a>
-            <figcaption><strong>Dev Mode: Android XML</strong>The same variable prints as its Android code syntax, <code>@color/text_primary</code>.</figcaption>
-          </figure>
-        </div>
-        <div class="row">
-          <figure style="--ar:1.6">
-            <a class="shot" href="images/v0.3/scale-untitled-ui-kit.png" data-size="2880 × 1800"><img src="images/v0.3/scale-untitled-ui-kit.png" width="2880" height="1800" loading="lazy" alt="DESIGN:OS Studio on the GPU canvas with the Untitled UI PRO v8.0 Figma kit open: the Input field frame, a dense matrix of text-field variants, with the file's pages and layers listed on the left"></a>
-            <figcaption><strong>Scale: Untitled UI PRO v8.0 Figma kit, by Untitled UI</strong>208,610 nodes on 113 pages when opened. Shown: the Input field frame.</figcaption>
-          </figure>
-          <div class="also">
-            <h3>Also new in 0.3.0</h3>
-            <ul>
-              <li>Multi-page PDF export from the Export panel. Pages are raster images for now.</li>
-              <li>Opacity bound to number variables, and Text wrap Pretty.</li>
-              <li>Files that contained broken numbers open again.</li>
-              <li>Clean captures: <code>--no-toast</code> and <code>--no-caption</code> for <code>--screenshot</code>.</li>
-            </ul>
-            <a href="https://github.com/jangtrinh/design-os-studio/blob/main/CHANGELOG.md#030---2026-10-17">Read the full changelog</a>
-          </div>
-        </div>
+      </div>
+      <div class="new-also">
+        <p><strong>Also new:</strong> multi-page PDF export, opacity bound to number variables, Text wrap Pretty, and files with broken numbers open again.</p>
+        <a href="https://github.com/jangtrinh/design-os-studio/blob/main/CHANGELOG.md#030---2026-10-17">Read the full changelog</a>
       </div>
     </div>
   </section>
@@ -687,6 +677,7 @@ rm -rf /tmp/design-os-studio</code></pre></div>
 <script defer src="assets/v2-core.js"></script>
 <script defer src="assets/v2-narrator.js"></script>
 <script defer src="assets/v2-proof-cards.js"></script>
+<script defer src="assets/v2-new.js"></script>
 <script>
 (function () {
   'use strict';
