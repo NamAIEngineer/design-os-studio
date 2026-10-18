@@ -1,0 +1,4 @@
+//! Modular MCP tool implementations (`v0.6 AI design`).
+
+pub mod libraries;
+pub mod library_source;

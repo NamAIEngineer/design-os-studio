@@ -10,9 +10,12 @@ async fn stdio_handshake_discovery_edit_and_error_recovery() {
         let client = ().serve(TokioChildProcess::new(command).unwrap()).await.unwrap();
         assert_eq!(client.peer_info().unwrap().server_info.as_ref().unwrap().name, "designos-mcp");
         let tools = client.list_all_tools().await.unwrap();
-        assert_eq!(tools.len(), 22);
+        assert_eq!(tools.len(), 23);
         assert!(tools.iter().all(|t| t.annotations.is_some()));
         let call = |name: &'static str, args: Value| CallToolRequestParams::new(name).with_arguments(args.as_object().unwrap().clone());
+        let libs = client.call_tool(call("designos_get_libraries", json!({}))).await.unwrap();
+        assert_eq!(libs.is_error, Some(false));
+        assert_eq!(libs.structured_content.unwrap()["libraries"][0]["id"], "local");
         let doc = client.call_tool(call("designos_get_document", json!({}))).await.unwrap();
         assert_eq!(doc.is_error, Some(false));
         let page = doc.structured_content.unwrap()["pages"][0]["node_id"].clone();
