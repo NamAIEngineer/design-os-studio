@@ -13,6 +13,22 @@ use designos_doc::*;
 use serde_json::json;
 use std::collections::{BTreeMap, HashSet};
 
+/// Plugin id under which Studio keeps node data that has no field in Figma's NodeChange schema. It travels
+/// as ordinary `pluginData` entries, which Figma keeps for any plugin id and ignores when it does not know the
+/// plugin. [`crate::fig`] reads these entries back into typed node data and never into `Node::plugin_data`.
+pub(crate) const STUDIO_PLUGIN_ID: &str = "designos-studio";
+/// Carrier key: an instance's slot content id, as written (`"7:42"`).
+pub(crate) const STUDIO_SLOT_CONTENT_ID_KEY: &str = "slot-content-id";
+/// Carrier key: `"true"` for a sticky that shows its author; absent means hidden.
+pub(crate) const STUDIO_AUTHOR_VISIBLE_KEY: &str = "author-visible";
+
+fn is_studio_carrier_key(full_key: &str) -> bool {
+    full_key
+        .strip_prefix(STUDIO_PLUGIN_ID)
+        .and_then(|rest| rest.strip_prefix(':'))
+        .is_some_and(|key| key == STUDIO_SLOT_CONTENT_ID_KEY || key == STUDIO_AUTHOR_VISIBLE_KEY)
+}
+
 // The kiwi encoder writes whatever float bits it is given, and a reader treats a NaN or an infinity
 // as an absent field, so a single bad number would drop a whole `size` or transform on the way back.
 // The exporter therefore never hands the encoder a non-finite float: it writes the neutral value of
@@ -606,24 +622,36 @@ fn export_node_rec(cx: &mut ExportCtx, id: NodeId, parent_guid: (u32, u32), sibl
         };
         fields.push(("hyperlink", hl_msg));
     }
-    if !node.plugin_data.is_empty() {
-        let pd_entries: Vec<V> = node
-            .plugin_data
-            .iter()
-            .map(|(full_key, val)| {
-                let mut m = Vec::with_capacity(3);
-                if let Some((pid, key)) = full_key.split_once(':') {
-                    if !pid.is_empty() {
-                        m.push(("pluginID", V::String(pid.to_string())));
-                    }
-                    m.push(("key", V::String(key.to_string())));
-                } else {
-                    m.push(("key", V::String(full_key.clone())));
+    // A node's own plugin data goes out unchanged; the reserved carrier keys are rebuilt below from typed
+    // data, so a stale copy of one in `plugin_data` is not written twice.
+    let studio_entry =
+        |key: &str, value: String| msg(vec![("pluginID", V::String(STUDIO_PLUGIN_ID.into())), ("key", V::String(key.into())), ("value", V::String(value))]);
+    let mut pd_entries: Vec<V> = node
+        .plugin_data
+        .iter()
+        .filter(|(full_key, _)| !is_studio_carrier_key(full_key))
+        .map(|(full_key, val)| {
+            let mut m = Vec::with_capacity(3);
+            if let Some((pid, key)) = full_key.split_once(':') {
+                if !pid.is_empty() {
+                    m.push(("pluginID", V::String(pid.to_string())));
                 }
-                m.push(("value", V::String(val.clone())));
-                msg(m)
-            })
-            .collect();
+                m.push(("key", V::String(key.to_string())));
+            } else {
+                m.push(("key", V::String(full_key.clone())));
+            }
+            m.push(("value", V::String(val.clone())));
+            msg(m)
+        })
+        .collect();
+    // Figma's NodeChange has no field for either value, so they ride in plugin data under the reserved id.
+    if matches!(&node.kind, NodeKind::Sticky(sp) if sp.show_author) {
+        pd_entries.push(studio_entry(STUDIO_AUTHOR_VISIBLE_KEY, "true".into()));
+    }
+    if let Some(id) = node.component.slot_content_id.as_deref().filter(|s| !s.is_empty()) {
+        pd_entries.push(studio_entry(STUDIO_SLOT_CONTENT_ID_KEY, id.to_string()));
+    }
+    if !pd_entries.is_empty() {
         fields.push(("pluginData", V::Array(pd_entries)));
     }
     if !node.component.description.is_empty() {
@@ -643,9 +671,6 @@ fn export_node_rec(cx: &mut ExportCtx, id: NodeId, parent_guid: (u32, u32), sibl
     }
     if node.component.is_slot_content {
         fields.push(("isSlotContent", V::Bool(true)));
-    }
-    if let Some(g) = node.component.slot_content_id.as_deref().and_then(parse_guid_pair) {
-        fields.push(("jsonSerialized", msg(vec![("slot-content-id", msg(vec![("guid", guid(g.0, g.1))]))])));
     }
     if let Some(src) = node.component.source.and_then(|s| cx.node_guids.get(&s).copied()) {
         fields.push(("overrideKey", guid(src.0, src.1)));
@@ -794,12 +819,11 @@ fn export_node_rec(cx: &mut ExportCtx, id: NodeId, parent_guid: (u32, u32), sibl
             }
             fields.push(("stackSpacing", fl(al.item_spacing)));
             fields.push(("stackCounterSpacing", fl(al.counter_spacing)));
-            fields.push(("stackPaddingTop", fl(al.padding[0])));
+            // Figma stores top and left padding on the vertical and horizontal padding fields.
+            fields.push(("stackVerticalPadding", fl(al.padding[0])));
             fields.push(("stackPaddingRight", fl(al.padding[1])));
             fields.push(("stackPaddingBottom", fl(al.padding[2])));
-            fields.push(("stackPaddingLeft", fl(al.padding[3])));
             fields.push(("stackHorizontalPadding", fl(al.padding[3])));
-            fields.push(("stackVerticalPadding", fl(al.padding[0])));
             let align_name = |a: LayoutAlign| match a {
                 LayoutAlign::Start => "MIN",
                 LayoutAlign::Center => "CENTER",
@@ -850,11 +874,9 @@ fn export_node_rec(cx: &mut ExportCtx, id: NodeId, parent_guid: (u32, u32), sibl
         fields.push(("stackPositioning", en("ABSOLUTE")));
     }
     if let Some(c) = lc.grid_column {
-        fields.push(("gridColumnAnchorIndex", V::Uint(u32::from(c))));
         fields.push(("gridColumnAnchor", V::Uint(u32::from(c))));
     }
     if let Some(r) = lc.grid_row {
-        fields.push(("gridRowAnchorIndex", V::Uint(u32::from(r))));
         fields.push(("gridRowAnchor", V::Uint(u32::from(r))));
     }
     if lc.col_span > 1 {
@@ -1137,7 +1159,6 @@ fn export_node_rec(cx: &mut ExportCtx, id: NodeId, parent_guid: (u32, u32), sibl
             encode_text_node(&mut fields, tp);
         }
         NodeKind::Sticky(sp) => {
-            fields.push(("authorVisible", V::Bool(sp.show_author)));
             encode_text_node(&mut fields, &sp.text);
         }
         NodeKind::ShapeWithText(sp) => {
@@ -1170,8 +1191,8 @@ fn export_node_rec(cx: &mut ExportCtx, id: NodeId, parent_guid: (u32, u32), sibl
                 ConnectorCap::Circle => "ROUND",
                 ConnectorCap::Diamond => "SQUARE",
             };
-            fields.push(("connectorStartStrokeCap", en(cap_name(cp.start_cap))));
-            fields.push(("connectorEndStrokeCap", en(cap_name(cp.end_cap))));
+            fields.push(("connectorStartCap", en(cap_name(cp.start_cap))));
+            fields.push(("connectorEndCap", en(cap_name(cp.end_cap))));
             let mag_name = |m: Magnet| match m {
                 Magnet::Auto => "AUTO",
                 Magnet::Top => "TOP",
@@ -1431,10 +1452,10 @@ fn collect_instance_overrides(cx: &ExportCtx, inst_id: NodeId) -> Vec<V> {
                         }
                         ov.push(("stackSpacing", fl(al.item_spacing)));
                         ov.push(("stackCounterSpacing", fl(al.counter_spacing)));
-                        ov.push(("stackPaddingTop", fl(al.padding[0])));
+                        ov.push(("stackVerticalPadding", fl(al.padding[0])));
                         ov.push(("stackPaddingRight", fl(al.padding[1])));
                         ov.push(("stackPaddingBottom", fl(al.padding[2])));
-                        ov.push(("stackPaddingLeft", fl(al.padding[3])));
+                        ov.push(("stackHorizontalPadding", fl(al.padding[3])));
                         ov.push(("stackPrimarySizing", en(if al.primary_sizing == Sizing::Hug { "RESIZE_TO_FIT" } else { "FIXED" })));
                         ov.push(("stackCounterSizing", en(if al.counter_sizing == Sizing::Hug { "RESIZE_TO_FIT_WITH_IMPLICIT_SIZE" } else { "FIXED" })));
                     }
@@ -1457,11 +1478,9 @@ fn collect_instance_overrides(cx: &ExportCtx, inst_id: NodeId) -> Vec<V> {
                     ov.push(("stackChildAlignSelf", en("AUTO")));
                 }
                 if let Some(c) = lc.grid_column {
-                    ov.push(("gridColumnAnchorIndex", V::Uint(u32::from(c))));
                     ov.push(("gridColumnAnchor", V::Uint(u32::from(c))));
                 }
                 if let Some(r) = lc.grid_row {
-                    ov.push(("gridRowAnchorIndex", V::Uint(u32::from(r))));
                     ov.push(("gridRowAnchor", V::Uint(u32::from(r))));
                 }
                 if lc.col_span > 1 {

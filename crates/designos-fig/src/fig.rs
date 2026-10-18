@@ -6,6 +6,7 @@
 //! fields are ignored.
 
 use crate::container::{self, Archive};
+use crate::fig_export::{STUDIO_AUTHOR_VISIBLE_KEY, STUDIO_PLUGIN_ID, STUDIO_SLOT_CONTENT_ID_KEY};
 use crate::kiwi::{self, KiwiValue, Schema};
 use crate::rest_import::{self, fnum, fstr};
 use crate::svgpath::write_path;
@@ -792,6 +793,8 @@ const MAPPED_NODE_CHANGE_FIELDS: &[&str] = &[
     "connectorType",
     "connectorStartStrokeCap",
     "connectorEndStrokeCap",
+    "connectorStartCap",
+    "connectorEndCap",
     "prototypeInteractions",
     "overflowDirection",
     "scrollBehavior",
@@ -876,9 +879,7 @@ fn extract_fig_metadata(nc: &Value, orig_ty: &str, large_file: bool) -> Option<V
             | "gridChildHorizontalAlign"
             | "codeExportName"
             | "documentColorProfile"
-            | "codeObjectType"
-            | "connectorStartCap"
-            | "connectorEndCap" => {
+            | "codeObjectType" => {
                 if let Some(s) = val.as_str().filter(|s| !s.is_empty()) {
                     meta.insert(k.clone(), Value::String(s.to_string()));
                 }
@@ -1116,6 +1117,22 @@ fn convert_node(nc: &Value, id: &str, lk: &Lk) -> Option<Map<String, Value>> {
             let Some(k) = fstr(entry, "key") else { continue };
             let val = fstr(entry, "value").unwrap_or("");
             let pid = fstr(entry, "pluginID").unwrap_or("");
+            // Studio's reserved carrier entries become typed node data, not plugin data.
+            if pid == STUDIO_PLUGIN_ID {
+                match k {
+                    STUDIO_SLOT_CONTENT_ID_KEY => {
+                        if !val.is_empty() {
+                            m.insert("slotContentId".into(), Value::String(val.to_string()));
+                        }
+                        continue;
+                    }
+                    STUDIO_AUTHOR_VISIBLE_KEY => {
+                        m.insert("authorVisible".into(), Value::Bool(val == "true"));
+                        continue;
+                    }
+                    _ => {}
+                }
+            }
             let full_key = if pid.is_empty() { k.to_string() } else { format!("{pid}:{k}") };
             pd_map.insert(full_key, Value::String(val.to_string()));
         }

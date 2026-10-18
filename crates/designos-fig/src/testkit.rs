@@ -14,7 +14,7 @@ fn enum_def(b: &mut SchemaBuilder, name: &str, variants: &[&str]) {
 }
 
 /// Real `NodeChange` field tags from Figma's Kiwi schema (`VSF - PCP.fig`).
-fn real_node_change_tag(name: &str) -> Option<u32> {
+pub fn real_node_change_tag(name: &str) -> Option<u32> {
     match name {
         "guid" => Some(1),
         "phase" => Some(2),
@@ -275,6 +275,18 @@ fn real_node_change_tag(name: &str) -> Option<u32> {
         "textElementDelayBehaviour" => Some(610),
         _ => None,
     }
+}
+
+/// The tag of a NodeChange field in Figma's schema.
+///
+/// Panics on a name that is not in [`real_node_change_tag`]: the schema is static, so this fires the first
+/// time it is built (every export and every test run), never on user data. A tag Figma does not know makes
+/// a decoder using Figma's own field table stop at it, hiding every field written after it, so a new field
+/// is added to the map with a tag checked against a real `.fig` first.
+pub fn node_change_tag(name: &str) -> u32 {
+    real_node_change_tag(name).unwrap_or_else(|| {
+        panic!("NodeChange field `{name}` is not in Figma's schema (real_node_change_tag): add it with a tag checked against a real .fig, or do not write it")
+    })
 }
 
 /// A reduced version of Figma's schema (same names for the fields we read and write).
@@ -665,13 +677,6 @@ pub fn figma_like_schema() -> Schema {
     b.field(cpd, "parentPropDefId", gt, false, 5);
     b.field(cpd, "preferredValues", gt, true, 6);
     b.field(cpd, "slotPropConfig", spct, false, 7);
-    // Real schema: `SlotContentId { guid }`. Stored on a node under the non-kiwi `jsonSerialized`
-    // bag, key `slot-content-id` (INFERENCE from the editor, not seen in a real file).
-    let sci = b.define("SlotContentId", DefKind::Message);
-    b.field(sci, "guid", gt, false, 1);
-    let jsf = b.define("JsonSerializedFields", DefKind::Message);
-    let scit = def(&b, "SlotContentId");
-    b.field(jsf, "slot-content-id", scit, false, 1);
     let cpa = b.define("ComponentPropAssignment", DefKind::Message);
     b.field(cpa, "defID", gt, false, 1);
     b.field(cpa, "value", cpvt, false, 2);
@@ -749,13 +754,8 @@ pub fn figma_like_schema() -> Schema {
     b.field(td, "lines", t, true, 4);
 
     let nc = b.define("NodeChange", DefKind::Message);
-    let mut fallback_id = 700;
-    let mut f = |b: &mut SchemaBuilder, name: &str, ty: FieldType, arr: bool| {
-        let tag = real_node_change_tag(name).unwrap_or_else(|| {
-            fallback_id += 1;
-            fallback_id
-        });
-        b.field(nc, name, ty, arr, tag);
+    let f = |b: &mut SchemaBuilder, name: &str, ty: FieldType, arr: bool| {
+        b.field(nc, name, ty, arr, node_change_tag(name));
     };
     let (gt, pit, nt, ph) = (def(&b, "GUID"), def(&b, "ParentIndex"), def(&b, "NodeType"), def(&b, "Phase"));
     f(&mut b, "guid", gt, false);
@@ -866,7 +866,7 @@ pub fn figma_like_schema() -> Schema {
     b.field(sd, "uniformScaleFactor", nat(Float), false, 3);
     f(&mut b, "derivedSymbolData", FieldType::Def(nc), true);
     // Additional NodeChange fields for 1:1 .fig export & import parity:
-    let (gt, swt, oszt, exst, gdt, vdt_node, cpdt, cpat, cprt, sgpvot, vcmt, vmsmt, vsmt, vrdtt, vdtt, vdvt, hsmt, fvt) = (
+    let (gt, swt, oszt, exst, gdt, vdt_node, cpdt, cpat, cprt, sgpvot, vcmt, vmsmt, vsmt, vrdtt, vdvt, hsmt, fvt) = (
         def(&b, "GUID"),
         def(&b, "StackWrap"),
         def(&b, "OptionalSize"),
@@ -881,7 +881,6 @@ pub fn figma_like_schema() -> Schema {
         def(&b, "VariableModeBySetMap"),
         def(&b, "VariableSetMode"),
         def(&b, "VariableResolvedDataType"),
-        def(&b, "VariableDataType"),
         def(&b, "VariableDataValues"),
         def(&b, "HandoffStatusMap"),
         def(&b, "FontVariation"),
@@ -890,15 +889,12 @@ pub fn figma_like_schema() -> Schema {
     f(&mut b, "overriddenSymbolID", gt, false);
     f(&mut b, "componentKey", nat(String), false);
     f(&mut b, "sourceLibraryKey", nat(String), false);
-    f(&mut b, "strokeMiterAngle", nat(Float), false);
     f(&mut b, "miterLimit", nat(Float), false);
     f(&mut b, "borderStrokeWeightsIndependent", nat(Bool), false);
     for n in ["borderTopWeight", "borderRightWeight", "borderBottomWeight", "borderLeftWeight"] {
         f(&mut b, n, nat(Float), false);
     }
     f(&mut b, "stackPadding", nat(Float), false);
-    f(&mut b, "stackPaddingLeft", nat(Float), false);
-    f(&mut b, "stackPaddingTop", nat(Float), false);
     f(&mut b, "stackWrap", swt, false);
     f(&mut b, "bordersTakeSpace", nat(Bool), false);
     f(&mut b, "stackReverseZIndex", nat(Bool), false);
@@ -921,11 +917,10 @@ pub fn figma_like_schema() -> Schema {
     f(&mut b, "variableSetModes", vsmt, true);
     f(&mut b, "variableSetID", sidt, false);
     f(&mut b, "variableResolvedType", vrdtt, false);
-    f(&mut b, "variableDataType", vdtt, false);
     f(&mut b, "variableScopes", nat(String), true);
-    // Figma's own field id (rea-findings: NodeChange.codeSyntax = 358); the sequential ids above stay below it.
+    // Figma's own field id (rea-findings: NodeChange.codeSyntax = 358), the same one `real_node_change_tag` lists.
     let csmt = def(&b, "CodeSyntaxMap");
-    b.field(nc, "codeSyntax", csmt, false, 358);
+    b.field(nc, "codeSyntax", csmt, false, node_change_tag("codeSyntax"));
     f(&mut b, "variableDataValues", vdvt, false);
     f(&mut b, "sortPosition", nat(String), false);
     f(&mut b, "description", nat(String), false);
@@ -945,20 +940,12 @@ pub fn figma_like_schema() -> Schema {
     b.field(pd_def, "key", nat(String), false, 3);
     let tar_def = b.define("TargetAspectRatio", DefKind::Message);
     b.field(tar_def, "value", vt_cep, false, 1);
-    let (cept, hst_info, sc_cap, hlt, pdt, tart) = (
-        def(&b, "ConnectorEndpoint"),
-        def(&b, "HandoffStatus"),
-        def(&b, "StrokeCap"),
-        def(&b, "Hyperlink"),
-        def(&b, "PluginData"),
-        def(&b, "TargetAspectRatio"),
-    );
+    let (cept, hst_info, hlt, pdt, tart) =
+        (def(&b, "ConnectorEndpoint"), def(&b, "HandoffStatus"), def(&b, "Hyperlink"), def(&b, "PluginData"), def(&b, "TargetAspectRatio"));
     f(&mut b, "gridColumns", nat(Uint), false);
     f(&mut b, "gridRows", nat(Uint), false);
     f(&mut b, "gridColumnSpan", nat(Uint), false);
     f(&mut b, "gridRowSpan", nat(Uint), false);
-    f(&mut b, "gridColumnAnchorIndex", nat(Uint), false);
-    f(&mut b, "gridRowAnchorIndex", nat(Uint), false);
     f(&mut b, "gridColumnAnchor", nat(Uint), false);
     f(&mut b, "gridRowAnchor", nat(Uint), false);
     f(&mut b, "gridColumnGap", nat(Float), false);
@@ -967,14 +954,11 @@ pub fn figma_like_schema() -> Schema {
     f(&mut b, "gridRowsSizing", nat(String), false);
     f(&mut b, "isSoftDeleted", nat(Bool), false);
     f(&mut b, "sectionStatusInfo", hst_info, false);
-    f(&mut b, "authorVisible", nat(Bool), false);
     f(&mut b, "shapeWithTextType", nat(String), false);
     f(&mut b, "connectorStart", cept, false);
     f(&mut b, "connectorEnd", cept, false);
     f(&mut b, "connectorLineStyle", nat(String), false);
     f(&mut b, "connectorType", nat(String), false);
-    f(&mut b, "connectorStartStrokeCap", sc_cap, false);
-    f(&mut b, "connectorEndStrokeCap", sc_cap, false);
     f(&mut b, "proportionsConstrained", nat(Bool), false);
     f(&mut b, "targetAspectRatio", tart, false);
     f(&mut b, "hyperlink", hlt, false);
@@ -1046,10 +1030,8 @@ pub fn figma_like_schema() -> Schema {
     f(&mut b, "inheritEffectStyleID", guid_ty, false);
     f(&mut b, "inheritGridStyleID", guid_ty, false);
     f(&mut b, "isSoftDeletedStyle", nat(Bool), false);
-    let jsft = def(&b, "JsonSerializedFields");
     f(&mut b, "isSlot", nat(Bool), false);
     f(&mut b, "isSlotContent", nat(Bool), false);
-    f(&mut b, "jsonSerialized", jsft, false);
 
     // Draw, Motion, Table, Slide, Layout, Slot, Widget, and remaining NodeChange passthrough types:
     enum_def(&mut b, "MaskType", &["ALPHA", "VECTOR", "LUMINANCE"]);
