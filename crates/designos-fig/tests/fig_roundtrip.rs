@@ -858,7 +858,7 @@ fn rea_v106_all_seven_gaps_fidelity_and_roundtrip() {
                 "isSoftDeleted": true
             })
         ),
-        // GAP-01 & GAP-02 & GAP-03: Frame with per-side border weights WITHOUT borderStrokeWeightsIndependent
+        // GAP-01 & GAP-02 & GAP-03: Frame with independent per-side border weights
         // and per-corner radii WITHOUT rectangleCornerRadiiIndependent, plus variableConsumptionMap
         node(
             (1, 10),
@@ -868,10 +868,8 @@ fn rea_v106_all_seven_gaps_fidelity_and_roundtrip() {
             "HeaderBar",
             json!({
                 "strokeWeight": 1.0,
-                "borderTopWeight": 0.0,
-                "borderRightWeight": 0.0,
+                "borderStrokeWeightsIndependent": true,
                 "borderBottomWeight": 2.0,
-                "borderLeftWeight": 0.0,
                 "rectangleTopLeftCornerRadius": 10.0,
                 "rectangleTopRightCornerRadius": 10.0,
                 "rectangleBottomRightCornerRadius": 0.0,
@@ -2306,6 +2304,139 @@ fn grid_auto_tracks_and_v106_track_maps_roundtrip() {
     assert_eq!(rt_al2.grid_auto_tracks, GridAutoTracks::Track(GridTrack::Fixed(64.0)));
 }
 
+#[test]
+fn layout_guide_alignment_fixed_width_auto_count_and_visibility_roundtrip() {
+    use designos_doc::{Color, Document, LayoutGrid, LayoutGridAlign, Node, NodeKind, Rect, Style};
+
+    // Old serialized LayoutGrid JSON without alignment/section_size/visible must load with Stretch, 0.0, true.
+    let legacy_grid: LayoutGrid =
+        serde_json::from_str(r#"{"Columns":{"count":12,"gutter":20.0,"offset":16.0,"color":{"r":1.0,"g":0.0,"b":0.0,"a":0.1}}}"#).unwrap();
+    assert_eq!(
+        legacy_grid,
+        LayoutGrid::Columns {
+            count: 12,
+            gutter: 20.0,
+            offset: 16.0,
+            section_size: 0.0,
+            alignment: LayoutGridAlign::Stretch,
+            color: Color { r: 1.0, g: 0.0, b: 0.0, a: 0.1 },
+            visible: true,
+        }
+    );
+
+    let mut doc = Document::new("GuideParity");
+    let page = doc.add_page("Page 1");
+    let fid = doc.alloc_id();
+    let mut frame = Node::frame(fid, Rect::new(0.0, 0.0, 1440.0, 900.0));
+    frame.name = "DesktopFrame".into();
+    let g_cols = LayoutGrid::Columns {
+        count: 12,
+        gutter: 20.0,
+        offset: 0.0,
+        section_size: 60.0,
+        alignment: LayoutGridAlign::Center,
+        color: Color::rgba(255, 0, 0, 26),
+        visible: true,
+    };
+    let g_rows = LayoutGrid::Rows {
+        count: 0,
+        gutter: 16.0,
+        offset: 24.0,
+        section_size: 48.0,
+        alignment: LayoutGridAlign::Min,
+        color: Color::rgba(0, 128, 255, 26),
+        visible: true,
+    };
+    let g_hidden = LayoutGrid::Grid { size: 8.0, color: Color::rgba(0, 255, 0, 26), visible: false };
+    if let NodeKind::Frame(fp) = &mut frame.kind {
+        fp.grids = vec![g_cols.clone(), g_rows.clone(), g_hidden.clone()];
+    }
+    doc.insert(page, frame).unwrap();
+
+    let style_grid = LayoutGrid::Columns {
+        count: 0,
+        gutter: 12.0,
+        offset: 32.0,
+        section_size: 72.0,
+        alignment: LayoutGridAlign::Max,
+        color: Color::rgba(255, 128, 0, 26),
+        visible: false,
+    };
+    doc.styles.insert("S:grid-auto-max".into(), Style::Grid(vec![style_grid.clone()]));
+
+    let bytes = export_fig(&doc).unwrap();
+    let rt = import_fig(&bytes).unwrap();
+    let rt_frame = find(&rt, "DesktopFrame");
+    let rt_grids = &rt_frame.kind.frame_props().unwrap().grids;
+    assert_eq!(rt_grids.len(), 3);
+    assert!(matches!(
+        &rt_grids[0],
+        LayoutGrid::Columns { count: 12, gutter, offset, section_size, alignment: LayoutGridAlign::Center, visible: true, .. }
+        if (*gutter - 20.0).abs() < 1e-4 && (*offset - 0.0).abs() < 1e-4 && (*section_size - 60.0).abs() < 1e-4
+    ));
+    assert!(matches!(
+        &rt_grids[1],
+        LayoutGrid::Rows { count: 0, gutter, offset, section_size, alignment: LayoutGridAlign::Min, visible: true, .. }
+        if (*gutter - 16.0).abs() < 1e-4 && (*offset - 24.0).abs() < 1e-4 && (*section_size - 48.0).abs() < 1e-4
+    ));
+    assert!(matches!(
+        &rt_grids[2],
+        LayoutGrid::Grid { size, visible: false, .. } if (*size - 8.0).abs() < 1e-4
+    ));
+
+    let has_grid_style = rt.styles.values().any(|s| {
+        matches!(
+            s,
+            Style::Grid(gs)
+            if matches!(
+                gs.as_slice(),
+                [LayoutGrid::Columns { count: 0, gutter, offset, section_size, alignment: LayoutGridAlign::Max, visible: false, .. }]
+                if (*gutter - 12.0).abs() < 1e-4 && (*offset - 32.0).abs() < 1e-4 && (*section_size - 72.0).abs() < 1e-4
+            )
+        )
+    });
+    assert!(has_grid_style, "grid style must round-trip alignment, section_size, auto count, and visible=false");
+}
+
+/// Equal-width columns: aligned but with no fixed width (paint width is (400 - 80) / 5).
+fn equal_width_columns_doc() -> (Document, LayoutGrid) {
+    use designos_doc::{Color, LayoutGridAlign, Node, NodeKind, Rect};
+    let equal = LayoutGrid::Columns {
+        count: 5,
+        gutter: 20.0,
+        offset: 0.0,
+        section_size: 0.0,
+        alignment: LayoutGridAlign::Min,
+        color: Color::rgba(255, 0, 0, 26),
+        visible: true,
+    };
+    let mut doc = Document::new("GuideZero");
+    let page = doc.add_page("Page 1");
+    let fid = doc.alloc_id();
+    let mut frame = Node::frame(fid, Rect::new(0.0, 0.0, 400.0, 300.0));
+    frame.name = "EqualColumns".into();
+    if let NodeKind::Frame(fp) = &mut frame.kind {
+        fp.grids = vec![equal.clone()];
+    }
+    doc.insert(page, frame).unwrap();
+    (doc, equal)
+}
+
+#[test]
+fn layout_guide_with_no_fixed_width_keeps_section_size_zero_through_fig() {
+    let (doc, equal) = equal_width_columns_doc();
+    let back = import_fig(&export_fig(&doc).unwrap()).unwrap();
+    assert_eq!(find(&back, "EqualColumns").kind.frame_props().unwrap().grids, vec![equal]);
+}
+
+#[test]
+fn layout_guide_with_no_fixed_width_keeps_section_size_zero_through_rest() {
+    let (doc, equal) = equal_width_columns_doc();
+    let json = designos_fig::export_rest_json(&doc);
+    let back = designos_fig::import_rest_json(&json.to_string()).unwrap();
+    assert_eq!(find(&back, "EqualColumns").kind.frame_props().unwrap().grids, vec![equal]);
+}
+
 /// Node name -> (`gridChildHorizontalAlign`, `gridChildVerticalAlign`) as written to the `.fig` message; a key that
 /// was not written reads `<absent>`. Only nodes that carry at least one of the keys are listed.
 fn wire_grid_child_aligns(bytes: &[u8]) -> BTreeMap<String, (String, String)> {
@@ -2865,4 +2996,118 @@ fn passthrough_color_struct_array_and_quoted_string_roundtrip() {
     assert_eq!(arr[0]["position"].as_f64(), Some(0.25));
     assert_eq!(arr[0]["leadingWidth"].as_f64(), Some(2.0));
     assert_eq!(arr[0]["trailingWidth"].as_f64(), Some(4.0));
+}
+
+#[test]
+fn per_side_stroke_weights_ignore_stale_borders_and_merge_partial_overrides() {
+    let g = |s: u64, l: u64| -> Value { json!({"sessionID": s, "localID": l}) };
+    let node = |id: (u64, u64), parent: (u64, u64), pos: &str, ty: &str, name: &str, extra: Value| -> Value {
+        let mut v = json!({
+            "guid": g(id.0, id.1),
+            "parentIndex": {"guid": g(parent.0, parent.1), "position": pos},
+            "type": ty,
+            "name": name,
+            "phase": "CREATED",
+            "visible": true,
+            "opacity": 1.0,
+            "size": {"x": 100.0, "y": 50.0},
+            "transform": {"m00": 1.0, "m01": 0.0, "m02": 0.0, "m10": 0.0, "m11": 1.0, "m12": 0.0}
+        });
+        for (k, x) in extra.as_object().unwrap() {
+            v[k] = x.clone();
+        }
+        v
+    };
+    let changes = json!([
+        node((0, 0), (0, 0), "!", "DOCUMENT", "Doc", json!({})),
+        node((1, 1), (0, 0), "!", "CANVAS", "Page 1", json!({})),
+        // 1. strokeWeight 1, border*Weight 12, no flag -> side_weights is None.
+        node(
+            (1, 10),
+            (1, 1),
+            "!",
+            "FRAME",
+            "UniformPill",
+            json!({
+                "strokeWeight": 1.0,
+                "borderTopWeight": 12.0,
+                "borderRightWeight": 12.0,
+                "borderBottomWeight": 12.0,
+                "borderLeftWeight": 12.0
+            })
+        ),
+        // 2. flag on, only borderRightWeight 1 -> [0, 1, 0, 0] even if strokeWeight is 1.
+        node(
+            (1, 20),
+            (1, 1),
+            "\"",
+            "FRAME",
+            "RightOnlyDivider",
+            json!({
+                "strokeWeight": 1.0,
+                "borderStrokeWeightsIndependent": true,
+                "borderRightWeight": 1.0
+            })
+        ),
+        // 3. Component with borderStrokeWeightsIndependent: true, borderRightWeight: 1, borderBottomWeight: 1,
+        // and an instance whose override sets only borderBottomWeight: 0 on that node -> [0, 1, 0, 0].
+        node(
+            (1, 30),
+            (1, 1),
+            "#",
+            "SYMBOL",
+            "CalendarHeader",
+            json!({
+                "strokeWeight": 1.0,
+                "borderStrokeWeightsIndependent": true,
+                "borderRightWeight": 1.0,
+                "borderBottomWeight": 1.0
+            })
+        ),
+        node(
+            (1, 31),
+            (1, 30),
+            "!",
+            "FRAME",
+            "CellDivider",
+            json!({
+                "overrideKey": g(9, 31),
+                "strokeWeight": 1.0,
+                "borderStrokeWeightsIndependent": true,
+                "borderRightWeight": 1.0,
+                "borderBottomWeight": 1.0
+            })
+        ),
+        node(
+            (1, 40),
+            (1, 1),
+            "$",
+            "INSTANCE",
+            "CalendarHeaderInst",
+            json!({
+                "symbolData": {
+                    "symbolID": g(1, 30),
+                    "symbolOverrides": [
+                        {
+                            "guidPath": {"guids": [g(9, 31)]},
+                            "borderBottomWeight": 0.0
+                        }
+                    ]
+                }
+            })
+        )
+    ]);
+
+    let doc = import_fig_node_changes(&changes, "SideWeights515").expect("import_fig_node_changes");
+
+    let pill = find(&doc, "UniformPill");
+    assert_eq!(pill.stroke.weight, 1.0);
+    assert_eq!(pill.stroke.side_weights, None, "stale border*Weight without borderStrokeWeightsIndependent must not set side_weights");
+
+    let right_only = find(&doc, "RightOnlyDivider");
+    assert_eq!(right_only.stroke.side_weights, Some([0.0, 1.0, 0.0, 0.0]), "missing side with flag on must default to 0");
+
+    let inst = find(&doc, "CalendarHeaderInst");
+    let cell = inst.children.iter().filter_map(|id| doc.get(*id)).find(|n| n.name == "CellDivider").expect("CellDivider in CalendarHeaderInst");
+    assert_eq!(cell.stroke.side_weights, Some([0.0, 1.0, 0.0, 0.0]), "partial borderBottomWeight override must preserve borderRightWeight");
 }

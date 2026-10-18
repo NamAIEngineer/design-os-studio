@@ -1286,10 +1286,8 @@ fn convert_node(nc: &Value, id: &str, lk: &Lk) -> Option<Map<String, Value>> {
     copy(&mut m, nc, "dashPattern", "strokeDashes");
     copy(&mut m, nc, "strokeMiterAngle", "strokeMiterAngle");
     copy(&mut m, nc, "miterLimit", "strokeMiterLimit");
-    let indep_borders = nc.get("borderStrokeWeightsIndependent").and_then(Value::as_bool) == Some(true);
-    if indep_borders || ["borderTopWeight", "borderRightWeight", "borderBottomWeight", "borderLeftWeight"].iter().any(|k| nc.get(*k).is_some()) {
-        let w = if indep_borders { fnum(nc, "strokeWeight").unwrap_or(1.0) } else { fnum(nc, "strokeWeight").unwrap_or(0.0) };
-        let g = |k: &str| fnum(nc, k).unwrap_or(w);
+    if nc.get("borderStrokeWeightsIndependent").and_then(Value::as_bool) == Some(true) {
+        let g = |k: &str| fnum(nc, k).unwrap_or(0.0);
         m.insert(
             "individualStrokeWeights".into(),
             json!({"top": g("borderTopWeight"), "right": g("borderRightWeight"), "bottom": g("borderBottomWeight"), "left": g("borderLeftWeight")}),
@@ -1754,7 +1752,10 @@ fn convert_grids(nc: &Value) -> Option<Value> {
             copy(&mut m, g, "offset", "offset");
             copy(&mut m, g, "color", "color");
             copy(&mut m, g, "visible", "visible");
-            if let Some(c) = g.get("count").or_else(|| g.get("numSections")) {
+            if let Some(a) = fstr(g, "alignment").or_else(|| fstr(g, "type").filter(|s| matches!(*s, "MIN" | "CENTER" | "STRETCH" | "MAX"))) {
+                m.insert("alignment".into(), a.into());
+            }
+            if let Some(c) = g.get("numSections").or_else(|| g.get("count")) {
                 m.insert("count".into(), c.clone());
             }
             Some(Value::Object(m))
@@ -1974,13 +1975,17 @@ fn convert_override(o: &Value, lk: &Lk) -> Map<String, Value> {
         }
     }
     if has_borders {
-        let indep_borders = obj.get("borderStrokeWeightsIndependent").and_then(Value::as_bool) == Some(true);
-        let w = if indep_borders { fnum(o, "strokeWeight").unwrap_or(1.0) } else { fnum(o, "strokeWeight").unwrap_or(0.0) };
-        let g = |k: &str| fnum(o, k).unwrap_or(w);
-        m.insert(
-            "individualStrokeWeights".into(),
-            json!({"top": g("borderTopWeight"), "right": g("borderRightWeight"), "bottom": g("borderBottomWeight"), "left": g("borderLeftWeight")}),
-        );
+        let mut iw = Map::new();
+        iw.insert("fromFig".into(), Value::Bool(true));
+        if let Some(indep) = obj.get("borderStrokeWeightsIndependent").and_then(Value::as_bool) {
+            iw.insert("independent".into(), Value::Bool(indep));
+        }
+        for (src, dst) in [("borderTopWeight", "top"), ("borderRightWeight", "right"), ("borderBottomWeight", "bottom"), ("borderLeftWeight", "left")] {
+            if let Some(v) = obj.get(src) {
+                iw.insert(dst.into(), v.clone());
+            }
+        }
+        m.insert("individualStrokeWeights".into(), Value::Object(iw));
     }
     if has_corners {
         let base = fnum(o, "cornerRadius").unwrap_or(0.0);

@@ -197,17 +197,31 @@ fn parse_guides(v: &Value, frame: Option<NodeId>) -> Vec<Guide> {
 }
 
 fn parse_grid(v: &Value) -> Option<LayoutGrid> {
-    if fbool(v, "visible") == Some(false) {
-        return None; // the model has no per-grid visibility flag
-    }
+    let visible = fbool(v, "visible").unwrap_or(true);
     let col = v.get("color").and_then(color).unwrap_or(Color::rgba(255, 0, 0, 25));
-    let count = v.get("count").and_then(Value::as_u64).unwrap_or(5) as u32;
+    let count = match v.get("count") {
+        Some(c) => match c.as_i64() {
+            Some(n) if n < 0 || n >= i64::from(i32::MAX) => 0,
+            Some(n) => n as u32,
+            None => c.as_u64().map(|n| if n >= i32::MAX as u64 { 0 } else { n as u32 }).unwrap_or(5),
+        },
+        None => 5,
+    };
     let gutter = fnum(v, "gutterSize").unwrap_or(0.0);
     let offset = fnum(v, "offset").unwrap_or(0.0);
+    let alignment = match fstr(v, "alignment") {
+        Some("MIN") | Some("LEFT") | Some("TOP") => LayoutGridAlign::Min,
+        Some("CENTER") => LayoutGridAlign::Center,
+        Some("MAX") | Some("RIGHT") | Some("BOTTOM") => LayoutGridAlign::Max,
+        _ => LayoutGridAlign::Stretch,
+    };
+    // a missing width is 0 (equal-width stripes), as the exporters write it; only the inspector
+    // gives a new non-stretch guide a starting width
+    let section_size = fnum(v, "sectionSize").unwrap_or(0.0);
     match fstr(v, "pattern")? {
-        "GRID" => Some(LayoutGrid::Grid { size: fnum(v, "sectionSize").unwrap_or(10.0), color: col }),
-        "COLUMNS" => Some(LayoutGrid::Columns { count, gutter, offset, color: col }),
-        "ROWS" => Some(LayoutGrid::Rows { count, gutter, offset, color: col }),
+        "GRID" => Some(LayoutGrid::Grid { size: fnum(v, "sectionSize").unwrap_or(10.0), color: col, visible }),
+        "COLUMNS" => Some(LayoutGrid::Columns { count, gutter, offset, section_size, alignment, color: col, visible }),
+        "ROWS" => Some(LayoutGrid::Rows { count, gutter, offset, section_size, alignment, color: col, visible }),
         _ => None,
     }
 }
@@ -2217,9 +2231,34 @@ impl<'a> Ctx<'a> {
             }
         }
         if let Some(iw) = set.get("individualStrokeWeights") {
-            let g = |k: &str| fnum(iw, k).unwrap_or(0.0);
-            n.stroke.side_weights = Some([g("top"), g("right"), g("bottom"), g("left")]);
-            if !has("strokeGeometry") {
+            let prev = n.stroke.side_weights;
+            let from_fig = fbool(iw, "fromFig") == Some(true);
+            match fbool(iw, "independent") {
+                Some(false) => {
+                    n.stroke.side_weights = None;
+                }
+                Some(true) => {
+                    let sw = n.stroke.side_weights.get_or_insert([0.0; 4]);
+                    for (i, k) in ["top", "right", "bottom", "left"].iter().enumerate() {
+                        if let Some(v) = fnum(iw, k) {
+                            sw[i] = v;
+                        }
+                    }
+                }
+                None => {
+                    if !from_fig {
+                        n.stroke.side_weights.get_or_insert([0.0; 4]);
+                    }
+                    if let Some(sw) = n.stroke.side_weights.as_mut() {
+                        for (i, k) in ["top", "right", "bottom", "left"].iter().enumerate() {
+                            if let Some(v) = fnum(iw, k) {
+                                sw[i] = v;
+                            }
+                        }
+                    }
+                }
+            }
+            if n.stroke.side_weights != prev && !has("strokeGeometry") {
                 n.stroke_geometry = None;
             }
         }
