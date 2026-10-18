@@ -131,14 +131,16 @@ fn without_an_opaque_fill_under_the_text_the_earlier_card_still_hides_the_backdr
 
 #[test]
 fn a_layer_painted_above_the_opaque_fill_still_hides_the_backdrop() {
-    // An earlier child of Card B itself, painted after Card B's fill, under the text.
+    // An earlier child of Card B itself, painted after Card B's fill, under the text. A multiplied
+    // fill is not a plain backdrop colour, so the text is left alone.
     let (mut f, b) = card_list(|_| {}, Some(Color::WHITE));
     let backing = f.rect(b, "Backing", gray(0x80));
     resize(&mut f, backing, 100.0, 60.0);
     place(&mut f, backing, 10.0, 10.0);
+    f.doc.get_mut(backing).unwrap().fills[0].blend = designos_doc::BlendMode::Multiply;
     // Put it before the text in Card B's stacking order.
     f.doc.get_mut(b).unwrap().children.rotate_right(1);
-    assert_eq!(audited(f), (0, 0), "a grey rectangle inside Card B sits between its fill and the text");
+    assert_eq!(audited(f), (0, 0), "a multiplied rectangle inside Card B sits between its fill and the text");
 }
 
 #[test]
