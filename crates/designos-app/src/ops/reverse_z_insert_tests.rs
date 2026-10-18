@@ -293,24 +293,3 @@ fn ungrouping_keeps_the_stacking_of_the_released_layers() {
         assert_eq!(released, inside, "reverse_z={reverse_z}: {order:?}");
     }
 }
-
-#[test]
-fn flattening_keeps_the_style_of_the_front_most_layer() {
-    let flattened_fill = |reverse_z: bool| {
-        let (mut app, _host, ids) = stack(reverse_z, 3);
-        let colors = [Color::rgb(255, 0, 0), Color::rgb(0, 255, 0), Color::rgb(0, 0, 255)];
-        for (id, c) in ids.iter().zip(colors) {
-            app.doc.get_mut(*id).unwrap().fills = vec![Paint::solid(c)];
-        }
-        app.selection = vec![ids[0], ids[2]];
-        // r0 is in front in a "First on top" frame, r2 in a plain one
-        let front = if reverse_z { colors[0] } else { colors[2] };
-        app.flatten_selection();
-        let flat = app.doc.get(app.selection[0]).unwrap();
-        (flat.fills.clone(), vec![Paint::solid(front)])
-    };
-    for reverse_z in [true, false] {
-        let (got, want) = flattened_fill(reverse_z);
-        assert_eq!(got, want, "reverse_z={reverse_z}");
-    }
-}

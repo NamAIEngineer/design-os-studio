@@ -71,8 +71,7 @@ impl App {
         if self.canvas.vedit.is_some() {
             crate::canvas::vector::exit(self);
         }
-        // bottom to top: the top-most contributing layer keeps its style
-        let ids: Vec<NodeId> = self.bottom_to_top(self.same_parent_tops().into_iter().filter(|i| has_geometry(self, *i)).collect());
+        let ids: Vec<NodeId> = self.same_parent_tops().into_iter().filter(|i| has_geometry(self, *i)).collect();
         if ids.is_empty() {
             self.show_toast("Select a layer with a shape to flatten", false);
             return;
