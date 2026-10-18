@@ -231,3 +231,279 @@ fn index_valued_override_anchor_is_kept() {
     assert_eq!(moved.layout_child.grid_column, Some(2));
     assert_eq!(moved.layout_child.grid_row, Some(1));
 }
+
+#[test]
+fn instance_track_reorder_remaps_component_child_anchor_without_repeating_it() {
+    // Component columns are [9:3, 9:4, 9:5] and rows are [9:1, 9:2]; pin a second child `Pinned` to (9:4, 9:2)
+    // (index 1, 1 in the component). The instance reorders columns to [9:4, 9:3, 9:5] and rows to [9:2, 9:1]
+    // without repeating `Pinned`'s anchors in `symbolOverrides`: `Pinned` must stay on track (9:4, 9:2) -> (0, 0).
+    let pinned = node(
+        (1, 12),
+        (1, 10),
+        "b",
+        "RECTANGLE",
+        "Pinned",
+        json!({
+            "overrideKey": g(9, 12),
+            "size": {"x": 40.0, "y": 20.0},
+            "gridColumnAnchor": g(9, 4),
+            "gridRowAnchor": g(9, 2)
+        }),
+    );
+    let overrides = vec![json!({
+        "guidPath": {"guids": []},
+        "gridColumns": track_map(&[(9, 4), (9, 3), (9, 5)]),
+        "gridRows": track_map(&[(9, 2), (9, 1)])
+    })];
+    let mut doc = grid_component_doc_with(overrides, json!({}), vec![pinned]);
+
+    let master_pinned = find(&doc, "GridComp").children.iter().filter_map(|id| doc.get(*id)).find(|n| n.name == "Pinned").unwrap();
+    assert_eq!((master_pinned.layout_child.grid_column, master_pinned.layout_child.grid_row), (Some(1), Some(1)));
+
+    let moved_inst_id = find(&doc, "MovedInst").id;
+    let plain_inst_id = find(&doc, "PlainInst").id;
+    doc.relayout_subtree(moved_inst_id);
+    doc.relayout_subtree(plain_inst_id);
+
+    let moved_pinned = find(&doc, "MovedInst").children.iter().filter_map(|id| doc.get(*id)).find(|n| n.name == "Pinned").unwrap();
+    assert_eq!(moved_pinned.layout_child.grid_column, Some(0), "9:4 moved to column 0 on MovedInst");
+    assert_eq!(moved_pinned.layout_child.grid_row, Some(0), "9:2 moved to row 0 on MovedInst");
+    assert_eq!((moved_pinned.transform.tx, moved_pinned.transform.ty), (0.0, 0.0));
+
+    let moved_cell = cell_of(&doc, "MovedInst");
+    assert_eq!(moved_cell.layout_child.grid_column, Some(1), "9:3 moved to column 1 on MovedInst");
+    assert_eq!(moved_cell.layout_child.grid_row, Some(1), "9:1 moved to row 1 on MovedInst");
+    assert_eq!((moved_cell.transform.tx, moved_cell.transform.ty), (40.0, 20.0));
+
+    let plain_pinned = find(&doc, "PlainInst").children.iter().filter_map(|id| doc.get(*id)).find(|n| n.name == "Pinned").unwrap();
+    assert_eq!((plain_pinned.layout_child.grid_column, plain_pinned.layout_child.grid_row), (Some(1), Some(1)));
+    assert_eq!((plain_pinned.transform.tx, plain_pinned.transform.ty), (40.0, 20.0));
+}
+
+#[test]
+fn restated_track_list_without_anchor_does_not_fall_through_to_file_wide_index() {
+    // Component columns are [9:3, 9:4, 9:5] (9:4 is index 1, unique in the file); `Cell` is on 9:3 (index 0).
+    // The instance restates columns to [9:6, 9:7, 9:5] and a child override still names 9:4: because the
+    // restated column list is non-empty and lacks 9:4, `Cell` keeps its component cell (0) instead of landing on 9:7 (1).
+    let overrides = vec![
+        json!({"guidPath": {"guids": []}, "gridColumns": track_map(&[(9, 6), (9, 7), (9, 5)])}),
+        json!({"guidPath": {"guids": [g(9, 11)]}, "gridColumnAnchor": g(9, 4)}),
+    ];
+    let doc = grid_component_doc(overrides, json!({}));
+    assert_eq!(cell_of(&doc, "MovedInst").layout_child.grid_column, Some(0));
+}
+
+#[test]
+fn restated_track_maps_at_same_path_merge_per_axis() {
+    // The instance node sets its own column order [9:4, 9:3, 9:5], while an empty-guidPath override sets only
+    // `gridRows` [9:2, 9:1]: the row override must not wipe out the instance's restated column order.
+    let overrides = vec![
+        json!({"guidPath": {"guids": []}, "gridRows": track_map(&[(9, 2), (9, 1)])}),
+        json!({"guidPath": {"guids": [g(9, 11)]}, "gridColumnAnchor": g(9, 4), "gridRowAnchor": g(9, 2)}),
+    ];
+    let doc = grid_component_doc(overrides, json!({"gridColumns": track_map(&[(9, 4), (9, 3), (9, 5)])}));
+    let moved = cell_of(&doc, "MovedInst");
+    assert_eq!(moved.layout_child.grid_column, Some(0));
+    assert_eq!(moved.layout_child.grid_row, Some(0));
+}
+
+#[test]
+fn real_v106_binary_fig_with_instance_grid_overrides_remaps_and_relayouts() {
+    use designos_fig::container::{write_container, Compression};
+    use designos_fig::import_fig;
+    use designos_fig::kiwi::{DefKind, FieldType, KiwiValue as V, Native, SchemaBuilder};
+
+    let mut b = SchemaBuilder::new();
+    let enum_def = |b: &mut SchemaBuilder, name: &str, variants: &[&str]| -> usize {
+        let d = b.define(name, DefKind::Enum);
+        for (i, v) in variants.iter().enumerate() {
+            b.variant(d, v, i as u32);
+        }
+        d
+    };
+    enum_def(&mut b, "Phase", &["CREATED", "REMOVED"]);
+    let nt_def = enum_def(&mut b, "NodeType", &["NONE", "DOCUMENT", "CANVAS", "SYMBOL", "INSTANCE", "ROUNDED_RECTANGLE"]);
+    let sm_def = enum_def(&mut b, "StackMode", &["NONE", "HORIZONTAL", "VERTICAL", "GRID"]);
+    let gs_type = enum_def(&mut b, "GridSizingType", &["FIXED", "FLEX", "HUG"]);
+
+    let guid_def = b.define("GUID", DefKind::Struct);
+    b.field(guid_def, "sessionID", FieldType::Native(Native::Uint), false, 1);
+    b.field(guid_def, "localID", FieldType::Native(Native::Uint), false, 2);
+    let guid_ty = FieldType::Def(guid_def);
+
+    let vec_def = b.define("Vector", DefKind::Struct);
+    b.field(vec_def, "x", FieldType::Native(Native::Float), false, 1);
+    b.field(vec_def, "y", FieldType::Native(Native::Float), false, 2);
+    let vec_ty = FieldType::Def(vec_def);
+
+    let mat_def = b.define("Matrix", DefKind::Struct);
+    for (i, n) in ["m00", "m01", "m02", "m10", "m11", "m12"].into_iter().enumerate() {
+        b.field(mat_def, n, FieldType::Native(Native::Float), false, (i + 1) as u32);
+    }
+    let mat_ty = FieldType::Def(mat_def);
+
+    let pi_def = b.define("ParentIndex", DefKind::Struct);
+    b.field(pi_def, "guid", guid_ty, false, 1);
+    b.field(pi_def, "position", FieldType::Native(Native::String), false, 2);
+    let pi_ty = FieldType::Def(pi_def);
+
+    let gp_entry = b.define("GUIDPositionEntry", DefKind::Message);
+    b.field(gp_entry, "id", guid_ty, false, 1);
+    b.field(gp_entry, "position", FieldType::Native(Native::String), false, 2);
+    let gp_map = b.define("GUIDPositionMap", DefKind::Message);
+    b.field(gp_map, "entries", FieldType::Def(gp_entry), true, 1);
+    let gp_map_ty = FieldType::Def(gp_map);
+
+    let gs_def = b.define("GridSizing", DefKind::Message);
+    b.field(gs_def, "type", FieldType::Def(gs_type), false, 1);
+    b.field(gs_def, "value", FieldType::Native(Native::Float), false, 2);
+    let gts_def = b.define("GridTrackSize", DefKind::Message);
+    b.field(gts_def, "minSizing", FieldType::Def(gs_def), false, 1);
+    b.field(gts_def, "maxSizing", FieldType::Def(gs_def), false, 2);
+    let gts_entry = b.define("GUIDGridTrackSizeEntry", DefKind::Message);
+    b.field(gts_entry, "id", guid_ty, false, 1);
+    b.field(gts_entry, "trackSize", FieldType::Def(gts_def), false, 2);
+    let gts_map = b.define("GUIDGridTrackSizeMap", DefKind::Message);
+    b.field(gts_map, "entries", FieldType::Def(gts_entry), true, 1);
+    let gts_map_ty = FieldType::Def(gts_map);
+
+    let gp_path = b.define("GUIDPath", DefKind::Message);
+    b.field(gp_path, "guids", guid_ty, true, 1);
+
+    let so_def = b.define("SymbolOverride", DefKind::Message);
+    b.field(so_def, "guidPath", FieldType::Def(gp_path), false, 1);
+    b.field(so_def, "gridColumns", gp_map_ty, false, 2);
+    b.field(so_def, "gridRows", gp_map_ty, false, 3);
+    b.field(so_def, "gridColumnsSizing", gts_map_ty, false, 4);
+    b.field(so_def, "gridRowsSizing", gts_map_ty, false, 5);
+    b.field(so_def, "gridColumnAnchor", guid_ty, false, 6);
+    b.field(so_def, "gridRowAnchor", guid_ty, false, 7);
+
+    let sd_def = b.define("SymbolData", DefKind::Message);
+    b.field(sd_def, "symbolID", guid_ty, false, 1);
+    b.field(sd_def, "symbolOverrides", FieldType::Def(so_def), true, 2);
+
+    let nc_def = b.define("NodeChange", DefKind::Message);
+    b.field(nc_def, "guid", guid_ty, false, 1);
+    b.field(nc_def, "parentIndex", pi_ty, false, 2);
+    b.field(nc_def, "type", FieldType::Def(nt_def), false, 3);
+    b.field(nc_def, "name", FieldType::Native(Native::String), false, 4);
+    b.field(nc_def, "size", vec_ty, false, 5);
+    b.field(nc_def, "transform", mat_ty, false, 6);
+    b.field(nc_def, "overrideKey", guid_ty, false, 7);
+    b.field(nc_def, "stackMode", FieldType::Def(sm_def), false, 8);
+    b.field(nc_def, "gridColumns", gp_map_ty, false, 9);
+    b.field(nc_def, "gridRows", gp_map_ty, false, 10);
+    b.field(nc_def, "gridColumnsSizing", gts_map_ty, false, 11);
+    b.field(nc_def, "gridRowsSizing", gts_map_ty, false, 12);
+    b.field(nc_def, "gridColumnAnchor", guid_ty, false, 13);
+    b.field(nc_def, "gridRowAnchor", guid_ty, false, 14);
+    b.field(nc_def, "symbolData", FieldType::Def(sd_def), false, 15);
+
+    let msg_def = b.define("Message", DefKind::Message);
+    b.field(msg_def, "nodeChanges", FieldType::Def(nc_def), true, 1);
+    let schema = b.build();
+
+    let kg = |s: u32, l: u32| V::Struct(vec![("sessionID".into(), V::Uint(s)), ("localID".into(), V::Uint(l))]);
+    let kpi = |s: u32, l: u32, pos: &str| V::Struct(vec![("guid".into(), kg(s, l)), ("position".into(), V::String(pos.into()))]);
+    let kvec = |x: f32, y: f32| V::Struct(vec![("x".into(), V::Float(x)), ("y".into(), V::Float(y))]);
+    let kmat = || {
+        V::Struct(vec![
+            ("m00".into(), V::Float(1.0)),
+            ("m01".into(), V::Float(0.0)),
+            ("m02".into(), V::Float(0.0)),
+            ("m10".into(), V::Float(0.0)),
+            ("m11".into(), V::Float(1.0)),
+            ("m12".into(), V::Float(0.0)),
+        ])
+    };
+    let ktrack_map = |ids: &[(u32, u32)]| {
+        let entries = ids
+            .iter()
+            .enumerate()
+            .map(|(i, &(s, l))| V::Message(vec![("id".into(), kg(s, l)), ("position".into(), V::String(((b'!' + i as u8) as char).to_string()))]))
+            .collect();
+        V::Message(vec![("entries".into(), V::Array(entries))])
+    };
+    let ksizing_map = |items: &[((u32, u32), &str, f32)]| {
+        let entries = items
+            .iter()
+            .map(|&((s, l), ty, val)| {
+                let sz = V::Message(vec![("type".into(), V::Enum(ty.into())), ("value".into(), V::Float(val))]);
+                let ts = V::Message(vec![("minSizing".into(), sz.clone()), ("maxSizing".into(), sz)]);
+                V::Message(vec![("id".into(), kg(s, l)), ("trackSize".into(), ts)])
+            })
+            .collect();
+        V::Message(vec![("entries".into(), V::Array(entries))])
+    };
+
+    let root = V::Message(vec![(
+        "nodeChanges".into(),
+        V::Array(vec![
+            V::Message(vec![("guid".into(), kg(0, 0)), ("type".into(), V::Enum("DOCUMENT".into())), ("name".into(), V::String("Doc".into()))]),
+            V::Message(vec![
+                ("guid".into(), kg(0, 1)),
+                ("parentIndex".into(), kpi(0, 0, "!")),
+                ("type".into(), V::Enum("CANVAS".into())),
+                ("name".into(), V::String("Page 1".into())),
+            ]),
+            V::Message(vec![
+                ("guid".into(), kg(1, 10)),
+                ("parentIndex".into(), kpi(0, 1, "!")),
+                ("type".into(), V::Enum("SYMBOL".into())),
+                ("name".into(), V::String("GridComp".into())),
+                ("size".into(), kvec(300.0, 120.0)),
+                ("transform".into(), kmat()),
+                ("stackMode".into(), V::Enum("GRID".into())),
+                ("gridColumns".into(), ktrack_map(&[(9, 3), (9, 4), (9, 5)])),
+                ("gridRows".into(), ktrack_map(&[(9, 1), (9, 2)])),
+                ("gridColumnsSizing".into(), ksizing_map(&[((9, 3), "FIXED", 80.0), ((9, 4), "FIXED", 120.0), ((9, 5), "FIXED", 100.0)])),
+                ("gridRowsSizing".into(), ksizing_map(&[((9, 1), "FIXED", 50.0), ((9, 2), "FIXED", 70.0)])),
+            ]),
+            V::Message(vec![
+                ("guid".into(), kg(1, 11)),
+                ("parentIndex".into(), kpi(1, 10, "!")),
+                ("type".into(), V::Enum("ROUNDED_RECTANGLE".into())),
+                ("name".into(), V::String("Cell".into())),
+                ("overrideKey".into(), kg(9, 11)),
+                ("size".into(), kvec(40.0, 20.0)),
+                ("transform".into(), kmat()),
+                ("gridColumnAnchor".into(), kg(9, 4)),
+                ("gridRowAnchor".into(), kg(9, 2)),
+            ]),
+            V::Message(vec![
+                ("guid".into(), kg(1, 20)),
+                ("parentIndex".into(), kpi(0, 1, "\"")),
+                ("type".into(), V::Enum("INSTANCE".into())),
+                ("name".into(), V::String("MovedInst".into())),
+                ("size".into(), kvec(300.0, 120.0)),
+                ("transform".into(), kmat()),
+                (
+                    "symbolData".into(),
+                    V::Message(vec![
+                        ("symbolID".into(), kg(1, 10)),
+                        (
+                            "symbolOverrides".into(),
+                            V::Array(vec![V::Message(vec![
+                                ("guidPath".into(), V::Message(vec![("guids".into(), V::Array(vec![]))])),
+                                ("gridColumns".into(), ktrack_map(&[(9, 4), (9, 3), (9, 5)])),
+                                ("gridColumnsSizing".into(), ksizing_map(&[((9, 4), "FIXED", 120.0), ((9, 3), "FIXED", 80.0), ((9, 5), "FIXED", 100.0)])),
+                            ])]),
+                        ),
+                    ]),
+                ),
+            ]),
+        ]),
+    )]);
+
+    let body = schema.encode_message(msg_def, &root).expect("encode v106 message");
+    let bytes = write_container(&schema.encode(), &body, Compression::Deflate, 106);
+    let mut doc = import_fig(&bytes).expect("import v106 binary fig");
+    let inst_id = find(&doc, "MovedInst").id;
+    doc.relayout_subtree(inst_id);
+
+    let cell = cell_of(&doc, "MovedInst");
+    assert_eq!(cell.layout_child.grid_column, Some(0), "9:4 remapped to column 0 in binary v106 .fig");
+    assert_eq!(cell.layout_child.grid_row, Some(1), "9:2 stays at row 1");
+    assert_eq!((cell.transform.tx, cell.transform.ty), (0.0, 50.0));
+}

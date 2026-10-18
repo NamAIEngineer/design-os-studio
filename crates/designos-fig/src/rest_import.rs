@@ -359,6 +359,8 @@ struct Ctx<'a> {
     /// `.fig` override keys (`_overrideKey`): the id override paths use for a
     /// node. Clones inherit the key of the node they copy.
     override_keys: HashMap<NodeId, std::sync::Arc<str>>,
+    col_anchor_guids: HashMap<NodeId, String>,
+    row_anchor_guids: HashMap<NodeId, String>,
     /// `.fig` `uniformScaleFactor` of instances made with the scale tool.
     scales: BTreeMap<NodeId, f32>,
     /// Library components and sets of `.fig` internal canvases: node ->
@@ -522,6 +524,8 @@ pub(crate) fn import_rest_value_owned<'a>(
         overrides: BTreeMap::new(),
         next_clone: 0,
         override_keys: HashMap::new(),
+        col_anchor_guids: HashMap::new(),
+        row_anchor_guids: HashMap::new(),
         scales: BTreeMap::new(),
         library_keys: BTreeMap::new(),
         pending_swaps: Vec::new(),
@@ -628,6 +632,8 @@ pub(crate) fn import_rest_value_with_blobs<'a>(
         overrides: BTreeMap::new(),
         next_clone: 0,
         override_keys: HashMap::new(),
+        col_anchor_guids: HashMap::new(),
+        row_anchor_guids: HashMap::new(),
         scales: BTreeMap::new(),
         library_keys: BTreeMap::new(),
         pending_swaps: Vec::new(),
@@ -1114,6 +1120,12 @@ impl<'a> Ctx<'a> {
         }
 
         n.layout_child = layout_child(v, pinfo.layout, &n.kind);
+        if let Some(g) = fstr(v, "_gridColumnAnchorGuid") {
+            self.col_anchor_guids.insert(id, g.to_string());
+        }
+        if let Some(g) = fstr(v, "_gridRowAnchorGuid") {
+            self.row_anchor_guids.insert(id, g.to_string());
+        }
 
         // Style references and library style definitions.
         if let Some(styles) = v.get("styles").and_then(Value::as_object) {
@@ -1407,6 +1419,8 @@ impl<'a> Ctx<'a> {
             ids: std::mem::take(&mut self.ids),
             overrides: std::mem::take(&mut self.overrides),
             override_keys: std::mem::take(&mut self.override_keys),
+            col_anchor_guids: std::mem::take(&mut self.col_anchor_guids),
+            row_anchor_guids: std::mem::take(&mut self.row_anchor_guids),
             scales: std::mem::take(&mut self.scales),
             path_cache: std::mem::take(&mut self.path_cache),
             blob_cache: std::mem::take(&mut self.blob_cache),
@@ -1830,6 +1844,15 @@ impl<'a> Ctx<'a> {
         if !self.doc.get(inst).map(|n| n.children.is_empty()).unwrap_or(false) || self.doc.is_ancestor(comp, inst) || comp == inst {
             return;
         }
+        let comp_grid_al =
+            self.doc.get(comp).and_then(|n| n.kind.frame_props()).and_then(|fp| fp.auto_layout.clone()).filter(|al| al.direction == LayoutDirection::Grid);
+        if let Some(comp_al) = comp_grid_al {
+            if let Some(fp) = self.doc.get_mut(inst).and_then(|n| n.kind.frame_props_mut()) {
+                if fp.auto_layout.is_none() {
+                    fp.auto_layout = Some(comp_al);
+                }
+            }
+        }
         let fast_clone = self.rest_overrides.is_empty() && self.doc.nodes.len() >= 10_000;
         let prefix = if fast_clone { String::new() } else { self.doc.get(inst).and_then(|n| n.source_id.clone()).unwrap_or_default() };
         let kids = self.doc.get(comp).map(|n| n.children.clone()).unwrap_or_default();
@@ -1856,6 +1879,12 @@ impl<'a> Ctx<'a> {
                 if let Some(k) = self.override_keys.get(&src).cloned() {
                     self.override_keys.insert(id, k);
                 }
+            }
+            if let Some(g) = self.col_anchor_guids.get(&src).cloned() {
+                self.col_anchor_guids.insert(id, g);
+            }
+            if let Some(g) = self.row_anchor_guids.get(&src).cloned() {
+                self.row_anchor_guids.insert(id, g);
             }
             n.component.source = Some(src);
             n.component.overrides.clear();
@@ -2397,9 +2426,19 @@ impl<'a> Ctx<'a> {
         }
         if let Some(c) = set.get("gridColumnAnchorIndex").and_then(Value::as_u64) {
             n.layout_child.grid_column = Some(c as u16);
+            if let Some(g) = fstr(set, "_gridColumnAnchorGuid") {
+                self.col_anchor_guids.insert(id, g.to_string());
+            } else {
+                self.col_anchor_guids.remove(&id);
+            }
         }
         if let Some(r) = set.get("gridRowAnchorIndex").and_then(Value::as_u64) {
             n.layout_child.grid_row = Some(r as u16);
+            if let Some(g) = fstr(set, "_gridRowAnchorGuid") {
+                self.row_anchor_guids.insert(id, g.to_string());
+            } else {
+                self.row_anchor_guids.remove(&id);
+            }
         }
         if let Some(c) = set.get("gridColumnSpan").and_then(Value::as_u64) {
             n.layout_child.col_span = (c as u16).max(1);
@@ -2468,6 +2507,33 @@ impl<'a> Ctx<'a> {
                 t.runs = build_runs(&t.content, &t.style, &ids, set.get("styleOverrideTable"));
             }
         }
+        let col_tracks: Vec<&str> = farr(set, "_gridColumnTrackIds").iter().filter_map(Value::as_str).collect();
+        let row_tracks: Vec<&str> = farr(set, "_gridRowTrackIds").iter().filter_map(Value::as_str).collect();
+        if !col_tracks.is_empty() || !row_tracks.is_empty() {
+            let children = self.doc.get(id).map(|n| n.children.clone()).unwrap_or_default();
+            for child_id in children {
+                let new_col = if !col_tracks.is_empty() {
+                    self.col_anchor_guids.get(&child_id).and_then(|g| col_tracks.iter().position(|t| *t == g.as_str())).map(|idx| idx as u16)
+                } else {
+                    None
+                };
+                let new_row = if !row_tracks.is_empty() {
+                    self.row_anchor_guids.get(&child_id).and_then(|g| row_tracks.iter().position(|t| *t == g.as_str())).map(|idx| idx as u16)
+                } else {
+                    None
+                };
+                if new_col.is_some() || new_row.is_some() {
+                    if let Some(child) = self.doc.get_mut(child_id) {
+                        if let Some(c) = new_col {
+                            child.layout_child.grid_column = Some(c);
+                        }
+                        if let Some(r) = new_row {
+                            child.layout_child.grid_row = Some(r);
+                        }
+                    }
+                }
+            }
+        }
         if set.get("componentProperties").is_some() || set.get("componentPropertyReferences").is_some() || set.get("variantPropSpecs").is_some() {
             if let Some(mut node_copy) = self.doc.get(id).cloned() {
                 self.parse_component_props(&mut node_copy, set);
@@ -2491,6 +2557,8 @@ struct DeferredFigHydrator {
     ids: BTreeMap<String, NodeId>,
     overrides: BTreeMap<NodeId, Overrides>,
     override_keys: HashMap<NodeId, std::sync::Arc<str>>,
+    col_anchor_guids: HashMap<NodeId, String>,
+    row_anchor_guids: HashMap<NodeId, String>,
     scales: BTreeMap<NodeId, f32>,
     path_cache: HashMap<String, Path>,
     blob_cache: HashMap<(usize, bool), Path>,
@@ -2526,6 +2594,8 @@ impl designos_doc::PageHydrator for DeferredFigHydrator {
             overrides: std::mem::take(&mut self.overrides),
             rest_overrides: Vec::new(),
             override_keys: std::mem::take(&mut self.override_keys),
+            col_anchor_guids: std::mem::take(&mut self.col_anchor_guids),
+            row_anchor_guids: std::mem::take(&mut self.row_anchor_guids),
             scales: std::mem::take(&mut self.scales),
             pending_swaps: Vec::new(),
             component_keys: BTreeMap::new(),
@@ -2561,6 +2631,8 @@ impl designos_doc::PageHydrator for DeferredFigHydrator {
             self.ids = cx.ids;
             self.overrides = cx.overrides;
             self.override_keys = cx.override_keys;
+            self.col_anchor_guids = cx.col_anchor_guids;
+            self.row_anchor_guids = cx.row_anchor_guids;
             self.scales = cx.scales;
             self.path_cache = cx.path_cache;
             self.blob_cache = cx.blob_cache;
