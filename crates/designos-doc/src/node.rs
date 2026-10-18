@@ -267,11 +267,13 @@ pub struct ComponentLink {
     /// The node is content placed in a slot (`isSlotContent`, tag=495).
     #[serde(default, skip_serializing_if = "is_false")]
     pub is_slot_content: bool,
-    /// Guid (`session:local`) a node carries as `slot-content-id`. Kept opaque: it names
-    /// slot content that need not be a node of this document.
+    /// Guid (`session:local`) a node carries as its own `slot-content-id` (`jsonSerialized`).
+    /// Kept opaque: it names slot content that need not be a node of this document. It is not a
+    /// per-property value and is never derived from or turned into `slot_content_ids`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub slot_content_id: Option<String>,
-    /// Per-property slot content guid (`session:local`), keyed by slot property name.
+    /// Per-property slot content guid (`session:local`), keyed by slot property name. Read from
+    /// the `SLOT_CONTENT_ID` value of a property definition or assignment, and only from there.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub slot_content_ids: BTreeMap<String, String>,
     /// Binds a node property to a component property, e.g.

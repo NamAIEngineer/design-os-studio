@@ -1286,7 +1286,6 @@ impl<'a> Ctx<'a> {
         }
         self.link_sources(&targets);
         self.resolve_swaps();
-        self.doc.migrate_legacy_slot_content_ids();
         if !expand_instances {
             self.apply_rest_overrides();
             self.resolve_proto();

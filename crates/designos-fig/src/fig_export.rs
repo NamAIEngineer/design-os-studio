@@ -541,19 +541,11 @@ fn export_styles_on_internal(cx: &mut ExportCtx, internal_guid: (u32, u32), idx:
     }
 }
 
-/// Slot content id written on the definition of slot property `prop_name`. The per-property map is
-/// authoritative; the legacy single id is read only while the map is empty and the node declares
-/// exactly one slot property, so it can never be copied onto a second slot.
+/// Slot content id written on the definition of slot property `prop_name`. It comes from the
+/// per-property map only: the node's own `slot_content_id` is a different field (written as
+/// `jsonSerialized.slot-content-id`) and is never turned into a property assignment.
 fn def_slot_content_id<'a>(link: &'a ComponentLink, prop_name: &str) -> Option<&'a str> {
-    if let Some(id) = link.slot_content_ids.get(prop_name) {
-        return Some(id.as_str());
-    }
-    let single_slot = link.props.iter().filter(|p| p.kind == PropKind::Slot).count() == 1;
-    if link.slot_content_ids.is_empty() && single_slot {
-        link.slot_content_id.as_deref()
-    } else {
-        None
-    }
+    link.slot_content_ids.get(prop_name).map(String::as_str)
 }
 
 fn export_node_rec(cx: &mut ExportCtx, id: NodeId, parent_guid: (u32, u32), sibling_idx: usize, parent_dir: Option<LayoutDirection>, in_component: bool) {
