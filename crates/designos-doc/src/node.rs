@@ -290,6 +290,10 @@ pub struct ComponentLink {
     /// Detached symbol provenance (`detachedSymbolId`, tag=342).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub detached_symbol_id: Option<String>,
+    /// The node's auto layout was removed on purpose (`stackMode: NONE`), so it must not inherit the
+    /// layout of its main component. A node that merely lacks auto layout does not set it.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub layout_cleared: bool,
 }
 
 impl ComponentLink {
@@ -308,6 +312,7 @@ impl ComponentLink {
             && self.variant_props.is_empty()
             && self.override_level.is_none()
             && self.detached_symbol_id.is_none()
+            && !self.layout_cleared
     }
 }
 

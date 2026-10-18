@@ -725,6 +725,7 @@ fn stack_mode_none_override_and_instance_node_remove_inherited_grid() {
         let inst_id = inst.id;
         assert!(inst.kind.frame_props().unwrap().auto_layout.is_none(), "{inst_name} must not inherit component grid when stackMode is NONE");
         assert!(inst.component.overrides.contains(&OverrideField::Layout), "{inst_name} must record OverrideField::Layout when stackMode is NONE");
+        assert!(inst.component.layout_cleared, "{inst_name} must remember the clear when stackMode is NONE");
         doc.relayout_subtree(inst_id);
         let free_child = find(&doc, inst_name).children.iter().filter_map(|id| doc.get(*id)).find(|n| n.name == "FreeChild").unwrap();
         assert_eq!(
@@ -784,6 +785,7 @@ fn stack_mode_none_instance_stays_without_a_grid_through_a_fig_round_trip() {
             find(&doc, inst_name).component.overrides.contains(&OverrideField::Layout),
             "{inst_name} must keep OverrideField::Layout after a .fig round trip"
         );
+        assert!(find(&doc, inst_name).component.layout_cleared, "{inst_name} must keep the clear after a .fig round trip");
     }
 
     let plain = find(&doc, "PlainInst");
@@ -853,6 +855,7 @@ fn stack_mode_none_override_on_a_nested_frame_survives_a_fig_round_trip() {
     let inner = inner_of(&doc, "Inst");
     assert!(inner.kind.frame_props().unwrap().auto_layout.is_none(), "stackMode NONE on a nested frame must survive a .fig round trip");
     assert!(inner.component.overrides.contains(&OverrideField::Layout));
+    assert!(inner.component.layout_cleared);
     let plain = inner_of(&doc, "PlainInst");
     assert!(plain.kind.frame_props().unwrap().auto_layout.is_some(), "an instance without the override keeps the nested auto layout");
 }
@@ -930,4 +933,60 @@ fn explicit_flex_sizing_on_the_instance_node_is_not_replaced_by_component_sizes(
     let doc = import_fig_node_changes(&changes, "explicit-flex").expect("import_fig_node_changes");
     let al = find(&doc, "FlexInst").kind.frame_props().unwrap().auto_layout.as_ref().expect("grid auto_layout").clone();
     assert_eq!(&al.grid_col_tracks[..3], &[GridTrack::Flex(1.0); 3], "the instance sized its own columns, so the component sizes must not replace them");
+}
+
+#[test]
+fn partial_layout_override_on_a_stack_instance_keeps_layout_and_padding_through_a_fig_round_trip() {
+    let changes = json!([
+        {"guid": g(0, 0), "type": "DOCUMENT", "name": "PartialLayoutDoc"},
+        {"guid": g(0, 1), "parentIndex": {"guid": g(0, 0), "position": "a"}, "type": "CANVAS", "name": "Page 1"},
+        node((1, 10), (0, 1), "a", "SYMBOL", "RowComp", json!({"size": {"x": 200.0, "y": 100.0}, "stackMode": "HORIZONTAL", "stackSpacing": 4.0})),
+        node((1, 11), (1, 10), "a", "RECTANGLE", "Item", json!({"size": {"x": 40.0, "y": 20.0}})),
+        node(
+            (1, 20),
+            (0, 1),
+            "b",
+            "INSTANCE",
+            "PaddedInst",
+            json!({
+                "size": {"x": 200.0, "y": 100.0},
+                "symbolData": {"symbolID": g(1, 10), "symbolOverrides": [{"guidPath": {"guids": []}, "stackPaddingLeft": 12.0}]}
+            })
+        ),
+        // Clipping is a layout field too, but it changes neither the layout nor its padding.
+        node(
+            (1, 30),
+            (0, 1),
+            "c",
+            "INSTANCE",
+            "ClipInst",
+            json!({
+                "size": {"x": 200.0, "y": 100.0},
+                "symbolData": {"symbolID": g(1, 10), "symbolOverrides": [{"guidPath": {"guids": []}, "frameMaskDisabled": true}]}
+            })
+        )
+    ]);
+    let layout_of = |doc: &Document| find(doc, "PaddedInst").kind.frame_props().unwrap().auto_layout.clone();
+    let clip_layout_of = |doc: &Document| find(doc, "ClipInst").kind.frame_props().unwrap().auto_layout.clone();
+
+    let original = import_fig_node_changes(&changes, "partial-layout").expect("import_fig_node_changes");
+    let al = layout_of(&original).expect("a padding override keeps the component's auto layout");
+    assert_eq!((al.direction, al.padding[3], al.item_spacing), (LayoutDirection::Horizontal, 12.0, 4.0), "component layout plus the overridden padding");
+    assert!(!find(&original, "PaddedInst").component.layout_cleared, "a padding override is not a layout clear");
+    assert!(!find(&original, "ClipInst").component.layout_cleared, "a clipping override is not a layout clear");
+    assert_eq!(clip_layout_of(&original).map(|a| (a.direction, a.padding[3])), Some((LayoutDirection::Horizontal, 0.0)), "clipping keeps the component layout");
+
+    let bytes = export_fig(&original).expect("export_fig");
+    let written = decode_fig_to_json(&bytes).expect("decode_fig_to_json");
+    let none_nodes = written["message"]["nodeChanges"].as_array().unwrap().iter().filter(|nc| nc["stackMode"] == "NONE").count();
+    assert_eq!(none_nodes, 0, "no stackMode NONE may be written for a padding override");
+
+    let doc = import_fig(&bytes).expect("import_fig");
+    let al = layout_of(&doc).expect("layout survives the round trip");
+    assert_eq!((al.direction, al.padding[3], al.item_spacing), (LayoutDirection::Horizontal, 12.0, 4.0), "layout and padding survive the round trip");
+    assert_eq!(
+        clip_layout_of(&doc).map(|a| (a.direction, a.padding[3])),
+        Some((LayoutDirection::Horizontal, 0.0)),
+        "the clipped instance keeps its layout through the round trip"
+    );
 }

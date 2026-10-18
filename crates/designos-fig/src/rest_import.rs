@@ -1147,6 +1147,7 @@ impl<'a> Ctx<'a> {
             self.no_auto_layout.insert(id);
             if ty == "INSTANCE" {
                 n.component.overrides.insert(OverrideField::Layout);
+                n.component.layout_cleared = true;
             }
         }
 
@@ -1865,6 +1866,28 @@ impl<'a> Ctx<'a> {
         self.library_keys = keys;
     }
 
+    /// An override that sets some layout field (padding, spacing, sizing, clipping ...) without restating
+    /// `layoutMode` changes only that field: the node keeps the auto layout of the component it mirrors.
+    /// An instance root does not carry that layout yet unless it is a grid, so copy it before the fields apply.
+    fn inherit_auto_layout_for_partial_override(&mut self, id: NodeId, set: &Value) {
+        let Some(obj) = set.as_object() else { return };
+        if !obj.keys().any(|k| override_field(k, false) == Some(OverrideField::Layout)) {
+            return;
+        }
+        let Some(n) = self.doc.get(id) else { return };
+        if n.kind.frame_props().is_none_or(|fp| fp.auto_layout.is_some()) {
+            return;
+        }
+        let master = match &n.kind {
+            NodeKind::Instance { component: Some(c), .. } => Some(*c),
+            _ => n.component.source,
+        };
+        let inherited = master.and_then(|m| self.doc.get(m)).and_then(|m| m.kind.frame_props()).and_then(|fp| fp.auto_layout.clone());
+        if let Some(fp) = self.doc.get_mut(id).and_then(|n| n.kind.frame_props_mut()) {
+            fp.auto_layout = inherited;
+        }
+    }
+
     /// Deep-copies the component's children under an empty instance.
     fn expand_instance(&mut self, inst: NodeId, comp: NodeId) {
         if !self.doc.get(inst).map(|n| n.children.is_empty()).unwrap_or(false) || self.doc.is_ancestor(comp, inst) || comp == inst {
@@ -1941,6 +1964,7 @@ impl<'a> Ctx<'a> {
             }
             n.component.source = Some(src);
             n.component.overrides.clear();
+            n.component.layout_cleared = false;
             n.component.props.clear();
             let container = n.kind.is_container();
             self.doc.nodes.insert(id, n);
@@ -2185,6 +2209,9 @@ impl<'a> Ctx<'a> {
             .and_then(|p| p.kind.frame_props())
             .and_then(|f| f.auto_layout.as_ref())
             .map(|a| a.direction);
+        if !derived_only && set.get("layoutMode").is_none() && !self.no_auto_layout.contains(&id) {
+            self.inherit_auto_layout_for_partial_override(id, set);
+        }
         let Some(n) = self.doc.get_mut(id) else { return swapped };
         let keep = |k: &str| !derived_only || matches!(k, "size" | "relativeTransform" | "fillGeometry" | "strokeGeometry");
         let has = |k: &str| keep(k) && set.get(k).is_some();
@@ -2340,6 +2367,7 @@ impl<'a> Ctx<'a> {
             }
             if set.get("layoutMode").is_some() {
                 fp.auto_layout = frame_props(set).auto_layout;
+                n.component.layout_cleared = fp.auto_layout.is_none();
                 if fp.auto_layout.is_none() {
                     self.no_auto_layout.insert(id);
                     self.grid_col_track_ids.remove(&id);

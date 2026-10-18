@@ -833,7 +833,7 @@ fn export_node_rec(cx: &mut ExportCtx, id: NodeId, parent_guid: (u32, u32), sibl
             fields.push(("stackWrap", en(if al.wrap { "WRAP" } else { "NO_WRAP" })));
             fields.push(("bordersTakeSpace", V::Bool(al.stroke_included)));
             fields.push(("stackReverseZIndex", V::Bool(al.reverse_z)));
-        } else if matches!(node.kind, NodeKind::Instance { .. }) && clears_inherited_auto_layout(cx.doc, &node) {
+        } else if clears_inherited_auto_layout(&node) {
             // An instance without auto layout over a component that has it must say so, or an importer
             // would hand the component's layout back to it.
             fields.push(("stackMode", en("NONE")));
@@ -1296,18 +1296,11 @@ pub(crate) fn format_grid_auto_tracks(gat: GridAutoTracks) -> Option<String> {
     }
 }
 
-/// True for a frame or instance that overrode its layout to none while its component (or the component
-/// child it copies) has auto layout: the file needs an explicit `stackMode: NONE` to keep it that way.
-/// Without the recorded layout override, a missing auto layout only means the import never filled it in.
-fn clears_inherited_auto_layout(doc: &Document, n: &Node) -> bool {
-    if !n.component.overrides.contains(&OverrideField::Layout) || n.kind.frame_props().is_none_or(|fp| fp.auto_layout.is_some()) {
-        return false;
-    }
-    let master = match &n.kind {
-        NodeKind::Instance { component: Some(c), .. } => Some(*c),
-        _ => n.component.source,
-    };
-    master.and_then(|m| doc.get(m)).and_then(|m| m.kind.frame_props()).is_some_and(|fp| fp.auto_layout.is_some())
+/// True for a frame or instance whose auto layout was removed on purpose (`layout_cleared`): the file needs
+/// an explicit `stackMode: NONE` to keep it that way. A node that merely lacks auto layout, or only has
+/// some other layout field overridden, must not be written with it.
+fn clears_inherited_auto_layout(n: &Node) -> bool {
+    n.component.layout_cleared && n.kind.frame_props().is_some_and(|fp| fp.auto_layout.is_none())
 }
 
 fn encode_node_var_entries(cx: &ExportCtx, vars: &NodeVariables) -> Vec<V> {
@@ -1519,7 +1512,7 @@ fn collect_instance_overrides(cx: &ExportCtx, inst_id: NodeId) -> Vec<V> {
                         ov.push(("stackPaddingLeft", fl(al.padding[3])));
                         ov.push(("stackPrimarySizing", en(if al.primary_sizing == Sizing::Hug { "RESIZE_TO_FIT" } else { "FIXED" })));
                         ov.push(("stackCounterSizing", en(if al.counter_sizing == Sizing::Hug { "RESIZE_TO_FIT_WITH_IMPLICIT_SIZE" } else { "FIXED" })));
-                    } else if clears_inherited_auto_layout(cx.doc, n) {
+                    } else if clears_inherited_auto_layout(n) {
                         ov.push(("stackMode", en("NONE")));
                     }
                 }
