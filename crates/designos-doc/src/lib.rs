@@ -720,6 +720,43 @@ impl Document {
         finite_json::count_non_finite(self)
     }
 
+    /// Replaces any non-finite numbers in the document with their neutral values (`0` or `1`) in
+    /// place without touching unaffected entries, embedded image blobs, `page_hydrator`, or
+    /// running [`Document::migrate_text`]. Returns how many numbers were replaced.
+    pub fn neutralize_non_finite(&mut self) -> usize {
+        let mut replaced = 0;
+        for node in self.nodes.values_mut() {
+            replaced += finite_json::neutralize_in_place(node);
+        }
+        for style in self.styles.values_mut() {
+            replaced += finite_json::neutralize_in_place(style);
+        }
+        for meta in self.style_meta.values_mut() {
+            replaced += finite_json::neutralize_in_place(meta);
+        }
+        for flow in &mut self.flows {
+            replaced += finite_json::neutralize_in_place(flow);
+        }
+        for var in self.variables.values_mut() {
+            replaced += finite_json::neutralize_in_place(var);
+        }
+        for col in self.variable_collections.values_mut() {
+            replaced += finite_json::neutralize_in_place(col);
+        }
+        for guides in self.guides.values_mut() {
+            replaced += finite_json::neutralize_in_place(guides);
+        }
+        replaced += finite_json::neutralize_in_place(&mut self.prototype_device);
+        for comment in &mut self.comments {
+            replaced += finite_json::neutralize_in_place(comment);
+        }
+        replaced += finite_json::neutralize_in_place(&mut self.library);
+        if replaced > 0 {
+            self.mark_full_dirty();
+        }
+        replaced
+    }
+
     /// Parses a native document. Text written by older versions that emulated lists with
     /// literal bullet and "1. " prefixes is converted to real lists. A malformed node graph is
     /// repaired in place (see [`Document::validate_and_repair`]) and noted on stderr, and a `null`
@@ -744,14 +781,39 @@ impl Document {
         Ok((doc, report))
     }
 
-    /// Converts literal list prefixes of every text node to real lists (see [`migrate_literal_lists`]).
+    /// Converts literal list prefixes of every text node to real lists (see [`migrate_literal_lists`])
+    /// and migrates legacy `gridChildHorizontalAlign` / `gridChildVerticalAlign` metadata keys onto [`LayoutChild`].
     pub fn migrate_text(&mut self) {
         for node in self.nodes.values_mut() {
             if let NodeKind::Text(t) = &mut node.kind {
                 migrate_literal_lists(t);
             }
+            node.migrate_grid_child_align_metadata();
         }
+        self.infer_grid_align_axis_overrides();
         self.mark_full_dirty();
+    }
+
+    /// Files saved before per-axis grid alignment overrides existed carry a `Layout` override with both axis
+    /// flags clear, which component sync read as "nothing on these axes is overridden". Flags each axis whose
+    /// value differs from the linked main child, so an overridden alignment survives the next sync. Nodes that
+    /// already have a flag set are left alone, so the pass is idempotent.
+    fn infer_grid_align_axis_overrides(&mut self) {
+        let inferred: Vec<(NodeId, [bool; 2])> = self
+            .nodes
+            .values()
+            .filter(|n| n.component.grid_align_overrides == [false, false] && n.component.overrides.contains(&OverrideField::Layout))
+            .filter_map(|n| {
+                let main = self.nodes.get(&n.component.source?)?;
+                let axes = components::record_grid_align_overrides(main, n);
+                (axes != [false, false]).then_some((n.id, axes))
+            })
+            .collect();
+        for (id, axes) in inferred {
+            if let Some(n) = self.nodes.get_mut(&id) {
+                n.component.grid_align_overrides = axes;
+            }
+        }
     }
 }
 
