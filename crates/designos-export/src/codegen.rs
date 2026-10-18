@@ -374,7 +374,9 @@ fn sizes_along(n: &Node, parent: Parent<'_>, row_parent: bool) -> Sizes {
     let text_w = matches!(&n.kind, NodeKind::Text(t) if t.auto_resize == TextAutoResize::WidthAndHeight);
     let text_h = matches!(&n.kind, NodeKind::Text(t) if matches!(t.auto_resize, TextAutoResize::WidthAndHeight | TextAutoResize::Height));
     let grows = in_flow && n.layout_child.grow > 0.0;
-    let counter_horiz = in_flow.then_some(!row_parent);
+    // The axis a stretch child fills follows the solver (`primary_is_horizontal`), not the emitted stack:
+    // a grid is emitted as a column but its counter axis is the height. `row_parent` only picks `grow`.
+    let counter_horiz = parent.al.filter(|_| in_flow).map(|a| !a.primary_is_horizontal());
     let lc = &n.layout_child;
     // The solver sizes a stretch child to the line, and a hugging counter axis derives that line from
     // the children, so the child's own size is what keeps the frame from collapsing.

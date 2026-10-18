@@ -436,4 +436,29 @@ mod tests {
         let out = compose_for(&d, row);
         assert!(out.contains("fillMaxHeight"), "a fixed parent still stretches the child: {out}");
     }
+
+    fn grid_stretch_child(vertical_fill: bool) -> (Document, NodeId) {
+        // Returns the grid: a node exported on its own has no flow parent.
+        let al = AutoLayout { grid_columns: 2, primary_sizing: Sizing::Fixed, counter_sizing: Sizing::Fixed, ..Default::default() };
+        let (mut d, grid) = fixture::grid_frame(al, Vec2::new(400.0, 300.0));
+        let rect = fixture::add_rect(&mut d, grid, Vec2::new(30.0, 20.0));
+        let lc = &mut d.get_mut(rect).unwrap().layout_child;
+        lc.align_self = AlignSelf::Stretch;
+        if vertical_fill {
+            lc.vertical = Sizing::Fill;
+        }
+        d.relayout_subtree(grid);
+        (d, grid)
+    }
+
+    #[test]
+    fn grid_stretch_child_stretches_height_and_keeps_its_width() {
+        for vertical_fill in [false, true] {
+            let (d, grid) = grid_stretch_child(vertical_fill);
+            let out = compose_for(&d, grid);
+            assert!(out.contains(".width(30.dp)") && !out.contains("fillMaxWidth"), "vertical_fill={vertical_fill}: {out}");
+            // The grid is emitted as a Column, where filling the height is a weight.
+            assert!(out.contains(".weight(1f)"), "vertical_fill={vertical_fill}: {out}");
+        }
+    }
 }
