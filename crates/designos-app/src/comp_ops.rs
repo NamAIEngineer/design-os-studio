@@ -330,7 +330,15 @@ impl App {
     pub fn insert_instance(&mut self, comp: NodeId, at: Vec2) -> Option<NodeId> {
         let size = self.doc.get(comp)?.size;
         let target = Vec2::new(at.x - size.x / 2.0, at.y - size.y / 2.0);
-        let mut parent = container_at(&self.doc, self.page, at, &[]);
+        let mut parent = if let [only] = self.selection.as_slice() {
+            if is_slot_container(&self.doc, *only) {
+                *only
+            } else {
+                container_at(&self.doc, self.page, at, &[])
+            }
+        } else {
+            container_at(&self.doc, self.page, at, &[])
+        };
         let mut tx = Tx::new();
         for attempt in 0..2 {
             let inv = self.doc.world_transform(parent).invert()?;
@@ -344,12 +352,29 @@ impl App {
                 }
                 return None;
             }
+            if is_slot_container(&self.doc, parent) {
+                if let Command::Insert { nodes, .. } = &cmd {
+                    if let Some(root) = nodes.first() {
+                        if let Err(err) = check_slot_insert(&self.doc, parent, &[root]) {
+                            self.show_toast(err.to_string(), true);
+                            return None;
+                        }
+                    }
+                }
+            }
             let id = match &cmd {
                 Command::Insert { nodes, .. } => nodes.first().map(|n| n.id),
                 _ => None,
             };
             if !self.push_cmd(&mut tx, cmd) {
                 return None;
+            }
+            let is_inst_slot =
+                is_slot_container(&self.doc, parent) && (self.doc.get(parent).is_some_and(is_linked) || instance_root_of(&self.doc, parent).is_some());
+            if is_inst_slot {
+                if let Some(sn) = tx.ed.node(&mut self.doc, parent) {
+                    sn.component.overrides.insert(OverrideField::SlotContent);
+                }
             }
             layout::relayout_around(&mut self.doc, &mut tx.ed, parent);
             self.run_tx(tx);
