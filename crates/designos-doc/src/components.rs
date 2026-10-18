@@ -1089,6 +1089,525 @@ pub fn bind_prop(doc: &mut Document, node: NodeId, field: OverrideField, prop: O
     c.finish()
 }
 
+#[derive(Clone, Debug)]
+enum MigrationMode {
+    InstanceLayer { prop_name: String, vis_prop: Option<String> },
+    WrappedInstance { child_inst: NodeId, prop_name: String, vis_prop: Option<String> },
+    BooleanContainer { prop_name: String },
+}
+
+fn unique_slot_prop_name(doc: &Document, owner: NodeId, base: &str) -> String {
+    let base = if base.trim().is_empty() { "Slot" } else { base.trim() };
+    let taken: Vec<String> = doc.get(owner).map(|n| n.component.props.iter().map(|p| p.name.clone()).collect()).unwrap_or_default();
+    if !taken.contains(&base.to_string()) {
+        return base.to_string();
+    }
+    let mut i = 2usize;
+    loop {
+        let candidate = format!("{base} {i}");
+        if !taken.contains(&candidate) {
+            return candidate;
+        }
+        i += 1;
+    }
+}
+
+fn classify_slot_migration(doc: &Document, node: NodeId) -> Result<(NodeId, NodeId, MigrationMode), &'static str> {
+    let Some(n) = doc.get(node) else {
+        return Err("Selected layer was not found");
+    };
+    if !is_top(n) {
+        return Err("Select a region inside a main component to migrate to a slot");
+    }
+    let Some(comp) = enclosing_component(doc, node) else {
+        return Err("Select a layer inside a main component to migrate to a slot");
+    };
+    if comp == node || matches!(n.kind, NodeKind::Component(_) | NodeKind::ComponentSet(_)) {
+        return Err("Cannot migrate a main component root; select an inner instance-swap or boolean region");
+    }
+    let mut cur = n.parent;
+    while let Some(p) = cur {
+        if p == comp {
+            break;
+        }
+        if matches!(doc.get(p).map(|pn| &pn.kind), Some(NodeKind::Instance { .. })) {
+            return Err("Select the nested instance itself rather than a layer inside it");
+        }
+        cur = doc.get(p).and_then(|pn| pn.parent);
+    }
+    if is_slot_container(doc, node) || n.component.is_slot {
+        return Err("Selected region is already a component slot");
+    }
+    let owner = doc.get(comp).and_then(|c| c.parent).filter(|p| matches!(doc.get(*p).map(|x| &x.kind), Some(NodeKind::ComponentSet(_)))).unwrap_or(comp);
+
+    match &n.kind {
+        NodeKind::Instance { .. } => {
+            let main_prop = n.component.bindings.get(&OverrideField::MainComponent).cloned();
+            let vis_prop = n.component.bindings.get(&OverrideField::Visible).cloned();
+            let prop_name = if let Some(p) = main_prop {
+                p
+            } else if let Some(p) = vis_prop.clone() {
+                p
+            } else {
+                unique_slot_prop_name(doc, owner, &n.name)
+            };
+            Ok((comp, owner, MigrationMode::InstanceLayer { prop_name, vis_prop }))
+        }
+        NodeKind::Frame(_) | NodeKind::Group => {
+            if n.children.len() == 1 {
+                let cid = n.children[0];
+                if let Some(cn) = doc.get(cid) {
+                    if matches!(cn.kind, NodeKind::Instance { .. }) {
+                        if let Some(p) = cn.component.bindings.get(&OverrideField::MainComponent).cloned() {
+                            let vis_prop = n
+                                .component
+                                .bindings
+                                .get(&OverrideField::Visible)
+                                .cloned()
+                                .or_else(|| cn.component.bindings.get(&OverrideField::Visible).cloned());
+                            return Ok((comp, owner, MigrationMode::WrappedInstance { child_inst: cid, prop_name: p, vis_prop }));
+                        }
+                    }
+                }
+            }
+            if let Some(p) =
+                n.component.bindings.get(&OverrideField::MainComponent).cloned().or_else(|| n.component.bindings.get(&OverrideField::Visible).cloned())
+            {
+                return Ok((comp, owner, MigrationMode::BooleanContainer { prop_name: p }));
+            }
+            Err("Selected container has no instance-swap or boolean property to migrate")
+        }
+        _ => Err("Unsupported shape: select an instance-swap layer or a container with a boolean property"),
+    }
+}
+
+/// True when `node` is an inner instance-swap or boolean container region inside
+/// a main component that can be migrated to a component slot.
+pub fn can_migrate_region_to_slot(doc: &Document, node: NodeId) -> bool {
+    classify_slot_migration(doc, node).is_ok()
+}
+
+fn instance_region_was_visible(doc: &Document, inst: NodeId, copy_id: NodeId, vis_prop: Option<&str>, default_vis: bool) -> bool {
+    if let Some(vp) = vis_prop {
+        if let Some(PropValue::Bool(b)) = doc.get(inst).and_then(|i| i.component.values.get(vp)) {
+            return *b;
+        }
+    }
+    if let Some(cn) = doc.get(copy_id) {
+        if cn.component.overrides.contains(&OverrideField::Visible) {
+            return cn.visible;
+        }
+        return default_vis && cn.visible;
+    }
+    default_vis
+}
+
+fn upgrade_owner_prop_to_slot(c: &mut Ctx, owner: NodeId, prop_name: &str, default_children: Vec<NodeId>, drop_vis_prop: Option<&str>) {
+    let Some(mut o) = c.s.get(owner).cloned() else { return };
+    let mut extracted_preferred = Vec::new();
+    let mut found = false;
+    for p in &mut o.component.props {
+        if p.name == prop_name {
+            if let PropKind::InstanceSwap { preferred } = &p.kind {
+                extracted_preferred = preferred.clone();
+            }
+            p.kind = PropKind::Slot;
+            p.default = PropValue::Slot(default_children.clone());
+            found = true;
+        }
+    }
+    if !found {
+        o.component.props.push(ComponentPropDef { name: prop_name.to_string(), kind: PropKind::Slot, default: PropValue::Slot(default_children) });
+    }
+    if !extracted_preferred.is_empty() {
+        o.component.slot_configs.entry(prop_name.to_string()).or_default().preferred = extracted_preferred;
+    }
+    if let Some(vp) = drop_vis_prop {
+        if vp != prop_name {
+            let still_bound = subtree_ids(c.s, owner).into_iter().any(|id| c.s.get(id).is_some_and(|n| n.component.bindings.values().any(|b| b == vp)));
+            if !still_bound {
+                o.component.props.retain(|p| p.name != vp);
+            }
+        }
+    }
+    c.update(o);
+}
+
+/// Migrates an instance-swap or boolean container region inside a main component
+/// to a component slot, keeping what existing instances hold in one undo step.
+/// Unsupported shapes return `Err` with an honest message without mutating `doc`.
+pub fn migrate_region_to_slot(doc: &mut Document, node: NodeId) -> Result<Command, &'static str> {
+    let (comp, owner, mode) = classify_slot_migration(doc, node)?;
+    let mut c = Ctx::new(doc);
+    let comps = components_of(c.s, owner);
+    let insts = instances_of_any(c.s, &comps);
+
+    match mode {
+        MigrationMode::InstanceLayer { prop_name, vis_prop } => {
+            let Some(orig_node) = c.s.get(node).cloned() else {
+                return Err("Selected layer was not found");
+            };
+            let NodeKind::Instance { frame, component: default_comp, component_key: comp_key } = orig_node.kind.clone() else {
+                return Err("Selected layer is not an instance");
+            };
+            let default_vis = vis_prop
+                .as_deref()
+                .and_then(|vp| prop_defs(c.s, comp).into_iter().find(|d| d.name == vp))
+                .and_then(|d| match d.default {
+                    PropValue::Bool(b) => Some(b),
+                    _ => None,
+                })
+                .unwrap_or(true);
+
+            let mut inst_targets = Vec::new();
+            for inst in &insts {
+                for id in subtree_ids(c.s, *inst) {
+                    if c.s.get(id).and_then(|n| n.component.source) == Some(node) {
+                        let was_vis = instance_region_was_visible(c.s, *inst, id, vis_prop.as_deref(), default_vis);
+                        inst_targets.push((*inst, id, was_vis));
+                    }
+                }
+            }
+
+            let old_children = orig_node.children.clone();
+            let d_inst_id = c.s.alloc_id();
+            let mut d_inst = Node::new(d_inst_id, NodeKind::Instance { frame: frame.clone(), component: default_comp, component_key: comp_key });
+            d_inst.name = default_comp.and_then(|dc| c.s.get(dc)).map(|dn| dn.name.clone()).unwrap_or_else(|| orig_node.name.clone());
+            d_inst.size = orig_node.size;
+            d_inst.transform = Affine::IDENTITY;
+            d_inst.fills = orig_node.fills.clone();
+            d_inst.stroke = orig_node.stroke.clone();
+            d_inst.effects = orig_node.effects.clone();
+            d_inst.corner_radii = orig_node.corner_radii;
+            d_inst.corner_smoothing = orig_node.corner_smoothing;
+            d_inst.opacity = orig_node.opacity;
+            d_inst.blend = orig_node.blend;
+            d_inst.component.source = default_comp;
+            d_inst.component.is_slot_content = true;
+            d_inst.component.values = orig_node.component.values.clone();
+
+            c.push(Command::Insert { parent: node, index: old_children.len(), nodes: vec![d_inst] });
+            for (k, cid) in old_children.iter().copied().enumerate() {
+                c.push(Command::Reparent { id: cid, parent: d_inst_id, index: k });
+            }
+            if let Some(mut updated_slot) = c.s.get(node).cloned() {
+                updated_slot.kind = NodeKind::Frame(frame.clone());
+                updated_slot.visible = true;
+                updated_slot.component.source = None;
+                updated_slot.component.is_slot = true;
+                updated_slot.component.values.clear();
+                updated_slot.component.bindings.remove(&OverrideField::MainComponent);
+                updated_slot.component.bindings.remove(&OverrideField::Visible);
+                updated_slot.component.bindings.insert(OverrideField::SlotContent, prop_name.clone());
+                c.update(updated_slot);
+            }
+
+            for (inst, copy_id, was_vis) in inst_targets {
+                let Some(copy_node) = c.s.get(copy_id).cloned() else { continue };
+                let (copy_frame, swapped_comp, copy_key) = match &copy_node.kind {
+                    NodeKind::Instance { frame: cf, component: sc, component_key: ck } => (cf.clone(), sc.or(default_comp), ck.clone()),
+                    _ => (frame.clone(), default_comp, None),
+                };
+                let active_comp = match c.s.get(inst).and_then(|in_n| in_n.component.values.get(&prop_name)) {
+                    Some(PropValue::Instance(pc)) => Some(*pc),
+                    _ => swapped_comp,
+                };
+                let copy_old_children = copy_node.children.clone();
+                if was_vis {
+                    let c_inst_id = c.s.alloc_id();
+                    let mut c_inst = Node::new(c_inst_id, NodeKind::Instance { frame: copy_frame, component: active_comp, component_key: copy_key });
+                    c_inst.name = active_comp.and_then(|ac| c.s.get(ac)).map(|an| an.name.clone()).unwrap_or_else(|| copy_node.name.clone());
+                    c_inst.size = copy_node.size;
+                    c_inst.transform = Affine::IDENTITY;
+                    c_inst.fills = copy_node.fills.clone();
+                    c_inst.stroke = copy_node.stroke.clone();
+                    c_inst.effects = copy_node.effects.clone();
+                    c_inst.corner_radii = copy_node.corner_radii;
+                    c_inst.corner_smoothing = copy_node.corner_smoothing;
+                    c_inst.opacity = copy_node.opacity;
+                    c_inst.blend = copy_node.blend;
+                    c_inst.component.source = active_comp;
+                    c_inst.component.is_slot_content = true;
+                    c_inst.component.values = copy_node.component.values.clone();
+
+                    c.push(Command::Insert { parent: copy_id, index: copy_old_children.len(), nodes: vec![c_inst] });
+                    for (k, cid) in copy_old_children.iter().copied().enumerate() {
+                        c.push(Command::Reparent { id: cid, parent: c_inst_id, index: k });
+                    }
+                    for desc_id in subtree_ids(c.s, c_inst_id) {
+                        if desc_id == c_inst_id {
+                            continue;
+                        }
+                        if let Some(mut dn) = c.s.get(desc_id).cloned() {
+                            if let Some(src) = dn.component.source {
+                                if c.s.is_ancestor(d_inst_id, src) {
+                                    if let Some(grand) = c.s.get(src).and_then(|m| m.component.source) {
+                                        dn.component.source = Some(grand);
+                                        c.update(dn);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    if let Some(mut updated_copy) = c.s.get(copy_id).cloned() {
+                        updated_copy.kind = NodeKind::Frame(frame.clone());
+                        updated_copy.name = orig_node.name.clone();
+                        updated_copy.visible = true;
+                        updated_copy.component.is_slot = true;
+                        updated_copy.component.values.clear();
+                        updated_copy.component.bindings.remove(&OverrideField::MainComponent);
+                        updated_copy.component.bindings.remove(&OverrideField::Visible);
+                        updated_copy.component.bindings.insert(OverrideField::SlotContent, prop_name.clone());
+                        updated_copy.component.overrides.remove(&OverrideField::MainComponent);
+                        updated_copy.component.overrides.remove(&OverrideField::Visible);
+                        updated_copy.component.overrides.insert(OverrideField::SlotContent);
+                        c.update(updated_copy);
+                    }
+                    if let Some(mut inst_node) = c.s.get(inst).cloned() {
+                        if let Some(vp) = &vis_prop {
+                            if vp != &prop_name {
+                                inst_node.component.values.remove(vp);
+                            }
+                        }
+                        inst_node.component.values.insert(prop_name.clone(), PropValue::Slot(vec![c_inst_id]));
+                        c.update(inst_node);
+                    }
+                } else {
+                    for cid in copy_old_children.into_iter().rev() {
+                        c.push(Command::Remove { id: cid });
+                    }
+                    if let Some(mut updated_copy) = c.s.get(copy_id).cloned() {
+                        updated_copy.kind = NodeKind::Frame(frame.clone());
+                        updated_copy.name = orig_node.name.clone();
+                        updated_copy.visible = true;
+                        updated_copy.component.is_slot = true;
+                        updated_copy.component.values.clear();
+                        updated_copy.component.bindings.remove(&OverrideField::MainComponent);
+                        updated_copy.component.bindings.remove(&OverrideField::Visible);
+                        updated_copy.component.bindings.insert(OverrideField::SlotContent, prop_name.clone());
+                        updated_copy.component.overrides.remove(&OverrideField::MainComponent);
+                        updated_copy.component.overrides.remove(&OverrideField::Visible);
+                        updated_copy.component.overrides.insert(OverrideField::SlotContent);
+                        c.update(updated_copy);
+                    }
+                    if let Some(mut inst_node) = c.s.get(inst).cloned() {
+                        if let Some(vp) = &vis_prop {
+                            if vp != &prop_name {
+                                inst_node.component.values.remove(vp);
+                            }
+                        }
+                        inst_node.component.values.insert(prop_name.clone(), PropValue::Slot(Vec::new()));
+                        c.update(inst_node);
+                    }
+                }
+            }
+
+            upgrade_owner_prop_to_slot(&mut c, owner, &prop_name, vec![d_inst_id], vis_prop.as_deref());
+        }
+        MigrationMode::WrappedInstance { child_inst, prop_name, vis_prop } => {
+            let default_vis = vis_prop
+                .as_deref()
+                .and_then(|vp| prop_defs(c.s, comp).into_iter().find(|d| d.name == vp))
+                .and_then(|d| match d.default {
+                    PropValue::Bool(b) => Some(b),
+                    _ => None,
+                })
+                .unwrap_or(true);
+
+            let mut inst_targets = Vec::new();
+            for inst in &insts {
+                for id in subtree_ids(c.s, *inst) {
+                    if c.s.get(id).and_then(|n| n.component.source) == Some(node) {
+                        let was_vis = instance_region_was_visible(c.s, *inst, id, vis_prop.as_deref(), default_vis);
+                        inst_targets.push((*inst, id, was_vis));
+                    }
+                }
+            }
+
+            if let Some(mut cn) = c.s.get(child_inst).cloned() {
+                cn.component.is_slot_content = true;
+                cn.component.bindings.remove(&OverrideField::MainComponent);
+                cn.component.bindings.remove(&OverrideField::Visible);
+                c.update(cn);
+            }
+            if let Some(mut slot_n) = c.s.get(node).cloned() {
+                if matches!(slot_n.kind, NodeKind::Group) {
+                    slot_n.kind = NodeKind::Frame(FrameProps::default());
+                }
+                slot_n.visible = true;
+                slot_n.component.is_slot = true;
+                slot_n.component.bindings.remove(&OverrideField::Visible);
+                slot_n.component.bindings.remove(&OverrideField::MainComponent);
+                slot_n.component.bindings.insert(OverrideField::SlotContent, prop_name.clone());
+                c.update(slot_n);
+            }
+
+            for (inst, copy_id, was_vis) in inst_targets {
+                let Some(copy_node) = c.s.get(copy_id).cloned() else { continue };
+                let copy_children = copy_node.children.clone();
+                if was_vis {
+                    for cid in &copy_children {
+                        if let Some(mut cn) = c.s.get(*cid).cloned() {
+                            cn.component.is_slot_content = true;
+                            cn.component.bindings.remove(&OverrideField::MainComponent);
+                            cn.component.bindings.remove(&OverrideField::Visible);
+                            cn.component.overrides.remove(&OverrideField::MainComponent);
+                            if let Some(ac) = instance_component(&cn) {
+                                cn.component.source = Some(ac);
+                            }
+                            c.update(cn);
+                        }
+                    }
+                    if let Some(mut updated_copy) = c.s.get(copy_id).cloned() {
+                        if matches!(updated_copy.kind, NodeKind::Group) {
+                            updated_copy.kind = NodeKind::Frame(FrameProps::default());
+                        }
+                        updated_copy.visible = true;
+                        updated_copy.component.is_slot = true;
+                        updated_copy.component.bindings.remove(&OverrideField::Visible);
+                        updated_copy.component.bindings.remove(&OverrideField::MainComponent);
+                        updated_copy.component.bindings.insert(OverrideField::SlotContent, prop_name.clone());
+                        updated_copy.component.overrides.remove(&OverrideField::Visible);
+                        updated_copy.component.overrides.insert(OverrideField::SlotContent);
+                        c.update(updated_copy);
+                    }
+                    if let Some(mut inst_node) = c.s.get(inst).cloned() {
+                        if let Some(vp) = &vis_prop {
+                            if vp != &prop_name {
+                                inst_node.component.values.remove(vp);
+                            }
+                        }
+                        inst_node.component.values.insert(prop_name.clone(), PropValue::Slot(copy_children));
+                        c.update(inst_node);
+                    }
+                } else {
+                    for cid in copy_children.into_iter().rev() {
+                        c.push(Command::Remove { id: cid });
+                    }
+                    if let Some(mut updated_copy) = c.s.get(copy_id).cloned() {
+                        if matches!(updated_copy.kind, NodeKind::Group) {
+                            updated_copy.kind = NodeKind::Frame(FrameProps::default());
+                        }
+                        updated_copy.visible = true;
+                        updated_copy.component.is_slot = true;
+                        updated_copy.component.bindings.remove(&OverrideField::Visible);
+                        updated_copy.component.bindings.remove(&OverrideField::MainComponent);
+                        updated_copy.component.bindings.insert(OverrideField::SlotContent, prop_name.clone());
+                        updated_copy.component.overrides.remove(&OverrideField::Visible);
+                        updated_copy.component.overrides.insert(OverrideField::SlotContent);
+                        c.update(updated_copy);
+                    }
+                    if let Some(mut inst_node) = c.s.get(inst).cloned() {
+                        if let Some(vp) = &vis_prop {
+                            if vp != &prop_name {
+                                inst_node.component.values.remove(vp);
+                            }
+                        }
+                        inst_node.component.values.insert(prop_name.clone(), PropValue::Slot(Vec::new()));
+                        c.update(inst_node);
+                    }
+                }
+            }
+
+            upgrade_owner_prop_to_slot(&mut c, owner, &prop_name, vec![child_inst], vis_prop.as_deref());
+        }
+        MigrationMode::BooleanContainer { prop_name } => {
+            let default_vis = prop_defs(c.s, comp)
+                .into_iter()
+                .find(|d| d.name == prop_name)
+                .and_then(|d| match d.default {
+                    PropValue::Bool(b) => Some(b),
+                    _ => None,
+                })
+                .unwrap_or(true);
+
+            let mut inst_targets = Vec::new();
+            for inst in &insts {
+                for id in subtree_ids(c.s, *inst) {
+                    if c.s.get(id).and_then(|n| n.component.source) == Some(node) {
+                        let was_vis = instance_region_was_visible(c.s, *inst, id, Some(&prop_name), default_vis);
+                        inst_targets.push((*inst, id, was_vis));
+                    }
+                }
+            }
+
+            let main_children = c.s.get(node).map(|n| n.children.clone()).unwrap_or_default();
+            for cid in &main_children {
+                if let Some(mut cn) = c.s.get(*cid).cloned() {
+                    cn.component.is_slot_content = true;
+                    c.update(cn);
+                }
+            }
+            if let Some(mut slot_n) = c.s.get(node).cloned() {
+                if matches!(slot_n.kind, NodeKind::Group) {
+                    slot_n.kind = NodeKind::Frame(FrameProps::default());
+                }
+                slot_n.visible = true;
+                slot_n.component.is_slot = true;
+                slot_n.component.bindings.remove(&OverrideField::Visible);
+                slot_n.component.bindings.remove(&OverrideField::MainComponent);
+                slot_n.component.bindings.insert(OverrideField::SlotContent, prop_name.clone());
+                c.update(slot_n);
+            }
+
+            for (inst, copy_id, was_vis) in inst_targets {
+                let Some(copy_node) = c.s.get(copy_id).cloned() else { continue };
+                let copy_children = copy_node.children.clone();
+                if was_vis {
+                    for cid in &copy_children {
+                        if let Some(mut cn) = c.s.get(*cid).cloned() {
+                            cn.component.is_slot_content = true;
+                            c.update(cn);
+                        }
+                    }
+                    if let Some(mut updated_copy) = c.s.get(copy_id).cloned() {
+                        if matches!(updated_copy.kind, NodeKind::Group) {
+                            updated_copy.kind = NodeKind::Frame(FrameProps::default());
+                        }
+                        updated_copy.visible = true;
+                        updated_copy.component.is_slot = true;
+                        updated_copy.component.bindings.remove(&OverrideField::Visible);
+                        updated_copy.component.bindings.remove(&OverrideField::MainComponent);
+                        updated_copy.component.bindings.insert(OverrideField::SlotContent, prop_name.clone());
+                        updated_copy.component.overrides.remove(&OverrideField::Visible);
+                        updated_copy.component.overrides.insert(OverrideField::SlotContent);
+                        c.update(updated_copy);
+                    }
+                    if let Some(mut inst_node) = c.s.get(inst).cloned() {
+                        inst_node.component.values.insert(prop_name.clone(), PropValue::Slot(copy_children));
+                        c.update(inst_node);
+                    }
+                } else {
+                    for cid in copy_children.into_iter().rev() {
+                        c.push(Command::Remove { id: cid });
+                    }
+                    if let Some(mut updated_copy) = c.s.get(copy_id).cloned() {
+                        if matches!(updated_copy.kind, NodeKind::Group) {
+                            updated_copy.kind = NodeKind::Frame(FrameProps::default());
+                        }
+                        updated_copy.visible = true;
+                        updated_copy.component.is_slot = true;
+                        updated_copy.component.bindings.remove(&OverrideField::Visible);
+                        updated_copy.component.bindings.remove(&OverrideField::MainComponent);
+                        updated_copy.component.bindings.insert(OverrideField::SlotContent, prop_name.clone());
+                        updated_copy.component.overrides.remove(&OverrideField::Visible);
+                        updated_copy.component.overrides.insert(OverrideField::SlotContent);
+                        c.update(updated_copy);
+                    }
+                    if let Some(mut inst_node) = c.s.get(inst).cloned() {
+                        inst_node.component.values.insert(prop_name.clone(), PropValue::Slot(Vec::new()));
+                        c.update(inst_node);
+                    }
+                }
+            }
+
+            upgrade_owner_prop_to_slot(&mut c, owner, &prop_name, main_children, None);
+        }
+    }
+
+    Ok(c.finish())
+}
+
 // ---------------------------------------------------------------------------
 // Variants
 // ---------------------------------------------------------------------------
@@ -1869,5 +2388,217 @@ mod tests {
         if let NodeKind::Text(t) = &n_label.kind {
             assert_eq!(t.style.font_size, 24.0);
         }
+    }
+
+    #[test]
+    fn migrate_instance_swap_region_to_slot_keeps_swapped_and_overridden_content_and_undoes_in_one_step() {
+        let mut f = fx();
+        let id = f.d.alloc_id();
+        let mut alt = Node::frame(id, Rect::new(0.0, 300.0, 50.0, 50.0));
+        alt.name = "Alt".into();
+        let alt = f.d.insert(f.page, alt).unwrap();
+        let id = f.d.alloc_id();
+        let mut dot = Node::ellipse(id, Rect::new(0.0, 0.0, 10.0, 10.0));
+        dot.name = "dot".into();
+        f.d.insert(alt, dot).unwrap();
+        let c = create_component(&mut f.d, alt);
+        apply(&mut f.d, c);
+
+        let id = f.d.alloc_id();
+        let card = f.d.insert(f.page, Node::frame(id, Rect::new(0.0, 500.0, 300.0, 100.0))).unwrap();
+        let c = create_component(&mut f.d, card);
+        apply(&mut f.d, c);
+        let c = create_instance(&mut f.d, f.comp, card, Vec2::new(12.0, 16.0));
+        apply(&mut f.d, c);
+        let slot = *f.d.get(card).unwrap().children.last().unwrap();
+        let c = add_prop(
+            &mut f.d,
+            card,
+            ComponentPropDef { name: "Icon".into(), kind: PropKind::InstanceSwap { preferred: vec![f.comp, alt] }, default: PropValue::Instance(f.comp) },
+        );
+        apply(&mut f.d, c);
+        let c = bind_prop(&mut f.d, slot, OverrideField::MainComponent, Some("Icon"));
+        apply(&mut f.d, c);
+
+        // First instance swaps "Icon" to `alt`.
+        let c = create_instance(&mut f.d, card, f.page, Vec2::new(600.0, 0.0));
+        apply(&mut f.d, c);
+        let outer_swapped = *f.d.get(f.page).unwrap().children.last().unwrap();
+        let c = set_instance_prop(&mut f.d, outer_swapped, "Icon", Some(PropValue::Instance(alt)));
+        apply(&mut f.d, c);
+
+        // Second instance keeps default `f.comp` and overrides its inner label text.
+        let c = create_instance(&mut f.d, card, f.page, Vec2::new(600.0, 150.0));
+        apply(&mut f.d, c);
+        let outer_overridden = *f.d.get(f.page).unwrap().children.last().unwrap();
+        let slot_copy_overridden = f.d.get(outer_overridden).unwrap().children[0];
+        let inner_label = child_named(&f.d, slot_copy_overridden, "label");
+        let before_lbl = f.d.get(inner_label).unwrap().clone();
+        set_text(&mut f.d, inner_label, "Custom");
+        let mut after_lbl = f.d.get(inner_label).unwrap().clone();
+        after_lbl.component.overrides = record_override(&before_lbl, &after_lbl);
+        apply(&mut f.d, Command::Update { node: Box::new(after_lbl) });
+
+        assert!(can_migrate_region_to_slot(&f.d, slot));
+        let before_nodes = f.d.nodes.clone();
+
+        let migrate_cmd = migrate_region_to_slot(&mut f.d, slot).expect("instance-swap region should migrate");
+        let inv = apply(&mut f.d, migrate_cmd);
+
+        // Property on `card` is now PropKind::Slot and carries preferred components into slot_configs.
+        let card_node = f.d.get(card).unwrap();
+        assert_eq!(card_node.component.props.len(), 1);
+        assert_eq!(card_node.component.props[0].name, "Icon");
+        assert_eq!(card_node.component.props[0].kind, PropKind::Slot);
+        assert_eq!(card_node.component.slot_configs.get("Icon").map(|cfg| cfg.preferred.clone()), Some(vec![f.comp, alt]));
+
+        // `slot` in `card` is now a slot Frame bound to OverrideField::SlotContent -> "Icon".
+        let slot_node = f.d.get(slot).unwrap();
+        assert!(matches!(slot_node.kind, NodeKind::Frame(_)));
+        assert!(slot_node.component.is_slot);
+        assert!(is_slot_container(&f.d, slot));
+        assert_eq!(slot_node.component.bindings.get(&OverrideField::SlotContent).map(String::as_str), Some("Icon"));
+        assert!(!slot_node.component.bindings.contains_key(&OverrideField::MainComponent));
+        assert_eq!(slot_node.children.len(), 1);
+        let default_content = slot_node.children[0];
+        assert!(f.d.get(default_content).unwrap().component.is_slot_content);
+        assert_eq!(instance_component(f.d.get(default_content).unwrap()), Some(f.comp));
+
+        // Swapped instance kept its `alt` instance as slot content inside `slot_copy`.
+        let slot_copy_swapped = f.d.get(outer_swapped).unwrap().children[0];
+        let sc_swapped = f.d.get(slot_copy_swapped).unwrap();
+        assert!(matches!(sc_swapped.kind, NodeKind::Frame(_)));
+        assert!(sc_swapped.component.is_slot);
+        assert!(sc_swapped.component.overrides.contains(&OverrideField::SlotContent));
+        assert_eq!(sc_swapped.children.len(), 1);
+        let swapped_content = sc_swapped.children[0];
+        let swapped_content_node = f.d.get(swapped_content).unwrap();
+        assert!(swapped_content_node.component.is_slot_content);
+        assert_eq!(instance_component(swapped_content_node), Some(alt));
+        assert_eq!(swapped_content_node.children.len(), 1);
+        assert_eq!(f.d.get(swapped_content_node.children[0]).unwrap().name, "dot");
+        assert_eq!(f.d.get(outer_swapped).unwrap().component.values.get("Icon"), Some(&PropValue::Slot(vec![swapped_content])));
+
+        // Overridden instance kept its `f.comp` instance AND its "Custom" text override inside the slot.
+        let sc_overridden = f.d.get(slot_copy_overridden).unwrap();
+        assert!(matches!(sc_overridden.kind, NodeKind::Frame(_)));
+        assert!(sc_overridden.component.is_slot);
+        assert_eq!(sc_overridden.children.len(), 1);
+        let ov_content = sc_overridden.children[0];
+        assert!(f.d.get(ov_content).unwrap().component.is_slot_content);
+        assert_eq!(instance_component(f.d.get(ov_content).unwrap()), Some(f.comp));
+        assert_eq!(text_of(&f.d, child_named(&f.d, ov_content, "label")), "Custom");
+        assert_eq!(f.d.get(outer_overridden).unwrap().component.values.get("Icon"), Some(&PropValue::Slot(vec![ov_content])));
+
+        // Syncing `card` preserves slot content in both instances.
+        let sync_cmd = sync_instances(&mut f.d, card);
+        apply(&mut f.d, sync_cmd);
+        assert_eq!(f.d.get(slot_copy_swapped).unwrap().children, vec![swapped_content]);
+        assert_eq!(text_of(&f.d, child_named(&f.d, ov_content, "label")), "Custom");
+
+        // Single-step undo restores the exact pre-migration state.
+        apply(&mut f.d, inv);
+        assert_eq!(f.d.nodes, before_nodes);
+    }
+
+    #[test]
+    fn migrate_boolean_container_region_to_slot_keeps_visible_content_empties_hidden_and_undoes_in_one_step() {
+        let mut f = fx();
+        let id = f.d.alloc_id();
+        let card = f.d.insert(f.page, Node::frame(id, Rect::new(0.0, 500.0, 300.0, 120.0))).unwrap();
+        let id = f.d.alloc_id();
+        let mut footer = Node::frame(id, Rect::new(0.0, 80.0, 300.0, 40.0));
+        footer.name = "footer".into();
+        let footer = f.d.insert(card, footer).unwrap();
+        let id = f.d.alloc_id();
+        let mut fbg = Node::rectangle(id, Rect::new(0.0, 0.0, 300.0, 40.0));
+        fbg.name = "footer_bg".into();
+        let fbg = f.d.insert(footer, fbg).unwrap();
+        let id = f.d.alloc_id();
+        let mut ftxt = Node::text(id, Rect::new(10.0, 10.0, 100.0, 20.0), "Footer", TextStyle::default());
+        ftxt.name = "footer_text".into();
+        let ftxt = f.d.insert(footer, ftxt).unwrap();
+
+        let c = create_component(&mut f.d, card);
+        apply(&mut f.d, c);
+        let c = add_prop(&mut f.d, card, ComponentPropDef { name: "Show footer".into(), kind: PropKind::Boolean, default: PropValue::Bool(true) });
+        apply(&mut f.d, c);
+        let c = bind_prop(&mut f.d, footer, OverrideField::Visible, Some("Show footer"));
+        apply(&mut f.d, c);
+
+        // Instance 1 keeps footer visible and overrides footer_text.
+        let c = create_instance(&mut f.d, card, f.page, Vec2::new(400.0, 0.0));
+        apply(&mut f.d, c);
+        let inst_shown = *f.d.get(f.page).unwrap().children.last().unwrap();
+        let footer_shown = child_named(&f.d, inst_shown, "footer");
+        let ftxt_shown = child_named(&f.d, footer_shown, "footer_text");
+        let before_t = f.d.get(ftxt_shown).unwrap().clone();
+        set_text(&mut f.d, ftxt_shown, "Custom footer");
+        let mut after_t = f.d.get(ftxt_shown).unwrap().clone();
+        after_t.component.overrides = record_override(&before_t, &after_t);
+        apply(&mut f.d, Command::Update { node: Box::new(after_t) });
+
+        // Instance 2 hides footer via the boolean property.
+        let c = create_instance(&mut f.d, card, f.page, Vec2::new(400.0, 200.0));
+        apply(&mut f.d, c);
+        let inst_hidden = *f.d.get(f.page).unwrap().children.last().unwrap();
+        let c = set_instance_prop(&mut f.d, inst_hidden, "Show footer", Some(PropValue::Bool(false)));
+        apply(&mut f.d, c);
+        let footer_hidden = child_named(&f.d, inst_hidden, "footer");
+        assert!(!f.d.get(footer_hidden).unwrap().visible);
+
+        assert!(can_migrate_region_to_slot(&f.d, footer));
+        let before_json = f.d.to_json().unwrap();
+
+        let migrate_cmd = migrate_region_to_slot(&mut f.d, footer).expect("boolean container region should migrate");
+        let inv = apply(&mut f.d, migrate_cmd);
+
+        let card_node = f.d.get(card).unwrap();
+        assert_eq!(card_node.component.props[0].kind, PropKind::Slot);
+        assert_eq!(card_node.component.props[0].default, PropValue::Slot(vec![fbg, ftxt]));
+
+        let footer_node = f.d.get(footer).unwrap();
+        assert!(footer_node.component.is_slot);
+        assert_eq!(footer_node.component.bindings.get(&OverrideField::SlotContent).map(String::as_str), Some("Show footer"));
+        assert!(!footer_node.component.bindings.contains_key(&OverrideField::Visible));
+        assert!(f.d.get(fbg).unwrap().component.is_slot_content);
+        assert!(f.d.get(ftxt).unwrap().component.is_slot_content);
+
+        // Shown instance keeps its children and "Custom footer" text override as slot content.
+        let fs_node = f.d.get(footer_shown).unwrap();
+        assert!(fs_node.component.is_slot);
+        assert!(fs_node.visible);
+        assert!(fs_node.component.overrides.contains(&OverrideField::SlotContent));
+        assert_eq!(fs_node.children.len(), 2);
+        assert!(fs_node.children.iter().all(|cid| f.d.get(*cid).unwrap().component.is_slot_content));
+        assert_eq!(text_of(&f.d, ftxt_shown), "Custom footer");
+        assert_eq!(f.d.get(inst_shown).unwrap().component.values.get("Show footer"), Some(&PropValue::Slot(fs_node.children.clone())));
+
+        // Hidden instance now has an empty slot container.
+        let fh_node = f.d.get(footer_hidden).unwrap();
+        assert!(fh_node.component.is_slot);
+        assert!(fh_node.visible);
+        assert!(fh_node.children.is_empty());
+        assert_eq!(f.d.get(inst_hidden).unwrap().component.values.get("Show footer"), Some(&PropValue::Slot(vec![])));
+
+        // Single-step undo restores everything, including the removed hidden children.
+        apply(&mut f.d, inv);
+        assert_eq!(f.d.to_json().unwrap(), before_json);
+    }
+
+    #[test]
+    fn migrate_region_to_slot_rejects_unsupported_shapes_as_noop_with_honest_message() {
+        let mut f = fx();
+        let i = inst(&mut f, (200.0, 0.0));
+        let id = f.d.alloc_id();
+        let unbound_frame = f.d.insert(f.comp, Node::frame(id, Rect::new(0.0, 0.0, 20.0, 20.0))).unwrap();
+        let before_json = f.d.to_json().unwrap();
+
+        for bad in [f.page, f.comp, f.bg, f.label, f.icon, i, child_named(&f.d, i, "bg"), unbound_frame, NodeId(999_999)] {
+            assert!(!can_migrate_region_to_slot(&f.d, bad));
+            let err = migrate_region_to_slot(&mut f.d, bad).expect_err("unsupported target should fail");
+            assert!(!err.is_empty());
+        }
+        assert_eq!(f.d.to_json().unwrap(), before_json, "unsupported targets must be a pure no-op");
     }
 }

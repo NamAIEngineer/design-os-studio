@@ -21,6 +21,9 @@ pub(super) fn sections(app: &mut App, ui: &mut Ui, pane: &mut Pane, id: NodeId) 
             instance_header(app, ui, pane, id);
             instance_props(app, ui, pane, id);
             overrides_row(app, ui, pane, id);
+            if enclosing_component(&app.doc, id).is_some() {
+                layer_bindings(app, ui, pane, id);
+            }
         }
         NodeKind::Component(_) | NodeKind::ComponentSet(_) => component_props(app, ui, pane, id),
         _ => {
@@ -381,8 +384,9 @@ fn layer_bindings(app: &mut App, ui: &mut Ui, pane: &mut Pane, id: NodeId) {
     if matches!(n.kind, NodeKind::Frame { .. }) {
         rows.push(("Slot", OverrideField::SlotContent, |k| matches!(k, PropKind::Slot)));
     }
+    let can_migrate = can_migrate_region_to_slot(&app.doc, id);
     let rows: Vec<_> = rows.into_iter().filter(|(_, f, accepts)| n.component.bindings.contains_key(f) || defs.iter().any(|d| accepts(&d.kind))).collect();
-    if rows.is_empty() {
+    if rows.is_empty() && !can_migrate {
         return;
     }
     title(ui, pane, "Component properties", None, false);
@@ -397,6 +401,17 @@ fn layer_bindings(app: &mut App, ui: &mut Ui, pane: &mut Pane, id: NodeId) {
         if let Some(i) = dropdown(ui, r, ("bind", label), &shown, &opts) {
             let prop = (i > 0).then(|| opts[i].clone());
             app.bind_prop(id, field, prop.as_deref());
+        }
+        row_end(pane);
+    }
+    if can_migrate {
+        let btn = pane.full(0.0);
+        widgets::record(ui, "migrate-to-slot", btn);
+        let resp = ui.interact(btn, ui.id().with("migrate-to-slot"), Sense::click());
+        ui.painter().rect_filled(btn, theme::cr(theme::RADIUS_MEDIUM), if resp.hovered() { theme::BG_TERTIARY } else { theme::BG_SECONDARY });
+        ui.painter().text(btn.center(), Align2::CENTER_CENTER, "Migrate to slot", theme::font_body(), theme::TEXT);
+        if resp.clicked() {
+            let _ = app.migrate_node_to_slot(id);
         }
         row_end(pane);
     }
