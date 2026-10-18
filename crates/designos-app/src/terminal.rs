@@ -966,6 +966,8 @@ impl TerminalState {
         let _ = atomic_write_session_file(&self.session_dir.join("SKILL.md"), skill_md.as_bytes());
         let _ = atomic_write_session_file(&self.session_dir.join(".claude/skills/designos-studio/SKILL.md"), skill_md.as_bytes());
         let _ = atomic_write_session_file(&self.session_dir.join(".agents/skills/designos-studio/SKILL.md"), skill_md.as_bytes());
+        // Codex, Grok and Antigravity read `AGENTS.md` from their cwd (the session dir).
+        let _ = atomic_write_session_file(&self.session_dir.join("AGENTS.md"), skill_md.as_bytes());
     }
 
     /// Terminates all child PTY processes owned by this file's terminal state.
@@ -2159,6 +2161,19 @@ fn session_workspace_dir(file_path: Option<&Path>) -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("."))
 }
 
+/// Working directory of a spawned tab, never `/` (an app opened from Finder has no useful cwd).
+/// Agent CLIs start in the per-file session dir because that is where they discover the project
+/// config, skills and `AGENTS.md` Studio provisions; a shell tab opens in the file's folder.
+fn resolve_pty_cwd(preset: AgentCliPreset, session_dir: Option<&Path>, workspace: PathBuf) -> PathBuf {
+    let is_agent = !matches!(preset, AgentCliPreset::Shell | AgentCliPreset::DesignOsHelp);
+    match session_dir {
+        Some(dir) if is_agent => dir.to_path_buf(),
+        _ if workspace.parent().is_some() => workspace,
+        Some(dir) => dir.to_path_buf(),
+        None => std::env::temp_dir(),
+    }
+}
+
 /// Auto-injects `TERM`, `COLORTERM`, `DESIGNOS_AGENT_RUNTIME` (the spawned `preset`), `DESIGNOS_BIN`, `DESIGNOS_MCP_BIN`, `DESIGNOS_LIVE_SPEC`,
 /// `DESIGNOS_SELECTION_JSON`, `DESIGNOS_FILE`, `DESIGNOS_WORKSPACE`, and prepends common CLI directories
 /// (`~/.cargo/bin`, `/opt/homebrew/bin`, `/usr/local/bin`, `~/.local/bin`, `~/.antigravity/bin`) to `PATH`.
@@ -2206,9 +2221,7 @@ pub fn configure_pty_env_with_session(cmd: &mut CommandBuilder, preset: AgentCli
         cmd.env("DESIGNOS_FILE", fp.as_os_str());
     }
     cmd.env("DESIGNOS_WORKSPACE", session_workspace_dir(file_path).as_os_str());
-    if let Ok(cwd) = std::env::current_dir() {
-        cmd.cwd(cwd);
-    }
+    cmd.cwd(resolve_pty_cwd(preset, session.map(|sess| sess.session_dir.as_path()), session_workspace_dir(file_path)));
 
     let home = std::env::var("HOME").unwrap_or_default();
     let mut extra_paths: Vec<String> = Vec::new();
@@ -5317,5 +5330,47 @@ Done!
             .expect("run stub mcp child");
         assert!(status.success());
         assert_eq!(std::fs::read_to_string(&patch).expect("doc-patch.jsonl written"), "{\"edit\":1}\n");
+    }
+
+    #[test]
+    fn pty_cwd_is_never_root_and_agent_clis_start_in_the_session_dir() {
+        let session = std::path::Path::new("/tmp/designos-sessions/cwd-case");
+        let files_folder = std::path::PathBuf::from("/Users/someone/designs");
+        // Agent CLIs discover project config, skills and AGENTS.md from their cwd: the session dir.
+        for preset in [AgentCliPreset::Claude, AgentCliPreset::Codex, AgentCliPreset::Antigravity, AgentCliPreset::Grok] {
+            assert_eq!(resolve_pty_cwd(preset, Some(session), files_folder.clone()), session, "{preset:?}");
+        }
+        // A shell tab opens in the file's folder.
+        assert_eq!(resolve_pty_cwd(AgentCliPreset::Shell, Some(session), files_folder.clone()), files_folder);
+        // A bundle launched from Finder has cwd `/`: never use it.
+        let root = std::path::PathBuf::from("/");
+        assert_eq!(resolve_pty_cwd(AgentCliPreset::Shell, Some(session), root.clone()), session);
+        assert_eq!(resolve_pty_cwd(AgentCliPreset::Claude, None, root.clone()), std::env::temp_dir());
+        assert_eq!(resolve_pty_cwd(AgentCliPreset::Shell, None, root), std::env::temp_dir());
+    }
+
+    #[test]
+    fn spawned_agent_env_sets_cwd_to_the_session_dir() {
+        let st = TerminalState::for_tab(735);
+        let env = st.session_env();
+        let mut agent = CommandBuilder::new("true");
+        configure_pty_env_with_session(&mut agent, AgentCliPreset::Claude, None, Some(&env));
+        assert_eq!(agent.get_cwd().map(|c| std::path::PathBuf::from(c)), Some(st.session_dir.clone()));
+        let file = std::env::temp_dir().join("cwd-case-file.designos");
+        let mut shell = CommandBuilder::new("true");
+        configure_pty_env_with_session(&mut shell, AgentCliPreset::Shell, Some(&file), Some(&env));
+        assert_eq!(shell.get_cwd().map(|c| std::path::PathBuf::from(c)), Some(std::env::temp_dir()));
+    }
+
+    #[test]
+    fn session_skill_and_instructions_are_laid_out_where_every_cli_discovers_them() {
+        let mut st = TerminalState::for_tab(736);
+        let mut doc = Document::new("Skill Layout File");
+        let page = doc.add_page("Page 1");
+        st.sync_live_file_context(&doc, page, &[], None);
+        for rel in [".claude/skills/designos-studio/SKILL.md", ".agents/skills/designos-studio/SKILL.md", "AGENTS.md"] {
+            let text = std::fs::read_to_string(st.session_dir.join(rel)).unwrap_or_else(|e| panic!("{rel}: {e}"));
+            assert!(text.contains("designos-studio") && text.contains("Skill Layout File"), "{rel}: {text}");
+        }
     }
 }
