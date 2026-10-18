@@ -1,8 +1,9 @@
 [
  {
+  "head": "ea8c8b0",
   "geo": {
    "top": 1326.296875,
-   "height": 2070,
+   "height": 1800,
    "vh": 900,
    "cls": "proof scrub",
    "pinned": true
@@ -10,85 +11,95 @@
  },
  {
   "p": -0.3,
-  "file": "/Users/jangtrinh/Products/design-os-studio/.claude/worktrees/agent-a0cd90219441f3062/plans/reports/site-v2-evidence/scene2/s2-p-030.png",
-  "pill": "1212 \u00d7 687",
-  "on": true,
-  "y": 975,
-  "docH": 7922
+  "file": "s2-p-030.png",
+  "y": 1056,
+  "docH": 11106,
+  "pill": "1212 × 686",
+  "d": "M114.5 468.5H1325.5V1153.5H114.5Z",
+  "on": true
  },
  {
-  "p": 0.0,
-  "file": "/Users/jangtrinh/Products/design-os-studio/.claude/worktrees/agent-a0cd90219441f3062/plans/reports/site-v2-evidence/scene2/s2-p+000.png",
-  "pill": "1212 \u00d7 687",
-  "on": false,
+  "p": 0,
+  "file": "s2-p+000.png",
   "y": 1326,
-  "docH": 7922
+  "docH": 11106,
+  "pill": "1212 × 686",
+  "d": "M114.5 468.5H1325.5V1153.5H114.5Z",
+  "on": false
  },
  {
   "p": 0.12,
-  "file": "/Users/jangtrinh/Products/design-os-studio/.claude/worktrees/agent-a0cd90219441f3062/plans/reports/site-v2-evidence/scene2/s2-p+012.png",
-  "pill": "380 \u00d7 472",
-  "on": true,
-  "y": 1467,
-  "docH": 7922
+  "file": "s2-p+012.png",
+  "y": 1434,
+  "docH": 11106,
+  "pill": "380 × 472",
+  "d": "M138.5 1901.5H517.5V2372.5H138.5Z",
+  "on": true
  },
  {
   "p": 0.25,
-  "file": "/Users/jangtrinh/Products/design-os-studio/.claude/worktrees/agent-a0cd90219441f3062/plans/reports/site-v2-evidence/scene2/s2-p+025.png",
-  "pill": "380 \u00d7 472",
-  "on": true,
-  "y": 1619,
-  "docH": 7922
+  "file": "s2-p+025.png",
+  "y": 1551,
+  "docH": 11106,
+  "pill": "380 × 472",
+  "d": "M138.5 1794.5H517.5V2265.5H138.5Z",
+  "on": true
  },
  {
   "p": 0.4,
-  "file": "/Users/jangtrinh/Products/design-os-studio/.claude/worktrees/agent-a0cd90219441f3062/plans/reports/site-v2-evidence/scene2/s2-p+040.png",
-  "pill": "380 \u00d7 472",
-  "on": true,
-  "y": 1794,
-  "docH": 7922
+  "file": "s2-p+040.png",
+  "y": 1686,
+  "docH": 11106,
+  "pill": "380 × 472",
+  "d": "M138.5 1932.5H517.5V2403.5H138.5Z",
+  "on": true
  },
  {
   "p": 0.55,
-  "file": "/Users/jangtrinh/Products/design-os-studio/.claude/worktrees/agent-a0cd90219441f3062/plans/reports/site-v2-evidence/scene2/s2-p+055.png",
-  "pill": "380 \u00d7 472",
-  "on": true,
-  "y": 1970,
-  "docH": 7922
+  "file": "s2-p+055.png",
+  "y": 1821,
+  "docH": 11106,
+  "pill": "380 × 472",
+  "d": "M530.5 2062.5H909.5V2533.5H530.5Z",
+  "on": true
  },
  {
   "p": 0.7,
-  "file": "/Users/jangtrinh/Products/design-os-studio/.claude/worktrees/agent-a0cd90219441f3062/plans/reports/site-v2-evidence/scene2/s2-p+070.png",
-  "pill": "380 \u00d7 472",
-  "on": true,
-  "y": 2145,
-  "docH": 7922
+  "file": "s2-p+070.png",
+  "y": 1956,
+  "docH": 11106,
+  "pill": "380 × 472",
+  "d": "M921.5 2204.5H1300.5V2675.5H921.5Z",
+  "on": true
  },
  {
   "p": 0.85,
-  "file": "/Users/jangtrinh/Products/design-os-studio/.claude/worktrees/agent-a0cd90219441f3062/plans/reports/site-v2-evidence/scene2/s2-p+085.png",
-  "pill": "380 \u00d7 472",
-  "on": true,
-  "y": 2321,
-  "docH": 7922
+  "file": "s2-p+085.png",
+  "y": 2091,
+  "docH": 11106,
+  "pill": "380 × 472",
+  "d": "M922.5 2307.5H1301.5V2778.5H922.5Z",
+  "on": true
  },
  {
-  "p": 1.0,
-  "file": "/Users/jangtrinh/Products/design-os-studio/.claude/worktrees/agent-a0cd90219441f3062/plans/reports/site-v2-evidence/scene2/s2-p+100.png",
-  "pill": "380 \u00d7 472",
-  "on": true,
-  "y": 2496,
-  "docH": 7922
+  "p": 1,
+  "file": "s2-p+100.png",
+  "y": 2226,
+  "docH": 11106,
+  "pill": "380 × 472",
+  "d": "M922.5 2468.5H1301.5V2939.5H922.5Z",
+  "on": true
  },
  {
   "p": 1.2,
-  "file": "/Users/jangtrinh/Products/design-os-studio/.claude/worktrees/agent-a0cd90219441f3062/plans/reports/site-v2-evidence/scene2/s2-p+120.png",
-  "pill": "380 \u00d7 472",
-  "on": true,
-  "y": 2730,
-  "docH": 7922
+  "file": "s2-p+120.png",
+  "y": 2406,
+  "docH": 11106,
+  "pill": "380 × 472",
+  "d": "M922.5 2468.5H1301.5V2939.5H922.5Z",
+  "on": true
  },
  {
-  "console": []
+  "errors": []
  }
 ]
