@@ -107,7 +107,7 @@ pub fn tab_next(app: &mut App) -> bool {
         s.color = color;
         s.author = Some(author_name());
     }
-    let index = crate::ops::front_index(&app.doc, parent);
+    let index = app.doc.get(parent).map(|p| p.children.len()).unwrap_or(0);
     let mut tx = Tx::new();
     if tx.cmd(&mut app.doc, Command::Insert { parent, index, nodes: vec![next] }).is_err() {
         return false;

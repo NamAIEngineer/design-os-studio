@@ -408,7 +408,7 @@ pub fn create_instance(doc: &mut Document, component: NodeId, parent: NodeId, at
     root.component.source = Some(component);
     root.component.bindings.clear();
     root.component.values.clear();
-    let index = doc.get(parent).map_or(0, Node::front_insert_index);
+    let index = doc.get(parent).map(|p| p.children.len()).unwrap_or(0);
     Command::Insert { parent, index, nodes }
 }
 
@@ -1366,30 +1366,6 @@ mod tests {
         match c {
             Command::Batch(v) => assert!(v.is_empty(), "{v:?}"),
             _ => panic!(),
-        }
-    }
-
-    #[test]
-    fn create_instance_lands_in_front_of_the_existing_children() {
-        for reverse_z in [true, false] {
-            let mut f = fx();
-            let hid = f.d.alloc_id();
-            let mut host = Node::frame(hid, Rect::new(300.0, 0.0, 200.0, 200.0));
-            if let NodeKind::Frame(fp) = &mut host.kind {
-                fp.auto_layout = Some(AutoLayout { reverse_z, ..Default::default() });
-            }
-            let host = f.d.insert(f.page, host).unwrap();
-            let rid = f.d.alloc_id();
-            let existing = f.d.insert(host, Node::rectangle(rid, Rect::new(0.0, 0.0, 50.0, 50.0))).unwrap();
-            let c = create_instance(&mut f.d, f.comp, host, Vec2::new(10.0, 10.0));
-            apply(&mut f.d, c);
-            let h = f.d.get(host).unwrap();
-            let front = *h.children_front_to_back().next().unwrap();
-            assert_ne!(front, existing, "reverse_z={reverse_z}: the instance paints in front of the existing child");
-            assert!(matches!(f.d.get(front).unwrap().kind, NodeKind::Instance { .. }));
-            if reverse_z {
-                assert_eq!(h.children[0], front, "front-first storage puts the instance at index 0");
-            }
         }
     }
 

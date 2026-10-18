@@ -931,7 +931,7 @@ fn start_draw(app: &mut App, tool: Tool, page: DV) {
     let node = create::new_shape(app, tool);
     let id = node.id;
     let mut tx = Tx::new();
-    let index = crate::ops::front_index(&app.doc, parent);
+    let index = app.doc.get(parent).map(|p| p.children.len()).unwrap_or(0);
     if tx.cmd(&mut app.doc, Command::Insert { parent, index, nodes: vec![node] }).is_err() {
         return;
     }
@@ -1161,7 +1161,7 @@ fn start_move(app: &mut App, clicked: NodeId, start: DV, alt: bool) -> Option<Mo
         let copies = clip.map(|c| crate::clipboard::instantiate(&mut app.doc, &c)).unwrap_or_default();
         for (id, nodes) in ids.iter().zip(copies) {
             let Some(parent) = app.doc.get(*id).and_then(|n| n.parent) else { continue };
-            let index = crate::ops::index_above(&app.doc, parent, *id).unwrap_or_else(|| crate::ops::front_index(&app.doc, parent));
+            let index = app.doc.get(parent).and_then(|p| p.children.iter().position(|c| c == id)).map(|i| i + 1).unwrap_or(usize::MAX);
             let root = nodes.first().map(|n| n.id);
             if tx.cmd(&mut app.doc, Command::Insert { parent, index, nodes }).is_ok() {
                 dup.extend(root);
@@ -1593,7 +1593,7 @@ fn reparent_after_move(app: &mut App, m: &mut MoveState, cur: DV) {
         }
         let Some(inv) = app.doc.world_transform(target).invert() else { continue };
         let world = app.doc.world_transform(id);
-        let index = crate::ops::front_index(&app.doc, target);
+        let index = app.doc.get(target).map(|p| p.children.len()).unwrap_or(0);
         if m.tx.cmd(&mut app.doc, Command::Reparent { id, parent: target, index }).is_ok() {
             if let Some(n) = m.tx.ed.node(&mut app.doc, id) {
                 n.transform = inv * world;
@@ -1976,7 +1976,7 @@ pub fn place_video_bytes(app: &mut App, page: DV, name: &str, bytes: Vec<u8>) ->
     }];
     node.prototype.videos = vec![designos_doc::VideoFill { paint: 0, source: video_key, autoplay: true, looping: false, muted: true }];
     let mut tx = Tx::new();
-    let index = crate::ops::front_index(&app.doc, parent);
+    let index = app.doc.get(parent).map(|p| p.children.len()).unwrap_or(0);
     tx.cmd(&mut app.doc, Command::Insert { parent, index, nodes: vec![node] }).ok()?;
     app.run_tx(tx);
     app.selection = vec![id];
@@ -2010,7 +2010,7 @@ pub fn place_image_bytes(app: &mut App, page: DV, name: &str, bytes: Vec<u8>) ->
         blend: designos_doc::BlendMode::Normal,
     }];
     let mut tx = Tx::new();
-    let index = crate::ops::front_index(&app.doc, parent);
+    let index = app.doc.get(parent).map(|p| p.children.len()).unwrap_or(0);
     tx.cmd(&mut app.doc, Command::Insert { parent, index, nodes: vec![n] }).ok()?;
     app.run_tx(tx);
     app.selection = vec![id];
@@ -2031,7 +2031,7 @@ fn text_press(app: &mut App, page: DV) {
     let Some((node, _)) = create::new_text(app, parent, page) else { return };
     let id = node.id;
     let mut tx = Tx::new();
-    let index = crate::ops::front_index(&app.doc, parent);
+    let index = app.doc.get(parent).map(|p| p.children.len()).unwrap_or(0);
     if tx.cmd(&mut app.doc, Command::Insert { parent, index, nodes: vec![node] }).is_err() {
         return;
     }
@@ -2619,6 +2619,3 @@ mod tests {
         assert_eq!(app.doc.get(child).unwrap().size, v2(100.0, 100.0), "Cmd+Resize on Frame must leave Scale-constrained child untouched");
     }
 }
-
-#[cfg(test)]
-mod reverse_z_insert_tests;

@@ -86,7 +86,8 @@ impl App {
             return;
         };
         let Some(template) = self.doc.get(ids[flat.style_from]).cloned() else { return };
-        let index = crate::ops::index_above_front_most(&self.doc, parent, &ids).unwrap_or_else(|| crate::ops::front_index(&self.doc, parent));
+        let siblings = self.doc.get(parent).map(|p| p.children.clone()).unwrap_or_default();
+        let index = ids.iter().filter_map(|i| siblings.iter().position(|c| c == i)).max().map(|i| i + 1).unwrap_or(siblings.len());
         let id = self.doc.alloc_id();
         // paths are in the parent's space already, so the template contributes no transform
         let mut base = template.clone();
@@ -141,7 +142,7 @@ impl App {
             let mut node = vector_node(vid, &outline, &template);
             node.name = if keeps_fill { self.unique_name(&format!("{} stroke", n.name)) } else { n.name.clone() };
             node.component = ComponentLink::default();
-            let at = if keeps_fill { self.doc.get(parent).map_or(index + 1, |p| p.insert_index_above(index)) } else { index };
+            let at = if keeps_fill { index + 1 } else { index };
             if tx.cmd(&mut self.doc, Command::Insert { parent, index: at, nodes: vec![node] }).is_err() {
                 continue;
             }
@@ -295,7 +296,7 @@ impl App {
 
     /// Wraps the selected layers into a boolean group (Union, Subtract, Intersect, Exclude).
     pub fn boolean_selection(&mut self, op: BooleanOp) {
-        let ids: Vec<NodeId> = self.bottom_to_top(self.same_parent_tops().into_iter().filter(|i| has_geometry(self, *i)).collect());
+        let ids: Vec<NodeId> = self.same_parent_tops().into_iter().filter(|i| has_geometry(self, *i)).collect();
         if ids.len() < 2 {
             self.show_toast("Select two or more layers to combine", false);
             return;

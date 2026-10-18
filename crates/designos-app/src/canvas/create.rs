@@ -284,7 +284,7 @@ pub fn commit_pen(app: &mut App, tx: &mut Tx, pts: &[PenPoint], closed: bool) ->
     n.stroke.paints = vec![Paint::solid(Color::BLACK)];
     n.stroke.weight = 1.0;
     n.stroke.align = StrokeAlign::Center;
-    let index = crate::ops::front_index(&app.doc, parent);
+    let index = app.doc.get(parent).map(|p| p.children.len()).unwrap_or(0);
     tx.cmd(&mut app.doc, Command::Insert { parent, index, nodes: vec![n] }).ok()?;
     Some(id)
 }

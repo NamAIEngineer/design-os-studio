@@ -22,28 +22,6 @@ pub enum Align {
     Bottom,
 }
 
-/// `Command::Insert` / `Command::Reparent` index that puts a node in front of every child of
-/// `parent` (the end of the list, or the start in a "First on top" frame).
-pub(crate) fn front_index(doc: &Document, parent: NodeId) -> usize {
-    doc.get(parent).map_or(0, Node::front_insert_index)
-}
-
-/// Index that puts a node directly in front of `child`, a child of `parent`. `None` when `child`
-/// is not stored under `parent`.
-pub(crate) fn index_above(doc: &Document, parent: NodeId, child: NodeId) -> Option<usize> {
-    let p = doc.get(parent)?;
-    p.children.iter().position(|c| *c == child).map(|pos| p.insert_index_above(pos))
-}
-
-/// Index that puts a node directly in front of the front-most of `ids` (children of `parent`).
-/// `None` when none of `ids` is stored under `parent`.
-pub(crate) fn index_above_front_most(doc: &Document, parent: NodeId, ids: &[NodeId]) -> Option<usize> {
-    let p = doc.get(parent)?;
-    let stored = ids.iter().filter_map(|id| p.children.iter().position(|c| c == id));
-    let front = if p.paints_children_reversed() { stored.min() } else { stored.max() };
-    front.map(|pos| p.insert_index_above(pos))
-}
-
 /// Sets size + transform of a node, applying constraints/auto-layout to its
 /// content and fixing ancestors. Shared by canvas resizing and the inspector.
 pub fn apply_resize(doc: &mut Document, ed: &mut Edit, id: NodeId, size: Vec2, transform: Affine, relayout: bool) {
@@ -437,7 +415,7 @@ impl App {
         let copies = clipboard::capture(&self.doc, &tops).map(|c| clipboard::instantiate(&mut self.doc, &c)).unwrap_or_default();
         for (id, mut nodes) in tops.into_iter().zip(copies) {
             let Some(parent) = self.doc.get(id).and_then(|n| n.parent) else { continue };
-            let index = index_above(&self.doc, parent, id).unwrap_or_else(|| front_index(&self.doc, parent));
+            let index = self.doc.get(parent).and_then(|p| p.children.iter().position(|c| *c == id)).map(|i| i + 1).unwrap_or(usize::MAX);
             let in_al = self.doc.get(parent).and_then(|p| p.kind.frame_props()).map(|f| f.auto_layout.is_some()).unwrap_or(false);
             if let Some(root) = nodes.first_mut() {
                 if !in_al {
@@ -503,8 +481,7 @@ impl App {
                 root.transform.ty += off;
                 new_sel.push(root.id);
             }
-            // each copy goes in front of the ones pasted before it
-            let index = front_index(&self.doc, parent);
+            let index = self.doc.get(parent).map(|p| p.children.len()).unwrap_or(0);
             let _ = tx.cmd(&mut self.doc, Command::Insert { parent, index, nodes });
         }
         layout::relayout_around(&mut self.doc, &mut tx.ed, parent);
@@ -518,29 +495,35 @@ impl App {
     pub fn paste_over_selection(&mut self) {
         let Some(clip) = self.clip.clone() else { return };
         let parent = self.container_for_insert();
-        let front = front_index(&self.doc, parent);
-        let (target_local, base_idx) = match self.selection.first().and_then(|&sel_id| self.doc.get(sel_id).map(|n| (sel_id, n))) {
-            Some((sel_id, n)) if sel_id != parent => (v2(n.transform.tx, n.transform.ty), index_above(&self.doc, parent, sel_id).unwrap_or(front)),
-            _ => (v2(0.0, 0.0), front),
+        let (target_local, base_idx) = if let Some(&sel_id) = self.selection.first() {
+            if sel_id == parent {
+                (v2(0.0, 0.0), self.doc.get(parent).map(|p| p.children.len()).unwrap_or(0))
+            } else if let Some(n) = self.doc.get(sel_id) {
+                let idx = self
+                    .doc
+                    .get(parent)
+                    .and_then(|p| p.children.iter().position(|&c| c == sel_id).map(|i| i + 1))
+                    .unwrap_or_else(|| self.doc.get(parent).map(|p| p.children.len()).unwrap_or(0));
+                (v2(n.transform.tx, n.transform.ty), idx)
+            } else {
+                (v2(0.0, 0.0), self.doc.get(parent).map(|p| p.children.len()).unwrap_or(0))
+            }
+        } else {
+            (v2(0.0, 0.0), self.doc.get(parent).map(|p| p.children.len()).unwrap_or(0))
         };
         let lists = clipboard::instantiate(&mut self.doc, &clip);
         let first_orig = lists.first().and_then(|l| l.first()).map(|r| v2(r.transform.tx, r.transform.ty)).unwrap_or(v2(0.0, 0.0));
         let delta = v2(target_local.x - first_orig.x, target_local.y - first_orig.y);
         let mut tx = Tx::new();
         let mut new_sel = Vec::new();
-        let mut prev: Option<NodeId> = None;
-        for mut nodes in lists {
+        for (k, mut nodes) in lists.into_iter().enumerate() {
             if let Some(root) = nodes.first_mut() {
                 root.transform.tx += delta.x;
                 root.transform.ty += delta.y;
                 new_sel.push(root.id);
             }
-            let root = nodes.first().map(|n| n.id);
-            // the first copy goes at the base slot, each next one directly in front of the previous
-            let index = prev.and_then(|p| index_above(&self.doc, parent, p)).unwrap_or(base_idx);
-            if tx.cmd(&mut self.doc, Command::Insert { parent, index, nodes }).is_ok() {
-                prev = root;
-            }
+            let index = (base_idx + k).min(self.doc.get(parent).map(|p| p.children.len()).unwrap_or(0));
+            let _ = tx.cmd(&mut self.doc, Command::Insert { parent, index, nodes });
         }
         layout::relayout_around(&mut self.doc, &mut tx.ed, parent);
         self.run_tx(tx);
@@ -573,19 +556,14 @@ impl App {
             let lists = clipboard::instantiate(&mut self.doc, &clip);
             let first_orig = lists.first().and_then(|l| l.first()).map(|r| v2(r.transform.tx, r.transform.ty)).unwrap_or(v2(0.0, 0.0));
             let delta = v2(tx0 - first_orig.x, ty0 - first_orig.y);
-            let mut prev: Option<NodeId> = None;
-            for mut nodes in lists {
+            for (k, mut nodes) in lists.into_iter().enumerate() {
                 if let Some(root) = nodes.first_mut() {
                     root.transform.tx += delta.x;
                     root.transform.ty += delta.y;
                     new_sel.push(root.id);
                 }
-                let root = nodes.first().map(|n| n.id);
-                // the first copy takes the removed layer's slot, each next one goes directly in front of the previous
-                let ins_idx = prev.and_then(|p| index_above(&self.doc, parent, p)).unwrap_or(index);
-                if tx.cmd(&mut self.doc, Command::Insert { parent, index: ins_idx, nodes }).is_ok() {
-                    prev = root;
-                }
+                let ins_idx = (index + k).min(self.doc.get(parent).map(|p| p.children.len()).unwrap_or(0));
+                let _ = tx.cmd(&mut self.doc, Command::Insert { parent, index: ins_idx, nodes });
             }
             if !affected_parents.contains(&parent) {
                 affected_parents.push(parent);
@@ -785,8 +763,8 @@ impl App {
         let frame = matches!(kind, NodeKind::Frame(_));
         let first = *ids.first()?;
         let parent = self.doc.get(first)?.parent?;
-        // the container takes the place of the front-most wrapped layer
-        let group_index = index_above_front_most(&self.doc, parent, ids)?;
+        let siblings = &self.doc.get(parent)?.children;
+        let max_index = ids.iter().filter_map(|i| siblings.iter().position(|c| c == i)).max()?;
         let pinv = self.doc.world_transform(parent).invert()?;
         let mut pts = Vec::new();
         let mut rel: Vec<(NodeId, Affine)> = Vec::new();
@@ -806,7 +784,7 @@ impl App {
         g.name = self.unique_name(name);
         g.transform = Affine::translate(bb.x, bb.y);
         g.size = v2(bb.w, bb.h);
-        tx.cmd(&mut self.doc, Command::Insert { parent, index: group_index, nodes: vec![g] }).ok()?;
+        tx.cmd(&mut self.doc, Command::Insert { parent, index: max_index + 1, nodes: vec![g] }).ok()?;
         for (i, (id, in_parent)) in rel.into_iter().enumerate() {
             tx.cmd(&mut self.doc, Command::Reparent { id, parent: gid, index: i }).ok()?;
             if let Some(n) = tx.ed.node(&mut self.doc, id) {
@@ -828,19 +806,8 @@ impl App {
         tops
     }
 
-    /// `ids` (siblings sorted by stored index) bottom to top, the order a new container needs for
-    /// its children: a "First on top" parent stores its children front first.
-    pub(crate) fn bottom_to_top(&self, mut ids: Vec<NodeId>) -> Vec<NodeId> {
-        let reversed =
-            ids.first().and_then(|id| self.doc.get(*id)).and_then(|n| n.parent).and_then(|p| self.doc.get(p)).is_some_and(Node::paints_children_reversed);
-        if reversed {
-            ids.reverse();
-        }
-        ids
-    }
-
     pub fn group_selection(&mut self, frame: bool) {
-        let ids = self.bottom_to_top(self.same_parent_tops());
+        let ids = self.same_parent_tops();
         if ids.is_empty() {
             return;
         }
@@ -864,12 +831,7 @@ impl App {
                 continue;
             }
             let mut index = self.doc.get(parent).and_then(|p| p.children.iter().position(|c| *c == id)).unwrap_or(0);
-            // released in the order that keeps their stacking: front first into a "First on top" parent
-            let mut released: Vec<NodeId> = g.paint_children().into_owned();
-            if self.doc.get(parent).is_some_and(Node::paints_children_reversed) {
-                released.reverse();
-            }
-            for c in released {
+            for c in g.children.clone() {
                 let t = self.doc.get(c).map(|n| n.transform).unwrap_or_default();
                 if tx.cmd(&mut self.doc, Command::Reparent { id: c, parent, index }).is_ok() {
                     if let Some(n) = tx.ed.node(&mut self.doc, c) {
@@ -2364,6 +2326,3 @@ mod tests {
         assert_eq!(n.size, v2(30.0, 30.0), "the typed height sticks instead of snapping back to the stretched 100");
     }
 }
-
-#[cfg(test)]
-mod reverse_z_insert_tests;
