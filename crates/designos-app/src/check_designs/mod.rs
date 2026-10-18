@@ -110,11 +110,16 @@ impl Report {
 
 /// Scans `scope` and lists every finding. Hidden layers and instance contents are skipped.
 pub fn audit(doc: &Document, scope: &Scope) -> Report {
+    audit_with_libraries(doc, scope, &[])
+}
+
+/// Scans `scope` and includes variables and styles from enabled `libraries` snapshots.
+pub fn audit_with_libraries(doc: &Document, scope: &Scope, libraries: &[&designos_doc::LibrarySnapshot]) -> Report {
     let roots: Vec<NodeId> = match scope {
         Scope::Page(page) => doc.get(*page).map(|p| p.children.clone()).unwrap_or_default(),
         Scope::Layers(ids) => ids.clone(),
     };
-    let index = hardcoded::Index::new(doc);
+    let index = hardcoded::Index::with_libraries(doc, libraries);
     let components = detached::Components::new(doc);
     let bounds = contrast::SubtreeBounds::default();
     let mut report = Report::default();

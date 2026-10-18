@@ -1,7 +1,8 @@
 //! Panel state: what is being checked and the cached report.
 
-use super::{audit, Report, Scope};
+use super::{audit_with_libraries, Report, Scope};
 use crate::app::App;
+use designos_doc::{LibraryRef, LibrarySnapshot};
 
 /// Check designs panel state. The scope is fixed when the panel opens, so selecting a finding's
 /// layer does not change what is being listed.
@@ -12,8 +13,8 @@ pub struct CheckDesignsState {
     /// "Selection (3 layers)" or "Page 1", shown under the title.
     pub scope_label: String,
     pub report: Report,
-    /// `(document revision, scope)` the cached `report` was computed for.
-    audited: Option<(u64, Scope)>,
+    /// `(document revision, scope, enabled libraries)` the cached `report` was computed for.
+    audited: Option<(u64, Scope, Vec<LibraryRef>)>,
 }
 
 impl CheckDesignsState {
@@ -49,11 +50,13 @@ impl App {
             self.check_designs.invalidate();
         }
         let Some(scope) = self.check_designs.scope.clone() else { return };
-        let key = (self.canvas.tiles.rev(), scope);
+        let key = (self.canvas.tiles.rev(), scope, self.doc.library.enabled.clone());
         if self.check_designs.audited.as_ref() == Some(&key) || (interacting && self.check_designs.audited.is_some()) {
             return;
         }
-        self.check_designs.report = audit(&self.doc, &key.1);
+        let snaps = self.enabled_library_snapshots();
+        let snap_refs: Vec<&LibrarySnapshot> = snaps.iter().map(|s| s.as_ref()).collect();
+        self.check_designs.report = audit_with_libraries(&self.doc, &key.1, &snap_refs);
         self.check_designs.audited = Some(key);
     }
 }

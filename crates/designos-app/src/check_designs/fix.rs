@@ -54,6 +54,9 @@ impl App {
         let id = finding.node;
         match fix {
             Fix::BindVariable { key, variable } => {
+                if !self.doc.variables.contains_key(variable) && !self.import_library_variable_for_fix(tx, id, key, variable) {
+                    return false;
+                }
                 let keys = hardcoded::keys_to_bind(&self.doc, id, key, variable);
                 if keys.is_empty() {
                     return false;
@@ -67,6 +70,9 @@ impl App {
                 true
             }
             Fix::ApplyStyle { style } => {
+                if !self.doc.styles.contains_key(style) && !self.import_library_style_for_fix(tx, id, style) {
+                    return false;
+                }
                 if !hardcoded::style_is_current(&self.doc, id, style) {
                     return false;
                 }
@@ -83,6 +89,42 @@ impl App {
             }
             Fix::Reconnect { component } => self.reconnect_detached(tx, id, *component),
         }
+    }
+
+    fn import_library_variable_for_fix(&mut self, tx: &mut Tx, id: NodeId, key: &str, variable: &str) -> bool {
+        let enabled = self.doc.library.enabled.clone();
+        for r in enabled {
+            let prefix = format!("{}/", r.id);
+            let Some(raw) = variable.strip_prefix(&prefix) else { continue };
+            let Some(snap) = self.latest_snapshot(&r.id).or_else(|| self.snapshot_of(&r.id, r.version)) else { return false };
+            if !hardcoded::library_bind_is_current(&self.doc, &snap, id, key, raw) {
+                return false;
+            }
+            let imported = self.import_asset_in(tx, &r.id, &format!("var:{raw}")).is_some();
+            if imported {
+                self.libs.invalidate();
+            }
+            return imported;
+        }
+        false
+    }
+
+    fn import_library_style_for_fix(&mut self, tx: &mut Tx, id: NodeId, style: &str) -> bool {
+        let enabled = self.doc.library.enabled.clone();
+        for r in enabled {
+            let prefix = format!("{}/", r.id);
+            let Some(raw) = style.strip_prefix(&prefix) else { continue };
+            let Some(snap) = self.latest_snapshot(&r.id).or_else(|| self.snapshot_of(&r.id, r.version)) else { return false };
+            if !hardcoded::library_style_is_current(&self.doc, &snap, id, raw) {
+                return false;
+            }
+            let imported = self.import_asset_in(tx, &r.id, &format!("style:{raw}")).is_some();
+            if imported {
+                self.libs.invalidate();
+            }
+            return imported;
+        }
+        false
     }
 
     /// Replaces the detached frame `id` with an instance of `component` in the same slot, keeping

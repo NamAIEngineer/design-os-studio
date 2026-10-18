@@ -607,6 +607,7 @@ fn resize(f: &mut Fx, id: NodeId, w: f32, h: f32) {
 
 mod backdrop;
 mod fix_all;
+mod libraries;
 mod not_painted_as_computed;
 mod numbers;
 mod outside_the_box;
