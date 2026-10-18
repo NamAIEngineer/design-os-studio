@@ -119,6 +119,9 @@ pub struct Session {
     pub bridge: LiveSessionBridge,
     /// Undo history was dropped because the editor's canvas replaced the document.
     history_dropped: bool,
+    /// Optional transcript JSONL path from `DESIGNOS_MCP_TRANSCRIPT` (E15-25).
+    pub transcript_path: Option<PathBuf>,
+    transcript_seq: u64,
 }
 
 #[derive(Deserialize)]
@@ -165,13 +168,25 @@ struct EditSnapshot {
     redo_steps: Vec<designos_doc::Command>,
 }
 
+fn transcript_path_from_env() -> Option<PathBuf> {
+    std::env::var_os("DESIGNOS_MCP_TRANSCRIPT").map(PathBuf::from).filter(|p| !p.as_os_str().is_empty())
+}
+
 impl Session {
     pub fn new(root: &Path) -> Result<Self, String> {
         let root = root.canonicalize().map_err(|e| format!("Cannot open workspace: {e}"))?;
         if !root.is_dir() {
             return Err("Workspace must be a directory".into());
         }
-        let mut s = Self { engine: Engine::default(), root, dirty: false, history_dropped: false, bridge: LiveSessionBridge::from_env() };
+        let mut s = Self {
+            engine: Engine::default(),
+            root,
+            dirty: false,
+            history_dropped: false,
+            bridge: LiveSessionBridge::from_env(),
+            transcript_path: transcript_path_from_env(),
+            transcript_seq: 0,
+        };
         s.record_live_ops();
         s.sync_from_live_canvas_if_newer();
         Ok(s)
@@ -183,7 +198,15 @@ impl Session {
         if !root.is_dir() {
             return Err("Workspace must be a directory".into());
         }
-        let mut s = Self { engine: Engine::default(), root, dirty: false, history_dropped: false, bridge: LiveSessionBridge::for_session_dir(session_dir) };
+        let mut s = Self {
+            engine: Engine::default(),
+            root,
+            dirty: false,
+            history_dropped: false,
+            bridge: LiveSessionBridge::for_session_dir(session_dir),
+            transcript_path: transcript_path_from_env(),
+            transcript_seq: 0,
+        };
         s.record_live_ops();
         s.sync_from_live_canvas_if_newer();
         Ok(s)
@@ -384,6 +407,44 @@ impl Session {
     }
 
     pub fn call(&mut self, name: &str, args: Value) -> Result<Value, String> {
+        let t0 = std::time::Instant::now();
+        let args_copy = args.clone();
+        let res = self.call_inner(name, args);
+        let t_ms = t0.elapsed().as_millis() as u64;
+        if let Some(t_path) = self.transcript_path.clone() {
+            self.transcript_seq += 1;
+            let seq = self.transcript_seq;
+            let undo_depth = self.engine.history.undo_depth();
+            let entry = match &res {
+                Ok(val) => json!({
+                    "seq": seq,
+                    "t_ms": t_ms,
+                    "tool": name,
+                    "args": args_copy,
+                    "result": val,
+                    "is_error": false,
+                    "undo_depth": undo_depth,
+                }),
+                Err(err) => json!({
+                    "seq": seq,
+                    "t_ms": t_ms,
+                    "tool": name,
+                    "args": args_copy,
+                    "error": err,
+                    "is_error": true,
+                    "undo_depth": undo_depth,
+                }),
+            };
+            let mut line = serde_json::to_string(&entry).map_err(|e| format!("Transcript serialization failed: {e}"))?;
+            line.push('\n');
+            if let Err(log_err) = append_log_line(&t_path, &line) {
+                return Err(format!("Transcript logging failed ({}): {log_err}", t_path.display()));
+            }
+        }
+        res
+    }
+
+    fn call_inner(&mut self, name: &str, args: Value) -> Result<Value, String> {
         self.sync_from_live_canvas_if_newer();
         match name {
             "designos_open_file" => {
@@ -891,5 +952,31 @@ mod tests {
 
         let _ = fs::remove_dir_all(&ws_dir);
         let _ = fs::remove_dir_all(&sess_dir);
+    }
+
+    #[test]
+    fn transcript_logging_failure_fails_call() {
+        let nonce = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+        let ws_dir = std::env::temp_dir().join(format!("designos-mcp-ws-transcript-{}-{nonce}", std::process::id()));
+        fs::create_dir_all(&ws_dir).unwrap();
+
+        let mut session = Session::new(&ws_dir).unwrap();
+        let valid_transcript = ws_dir.join("transcript.jsonl");
+        session.transcript_path = Some(valid_transcript.clone());
+        session.call("designos_get_document", json!({})).expect("call with writable transcript succeeds");
+        let lines: Vec<Value> = fs::read_to_string(&valid_transcript).unwrap().lines().map(|l| serde_json::from_str(l).unwrap()).collect();
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0]["seq"], 1);
+        assert_eq!(lines[0]["tool"], "designos_get_document");
+        assert_eq!(lines[0]["is_error"], false);
+
+        // Point transcript_path inside a regular file (impossible parent dir) so open/append fails.
+        let blocker = ws_dir.join("blocker_file");
+        fs::write(&blocker, "not a directory").unwrap();
+        session.transcript_path = Some(blocker.join("transcript.jsonl"));
+        let err = session.call("designos_get_document", json!({})).expect_err("transcript logging failure must fail the call");
+        assert!(err.contains("Transcript logging failed"), "{err}");
+
+        let _ = fs::remove_dir_all(&ws_dir);
     }
 }

@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/designos-doc",
+    "crates/designos-eval",
     "crates/designos-render",
     "crates/designos-fonts",
     "crates/designos-fig",
@@ -22,6 +23,7 @@ repository = "https://github.com/jangtrinh/design-os-studio"
 
 [workspace.dependencies]
 designos-doc = { path = "crates/designos-doc" }
+designos-eval = { path = "crates/designos-eval" }
 designos-render = { path = "crates/designos-render" }
 designos-fig = { path = "crates/designos-fig" }
 designos-library = { path = "crates/designos-library" }
