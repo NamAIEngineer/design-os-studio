@@ -180,7 +180,7 @@ pub fn compute(al: &AutoLayout, frame: Vec2, own: SizeLimits, kids: &[ChildIn]) 
     // Cross extent of each line. A plain child needs its outer extent (size plus margins). A child that stretches the
     // counter axis (Fill or `align_self` stretch) stores the stretched size, so counting it would stop the line from ever
     // shrinking again: with cross margins it only holds the line open by its minimum size plus margins, wrapped or not.
-    // Without margins it counts for nothing while a plain child sizes the line, and keeps its natural extent as the line
+    // Without margins it counts for nothing while a plain child sizes the line, and keeps its natural margin box as the line
     // size when none does (wrapped or not), so a hugging frame whose children all stretch does not fold to its padding.
     // Its cross minimum floors the line either way, so a stretched child never overflows the frame.
     let mut line_cross: Vec<f32> = lines
@@ -194,7 +194,7 @@ pub fn compute(al: &AutoLayout, frame: Vec2, own: SizeLimits, kids: &[ChildIn]) 
                 } else {
                     floor = floor.max(ax.clamp_cross(&k.limits, 0.0) + margins);
                     if margins <= 0.0 {
-                        natural = natural.max(nat_cross(k));
+                        natural = natural.max(outer_cross(k));
                     }
                 }
             }
@@ -507,5 +507,31 @@ mod tests {
         d.relayout_subtree(row);
         assert_eq!(d.get(row).unwrap().size.y, 80.0);
         assert_eq!((d.get(b).unwrap().transform.ty, d.get(b).unwrap().size.y), (25.0, 30.0));
+    }
+
+    #[test]
+    fn counter_hugging_wrapped_row_measures_a_lone_cross_fill_child_by_its_margin_box_across_relayouts() {
+        // One 20x40 child that fills the height, alone in its line. The line is the child's margin box (40 + top margin), and
+        // the child stretches back to 40, so a negative margin must not feed the stretched size back into the measure.
+        for (top, line) in [(0.0f32, 40.0f32), (-10.0, 30.0)] {
+            let mut d = Document::new("t");
+            let page = d.add_page("p");
+            let row_id = d.alloc_id();
+            let mut row = Node::frame(row_id, Rect::new(0.0, 0.0, 100.0, 1.0));
+            row.kind = NodeKind::Frame(FrameProps {
+                auto_layout: Some(AutoLayout { direction: LayoutDirection::Horizontal, counter_sizing: Sizing::Hug, wrap: true, ..Default::default() }),
+                ..Default::default()
+            });
+            let row = d.insert(page, row).unwrap();
+            let cid = d.alloc_id();
+            let mut c = Node::rectangle(cid, Rect::new(0.0, 0.0, 20.0, 40.0));
+            c.layout_child = LayoutChild { vertical: Sizing::Fill, margin: [top, 0.0, 0.0, 0.0], ..Default::default() };
+            let cid = d.insert(row, c).unwrap();
+            for pass in 0..3 {
+                d.relayout_subtree(row);
+                assert_eq!(d.get(row).unwrap().size.y, line, "top margin {top}, relayout {pass}: line");
+                assert_eq!(d.get(cid).unwrap().size.y, 40.0, "top margin {top}, relayout {pass}: child");
+            }
+        }
     }
 }

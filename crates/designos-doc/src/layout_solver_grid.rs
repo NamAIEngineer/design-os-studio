@@ -15,7 +15,7 @@ fn row_need(k: &ChildIn) -> f32 {
 ///
 /// Mirrors the flow solver's `(plain, natural, floor)` rule: non-Fill children set `plain`, while
 /// `main_fill` children always floor the column by `min_w + margins` and only contribute their
-/// stored width (`natural`) when the column has no plain child and `margins <= 0.0`.
+/// stored width plus margins (`natural`, its margin box) when the column has no plain child and `margins <= 0.0`.
 fn widest_in_column(kids: &[ChildIn], placements: &[Placed], c: usize) -> f32 {
     let (mut plain, mut natural, mut floor) = (None::<f32>, 0.0f32, 0.0f32);
     for (_, k) in placements.iter().zip(kids).filter(|(p, _)| p.col == c && p.col_span == 1) {
@@ -26,7 +26,7 @@ fn widest_in_column(kids: &[ChildIn], placements: &[Placed], c: usize) -> f32 {
         } else {
             floor = floor.max(k.limits.clamp_w(0.0) + margins);
             if margins <= 0.0 {
-                natural = natural.max(k.limits.clamp_w(k.size.x));
+                natural = natural.max(k.limits.clamp_w(k.size.x) + margins);
             }
         }
     }
@@ -45,7 +45,7 @@ fn auto_row_height(kids: &[ChildIn], placements: &[Placed], r: usize) -> f32 {
         } else {
             floor = floor.max(k.limits.clamp_h(0.0) + margins);
             if margins <= 0.0 {
-                natural = natural.max(k.limits.clamp_h(k.size.y));
+                natural = natural.max(k.limits.clamp_h(k.size.y) + margins);
             }
         }
     }
@@ -428,5 +428,48 @@ mod tests {
         let out = compute_grid(&al, Vec2::new(1.0, 1.0), own, &[k]);
         assert_eq!(out.frame, Vec2::new(200.0, 30.0));
         assert_eq!(out.rects[0], Rect::new(25.0, 0.0, 160.0, 30.0));
+    }
+
+    /// Solves `times` passes the way a document does: each pass reads the sizes the previous one wrote.
+    fn solve_repeatedly(al: &AutoLayout, frame: Vec2, mut kids: Vec<ChildIn>, times: usize) -> Vec<LayoutOut> {
+        let mut frame = frame;
+        let mut outs = Vec::new();
+        for _ in 0..times {
+            let out = compute_grid(al, frame, SizeLimits::default(), &kids);
+            for (k, r) in kids.iter_mut().zip(&out.rects) {
+                k.size = Vec2::new(r.w, r.h);
+            }
+            frame = out.frame;
+            outs.push(out);
+        }
+        outs
+    }
+
+    #[test]
+    fn hugging_grid_column_measures_a_lone_main_fill_child_by_its_margin_box_across_relayouts() {
+        // One column, one 100 x 20 child that fills the width: the column is the child's margin box (100 + left margin) and
+        // the child stretches back to 100, so a negative margin must not grow the frame on every pass.
+        for (left, frame_w) in [(0.0f32, 100.0f32), (-10.0, 90.0)] {
+            let al = grid(1, Sizing::Hug, Sizing::Hug);
+            let k = ChildIn { main_fill: true, margin: [0.0, 0.0, 0.0, left], ..child(100.0, 20.0) };
+            for (pass, out) in solve_repeatedly(&al, Vec2::new(1.0, 1.0), vec![k], 3).iter().enumerate() {
+                assert_eq!(out.frame.x, frame_w, "left margin {left}, relayout {pass}: frame");
+                assert_eq!(out.rects[0].w, 100.0, "left margin {left}, relayout {pass}: child");
+            }
+        }
+    }
+
+    #[test]
+    fn hugging_grid_row_measures_a_lone_cross_fill_child_by_its_margin_box_across_relayouts() {
+        // One row, one 20 x 40 child that fills the height: the row is the child's margin box (40 + top margin) and the child
+        // stretches back to 40, so a negative margin must not grow the frame on every pass.
+        for (top, frame_h) in [(0.0f32, 40.0f32), (-10.0, 30.0)] {
+            let al = grid(1, Sizing::Hug, Sizing::Hug);
+            let k = ChildIn { cross_fill: true, margin: [top, 0.0, 0.0, 0.0], ..child(20.0, 40.0) };
+            for (pass, out) in solve_repeatedly(&al, Vec2::new(1.0, 1.0), vec![k], 3).iter().enumerate() {
+                assert_eq!(out.frame.y, frame_h, "top margin {top}, relayout {pass}: frame");
+                assert_eq!(out.rects[0].h, 40.0, "top margin {top}, relayout {pass}: child");
+            }
+        }
     }
 }
