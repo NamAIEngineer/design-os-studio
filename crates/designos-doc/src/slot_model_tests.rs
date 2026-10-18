@@ -215,3 +215,61 @@ fn editing_instance_slot_adds_reorders_and_removes_without_detaching_and_enforce
     assert_eq!(d.get(inst_body).unwrap().children, vec![c1_id]);
     assert_eq!(crate::remove_from_slot(&mut d, c1_id).unwrap_err(), crate::SlotConstraintError::MinChildren(1));
 }
+
+#[test]
+fn empty_slot_placeholder_preferred_picker_and_stretch_on_insert() {
+    let (mut d, comp, body, icon) = component_with_slot();
+    let page = d.pages[0];
+    let other_id = d.alloc_id();
+    let mut other = Node::frame(other_id, Rect::new(0.0, 40.0, 24.0, 24.0));
+    other.name = "Other".into();
+    let other = d.insert(page, other).unwrap();
+    create_component(&mut d, other).apply(&mut d).unwrap();
+
+    d.get_mut(body).unwrap().component.is_slot = true;
+    d.get_mut(body).unwrap().component.bindings.insert(crate::OverrideField::SlotContent, "Body".into());
+    d.get_mut(comp).unwrap().component.slot_configs.insert(
+        "Body".into(),
+        SlotPropConfig { display_by_default: Some(true), stretch_child_on_insert: Some(true), preferred: vec![icon], ..Default::default() },
+    );
+
+    create_instance(&mut d, comp, page, Vec2::new(400.0, 0.0)).apply(&mut d).unwrap();
+    let inst = instances_of(&d, comp)[0];
+    let inst_body = d.get(inst).unwrap().children[0];
+
+    // 1. Empty slot shows placeholder in main component and in instance when display_by_default is true/None.
+    assert!(crate::should_show_empty_slot_placeholder(&d, body));
+    assert!(crate::should_show_empty_slot_placeholder(&d, inst_body));
+
+    // When display_by_default is Some(false), the instance hides the empty-slot placeholder by default while main keeps it.
+    d.get_mut(comp).unwrap().component.slot_configs.get_mut("Body").unwrap().display_by_default = Some(false);
+    assert!(crate::should_show_empty_slot_placeholder(&d, body));
+    assert!(!crate::should_show_empty_slot_placeholder(&d, inst_body));
+    d.get_mut(comp).unwrap().component.slot_configs.get_mut("Body").unwrap().display_by_default = Some(true);
+
+    // 2. Preferred-instance picker lists only preferred components when set, and all other components when empty.
+    assert_eq!(crate::preferred_slot_components(&d, inst_body), vec![icon]);
+    d.get_mut(comp).unwrap().component.slot_configs.get_mut("Body").unwrap().preferred.clear();
+    let all_candidates = crate::preferred_slot_components(&d, inst_body);
+    assert!(all_candidates.contains(&icon) && all_candidates.contains(&other) && !all_candidates.contains(&comp));
+    d.get_mut(comp).unwrap().component.slot_configs.get_mut("Body").unwrap().preferred = vec![icon];
+
+    // 3. Inserting a child when stretch_child_on_insert is true stretches the child to the slot's inner width and sets Sizing::Fill.
+    let cmd = create_instance(&mut d, icon, page, Vec2::ZERO);
+    let nodes = match cmd {
+        crate::Command::Insert { nodes, .. } => nodes,
+        _ => panic!("expected Insert"),
+    };
+    let child_id = nodes[0].id;
+    crate::insert_into_slot(&mut d, inst_body, 0, nodes).unwrap().apply(&mut d).unwrap();
+    let child = d.get(child_id).unwrap();
+    assert_eq!(child.layout_child.horizontal, crate::Sizing::Fill);
+    assert_eq!(child.size.x, 200.0);
+    assert!(!crate::should_show_empty_slot_placeholder(&d, inst_body), "non-empty slot hides placeholder");
+
+    // Syncing the main component preserves the stretched width and Fill sizing on the inserted instance.
+    sync_instances(&mut d, comp).apply(&mut d).unwrap();
+    let child = d.get(child_id).unwrap();
+    assert_eq!(child.layout_child.horizontal, crate::Sizing::Fill);
+    assert_eq!(child.size.x, 200.0);
+}

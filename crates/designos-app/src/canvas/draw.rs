@@ -28,12 +28,10 @@ pub fn is_slice_node(n: &Node) -> bool {
 
 #[inline]
 fn fast_is_slot_container(doc: &designos_doc::Document, n: &Node, id: NodeId) -> bool {
-    let has_own = n.component.overrides.contains(&designos_doc::OverrideField::SlotContent) || !n.component.bindings.is_empty();
-    let has_src = n
-        .component
-        .source
-        .and_then(|s| doc.get(s))
-        .is_some_and(|sn| sn.component.overrides.contains(&designos_doc::OverrideField::SlotContent) || !sn.component.bindings.is_empty());
+    let has_own = n.component.is_slot || n.component.overrides.contains(&designos_doc::OverrideField::SlotContent) || !n.component.bindings.is_empty();
+    let has_src = n.component.source.and_then(|s| doc.get(s)).is_some_and(|sn| {
+        sn.component.is_slot || sn.component.overrides.contains(&designos_doc::OverrideField::SlotContent) || !sn.component.bindings.is_empty()
+    });
     (has_own || has_src) && designos_doc::is_slot_container(doc, id)
 }
 
@@ -297,7 +295,22 @@ fn draw_component_slot_and_slice_chrome(app: &App, p: &Painter, rect: ERect) {
             dashed_quad(p, &corners, 6.0, 4.0, Stroke::new(1.25, FIGMA_COMPONENT_PURPLE.gamma_multiply(0.85)));
         }
         if is_slot {
-            dashed_quad(p, &corners, 4.0, 3.0, Stroke::new(1.0, FIGMA_COMPONENT_PURPLE.gamma_multiply(0.75)));
+            let show_placeholder = designos_doc::should_show_empty_slot_placeholder(&app.doc, id);
+            if show_placeholder {
+                p.add(egui::Shape::convex_polygon(corners.to_vec(), FIGMA_COMPONENT_PURPLE.gamma_multiply(0.08), Stroke::NONE));
+                dashed_quad(p, &corners, 4.0, 3.0, Stroke::new(1.25, FIGMA_COMPONENT_PURPLE.gamma_multiply(0.85)));
+                if let Some(plus_r) = empty_slot_plus_button_rect(app, rect, id) {
+                    p.rect_filled(plus_r, theme::cr(11), FIGMA_COMPONENT_PURPLE);
+                    crate::icons::paint(p, crate::icons::Icon::Plus, plus_r.center(), 12.0, Color32::WHITE);
+                    let s_rect = ERect::from_two_pos(corners[0], corners[2]);
+                    if s_rect.width() >= 64.0 && s_rect.height() >= 48.0 {
+                        let font = theme::font_small_strong();
+                        p.text(Pos2::new(plus_r.center().x, plus_r.bottom() + 8.0), Align2::CENTER_CENTER, &n.name, font, FIGMA_COMPONENT_PURPLE);
+                    }
+                }
+            } else if !n.children.is_empty() || app.is_selected(id) || app.hover == Some(id) || app.hover_layer == Some(id) {
+                dashed_quad(p, &corners, 4.0, 3.0, Stroke::new(1.0, FIGMA_COMPONENT_PURPLE.gamma_multiply(0.75)));
+            }
             if app.is_selected(id) || app.hover == Some(id) || app.hover_layer == Some(id) {
                 let font = theme::font_small_strong();
                 let w = crate::widgets::text_width(p, "Slot", &font) + 8.0;
@@ -316,6 +329,57 @@ fn draw_component_slot_and_slice_chrome(app: &App, p: &Painter, rect: ERect) {
             p.text(pill.center(), Align2::CENTER_CENTER, "Slice", font, Color32::WHITE);
         }
     }
+}
+
+/// Screen rect of the centered `+` button inside an empty slot placeholder,
+/// or `None` when `id` should not display an empty-slot placeholder.
+pub fn empty_slot_plus_button_rect(app: &App, rect: ERect, id: NodeId) -> Option<ERect> {
+    if !designos_doc::should_show_empty_slot_placeholder(&app.doc, id) {
+        return None;
+    }
+    let n = app.doc.get(id)?;
+    let world = super::fast_world_transform(&app.doc, id);
+    let c0 = app.view.to_screen(rect.min, world.apply(DV::ZERO));
+    let c2 = app.view.to_screen(rect.min, world.apply(DV::new(n.size.x, n.size.y)));
+    let s_rect = ERect::from_two_pos(c0, c2);
+    if s_rect.width() < 16.0 || s_rect.height() < 16.0 {
+        return None;
+    }
+    Some(ERect::from_center_size(s_rect.center(), EV::splat(22.0)))
+}
+
+/// Records and handles clicks on the on-canvas `+` buttons of empty slot placeholders,
+/// and renders the active preferred-instance picker popup.
+pub fn empty_slot_picker_overlay(app: &mut App, ui: &mut Ui, rect: ERect) {
+    if app.view.zoom >= 0.15 && app.history.viewing.is_none() {
+        let chrome_nodes = collect_page_chrome_nodes(&app.doc, app.page);
+        let blocked = crate::widgets::pointer_over_popup(ui.ctx());
+        let mut clicked_slot: Option<(NodeId, ERect)> = None;
+        for (id, _, is_slot, _) in chrome_nodes {
+            if !is_slot {
+                continue;
+            }
+            let Some(plus_r) = empty_slot_plus_button_rect(app, rect, id) else { continue };
+            if !rect.intersects(plus_r) {
+                continue;
+            }
+            crate::widgets::record(ui, &format!("canvas-slot-plus:{}", id.0), plus_r);
+            let resp = ui.interact(plus_r, ui.id().with(("canvas-slot-plus", id)), if blocked { Sense::hover() } else { Sense::click() });
+            if resp.hovered() && !blocked {
+                ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+            }
+            let ptr_clicked = !blocked
+                && ui.input(|i| i.pointer.button_released(egui::PointerButton::Primary) && i.pointer.interact_pos().is_some_and(|p| plus_r.contains(p)));
+            if resp.clicked() || ptr_clicked {
+                clicked_slot = Some((id, plus_r));
+            }
+        }
+        if let Some((slot_id, plus_r)) = clicked_slot {
+            app.selection = vec![slot_id];
+            app.ui.slot_picker = if app.ui.slot_picker.map(|(s, _)| s) == Some(slot_id) { None } else { Some((slot_id, plus_r)) };
+        }
+    }
+    crate::panels::components::show_slot_picker_popup(app, ui.ctx());
 }
 
 /// Screen rect and status of the on-canvas Dev Status pill badge right after a top-level frame label (`S3-12`).

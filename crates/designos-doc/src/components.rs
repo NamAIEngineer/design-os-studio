@@ -283,6 +283,58 @@ pub fn slot_config_of(doc: &Document, slot: NodeId) -> Option<SlotPropConfig> {
     None
 }
 
+/// True when `slot` is a visible empty slot container that should display an empty-slot placeholder
+/// (always true in a main component; governed by `display_by_default` in an instance).
+pub fn should_show_empty_slot_placeholder(doc: &Document, slot: NodeId) -> bool {
+    if !is_slot_container(doc, slot) {
+        return false;
+    }
+    let Some(n) = doc.get(slot) else { return false };
+    if !n.visible || !n.children.is_empty() {
+        return false;
+    }
+    if is_linked(n) || instance_root_of(doc, slot).is_some() {
+        slot_config_of(doc, slot).and_then(|c| c.display_by_default).unwrap_or(true)
+    } else {
+        true
+    }
+}
+
+/// Returns the list of candidate `Component` node ids to offer in the `+` instance picker for `slot`:
+/// when `SlotPropConfig::preferred` is non-empty, returns only those preferred components (expanding
+/// any preferred `ComponentSet` to its variants); otherwise returns all other components in `doc`.
+pub fn preferred_slot_components(doc: &Document, slot: NodeId) -> Vec<NodeId> {
+    if !is_slot_container(doc, slot) {
+        return Vec::new();
+    }
+    let own_comp = enclosing_component(doc, slot).or_else(|| doc.get(slot).and_then(|n| n.component.source).and_then(|s| enclosing_component(doc, s)));
+    if let Some(cfg) = slot_config_of(doc, slot).filter(|c| !c.preferred.is_empty()) {
+        let mut out = Vec::new();
+        for pid in cfg.preferred {
+            let Some(pn) = doc.get(pid) else { continue };
+            match &pn.kind {
+                NodeKind::Component(_) if Some(pid) != own_comp && !out.contains(&pid) => out.push(pid),
+                NodeKind::ComponentSet(_) => {
+                    for &cid in &pn.children {
+                        if Some(cid) != own_comp && matches!(doc.get(cid).map(|c| &c.kind), Some(NodeKind::Component(_))) && !out.contains(&cid) {
+                            out.push(cid);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        return out;
+    }
+    let mut all: Vec<NodeId> = doc.nodes.values().filter(|n| matches!(n.kind, NodeKind::Component(_)) && Some(n.id) != own_comp).map(|n| n.id).collect();
+    all.sort_by(|a, b| {
+        let na = doc.get(*a).map(|n| n.name.as_str()).unwrap_or("");
+        let nb = doc.get(*b).map(|n| n.name.as_str()).unwrap_or("");
+        na.cmp(nb).then_with(|| a.0.cmp(&b.0))
+    });
+    all
+}
+
 /// Property definitions that apply to `comp`: its own plus those of its set.
 pub fn prop_defs(doc: &Document, comp: NodeId) -> Vec<ComponentPropDef> {
     let Some(n) = doc.get(comp) else { return Vec::new() };
@@ -1267,9 +1319,31 @@ pub fn check_slot_remove(doc: &Document, slot: NodeId, removing_count: usize) ->
     Ok(())
 }
 
+/// Applies `stretchChildOnInsert` to `child` when `slot` is a slot container
+/// whose [`SlotPropConfig`] has `stretch_child_on_insert == Some(true)`.
+pub fn apply_slot_stretch_on_insert(doc: &Document, slot: NodeId, child: &mut Node) {
+    if slot_config_of(doc, slot).and_then(|cfg| cfg.stretch_child_on_insert) != Some(true) {
+        return;
+    }
+    let Some(sn) = doc.get(slot) else { return };
+    let (pad_l, pad_r, has_al) =
+        sn.kind.frame_props().and_then(|fp| fp.auto_layout.as_ref()).map(|al| (al.padding[3], al.padding[1], true)).unwrap_or((0.0, 0.0, false));
+    let target_w = (sn.size.x - pad_l - pad_r).max(1.0);
+    child.layout_child.horizontal = Sizing::Fill;
+    child.size.x = target_w;
+    if !has_al {
+        child.transform.tx = pad_l;
+    }
+    if is_linked(child) || matches!(child.kind, NodeKind::Instance { .. }) {
+        child.component.overrides.insert(OverrideField::Size);
+        child.component.overrides.insert(OverrideField::Layout);
+    }
+}
+
 /// Inserts a subtree `nodes` (root first) into `slot` at `index`, validating [`SlotPropConfig`]
-/// constraints and recording `OverrideField::SlotContent` so the instance stays linked.
-pub fn insert_into_slot(doc: &mut Document, slot: NodeId, index: usize, nodes: Vec<Node>) -> Result<Command, SlotConstraintError> {
+/// constraints, stretching the inserted root when `stretch_child_on_insert` is set, and recording
+/// `OverrideField::SlotContent` so the instance stays linked.
+pub fn insert_into_slot(doc: &mut Document, slot: NodeId, index: usize, mut nodes: Vec<Node>) -> Result<Command, SlotConstraintError> {
     let Some(root) = nodes.first() else {
         if !is_slot_container(doc, slot) {
             return Err(SlotConstraintError::NotASlot(slot));
@@ -1277,6 +1351,9 @@ pub fn insert_into_slot(doc: &mut Document, slot: NodeId, index: usize, nodes: V
         return Ok(nothing());
     };
     check_slot_insert(doc, slot, &[root])?;
+    if let Some(root_mut) = nodes.first_mut() {
+        apply_slot_stretch_on_insert(doc, slot, root_mut);
+    }
     let mut c = Ctx::new(doc);
     if let Some(mut sn) = c.s.get(slot).cloned() {
         if is_linked(&sn) || instance_root_of(c.s, slot).is_some() {
