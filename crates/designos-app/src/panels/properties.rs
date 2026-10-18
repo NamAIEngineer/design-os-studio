@@ -1280,7 +1280,7 @@ fn track_move_button(idx: usize, len: usize) -> (Icon, &'static str, usize) {
     if idx + 1 < len {
         (Icon::ChevronDown, "Move down", idx + 1)
     } else {
-        (Icon::ArrowUp, "Move up", idx - 1)
+        (Icon::ChevronUp, "Move up", idx - 1)
     }
 }
 
@@ -1311,12 +1311,12 @@ fn grid_tracks_ui(app: &mut App, ui: &mut Ui, pane: &mut Pane, grid_id: NodeId) 
                 GridTrack::Hug => 2,
             };
             if let Some(picked) = dropdown(ui, row.mode, format!("grid-{tag}-mode-{idx}"), &options[mode], &options) {
-                if picked != mode {
-                    let next = match picked {
-                        0 => GridTrack::Flex(1.0),
-                        1 => GridTrack::Fixed(120.0),
-                        _ => GridTrack::Hug,
-                    };
+                let next = match picked {
+                    0 => GridTrack::Flex(1.0),
+                    1 => GridTrack::Fixed(120.0),
+                    _ => GridTrack::Hug,
+                };
+                if next != track {
                     resize_grid_track(app, grid_id, is_col, idx, next);
                 }
             }
@@ -2374,11 +2374,11 @@ mod tests {
         assert_eq!((icon, tip, to), (Icon::ChevronDown, "Move down", 1));
         let (icon, tip, to) = track_move_button(1, 3);
         assert_eq!((icon, tip, to), (Icon::ChevronDown, "Move down", 2));
-        // the last track has nowhere to go but up, so the button must not point down
+        // the last track has nowhere to go but up, so the button must point up with ChevronUp
         let (icon, tip, to) = track_move_button(2, 3);
-        assert_eq!((icon, tip, to), (Icon::ArrowUp, "Move up", 1));
+        assert_eq!((icon, tip, to), (Icon::ChevronUp, "Move up", 1));
         let (icon, tip, to) = track_move_button(1, 2);
-        assert_eq!((icon, tip, to), (Icon::ArrowUp, "Move up", 0));
+        assert_eq!((icon, tip, to), (Icon::ChevronUp, "Move up", 0));
     }
 
     #[test]
