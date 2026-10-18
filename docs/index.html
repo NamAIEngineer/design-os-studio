@@ -110,7 +110,8 @@ code,pre{font-family:var(--font);font-variant-numeric:tabular-nums}
 /* top bar */
 .topbar{position:sticky;top:0;z-index:20;background:var(--bg);border-bottom:1px solid var(--border)}
 .topbar nav{display:flex;align-items:center;gap:8px;min-height:64px}
-.brand{display:inline-flex;align-items:center;min-height:44px;margin-right:auto;color:var(--text);font-weight:700;letter-spacing:-.01em;text-decoration:none}
+.brand{display:inline-flex;align-items:center;min-height:44px;margin-right:auto;color:var(--text);font-weight:700;letter-spacing:-.01em;text-decoration:none;white-space:nowrap}
+.topbar .btn{white-space:nowrap}
 .navlinks{display:flex;gap:4px}
 .navlinks a{display:inline-flex;align-items:center;min-height:44px;padding:0 14px;border-radius:var(--r-pill);color:var(--muted);font-size:.9375rem;font-weight:500;text-decoration:none}
 
@@ -220,14 +221,11 @@ code{padding:1px 6px;border-radius:var(--r-sm);background:var(--surface);font-si
 .qa details p{padding:0 40px 24px 0;max-width:var(--measure);color:var(--muted);text-wrap:pretty}
 
 /* footer */
-.foot{border-top:1px solid var(--border);padding-block:32px 36px;color:var(--muted);font-size:.9375rem}
-.foot-top{display:flex;align-items:flex-start;justify-content:space-between;gap:40px}
-.foot .brand-line{flex:none;max-width:34ch;padding-top:10px;text-wrap:pretty}
-.foot .brand-line strong{display:block;margin-bottom:4px;color:var(--text);font-size:1.0625rem}
-.foot-links{display:flex;flex-wrap:wrap;justify-content:flex-end;gap:0 28px;max-width:760px}
+.foot{border-top:1px solid var(--border);padding-block:28px 24px;color:var(--muted);font-size:.9375rem}
+.foot-links{display:flex;flex-wrap:wrap;gap:0 24px;margin-top:36px}
 .foot-links a{display:flex;align-items:center;min-height:44px;color:var(--muted);text-decoration:none}
-.foot .legal{margin-top:20px;padding-top:16px;border-top:1px solid var(--border);font-size:.875rem}
-.foot .legal p{max-width:70ch;text-wrap:pretty}
+.foot .legal{margin-top:4px;padding-top:14px;border-top:1px solid var(--border);font-size:.875rem}
+.foot .legal p{max-width:100ch;text-wrap:pretty}
 
 /* hover styling only where a pointer can hover */
 @media (hover:hover){
@@ -252,20 +250,30 @@ code{padding:1px 6px;border-radius:var(--r-sm);background:var(--surface);font-si
 /* narrow screens */
 @media (max-width:1024px){
   .install,.faq{grid-template-columns:minmax(0,1fr)}
-  .foot-top{flex-direction:column;gap:12px}
-  .foot-links{justify-content:flex-start}
+}
+@media (min-width:1240px){
+  .foot-links{justify-content:space-between}
 }
 @media (max-width:900px){
   .navlinks{display:none}
+}
+@media (max-width:799px){
+  .foot-links{margin-top:12px}
 }
 @media (max-width:760px){
   .dl li{grid-template-columns:minmax(0,1fr)}
   .hero .sub{margin-top:56px}
 }
 @media (max-width:480px){
+  .brand{font-size:.9375rem}
+  .topbar .btn{padding:0 12px;font-size:.875rem}
   .cta .btn{width:100%}
   .film-bar p{margin-left:0;flex-basis:100%}
   .code pre{font-size:.8125rem}
+}
+@media (max-width:340px){
+  .brand{font-size:.8125rem}
+  .topbar .btn{padding:0 10px}
 }
 </style>
 <link rel="stylesheet" href="assets/v2-story.css">
@@ -273,6 +281,7 @@ code{padding:1px 6px;border-radius:var(--r-sm);background:var(--surface);font-si
 <link rel="stylesheet" href="assets/v2-anatomy.css">
 <link rel="stylesheet" href="assets/v2-workflow.css">
 <link rel="stylesheet" href="assets/v2-big-files.css">
+<link rel="stylesheet" href="assets/v2-closer.css">
 </head>
 <body>
 <svg class="sprite" aria-hidden="true" focusable="false">
@@ -297,7 +306,7 @@ code{padding:1px 6px;border-radius:var(--r-sm);background:var(--surface);font-si
       <li><a href="#install">Install</a></li>
       <li><a href="#faq">FAQ</a></li>
     </ul>
-    <a class="btn btn-ghost btn-sm" href="https://github.com/jangtrinh/design-os-studio">GitHub</a>
+    <a class="btn btn-primary btn-sm" href="https://github.com/jangtrinh/design-os-studio/releases/download/v0.3.0/designos-0.3.0-macos.dmg">Download for macOS</a>
   </nav>
 </header>
 
@@ -631,26 +640,98 @@ rm -rf /tmp/design-os-studio</code></pre></div>
     </div>
   </section>
 
+  <!-- Get it. The closing call to action bookends the hero headline. The download link is a plain link: the
+       script in v2-closer.js only draws the hairline burst over it and never touches the navigation. -->
+  <section id="get" class="sec get" aria-labelledby="get-h">
+    <div class="wrap get__row">
+      <div class="get__copy">
+        <h2 id="get-h"><span class="own">Own</span> your design canvas.</h2>
+        <p class="lead">Free and open source. macOS, Windows and Linux.</p>
+      </div>
+      <div class="get__actions">
+        <div class="cta">
+          <a class="btn btn-primary" id="get-download" href="https://github.com/jangtrinh/design-os-studio/releases/download/v0.3.0/designos-0.3.0-macos.dmg"><svg class="ico" aria-hidden="true"><use href="#i-download"/></svg>Download for macOS</a>
+          <a class="btn btn-ghost" href="https://github.com/jangtrinh/design-os-studio"><svg class="ico" aria-hidden="true"><use href="#i-github"/></svg>View on GitHub</a>
+        </div>
+        <p class="cta-note"><a href="https://github.com/jangtrinh/design-os-studio/releases/latest">Windows · Linux · all downloads</a></p>
+      </div>
+    </div>
+    <div class="get__burst" id="get-burst" aria-hidden="true"></div>
+  </section>
+
 </main>
 
 <footer class="foot">
   <div class="wrap">
-    <div class="foot-top">
-      <p class="brand-line"><strong>DESIGN:OS Studio</strong>A native design editor for Figma files and coding agents.</p>
-      <nav aria-label="Footer">
-        <ul class="foot-links">
-          <li><a href="https://github.com/jangtrinh/design-os-studio">GitHub</a></li>
-          <li><a href="https://github.com/jangtrinh/design-os-studio/releases">Releases</a></li>
-          <li><a href="https://github.com/jangtrinh/design-os-studio/blob/main/CHANGELOG.md">Changelog</a></li>
-          <li><a href="https://github.com/jangtrinh/design-os-studio/blob/main/LICENSE">License: MIT / Apache-2.0</a></li>
-          <li><a href="https://github.com/jangtrinh/design-os-studio#why-this-exists">Honest comparison</a></li>
-          <li><a href="https://github.com/jangtrinh/design-os-studio#designos-ecosystem">Ecosystem</a></li>
-          <li><a href="https://github.com/jangtrinh/design-os-studio/blob/main/docs/install.md">Install guide</a></li>
-          <li><a href="https://github.com/jangtrinh/design-os-studio/blob/main/docs/cookbook.md">Cookbook</a></li>
-          <li><a href="https://buymeacoffee.com/jangtrinh">Buy me a coffee</a></li>
-        </ul>
-      </nav>
-    </div>
+    <figure class="closer">
+      <svg class="closer__mark" viewBox="0 0 1200 203" role="img" aria-label="DESIGN:OS Studio, a native design editor for Figma files and coding agents." focusable="false">
+        <defs>
+          <text id="closer-word" class="closer__word" x="-4" y="157" textLength="1210" lengthAdjust="spacing">design:os</text>
+          <clipPath id="closer-clip"><text class="closer__word" x="-4" y="157" textLength="1210" lengthAdjust="spacing">design:os</text></clipPath>
+          <text id="closer-row" class="closer__row" y="0">Paste from Figma&#160;&#160;·&#160;&#160;
+          .fig read and write&#160;&#160;·&#160;&#160;
+          GPU canvas&#160;&#160;·&#160;&#160;
+          designos-mcp&#160;&#160;·&#160;&#160;
+          22 MCP tools&#160;&#160;·&#160;&#160;
+          Dev Mode&#160;&#160;·&#160;&#160;
+          CSS&#160;&#160;·&#160;&#160;
+          Tailwind&#160;&#160;·&#160;&#160;
+          React&#160;&#160;·&#160;&#160;
+          SwiftUI&#160;&#160;·&#160;&#160;
+          UIKit&#160;&#160;·&#160;&#160;
+          Compose&#160;&#160;·&#160;&#160;
+          Android XML&#160;&#160;·&#160;&#160;
+          Agents rail&#160;&#160;·&#160;&#160;
+          Layers&#160;&#160;·&#160;&#160;
+          Inspector&#160;&#160;·&#160;&#160;
+          Prototype&#160;&#160;·&#160;&#160;
+          Effect and grid styles&#160;&#160;·&#160;&#160;
+          Edit a style everywhere&#160;&#160;·&#160;&#160;
+          Space evenly and wrap&#160;&#160;·&#160;&#160;
+          Text wrap Balance&#160;&#160;·&#160;&#160;
+          PDF export&#160;&#160;·&#160;&#160;
+          Auto layout&#160;&#160;·&#160;&#160;
+          Variables&#160;&#160;·&#160;&#160;
+          Claude Code&#160;&#160;·&#160;&#160;
+          Codex&#160;&#160;·&#160;&#160;
+          Antigravity&#160;&#160;·&#160;&#160;
+          208,610 nodes&#160;&#160;·&#160;&#160;
+          wgpu&#160;&#160;·&#160;&#160;</text>
+        </defs>
+        <g class="closer__rows" clip-path="url(#closer-clip)">
+        <use href="#closer-row" x="0" y="8"/>
+        <use href="#closer-row" x="-340" y="21"/>
+        <use href="#closer-row" x="-120" y="34"/>
+        <use href="#closer-row" x="-610" y="47"/>
+        <use href="#closer-row" x="-210" y="60"/>
+        <use href="#closer-row" x="-760" y="73"/>
+        <use href="#closer-row" x="-60" y="86"/>
+        <use href="#closer-row" x="-480" y="99"/>
+        <use href="#closer-row" x="-290" y="112"/>
+        <use href="#closer-row" x="-690" y="125"/>
+        <use href="#closer-row" x="-150" y="138"/>
+        <use href="#closer-row" x="-880" y="151"/>
+        <use href="#closer-row" x="-400" y="164"/>
+        <use href="#closer-row" x="-30" y="177"/>
+        <use href="#closer-row" x="-540" y="190"/>
+        <use href="#closer-row" x="-250" y="203"/>
+        </g>
+        <use class="closer__outline" href="#closer-word"/>
+      </svg>
+    </figure>
+    <nav aria-label="Footer">
+      <ul class="foot-links">
+        <li><a href="https://github.com/jangtrinh/design-os-studio">GitHub</a></li>
+        <li><a href="https://github.com/jangtrinh/design-os-studio/releases">Releases</a></li>
+        <li><a href="https://github.com/jangtrinh/design-os-studio/blob/main/CHANGELOG.md">Changelog</a></li>
+        <li><a href="https://github.com/jangtrinh/design-os-studio/blob/main/LICENSE">License: MIT / Apache-2.0</a></li>
+        <li><a href="https://github.com/jangtrinh/design-os-studio#why-this-exists">Honest comparison</a></li>
+        <li><a href="https://github.com/jangtrinh/design-os-studio#designos-ecosystem">Ecosystem</a></li>
+        <li><a href="https://github.com/jangtrinh/design-os-studio/blob/main/docs/install.md">Install guide</a></li>
+        <li><a href="https://github.com/jangtrinh/design-os-studio/blob/main/docs/cookbook.md">Cookbook</a></li>
+        <li><a href="https://buymeacoffee.com/jangtrinh">Buy me a coffee</a></li>
+      </ul>
+    </nav>
     <div class="legal"><p>DESIGN:OS Studio is an independent open-source project. Figma is a trademark of Figma, Inc. The film, the renders and the film frames on this page show the Untitled UI PRO v8.0 kit by Untitled UI.</p></div>
   </div>
 </footer>
@@ -666,6 +747,7 @@ rm -rf /tmp/design-os-studio</code></pre></div>
 <script defer src="assets/v2-anatomy.js"></script>
 <script defer src="assets/v2-workflow.js"></script>
 <script defer src="assets/v2-big-files.js"></script>
+<script defer src="assets/v2-closer.js"></script>
 <script>
 (function () {
   'use strict';
