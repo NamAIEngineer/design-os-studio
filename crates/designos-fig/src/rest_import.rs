@@ -1874,9 +1874,19 @@ impl<'a> Ctx<'a> {
             let comp_grid_al =
                 self.doc.get(comp).and_then(|n| n.kind.frame_props()).and_then(|fp| fp.auto_layout.clone()).filter(|al| al.direction == LayoutDirection::Grid);
             if let Some(comp_al) = comp_grid_al {
+                let comp_ids = (self.grid_col_track_ids.get(&comp), self.grid_row_track_ids.get(&comp));
+                let inst_ids = (self.grid_col_track_ids.get(&inst), self.grid_row_track_ids.get(&inst));
                 if let Some(fp) = self.doc.get_mut(inst).and_then(|n| n.kind.frame_props_mut()) {
-                    if fp.auto_layout.is_none() {
-                        fp.auto_layout = Some(comp_al);
+                    // An instance without a grid of its own takes the component grid with unsized tracks, so
+                    // both cases below fill the sizes the same way.
+                    let own = fp.auto_layout.get_or_insert_with(|| AutoLayout {
+                        grid_col_tracks: GridTracks::default(),
+                        grid_row_tracks: GridTracks::default(),
+                        ..comp_al.clone()
+                    });
+                    if own.direction == LayoutDirection::Grid {
+                        inherit_track_sizes(&mut own.grid_col_tracks, &comp_al.grid_col_tracks, comp_ids.0, inst_ids.0);
+                        inherit_track_sizes(&mut own.grid_row_tracks, &comp_al.grid_row_tracks, comp_ids.1, inst_ids.1);
                     }
                 }
             }
@@ -2407,13 +2417,7 @@ impl<'a> Ctx<'a> {
                 if !col_tracks.is_empty() {
                     if set.get("gridColumnsSizing").is_none() {
                         if let (Some((old_tracks, _)), Some(old_ids)) = (&prev_tracks, self.grid_col_track_ids.get(&id)) {
-                            let mut permuted = GridTracks::default();
-                            for (new_idx, &tid) in col_tracks.iter().take(MAX_GRID_TRACKS).enumerate() {
-                                if let Some(old_idx) = old_ids.iter().position(|old| old == tid).filter(|&i| i < MAX_GRID_TRACKS) {
-                                    permuted[new_idx] = old_tracks[old_idx];
-                                }
-                            }
-                            al.grid_col_tracks = permuted;
+                            al.grid_col_tracks = permute_tracks_by_ids(old_tracks, old_ids, &col_tracks);
                         }
                     }
                     self.grid_col_track_ids.insert(id, col_tracks.into_iter().map(String::from).collect());
@@ -2422,13 +2426,7 @@ impl<'a> Ctx<'a> {
                 if !row_tracks.is_empty() {
                     if set.get("gridRowsSizing").is_none() {
                         if let (Some((_, old_tracks)), Some(old_ids)) = (&prev_tracks, self.grid_row_track_ids.get(&id)) {
-                            let mut permuted = GridTracks::default();
-                            for (new_idx, &tid) in row_tracks.iter().take(MAX_GRID_TRACKS).enumerate() {
-                                if let Some(old_idx) = old_ids.iter().position(|old| old == tid).filter(|&i| i < MAX_GRID_TRACKS) {
-                                    permuted[new_idx] = old_tracks[old_idx];
-                                }
-                            }
-                            al.grid_row_tracks = permuted;
+                            al.grid_row_tracks = permute_tracks_by_ids(old_tracks, old_ids, &row_tracks);
                         }
                     }
                     self.grid_row_track_ids.insert(id, row_tracks.into_iter().map(String::from).collect());
@@ -3082,6 +3080,30 @@ fn parse_grid_auto_tracks(s: &str) -> GridAutoTracks {
             GridAutoTracks::Rows
         }
     }
+}
+
+/// Re-orders `old_tracks`, which follow the track ids `old_ids`, to follow `new_ids`. A new id the old list
+/// lacks keeps an unsized slot.
+fn permute_tracks_by_ids<S: AsRef<str>, T: AsRef<str>>(old_tracks: &GridTracks, old_ids: &[S], new_ids: &[T]) -> GridTracks {
+    let mut permuted = GridTracks::default();
+    for (new_idx, tid) in new_ids.iter().take(MAX_GRID_TRACKS).enumerate() {
+        if let Some(old_idx) = old_ids.iter().position(|old| old.as_ref() == tid.as_ref()).filter(|&i| i < MAX_GRID_TRACKS) {
+            permuted[new_idx] = old_tracks[old_idx];
+        }
+    }
+    permuted
+}
+
+/// Gives an instance axis the component's track sizes when the instance sized none of its own, in the order of
+/// the track ids the instance lists, so those ids keep describing the size slots.
+fn inherit_track_sizes(own: &mut GridTracks, comp: &GridTracks, comp_ids: Option<&Vec<String>>, own_ids: Option<&Vec<String>>) {
+    if !own.is_default() || comp.is_default() {
+        return;
+    }
+    *own = match (comp_ids, own_ids) {
+        (Some(c), Some(o)) if c != o => permute_tracks_by_ids(comp, c, o),
+        _ => comp.clone(),
+    };
 }
 
 fn frame_props(v: &Value) -> FrameProps {

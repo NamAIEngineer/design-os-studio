@@ -5,7 +5,7 @@
 //! index while the parent is converted; an override entry has to end up with the same index.
 
 use designos_doc::*;
-use designos_fig::import_fig_node_changes;
+use designos_fig::{decode_fig_to_json, export_fig, import_fig, import_fig_node_changes};
 use serde_json::{json, Value};
 
 fn g(s: u64, l: u64) -> Value {
@@ -603,11 +603,44 @@ fn reorder_only_override_permutes_unequal_track_sizes() {
                 "gridRows": track_map(&[(9, 2), (9, 1)]),
                 "symbolData": {"symbolID": g(1, 10), "symbolOverrides": []}
             })
+        ),
+        // The instance node itself carries the restated track lists next to its own grid stack mode,
+        // so its track ids are known before the component grid is copied onto it.
+        node(
+            (1, 40),
+            (0, 1),
+            "d",
+            "INSTANCE",
+            "NodeGridMovedInst",
+            json!({
+                "size": {"x": 300.0, "y": 120.0},
+                "stackMode": "GRID",
+                "gridColumns": track_map(&[(9, 4), (9, 3), (9, 5)]),
+                "gridRows": track_map(&[(9, 2), (9, 1)]),
+                "symbolData": {"symbolID": g(1, 10), "symbolOverrides": []}
+            })
+        ),
+        // Columns restated on the node, rows restated later by an override with an empty path.
+        node(
+            (1, 50),
+            (0, 1),
+            "e",
+            "INSTANCE",
+            "MixedAxisInst",
+            json!({
+                "size": {"x": 300.0, "y": 120.0},
+                "stackMode": "GRID",
+                "gridColumns": track_map(&[(9, 4), (9, 3), (9, 5)]),
+                "symbolData": {
+                    "symbolID": g(1, 10),
+                    "symbolOverrides": [{"guidPath": {"guids": []}, "gridRows": track_map(&[(9, 2), (9, 1)])}]
+                }
+            })
         )
     ]);
 
     let mut doc = import_fig_node_changes(&changes, "unequal-track-reorder").expect("import_fig_node_changes");
-    for inst_name in ["MovedInst", "NodeMovedInst"] {
+    for inst_name in ["MovedInst", "NodeMovedInst", "NodeGridMovedInst", "MixedAxisInst"] {
         let inst_id = find(&doc, inst_name).id;
         let al = find(&doc, inst_name).kind.frame_props().unwrap().auto_layout.as_ref().expect("grid auto_layout").clone();
         assert_eq!(
@@ -704,4 +737,197 @@ fn stack_mode_none_override_and_instance_node_remove_inherited_grid() {
     // PlainInst (which did not set stackMode: NONE) still inherits the component grid.
     let plain = find(&doc, "PlainInst");
     assert_eq!(plain.kind.frame_props().unwrap().auto_layout.as_ref().map(|a| a.direction), Some(LayoutDirection::Grid));
+}
+
+#[test]
+fn stack_mode_none_instance_stays_without_a_grid_through_a_fig_round_trip() {
+    let mut cell_free = node(
+        (1, 21),
+        (1, 10),
+        "a",
+        "RECTANGLE",
+        "FreeChild",
+        json!({
+            "overrideKey": g(9, 21),
+            "size": {"x": 40.0, "y": 20.0},
+            "gridColumnAnchor": g(9, 4),
+            "gridRowAnchor": g(9, 2)
+        }),
+    );
+    cell_free["transform"] = json!({"m00": 1.0, "m01": 0.0, "m02": 37.0, "m10": 0.0, "m11": 1.0, "m12": 53.0});
+    let none_on_node = node(
+        (1, 50),
+        (0, 1),
+        "e",
+        "INSTANCE",
+        "NoneOnNodeInst",
+        json!({
+            "size": {"x": 300.0, "y": 200.0},
+            "stackMode": "NONE",
+            "symbolData": {"symbolID": g(1, 10), "symbolOverrides": []}
+        }),
+    );
+
+    let none_only_overrides = vec![json!({"guidPath": {"guids": []}, "stackMode": "NONE"})];
+    let original = grid_component_doc_with(none_only_overrides, json!({}), vec![cell_free, none_on_node]);
+    let bytes = export_fig(&original).expect("export_fig");
+    let mut doc = import_fig(&bytes).expect("import_fig");
+
+    for inst_name in ["MovedInst", "NoneOnNodeInst"] {
+        let inst = find(&doc, inst_name);
+        let inst_id = inst.id;
+        assert!(inst.kind.frame_props().unwrap().auto_layout.is_none(), "{inst_name} must not re-inherit the component grid after a .fig round trip");
+        doc.relayout_subtree(inst_id);
+        let free_child = find(&doc, inst_name).children.iter().filter_map(|id| doc.get(*id)).find(|n| n.name == "FreeChild").unwrap();
+        assert_eq!((free_child.transform.tx, free_child.transform.ty), (37.0, 53.0), "{inst_name} FreeChild keeps its free position");
+        assert!(
+            find(&doc, inst_name).component.overrides.contains(&OverrideField::Layout),
+            "{inst_name} must keep OverrideField::Layout after a .fig round trip"
+        );
+    }
+
+    let plain = find(&doc, "PlainInst");
+    assert_eq!(
+        plain.kind.frame_props().unwrap().auto_layout.as_ref().map(|a| a.direction),
+        Some(LayoutDirection::Grid),
+        "an instance that never set stackMode NONE keeps the grid"
+    );
+}
+
+#[test]
+fn stack_mode_none_override_on_a_nested_frame_survives_a_fig_round_trip() {
+    let changes = json!([
+        {"guid": g(0, 0), "type": "DOCUMENT", "name": "NestedNoneDoc"},
+        {"guid": g(0, 1), "parentIndex": {"guid": g(0, 0), "position": "a"}, "type": "CANVAS", "name": "Page 1"},
+        node((1, 10), (0, 1), "a", "SYMBOL", "Comp", json!({"size": {"x": 200.0, "y": 100.0}})),
+        node(
+            (1, 11),
+            (1, 10),
+            "a",
+            "FRAME",
+            "Inner",
+            json!({"overrideKey": g(9, 30), "size": {"x": 100.0, "y": 50.0}, "stackMode": "HORIZONTAL"})
+        ),
+        node(
+            (1, 20),
+            (0, 1),
+            "b",
+            "INSTANCE",
+            "Inst",
+            json!({
+                "size": {"x": 200.0, "y": 100.0},
+                "symbolData": {
+                    "symbolID": g(1, 10),
+                    "symbolOverrides": [{"guidPath": {"guids": [g(9, 30)]}, "stackMode": "NONE"}]
+                }
+            })
+        ),
+        node(
+            (1, 30),
+            (0, 1),
+            "c",
+            "INSTANCE",
+            "PlainInst",
+            json!({"size": {"x": 200.0, "y": 100.0}, "symbolData": {"symbolID": g(1, 10), "symbolOverrides": []}})
+        )
+    ]);
+    let inner_of = |doc: &Document, inst: &str| -> Node {
+        find(doc, inst).children.iter().filter_map(|id| doc.get(*id)).find(|n| n.name == "Inner").expect("Inner").clone()
+    };
+
+    let original = import_fig_node_changes(&changes, "nested-none").expect("import_fig_node_changes");
+    assert!(inner_of(&original, "Inst").kind.frame_props().unwrap().auto_layout.is_none(), "the override clears the nested auto layout");
+
+    let bytes = export_fig(&original).expect("export_fig");
+    let written = decode_fig_to_json(&bytes).expect("decode_fig_to_json");
+    let none_overrides = written["message"]["nodeChanges"]
+        .as_array()
+        .expect("message.nodeChanges")
+        .iter()
+        .flat_map(|nc| nc["symbolData"]["symbolOverrides"].as_array().into_iter().flatten())
+        .filter(|ov| ov["stackMode"] == "NONE")
+        .count();
+    assert_eq!(none_overrides, 1, "the override of the nested frame must write stackMode NONE itself");
+
+    let doc = import_fig(&bytes).expect("import_fig");
+    let inner = inner_of(&doc, "Inst");
+    assert!(inner.kind.frame_props().unwrap().auto_layout.is_none(), "stackMode NONE on a nested frame must survive a .fig round trip");
+    assert!(inner.component.overrides.contains(&OverrideField::Layout));
+    let plain = inner_of(&doc, "PlainInst");
+    assert!(plain.kind.frame_props().unwrap().auto_layout.is_some(), "an instance without the override keeps the nested auto layout");
+}
+
+#[test]
+fn instance_that_never_set_stack_mode_is_not_exported_as_none() {
+    let changes = json!([
+        {"guid": g(0, 0), "type": "DOCUMENT", "name": "PlainStackDoc"},
+        {"guid": g(0, 1), "parentIndex": {"guid": g(0, 0), "position": "a"}, "type": "CANVAS", "name": "Page 1"},
+        node((1, 10), (0, 1), "a", "SYMBOL", "RowComp", json!({"size": {"x": 200.0, "y": 100.0}, "stackMode": "HORIZONTAL"})),
+        node((1, 11), (1, 10), "a", "RECTANGLE", "Item", json!({"size": {"x": 40.0, "y": 20.0}})),
+        node(
+            (1, 20),
+            (0, 1),
+            "b",
+            "INSTANCE",
+            "PlainInst",
+            json!({"size": {"x": 200.0, "y": 100.0}, "symbolData": {"symbolID": g(1, 10), "symbolOverrides": []}})
+        )
+    ]);
+    let original = import_fig_node_changes(&changes, "plain-stack").expect("import_fig_node_changes");
+    let inst = find(&original, "PlainInst");
+    eprintln!(
+        "plain instance auto_layout = {:?}, overrides = {:?}",
+        inst.kind.frame_props().unwrap().auto_layout.as_ref().map(|a| a.direction),
+        inst.component.overrides
+    );
+    let written = decode_fig_to_json(&export_fig(&original).expect("export_fig")).expect("decode_fig_to_json");
+    let none_nodes = written["message"]["nodeChanges"].as_array().unwrap().iter().filter(|nc| nc["name"] == "PlainInst" && nc["stackMode"] == "NONE").count();
+    assert_eq!(none_nodes, 0, "an instance that never set stackMode NONE must not be written with it");
+}
+
+#[test]
+fn explicit_flex_sizing_on_the_instance_node_is_not_replaced_by_component_sizes() {
+    let sizing_map = |items: &[((u64, u64), &str, f32)]| -> Value {
+        let entries: Vec<Value> = items
+            .iter()
+            .map(|&((s, l), ty, val)| json!({"id": g(s, l), "trackSize": {"minSizing": {"type": ty, "value": val}, "maxSizing": {"type": ty, "value": val}}}))
+            .collect();
+        json!({"entries": entries})
+    };
+    let changes = json!([
+        {"guid": g(0, 0), "type": "DOCUMENT", "name": "ExplicitFlexDoc"},
+        {"guid": g(0, 1), "parentIndex": {"guid": g(0, 0), "position": "a"}, "type": "CANVAS", "name": "Page 1"},
+        node(
+            (1, 10),
+            (0, 1),
+            "a",
+            "SYMBOL",
+            "GridComp",
+            json!({
+                "size": {"x": 300.0, "y": 120.0},
+                "stackMode": "GRID",
+                "gridColumns": track_map(&[(9, 3), (9, 4), (9, 5)]),
+                "gridRows": track_map(&[(9, 1)]),
+                "gridColumnsSizing": sizing_map(&[((9, 3), "FIXED", 80.0), ((9, 4), "FIXED", 120.0), ((9, 5), "FIXED", 100.0)])
+            })
+        ),
+        node(
+            (1, 20),
+            (0, 1),
+            "b",
+            "INSTANCE",
+            "FlexInst",
+            json!({
+                "size": {"x": 300.0, "y": 120.0},
+                "stackMode": "GRID",
+                "gridColumns": track_map(&[(9, 4), (9, 3), (9, 5)]),
+                "gridRows": track_map(&[(9, 1)]),
+                "gridColumnsSizing": sizing_map(&[((9, 4), "FLEX", 1.0), ((9, 3), "FLEX", 1.0), ((9, 5), "FLEX", 1.0)]),
+                "symbolData": {"symbolID": g(1, 10), "symbolOverrides": []}
+            })
+        )
+    ]);
+    let doc = import_fig_node_changes(&changes, "explicit-flex").expect("import_fig_node_changes");
+    let al = find(&doc, "FlexInst").kind.frame_props().unwrap().auto_layout.as_ref().expect("grid auto_layout").clone();
+    assert_eq!(&al.grid_col_tracks[..3], &[GridTrack::Flex(1.0); 3], "the instance sized its own columns, so the component sizes must not replace them");
 }
