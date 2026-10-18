@@ -198,3 +198,26 @@ fn a_later_card_is_not_looked_at_for_the_card_before_it() {
     shadow(f.doc.get_mut(c).unwrap());
     assert_eq!(audited(f), (1, 1));
 }
+
+#[test]
+fn text_inside_a_rounded_opaque_card_inset_by_corner_radius_is_checked_while_corner_cutout_text_is_skipped() {
+    let (mut f, b) = card_list(shadow, Some(Color::WHITE));
+    f.doc.get_mut(b).unwrap().corner_radii = [16.0; 4];
+    // Grey text at (16, 24) of size (40, 16) sits wholly within the 16 px corner-radius inset box [16..184, 16..84].
+    assert_eq!(audited(f), (1, 1));
+
+    // Text tucked into the top-left rounded corner cutout at (2, 2) can overlap Card A's shadow showing around the curve.
+    let (mut f_corner, b_corner) = cards(shadow, Some(Color::WHITE));
+    f_corner.doc.get_mut(b_corner).unwrap().corner_radii = [24.0; 4];
+    let t = f_corner.text(b_corner, "Corner text", 14.0, 400, gray(0x77));
+    resize(&mut f_corner, t, 40.0, 16.0);
+    place(&mut f_corner, t, 2.0, 2.0);
+    assert_eq!(audited(f_corner), (0, 0));
+}
+
+#[test]
+fn an_opaque_card_with_a_visible_effect_does_not_occlude_an_earlier_sibling_shadow() {
+    let (mut f, b) = card_list(shadow, Some(Color::WHITE));
+    blur(f.doc.get_mut(b).unwrap());
+    assert_eq!(audited(f), (0, 0));
+}

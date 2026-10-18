@@ -101,6 +101,14 @@ fn inside_layer(corners: &[Vec2; 4], size: Vec2) -> [Vec2; 4] {
     [Vec2::new(x0, y0), Vec2::new(x1, y0), Vec2::new(x0, y1), Vec2::new(x1, y1)]
 }
 
+/// Whether `corners` lies inside the box of `size` inset by its corner radius `radii`, where the
+/// fill is not cut away at the rounded corners.
+fn inside_inset_box(corners: &[Vec2; 4], size: Vec2, radii: [f32; 4]) -> bool {
+    const EDGE: f32 = 0.01;
+    let r = radii.into_iter().fold(0.0_f32, f32::max).min(size.x / 2.0).min(size.y / 2.0);
+    corners.iter().all(|c| c.x >= r - EDGE && c.y >= r - EDGE && c.x <= size.x - r + EDGE && c.y <= size.y - r + EDGE)
+}
+
 /// What the ancestors of `id` paint behind it. `None` when the text is not checkable: a visible
 /// ancestor is blended as a group or is not drawn at all (opacity 0), a clipping ancestor cuts the
 /// text away, a stroke band is under it, or a fill under the text is not a plain solid or covers
@@ -166,7 +174,14 @@ pub(super) fn backdrop(doc: &Document, id: NodeId) -> Option<Backdrop> {
                 }
             }
         }
-        if out.occluder.is_none() && opaque_chain && whole && fills.iter().any(|(_, alpha)| *alpha >= 1.0) {
+        let no_effects = !n.effects.iter().any(|e| e.visible());
+        if out.occluder.is_none()
+            && opaque_chain
+            && whole
+            && no_effects
+            && inside_inset_box(&here, n.size, n.corner_radii)
+            && fills.iter().any(|(_, alpha)| *alpha >= 1.0)
+        {
             out.occluder = Some(p);
         }
         out.layers.push(Layer { fills, opacity: n.opacity });

@@ -104,8 +104,11 @@ fn failure(doc: &Document, id: NodeId, bounds: &SubtreeBounds) -> Option<Failure
         return None;
     }
     let (paint, color) = text_paint(&n)?;
-    let backdrop = backdrop(doc, id)?;
     let alpha = color.a * t.style.fills[paint].opacity * n.opacity;
+    if alpha <= 0.0 {
+        return None;
+    }
+    let backdrop = backdrop(doc, id)?;
     let bg = backdrop.pixel(None);
     let ratio = contrast_ratio(backdrop.pixel(Some((color, alpha))), bg);
     let required = required_ratio(t.style.font_size, t.style.font_weight);
