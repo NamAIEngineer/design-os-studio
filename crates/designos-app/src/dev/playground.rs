@@ -13,7 +13,7 @@ use crate::widgets::menu::dropdown;
 use crate::widgets::{self, elide};
 use designos_doc::*;
 use egui::{Align2, Color32, Context, Pos2, Rect, Sense, Stroke, TextureHandle, Ui, Vec2};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 type PreviewCacheKey = (u64, u64, NodeId, u64);
 
@@ -60,17 +60,17 @@ impl PlaygroundState {
     }
 }
 
-/// Resolves `(target_node, main_component)` for `id` if it is (or lies inside) an
-/// `Instance`, `Component`, or `ComponentSet`.
+/// Resolves `(target_node, main_component)` for `id`: the nearest `Instance` at or above it
+/// (nested instances included), else the `Component` / `ComponentSet` it is or lies inside.
 pub fn playground_target(doc: &Document, id: NodeId) -> Option<(NodeId, NodeId)> {
     let n = doc.get(id)?;
-    if let Some(inst) = instance_root_of(doc, id) {
-        if let Some(comp) = doc.get(inst).and_then(instance_component) {
-            return Some((inst, comp));
+    let mut cur = Some(id);
+    while let Some(c) = cur {
+        let node = doc.get(c)?;
+        if let Some(comp) = instance_component(node) {
+            return Some((c, comp));
         }
-    }
-    if let Some(comp) = instance_component(n) {
-        return Some((id, comp));
+        cur = node.parent;
     }
     match &n.kind {
         NodeKind::Component(_) => Some((id, id)),
@@ -121,81 +121,174 @@ fn refit_text_in_subtree(doc: &mut Document, root: NodeId) {
     }
 }
 
-fn apply_bindings_to_component_subtree(doc: &mut Document, root: NodeId, values: &BTreeMap<String, PropValue>) {
-    let mut stack = vec![root];
-    while let Some(cur) = stack.pop() {
-        let kids = doc.get(cur).map(|n| n.children.clone()).unwrap_or_default();
-        if let Some(n) = doc.get_mut(cur) {
-            for (field, prop) in n.component.bindings.clone() {
-                let Some(v) = values.get(&prop) else { continue };
-                match (field, v) {
-                    (OverrideField::Visible, PropValue::Bool(b)) => n.visible = *b,
-                    (OverrideField::Characters, PropValue::Text(s)) => {
-                        if let NodeKind::Text(t) = &mut n.kind {
-                            t.content = s.clone();
-                        }
-                    }
-                    _ => {}
-                }
-            }
+/// Components `seeds` need to behave like in the real document: each one with its whole set (the
+/// sibling variants a variant prop switches to), plus every component its layers instantiate or
+/// offer as an instance-swap choice. Returns every node id of those trees.
+fn component_closure(base: &Document, seeds: Vec<NodeId>) -> BTreeSet<NodeId> {
+    let mut keep = BTreeSet::new();
+    let mut owners = BTreeSet::new();
+    let mut pending = seeds;
+    while let Some(c) = pending.pop() {
+        let Some(cn) = base.get(c) else { continue };
+        let set = cn.parent.filter(|p| base.get(*p).is_some_and(|n| matches!(n.kind, NodeKind::ComponentSet(_))));
+        let owner = set.unwrap_or(c);
+        if !owners.insert(owner) {
+            continue;
         }
-        stack.extend(kids);
+        base.walk(owner, |n, _| {
+            keep.insert(n.id);
+            referenced_components(n, &mut pending);
+        });
+    }
+    keep
+}
+
+/// Components `n` points at: its main, instance-swap choices and defaults, and chosen values.
+fn referenced_components(n: &Node, out: &mut Vec<NodeId>) {
+    out.extend(instance_component(n));
+    for def in &n.component.props {
+        if let PropKind::InstanceSwap { preferred } = &def.kind {
+            out.extend(preferred.iter().copied());
+        }
+        if let PropValue::Instance(c) = &def.default {
+            out.push(*c);
+        }
+    }
+    out.extend(n.component.values.values().filter_map(|v| if let PropValue::Instance(c) = v { Some(*c) } else { None }));
+}
+
+/// Image keys painted by `n` (fills, stroke, text fills).
+fn image_refs(n: &Node, out: &mut BTreeSet<String>) {
+    let mut lists: Vec<&Vec<Paint>> = vec![&n.fills, &n.stroke.paints];
+    if let NodeKind::Text(t) = &n.kind {
+        lists.push(&t.style.fills);
+        lists.extend(t.runs.iter().map(|r| &r.style.fills));
+    }
+    for p in lists.into_iter().flatten() {
+        if let PaintKind::Image { image_ref, .. } = &p.kind {
+            out.insert(image_ref.clone());
+        }
     }
 }
 
-/// Builds an in-memory scratch `(Document, codegen_node_id, preview_node_id)` with
-/// `pg.values` applied, without mutating `base_doc`.
-pub fn build_scratch_doc(base_doc: &Document, id: NodeId, pg: &PlaygroundState) -> Option<(Document, NodeId, NodeId)> {
-    let (target_id, comp_id) = playground_target(base_doc, id)?;
-    let mut scratch = base_doc.clone();
+/// Re-points a copied instance node at the main component tree (`keep`) instead of the outer
+/// instance or component it mirrored in the real document, so the copy syncs like a top-level
+/// instance. Overrides and values of every skipped link move onto the node, so what the nested
+/// instance showed stays as it was.
+fn relink_to_scratch(base: &Document, keep: &BTreeSet<NodeId>, n: &mut Node) {
+    for _ in 0..8 {
+        let Some(s) = n.component.source.filter(|s| !keep.contains(s)) else { return };
+        let Some(sn) = base.get(s) else { break };
+        n.component.overrides.extend(sn.component.overrides.iter().copied());
+        for (k, v) in &sn.component.values {
+            n.component.values.entry(k.clone()).or_insert_with(|| v.clone());
+        }
+        n.component.source = sn.component.source;
+    }
+    n.component.source = n.component.source.filter(|s| keep.contains(s));
+}
+
+/// Builds an in-memory scratch `(Document, codegen_node_id, preview_node_id)` with `pg.values`
+/// applied, without mutating `base`. The scratch document holds only the instance (a copy of the
+/// target instance, or a fresh one of the selected component) and the components it needs, so its
+/// size follows the component, never the file.
+pub fn build_scratch_doc(base: &Document, id: NodeId, pg: &PlaygroundState) -> Option<(Document, NodeId, NodeId)> {
+    let (target_id, comp_id) = playground_target(base, id)?;
     let empty = BTreeMap::new();
     let values = if pg.node == Some(id) { &pg.values } else { &empty };
+    let target_is_instance = base.get(target_id).is_some_and(|n| matches!(n.kind, NodeKind::Instance { .. }));
 
-    if scratch.get(target_id).is_some_and(|n| matches!(n.kind, NodeKind::Instance { .. })) {
-        for (k, v) in values {
-            let cmd = set_instance_prop(&mut scratch, target_id, k, Some(v.clone()));
-            let _ = cmd.apply(&mut scratch);
+    let mut inst_ids = Vec::new();
+    if target_is_instance {
+        base.walk(target_id, |n, _| inst_ids.push(n.id));
+    }
+    let mut seeds = vec![comp_id];
+    seeds.extend(values.values().filter_map(|v| if let PropValue::Instance(c) = v { Some(*c) } else { None }));
+    for nid in &inst_ids {
+        if let Some(n) = base.get(*nid) {
+            referenced_components(n, &mut seeds);
         }
-        refit_text_in_subtree(&mut scratch, target_id);
-        scratch.relayout_subtree(target_id);
-        return Some((scratch, id, target_id));
+    }
+    let keep = component_closure(base, seeds);
+
+    let mut scratch = Document::new("component playground");
+    scratch.styles = base.styles.clone();
+    scratch.style_meta = base.style_meta.clone();
+    for nid in &keep {
+        let Some(n) = base.get(*nid) else { continue };
+        let mut c = n.clone();
+        c.parent = c.parent.filter(|p| keep.contains(p));
+        scratch.nodes.insert(*nid, c);
+    }
+    let page_id = NodeId(base.nodes.keys().next_back().map_or(0, |k| k.0) + 1);
+    let mut page = Node::new(page_id, NodeKind::Page { background: Color::TRANSPARENT });
+    if target_is_instance {
+        for nid in &inst_ids {
+            let Some(n) = base.get(*nid) else { continue };
+            let mut c = n.clone();
+            relink_to_scratch(base, &keep, &mut c);
+            if *nid == target_id {
+                c.parent = Some(page_id);
+                if c.component.source.is_some() {
+                    c.component.source = instance_component(&c);
+                }
+            }
+            scratch.nodes.insert(*nid, c);
+        }
+        page.children = vec![target_id];
+    }
+    scratch.nodes.insert(page_id, page);
+    scratch.pages.push(page_id);
+    scratch.reserve_ids(page_id);
+
+    let mut refs = BTreeSet::new();
+    let mut bound = false;
+    for n in scratch.nodes.values() {
+        image_refs(n, &mut refs);
+        bound |= !n.variables.bindings.is_empty();
+    }
+    for r in refs {
+        if let Some(bytes) = base.images.get(&r) {
+            scratch.images.insert(r, bytes.clone());
+        }
+    }
+    if bound {
+        scratch.variables = base.variables.clone();
+        scratch.variable_collections = base.variable_collections.clone();
     }
 
-    // `target_id` is a Component or ComponentSet: instantiate a scratch instance on its page.
-    let page = scratch.pages.iter().copied().find(|&p| scratch.is_ancestor(p, comp_id)).unwrap_or_else(|| scratch.pages.first().copied().unwrap_or(comp_id));
-    let cmd = create_instance(&mut scratch, comp_id, page, designos_doc::Vec2::ZERO);
-    let scratch_inst = match &cmd {
-        Command::Insert { nodes, .. } => nodes.first().map(|n| n.id),
-        _ => None,
+    let inst_id = if target_is_instance {
+        target_id
+    } else {
+        let cmd = create_instance(&mut scratch, comp_id, page_id, designos_doc::Vec2::ZERO);
+        let inst_id = match &cmd {
+            Command::Insert { nodes, .. } => nodes.first().map(|n| n.id)?,
+            _ => return None,
+        };
+        cmd.apply(&mut scratch).ok()?;
+        inst_id
     };
-    let _ = cmd.apply(&mut scratch);
-    if let Some(inst_id) = scratch_inst {
-        for (k, v) in values {
-            let c = set_instance_prop(&mut scratch, inst_id, k, Some(v.clone()));
-            let _ = c.apply(&mut scratch);
-        }
-        refit_text_in_subtree(&mut scratch, inst_id);
-        // Also apply bindings onto the component subtree in `scratch` so inspecting a main Component directly updates its codegen live.
-        if !values.is_empty() {
-            let active_comp = scratch.get(inst_id).and_then(instance_component).unwrap_or(comp_id);
-            apply_bindings_to_component_subtree(&mut scratch, active_comp, values);
-            refit_text_in_subtree(&mut scratch, active_comp);
-            scratch.relayout_subtree(active_comp);
-            scratch.relayout_subtree(inst_id);
-            let code_node = if matches!(scratch.get(id).map(|n| &n.kind), Some(NodeKind::ComponentSet(_))) {
-                inst_id
-            } else if id == comp_id {
-                active_comp
-            } else {
-                id
-            };
-            return Some((scratch, code_node, inst_id));
-        }
-        scratch.relayout_subtree(inst_id);
-        return Some((scratch, id, inst_id));
+    for (k, v) in values {
+        let _ = set_instance_prop(&mut scratch, inst_id, k, Some(v.clone())).apply(&mut scratch);
     }
+    refit_text_in_subtree(&mut scratch, inst_id);
+    scratch.relayout_subtree(inst_id);
 
-    Some((scratch, id, comp_id))
+    // The code is for the layer that was selected, as it appears in the scratch instance.
+    let in_instance = id == inst_id || scratch.is_ancestor(inst_id, id);
+    let code_node = if in_instance && scratch.get(id).is_some() {
+        id
+    } else {
+        let mut found = None;
+        scratch.walk(inst_id, |n, _| {
+            if found.is_none() && n.component.source == Some(id) {
+                found = Some(n.id);
+            }
+        });
+        found.unwrap_or(inst_id)
+    };
+    let scratch = if bound { apply_bound_variables(&scratch) } else { scratch };
+    Some((scratch, code_node, inst_id))
 }
 
 fn preview_texture(ctx: &Context, base_doc: &Document, id: NodeId, pg: &mut PlaygroundState) -> Option<TextureHandle> {
@@ -205,11 +298,9 @@ fn preview_texture(ctx: &Context, base_doc: &Document, id: NodeId, pg: &mut Play
             return cached.clone();
         }
     }
-    let (_, _, _) = playground_target(base_doc, id).map(|(t, c)| (t, c, ()))?;
     let (scratch, _, preview_id) = build_scratch_doc(base_doc, id, pg)?;
     let dim = scratch.get(preview_id).map(|n| n.size.x.max(n.size.y)).unwrap_or(1.0).max(1.0);
-    let scale = (168.0 / dim).clamp(0.5, 1.0);
-    let png = designos_export::export_png(&scratch, preview_id, scale);
+    let png = designos_export::export_png(&scratch, preview_id, 168.0 / dim);
     let tex = image::load_from_memory(&png).ok().map(|img| {
         let rgba = img.to_rgba8();
         let ci = egui::ColorImage::from_rgba_unmultiplied([rgba.width() as usize, rgba.height() as usize], rgba.as_raw());
@@ -308,8 +399,6 @@ pub fn playground_section(app: &mut App, ui: &mut Ui, c: &mut Cur, id: NodeId) {
     }
     c.y += stage_h + 8.0;
 
-    let all_comps: Vec<NodeId> = app.doc.nodes.values().filter(|n| matches!(n.kind, NodeKind::Component(_))).map(|n| n.id).collect();
-
     for def in defs {
         if matches!(def.kind, PropKind::Slot) {
             continue;
@@ -357,8 +446,7 @@ pub fn playground_section(app: &mut App, ui: &mut Ui, c: &mut Cur, id: NodeId) {
                     PropValue::Instance(cid) => comp_label(&app.doc, *cid),
                     _ => String::new(),
                 };
-                let candidates: Vec<NodeId> =
-                    if preferred.is_empty() { all_comps.clone() } else { preferred.iter().copied().filter(|cid| app.doc.get(*cid).is_some()).collect() };
+                let candidates: Vec<NodeId> = preferred.iter().copied().filter(|cid| app.doc.get(*cid).is_some()).collect();
                 let names: Vec<String> = candidates.iter().map(|cid| comp_label(&app.doc, *cid)).collect();
                 if let Some(i) = dropdown(ui, ctl, &key, &cur, &names) {
                     if let Some(&chosen) = candidates.get(i) {
@@ -371,4 +459,196 @@ pub fn playground_section(app: &mut App, ui: &mut Ui, c: &mut Cur, id: NodeId) {
         c.y += 28.0;
     }
     c.y += 6.0;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::dev::Language;
+
+    struct Fx {
+        d: Document,
+        page: NodeId,
+        button: NodeId,
+        star: NodeId,
+        card: NodeId,
+        card_inst: NodeId,
+        nested_button: NodeId,
+    }
+
+    fn run(d: &mut Document, f: impl FnOnce(&mut Document) -> Command) {
+        let c = f(d);
+        c.apply(d).unwrap();
+    }
+
+    fn named_child(d: &Document, parent: NodeId, name: &str) -> NodeId {
+        *d.get(parent).unwrap().children.iter().find(|c| d.get(**c).unwrap().name == name).unwrap_or_else(|| panic!("no child {name}"))
+    }
+
+    /// A Button component (`Label` text and `Show icon` boolean props), a `Star` component, a Card
+    /// component holding a Button instance whose main is swappable through its `Icon` prop, and an
+    /// instance of that Card on the page.
+    fn fixture(unrelated: usize) -> Fx {
+        let mut d = Document::new("playground");
+        let page = d.add_page("P");
+        let id = d.alloc_id();
+        let mut b = Node::frame(id, designos_doc::Rect::new(0.0, 0.0, 100.0, 40.0));
+        b.name = "Button".into();
+        let button = d.insert(page, b).unwrap();
+        let id = d.alloc_id();
+        let mut t = Node::text(id, designos_doc::Rect::new(10.0, 10.0, 60.0, 20.0), "Label", TextStyle::default());
+        t.name = "label".into();
+        let label = d.insert(button, t).unwrap();
+        let id = d.alloc_id();
+        let mut ic = Node::ellipse(id, designos_doc::Rect::new(75.0, 10.0, 20.0, 20.0));
+        ic.name = "icon".into();
+        let icon = d.insert(button, ic).unwrap();
+        run(&mut d, |d| create_component(d, button));
+        let defs = [
+            ("Label", PropKind::Text, PropValue::Text("Label".into()), label, OverrideField::Characters),
+            ("Show icon", PropKind::Boolean, PropValue::Bool(true), icon, OverrideField::Visible),
+        ];
+        for (name, kind, default, layer, field) in defs {
+            run(&mut d, |d| add_prop(d, button, ComponentPropDef { name: name.into(), kind, default }));
+            run(&mut d, |d| bind_prop(d, layer, field, Some(name)));
+        }
+
+        let id = d.alloc_id();
+        let mut star = Node::frame(id, designos_doc::Rect::new(0.0, 100.0, 24.0, 24.0));
+        star.name = "Star".into();
+        let star = d.insert(page, star).unwrap();
+        let id = d.alloc_id();
+        d.insert(star, Node::ellipse(id, designos_doc::Rect::new(0.0, 0.0, 8.0, 8.0))).unwrap();
+        run(&mut d, |d| create_component(d, star));
+
+        let id = d.alloc_id();
+        let mut card = Node::frame(id, designos_doc::Rect::new(0.0, 200.0, 300.0, 100.0));
+        card.name = "Card".into();
+        let card = d.insert(page, card).unwrap();
+        run(&mut d, |d| create_component(d, card));
+        run(&mut d, |d| create_instance(d, button, card, designos_doc::Vec2::ZERO));
+        let slot = *d.get(card).unwrap().children.last().unwrap();
+        let swap =
+            ComponentPropDef { name: "Icon".into(), kind: PropKind::InstanceSwap { preferred: vec![star, button] }, default: PropValue::Instance(button) };
+        run(&mut d, |d| add_prop(d, card, swap));
+        run(&mut d, |d| bind_prop(d, slot, OverrideField::MainComponent, Some("Icon")));
+        run(&mut d, |d| create_instance(d, card, page, designos_doc::Vec2::new(0.0, 400.0)));
+        let card_inst = *d.get(page).unwrap().children.last().unwrap();
+        let nested_button = d.get(card_inst).unwrap().children[0];
+        assert!(matches!(d.get(nested_button).unwrap().kind, NodeKind::Instance { .. }), "the card holds a button instance");
+
+        for i in 0..unrelated {
+            let id = d.alloc_id();
+            let mut f = Node::frame(id, designos_doc::Rect::new(i as f32, 900.0, 10.0, 10.0));
+            f.fills = vec![Paint {
+                kind: PaintKind::Image { image_ref: "unrelated".into(), scale_mode: ImageScaleMode::Fill },
+                opacity: 1.0,
+                visible: true,
+                blend: BlendMode::Normal,
+            }];
+            d.insert(page, f).unwrap();
+        }
+        d.images.insert("unrelated".into(), vec![7u8; 4096]);
+        Fx { d, page, button, star, card, card_inst, nested_button }
+    }
+
+    fn pg_with(id: NodeId, values: &[(&str, PropValue)]) -> PlaygroundState {
+        let mut pg = PlaygroundState::default();
+        for (k, v) in values {
+            pg.set_prop(id, (*k).to_string(), v.clone());
+        }
+        pg
+    }
+
+    #[test]
+    fn scratch_document_follows_the_component_not_the_file() {
+        let small = fixture(0);
+        let big = fixture(600);
+        let pg_small = pg_with(small.card_inst, &[("Icon", PropValue::Instance(small.star))]);
+        let pg_big = pg_with(big.card_inst, &[("Icon", PropValue::Instance(big.star))]);
+        let (s_small, _, _) = build_scratch_doc(&small.d, small.card_inst, &pg_small).unwrap();
+        let (s_big, _, _) = build_scratch_doc(&big.d, big.card_inst, &pg_big).unwrap();
+        assert!(big.d.nodes.len() > 600, "the unrelated frames are in the file");
+        assert_eq!(s_big.nodes.len(), s_small.nodes.len(), "unrelated layers must not reach the scratch document");
+        assert!(s_big.nodes.len() < 40, "scratch holds {} nodes", s_big.nodes.len());
+        assert!(s_big.images.is_empty(), "images nothing in the scratch document paints must stay behind");
+        // The component selected directly is bounded the same way.
+        let (s_main, _, _) = build_scratch_doc(&big.d, big.card, &pg_with(big.card, &[("Icon", PropValue::Instance(big.star))])).unwrap();
+        assert!(s_main.nodes.len() < 40, "scratch holds {} nodes", s_main.nodes.len());
+    }
+
+    #[test]
+    fn a_nested_instance_is_the_playground_target() {
+        let f = fixture(0);
+        assert_eq!(playground_target(&f.d, f.nested_button), Some((f.nested_button, f.button)));
+        let label = named_child(&f.d, f.nested_button, "label");
+        assert_eq!(playground_target(&f.d, label), Some((f.nested_button, f.button)), "a layer inside the nested button belongs to the button");
+        assert_eq!(playground_target(&f.d, f.card_inst), Some((f.card_inst, f.card)));
+
+        let pg = pg_with(f.nested_button, &[("Show icon", PropValue::Bool(false)), ("Label", PropValue::Text("Pay now".into()))]);
+        let (scratch, code_id, preview_id) = build_scratch_doc(&f.d, f.nested_button, &pg).unwrap();
+        assert_eq!(code_id, f.nested_button);
+        assert_eq!(preview_id, f.nested_button);
+        let icon = named_child(&scratch, preview_id, "icon");
+        assert!(!scratch.get(icon).unwrap().visible, "the preview shows the button without its icon");
+        let label = named_child(&scratch, preview_id, "label");
+        assert!(matches!(&scratch.get(label).unwrap().kind, NodeKind::Text(t) if t.content == "Pay now"), "the preview shows the new label");
+        let code = Language::React.generate(&scratch, code_id, false);
+        assert!(code.contains("showIcon={false}") && code.contains("label=\"Pay now\""), "code follows the nested button:\n{code}");
+        assert!(!code.contains("<Card"), "code is not the card's:\n{code}");
+        // The file is untouched.
+        let base_icon = named_child(&f.d, f.nested_button, "icon");
+        assert!(f.d.get(base_icon).unwrap().visible);
+    }
+
+    #[test]
+    fn a_nested_instance_keeps_what_its_card_customised_while_a_prop_is_edited() {
+        let mut f = fixture(0);
+        // The card's own copy of the button says "Pay"; the card instance mirrors that.
+        let in_card = named_child(&f.d, f.card, "Button");
+        let in_card_label = named_child(&f.d, in_card, "label");
+        let mut n = f.d.get(in_card_label).unwrap().clone();
+        if let NodeKind::Text(t) = &mut n.kind {
+            t.content = "Pay".into();
+        }
+        n.component.overrides.insert(OverrideField::Characters);
+        Command::Update { node: Box::new(n) }.apply(&mut f.d).unwrap();
+        run(&mut f.d, |d| sync_instances(d, f.card));
+        let label = named_child(&f.d, f.nested_button, "label");
+        assert!(matches!(&f.d.get(label).unwrap().kind, NodeKind::Text(t) if t.content == "Pay"), "the card instance shows the card's label");
+        let kids_before = f.d.get(f.nested_button).unwrap().children.len();
+
+        let pg = pg_with(f.nested_button, &[("Show icon", PropValue::Bool(false))]);
+        let (scratch, _, preview_id) = build_scratch_doc(&f.d, f.nested_button, &pg).unwrap();
+        assert_eq!(scratch.get(preview_id).unwrap().children.len(), kids_before, "layers are kept, not rebuilt");
+        let label = named_child(&scratch, preview_id, "label");
+        assert!(matches!(&scratch.get(label).unwrap().kind, NodeKind::Text(t) if t.content == "Pay"), "the card's label survives the edit");
+        assert!(!scratch.get(named_child(&scratch, preview_id, "icon")).unwrap().visible);
+    }
+
+    #[test]
+    fn an_icon_swap_on_a_main_component_reaches_the_code_and_the_preview() {
+        let f = fixture(0);
+        let pg = pg_with(f.card, &[("Icon", PropValue::Instance(f.star))]);
+        let (scratch, code_id, preview_id) = build_scratch_doc(&f.d, f.card, &pg).unwrap();
+        assert_eq!(code_id, preview_id, "the code is generated from the node the preview renders");
+        assert!(matches!(scratch.get(code_id).unwrap().kind, NodeKind::Instance { .. }));
+        let swapped = scratch.get(preview_id).unwrap().children[0];
+        assert_eq!(instance_component(scratch.get(swapped).unwrap()), Some(f.star), "the preview shows the star");
+        let code = Language::React.generate(&scratch, code_id, false);
+        assert!(code.contains("icon={<Star />}"), "swap missing from the code:\n{code}");
+        // A layer inside the main component maps to its copy in the scratch instance.
+        let (_, layer_code_id, _) = build_scratch_doc(&f.d, f.button, &pg_with(f.button, &[("Show icon", PropValue::Bool(false))])).unwrap();
+        assert_ne!(layer_code_id, f.button, "the code is for the scratch instance, not the main component");
+    }
+
+    #[test]
+    fn scratch_code_matches_the_file_when_nothing_is_edited() {
+        let f = fixture(0);
+        let base = Language::React.generate(&f.d, f.card_inst, false);
+        let pg = pg_with(f.card_inst, &[("Icon", PropValue::Instance(f.button))]);
+        let (scratch, code_id, _) = build_scratch_doc(&f.d, f.card_inst, &pg).unwrap();
+        assert_eq!(Language::React.generate(&scratch, code_id, false), base);
+        assert!(f.d.get(f.page).is_some());
+    }
 }
