@@ -2219,6 +2219,10 @@ fn convert_stack(m: &mut Map<String, Value>, nc: &Value) {
         Some("HORIZONTAL") => "HORIZONTAL",
         Some("VERTICAL") => "VERTICAL",
         Some("GRID") => "GRID",
+        Some("NONE") => {
+            m.insert("layoutMode".into(), "NONE".into());
+            return;
+        }
         _ => return,
     };
     m.insert("layoutMode".into(), mode.into());

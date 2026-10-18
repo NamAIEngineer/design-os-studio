@@ -507,3 +507,201 @@ fn real_v106_binary_fig_with_instance_grid_overrides_remaps_and_relayouts() {
     assert_eq!(cell.layout_child.grid_row, Some(1), "9:2 stays at row 1");
     assert_eq!((cell.transform.tx, cell.transform.ty), (0.0, 50.0));
 }
+
+#[test]
+fn reorder_only_override_permutes_unequal_track_sizes() {
+    let sizing_map = |items: &[((u64, u64), &str, f32)]| -> Value {
+        let entries: Vec<Value> = items
+            .iter()
+            .map(|&((s, l), ty, val)| {
+                json!({
+                    "id": g(s, l),
+                    "trackSize": {
+                        "minSizing": {"type": ty, "value": val},
+                        "maxSizing": {"type": ty, "value": val}
+                    }
+                })
+            })
+            .collect();
+        json!({"entries": entries})
+    };
+    let changes = json!([
+        {"guid": g(0, 0), "type": "DOCUMENT", "name": "UnequalTrackReorderDoc"},
+        {"guid": g(0, 1), "parentIndex": {"guid": g(0, 0), "position": "a"}, "type": "CANVAS", "name": "Page 1"},
+        node(
+            (1, 10),
+            (0, 1),
+            "a",
+            "SYMBOL",
+            "GridComp",
+            json!({
+                "size": {"x": 300.0, "y": 120.0},
+                "stackMode": "GRID",
+                "gridColumns": track_map(&[(9, 3), (9, 4), (9, 5)]),
+                "gridRows": track_map(&[(9, 1), (9, 2)]),
+                "gridColumnsSizing": sizing_map(&[((9, 3), "FIXED", 80.0), ((9, 4), "FIXED", 120.0), ((9, 5), "FIXED", 100.0)]),
+                "gridRowsSizing": sizing_map(&[((9, 1), "FIXED", 50.0), ((9, 2), "FIXED", 70.0)])
+            })
+        ),
+        node(
+            (1, 11),
+            (1, 10),
+            "a",
+            "RECTANGLE",
+            "Cell",
+            json!({
+                "overrideKey": g(9, 11),
+                "size": {"x": 80.0, "y": 50.0},
+                "layoutSizingHorizontal": "FILL",
+                "layoutSizingVertical": "FILL",
+                "gridColumnAnchor": g(9, 3),
+                "gridRowAnchor": g(9, 1)
+            })
+        ),
+        node(
+            (1, 12),
+            (1, 10),
+            "b",
+            "RECTANGLE",
+            "Wide",
+            json!({
+                "overrideKey": g(9, 12),
+                "size": {"x": 120.0, "y": 70.0},
+                "layoutSizingHorizontal": "FILL",
+                "layoutSizingVertical": "FILL",
+                "gridColumnAnchor": g(9, 4),
+                "gridRowAnchor": g(9, 2)
+            })
+        ),
+        node(
+            (1, 20),
+            (0, 1),
+            "b",
+            "INSTANCE",
+            "MovedInst",
+            json!({
+                "size": {"x": 300.0, "y": 120.0},
+                "symbolData": {
+                    "symbolID": g(1, 10),
+                    "symbolOverrides": [{
+                        "guidPath": {"guids": []},
+                        "gridColumns": track_map(&[(9, 4), (9, 3), (9, 5)]),
+                        "gridRows": track_map(&[(9, 2), (9, 1)])
+                    }]
+                }
+            })
+        ),
+        node(
+            (1, 30),
+            (0, 1),
+            "c",
+            "INSTANCE",
+            "NodeMovedInst",
+            json!({
+                "size": {"x": 300.0, "y": 120.0},
+                "gridColumns": track_map(&[(9, 4), (9, 3), (9, 5)]),
+                "gridRows": track_map(&[(9, 2), (9, 1)]),
+                "symbolData": {"symbolID": g(1, 10), "symbolOverrides": []}
+            })
+        )
+    ]);
+
+    let mut doc = import_fig_node_changes(&changes, "unequal-track-reorder").expect("import_fig_node_changes");
+    for inst_name in ["MovedInst", "NodeMovedInst"] {
+        let inst_id = find(&doc, inst_name).id;
+        let al = find(&doc, inst_name).kind.frame_props().unwrap().auto_layout.as_ref().expect("grid auto_layout").clone();
+        assert_eq!(
+            &al.grid_col_tracks[..3],
+            &[GridTrack::Fixed(120.0), GridTrack::Fixed(80.0), GridTrack::Fixed(100.0)],
+            "{inst_name} must permute column track sizes to match [9:4, 9:3, 9:5]"
+        );
+        assert_eq!(&al.grid_row_tracks[..2], &[GridTrack::Fixed(70.0), GridTrack::Fixed(50.0)], "{inst_name} must permute row track sizes to match [9:2, 9:1]");
+
+        doc.relayout_subtree(inst_id);
+        let wide = find(&doc, inst_name).children.iter().filter_map(|id| doc.get(*id)).find(|n| n.name == "Wide").unwrap();
+        assert_eq!((wide.layout_child.grid_column, wide.layout_child.grid_row), (Some(0), Some(0)));
+        assert_eq!((wide.transform.tx, wide.transform.ty), (0.0, 0.0), "{inst_name} Wide position");
+        assert_eq!((wide.size.x, wide.size.y), (120.0, 70.0), "{inst_name} Wide stays in 120x70 track");
+
+        let cell = cell_of(&doc, inst_name);
+        assert_eq!((cell.layout_child.grid_column, cell.layout_child.grid_row), (Some(1), Some(1)));
+        assert_eq!((cell.transform.tx, cell.transform.ty), (120.0, 70.0), "{inst_name} Cell shifts past 120x70 track");
+        assert_eq!((cell.size.x, cell.size.y), (80.0, 50.0), "{inst_name} Cell stays in 80x50 track");
+    }
+}
+
+#[test]
+fn stack_mode_none_override_and_instance_node_remove_inherited_grid() {
+    let mut cell_free = node(
+        (1, 21),
+        (1, 10),
+        "a",
+        "RECTANGLE",
+        "FreeChild",
+        json!({
+            "overrideKey": g(9, 21),
+            "size": {"x": 40.0, "y": 20.0},
+            "gridColumnAnchor": g(9, 4),
+            "gridRowAnchor": g(9, 2)
+        }),
+    );
+    cell_free["transform"] = json!({"m00": 1.0, "m01": 0.0, "m02": 37.0, "m10": 0.0, "m11": 1.0, "m12": 53.0});
+
+    let none_with_name = node(
+        (1, 40),
+        (0, 1),
+        "d",
+        "INSTANCE",
+        "NoneWithNameRaw",
+        json!({
+            "size": {"x": 300.0, "y": 200.0},
+            "symbolData": {
+                "symbolID": g(1, 10),
+                "symbolOverrides": [{
+                    "guidPath": {"guids": []},
+                    "stackMode": "NONE",
+                    "name": "NoneWithNameInst"
+                }]
+            }
+        }),
+    );
+    let none_on_node = node(
+        (1, 50),
+        (0, 1),
+        "e",
+        "INSTANCE",
+        "NoneOnNodeRaw",
+        json!({
+            "size": {"x": 300.0, "y": 200.0},
+            "stackMode": "NONE",
+            "symbolData": {
+                "symbolID": g(1, 10),
+                "symbolOverrides": [{
+                    "guidPath": {"guids": []},
+                    "name": "NoneOnNodeInst"
+                }]
+            }
+        }),
+    );
+
+    let none_only_overrides = vec![json!({"guidPath": {"guids": []}, "stackMode": "NONE"})];
+    let mut doc = grid_component_doc_with(none_only_overrides, json!({}), vec![cell_free, none_with_name, none_on_node]);
+
+    for inst_name in ["MovedInst", "NoneWithNameInst", "NoneOnNodeInst"] {
+        let inst = find(&doc, inst_name);
+        let inst_id = inst.id;
+        assert!(inst.kind.frame_props().unwrap().auto_layout.is_none(), "{inst_name} must not inherit component grid when stackMode is NONE");
+        assert!(inst.component.overrides.contains(&OverrideField::Layout), "{inst_name} must record OverrideField::Layout when stackMode is NONE");
+        doc.relayout_subtree(inst_id);
+        let free_child = find(&doc, inst_name).children.iter().filter_map(|id| doc.get(*id)).find(|n| n.name == "FreeChild").unwrap();
+        assert_eq!(
+            (free_child.transform.tx, free_child.transform.ty),
+            (37.0, 53.0),
+            "{inst_name} FreeChild must stay at its free position after relayout_subtree"
+        );
+    }
+
+    // PlainInst (which did not set stackMode: NONE) still inherits the component grid.
+    let plain = find(&doc, "PlainInst");
+    assert_eq!(plain.kind.frame_props().unwrap().auto_layout.as_ref().map(|a| a.direction), Some(LayoutDirection::Grid));
+}

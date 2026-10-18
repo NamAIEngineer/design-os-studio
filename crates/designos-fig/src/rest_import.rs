@@ -361,6 +361,9 @@ struct Ctx<'a> {
     override_keys: HashMap<NodeId, std::sync::Arc<str>>,
     col_anchor_guids: HashMap<NodeId, String>,
     row_anchor_guids: HashMap<NodeId, String>,
+    grid_col_track_ids: HashMap<NodeId, Vec<String>>,
+    grid_row_track_ids: HashMap<NodeId, Vec<String>>,
+    no_auto_layout: HashSet<NodeId>,
     /// `.fig` `uniformScaleFactor` of instances made with the scale tool.
     scales: BTreeMap<NodeId, f32>,
     /// Library components and sets of `.fig` internal canvases: node ->
@@ -526,6 +529,9 @@ pub(crate) fn import_rest_value_owned<'a>(
         override_keys: HashMap::new(),
         col_anchor_guids: HashMap::new(),
         row_anchor_guids: HashMap::new(),
+        grid_col_track_ids: HashMap::new(),
+        grid_row_track_ids: HashMap::new(),
+        no_auto_layout: HashSet::new(),
         scales: BTreeMap::new(),
         library_keys: BTreeMap::new(),
         pending_swaps: Vec::new(),
@@ -634,6 +640,9 @@ pub(crate) fn import_rest_value_with_blobs<'a>(
         override_keys: HashMap::new(),
         col_anchor_guids: HashMap::new(),
         row_anchor_guids: HashMap::new(),
+        grid_col_track_ids: HashMap::new(),
+        grid_row_track_ids: HashMap::new(),
+        no_auto_layout: HashSet::new(),
         scales: BTreeMap::new(),
         library_keys: BTreeMap::new(),
         pending_swaps: Vec::new(),
@@ -1126,6 +1135,20 @@ impl<'a> Ctx<'a> {
         if let Some(g) = fstr(v, "_gridRowAnchorGuid") {
             self.row_anchor_guids.insert(id, g.to_string());
         }
+        let col_tracks: Vec<String> = farr(v, "_gridColumnTrackIds").iter().filter_map(|x| x.as_str().map(String::from)).collect();
+        if !col_tracks.is_empty() {
+            self.grid_col_track_ids.insert(id, col_tracks);
+        }
+        let row_tracks: Vec<String> = farr(v, "_gridRowTrackIds").iter().filter_map(|x| x.as_str().map(String::from)).collect();
+        if !row_tracks.is_empty() {
+            self.grid_row_track_ids.insert(id, row_tracks);
+        }
+        if fstr(v, "layoutMode") == Some("NONE") {
+            self.no_auto_layout.insert(id);
+            if ty == "INSTANCE" {
+                n.component.overrides.insert(OverrideField::Layout);
+            }
+        }
 
         // Style references and library style definitions.
         if let Some(styles) = v.get("styles").and_then(Value::as_object) {
@@ -1421,6 +1444,9 @@ impl<'a> Ctx<'a> {
             override_keys: std::mem::take(&mut self.override_keys),
             col_anchor_guids: std::mem::take(&mut self.col_anchor_guids),
             row_anchor_guids: std::mem::take(&mut self.row_anchor_guids),
+            grid_col_track_ids: std::mem::take(&mut self.grid_col_track_ids),
+            grid_row_track_ids: std::mem::take(&mut self.grid_row_track_ids),
+            no_auto_layout: std::mem::take(&mut self.no_auto_layout),
             scales: std::mem::take(&mut self.scales),
             path_cache: std::mem::take(&mut self.path_cache),
             blob_cache: std::mem::take(&mut self.blob_cache),
@@ -1844,13 +1870,21 @@ impl<'a> Ctx<'a> {
         if !self.doc.get(inst).map(|n| n.children.is_empty()).unwrap_or(false) || self.doc.is_ancestor(comp, inst) || comp == inst {
             return;
         }
-        let comp_grid_al =
-            self.doc.get(comp).and_then(|n| n.kind.frame_props()).and_then(|fp| fp.auto_layout.clone()).filter(|al| al.direction == LayoutDirection::Grid);
-        if let Some(comp_al) = comp_grid_al {
-            if let Some(fp) = self.doc.get_mut(inst).and_then(|n| n.kind.frame_props_mut()) {
-                if fp.auto_layout.is_none() {
-                    fp.auto_layout = Some(comp_al);
+        if !self.no_auto_layout.contains(&inst) {
+            let comp_grid_al =
+                self.doc.get(comp).and_then(|n| n.kind.frame_props()).and_then(|fp| fp.auto_layout.clone()).filter(|al| al.direction == LayoutDirection::Grid);
+            if let Some(comp_al) = comp_grid_al {
+                if let Some(fp) = self.doc.get_mut(inst).and_then(|n| n.kind.frame_props_mut()) {
+                    if fp.auto_layout.is_none() {
+                        fp.auto_layout = Some(comp_al);
+                    }
                 }
+            }
+            if let Some(ids) = self.grid_col_track_ids.get(&comp).cloned() {
+                self.grid_col_track_ids.entry(inst).or_insert(ids);
+            }
+            if let Some(ids) = self.grid_row_track_ids.get(&comp).cloned() {
+                self.grid_row_track_ids.entry(inst).or_insert(ids);
             }
         }
         let fast_clone = self.rest_overrides.is_empty() && self.doc.nodes.len() >= 10_000;
@@ -1885,6 +1919,15 @@ impl<'a> Ctx<'a> {
             }
             if let Some(g) = self.row_anchor_guids.get(&src).cloned() {
                 self.row_anchor_guids.insert(id, g);
+            }
+            if let Some(ids) = self.grid_col_track_ids.get(&src).cloned() {
+                self.grid_col_track_ids.insert(id, ids);
+            }
+            if let Some(ids) = self.grid_row_track_ids.get(&src).cloned() {
+                self.grid_row_track_ids.insert(id, ids);
+            }
+            if self.no_auto_layout.contains(&src) {
+                self.no_auto_layout.insert(id);
             }
             n.component.source = Some(src);
             n.component.overrides.clear();
@@ -2276,6 +2319,9 @@ impl<'a> Ctx<'a> {
             }
         }
         if let Some(fp) = n.kind.frame_props_mut() {
+            let prev_tracks = (set.get("_gridColumnTrackIds").is_some() || set.get("_gridRowTrackIds").is_some())
+                .then(|| fp.auto_layout.as_ref().map(|al| (al.grid_col_tracks.clone(), al.grid_row_tracks.clone())))
+                .flatten();
             if let Some(c) = fbool(set, "clipsContent") {
                 fp.clips_content = c;
             }
@@ -2284,6 +2330,13 @@ impl<'a> Ctx<'a> {
             }
             if set.get("layoutMode").is_some() {
                 fp.auto_layout = frame_props(set).auto_layout;
+                if fp.auto_layout.is_none() {
+                    self.no_auto_layout.insert(id);
+                    self.grid_col_track_ids.remove(&id);
+                    self.grid_row_track_ids.remove(&id);
+                } else {
+                    self.no_auto_layout.remove(&id);
+                }
             } else if let Some(al) = fp.auto_layout.as_mut() {
                 let align = |s: &str| match s {
                     "CENTER" => LayoutAlign::Center,
@@ -2347,6 +2400,38 @@ impl<'a> Ctx<'a> {
                 }
                 if let Some(s) = fstr(set, "gridAutoTracks") {
                     al.grid_auto_tracks = parse_grid_auto_tracks(s);
+                }
+            }
+            if let Some(al) = fp.auto_layout.as_mut() {
+                let col_tracks: Vec<&str> = farr(set, "_gridColumnTrackIds").iter().filter_map(Value::as_str).collect();
+                if !col_tracks.is_empty() {
+                    if set.get("gridColumnsSizing").is_none() {
+                        if let (Some((old_tracks, _)), Some(old_ids)) = (&prev_tracks, self.grid_col_track_ids.get(&id)) {
+                            let mut permuted = GridTracks::default();
+                            for (new_idx, &tid) in col_tracks.iter().take(MAX_GRID_TRACKS).enumerate() {
+                                if let Some(old_idx) = old_ids.iter().position(|old| old == tid).filter(|&i| i < MAX_GRID_TRACKS) {
+                                    permuted[new_idx] = old_tracks[old_idx];
+                                }
+                            }
+                            al.grid_col_tracks = permuted;
+                        }
+                    }
+                    self.grid_col_track_ids.insert(id, col_tracks.into_iter().map(String::from).collect());
+                }
+                let row_tracks: Vec<&str> = farr(set, "_gridRowTrackIds").iter().filter_map(Value::as_str).collect();
+                if !row_tracks.is_empty() {
+                    if set.get("gridRowsSizing").is_none() {
+                        if let (Some((_, old_tracks)), Some(old_ids)) = (&prev_tracks, self.grid_row_track_ids.get(&id)) {
+                            let mut permuted = GridTracks::default();
+                            for (new_idx, &tid) in row_tracks.iter().take(MAX_GRID_TRACKS).enumerate() {
+                                if let Some(old_idx) = old_ids.iter().position(|old| old == tid).filter(|&i| i < MAX_GRID_TRACKS) {
+                                    permuted[new_idx] = old_tracks[old_idx];
+                                }
+                            }
+                            al.grid_row_tracks = permuted;
+                        }
+                    }
+                    self.grid_row_track_ids.insert(id, row_tracks.into_iter().map(String::from).collect());
                 }
             }
         }
@@ -2559,6 +2644,9 @@ struct DeferredFigHydrator {
     override_keys: HashMap<NodeId, std::sync::Arc<str>>,
     col_anchor_guids: HashMap<NodeId, String>,
     row_anchor_guids: HashMap<NodeId, String>,
+    grid_col_track_ids: HashMap<NodeId, Vec<String>>,
+    grid_row_track_ids: HashMap<NodeId, Vec<String>>,
+    no_auto_layout: HashSet<NodeId>,
     scales: BTreeMap<NodeId, f32>,
     path_cache: HashMap<String, Path>,
     blob_cache: HashMap<(usize, bool), Path>,
@@ -2596,6 +2684,9 @@ impl designos_doc::PageHydrator for DeferredFigHydrator {
             override_keys: std::mem::take(&mut self.override_keys),
             col_anchor_guids: std::mem::take(&mut self.col_anchor_guids),
             row_anchor_guids: std::mem::take(&mut self.row_anchor_guids),
+            grid_col_track_ids: std::mem::take(&mut self.grid_col_track_ids),
+            grid_row_track_ids: std::mem::take(&mut self.grid_row_track_ids),
+            no_auto_layout: std::mem::take(&mut self.no_auto_layout),
             scales: std::mem::take(&mut self.scales),
             pending_swaps: Vec::new(),
             component_keys: BTreeMap::new(),
@@ -2633,6 +2724,9 @@ impl designos_doc::PageHydrator for DeferredFigHydrator {
             self.override_keys = cx.override_keys;
             self.col_anchor_guids = cx.col_anchor_guids;
             self.row_anchor_guids = cx.row_anchor_guids;
+            self.grid_col_track_ids = cx.grid_col_track_ids;
+            self.grid_row_track_ids = cx.grid_row_track_ids;
+            self.no_auto_layout = cx.no_auto_layout;
             self.scales = cx.scales;
             self.path_cache = cx.path_cache;
             self.blob_cache = cx.blob_cache;
