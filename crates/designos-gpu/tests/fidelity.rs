@@ -198,3 +198,46 @@ fn board_kinds_through_the_cpu_fallback_match_cpu() {
     let c = compare(&mut g, "board_fallback", &doc, page, vp, (1000, 800), 8);
     assert!(c.report.ratio < 0.02, "mismatch {:.3}%", c.report.ratio * 100.0);
 }
+
+#[test]
+fn auto_layout_reverse_z_matches_cpu() {
+    let Some(mut g) = gpu() else { return };
+    let mut t = T::new();
+    let red = Color { r: 1.0, g: 0.0, b: 0.0, a: 1.0 };
+    let blue = Color { r: 0.0, g: 0.0, b: 1.0, a: 1.0 };
+    let row = t.add(None, |id| {
+        let mut n = Node::frame(id, Rect::new(0.0, 0.0, 40.0, 20.0));
+        n.fills.clear();
+        if let NodeKind::Frame(fp) = &mut n.kind {
+            fp.clips_content = false;
+            fp.auto_layout = Some(AutoLayout { direction: LayoutDirection::Horizontal, item_spacing: -12.0, reverse_z: true, ..Default::default() });
+        }
+        n
+    });
+    t.rect(Some(row), Rect::new(0.0, 0.0, 20.0, 20.0), red);
+    t.rect(Some(row), Rect::new(0.0, 0.0, 20.0, 20.0), blue);
+    t.doc.relayout_subtree(row);
+
+    // Also test a clipped reverse_z frame (exercises the clipped unit-quad fast path on GPU).
+    let clipped_swatch = t.add(None, |id| {
+        let mut n = Node::frame(id, Rect::new(0.0, 30.0, 40.0, 40.0));
+        n.fills = vec![Paint::solid(Color::WHITE)];
+        if let NodeKind::Frame(fp) = &mut n.kind {
+            fp.clips_content = true;
+            fp.auto_layout = Some(AutoLayout { direction: LayoutDirection::Vertical, item_spacing: -12.0, reverse_z: true, ..Default::default() });
+        }
+        n
+    });
+    let swatch = t.rect(Some(clipped_swatch), Rect::new(0.0, 0.0, 40.0, 20.0), red);
+    t.node(swatch).layout_child.absolute = true;
+    t.rect(Some(clipped_swatch), Rect::new(0.0, 0.0, 40.0, 40.0), blue);
+    t.doc.relayout_subtree(clipped_swatch);
+
+    let vp = Viewport { offset: Vec2::ZERO, zoom: 1.0, dpr: 1.0 };
+    let c = compare(&mut g, "auto_layout_reverse_z", &t.doc, t.page, vp, (60, 80), 2);
+    assert_eq!(c.report.mismatched, 0);
+    let p_overlap = c.gpu.pixel(14, 10).unwrap();
+    assert_eq!([p_overlap.red(), p_overlap.green(), p_overlap.blue(), p_overlap.alpha()], [255, 0, 0, 255]);
+    let p_swatch = c.gpu.pixel(20, 40).unwrap();
+    assert_eq!([p_swatch.red(), p_swatch.green(), p_swatch.blue(), p_swatch.alpha()], [255, 0, 0, 255]);
+}

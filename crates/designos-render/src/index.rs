@@ -141,7 +141,17 @@ fn paint_path(doc: &Document, id: NodeId) -> Vec<usize> {
     let mut path = Vec::new();
     let mut cur = id;
     while let Some(parent) = doc.get(cur).and_then(|n| n.parent) {
-        path.push(doc.get(parent).and_then(|p| p.children.iter().position(|&c| c == cur)).unwrap_or(usize::MAX));
+        let pos = doc
+            .get(parent)
+            .and_then(|p| {
+                if p.kind.frame_props().and_then(|f| f.auto_layout.as_ref()).is_some_and(|al| al.reverse_z) {
+                    p.children.iter().rev().position(|&c| c == cur)
+                } else {
+                    p.children.iter().position(|&c| c == cur)
+                }
+            })
+            .unwrap_or(usize::MAX);
+        path.push(pos);
         cur = parent;
     }
     path.reverse();

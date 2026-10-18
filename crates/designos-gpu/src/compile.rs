@@ -930,16 +930,17 @@ impl Ctx<'_> {
                         self.note_stencil_children_skipped(n);
                         return;
                     }
+                    let kids = paint_children(n);
                     if clips {
                         let (x0, y0) = (ts.tx, ts.ty);
                         let (x1, y1) = (ts.tx + n.size.x * ts.sx, ts.ty + n.size.y * ts.sy);
                         let r = IRect::new(x0.round() as i32, y0.round() as i32, x1.round() as i32, y1.round() as i32);
                         let cc = self.narrow_clip(clip, r);
                         if !self.visible(cc).is_empty() {
-                            self.draw_children(&n.children, ts, cc);
+                            self.draw_children(&kids, ts, cc);
                         }
                     } else {
-                        self.draw_children(&n.children, ts, clip);
+                        self.draw_children(&kids, ts, clip);
                     }
                 }
                 return;
@@ -1010,6 +1011,7 @@ impl Ctx<'_> {
                 self.note_stencil_children_skipped(n);
                 return;
             }
+            let kids = paint_children(n);
             if clips {
                 let Some(sh) = &g.shape else { return };
                 let radii = if matches!(n.kind, NodeKind::Section) { [0.0; 4] } else { n.corner_radii };
@@ -1033,9 +1035,9 @@ impl Ctx<'_> {
                 if self.visible(cc).is_empty() {
                     return;
                 }
-                self.draw_children(&n.children, ts, cc);
+                self.draw_children(&kids, ts, cc);
             } else {
-                self.draw_children(&n.children, ts, clip);
+                self.draw_children(&kids, ts, clip);
             }
         }
     }
@@ -1183,9 +1185,10 @@ impl Ctx<'_> {
             }
         }
         if draws_children(n) {
+            let kids = paint_children(n);
             // silhouettes are drawn offset from the page grid: no index culling
             let was = std::mem::replace(&mut self.cull, false);
-            self.draw_children(&n.children, ts2, clip);
+            self.draw_children(&kids, ts2, clip);
             self.cull = was;
         }
     }
@@ -1449,4 +1452,14 @@ impl Ctx<'_> {
 fn solid_inst(c: [f32; 4]) -> PaintInst {
     let inst = Instance { q: [KIND_SOLID, 0, 0, 0], c0: c, t: [0.0, 0.0, 1.0, 0.0], ..Default::default() };
     PaintInst { inst, ramp: None, image: None }
+}
+
+fn paint_children(n: &Node) -> std::borrow::Cow<'_, [NodeId]> {
+    if n.kind.frame_props().and_then(|f| f.auto_layout.as_ref()).is_some_and(|al| al.reverse_z) && n.children.len() > 1 {
+        let mut rev = n.children.clone();
+        rev.reverse();
+        std::borrow::Cow::Owned(rev)
+    } else {
+        std::borrow::Cow::Borrowed(&n.children)
+    }
 }
