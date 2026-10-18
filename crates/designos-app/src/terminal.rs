@@ -5628,17 +5628,23 @@ Done!
                 let _ = show_left(st, ui, panel_rect, None);
             });
         };
+        // The button's rectangle is read again before every event so the click follows the layout.
+        let button_center = |ctx: &egui::Context| -> Pos2 {
+            let btn: Rect = ctx
+                .data(|d| d.get_temp(Id::new(("test-rect", "agents-start-failure-fix-agents-left-pty".to_string()))))
+                .expect("fix button painted in the Agents panel");
+            btn.center()
+        };
         frame(&mut st, vec![]);
-        let btn: Rect = ctx
-            .data(|d| d.get_temp(Id::new(("test-rect", "agents-start-failure-fix-agents-left-pty".to_string()))))
-            .expect("fix button painted in the Agents panel");
-        let at = btn.center();
+        frame(&mut st, vec![]);
+        let at = button_center(&ctx);
         frame(&mut st, vec![egui::Event::PointerMoved(at)]);
-        for pressed in [true, false] {
-            frame(&mut st, vec![egui::Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed, modifiers: Default::default() }]);
-        }
+        let at = button_center(&ctx);
+        frame(&mut st, vec![egui::Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed: true, modifiers: Default::default() }]);
+        let at = button_center(&ctx);
+        frame(&mut st, vec![egui::Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed: false, modifiers: Default::default() }]);
         frame(&mut st, vec![]);
-        assert_eq!(st.tabs.len(), tabs_before + 1, "the fix must open a tab");
+        assert_eq!(st.tabs.len(), tabs_before + 1, "the fix must open a tab (status: {:?}, pending: {:?})", st.status_msg, st.pending_start_fix);
         assert_eq!(st.tabs.last().map(|t| t.spawn_preset), Some(AgentCliPreset::Shell));
         kill_tabs(&mut st);
     }
