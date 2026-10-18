@@ -184,6 +184,39 @@ pub fn radius_full(height: f32) -> f32 {
 }
 
 // ---------------------------------------------------------------- spacing
+// Every gap names the relationship it separates and takes that rung (design/principles.md P3).
+// Rungs may share a value but never swap order. All values sit on the 4px grid.
+/// Parts of one fact: icon and label, a label and the field it names.
+pub const SPACE_FACT: f32 = 4.0;
+/// Stacked rows in one group.
+pub const SPACE_ROW: f32 = 4.0;
+/// Peers side by side: field columns, buttons in a bar, chips, tabs.
+pub const SPACE_INLINE: f32 = 8.0;
+/// Group to group inside a section.
+pub const SPACE_GROUP: f32 = 12.0;
+/// Block to block in one region: cards in a grid.
+pub const SPACE_BLOCK: f32 = 16.0;
+/// Section to section in a panel.
+pub const SPACE_SECTION: f32 = 24.0;
+/// Region to region: Home header to grid, Home section to section.
+pub const SPACE_REGION: f32 = 48.0;
+
+// Insets: padding inside an element's own frame (P3, P10). A child's inset never exceeds its parent's.
+pub const INSET_SEGMENT: f32 = 2.0;
+pub const INSET_CONTROL: f32 = 8.0;
+pub const INSET_FRAME: f32 = 8.0;
+pub const INSET_BUTTON: f32 = 12.0;
+pub const INSET_PANEL: f32 = 16.0;
+pub const INSET_POPOVER: f32 = 16.0;
+pub const INSET_MODAL: f32 = 24.0;
+
+// Control heights: a separate family the ladder never re-values (P3).
+pub const CONTROL_DENSE: f32 = 24.0;
+pub const CONTROL_STANDARD: f32 = 28.0;
+pub const CONTROL_TOOL: f32 = 32.0;
+pub const CONTROL_ROW: f32 = 40.0;
+/// Smallest pointer target (WCAG 2.5.8 AA).
+pub const TARGET_MIN: f32 = 24.0;
 
 // ---------------------------------------------------------------- shell layout
 pub const RAIL_WIDTH: f32 = 56.0;
@@ -725,5 +758,49 @@ mod tests {
     #[test]
     fn radius_full_clamps_a_negative_height() {
         assert_eq!(radius_full(-8.0), 0.0);
+    }
+
+    const LADDER: [f32; 7] = [SPACE_FACT, SPACE_ROW, SPACE_INLINE, SPACE_GROUP, SPACE_BLOCK, SPACE_SECTION, SPACE_REGION];
+    const INSETS: [f32; 7] = [INSET_SEGMENT, INSET_CONTROL, INSET_FRAME, INSET_BUTTON, INSET_PANEL, INSET_POPOVER, INSET_MODAL];
+    const CONTROLS: [f32; 5] = [CONTROL_DENSE, CONTROL_STANDARD, CONTROL_TOOL, CONTROL_ROW, TARGET_MIN];
+
+    #[test]
+    fn ladder_insets_and_controls_sit_on_the_4px_grid() {
+        // The segment inset (2px) is the one declared half-step inside a control.
+        for v in LADDER.into_iter().chain(INSETS.into_iter().filter(|v| *v != INSET_SEGMENT)).chain(CONTROLS) {
+            assert_eq!(v % 4.0, 0.0, "{v} is off the 4px grid");
+        }
+    }
+
+    #[test]
+    fn the_ladder_never_inverts() {
+        for pair in LADDER.windows(2) {
+            assert!(pair[0] <= pair[1], "{} is followed by the smaller {}", pair[0], pair[1]);
+        }
+    }
+
+    #[test]
+    fn a_group_sits_at_least_twice_its_inner_gap_from_its_neighbours() {
+        assert!(SPACE_GROUP >= 2.0 * SPACE_FACT, "a label sits nearer its field than the field above");
+        assert!(SPACE_BLOCK >= 2.0 * SPACE_INLINE);
+        assert!(SPACE_REGION >= 2.0 * SPACE_BLOCK);
+    }
+
+    #[test]
+    fn a_child_inset_never_exceeds_its_parent_inset() {
+        assert!(INSET_MODAL >= INSET_POPOVER);
+        assert!(INSET_POPOVER >= INSET_PANEL);
+        assert!(INSET_PANEL >= INSET_BUTTON);
+        assert!(INSET_BUTTON >= INSET_FRAME);
+        assert!(INSET_FRAME >= INSET_CONTROL);
+        assert!(INSET_CONTROL >= INSET_SEGMENT);
+    }
+
+    #[test]
+    fn control_heights_are_the_ratified_family() {
+        assert_eq!([CONTROL_DENSE, CONTROL_STANDARD, CONTROL_TOOL, CONTROL_ROW], [24.0, 28.0, 32.0, 40.0]);
+        assert!(CONTROL_DENSE >= TARGET_MIN, "the densest control still meets the pointer floor");
+        assert_eq!(TARGET_MIN, 24.0);
+        assert_eq!(RIGHT_TABS_H, CONTROL_DENSE, "inspector tab strips are 24px, not 28px");
     }
 }
