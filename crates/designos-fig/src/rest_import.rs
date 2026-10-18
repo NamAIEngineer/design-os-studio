@@ -2260,6 +2260,8 @@ impl<'a> Ctx<'a> {
                     "CENTER" => LayoutAlign::Center,
                     "MAX" => LayoutAlign::End,
                     "SPACE_BETWEEN" => LayoutAlign::SpaceBetween,
+                    "SPACE_AROUND" => LayoutAlign::SpaceAround,
+                    "SPACE_EVENLY" => LayoutAlign::SpaceEvenly,
                     "BASELINE" => LayoutAlign::Baseline,
                     _ => LayoutAlign::Start,
                 };
@@ -2280,6 +2282,12 @@ impl<'a> Ctx<'a> {
                 }
                 if let Some(s) = fstr(set, "counterAxisAlignItems") {
                     al.counter_align = align(s);
+                }
+                if let Some(s) = fstr(set, "counterAxisAlignContent") {
+                    al.counter_align_content = if s == "SPACE_BETWEEN" { CounterAlignContent::SpaceBetween } else { CounterAlignContent::Auto };
+                }
+                if let Some(n) = fnum(set, "stackLayoutVersion") {
+                    al.layout_version = n.clamp(0.0, u8::MAX as f32) as u8;
                 }
                 if let Some(s) = fstr(set, "primaryAxisSizingMode") {
                     al.primary_sizing = sizing(s);
@@ -2698,6 +2706,7 @@ pub(crate) fn override_field(key: &str, is_text: bool) -> Option<OverrideField> 
         | "lineIndentations"
         | "opentypeFlags"
         | "fontVariations"
+        | "textWrapStyle"
         | "maxLines" => OverrideField::TextStyle,
         "layoutMode"
         | "itemSpacing"
@@ -2708,9 +2717,13 @@ pub(crate) fn override_field(key: &str, is_text: bool) -> Option<OverrideField> 
         | "paddingBottom"
         | "primaryAxisAlignItems"
         | "counterAxisAlignItems"
+        | "counterAxisAlignContent"
+        | "stackLayoutVersion"
         | "primaryAxisSizingMode"
         | "counterAxisSizingMode"
         | "layoutWrap"
+        | "strokesIncludedInLayout"
+        | "itemReverseZIndex"
         | "clipsContent"
         | "layoutGrids"
         | "layoutAlign"

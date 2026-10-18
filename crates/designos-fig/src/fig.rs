@@ -1928,7 +1928,9 @@ fn convert_override(o: &Value, lk: &Lk) -> Map<String, Value> {
             | "gridRowAnchor"
             | "gridRowAnchorIndex"
             | "gridChildHorizontalAlign"
-            | "gridChildVerticalAlign" => {
+            | "gridChildVerticalAlign"
+            | "stackCounterAlignContent"
+            | "stackLayoutVersion" => {
                 has_layout = true;
             }
             "fontName"
@@ -2036,6 +2038,12 @@ fn convert_override(o: &Value, lk: &Lk) -> Map<String, Value> {
         }
         if let Some(s) = fstr(o, "stackCounterAlignItems") {
             m.insert("counterAxisAlignItems".into(), stack_align(Some(s)).into());
+        }
+        if let Some(s) = fstr(o, "stackCounterAlignContent") {
+            m.insert("counterAxisAlignContent".into(), (if s == "SPACE_BETWEEN" { "SPACE_BETWEEN" } else { "AUTO" }).into());
+        }
+        if let Some(n) = fnum(o, "stackLayoutVersion") {
+            m.insert("stackLayoutVersion".into(), n.into());
         }
         if let Some(s) = fstr(o, "stackPrimarySizing") {
             m.insert("primaryAxisSizingMode".into(), stack_sizing(Some(s)).into());
