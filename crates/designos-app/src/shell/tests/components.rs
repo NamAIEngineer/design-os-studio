@@ -426,3 +426,135 @@ fn slot_toggles_of_a_second_slot_change_only_that_slot() {
         assert_eq!(pick(&cfg_of(&s, "Leading slot")), before_first, "{rec}: first slot untouched");
     }
 }
+
+/// Every text run painted last frame.
+fn painted_strings(s: &Sim) -> Vec<String> {
+    fn collect(shape: &egui::Shape, out: &mut Vec<String>) {
+        match shape {
+            egui::Shape::Text(t) => out.push(t.galley.job.text.clone()),
+            egui::Shape::Vec(shapes) => shapes.iter().for_each(|x| collect(x, out)),
+            _ => {}
+        }
+    }
+    let mut out = Vec::new();
+    for clipped in &s.shapes {
+        collect(&clipped.shape, &mut out);
+    }
+    out
+}
+
+/// A slot "Leading slot" in "Primary button" with preferred-only on, selected in the inspector, plus
+/// extra components named `names`. Returns the sim, the main component, and the new component ids.
+fn preferred_picker_sim(names: &[&str]) -> (Sim, NodeId, Vec<NodeId>) {
+    let mut s = Sim::with(Options { select: Some("Primary button".into()), ..Default::default() });
+    let main = s.by_name("Primary button");
+    let slot_frame = {
+        let id = s.shell.app.doc.alloc_id();
+        let mut f = designos_doc::Node::frame(id, designos_doc::Rect::new(8.0, 8.0, 24.0, 24.0));
+        f.name = "Leading slot".into();
+        s.shell.app.doc.insert(main, f).unwrap()
+    };
+    let page = s.app().doc.pages[0];
+    let mut comps = Vec::new();
+    for name in names {
+        let id = s.shell.app.doc.alloc_id();
+        let mut c = designos_doc::Node::frame(id, designos_doc::Rect::new(0.0, 0.0, 16.0, 16.0));
+        c.name = (*name).into();
+        c.kind = NodeKind::Component(designos_doc::FrameProps::default());
+        comps.push(s.shell.app.doc.insert(page, c).unwrap());
+    }
+    s.shell.app.selection = vec![slot_frame];
+    s.frame(vec![]);
+    s.frame(vec![]);
+    let btn = s.rect_of("convert-to-slot");
+    s.click(btn.center());
+    s.frame(vec![]);
+    s.frame(vec![]);
+    let pref_toggle = s.rect_of("toggle:slot-preferred-only:Leading slot");
+    s.click(pref_toggle.left_center() + Vec2::new(10.0, 0.0));
+    s.frame(vec![]);
+    s.frame(vec![]);
+    (s, main, comps)
+}
+
+/// Row index of `id` in the picker, which lists every component but `main`, ordered by label.
+fn picker_row(s: &Sim, main: NodeId, id: NodeId) -> usize {
+    let mut all: Vec<NodeId> = s.app().doc.nodes.values().filter(|n| matches!(n.kind, NodeKind::Component(_))).map(|n| n.id).filter(|x| *x != main).collect();
+    all.sort_by_key(|x| {
+        let n = s.app().doc.get(*x).unwrap();
+        match n.parent.and_then(|p| s.app().doc.get(p)).filter(|p| matches!(p.kind, NodeKind::ComponentSet(_))) {
+            Some(set) => format!("{} / {}", set.name, n.name),
+            None => n.name.clone(),
+        }
+    });
+    all.iter().position(|x| *x == id).expect("component listed in the picker")
+}
+
+fn open_preferred_picker(s: &mut Sim) {
+    let picker = s.rect_of("slot-preferred-picker");
+    s.click(picker.center());
+    s.frame(vec![]);
+}
+
+fn click_picker_row(s: &mut Sim, row: usize) {
+    let r = s.rect_of(&format!("menu-row-0-{row}"));
+    s.click(r.center());
+    s.frame(vec![]);
+    s.frame(vec![]);
+}
+
+fn preferred_of(s: &Sim, main: NodeId) -> Vec<NodeId> {
+    s.app().doc.get(main).unwrap().component.slot_configs.get("Leading slot").map(|c| c.preferred.clone()).unwrap_or_default()
+}
+
+fn row_is_checked(s: &Sim, row: usize) -> bool {
+    s.rect_of(&format!("menu-check-0-{row}")).is_positive()
+}
+
+#[test]
+fn slot_preferred_picker_checks_and_shows_every_selected_component() {
+    let (mut s, main, comps) = preferred_picker_sim(&["Icon", "Avatar"]);
+    let (icon, avatar) = (comps[0], comps[1]);
+    for id in [icon, avatar] {
+        open_preferred_picker(&mut s);
+        let row = picker_row(&s, main, id);
+        click_picker_row(&mut s, row);
+    }
+    assert_eq!(preferred_of(&s, main), vec![icon, avatar]);
+    assert!(painted_strings(&s).iter().any(|t| t == "Icon +1"), "the closed field names the first component and counts the rest: {:?}", painted_strings(&s));
+
+    open_preferred_picker(&mut s);
+    let (icon_row, avatar_row) = (picker_row(&s, main, icon), picker_row(&s, main, avatar));
+    assert!(row_is_checked(&s, icon_row), "Icon is checked");
+    assert!(row_is_checked(&s, avatar_row), "Avatar is checked although it is not the first preferred");
+    let others = (0..).take_while(|i| s.ctx.data(|d| d.get_temp::<Rect>(egui::Id::new(("test-rect", format!("menu-check-0-{i}"))))).is_some());
+    for i in others.filter(|i| *i != icon_row && *i != avatar_row) {
+        assert!(!row_is_checked(&s, i), "row {i} is not preferred");
+    }
+
+    click_picker_row(&mut s, icon_row);
+    assert_eq!(preferred_of(&s, main), vec![avatar], "clicking a checked row removes only that component");
+    assert!(painted_strings(&s).iter().any(|t| t == "Avatar"), "one selection shows its name: {:?}", painted_strings(&s));
+}
+
+#[test]
+fn slot_preferred_picker_tells_same_named_components_apart_by_id() {
+    let (mut s, main, comps) = preferred_picker_sim(&["Icon", "Icon"]);
+    let (first, second) = (comps[0], comps[1]);
+    open_preferred_picker(&mut s);
+    let row = picker_row(&s, main, first);
+    click_picker_row(&mut s, row);
+    assert_eq!(preferred_of(&s, main), vec![first]);
+
+    open_preferred_picker(&mut s);
+    let (first_row, second_row) = (picker_row(&s, main, first), picker_row(&s, main, second));
+    assert_ne!(first_row, second_row);
+    assert!(row_is_checked(&s, first_row), "the selected Icon is checked");
+    assert!(!row_is_checked(&s, second_row), "the other Icon, same label, is not checked");
+
+    click_picker_row(&mut s, second_row);
+    assert_eq!(preferred_of(&s, main), vec![first, second], "the second Icon is added, not mistaken for the first");
+    open_preferred_picker(&mut s);
+    click_picker_row(&mut s, first_row);
+    assert_eq!(preferred_of(&s, main), vec![second], "removing the first Icon keeps the second");
+}

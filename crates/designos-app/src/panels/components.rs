@@ -8,7 +8,7 @@ use crate::icons::Icon;
 use crate::theme;
 use crate::widgets;
 use crate::widgets::field;
-use crate::widgets::menu::{dropdown, popup_menu, MenuItem, MenuResult};
+use crate::widgets::menu::{dropdown, dropdown_checked, popup_menu, MenuItem, MenuResult};
 use designos_doc::*;
 use egui::{Align2, Pos2, Rect, Sense, Ui, Vec2};
 
@@ -438,14 +438,19 @@ fn slot_settings_rows(app: &mut App, ui: &mut Ui, pane: &mut Pane, owner: NodeId
     row_end(pane);
 
     if pref_on || !cfg.preferred.is_empty() {
-        let cur_pref = cfg.preferred.first().map(|id| comp_label(&app.doc, *id)).unwrap_or_else(|| "Add preferred…".into());
+        let cur_pref = match cfg.preferred.split_first() {
+            None => "Add preferred…".to_string(),
+            Some((first, [])) => comp_label(&app.doc, *first),
+            Some((first, rest)) => format!("{} +{}", comp_label(&app.doc, *first), rest.len()),
+        };
         let dd_r = pane.full(0.0);
         let pref_key = format!("slot-preferred-picker:{prop_name}");
         widgets::record(ui, "slot-preferred-picker", dd_r);
         if is_dropdown_open(ui, &pref_key) {
             let comps: Vec<NodeId> = all_components_cached(app).into_iter().filter(|x| *x != owner).collect();
             let names: Vec<String> = comps.iter().map(|x| comp_label(&app.doc, *x)).collect();
-            if let Some(i) = dropdown(ui, dd_r, &pref_key, &cur_pref, &names) {
+            let selected: Vec<bool> = comps.iter().map(|x| cfg.preferred.contains(x)).collect();
+            if let Some(i) = dropdown_checked(ui, dd_r, &pref_key, &cur_pref, &names, &selected) {
                 let picked = comps[i];
                 let mut next = cfg.clone();
                 if let Some(pos) = next.preferred.iter().position(|x| *x == picked) {
