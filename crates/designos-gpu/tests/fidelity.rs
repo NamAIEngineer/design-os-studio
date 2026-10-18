@@ -198,3 +198,22 @@ fn board_kinds_through_the_cpu_fallback_match_cpu() {
     let c = compare(&mut g, "board_fallback", &doc, page, vp, (1000, 800), 8);
     assert!(c.report.ratio < 0.02, "mismatch {:.3}%", c.report.ratio * 100.0);
 }
+
+#[test]
+fn radial_gradient_non_square_matches_cpu() {
+    let Some(mut g) = gpu() else { return };
+    let mut t = T::new();
+    let f = t.rect(None, Rect::new(0.0, 0.0, 200.0, 100.0), Color::WHITE);
+    let handles = [Vec2::new(0.5, 0.5), Vec2::new(0.5, 1.0), Vec2::new(0.0, 0.5)];
+    let stops = vec![GradientStop { pos: 0.0, color: Color::rgb(255, 0, 0) }, GradientStop { pos: 1.0, color: Color::rgb(0, 0, 255) }];
+    t.node(f).fills = vec![Paint { kind: PaintKind::RadialGradient { handles, stops }, opacity: 1.0, visible: true, blend: BlendMode::Normal }];
+    let vp = Viewport { offset: Vec2::ZERO, zoom: 1.0, dpr: 1.0 };
+    let c = compare(&mut g, "radial_non_square", &t.doc, t.page, vp, (200, 100), 4);
+    assert!(c.report.ratio < 0.01, "mismatch {:.3}%", c.report.ratio * 100.0);
+    let centre = c.gpu.pixel(100, 50).unwrap();
+    assert!(centre.red() > 245 && centre.blue() < 10, "centre (100, 50): {centre:?}");
+    for (x, y) in [(0, 50), (199, 50), (100, 0), (100, 99)] {
+        let p = c.gpu.pixel(x, y).unwrap();
+        assert!(p.blue() > 245 && p.red() < 10, "edge ({x}, {y}): {p:?}");
+    }
+}
