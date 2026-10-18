@@ -326,6 +326,8 @@ pub fn pick_export(default_name: &str) -> Option<PathBuf> {
 }
 
 /// Like [`save_path`], also returning the once-per-file notice when non-finite numbers were replaced.
+/// The app saves through [`save_path_counted`] so it can repair the open document; tests use this wrapper.
+#[cfg(test)]
 pub fn save_path_with_notice(doc: &Document, path: &Path) -> Result<(PathBuf, Option<String>), String> {
     let (p, replaced) = save_path_counted(doc, path)?;
     let notice = non_finite_notice_once(&p, replaced);
