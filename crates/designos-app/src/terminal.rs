@@ -5548,10 +5548,16 @@ Done!
         assert!(read_json(&st.context_json_path).get("selected_node_ids").is_some());
     }
 
+    /// A state whose stub agent has exited but whose exit the terminal has not yet observed: the
+    /// bridge is not polled here, so each test decides the spawn time the exit is judged against.
     fn exited_stub_state() -> TerminalState {
         let mut st = TerminalState::default();
         spawn_stub_exiting_agent_into(&mut st);
-        assert!(wait_until_tab_exits(&mut st, 8), "stub agent must exit");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        while st.active_tab_mut().unwrap().is_alive() {
+            assert!(std::time::Instant::now() < deadline, "stub agent must exit");
+            std::thread::sleep(std::time::Duration::from_millis(25));
+        }
         st
     }
 
