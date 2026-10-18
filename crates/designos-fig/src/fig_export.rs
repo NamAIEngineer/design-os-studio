@@ -6,7 +6,7 @@
 
 use crate::container::{self, Compression};
 use crate::kiwi::KiwiValue as V;
-use crate::rest_import::utf16_to_byte_offsets;
+use crate::rest_import::{grid_child_align_name, utf16_to_byte_offsets, writes_grid_child_align};
 use crate::testkit::{self, en, figma_like_schema, guid, msg, st};
 use crate::FigError;
 use designos_doc::*;
@@ -784,9 +784,12 @@ fn export_node_rec(cx: &mut ExportCtx, id: NodeId, parent_guid: (u32, u32), sibl
                 fields.push(("gridColumns", V::Uint(al.grid_columns)));
                 fields.push(("gridColumnsSizing", V::String(format_grid_tracks(al.grid_columns, &al.grid_col_tracks))));
             }
-            if al.grid_rows > 0 {
-                fields.push(("gridRows", V::Uint(al.grid_rows)));
-                fields.push(("gridRowsSizing", V::String(format_grid_tracks(al.grid_rows, &al.grid_row_tracks))));
+            if let Some((rows, sizing)) = grid_rows_for_export(cx.doc, &node, al) {
+                fields.push(("gridRows", V::Uint(rows)));
+                fields.push(("gridRowsSizing", V::String(sizing)));
+            }
+            if let Some(gat) = format_grid_auto_tracks(al.grid_auto_tracks) {
+                fields.push(("gridAutoTracks", V::String(gat)));
             }
             if al.direction == LayoutDirection::Grid {
                 fields.push(("gridColumnGap", fl(al.item_spacing)));
@@ -843,11 +846,29 @@ fn export_node_rec(cx: &mut ExportCtx, id: NodeId, parent_guid: (u32, u32), sibl
     if prim_fill {
         fields.push(("stackChildPrimaryGrow", fl(if lc.grow > 0.0 { lc.grow } else { 1.0 })));
     }
-    if counter_fill {
-        fields.push(("stackChildAlignSelf", en("STRETCH")));
+    let align_self_name = match lc.align_self {
+        AlignSelf::Start => Some("MIN"),
+        AlignSelf::Center => Some("CENTER"),
+        AlignSelf::End => Some("MAX"),
+        AlignSelf::Stretch => Some("STRETCH"),
+        AlignSelf::Baseline => Some("BASELINE"),
+        AlignSelf::Auto => counter_fill.then_some("STRETCH"),
+    };
+    if let Some(a) = align_self_name {
+        fields.push(("stackChildAlignSelf", en(a)));
     }
     if lc.absolute {
         fields.push(("stackPositioning", en("ABSOLUTE")));
+    }
+    for (val, key) in [
+        (lc.margin[0], "stackChildMarginTop"),
+        (lc.margin[1], "stackChildMarginRight"),
+        (lc.margin[2], "stackChildMarginBottom"),
+        (lc.margin[3], "stackChildMarginLeft"),
+    ] {
+        if val != 0.0 {
+            fields.push((key, fl(val)));
+        }
     }
     if let Some(c) = lc.grid_column {
         fields.push(("gridColumnAnchorIndex", V::Uint(u32::from(c))));
@@ -862,6 +883,11 @@ fn export_node_rec(cx: &mut ExportCtx, id: NodeId, parent_guid: (u32, u32), sibl
     }
     if lc.row_span > 1 {
         fields.push(("gridRowSpan", V::Uint(u32::from(lc.row_span))));
+    }
+    for (k, a) in [("gridChildHorizontalAlign", lc.grid_align_h), ("gridChildVerticalAlign", lc.grid_align_v)] {
+        if writes_grid_child_align(a, parent_dir) {
+            fields.push((k, en(grid_child_align_name(a))));
+        }
     }
     if lc.min_w.is_some() || lc.min_h.is_some() {
         let mut s = Vec::new();
@@ -1231,6 +1257,41 @@ pub(crate) fn format_grid_tracks(count: u32, tracks: &[GridTrack]) -> String {
         .join(" ")
 }
 
+/// `gridRows` count and `gridRowsSizing` of grid `node`. A grid with no explicit rows still gives every
+/// Fixed row slot its height (a slot that is not Fixed takes the Fixed auto-track height), and the file
+/// has no other place for row tracks, so those slots are written as explicit rows up to the last Fixed one.
+/// Only slots inside the rows the children fill ([`placed_grid_rows`]) are written: a slot past them is unused,
+/// and as a real row it would add an empty row and a gap.
+pub(crate) fn grid_rows_for_export(doc: &Document, node: &Node, al: &AutoLayout) -> Option<(u32, String)> {
+    if al.grid_rows > 0 {
+        return Some((al.grid_rows, format_grid_tracks(al.grid_rows, &al.grid_row_tracks)));
+    }
+    if al.direction != LayoutDirection::Grid || !al.grid_row_tracks.iter().any(|t| matches!(t, GridTrack::Fixed(_))) {
+        return None;
+    }
+    let kids: Vec<_> = node.children.iter().filter_map(|c| doc.flow_child_input(*c, true)).collect();
+    let placed = designos_doc::layout_solver::placed_grid_rows(al, &kids);
+    let count = al.grid_row_tracks[..placed.min(al.grid_row_tracks.len())].iter().rposition(|t| matches!(t, GridTrack::Fixed(_)))? + 1;
+    let auto = match al.grid_auto_tracks {
+        GridAutoTracks::Track(t @ GridTrack::Fixed(_)) => Some(t),
+        _ => None,
+    };
+    let tracks: Vec<GridTrack> = al.grid_row_tracks[..count].iter().map(|&t| if matches!(t, GridTrack::Fixed(_)) { t } else { auto.unwrap_or(t) }).collect();
+    Some((count as u32, format_grid_tracks(count as u32, &tracks)))
+}
+
+pub(crate) fn format_grid_auto_tracks(gat: GridAutoTracks) -> Option<String> {
+    match gat {
+        GridAutoTracks::None => None,
+        GridAutoTracks::Rows => Some("ROWS".to_string()),
+        GridAutoTracks::Track(t) => {
+            let mut arr = [GridTrack::default(); 8];
+            arr[0] = t;
+            Some(format_grid_tracks(1, &arr))
+        }
+    }
+}
+
 fn encode_node_var_entries(cx: &ExportCtx, vars: &NodeVariables) -> Vec<V> {
     let mut var_entries = Vec::new();
     for (k, vid) in &vars.bindings {
@@ -1421,9 +1482,12 @@ fn collect_instance_overrides(cx: &ExportCtx, inst_id: NodeId) -> Vec<V> {
                             ov.push(("gridColumns", V::Uint(al.grid_columns)));
                             ov.push(("gridColumnsSizing", V::String(format_grid_tracks(al.grid_columns, &al.grid_col_tracks))));
                         }
-                        if al.grid_rows > 0 {
-                            ov.push(("gridRows", V::Uint(al.grid_rows)));
-                            ov.push(("gridRowsSizing", V::String(format_grid_tracks(al.grid_rows, &al.grid_row_tracks))));
+                        if let Some((rows, sizing)) = grid_rows_for_export(cx.doc, n, al) {
+                            ov.push(("gridRows", V::Uint(rows)));
+                            ov.push(("gridRowsSizing", V::String(sizing)));
+                        }
+                        if let Some(gat) = format_grid_auto_tracks(al.grid_auto_tracks) {
+                            ov.push(("gridAutoTracks", V::String(gat)));
                         }
                         if al.direction == LayoutDirection::Grid {
                             ov.push(("gridColumnGap", fl(al.item_spacing)));
@@ -1452,10 +1516,18 @@ fn collect_instance_overrides(cx: &ExportCtx, inst_id: NodeId) -> Vec<V> {
                 } else if parent_dir.is_some() {
                     ov.push(("stackChildPrimaryGrow", fl(0.0)));
                 }
-                if counter_fill {
-                    ov.push(("stackChildAlignSelf", en("STRETCH")));
-                } else if parent_dir.is_some() {
-                    ov.push(("stackChildAlignSelf", en("AUTO")));
+                let align_self_ov = match lc.align_self {
+                    AlignSelf::Start => Some("MIN"),
+                    AlignSelf::Center => Some("CENTER"),
+                    AlignSelf::End => Some("MAX"),
+                    AlignSelf::Stretch => Some("STRETCH"),
+                    AlignSelf::Baseline => Some("BASELINE"),
+                    AlignSelf::Auto if counter_fill => Some("STRETCH"),
+                    AlignSelf::Auto if parent_dir.is_some() => Some("AUTO"),
+                    AlignSelf::Auto => None,
+                };
+                if let Some(a) = align_self_ov {
+                    ov.push(("stackChildAlignSelf", en(a)));
                 }
                 if let Some(c) = lc.grid_column {
                     ov.push(("gridColumnAnchorIndex", V::Uint(u32::from(c))));
@@ -1471,6 +1543,27 @@ fn collect_instance_overrides(cx: &ExportCtx, inst_id: NodeId) -> Vec<V> {
                 if lc.row_span > 1 {
                     ov.push(("gridRowSpan", V::Uint(u32::from(lc.row_span))));
                 }
+                // An alignment key is written only for an axis that differs from the main component's child: a reader
+                // keeps the main's value for any key the override does not name, so naming one that still matches
+                // would freeze it (a margin, span or sizing override takes this same Layout flag). A reset to Start
+                // differs from a Center or End main and is written as MIN. With no main child to compare against,
+                // both axes are written.
+                let main_lc = n.component.source.and_then(|s| cx.doc.get(s)).map(|s| s.layout_child);
+                let axes = [
+                    ("gridChildHorizontalAlign", lc.grid_align_h, main_lc.map(|m| m.grid_align_h)),
+                    ("gridChildVerticalAlign", lc.grid_align_v, main_lc.map(|m| m.grid_align_v)),
+                ];
+                for (k, a, main) in axes {
+                    if main != Some(a) {
+                        ov.push((k, en(grid_child_align_name(a))));
+                    }
+                }
+                // Every side is written, zero included: a reader rebuilds the instance from its master and keeps the
+                // master's margin for any side the override does not name, so a cleared margin has to be explicit.
+                ov.push(("stackChildMarginTop", fl(lc.margin[0])));
+                ov.push(("stackChildMarginRight", fl(lc.margin[1])));
+                ov.push(("stackChildMarginBottom", fl(lc.margin[2])));
+                ov.push(("stackChildMarginLeft", fl(lc.margin[3])));
             }
             if ovs.contains(&OverrideField::MainComponent) {
                 if let NodeKind::Instance { component: Some(comp_id), .. } = &n.kind {
@@ -1736,25 +1829,32 @@ fn encode_effect(e: &Effect, color_var: Option<V>, opacity_var: Option<V>) -> V 
 
 fn encode_grid(g: &LayoutGrid) -> V {
     match g {
-        LayoutGrid::Grid { size, color: c } => {
-            msg(vec![("pattern", en("GRID")), ("sectionSize", fl(*size)), ("color", color(c.r, c.g, c.b, c.a)), ("visible", V::Bool(true))])
+        LayoutGrid::Grid { size, color: c, visible } => {
+            msg(vec![("pattern", en("GRID")), ("sectionSize", fl(*size)), ("color", color(c.r, c.g, c.b, c.a)), ("visible", V::Bool(*visible))])
         }
-        LayoutGrid::Columns { count, gutter, offset, color: c } => msg(vec![
-            ("pattern", en("COLUMNS")),
-            ("count", V::Uint(*count)),
-            ("gutterSize", fl(*gutter)),
-            ("offset", fl(*offset)),
-            ("color", color(c.r, c.g, c.b, c.a)),
-            ("visible", V::Bool(true)),
-        ]),
-        LayoutGrid::Rows { count, gutter, offset, color: c } => msg(vec![
-            ("pattern", en("ROWS")),
-            ("count", V::Uint(*count)),
-            ("gutterSize", fl(*gutter)),
-            ("offset", fl(*offset)),
-            ("color", color(c.r, c.g, c.b, c.a)),
-            ("visible", V::Bool(true)),
-        ]),
+        LayoutGrid::Columns { count, gutter, offset, section_size, alignment, color: c, visible }
+        | LayoutGrid::Rows { count, gutter, offset, section_size, alignment, color: c, visible } => {
+            let pat = if matches!(g, LayoutGrid::Columns { .. }) { "COLUMNS" } else { "ROWS" };
+            let align = match alignment {
+                LayoutGridAlign::Min => "MIN",
+                LayoutGridAlign::Center => "CENTER",
+                LayoutGridAlign::Stretch => "STRETCH",
+                LayoutGridAlign::Max => "MAX",
+            };
+            let (cnt_u, num_sec) = if *count == 0 { (i32::MAX as u32, -1i32) } else { (*count, *count as i32) };
+            msg(vec![
+                ("pattern", en(pat)),
+                ("type", en(align)),
+                ("count", V::Uint(cnt_u)),
+                ("numSections", V::Int(num_sec)),
+                ("gutterSize", fl(*gutter)),
+                ("offset", fl(*offset)),
+                ("color", color(c.r, c.g, c.b, c.a)),
+                ("visible", V::Bool(*visible)),
+                // 0 is a real mode (equal-width stripes), so it is written like any other width
+                ("sectionSize", fl(*section_size)),
+            ])
+        }
     }
 }
 

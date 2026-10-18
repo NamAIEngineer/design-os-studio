@@ -858,7 +858,7 @@ fn rea_v106_all_seven_gaps_fidelity_and_roundtrip() {
                 "isSoftDeleted": true
             })
         ),
-        // GAP-01 & GAP-02 & GAP-03: Frame with per-side border weights WITHOUT borderStrokeWeightsIndependent
+        // GAP-01 & GAP-02 & GAP-03: Frame with independent per-side border weights
         // and per-corner radii WITHOUT rectangleCornerRadiiIndependent, plus variableConsumptionMap
         node(
             (1, 10),
@@ -868,10 +868,8 @@ fn rea_v106_all_seven_gaps_fidelity_and_roundtrip() {
             "HeaderBar",
             json!({
                 "strokeWeight": 1.0,
-                "borderTopWeight": 0.0,
-                "borderRightWeight": 0.0,
+                "borderStrokeWeightsIndependent": true,
                 "borderBottomWeight": 2.0,
-                "borderLeftWeight": 0.0,
                 "rectangleTopLeftCornerRadius": 10.0,
                 "rectangleTopRightCornerRadius": 10.0,
                 "rectangleBottomRightCornerRadius": 0.0,
@@ -1518,6 +1516,31 @@ fn fig_v106_wave5_schema_99pct_coverage_roundtrip() {
 }
 
 #[test]
+fn roundtrip_stack_child_margins_606_to_609() {
+    let mut doc = Document::new("ChildMarginsTest");
+    let page = doc.add_page("Page 1");
+    let fid = doc.alloc_id();
+    let mut frame = Node::frame(fid, Rect::new(0.0, 0.0, 300.0, 120.0));
+    frame.name = "MarginFrame".into();
+    if let NodeKind::Frame(fp) = &mut frame.kind {
+        fp.auto_layout =
+            Some(AutoLayout { direction: LayoutDirection::Horizontal, item_spacing: 8.0, padding: [10.0, 10.0, 10.0, 10.0], ..Default::default() });
+    }
+    doc.insert(page, frame).unwrap();
+
+    let cid = doc.alloc_id();
+    let mut child = Node::rectangle(cid, Rect::new(0.0, 0.0, 80.0, 40.0));
+    child.name = "MarginChild".into();
+    child.layout_child.margin = [6.0, 12.0, 18.0, 24.0];
+    doc.insert(fid, child).unwrap();
+
+    let bytes = export_fig(&doc).expect("export_fig with child margins");
+    let rt = import_fig(&bytes).expect("import_fig with child margins");
+    let rt_child = find(&rt, "MarginChild");
+    assert_eq!(rt_child.layout_child.margin, [6.0, 12.0, 18.0, 24.0]);
+}
+
+#[test]
 fn roundtrip_twelve_track_grid_columns_and_rows() {
     let g = |s: u64, l: u64| -> Value { json!({"sessionID": s, "localID": l}) };
     let changes = json!([
@@ -1796,7 +1819,8 @@ fn typed_kiwi_passthrough_draw_motion_table_slide_and_large_file_roundtrip() {
                 "CellR1C1",
                 json!({
                     "gridChildVerticalAlign": "CENTER",
-                    "gridChildHorizontalAlign": "MAX"
+                    "gridChildHorizontalAlign": "MAX",
+                    "lockMode": "ALL"
                 }),
             ),
             // 4. Slide: SLIDE_GRID -> SLIDE_ROW -> SLIDE -> INTERACTIVE_SLIDE_ELEMENT
@@ -1902,6 +1926,11 @@ fn typed_kiwi_passthrough_draw_motion_table_slide_and_large_file_roundtrip() {
         assert!(tbl.fig_metadata.contains_key("tableRowHeights"));
         assert!(tbl.fig_metadata.contains_key("tableColumnWidths"));
         assert!(tbl.fig_metadata.contains_key("tableMergedCells"));
+
+        // The cell's grid alignment is a typed field, not passthrough metadata, and it survives the trip.
+        let cell = find(&rt, "CellR1C1");
+        assert!(!cell.fig_metadata.contains_key("gridChildVerticalAlign") && !cell.fig_metadata.contains_key("gridChildHorizontalAlign"));
+        assert_eq!((cell.layout_child.grid_align_h, cell.layout_child.grid_align_v), (GridChildAlign::End, GridChildAlign::Center), "{label}");
 
         let slide = find(&rt, "OpeningSlide");
         assert_eq!(slide.kind, NodeKind::Unknown { type_name: "SLIDE".into() });
@@ -2050,4 +2079,984 @@ fn slot_fields_stay_typed_and_a_cleared_flag_is_not_resurrected_by_passthrough_m
     assert!(!find(&rt, "SlotHost").component.is_slot, "cleared isSlot came back");
     assert!(!find(&rt, "SlotCard").component.is_slot_content, "cleared isSlotContent came back");
     assert!(find(&rt, "SlotCard").component.slot_content_id.is_none(), "cleared slot content id came back");
+}
+
+#[test]
+fn stack_child_align_self_max_center_min_stretch_roundtrip_and_relayout() {
+    let g = |s: u64, l: u64| -> Value { json!({"sessionID": s, "localID": l}) };
+    let node = |id: (u64, u64), parent: (u64, u64), pos: &str, ty: &str, name: &str, extra: Value| -> Value {
+        let mut v = json!({
+            "guid": g(id.0, id.1),
+            "parentIndex": {"guid": g(parent.0, parent.1), "position": pos},
+            "type": ty,
+            "name": name,
+            "phase": "CREATED",
+            "visible": true,
+            "opacity": 1.0,
+            "size": {"x": 30.0, "y": 20.0},
+            "transform": {"m00": 1.0, "m01": 0.0, "m02": 0.0, "m10": 0.0, "m11": 1.0, "m12": 0.0}
+        });
+        for (k, x) in extra.as_object().unwrap() {
+            v[k] = x.clone();
+        }
+        v
+    };
+    let changes = json!([
+        node((0, 0), (0, 0), "!", "DOCUMENT", "AlignSelfDoc", json!({})),
+        node((0, 1), (0, 0), "!", "CANVAS", "Page 1", json!({})),
+        node(
+            (1, 10),
+            (0, 1),
+            "!",
+            "FRAME",
+            "Row",
+            json!({
+                "size": {"x": 200.0, "y": 100.0},
+                "stackMode": "HORIZONTAL",
+                "stackLayoutVersion": 1,
+                "stackSpacing": 10.0,
+                "stackPrimaryAlignItems": "MIN",
+                "stackCounterAlignItems": "MIN",
+                "stackPrimarySizing": "FIXED",
+                "stackCounterSizing": "FIXED"
+            })
+        ),
+        node((1, 11), (1, 10), "!", "RECTANGLE", "ChildCenter", json!({"stackChildAlignSelf": "CENTER"})),
+        node((1, 12), (1, 10), "\"", "RECTANGLE", "ChildMax", json!({"stackChildAlignSelf": "MAX"})),
+        node((1, 13), (1, 10), "#", "RECTANGLE", "ChildMin", json!({"stackChildAlignSelf": "MIN"})),
+        node((1, 14), (1, 10), "$", "RECTANGLE", "ChildBaseline", json!({"stackChildAlignSelf": "BASELINE"})),
+    ]);
+    let mut doc = import_fig_node_changes(&changes, "AlignSelfDoc").expect("import AlignSelfDoc");
+    let row_id = find(&doc, "Row").id;
+    doc.relayout_subtree(row_id);
+
+    let c_center = find(&doc, "ChildCenter");
+    let c_max = find(&doc, "ChildMax");
+    let c_min = find(&doc, "ChildMin");
+    assert_eq!(c_center.layout_child.align_self, AlignSelf::Center);
+    assert_eq!(c_max.layout_child.align_self, AlignSelf::End);
+    assert_eq!(c_min.layout_child.align_self, AlignSelf::Start);
+    // BASELINE is stored even though the solver does not align baselines yet
+    assert_eq!(find(&doc, "ChildBaseline").layout_child.align_self, AlignSelf::Baseline);
+    assert_eq!((c_center.transform.tx, c_center.transform.ty), (0.0, 40.0));
+    assert_eq!((c_max.transform.tx, c_max.transform.ty), (40.0, 80.0));
+    assert_eq!((c_min.transform.tx, c_min.transform.ty), (80.0, 0.0));
+
+    let bytes = export_fig(&doc).expect("export_fig AlignSelfDoc");
+    let mut rt = import_fig(&bytes).expect("re-import AlignSelfDoc");
+    let rt_row = find(&rt, "Row").id;
+    rt.relayout_subtree(rt_row);
+    let rt_center = find(&rt, "ChildCenter");
+    let rt_max = find(&rt, "ChildMax");
+    let rt_min = find(&rt, "ChildMin");
+    assert_eq!(rt_center.layout_child.align_self, AlignSelf::Center);
+    assert_eq!(rt_max.layout_child.align_self, AlignSelf::End);
+    assert_eq!(rt_min.layout_child.align_self, AlignSelf::Start);
+    assert_eq!(find(&rt, "ChildBaseline").layout_child.align_self, AlignSelf::Baseline);
+    assert_eq!((rt_center.transform.tx, rt_center.transform.ty), (0.0, 40.0));
+    assert_eq!((rt_max.transform.tx, rt_max.transform.ty), (40.0, 80.0));
+    assert_eq!((rt_min.transform.tx, rt_min.transform.ty), (80.0, 0.0));
+}
+
+#[test]
+fn counter_fill_child_keeps_its_cross_size_in_a_hugging_frame_through_a_fig_round_trip() {
+    let mut doc = Document::new("HugFill");
+    let page = doc.add_page("Page 1");
+    let fid = doc.alloc_id();
+    let mut row = Node::frame(fid, Rect::new(0.0, 0.0, 100.0, 1.0));
+    row.name = "Row".into();
+    let al = AutoLayout { direction: LayoutDirection::Horizontal, primary_sizing: Sizing::Fixed, counter_sizing: Sizing::Hug, ..Default::default() };
+    row.kind = NodeKind::Frame(FrameProps { auto_layout: Some(al), ..Default::default() });
+    let row_id = doc.insert(page, row).unwrap();
+    let cid = doc.alloc_id();
+    let mut child = Node::rectangle(cid, Rect::new(0.0, 0.0, 30.0, 40.0));
+    child.name = "FillChild".into();
+    child.layout_child.vertical = Sizing::Fill;
+    doc.insert(row_id, child).unwrap();
+    doc.relayout_subtree(row_id);
+    assert_eq!(find(&doc, "Row").size.y, 40.0, "Fill on the counter axis alone keeps the natural size");
+
+    let bytes = export_fig(&doc).expect("export_fig HugFill");
+    let mut rt = import_fig(&bytes).expect("re-import HugFill");
+    let rt_row = find(&rt, "Row").id;
+    rt.relayout_subtree(rt_row);
+    assert_eq!(find(&rt, "Row").size.y, 40.0, "the round trip must not change the cross size");
+    assert_eq!(find(&rt, "FillChild").size.y, 40.0);
+}
+
+#[test]
+fn grid_auto_tracks_and_v106_track_maps_roundtrip() {
+    let g = |s: u64, l: u64| -> Value { json!({"sessionID": s, "localID": l}) };
+    let nc = |id: (u64, u64), parent: (u64, u64), pos: &str, ty: &str, name: &str, extra: Value| -> Value {
+        let mut v = json!({
+            "guid": g(id.0, id.1),
+            "parentIndex": {"guid": g(parent.0, parent.1), "position": pos},
+            "type": ty,
+            "name": name,
+            "phase": "CREATED",
+            "visible": true,
+            "opacity": 1.0,
+            "size": {"x": 120.0, "y": 60.0},
+            "transform": {"m00": 1.0, "m01": 0.0, "m02": 0.0, "m10": 0.0, "m11": 1.0, "m12": 0.0}
+        });
+        for (k, x) in extra.as_object().unwrap() {
+            v[k] = x.clone();
+        }
+        v
+    };
+    let changes = json!([
+        {"guid": g(0, 0), "type": "DOCUMENT", "name": "GridAutoDoc"},
+        {"guid": g(0, 1), "parentIndex": {"guid": g(0, 0), "position": "a"}, "type": "CANVAS", "name": "Page 1"},
+        nc(
+            (1, 10),
+            (0, 1),
+            "a",
+            "FRAME",
+            "AutoRowsEnumGrid",
+            json!({
+                "size": {"x": 300.0, "y": 200.0},
+                "stackMode": "GRID",
+                "gridRows": {
+                    "entries": [
+                        {"id": g(9, 1), "position": "!"},
+                        {"id": g(9, 2), "position": "\""}
+                    ]
+                },
+                "gridColumns": {
+                    "entries": [
+                        {"id": g(9, 3), "position": "!"},
+                        {"id": g(9, 4), "position": "\""}
+                    ]
+                },
+                "gridColumnsSizing": {
+                    "entries": [
+                        {"id": g(9, 3), "trackSize": {"minSizing": {"type": "FLEX", "value": 1.0}, "maxSizing": {"type": "FLEX", "value": 1.0}}},
+                        {"id": g(9, 4), "trackSize": {"minSizing": {"type": "FIXED", "value": 120.0}, "maxSizing": {"type": "FIXED", "value": 120.0}}}
+                    ]
+                },
+                "gridRowsSizing": {
+                    "entries": [
+                        {"id": g(9, 1), "trackSize": {"minSizing": {"type": "HUG", "value": 1.0}, "maxSizing": {"type": "HUG", "value": 1.0}}},
+                        {"id": g(9, 2), "trackSize": {"minSizing": {"type": "FIXED", "value": 48.0}, "maxSizing": {"type": "FIXED", "value": 48.0}}}
+                    ]
+                },
+                "gridAutoTracks": "ROWS"
+            })
+        ),
+        nc(
+            (1, 11),
+            (1, 10),
+            "a",
+            "RECTANGLE",
+            "PinnedCell",
+            json!({
+                "size": {"x": 40.0, "y": 20.0},
+                "gridRowAnchor": g(9, 2),
+                "gridColumnAnchor": g(9, 4)
+            })
+        ),
+        nc(
+            (1, 20),
+            (0, 1),
+            "b",
+            "FRAME",
+            "AutoRowsSizedGrid",
+            json!({
+                "size": {"x": 300.0, "y": 200.0},
+                "stackMode": "GRID",
+                "gridColumns": 3,
+                "gridRows": 1,
+                "gridColumnsSizing": "1fr 1fr 1fr",
+                "gridRowsSizing": "40px",
+                "gridAutoTracks": "64px"
+            })
+        )
+    ]);
+
+    let doc = import_fig_node_changes(&changes, "GridAutoDoc").expect("import GridAutoDoc");
+
+    let g1 = find(&doc, "AutoRowsEnumGrid");
+    assert!(!g1.fig_metadata.contains_key("gridAutoTracks"), "gridAutoTracks must map to the model, not metadata");
+    let al1 = g1.kind.frame_props().unwrap().auto_layout.clone().unwrap();
+    assert_eq!(al1.grid_columns, 2);
+    assert_eq!(al1.grid_rows, 2);
+    assert_eq!(&al1.grid_col_tracks[..2], &[GridTrack::Flex(1.0), GridTrack::Fixed(120.0)]);
+    assert_eq!(&al1.grid_row_tracks[..2], &[GridTrack::Hug, GridTrack::Fixed(48.0)]);
+    assert_eq!(al1.grid_auto_tracks, GridAutoTracks::Rows);
+
+    let cell = find(&doc, "PinnedCell");
+    assert_eq!(cell.layout_child.grid_row, Some(1));
+    assert_eq!(cell.layout_child.grid_column, Some(1));
+
+    let g2 = find(&doc, "AutoRowsSizedGrid");
+    let al2 = g2.kind.frame_props().unwrap().auto_layout.clone().unwrap();
+    assert_eq!(al2.grid_auto_tracks, GridAutoTracks::Track(GridTrack::Fixed(64.0)));
+
+    let bytes = export_fig(&doc).expect("export_fig GridAutoDoc");
+    let rt = import_fig(&bytes).expect("re-import GridAutoDoc");
+
+    let rt_al1 = find(&rt, "AutoRowsEnumGrid").kind.frame_props().unwrap().auto_layout.clone().unwrap();
+    assert_eq!(rt_al1.grid_auto_tracks, GridAutoTracks::Rows);
+    assert_eq!(&rt_al1.grid_col_tracks[..2], &[GridTrack::Flex(1.0), GridTrack::Fixed(120.0)]);
+    assert_eq!(&rt_al1.grid_row_tracks[..2], &[GridTrack::Hug, GridTrack::Fixed(48.0)]);
+
+    let rt_al2 = find(&rt, "AutoRowsSizedGrid").kind.frame_props().unwrap().auto_layout.clone().unwrap();
+    assert_eq!(rt_al2.grid_auto_tracks, GridAutoTracks::Track(GridTrack::Fixed(64.0)));
+}
+
+#[test]
+fn layout_guide_alignment_fixed_width_auto_count_and_visibility_roundtrip() {
+    use designos_doc::{Color, Document, LayoutGrid, LayoutGridAlign, Node, NodeKind, Rect, Style};
+
+    // Old serialized LayoutGrid JSON without alignment/section_size/visible must load with Stretch, 0.0, true.
+    let legacy_grid: LayoutGrid =
+        serde_json::from_str(r#"{"Columns":{"count":12,"gutter":20.0,"offset":16.0,"color":{"r":1.0,"g":0.0,"b":0.0,"a":0.1}}}"#).unwrap();
+    assert_eq!(
+        legacy_grid,
+        LayoutGrid::Columns {
+            count: 12,
+            gutter: 20.0,
+            offset: 16.0,
+            section_size: 0.0,
+            alignment: LayoutGridAlign::Stretch,
+            color: Color { r: 1.0, g: 0.0, b: 0.0, a: 0.1 },
+            visible: true,
+        }
+    );
+
+    let mut doc = Document::new("GuideParity");
+    let page = doc.add_page("Page 1");
+    let fid = doc.alloc_id();
+    let mut frame = Node::frame(fid, Rect::new(0.0, 0.0, 1440.0, 900.0));
+    frame.name = "DesktopFrame".into();
+    let g_cols = LayoutGrid::Columns {
+        count: 12,
+        gutter: 20.0,
+        offset: 0.0,
+        section_size: 60.0,
+        alignment: LayoutGridAlign::Center,
+        color: Color::rgba(255, 0, 0, 26),
+        visible: true,
+    };
+    let g_rows = LayoutGrid::Rows {
+        count: 0,
+        gutter: 16.0,
+        offset: 24.0,
+        section_size: 48.0,
+        alignment: LayoutGridAlign::Min,
+        color: Color::rgba(0, 128, 255, 26),
+        visible: true,
+    };
+    let g_hidden = LayoutGrid::Grid { size: 8.0, color: Color::rgba(0, 255, 0, 26), visible: false };
+    if let NodeKind::Frame(fp) = &mut frame.kind {
+        fp.grids = vec![g_cols.clone(), g_rows.clone(), g_hidden.clone()];
+    }
+    doc.insert(page, frame).unwrap();
+
+    let style_grid = LayoutGrid::Columns {
+        count: 0,
+        gutter: 12.0,
+        offset: 32.0,
+        section_size: 72.0,
+        alignment: LayoutGridAlign::Max,
+        color: Color::rgba(255, 128, 0, 26),
+        visible: false,
+    };
+    doc.styles.insert("S:grid-auto-max".into(), Style::Grid(vec![style_grid.clone()]));
+
+    let bytes = export_fig(&doc).unwrap();
+    let rt = import_fig(&bytes).unwrap();
+    let rt_frame = find(&rt, "DesktopFrame");
+    let rt_grids = &rt_frame.kind.frame_props().unwrap().grids;
+    assert_eq!(rt_grids.len(), 3);
+    assert!(matches!(
+        &rt_grids[0],
+        LayoutGrid::Columns { count: 12, gutter, offset, section_size, alignment: LayoutGridAlign::Center, visible: true, .. }
+        if (*gutter - 20.0).abs() < 1e-4 && (*offset - 0.0).abs() < 1e-4 && (*section_size - 60.0).abs() < 1e-4
+    ));
+    assert!(matches!(
+        &rt_grids[1],
+        LayoutGrid::Rows { count: 0, gutter, offset, section_size, alignment: LayoutGridAlign::Min, visible: true, .. }
+        if (*gutter - 16.0).abs() < 1e-4 && (*offset - 24.0).abs() < 1e-4 && (*section_size - 48.0).abs() < 1e-4
+    ));
+    assert!(matches!(
+        &rt_grids[2],
+        LayoutGrid::Grid { size, visible: false, .. } if (*size - 8.0).abs() < 1e-4
+    ));
+
+    let has_grid_style = rt.styles.values().any(|s| {
+        matches!(
+            s,
+            Style::Grid(gs)
+            if matches!(
+                gs.as_slice(),
+                [LayoutGrid::Columns { count: 0, gutter, offset, section_size, alignment: LayoutGridAlign::Max, visible: false, .. }]
+                if (*gutter - 12.0).abs() < 1e-4 && (*offset - 32.0).abs() < 1e-4 && (*section_size - 72.0).abs() < 1e-4
+            )
+        )
+    });
+    assert!(has_grid_style, "grid style must round-trip alignment, section_size, auto count, and visible=false");
+}
+
+/// Equal-width columns: aligned but with no fixed width (paint width is (400 - 80) / 5).
+fn equal_width_columns_doc() -> (Document, LayoutGrid) {
+    use designos_doc::{Color, LayoutGridAlign, Node, NodeKind, Rect};
+    let equal = LayoutGrid::Columns {
+        count: 5,
+        gutter: 20.0,
+        offset: 0.0,
+        section_size: 0.0,
+        alignment: LayoutGridAlign::Min,
+        color: Color::rgba(255, 0, 0, 26),
+        visible: true,
+    };
+    let mut doc = Document::new("GuideZero");
+    let page = doc.add_page("Page 1");
+    let fid = doc.alloc_id();
+    let mut frame = Node::frame(fid, Rect::new(0.0, 0.0, 400.0, 300.0));
+    frame.name = "EqualColumns".into();
+    if let NodeKind::Frame(fp) = &mut frame.kind {
+        fp.grids = vec![equal.clone()];
+    }
+    doc.insert(page, frame).unwrap();
+    (doc, equal)
+}
+
+#[test]
+fn layout_guide_with_no_fixed_width_keeps_section_size_zero_through_fig() {
+    let (doc, equal) = equal_width_columns_doc();
+    let back = import_fig(&export_fig(&doc).unwrap()).unwrap();
+    assert_eq!(find(&back, "EqualColumns").kind.frame_props().unwrap().grids, vec![equal]);
+}
+
+#[test]
+fn layout_guide_with_no_fixed_width_keeps_section_size_zero_through_rest() {
+    let (doc, equal) = equal_width_columns_doc();
+    let json = designos_fig::export_rest_json(&doc);
+    let back = designos_fig::import_rest_json(&json.to_string()).unwrap();
+    assert_eq!(find(&back, "EqualColumns").kind.frame_props().unwrap().grids, vec![equal]);
+}
+
+/// Node name -> (`gridChildHorizontalAlign`, `gridChildVerticalAlign`) as written to the `.fig` message; a key that
+/// was not written reads `<absent>`. Only nodes that carry at least one of the keys are listed.
+fn wire_grid_child_aligns(bytes: &[u8]) -> BTreeMap<String, (String, String)> {
+    use designos_fig::kiwi::{KiwiValue, Schema};
+    let archive = designos_fig::container::open(bytes).expect("open fig archive");
+    let (schema_bytes, message) = designos_fig::container::read_archive_chunks(&archive).expect("fig chunks");
+    let schema = Schema::decode(&schema_bytes).expect("fig schema");
+    let root = schema.root_message().expect("root message");
+    let msg = schema.decode_message(root, &message).expect("decode fig message");
+    let enum_of = |n: &KiwiValue, key: &str| match n.get(key) {
+        Some(KiwiValue::Enum(e)) => e.to_string(),
+        Some(other) => format!("{other:?}"),
+        None => "<absent>".to_string(),
+    };
+    let mut out = BTreeMap::new();
+    for n in msg.get("nodeChanges").and_then(KiwiValue::as_array).expect("nodeChanges") {
+        let (h, v) = (enum_of(n, "gridChildHorizontalAlign"), enum_of(n, "gridChildVerticalAlign"));
+        if h == "<absent>" && v == "<absent>" {
+            continue;
+        }
+        if let Some(KiwiValue::String(name)) = n.get("name") {
+            out.insert(name.clone(), (h, v));
+        }
+    }
+    out
+}
+
+#[test]
+fn grid_child_horizontal_and_vertical_align_roundtrip() {
+    use designos_doc::GridChildAlign;
+
+    let g = |s: u64, l: u64| -> Value { json!({"sessionID": s, "localID": l}) };
+    let nc = |id: (u64, u64), parent: (u64, u64), pos: &str, ty: &str, name: &str, extra: Value| -> Value {
+        let mut v = json!({
+            "guid": g(id.0, id.1),
+            "parentIndex": {"guid": g(parent.0, parent.1), "position": pos},
+            "type": ty,
+            "name": name,
+            "phase": "CREATED",
+            "visible": true,
+            "opacity": 1.0,
+            "size": {"x": 40.0, "y": 20.0},
+            "transform": {"m00": 1.0, "m01": 0.0, "m02": 0.0, "m10": 0.0, "m11": 1.0, "m12": 0.0}
+        });
+        for (k, x) in extra.as_object().unwrap() {
+            v[k] = x.clone();
+        }
+        v
+    };
+    let changes = json!([
+        {"guid": g(0, 0), "type": "DOCUMENT", "name": "GridChildAlignDoc"},
+        {"guid": g(0, 1), "parentIndex": {"guid": g(0, 0), "position": "a"}, "type": "CANVAS", "name": "Page 1"},
+        nc(
+            (1, 10),
+            (0, 1),
+            "a",
+            "FRAME",
+            "GridParent",
+            json!({
+                "size": {"x": 200.0, "y": 200.0},
+                "stackMode": "GRID",
+                "gridColumns": 2,
+                "gridRows": 2,
+                "gridColumnsSizing": "100px 100px",
+                "gridRowsSizing": "100px 100px"
+            })
+        ),
+        nc((1, 11), (1, 10), "a", "RECTANGLE", "LegacyDefaultChild", json!({})),
+        nc(
+            (1, 12),
+            (1, 10),
+            "b",
+            "RECTANGLE",
+            "CenteredEndChild",
+            json!({
+                "gridChildHorizontalAlign": "CENTER",
+                "gridChildVerticalAlign": "MAX"
+            })
+        ),
+        nc(
+            (1, 13),
+            (1, 10),
+            "c",
+            "RECTANGLE",
+            "EndCenterChild",
+            json!({
+                "gridChildHorizontalAlign": "MAX",
+                "gridChildVerticalAlign": "CENTER"
+            })
+        ),
+        nc(
+            (1, 14),
+            (1, 10),
+            "d",
+            "RECTANGLE",
+            "AutoMinChild",
+            json!({
+                "gridChildHorizontalAlign": "AUTO",
+                "gridChildVerticalAlign": "MIN"
+            })
+        ),
+        nc(
+            (1, 15),
+            (1, 10),
+            "e",
+            "RECTANGLE",
+            "StartStartChild",
+            json!({
+                "gridChildHorizontalAlign": "MIN",
+                "gridChildVerticalAlign": "MIN"
+            })
+        )
+    ]);
+
+    let doc = import_fig_node_changes(&changes, "GridChildAlignDoc").expect("import GridChildAlignDoc");
+
+    // Figma omits an enum at its schema default, and GridChildAlign defaults to AUTO (enum 0), so a grid child that
+    // never set either key inherits the frame's alignment instead of being pinned to the cell origin.
+    let legacy = find(&doc, "LegacyDefaultChild");
+    assert_eq!((legacy.layout_child.grid_align_h, legacy.layout_child.grid_align_v), (GridChildAlign::Auto, GridChildAlign::Auto));
+
+    let c1 = find(&doc, "CenteredEndChild");
+    assert!(!c1.fig_metadata.contains_key("gridChildVerticalAlign"), "gridChildVerticalAlign must map to LayoutChild, not fig_metadata");
+    assert!(!c1.fig_metadata.contains_key("gridChildHorizontalAlign"));
+    assert_eq!((c1.layout_child.grid_align_h, c1.layout_child.grid_align_v), (GridChildAlign::Center, GridChildAlign::End));
+
+    let c2 = find(&doc, "EndCenterChild");
+    assert_eq!((c2.layout_child.grid_align_h, c2.layout_child.grid_align_v), (GridChildAlign::End, GridChildAlign::Center));
+
+    let c3 = find(&doc, "AutoMinChild");
+    assert_eq!((c3.layout_child.grid_align_h, c3.layout_child.grid_align_v), (GridChildAlign::Auto, GridChildAlign::Start));
+
+    let c4 = find(&doc, "StartStartChild");
+    assert_eq!((c4.layout_child.grid_align_h, c4.layout_child.grid_align_v), (GridChildAlign::Start, GridChildAlign::Start));
+
+    let bytes = export_fig(&doc).expect("export_fig GridChildAlignDoc");
+
+    // On the wire an explicit Start is MIN and an unset child is AUTO: omitting the key would read back as AUTO.
+    let wire = wire_grid_child_aligns(&bytes);
+    assert_eq!(wire["LegacyDefaultChild"], ("AUTO".to_string(), "AUTO".to_string()));
+    assert_eq!(wire["CenteredEndChild"], ("CENTER".to_string(), "MAX".to_string()));
+    assert_eq!(wire["EndCenterChild"], ("MAX".to_string(), "CENTER".to_string()));
+    assert_eq!(wire["AutoMinChild"], ("AUTO".to_string(), "MIN".to_string()));
+    assert_eq!(wire["StartStartChild"], ("MIN".to_string(), "MIN".to_string()));
+    assert!(!wire.contains_key("GridParent"), "only grid children carry the alignment keys");
+
+    let rt = import_fig(&bytes).expect("re-import GridChildAlignDoc");
+
+    let rt_legacy = find(&rt, "LegacyDefaultChild");
+    assert_eq!((rt_legacy.layout_child.grid_align_h, rt_legacy.layout_child.grid_align_v), (GridChildAlign::Auto, GridChildAlign::Auto));
+
+    let rt_c4 = find(&rt, "StartStartChild");
+    assert_eq!((rt_c4.layout_child.grid_align_h, rt_c4.layout_child.grid_align_v), (GridChildAlign::Start, GridChildAlign::Start));
+
+    let rt_c1 = find(&rt, "CenteredEndChild");
+    assert_eq!((rt_c1.layout_child.grid_align_h, rt_c1.layout_child.grid_align_v), (GridChildAlign::Center, GridChildAlign::End));
+
+    let rt_c2 = find(&rt, "EndCenterChild");
+    assert_eq!((rt_c2.layout_child.grid_align_h, rt_c2.layout_child.grid_align_v), (GridChildAlign::End, GridChildAlign::Center));
+
+    let rt_c3 = find(&rt, "AutoMinChild");
+    assert_eq!((rt_c3.layout_child.grid_align_h, rt_c3.layout_child.grid_align_v), (GridChildAlign::Auto, GridChildAlign::Start));
+}
+
+fn grid_align_changes(frame_extra: Value, children: Vec<(&str, Value)>) -> Value {
+    let g = |s: u64, l: u64| -> Value { json!({"sessionID": s, "localID": l}) };
+    let xform = json!({"m00": 1.0, "m01": 0.0, "m02": 0.0, "m10": 0.0, "m11": 1.0, "m12": 0.0});
+    let mut frame = json!({
+        "guid": g(1, 10),
+        "parentIndex": {"guid": g(0, 1), "position": "a"},
+        "type": "FRAME",
+        "name": "AlignFrame",
+        "phase": "CREATED",
+        "visible": true,
+        "opacity": 1.0,
+        "size": {"x": 300.0, "y": 100.0},
+        "transform": xform
+    });
+    for (k, x) in frame_extra.as_object().unwrap() {
+        frame[k] = x.clone();
+    }
+    let mut changes = vec![
+        json!({"guid": g(0, 0), "type": "DOCUMENT", "name": "AlignDoc"}),
+        json!({"guid": g(0, 1), "parentIndex": {"guid": g(0, 0), "position": "a"}, "type": "CANVAS", "name": "Page 1"}),
+        frame,
+    ];
+    for (i, (name, extra)) in children.into_iter().enumerate() {
+        let mut child = json!({
+            "guid": g(1, 20 + i as u64),
+            "parentIndex": {"guid": g(1, 10), "position": ((b'a' + i as u8) as char).to_string()},
+            "type": "RECTANGLE",
+            "name": name,
+            "phase": "CREATED",
+            "visible": true,
+            "opacity": 1.0,
+            "size": {"x": 40.0, "y": 20.0},
+            "transform": xform
+        });
+        for (k, x) in extra.as_object().unwrap() {
+            child[k] = x.clone();
+        }
+        changes.push(child);
+    }
+    Value::Array(changes)
+}
+
+#[test]
+fn grid_child_without_align_keys_is_placed_by_the_frame_alignment() {
+    // Three 100x100 cells whose frame centres its children on x and ends them on y. A child that never set either
+    // alignment key is AUTO in Figma, so it centres on x and ends on y; an explicit MIN pins it to the cell origin.
+    let changes = grid_align_changes(
+        json!({
+            "stackMode": "GRID",
+            "gridColumns": 3,
+            "gridRows": 1,
+            "gridColumnsSizing": "100px 100px 100px",
+            "gridRowsSizing": "100px",
+            "stackPrimaryAlignItems": "CENTER",
+            "stackCounterAlignItems": "MAX",
+            "stackPrimarySizing": "FIXED",
+            "stackCounterSizing": "FIXED"
+        }),
+        vec![
+            ("UnsetChild", json!({})),
+            ("MinChild", json!({"gridChildHorizontalAlign": "MIN", "gridChildVerticalAlign": "MIN"})),
+            ("AutoChild", json!({"gridChildHorizontalAlign": "AUTO", "gridChildVerticalAlign": "AUTO"})),
+        ],
+    );
+    let mut doc = import_fig_node_changes(&changes, "AlignDoc").expect("import AlignDoc");
+    let frame = find(&doc, "AlignFrame").id;
+    doc.relayout_subtree(frame);
+    let at = |doc: &Document, name: &str| {
+        let n = find(doc, name);
+        (n.transform.tx, n.transform.ty)
+    };
+    assert_eq!(at(&doc, "UnsetChild"), (30.0, 80.0));
+    assert_eq!(at(&doc, "MinChild"), (100.0, 0.0));
+    assert_eq!(at(&doc, "AutoChild"), (230.0, 80.0));
+
+    // The same placement after a trip through the .fig writer.
+    let mut rt = import_fig(&export_fig(&doc).expect("export_fig AlignDoc")).expect("re-import AlignDoc");
+    let rt_frame = find(&rt, "AlignFrame").id;
+    rt.relayout_subtree(rt_frame);
+    assert_eq!(at(&rt, "UnsetChild"), (30.0, 80.0));
+    assert_eq!(at(&rt, "MinChild"), (100.0, 0.0));
+    assert_eq!(at(&rt, "AutoChild"), (230.0, 80.0));
+}
+
+#[test]
+fn child_of_a_flow_frame_keeps_the_default_alignment_and_writes_no_alignment_keys() {
+    use designos_doc::GridChildAlign;
+
+    // The alignment keys only mean something under a grid: a flow child stays at the Start default, so a file full of
+    // them does not grow two enum fields per node.
+    let changes = grid_align_changes(
+        json!({"stackMode": "HORIZONTAL", "stackPrimaryAlignItems": "CENTER", "stackCounterAlignItems": "MAX"}),
+        vec![("FlowChild", json!({}))],
+    );
+    let doc = import_fig_node_changes(&changes, "AlignDoc").expect("import AlignDoc");
+    let child = find(&doc, "FlowChild");
+    assert_eq!((child.layout_child.grid_align_h, child.layout_child.grid_align_v), (GridChildAlign::Start, GridChildAlign::Start));
+    let wire = wire_grid_child_aligns(&export_fig(&doc).expect("export_fig AlignDoc"));
+    assert!(wire.is_empty(), "flow children wrote alignment keys: {wire:?}");
+}
+
+#[test]
+fn instance_override_that_resets_a_grid_child_alignment_to_start_survives_a_roundtrip() {
+    use designos_doc::GridChildAlign;
+
+    let g = |s: u64, l: u64| -> Value { json!({"sessionID": s, "localID": l}) };
+    let node = |id: (u64, u64), parent: (u64, u64), pos: &str, ty: &str, name: &str, extra: Value| -> Value {
+        let mut v = json!({
+            "guid": g(id.0, id.1),
+            "parentIndex": {"guid": g(parent.0, parent.1), "position": pos},
+            "type": ty,
+            "name": name,
+            "phase": "CREATED",
+            "visible": true,
+            "opacity": 1.0,
+            "size": {"x": 40.0, "y": 20.0},
+            "transform": {"m00": 1.0, "m01": 0.0, "m02": 0.0, "m10": 0.0, "m11": 1.0, "m12": 0.0}
+        });
+        for (k, x) in extra.as_object().unwrap() {
+            v[k] = x.clone();
+        }
+        v
+    };
+    // The main component centres its child horizontally and ends it vertically; the instance resets the horizontal
+    // alignment to MIN (Start) and leaves the vertical one alone.
+    let changes = json!([
+        {"guid": g(0, 0), "type": "DOCUMENT", "name": "OverrideAlignDoc"},
+        {"guid": g(0, 1), "parentIndex": {"guid": g(0, 0), "position": "a"}, "type": "CANVAS", "name": "Page 1"},
+        node(
+            (1, 10),
+            (0, 1),
+            "a",
+            "SYMBOL",
+            "AlignComp",
+            json!({
+                "size": {"x": 100.0, "y": 100.0},
+                "stackMode": "GRID",
+                "gridColumns": 1,
+                "gridRows": 1,
+                "gridColumnsSizing": "100px",
+                "gridRowsSizing": "100px"
+            })
+        ),
+        node(
+            (1, 11),
+            (1, 10),
+            "a",
+            "RECTANGLE",
+            "AlignedChild",
+            json!({
+                "overrideKey": g(9, 11),
+                "gridChildHorizontalAlign": "CENTER",
+                "gridChildVerticalAlign": "MAX"
+            })
+        ),
+        node(
+            (1, 12),
+            (0, 1),
+            "b",
+            "INSTANCE",
+            "AlignInst",
+            json!({
+                "size": {"x": 100.0, "y": 100.0},
+                "symbolData": {
+                    "symbolID": g(1, 10),
+                    "symbolOverrides": [
+                        {"guidPath": {"guids": [g(9, 11)]}, "gridChildHorizontalAlign": "MIN"}
+                    ]
+                }
+            })
+        )
+    ]);
+    let instance_child = |doc: &Document| {
+        let inst = find(doc, "AlignInst");
+        let child = doc.get(*inst.children.first().expect("instance child")).expect("instance child node");
+        (child.layout_child.grid_align_h, child.layout_child.grid_align_v)
+    };
+
+    let doc = import_fig_node_changes(&changes, "OverrideAlignDoc").expect("import OverrideAlignDoc");
+    assert_eq!(instance_child(&doc), (GridChildAlign::Start, GridChildAlign::End), "the override applies on import");
+
+    let bytes = export_fig(&doc).expect("export_fig OverrideAlignDoc");
+
+    // The override entry names only the axis that changed, and names the reset to Start as MIN: an omitted key keeps
+    // the main component's value, so the vertical axis (still the main's MAX) must not be written.
+    let (_, overrides) = wire_instance_override(&bytes, "AlignInst", None);
+    assert_eq!(overrides, ("MIN".to_string(), "<absent>".to_string()), "the symbolOverrides must carry the MIN reset and nothing for the unchanged axis");
+
+    // A real .fig instance stores no children, so the copy is rebuilt from the component plus the written overrides.
+    let (stripped, _) = wire_instance_override(&bytes, "AlignInst", None);
+    let rt = import_fig(&stripped).expect("re-import OverrideAlignDoc");
+    assert_eq!(instance_child(&rt), (GridChildAlign::Start, GridChildAlign::End), "the rebuilt copy kept the component's alignment");
+
+    // The untouched axis keeps following the main component: after the main changes to CENTER/MIN the rebuilt copy is
+    // still reset horizontally (Start) and now follows the main vertically (Start, no longer End).
+    let (stripped, _) = wire_instance_override(&bytes, "AlignInst", Some(("AlignedChild", "CENTER", "MIN")));
+    let rt = import_fig(&stripped).expect("re-import OverrideAlignDoc after the main changed");
+    assert_eq!(instance_child(&rt), (GridChildAlign::Start, GridChildAlign::Start), "the unchanged axis froze the main's old value");
+}
+
+#[test]
+fn instance_override_of_a_margin_leaves_the_grid_child_alignment_following_the_main_component() {
+    use designos_doc::GridChildAlign;
+
+    let g = |s: u64, l: u64| -> Value { json!({"sessionID": s, "localID": l}) };
+    let node = |id: (u64, u64), parent: (u64, u64), pos: &str, ty: &str, name: &str, extra: Value| -> Value {
+        let mut v = json!({
+            "guid": g(id.0, id.1),
+            "parentIndex": {"guid": g(parent.0, parent.1), "position": pos},
+            "type": ty,
+            "name": name,
+            "phase": "CREATED",
+            "visible": true,
+            "opacity": 1.0,
+            "size": {"x": 40.0, "y": 20.0},
+            "transform": {"m00": 1.0, "m01": 0.0, "m02": 0.0, "m10": 0.0, "m11": 1.0, "m12": 0.0}
+        });
+        for (k, x) in extra.as_object().unwrap() {
+            v[k] = x.clone();
+        }
+        v
+    };
+    // The main child is centred horizontally and ends vertically; the instance only sets a left margin. A margin takes
+    // the same Layout override flag as an alignment, but it names no alignment, so the alignment stays the main's.
+    let changes = json!([
+        {"guid": g(0, 0), "type": "DOCUMENT", "name": "MarginOverrideDoc"},
+        {"guid": g(0, 1), "parentIndex": {"guid": g(0, 0), "position": "a"}, "type": "CANVAS", "name": "Page 1"},
+        node(
+            (1, 10),
+            (0, 1),
+            "a",
+            "SYMBOL",
+            "AlignComp",
+            json!({
+                "size": {"x": 100.0, "y": 100.0},
+                "stackMode": "GRID",
+                "gridColumns": 1,
+                "gridRows": 1,
+                "gridColumnsSizing": "100px",
+                "gridRowsSizing": "100px"
+            })
+        ),
+        node(
+            (1, 11),
+            (1, 10),
+            "a",
+            "RECTANGLE",
+            "AlignedChild",
+            json!({
+                "overrideKey": g(9, 11),
+                "gridChildHorizontalAlign": "CENTER",
+                "gridChildVerticalAlign": "MAX"
+            })
+        ),
+        node(
+            (1, 12),
+            (0, 1),
+            "b",
+            "INSTANCE",
+            "AlignInst",
+            json!({
+                "size": {"x": 100.0, "y": 100.0},
+                "symbolData": {
+                    "symbolID": g(1, 10),
+                    "symbolOverrides": [
+                        {"guidPath": {"guids": [g(9, 11)]}, "stackChildMarginLeft": 8.0}
+                    ]
+                }
+            })
+        )
+    ]);
+    let instance_child = |doc: &Document| {
+        let inst = find(doc, "AlignInst");
+        let child = doc.get(*inst.children.first().expect("instance child")).expect("instance child node");
+        (child.layout_child.grid_align_h, child.layout_child.grid_align_v, child.layout_child.margin[3])
+    };
+
+    let doc = import_fig_node_changes(&changes, "MarginOverrideDoc").expect("import MarginOverrideDoc");
+    assert_eq!(instance_child(&doc), (GridChildAlign::Center, GridChildAlign::End, 8.0), "the margin applies on import, the alignment is the main's");
+
+    let bytes = export_fig(&doc).expect("export_fig MarginOverrideDoc");
+    let (_, overrides) = wire_instance_override(&bytes, "AlignInst", None);
+    assert_eq!(overrides, ("<absent>".to_string(), "<absent>".to_string()), "a margin override must not write the alignment");
+
+    // The main child changes to MIN/MIN and the instance is rebuilt: it follows, and keeps its own margin.
+    let (stripped, _) = wire_instance_override(&bytes, "AlignInst", Some(("AlignedChild", "MIN", "MIN")));
+    let rt = import_fig(&stripped).expect("re-import MarginOverrideDoc after the main changed");
+    assert_eq!(instance_child(&rt), (GridChildAlign::Start, GridChildAlign::Start, 8.0), "the alignment froze at the main's old CENTER/MAX");
+}
+
+/// The `.fig` bytes with the children stored under instance `instance_name` removed, and the
+/// (`gridChildHorizontalAlign`, `gridChildVerticalAlign`) of the first `symbolOverrides` entry that carries either key
+/// (`<absent>` for a key it does not carry). `main_edit` rewrites both alignment keys of the remaining node of that
+/// name (the main component's child) to the given `(name, horizontal, vertical)`, as if the main had changed.
+fn wire_instance_override(bytes: &[u8], instance_name: &str, main_edit: Option<(&str, &str, &str)>) -> (Vec<u8>, (String, String)) {
+    use designos_fig::container::{self, Compression};
+    use designos_fig::kiwi::{KiwiValue, Schema};
+    let archive = container::open(bytes).expect("open fig archive");
+    let (schema_bytes, message) = container::read_archive_chunks(&archive).expect("fig chunks");
+    let schema = Schema::decode(&schema_bytes).expect("fig schema");
+    let root = schema.root_message().expect("root message");
+    let mut msg = schema.decode_message(root, &message).expect("decode fig message");
+    let Some(KiwiValue::Array(nodes)) = msg.take_field("nodeChanges") else { panic!("no nodeChanges") };
+    let guid_of = |v: Option<&KiwiValue>| match (v.and_then(|g| g.get("sessionID")), v.and_then(|g| g.get("localID"))) {
+        (Some(KiwiValue::Uint(s)), Some(KiwiValue::Uint(l))) => Some((*s, *l)),
+        _ => None,
+    };
+    let instance = nodes
+        .iter()
+        .find(|n| matches!(n.get("name"), Some(KiwiValue::String(s)) if s == instance_name))
+        .and_then(|n| guid_of(n.get("guid")))
+        .expect("instance guid");
+    let enum_of = |n: &KiwiValue, key: &str| match n.get(key) {
+        Some(KiwiValue::Enum(e)) => e.to_string(),
+        Some(other) => format!("{other:?}"),
+        None => "<absent>".to_string(),
+    };
+    let mut carried = ("<absent>".to_string(), "<absent>".to_string());
+    for n in &nodes {
+        let entries = n.get("symbolData").and_then(|s| s.get("symbolOverrides")).and_then(KiwiValue::as_array).unwrap_or(&[]);
+        for e in entries {
+            let pair = (enum_of(e, "gridChildHorizontalAlign"), enum_of(e, "gridChildVerticalAlign"));
+            if pair != ("<absent>".to_string(), "<absent>".to_string()) {
+                carried = pair;
+            }
+        }
+    }
+    let mut kept: Vec<KiwiValue> = nodes.into_iter().filter(|n| guid_of(n.get("parentIndex").and_then(|p| p.get("guid"))) != Some(instance)).collect();
+    if let Some((name, h, v)) = main_edit {
+        let main = kept.iter_mut().find(|n| matches!(n.get("name"), Some(KiwiValue::String(s)) if s == name)).expect("main component child");
+        let KiwiValue::Message(main_fields) = main else { panic!("node is not a message") };
+        for (key, value) in [("gridChildHorizontalAlign", h), ("gridChildVerticalAlign", v)] {
+            let value = KiwiValue::Enum(value.into());
+            match main_fields.iter_mut().find(|(k, _)| &**k == key) {
+                Some(slot) => slot.1 = value,
+                None => main_fields.push((key.into(), value)),
+            }
+        }
+    }
+    let KiwiValue::Message(fields) = &mut msg else { panic!("root is not a message") };
+    fields.push(("nodeChanges".into(), KiwiValue::Array(kept)));
+    let encoded = schema.encode_message(root, &msg).expect("encode fig message");
+    let version = container::container_version(&archive.canvas).unwrap_or(106);
+    (container::write_container(&schema_bytes, &encoded, Compression::Deflate, version), carried)
+}
+
+#[test]
+fn per_side_stroke_weights_ignore_stale_borders_and_merge_partial_overrides() {
+    let g = |s: u64, l: u64| -> Value { json!({"sessionID": s, "localID": l}) };
+    let node = |id: (u64, u64), parent: (u64, u64), pos: &str, ty: &str, name: &str, extra: Value| -> Value {
+        let mut v = json!({
+            "guid": g(id.0, id.1),
+            "parentIndex": {"guid": g(parent.0, parent.1), "position": pos},
+            "type": ty,
+            "name": name,
+            "phase": "CREATED",
+            "visible": true,
+            "opacity": 1.0,
+            "size": {"x": 100.0, "y": 50.0},
+            "transform": {"m00": 1.0, "m01": 0.0, "m02": 0.0, "m10": 0.0, "m11": 1.0, "m12": 0.0}
+        });
+        for (k, x) in extra.as_object().unwrap() {
+            v[k] = x.clone();
+        }
+        v
+    };
+    let changes = json!([
+        node((0, 0), (0, 0), "!", "DOCUMENT", "Doc", json!({})),
+        node((1, 1), (0, 0), "!", "CANVAS", "Page 1", json!({})),
+        // 1. strokeWeight 1, border*Weight 12, no flag -> side_weights is None.
+        node(
+            (1, 10),
+            (1, 1),
+            "!",
+            "FRAME",
+            "UniformPill",
+            json!({
+                "strokeWeight": 1.0,
+                "borderTopWeight": 12.0,
+                "borderRightWeight": 12.0,
+                "borderBottomWeight": 12.0,
+                "borderLeftWeight": 12.0
+            })
+        ),
+        // 2. flag on, only borderRightWeight 1 -> [0, 1, 0, 0] even if strokeWeight is 1.
+        node(
+            (1, 20),
+            (1, 1),
+            "\"",
+            "FRAME",
+            "RightOnlyDivider",
+            json!({
+                "strokeWeight": 1.0,
+                "borderStrokeWeightsIndependent": true,
+                "borderRightWeight": 1.0
+            })
+        ),
+        // 3. Component with borderStrokeWeightsIndependent: true, borderRightWeight: 1, borderBottomWeight: 1,
+        // and an instance whose override sets only borderBottomWeight: 0 on that node -> [0, 1, 0, 0].
+        node(
+            (1, 30),
+            (1, 1),
+            "#",
+            "SYMBOL",
+            "CalendarHeader",
+            json!({
+                "strokeWeight": 1.0,
+                "borderStrokeWeightsIndependent": true,
+                "borderRightWeight": 1.0,
+                "borderBottomWeight": 1.0
+            })
+        ),
+        node(
+            (1, 31),
+            (1, 30),
+            "!",
+            "FRAME",
+            "CellDivider",
+            json!({
+                "overrideKey": g(9, 31),
+                "strokeWeight": 1.0,
+                "borderStrokeWeightsIndependent": true,
+                "borderRightWeight": 1.0,
+                "borderBottomWeight": 1.0
+            })
+        ),
+        node(
+            (1, 40),
+            (1, 1),
+            "$",
+            "INSTANCE",
+            "CalendarHeaderInst",
+            json!({
+                "symbolData": {
+                    "symbolID": g(1, 30),
+                    "symbolOverrides": [
+                        {
+                            "guidPath": {"guids": [g(9, 31)]},
+                            "borderBottomWeight": 0.0
+                        }
+                    ]
+                }
+            })
+        )
+    ]);
+
+    let doc = import_fig_node_changes(&changes, "SideWeights515").expect("import_fig_node_changes");
+
+    let pill = find(&doc, "UniformPill");
+    assert_eq!(pill.stroke.weight, 1.0);
+    assert_eq!(pill.stroke.side_weights, None, "stale border*Weight without borderStrokeWeightsIndependent must not set side_weights");
+
+    let right_only = find(&doc, "RightOnlyDivider");
+    assert_eq!(right_only.stroke.side_weights, Some([0.0, 1.0, 0.0, 0.0]), "missing side with flag on must default to 0");
+
+    let inst = find(&doc, "CalendarHeaderInst");
+    let cell = inst.children.iter().filter_map(|id| doc.get(*id)).find(|n| n.name == "CellDivider").expect("CellDivider in CalendarHeaderInst");
+    assert_eq!(cell.stroke.side_weights, Some([0.0, 1.0, 0.0, 0.0]), "partial borderBottomWeight override must preserve borderRightWeight");
 }
