@@ -62,44 +62,6 @@ CANONICAL_LINT_RULE_IDS: Set[str] = {
     "tap-target-size",
 }
 
-# Canonical E15-21 surface checklist rule IDs
-CANONICAL_SURFACE_CHECK_IDS: Set[str] = {
-    "surface.slides.frame-size",
-    "surface.slides.body-min-size",
-    "surface.slides.title-min-size",
-    "surface.slides.caption-min-size",
-    "surface.slides.edge-margin",
-    "surface.slides.font-families",
-    "surface.slides.max-line-chars",
-    "surface.mobile.frame-width",
-    "surface.mobile.body-min-size",
-    "surface.mobile.caption-min-size",
-    "surface.mobile.edge-margin",
-    "surface.mobile.section-gap",
-    "surface.mobile.item-gap",
-    "surface.mobile.tab-bar-items",
-    "surface.mobile.title-consistency",
-    "surface.web-app.body-min-size",
-    "surface.web-app.caption-min-size",
-    "surface.web-app.edge-margin",
-    "surface.web-app.section-gap",
-    "surface.web-app.required-states",
-    "surface.web-app.title-consistency",
-    "surface.landing-page.body-min-size",
-    "surface.landing-page.caption-min-size",
-    "surface.landing-page.max-line-chars",
-    "surface.landing-page.edge-margin",
-    "surface.landing-page.section-gap",
-    "surface.landing-page.font-families",
-    "surface.table.body-min-size",
-    "surface.table.caption-min-size",
-    "surface.table.required-states",
-    "surface.table.row-height",
-    "surface.design-system.caption-min-size",
-    "surface.design-system.edge-margin",
-    "surface.design-system.font-families",
-}
-
 # Canonical E15-31 / E15-34 critique rubric axes
 CANONICAL_RUBRIC_AXES: Set[str] = {
     "layout",
@@ -199,8 +161,9 @@ def load_lint_rule_ids(repo_root: Path) -> Set[str]:
 
 
 def load_surface_check_ids(repo_root: Path) -> Set[str]:
-    """Read E15-21 surface check IDs from assets/surfaces/*.json if present, plus canonical set."""
-    ids = set(CANONICAL_SURFACE_CHECK_IDS)
+    """Surface check IDs read from the E15-21 data in assets/surfaces/*.json; none when that data is absent, so a
+    `check:` mapping is `unknown-check-id` until E15-21 lands and cannot be validated against a built-in list."""
+    ids: Set[str] = set()
     surfaces_dir = repo_root / "assets" / "surfaces"
     if surfaces_dir.is_dir():
         import json
@@ -552,6 +515,7 @@ def cmd_map_coverage(repo_root: Path, write_canvas: bool = False) -> Tuple[int, 
     check_ids = load_surface_check_ids(repo_root)
 
     seen_ids: Set[str] = set()
+    canvas_text_owner: Dict[str, str] = {}
     for entry in rule_entries:
         rid = entry.get("id", "")
         if not rid:
@@ -613,6 +577,14 @@ def cmd_map_coverage(repo_root: Path, write_canvas: bool = False) -> Tuple[int, 
                 errors.append(
                     f"forbidden-tool-name: {rid} canvas_text names a third-party design tool other than Figma"
                 )
+            if canvas_text:
+                # A canvas_text restates ONE locked rule. The same sentence on several rules is a group summary
+                # standing in for the individual rules, which is how an unrelated rule ends up with wrong guidance.
+                owner = canvas_text_owner.setdefault(canvas_text, rid)
+                if canvas_text.endswith(f"({rid})"):
+                    errors.append(f"generic-canvas-text: {rid} canvas_text only tags the group summary with the rule id; restate the rule")
+                if owner != rid:
+                    errors.append(f"duplicate-canvas-text: {rid} repeats the canvas_text of {owner}; restate its own locked rule")
 
     for rid in lock_by_id:
         if rid not in seen_ids:

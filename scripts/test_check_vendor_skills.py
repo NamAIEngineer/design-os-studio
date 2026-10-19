@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import shutil
 import stat
@@ -186,6 +187,60 @@ class TestCheckVendorSkills(unittest.TestCase):
             "python3 -B -m unittest scripts/test_check_vendor_skills.py",
         ):
             self.assertIn(command, ci, f"CI must run `{command}` so deleting LICENSE or a rule block turns the build red")
+
+    def _rule_entries(self) -> dict:
+        jakub_dir = REPO_ROOT / "skills" / "vendor" / "jakubkrehel-skills"
+        doc = tomllib.loads((jakub_dir / "rule-map.toml").read_text(encoding="utf-8"))
+        return {r["id"]: r for r in doc["rule"]}
+
+    def test_rows_that_carried_unrelated_guidance_now_restate_their_rule(self) -> None:
+        """Review finding: `canvas_text` must restate the locked bullet of its own row."""
+        rules = self._rule_entries()
+        forms6 = rules["better-accessibility/forms#6"]
+        self.assertNotEqual(forms6["map"], "lint:placeholder-text", "forms#6 is about a busy submit button, not placeholders")
+        self.assertIn("spinner", forms6["canvas_text"].lower())
+        hit1 = rules["better-accessibility/hit-areas#1"]
+        self.assertNotEqual(hit1["map"], "lint:tap-target-size", "hit-areas#1 is about single-pointer drag alternatives")
+        self.assertIn("single-pointer", hit1["canvas_text"])
+        color_mix = rules["better-colors/color-formats#5"]["canvas_text"]
+        self.assertNotIn("Variable Collections", color_mix, "color-formats#5 says keep derived colours OUT of the token layer")
+        self.assertIn("color-mix", color_mix)
+        contrast2 = rules["better-colors/contrast#2"]["canvas_text"]
+        self.assertNotIn("4.5:1", contrast2, "contrast#2 is about gamut after a lightness push")
+        self.assertIn("gamut", contrast2)
+        self.assertEqual(rules["explain-interface/from-an-image#14"]["map"], "web-only", "keyboard reachability and focus are web-only")
+        self.assertIn("vividness", rules["better-colors/palette-generation#3"]["canvas_text"].lower())
+        writing1 = rules["better-writing/SKILL#1"]
+        self.assertIn("translation", writing1.get("reason", "") + writing1.get("canvas_text", ""))
+
+    def test_every_canvas_text_is_its_own(self) -> None:
+        """No sentence is shared by two rules and none is a group summary tagged with the rule id."""
+        rules = [r for r in self._rule_entries().values() if r["map"] != "web-only"]
+        texts = [r["canvas_text"] for r in rules]
+        self.assertEqual(len(texts), len(set(texts)))
+        self.assertEqual([r["id"] for r in rules if r["canvas_text"].endswith(f"({r['id']})")], [])
+
+    def test_repeated_canvas_text_fails_map_coverage(self) -> None:
+        tmp = self._copy_vendor_fixture()
+        map_path = tmp / "skills" / "vendor" / "jakubkrehel-skills" / "rule-map.toml"
+        doc = tomllib.loads(map_path.read_text(encoding="utf-8"))
+        first, second = [r for r in doc["rule"] if r["map"] != "web-only"][:2]
+        self._edit(
+            map_path,
+            f"canvas_text = {json.dumps(second['canvas_text'], ensure_ascii=False)}",
+            f"canvas_text = {json.dumps(first['canvas_text'], ensure_ascii=False)}",
+        )
+        code, errors = cvs.cmd_map_coverage(tmp)
+        self.assertEqual(code, 1)
+        self.assertTrue(any(e.startswith("duplicate-canvas-text:") for e in errors), errors)
+
+    def test_check_mapping_is_unknown_without_the_surface_data(self) -> None:
+        tmp = self._copy_vendor_fixture()
+        map_path = tmp / "skills" / "vendor" / "jakubkrehel-skills" / "rule-map.toml"
+        self._edit(map_path, 'map = "rubric:color"', 'map = "check:surface.web-app.required-states"')
+        code, errors = cvs.cmd_map_coverage(tmp)
+        self.assertEqual(code, 1)
+        self.assertTrue(any(e.startswith("unknown-check-id:") for e in errors), errors)
 
     def test_fail_before_when_vendor_folder_missing(self) -> None:
         """When `skills/vendor` does not exist, `verify` exits 2."""
