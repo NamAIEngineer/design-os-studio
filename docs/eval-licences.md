@@ -23,7 +23,7 @@ Pins were taken from the GitHub and Hugging Face APIs on 2026-10-19 (the upstrea
 | `uicrit` | `CC-BY-4.0` | `eval-only-cache` | Google Research UICrit critiques and ratings | `dataset` | `approved` | `E15-32` |
 | `rico-screenshots` | `LicenseRef-RICO-Terms` | `eval-only-cache` | RICO mobile UI screenshot corpus | `dataset` | `approved` | `E15-32` |
 | `uiclip` | `MIT` | `eval-only-cache` | UIClip model weights (`biglab/uiclip_jitteredwebsites-2-224-paraphrased`) | `weights` | `approved` | `E15-31`, `E15-37` |
-| `openai-clip` | `MIT` | `eval-only-cache` | OpenAI CLIP ViT-B/32 code and weights | `weights` | `pending` | `E15-31`, `E15-37` |
+| `clip-vit-b32` | `MIT` | `eval-only-cache` | OpenAI CLIP ViT-B/32 weights (`openai/clip-vit-base-patch32`) | `weights` | `approved` | `E15-31`, `E15-37` |
 | `shadcn-ui` | `MIT` | `eval-redistribute` | shadcn/ui open component and token templates | `kit` | `approved` | `E15-24`, `E15-28`, `E15-29`, `E15-30` |
 | `ibm-carbon` | `Apache-2.0` | `eval-redistribute` | IBM Carbon Design System tokens and components | `kit` | `approved` | `E15-24`, `E15-28`, `E15-29`, `E15-30` |
 | `jakubkrehel-skills` | `MIT` | `ship-in-skills` | jakubkrehel/skills UI craft rules | `skills` | `approved` | `E15-46`, `E15-47` |
@@ -132,19 +132,19 @@ notes = "Owner ruling 2026-10-19: approved as eval-only-cache only; weights are 
 consumers = ["E15-31", "E15-37"]
 
 [[source]]
-id = "openai-clip"
-name = "OpenAI CLIP ViT-B/32 code and weights"
+id = "clip-vit-b32"
+name = "OpenAI CLIP ViT-B/32 weights (openai/clip-vit-base-patch32)"
 kind = "weights"
-url = "https://github.com/openai/CLIP"
-pinned = "dcba3cb2e2827b402d2701e7e1c7d9fed8a20ef1"
-pin_source = "https://api.github.com/repos/openai/CLIP/commits/dcba3cb2e2827b402d2701e7e1c7d9fed8a20ef1"
+url = "https://huggingface.co/openai/clip-vit-base-patch32"
+pinned = "3d74acf9a28c67741b2f4f2ea7635f0aaf6f0268"
+pin_source = "https://huggingface.co/api/models/openai/clip-vit-base-patch32/revision/3d74acf9a28c67741b2f4f2ea7635f0aaf6f0268"
 licence = "MIT"
 use = "eval-only-cache"
 attribution = "Copyright (c) 2021 OpenAI (MIT License)."
-review = "pending"
-reviewer = ""
-reviewed_on = ""
-notes = "No owner ruling yet. Intended class eval-only-cache: ViT-B/32 weights cached in the user cache for the optional aesthetic score, never bundled in Studio (R4.13)."
+review = "approved"
+reviewer = "owner"
+reviewed_on = "2026-10-19"
+notes = "Owner ruling 2026-10-19: approved as eval-only-cache only; ViT-B/32 weights are cached in the user cache for the optional aesthetic score and never bundled in the Studio binary (R4.13)."
 consumers = ["E15-31", "E15-37"]
 
 [[source]]

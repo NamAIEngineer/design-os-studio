@@ -211,7 +211,8 @@ class TestCheckEvalLicences(unittest.TestCase):
     def test_unreviewed_sources_stay_pending(self) -> None:
         parsed, _ = cel.extract_register((REPO_ROOT / "docs" / "eval-licences.md").read_text(encoding="utf-8"))
         review = {s["id"]: s["review"] for s in parsed["source"]}
-        for sid in ("openai-clip", "websight", "design2code-code", "font-inter"):
+        self.assertEqual(review["clip-vit-b32"], "approved")
+        for sid in ("websight", "design2code-code", "font-inter"):
             self.assertEqual(review[sid], "pending", sid)
         for s in parsed["source"]:
             if s["review"] == "pending":
