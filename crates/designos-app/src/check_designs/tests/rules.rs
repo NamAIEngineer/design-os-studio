@@ -371,3 +371,35 @@ fn a_figma_source_library_key_on_a_collection_is_not_a_disabled_studio_library()
     let report = f.report();
     assert_eq!(report.of(Rule::LibraryAssets).count(), 0, "{:#?}", report.findings);
 }
+
+#[test]
+fn two_text_styles_that_equal_the_text_offer_no_fix() {
+    let mut f = fx();
+    f.doc.check_designs.disabled_rules.remove(Rule::TextStyles.figma_id());
+    let card = f.frame(f.page, "Card", Some(Color::WHITE));
+    let t = f.text(card, "Heading", 32.0, 700, gray(0x11));
+    let ts = TextStyle { font_size: 32.0, font_weight: 700, ..TextStyle::default() };
+    f.style("H1", "Heading/H1", Style::Text(ts.clone()), StyleProperty::Text);
+    f.style("H1b", "Heading/H1 copy", Style::Text(ts), StyleProperty::Text);
+    let report = f.report();
+    let found = only(&report, Rule::TextStyles);
+    assert_eq!(found.node, t);
+    assert_eq!(found.message, "No text style", "the user picks between two equal styles");
+    assert_eq!(found.fix, None);
+}
+
+#[test]
+fn a_typography_number_match_does_not_hide_the_text_style_when_that_rule_is_off() {
+    let mut f = fx();
+    f.doc.check_designs.disabled_rules.remove(Rule::TextStyles.figma_id());
+    f.doc.check_designs.disabled_rules.insert(Rule::TypographyAndStroke.figma_id().into());
+    f.number_var("Size/Title", 32.0, 32.0);
+    let card = f.frame(f.page, "Card", Some(Color::WHITE));
+    let t = f.text(card, "Heading", 32.0, 700, gray(0x11));
+    f.style("H1", "Heading/H1", Style::Text(TextStyle { font_size: 32.0, font_weight: 700, ..TextStyle::default() }), StyleProperty::Text);
+    let report = f.report();
+    assert_eq!(report.of(Rule::TypographyAndStroke).count(), 0);
+    let found = only(&report, Rule::TextStyles);
+    assert_eq!(found.node, t);
+    assert_eq!(found.fix, Some(Fix::ApplyStyle { style: "H1".into() }));
+}

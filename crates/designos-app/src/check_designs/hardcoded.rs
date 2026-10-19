@@ -794,7 +794,8 @@ pub(super) fn text_style_inherited(n: &Node, src: Option<&Node>) -> bool {
 
 fn check_typography_numbers(doc: &Document, index: &Index, n: &Node, src: Option<&Node>, emit: bool, out: &mut Vec<Finding>) -> bool {
     let NodeKind::Text(_) = &n.kind else { return false };
-    if n.style_refs.contains_key("text") || index.by_num.is_empty() || text_style_inherited(n, src) {
+    // A match of a disabled rule is not a finding, so it must not hide the text style either.
+    if !emit || n.style_refs.contains_key("text") || index.by_num.is_empty() || text_style_inherited(n, src) {
         return false;
     }
     let mut matched = false;
@@ -805,10 +806,12 @@ fn check_typography_numbers(doc: &Document, index: &Index, n: &Node, src: Option
 
 impl<'a> Index<'a> {
     pub(super) fn find_matching_text_style(&self, t: &designos_doc::TextProps) -> Option<(String, String, String)> {
-        let s = self
+        let mut matches = self
             .styles
             .iter()
-            .find(|s| matches!(s.style, Style::Text(ts) if same_text_style(&t.style, ts) && t.runs.iter().all(|r| same_text_style(&r.style, ts))))?;
+            .filter(|s| matches!(s.style, Style::Text(ts) if same_text_style(&t.style, ts) && t.runs.iter().all(|r| same_text_style(&r.style, ts))));
+        // Two equal styles leave the choice to the user, so none is offered.
+        let s = matches.next().filter(|_| matches.next().is_none())?;
         Some((s.fix_key.clone(), fmt_style_quoted(s), fmt_style_apply_label(s)))
     }
 }
