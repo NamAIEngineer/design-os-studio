@@ -89,36 +89,78 @@ fn no_layer_cut_off_on_large_page() {
     assert!(!report.findings.is_empty());
 }
 
-#[test]
-#[cfg_attr(debug_assertions, ignore = "release perf")]
-fn each_slice_respects_budget_on_112k_page() {
-    let (doc, page) = build_synthetic_page(112_474);
-    let scope = Scope::Page(page);
-    // A lone slice on a shared runner includes scheduler stalls that are not the scan's cost. Noise
-    // only adds time, so the run with the smallest worst slice bounds the real cost; a scan that
-    // cannot yield in time stays over the budget on every run.
+/// The smallest worst slice over repeated scans of `scope` with a 2 ms budget, and how many layers
+/// the last scan visited. A lone slice on a shared runner includes scheduler stalls that are not the
+/// scan's cost. Noise only adds time, so the run with the smallest worst slice bounds the real
+/// cost; a scan that cannot yield in time stays over the budget on every run.
+fn worst_slice(doc: &Document, scope: &Scope) -> (Duration, usize) {
     let deadline = Instant::now() + Duration::from_secs(10);
-    let mut worst_slice = Duration::MAX;
-    let mut scanned;
+    let mut worst = Duration::MAX;
     loop {
-        let mut cur = ScanCursor::new(&doc, scope.clone());
+        let mut cur = ScanCursor::new(doc, scope.clone());
         let mut max_slice = Duration::ZERO;
         loop {
             let t0 = Instant::now();
-            let done = audit_step(&doc, &mut cur, Duration::from_millis(2));
+            let done = audit_step(doc, &mut cur, Duration::from_millis(2));
             max_slice = max_slice.max(t0.elapsed());
             if done {
                 break;
             }
         }
-        scanned = cur.scanned;
-        worst_slice = worst_slice.min(max_slice);
-        if worst_slice <= Duration::from_millis(4) || Instant::now() >= deadline {
-            break;
+        worst = worst.min(max_slice);
+        if worst <= Duration::from_millis(4) || Instant::now() >= deadline {
+            return (worst, cur.scanned);
         }
     }
+}
+
+#[test]
+#[cfg_attr(debug_assertions, ignore = "release perf")]
+fn each_slice_respects_budget_on_112k_page() {
+    let (doc, page) = build_synthetic_page(112_474);
+    let (worst, scanned) = worst_slice(&doc, &Scope::Page(page));
     assert_eq!(scanned, 112_474);
-    assert!(worst_slice <= Duration::from_millis(4), "worst slice {worst_slice:?} exceeded 4ms budget");
+    assert!(worst <= Duration::from_millis(4), "worst slice {worst:?} exceeded 4ms budget");
+}
+
+#[test]
+#[cfg_attr(debug_assertions, ignore = "release perf")]
+fn a_large_detached_frame_does_not_stall_one_slice() {
+    let mut f = fx();
+    let comp = {
+        let id = f.doc.alloc_id();
+        let mut n = Node::frame(id, Rect::new(300.0, 0.0, 80.0, 40.0));
+        n.name = "Big".into();
+        n.kind = NodeKind::Component(FrameProps::default());
+        n.source_id = Some("1:1".into());
+        f.doc.insert(f.page, n).unwrap()
+    };
+    for i in 0..20_000 {
+        f.rect(comp, &format!("Dot {i}"), gray(0xEE));
+    }
+    let frame = detached_copy(&mut f, comp, "Copy", "guid:1:1");
+    let (doc, page) = (f.doc, f.page);
+    let (worst, _) = worst_slice(&doc, &Scope::Page(page));
+    assert!(worst <= Duration::from_millis(4), "worst slice {worst:?} exceeded 4ms budget");
+    let report = audit(&doc, &Scope::Page(page));
+    let found = report.of(Rule::DetachedInstance).find(|x| x.node == frame).expect("the copy is reported");
+    assert!(matches!(found.fix, Some(Fix::Reconnect { component }) if component == comp), "an unedited copy still gets its reconnect");
+}
+
+#[test]
+#[cfg_attr(debug_assertions, ignore = "release perf")]
+fn a_text_after_a_large_group_does_not_stall_one_slice() {
+    let mut f = fx();
+    let card = f.frame(f.page, "Card", Some(Color::WHITE));
+    let group = f.frame(card, "Group", None);
+    for i in 0..20_000 {
+        let r = f.rect(group, &format!("Dot {i}"), gray(0xEE));
+        place(&mut f, r, (i % 200) as f32 * 4.0, (i / 200) as f32 * 4.0);
+    }
+    f.text(card, "Caption", 14.0, 400, gray(0x11));
+    let (doc, page) = (f.doc, f.page);
+    let (worst, _) = worst_slice(&doc, &Scope::Page(page));
+    assert!(worst <= Duration::from_millis(4), "worst slice {worst:?} exceeded 4ms budget");
 }
 
 #[test]
@@ -162,4 +204,52 @@ fn mid_scan_edit_restarts_and_keeps_previous_complete_report_until_done() {
     }
     assert_eq!(app.check_designs.report.scanned, 2_001);
     assert_eq!(app.check_designs.report.findings.len(), initial_findings_len + 1);
+}
+
+#[test]
+fn a_detached_comparison_paused_between_slices_gives_the_same_report() {
+    let mut f = fx();
+    let comp = component(&mut f, "1:1");
+    for i in 0..300 {
+        f.rect(comp, &format!("Dot {i}"), gray(0xEE));
+    }
+    let frame = detached_copy(&mut f, comp, "Copy", "guid:1:1");
+    let (doc, scope) = (f.doc, Scope::Page(f.page));
+    let sync = audit(&doc, &scope);
+
+    let mut cur = ScanCursor::new(&doc, scope);
+    let mut slices = 0usize;
+    while !audit_step(&doc, &mut cur, Duration::from_micros(1)) {
+        slices += 1;
+    }
+    assert!(slices > 50, "a 300-layer comparison spans many 1 us slices, got {slices}");
+    let sliced = cur.into_report(&doc);
+    assert_eq!(sliced, sync);
+    let found = sliced.of(Rule::DetachedInstance).find(|x| x.node == frame).expect("the copy is reported");
+    assert!(matches!(found.fix, Some(Fix::Reconnect { component }) if component == comp));
+}
+
+#[test]
+fn a_bounds_walk_paused_between_slices_gives_the_same_report() {
+    let mut f = fx();
+    let card = f.frame(f.page, "Card", Some(Color::WHITE));
+    let group = f.frame(card, "Group", None);
+    place(&mut f, group, 300.0, 0.0);
+    for i in 0..300 {
+        let r = f.rect(group, &format!("Dot {i}"), gray(0xEE));
+        place(&mut f, r, (i % 20) as f32 * 4.0, (i / 20) as f32 * 4.0);
+    }
+    let caption = f.text(card, "Caption", 14.0, 400, gray(0xCC));
+    let (doc, scope) = (f.doc, Scope::Layers(vec![caption]));
+    let sync = audit(&doc, &scope);
+
+    let mut cur = ScanCursor::new(&doc, scope);
+    let mut slices = 0usize;
+    while !audit_step(&doc, &mut cur, Duration::from_micros(1)) {
+        slices += 1;
+    }
+    assert!(slices >= 4, "a 300-layer sibling bounds walk spans multiple 1 us slices, got {slices}");
+    let sliced = cur.into_report(&doc);
+    assert_eq!(sliced, sync);
+    assert!(sliced.of(Rule::Contrast).any(|x| x.node == caption));
 }

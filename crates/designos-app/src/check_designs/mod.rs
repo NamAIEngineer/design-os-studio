@@ -25,7 +25,7 @@ mod text_styles;
 pub use fixture::FIXTURE;
 pub use state::CheckDesignsState;
 
-use designos_doc::{CheckDesignsSettings, Color, Document, IgnoreKey, LibraryRef, LibrarySnapshot, NodeId, NodeKind};
+use designos_doc::{CheckDesignsSettings, Color, Document, IgnoreKey, LibraryRef, LibrarySnapshot, Node, NodeId, NodeKind};
 use std::collections::HashMap;
 use std::ops::Bound;
 use std::sync::Arc;
@@ -189,6 +189,16 @@ pub enum Phase {
     Done,
 }
 
+/// The comparison of one detached frame with its main component, paused between slices. The rest
+/// of the frame's own checks wait for it, so the findings come out in the order a one-shot audit
+/// gives.
+struct DetachJob {
+    node: NodeId,
+    component: NodeId,
+    findings_before: usize,
+    comparison: detached::Comparison,
+}
+
 /// Incremental, time-sliced audit cursor.
 pub struct ScanCursor {
     pub phase: Phase,
@@ -206,6 +216,8 @@ pub struct ScanCursor {
     index: Option<hardcoded::Index>,
     bounds: contrast::SubtreeBounds,
     libs: LibrarySources,
+    /// A detached frame whose comparison with its main component is still running.
+    detach: Option<DetachJob>,
     pub(super) unreadable_libraries: Vec<String>,
     pub(super) full_key: Option<(u64, Scope, Vec<LibraryRef>, CheckDesignsSettings)>,
     pub(super) updating: bool,
@@ -237,6 +249,7 @@ impl ScanCursor {
             index: None,
             bounds: contrast::SubtreeBounds::default(),
             libs,
+            detach: None,
             unreadable_libraries: Vec::new(),
             full_key: None,
             updating: false,
@@ -263,6 +276,22 @@ impl ScanCursor {
     }
 }
 
+/// What a layer still gets once the checks that can pause are done: the library-asset check, the
+/// count of layers examined, and its children queued.
+fn finish_layer(doc: &Document, cur: &mut ScanCursor, n: &Node, findings_before: usize) {
+    if !doc.check_designs.disabled_rules.contains(Rule::LibraryAssets.figma_id()) {
+        library_assets::check(doc, &cur.libs, n, n.component.source.and_then(|s| doc.get(s)), &mut cur.partial);
+    }
+    if n.component.source.is_none() || !n.component.overrides.is_empty() || cur.partial.len() > findings_before {
+        cur.examined += 1;
+    }
+    cur.stack.extend(n.children.iter().rev().copied());
+}
+
+/// A document with at most this many layers always gets a few dozen layers per slice, so a
+/// scheduler stall on a small file cannot split its scan; a larger one yields as soon as the budget is spent.
+const SMALL_DOCUMENT_NODES: usize = 512;
+
 /// Advances `cur` for up to `budget` and returns `true` when the scan reaches [`Phase::Done`].
 pub fn audit_step(doc: &Document, cur: &mut ScanCursor, budget: Duration) -> bool {
     if cur.phase == Phase::Done {
@@ -271,7 +300,7 @@ pub fn audit_step(doc: &Document, cur: &mut ScanCursor, budget: Duration) -> boo
     let start = Instant::now();
     // Small fixtures (<= 32 nodes) under the normal >=1ms frame budget always finish in one slice
     // even if the OS scheduler preempts the test thread; sub-millisecond budgets yield immediately.
-    let min_steps = if budget >= Duration::from_millis(1) { 32 } else { 1 };
+    let min_steps = if budget >= Duration::from_millis(1) && doc.nodes.len() <= SMALL_DOCUMENT_NODES { 32 } else { 1 };
     let prep_mask = if budget >= Duration::from_millis(1) { 31 } else { 0 };
     let mut steps = 0usize;
 
@@ -325,11 +354,28 @@ pub fn audit_step(doc: &Document, cur: &mut ScanCursor, budget: Duration) -> boo
     if cur.phase == Phase::Walk {
         let contrast_on = !doc.check_designs.disabled_rules.contains(Rule::Contrast.figma_id());
         let detached_on = !doc.check_designs.disabled_rules.contains(Rule::DetachedInstance.figma_id());
-        let lib_assets_on = !doc.check_designs.disabled_rules.contains(Rule::LibraryAssets.figma_id());
-        while let Some(id) = cur.stack.pop() {
+        loop {
+            if let Some(mut job) = cur.detach.take() {
+                let Some(equal) = job.comparison.run(doc, start + budget) else {
+                    cur.detach = Some(job);
+                    return false;
+                };
+                if let Some(n) = doc.get(job.node) {
+                    cur.partial.push(detached::compared(doc, n, job.component, equal));
+                    finish_layer(doc, cur, n, job.findings_before);
+                }
+                if !cur.stack.is_empty() && start.elapsed() >= budget {
+                    return false;
+                }
+            }
+            let Some(id) = cur.stack.pop() else { break };
             let Some(n) = doc.get(id) else { continue };
             if !n.visible || matches!(n.kind, NodeKind::Page { .. }) {
                 continue;
+            }
+            if contrast_on && matches!(n.kind, NodeKind::Text(_)) && !cur.bounds.warm_for_text(doc, id, start + budget) {
+                cur.stack.push(id);
+                return false;
             }
             cur.scanned += 1;
             steps += 1;
@@ -341,15 +387,16 @@ pub fn audit_step(doc: &Document, cur: &mut ScanCursor, budget: Duration) -> boo
                 contrast::check(doc, &cur.bounds, n, &mut cur.partial);
             }
             if detached_on {
-                detached::check(doc, &cur.components, n, &mut cur.partial);
+                match detached::plan(doc, &cur.components, n) {
+                    detached::Detached::Nothing => {}
+                    detached::Detached::Found(f) => cur.partial.push(f),
+                    detached::Detached::Compare { component } => {
+                        cur.detach = Some(DetachJob { node: id, component, findings_before: before, comparison: detached::Comparison::new(id, component) });
+                        continue;
+                    }
+                }
             }
-            if lib_assets_on {
-                library_assets::check(doc, &cur.libs, n, n.component.source.and_then(|s| doc.get(s)), &mut cur.partial);
-            }
-            if n.component.source.is_none() || !n.component.overrides.is_empty() || cur.partial.len() > before {
-                cur.examined += 1;
-            }
-            cur.stack.extend(n.children.iter().rev().copied());
+            finish_layer(doc, cur, n, before);
             if !cur.stack.is_empty() && steps >= min_steps && start.elapsed() >= budget {
                 return false;
             }
