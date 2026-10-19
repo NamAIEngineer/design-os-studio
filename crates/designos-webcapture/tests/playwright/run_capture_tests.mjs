@@ -10,7 +10,13 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import assert from "node:assert/strict";
-import { chromium } from "playwright";
+import { createRequire } from "node:module";
+
+// `require` honours NODE_PATH (the Rust tests and CI point it at the Playwright install); an ES
+// `import` of a bare specifier does not.
+const require = createRequire(import.meta.url);
+const { chromium } = require("playwright");
+const playwrightVersion = require("playwright/package.json").version;
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -30,9 +36,14 @@ if (outDir) fs.mkdirSync(outDir, { recursive: true });
 
 async function launchBrowser() {
   try {
-    return await chromium.launch({ headless: true });
-  } catch (_err) {
-    return await chromium.launch({ channel: "chrome", headless: true });
+    const browser = await chromium.launch({ headless: true });
+    console.log(`browser: playwright ${playwrightVersion}, bundled chromium ${browser.version()}`);
+    return browser;
+  } catch (err) {
+    console.log(`bundled chromium unavailable (${String(err.message).split("\n")[0]}); using channel chrome`);
+    const browser = await chromium.launch({ channel: "chrome", headless: true });
+    console.log(`browser: playwright ${playwrightVersion}, chrome ${browser.version()}`);
+    return browser;
   }
 }
 
