@@ -230,8 +230,8 @@ fn paint_index_beyond_i32_parses() {
     // `z-index: 2147483647` must still load rather than fail the whole capture.
     let json = r#"{"schema":"designos-webcapture","version":1,"root":{"tag":"html","z":2147483647006,"children":[{"tag":"div","z":-7}]}}"#;
     let capture = Capture::from_json(json).expect("a z beyond i32 must parse");
-    assert_eq!(i64::from(capture.root.z), 2_147_483_647_006);
-    assert_eq!(i64::from(capture.root.children[0].z), -7);
+    assert_eq!(capture.root.z, 2_147_483_647_006);
+    assert_eq!(capture.root.children[0].z, -7);
 }
 
 #[test]
