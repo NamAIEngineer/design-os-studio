@@ -241,3 +241,22 @@ fn a_reconnect_aimed_at_a_mirror_inside_an_instance_is_refused() {
     assert!(app.doc.get(mirror).is_some());
     assert!(!app.hist.can_undo());
 }
+
+#[test]
+fn an_instance_mirroring_an_unstyled_main_text_reports_no_text_style_once_on_the_main_component() {
+    let mut f = fx();
+    f.doc.check_designs.disabled_rules.remove(Rule::TextStyles.figma_id());
+    white_page(&mut f);
+    let comp = component(&mut f, "10:3");
+    f.doc.get_mut(comp).unwrap().size = Vec2::new(200.0, 100.0);
+    f.doc.get_mut(comp).unwrap().fills = vec![Paint::solid(Color::WHITE)];
+    let comp_label = f.text(comp, "Caption", 14.0, 400, gray(0x11));
+    place(&mut f, comp_label, 60.0, 12.0);
+
+    let _inst_a = spawn_instance(&mut f, comp, 260.0, 0.0);
+    let _inst_b = spawn_instance(&mut f, comp, 520.0, 0.0);
+
+    let report = f.report();
+    let nodes: Vec<NodeId> = report.of(Rule::TextStyles).map(|x| x.node).collect();
+    assert_eq!(nodes, vec![comp_label], "the text of an instance that mirrors its main is not listed again: {:#?}", report.findings);
+}
