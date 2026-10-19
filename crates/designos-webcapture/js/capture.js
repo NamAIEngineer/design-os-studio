@@ -15,6 +15,7 @@
   const nativeSlice = Array.prototype.slice;
   const nativeFrom = Array.from;
   const nativeKeys = Object.keys;
+  const nativeToString = Object.prototype.toString;
   const nativeNow =
     typeof performance !== "undefined" && typeof performance.now === "function"
       ? () => performance.now()
@@ -117,43 +118,52 @@
     "white-space",
   ];
 
-  // CSS shorthand expansion map so declarations like `background: var(--brand)`
-  // populate `css_var_refs["background-color"]` (T8.25 §3.7, §10).
+  // CSS shorthand -> longhand map. A shorthand declaration (with or without `var()`) resets every
+  // longhand it covers, so it takes part in the cascade for each of them (T8.25 §3.7).
+  const SIDES = ["top", "right", "bottom", "left"];
+  const CORNERS = ["top-left", "top-right", "bottom-right", "bottom-left"];
+  const BORDER_PARTS = ["width", "style", "color"];
   const SHORTHAND_EXPANSIONS = {
-    background: ["background-color", "background-image"],
-    "border-radius": [
-      "border-top-left-radius",
-      "border-top-right-radius",
-      "border-bottom-right-radius",
-      "border-bottom-left-radius",
+    background: [
+      "background-color",
+      "background-image",
+      "background-size",
+      "background-position",
+      "background-repeat",
     ],
-    padding: ["padding-top", "padding-right", "padding-bottom", "padding-left"],
-    margin: ["margin-top", "margin-right", "margin-bottom", "margin-left"],
-    "border-color": [
-      "border-top-color",
-      "border-right-color",
-      "border-bottom-color",
-      "border-left-color",
-    ],
-    "border-width": [
-      "border-top-width",
-      "border-right-width",
-      "border-bottom-width",
-      "border-left-width",
-    ],
-    border: [
-      "border-top-width",
-      "border-right-width",
-      "border-bottom-width",
-      "border-left-width",
-      "border-top-color",
-      "border-right-color",
-      "border-bottom-color",
-      "border-left-color",
-    ],
+    "border-radius": CORNERS.map((c) => `border-${c}-radius`),
+    padding: SIDES.map((s) => `padding-${s}`),
+    margin: SIDES.map((s) => `margin-${s}`),
+    inset: SIDES.slice(),
+    "border-color": SIDES.map((s) => `border-${s}-color`),
+    "border-width": SIDES.map((s) => `border-${s}-width`),
+    "border-style": SIDES.map((s) => `border-${s}-style`),
+    border: SIDES.flatMap((s) => BORDER_PARTS.map((p) => `border-${s}-${p}`)),
     gap: ["gap", "row-gap", "column-gap"],
     overflow: ["overflow-x", "overflow-y"],
+    font: ["font-family", "font-size", "font-weight", "font-style", "line-height"],
+    flex: ["flex-grow", "flex-shrink", "flex-basis"],
+    "flex-flow": ["flex-direction", "flex-wrap"],
+    "text-decoration": ["text-decoration-line"],
   };
+  for (const side of SIDES) {
+    SHORTHAND_EXPANSIONS[`border-${side}`] = BORDER_PARTS.map((p) => `border-${side}-${p}`);
+  }
+  const CAPTURED_SET = new Set(CAPTURED_STYLE_PROPS);
+  const COLOR_PROPS = new Set([
+    "color",
+    "background-color",
+    "border-top-color",
+    "border-right-color",
+    "border-bottom-color",
+    "border-left-color",
+  ]);
+
+  /** Captured longhands a declaration of `name` sets (`all` resets every captured property). */
+  function expandProp(name) {
+    if (name === "all") return CAPTURED_STYLE_PROPS;
+    return (SHORTHAND_EXPANSIONS[name] || [name]).filter((p) => CAPTURED_SET.has(p));
+  }
 
   function parsePx(val) {
     if (!val) return 0;
@@ -165,27 +175,223 @@
     return Math.round(n * 100) / 100;
   }
 
-  /**
-   * Computes a simple CSS selector specificity tuple `[idCount, classAttrPseudoCount, tagCount]`
-   * encoded as a single integer for deterministic rule ordering (T8.25 §3.7).
-   */
+  /** Splits `text` at top-level `separator`, ignoring quotes and (), [], {} nesting. */
+  function splitTopLevel(text, separator) {
+    const parts = [];
+    let depth = 0;
+    let quote = "";
+    let start = 0;
+    for (let i = 0; i < text.length; i++) {
+      const ch = text[i];
+      if (quote) {
+        if (ch === "\\") i++;
+        else if (ch === quote) quote = "";
+        continue;
+      }
+      if (ch === "\\") i++;
+      else if (ch === '"' || ch === "'") quote = ch;
+      else if (ch === "(" || ch === "[" || ch === "{") depth++;
+      else if (ch === ")" || ch === "]" || ch === "}") depth = Math.max(0, depth - 1);
+      else if (ch === separator && depth === 0) {
+        parts.push(text.slice(start, i));
+        start = i + 1;
+      }
+    }
+    parts.push(text.slice(start));
+    return parts;
+  }
+
+  /** Index of the `)` matching the `(` at `open`, or -1. */
+  function matchParen(text, open) {
+    let depth = 0;
+    let quote = "";
+    for (let i = open; i < text.length; i++) {
+      const ch = text[i];
+      if (quote) {
+        if (ch === "\\") i++;
+        else if (ch === quote) quote = "";
+      } else if (ch === "\\") i++;
+      else if (ch === '"' || ch === "'") quote = ch;
+      else if (ch === "(") depth++;
+      else if (ch === ")" && --depth === 0) return i;
+    }
+    return -1;
+  }
+
+  /** Parses a declaration block (`a: b; c: d !important`) keeping `var()` shorthands intact. */
+  function parseDeclarations(cssText) {
+    const out = [];
+    for (const part of splitTopLevel(String(cssText || ""), ";")) {
+      const colon = part.indexOf(":");
+      if (colon <= 0) continue;
+      let name = part.slice(0, colon).trim();
+      let value = part.slice(colon + 1).trim();
+      const important = /!\s*important\s*$/i.test(value);
+      if (important) value = value.replace(/!\s*important\s*$/i, "").trim();
+      if (!name.startsWith("--")) name = name.toLowerCase();
+      if (name) out.push({ name, value, important });
+    }
+    return out;
+  }
+
+  function skipIdent(sel, i) {
+    while (i < sel.length && /[\w-]|[^\x00-\x7f]/.test(sel[i])) i++;
+    return i;
+  }
+
+  /** `[ids, classes/attributes/pseudo-classes, types/pseudo-elements]` of one complex selector. */
+  function specificityTriple(sel) {
+    let a = 0;
+    let b = 0;
+    let c = 0;
+    let i = 0;
+    const addMax = (list) => {
+      let best = [0, 0, 0];
+      for (const item of list) {
+        const t = specificityTriple(item.trim());
+        if (t[0] > best[0] || (t[0] === best[0] && (t[1] > best[1] || (t[1] === best[1] && t[2] > best[2])))) {
+          best = t;
+        }
+      }
+      a += best[0];
+      b += best[1];
+      c += best[2];
+    };
+    while (i < sel.length) {
+      const ch = sel[i];
+      if (ch === "\\") {
+        i += 2;
+      } else if (ch === "#") {
+        a++;
+        i = skipIdent(sel, i + 1);
+      } else if (ch === ".") {
+        b++;
+        i = skipIdent(sel, i + 1);
+      } else if (ch === "[") {
+        b++;
+        const end = sel.indexOf("]", i);
+        i = end < 0 ? sel.length : end + 1;
+      } else if (ch === ":") {
+        const double = sel[i + 1] === ":";
+        i += double ? 2 : 1;
+        const start = i;
+        i = skipIdent(sel, i);
+        const name = sel.slice(start, i).toLowerCase();
+        let arg = null;
+        if (sel[i] === "(") {
+          const end = matchParen(sel, i);
+          arg = sel.slice(i + 1, end < 0 ? sel.length : end);
+          i = end < 0 ? sel.length : end + 1;
+        }
+        if (double || name === "before" || name === "after" || name === "first-line" || name === "first-letter") {
+          c++;
+        } else if (name === "where") {
+          // zero specificity
+        } else if (["is", "matches", "not", "has", "-webkit-any", "-moz-any"].includes(name)) {
+          addMax(splitTopLevel(arg || "", ","));
+        } else if ((name === "nth-child" || name === "nth-last-child") && arg && / of /i.test(arg)) {
+          b++;
+          addMax(splitTopLevel(arg.split(/ of /i).slice(1).join(" of "), ","));
+        } else {
+          b++;
+        }
+      } else if (ch === "*") {
+        i++;
+      } else if (/[a-zA-Z_]|[^\x00-\x7f]/.test(ch)) {
+        c++;
+        i = skipIdent(sel, i);
+      } else {
+        i++;
+      }
+    }
+    return [a, b, c];
+  }
+
   function selectorSpecificity(selector) {
-    const cleaned = String(selector || "")
-      .replace(/:not\(([^)]*)\)/g, " $1 ")
-      .replace(/::[a-zA-Z-]+/g, " ");
-    const ids = (cleaned.match(/#[a-zA-Z0-9_-]+/g) || []).length;
-    const classesAttrs = (
-      cleaned.match(/(\.[a-zA-Z0-9_-]+|\[[^\]]+\]|:[a-zA-Z-]+(\([^)]*\))?)/g) || []
-    ).length;
-    const tags = (
-      cleaned
-        .replace(/#[a-zA-Z0-9_-]+/g, " ")
-        .replace(/\.[a-zA-Z0-9_-]+/g, " ")
-        .replace(/\[[^\]]+\]/g, " ")
-        .replace(/:[a-zA-Z-]+(\([^)]*\))?/g, " ")
-        .match(/\b[a-zA-Z][a-zA-Z0-9-]*/g) || []
-    ).length;
-    return ids * 1000000 + classesAttrs * 1000 + tags;
+    const [a, b, c] = specificityTriple(String(selector || ""));
+    return Math.min(a, 999) * 1e6 + Math.min(b, 999) * 1e3 + Math.min(c, 999);
+  }
+
+  /** Higher result = the `x` layer path wins a normal declaration; `[]` is the unlayered top. */
+  function compareLayers(x, y) {
+    for (let i = 0; ; i++) {
+      if (i >= x.length && i >= y.length) return 0;
+      if (i >= x.length) return 1;
+      if (i >= y.length) return -1;
+      if (x[i] !== y[i]) return x[i] > y[i] ? 1 : -1;
+    }
+  }
+
+  /**
+   * CSS cascade order of two author declarations: importance, element-attached (`style=""`),
+   * layer (reversed for `!important`), specificity, then source order (css-cascade-5 §6.1).
+   */
+  function compareRank(a, b) {
+    if (a.important !== b.important) return a.important - b.important;
+    if (a.attached !== b.attached) return a.attached - b.attached;
+    const layers = compareLayers(a.layer, b.layer);
+    if (layers !== 0) return a.important ? -layers : layers;
+    if (a.spec !== b.spec) return a.spec - b.spec;
+    return a.order - b.order;
+  }
+
+  /** Substitutes `var()` with `lookup(name)` values; `null` when any reference cannot resolve. */
+  function substituteVars(text, lookup, depth = 0) {
+    if (depth > 8) return null;
+    let out = "";
+    let i = 0;
+    while (i < text.length) {
+      const at = text.indexOf("var(", i);
+      if (at < 0) {
+        out += text.slice(i);
+        break;
+      }
+      out += text.slice(i, at);
+      const end = matchParen(text, at + 3);
+      if (end < 0) return null;
+      const parts = splitTopLevel(text.slice(at + 4, end), ",");
+      let value = lookup(parts[0].trim());
+      if (!value) value = parts.slice(1).join(",").trim();
+      if (!value) return null;
+      if (value.includes("var(")) {
+        value = substituteVars(value, lookup, depth + 1);
+        if (value === null) return null;
+      }
+      out += value;
+      i = end + 1;
+    }
+    return out.trim();
+  }
+
+  let colorProbeCtx;
+  /**
+   * Normalises a CSS colour through a detached 2D canvas (the page is never touched). `null` when
+   * the text is not a colour: an invalid assignment keeps the sentinel, so two sentinels disagree.
+   */
+  function canonicalColor(text) {
+    try {
+      if (colorProbeCtx === undefined) {
+        const canvas = g.document.createElement("canvas");
+        colorProbeCtx = canvas.getContext("2d") || null;
+      }
+      if (!colorProbeCtx) return null;
+      colorProbeCtx.fillStyle = "#010203";
+      colorProbeCtx.fillStyle = text;
+      const first = colorProbeCtx.fillStyle;
+      colorProbeCtx.fillStyle = "#040506";
+      colorProbeCtx.fillStyle = text;
+      return first === colorProbeCtx.fillStyle ? first : null;
+    } catch (_e) {
+      return null;
+    }
+  }
+
+  function sameValue(resolved, computed) {
+    const colorA = canonicalColor(resolved);
+    const colorB = canonicalColor(computed);
+    if (colorA !== null && colorB !== null) return colorA === colorB;
+    const norm = (s) => String(s).trim().toLowerCase().replace(/\s+/g, " ").replace(/^0$/, "0px");
+    return norm(resolved) === norm(computed);
   }
 
   /**
@@ -207,185 +413,211 @@
   }
 
   /**
-   * Indexes readable CSSStyleRules in `doc.styleSheets` and records unreadable cross-origin
-   * stylesheet URLs in `unavailableSet` (T8.25 §3.7).
+   * Indexes the author style rules of one tree scope (a document or an open shadow root) in
+   * cascade terms: every declaration (not only `var()` ones, so a later literal can clear an
+   * earlier token), the layer path, specificity per selector, and source order. Rules inside
+   * `@media`/`@supports`/`@import` conditions that do not apply to the scope's window are dropped.
+   * `@container`, `@scope` and `@starting-style` groups cannot be evaluated here, so their rules
+   * are left out rather than guessed (T8.25 §3.7). Unreadable cross-origin sheets go to
+   * `unavailableSet`.
    */
-  function collectStylesheetRules(doc, unavailableSet) {
-    const rules = [];
+  function collectScopeRules(scope, unavailableSet) {
+    const ownerDoc = scope.nodeType === 9 ? scope : scope.ownerDocument;
+    const scopeWin = ownerDoc.defaultView || g;
+    const raw = [];
+    const layerOrdinals = new Map();
+    const layerCounts = new Map();
     let order = 0;
+    let anonymousLayers = 0;
 
-    function visitRuleList(ruleList) {
+    function mediaApplies(media) {
+      const text = media && media.mediaText;
+      if (!text) return true;
+      try {
+        return Boolean(scopeWin.matchMedia(text).matches);
+      } catch (_e) {
+        return false;
+      }
+    }
+
+    function supportsApplies(condition) {
+      if (!condition) return true;
+      try {
+        return !scopeWin.CSS || typeof scopeWin.CSS.supports !== "function"
+          ? true
+          : Boolean(scopeWin.CSS.supports(condition));
+      } catch (_e) {
+        return false;
+      }
+    }
+
+    /** Layer path (ordinals by first appearance per parent) for `name`, nested with dots. */
+    function layerPathFor(parentPath, name) {
+      let path = parentPath;
+      const names = name ? String(name).split(".") : [`\u0002anonymous-${anonymousLayers++}`];
+      for (const segment of names) {
+        const parentKey = path.join(",");
+        const key = `${parentKey}\u0000${segment}`;
+        if (!layerOrdinals.has(key)) {
+          const next = layerCounts.get(parentKey) || 0;
+          layerCounts.set(parentKey, next + 1);
+          layerOrdinals.set(key, next);
+        }
+        path = path.concat(layerOrdinals.get(key));
+      }
+      return path;
+    }
+
+    function addStyleRule(rule, layerPath) {
+      if (!rule.selectorText || !rule.style) return;
+      const decls = parseDeclarations(rule.style.cssText);
+      if (decls.length === 0) return;
+      const selectors = splitTopLevel(rule.selectorText, ",")
+        .map((t) => t.trim())
+        .filter(Boolean)
+        .map((text) => ({ text, spec: selectorSpecificity(text) }));
+      raw.push({ selectors, decls, layer: layerPath, order: order++ });
+    }
+
+    function visitImport(rule, layerPath) {
+      const sheet = rule.styleSheet;
+      if (!sheet || !mediaApplies(rule.media) || !supportsApplies(rule.supportsText)) return;
+      const path =
+        rule.layerName === null || rule.layerName === undefined
+          ? layerPath
+          : layerPathFor(layerPath, rule.layerName);
+      let rules;
+      try {
+        rules = sheet.cssRules;
+      } catch (_e) {
+        if (sheet.href || rule.href) unavailableSet.add(sheet.href || rule.href);
+        return;
+      }
+      if (rules) visit(rules, path);
+    }
+
+    function visit(ruleList, layerPath) {
       for (let i = 0; i < ruleList.length; i++) {
         const rule = ruleList[i];
         if (!rule) continue;
-        // STYLE_RULE === 1
-        if (rule.type === 1 && rule.selectorText && rule.style) {
-          const decls = {};
-          const customProps = {};
-          const style = rule.style;
-          for (let j = 0; j < style.length; j++) {
-            const prop = style[j];
-            const val = style.getPropertyValue(prop);
-            const prio = style.getPropertyPriority(prop) === "important" ? 1 : 0;
-            if (prop.startsWith("--")) {
-              customProps[prop] = { value: val ? val.trim() : "", important: prio };
-            } else if (val && val.includes("var(")) {
-              decls[prop] = { value: val.trim(), important: prio };
-            }
-          }
-          // Check shorthand properties on `rule.style` because browsers keep unexpanded `var(...)`
-          // on shorthand keys or expose them via `cssText`.
-          for (const shortProp of nativeKeys(SHORTHAND_EXPANSIONS)) {
-            const sv = style.getPropertyValue(shortProp);
-            if (sv && sv.includes("var(")) {
-              const prio = style.getPropertyPriority(shortProp) === "important" ? 1 : 0;
-              decls[shortProp] = { value: sv.trim(), important: prio };
-            }
-          }
-          if (rule.cssText && rule.cssText.includes("var(")) {
-            const bodyMatch = rule.cssText.match(/\{([\s\S]*)\}/);
-            if (bodyMatch) {
-              const parts = bodyMatch[1].split(";");
-              for (const part of parts) {
-                const colon = part.indexOf(":");
-                if (colon <= 0) continue;
-                const pName = part.slice(0, colon).trim().toLowerCase();
-                let pVal = part.slice(colon + 1).trim();
-                const imp = /!important\s*$/i.test(pVal) ? 1 : 0;
-                if (imp) pVal = pVal.replace(/!important\s*$/i, "").trim();
-                if (pName.startsWith("--")) {
-                  customProps[pName] = { value: pVal, important: imp };
-                } else if (pVal.includes("var(")) {
-                  decls[pName] = { value: pVal, important: imp };
-                }
-              }
-            }
-          }
-          if (nativeKeys(decls).length > 0 || nativeKeys(customProps).length > 0) {
-            rules.push({
-              selectorText: rule.selectorText,
-              decls,
-              customProps,
-              order: order++,
-            });
-          }
-        } else if (rule.cssRules) {
-          try {
-            visitRuleList(rule.cssRules);
-          } catch (_e) {
-            // Ignore nested unreadable rules
-          }
+        // Realm-independent (rules inside an iframe fail `instanceof`).
+        const kind = nativeToString.call(rule).slice(8, -1);
+        if (kind === "CSSStyleRule") {
+          addStyleRule(rule, layerPath);
+        } else if (kind === "CSSMediaRule") {
+          if (mediaApplies(rule.media)) visit(rule.cssRules, layerPath);
+        } else if (kind === "CSSSupportsRule") {
+          if (supportsApplies(rule.conditionText)) visit(rule.cssRules, layerPath);
+        } else if (kind === "CSSLayerBlockRule") {
+          visit(rule.cssRules, layerPathFor(layerPath, rule.name));
+        } else if (kind === "CSSLayerStatementRule") {
+          for (const name of rule.nameList || []) layerPathFor(layerPath, name);
+        } else if (kind === "CSSImportRule") {
+          visitImport(rule, layerPath);
         }
       }
     }
 
-    const sheets = doc.styleSheets ? nativeSlice.call(doc.styleSheets) : [];
-    for (const sheet of sheets) {
-      let cssRules;
+    function visitSheet(sheet) {
+      if (!sheet || sheet.disabled || !mediaApplies(sheet.media)) return;
+      let rules;
       try {
-        cssRules = sheet.cssRules;
+        rules = sheet.cssRules;
       } catch (_err) {
-        if (sheet.href) {
-          unavailableSet.add(sheet.href);
-        }
-        continue;
+        if (sheet.href) unavailableSet.add(sheet.href);
+        return;
       }
-      if (cssRules) {
-        visitRuleList(cssRules);
+      if (rules) visit(rules, []);
+    }
+
+    const sheets = scope.styleSheets ? nativeSlice.call(scope.styleSheets) : [];
+    if (scope.adoptedStyleSheets) sheets.push(...nativeSlice.call(scope.adoptedStyleSheets));
+    for (const sheet of sheets) visitSheet(sheet);
+
+    // Only a property that some declaration writes with `var()` can carry a ref, so only the rules
+    // that write such a property (with any value) or a custom property can decide the winner.
+    const varTargets = new Set();
+    const noteVarTargets = (decl) => {
+      if (!decl.name.startsWith("--") && decl.value.includes("var(")) {
+        for (const target of expandProp(decl.name)) varTargets.add(target);
       }
+    };
+    for (const rule of raw) rule.decls.forEach(noteVarTargets);
+    if (scope.querySelectorAll) {
+      for (const node of nativeSlice.call(scope.querySelectorAll('[style*="var("]'))) {
+        parseDeclarations(node.getAttribute("style")).forEach(noteVarTargets);
+      }
+    }
+    const rules = [];
+    for (const rule of raw) {
+      const decls = rule.decls.filter(
+        (d) => d.name.startsWith("--") || expandProp(d.name).some((t) => varTargets.has(t))
+      );
+      if (decls.length > 0) rules.push({ ...rule, decls });
     }
     return rules;
   }
 
   /**
    * Computes `css_vars_declared`, `css_var_refs`, and `declaration_sources` for `el` (T8.25 §3.7).
+   * A ref is only emitted for a property whose cascade winner is a `var()` declaration, and a
+   * colour winner is cross-checked against `getComputedStyle` so a stale winner is dropped.
    */
   function resolveElementCssVars(el, cs, parentCs, rules, inheritedCustomDefs) {
-    const winningDecls = {};
-    const localCustomDefs = Object.assign({}, inheritedCustomDefs);
-    const candidateVarNames = new Set();
+    const winners = new Map();
+    const customWinners = new Map();
+
+    function offer(decl, rank) {
+      if (decl.name.startsWith("--")) {
+        const prev = customWinners.get(decl.name);
+        if (!prev || compareRank(rank, prev.rank) >= 0) {
+          customWinners.set(decl.name, { value: decl.value, rank });
+        }
+        return;
+      }
+      const shorthand =
+        decl.name === "all" || SHORTHAND_EXPANSIONS[decl.name] ? decl.name : null;
+      for (const target of expandProp(decl.name)) {
+        const prev = winners.get(target);
+        if (!prev || compareRank(rank, prev.rank) >= 0) {
+          winners.set(target, { value: decl.value, shorthand, rank });
+        }
+      }
+    }
 
     for (const rule of rules) {
-      const selectors = rule.selectorText.split(",");
-      let bestSpec = -1;
-      for (const rawSel of selectors) {
-        const sel = rawSel.trim();
-        if (!sel) continue;
+      let spec = -1;
+      for (const sel of rule.selectors) {
         try {
-          if (el.matches(sel)) {
-            const spec = selectorSpecificity(sel);
-            if (spec > bestSpec) bestSpec = spec;
-          }
+          if (sel.spec > spec && el.matches(sel.text)) spec = sel.spec;
         } catch (_e) {
-          // Ignore pseudo-element or unsupported selectors in `el.matches`
+          // Pseudo-element or unsupported selectors never match an element.
         }
       }
-      if (bestSpec < 0) continue;
-
-      for (const k of nativeKeys(rule.customProps)) {
-        const entry = rule.customProps[k];
-        candidateVarNames.add(k);
-        localCustomDefs[k] = entry.value;
+      if (spec < 0) continue;
+      for (const decl of rule.decls) {
+        offer(decl, {
+          important: decl.important ? 1 : 0,
+          attached: 0,
+          layer: rule.layer,
+          spec,
+          order: rule.order,
+        });
       }
-
-      for (const prop of nativeKeys(rule.decls)) {
-        const entry = rule.decls[prop];
-        const score = entry.important * 1e9 + bestSpec * 1e3 + rule.order;
-        const targets = SHORTHAND_EXPANSIONS[prop] || [prop];
-        for (const targetProp of targets) {
-          if (
-            prop === "background" &&
-            targetProp === "background-image" &&
-            !entry.value.includes("url(") &&
-            !entry.value.includes("gradient(")
-          ) {
-            continue;
-          }
-          const prev = winningDecls[targetProp];
-          if (!prev || score >= prev.score) {
-            winningDecls[targetProp] = { value: entry.value, score };
-          }
-        }
+    }
+    const inline = el.getAttribute("style");
+    if (inline) {
+      for (const decl of parseDeclarations(inline)) {
+        offer(decl, { important: decl.important ? 1 : 0, attached: 1, layer: [], spec: 0, order: 0 });
       }
     }
 
-    // Check inline `el.style`
-    if (el.style) {
-      const inlineCssText = el.getAttribute("style") || "";
-      if (inlineCssText) {
-        for (const part of inlineCssText.split(";")) {
-          const colon = part.indexOf(":");
-          if (colon <= 0) continue;
-          const pName = part.slice(0, colon).trim();
-          let pVal = part.slice(colon + 1).trim();
-          const imp = /!important\s*$/i.test(pVal) ? 1 : 0;
-          if (imp) pVal = pVal.replace(/!important\s*$/i, "").trim();
-          if (pName.startsWith("--")) {
-            candidateVarNames.add(pName);
-            localCustomDefs[pName] = pVal;
-          } else if (pVal.includes("var(")) {
-            const lower = pName.toLowerCase();
-            const score = (imp ? 2e9 : 1.5e9) + 999999;
-            const targets = SHORTHAND_EXPANSIONS[lower] || [lower];
-            for (const targetProp of targets) {
-              if (
-                lower === "background" &&
-                targetProp === "background-image" &&
-                !pVal.includes("url(") &&
-                !pVal.includes("gradient(")
-              ) {
-                continue;
-              }
-              winningDecls[targetProp] = { value: pVal, score };
-            }
-          }
-        }
-      }
-    }
+    const localCustomDefs = Object.assign({}, inheritedCustomDefs);
+    for (const [name, entry] of customWinners) localCustomDefs[name] = entry.value;
 
     // (a) `css_vars_declared`: custom properties whose computed value on `el` differs from parent's.
     const cssVarsDeclared = {};
-    for (const varName of candidateVarNames) {
+    for (const varName of customWinners.keys()) {
       const val = cs.getPropertyValue(varName).trim();
       if (!val) continue;
       const parentVal = parentCs ? parentCs.getPropertyValue(varName).trim() : "";
@@ -394,13 +626,44 @@
       }
     }
 
-    // (b) `css_var_refs`: resolve chains `prop -> ["--brand", ...]`
+    // (b) `css_var_refs`: resolve chains `prop -> ["--brand", ...]` for var() winners only.
+    const lookup = (name) => cs.getPropertyValue(name).trim();
     const cssVarRefs = {};
     const declarationSources = {};
-    for (const prop of nativeKeys(winningDecls)) {
-      const rawVal = winningDecls[prop].value;
+    for (const [prop, winner] of winners) {
+      const rawVal = winner.value;
       const directVars = extractVarNames(rawVal);
       if (directVars.length === 0) continue;
+      const resolved = substituteVars(rawVal, lookup);
+      const computed = cs.getPropertyValue(prop).trim();
+      if (winner.shorthand) {
+        // A shorthand feeds several longhands; a longhand only gets the ref when the value the
+        // var() resolved to is provably what that longhand computes to.
+        if (resolved === null) continue;
+        if (winner.shorthand === "background") {
+          const isImage = /url\(|gradient\(/i.test(resolved);
+          if (prop === "background-image") {
+            if (!isImage) continue;
+          } else if (prop !== "background-color" || isImage || !sameValue(resolved, computed)) {
+            continue;
+          }
+        } else {
+          const tokens = splitTopLevel(rawVal, " ")
+            .filter((t) => t.includes("var("))
+            .map((t) => substituteVars(t.trim(), lookup));
+          if (!tokens.some((t) => t !== null && sameValue(t, computed))) continue;
+        }
+      } else if (
+        resolved !== null &&
+        COLOR_PROPS.has(prop) &&
+        /^(#[0-9a-f]{3,8}|(rgb|hsl)a?\([^()]*\)|[a-z]+)$/i.test(resolved) &&
+        !/^(inherit|initial|unset|revert|revert-layer|currentcolor)$/i.test(resolved) &&
+        !sameValue(resolved, computed)
+      ) {
+        // The winner we picked does not produce the painted colour (for example a rule we could
+        // not evaluate overrode it). A wrong ref is worse than none.
+        continue;
+      }
       const chain = [];
       const visited = new Set();
       const queue = nativeFrom(directVars);
@@ -512,9 +775,114 @@
     return out;
   }
 
-  function capturePseudo(el, which, borderBox) {
+  function isSetValue(cs, prop) {
+    const v = cs.getPropertyValue(prop);
+    return Boolean(v) && v !== "none" && v !== "normal";
+  }
+
+  const PX_VALUE = /^-?\d*\.?\d+(e-?\d+)?px$/;
+
+  /**
+   * Padding-box origin, in page coordinates, of the box an absolutely positioned child of `el`
+   * is placed against: the nearest ancestor-or-self that positions, transforms, filters or
+   * contains its descendants; the initial containing block when there is none.
+   */
+  function containingBlockOrigin(el, position, geo) {
+    if (position === "fixed") return { x: geo.offX, y: geo.offY };
+    for (let a = el; a; a = a.parentElement || (a.getRootNode && a.getRootNode().host) || null) {
+      const acs = geo.elWin.getComputedStyle(a);
+      const contains =
+        acs.getPropertyValue("position") !== "static" ||
+        isSetValue(acs, "transform") ||
+        isSetValue(acs, "filter") ||
+        isSetValue(acs, "perspective") ||
+        /paint|layout|strict|content/.test(acs.getPropertyValue("contain"));
+      if (contains) {
+        const r = a.getBoundingClientRect();
+        return {
+          x: r.left + geo.offX + parsePx(acs.getPropertyValue("border-left-width")),
+          y: r.top + geo.offY + parsePx(acs.getPropertyValue("border-top-width")),
+        };
+      }
+    }
+    return { x: geo.pageOffsetX, y: geo.pageOffsetY };
+  }
+
+  /**
+   * Where in-flow content of `el` ends: the last in-flow child element or text line, starting from
+   * `seed` (the in-flow `::before` box, when there is one).
+   */
+  function flowEnd(el, geo, seed) {
+    let end = seed;
+    const doc = el.ownerDocument;
+    for (const node of nativeSlice.call(el.childNodes)) {
+      if (node.nodeType === 1) {
+        const ncs = geo.elWin.getComputedStyle(node);
+        const pos = ncs.getPropertyValue("position");
+        if (ncs.getPropertyValue("display") === "none" || pos === "absolute" || pos === "fixed") continue;
+        const r = node.getBoundingClientRect();
+        end = {
+          right: r.right + geo.offX,
+          top: r.top + geo.offY,
+          bottom: r.bottom + geo.offY,
+          marginBottom: parsePx(ncs.getPropertyValue("margin-bottom")),
+        };
+      } else if (node.nodeType === 3 && (node.nodeValue || "").trim()) {
+        const range = doc.createRange();
+        range.selectNodeContents(node);
+        const rects = nativeSlice.call(range.getClientRects()).filter((r) => r.width > 0 || r.height > 0);
+        const last = rects[rects.length - 1];
+        if (last) {
+          end = {
+            right: last.right + geo.offX,
+            top: last.top + geo.offY,
+            bottom: last.bottom + geo.offY,
+            marginBottom: 0,
+          };
+        }
+      }
+    }
+    return end;
+  }
+
+  /**
+   * Border-box origin of the `::before`/`::after` box of `el`. Absolutely positioned pseudos sit
+   * at their used inset from the containing block's padding edge (plus their margin); in-flow
+   * ones start the content box (`::before`) or follow the last in-flow item (`::after`).
+   */
+  function pseudoOrigin(el, which, pcs, geo, beforeEnd) {
+    const ml = parsePx(pcs.getPropertyValue("margin-left"));
+    const mt = parsePx(pcs.getPropertyValue("margin-top"));
+    const position = pcs.getPropertyValue("position");
+    if (position === "absolute" || position === "fixed") {
+      const left = pcs.getPropertyValue("left");
+      const top = pcs.getPropertyValue("top");
+      if (PX_VALUE.test(left) && PX_VALUE.test(top)) {
+        const cb = containingBlockOrigin(el, position, geo);
+        return { x: cb.x + parsePx(left) + ml, y: cb.y + parsePx(top) + mt, inFlow: false };
+      }
+    }
+    const start = geo.contentBox;
+    if (which === "::before") return { x: start.x + ml, y: start.y + mt, inFlow: true };
+    const end = flowEnd(el, geo, beforeEnd);
+    if (!end) return { x: start.x + ml, y: start.y + mt, inFlow: true };
+    if (/^inline/.test(pcs.getPropertyValue("display"))) {
+      return { x: end.right + ml, y: end.top + mt, inFlow: true };
+    }
+    return {
+      x: start.x + ml,
+      y: end.bottom + Math.max(end.marginBottom, mt),
+      inFlow: true,
+    };
+  }
+
+  /**
+   * Captures a rendered `::before`/`::after`. Returns `{ pseudo, end }` where `end` is the in-flow
+   * extent used to place a following `::after`, or `null` when nothing renders.
+   */
+  function capturePseudo(el, which, geo, beforeEnd) {
     try {
-      const pcs = g.getComputedStyle(el, which);
+      const pcs = geo.elWin.getComputedStyle(el, which);
       if (!pcs) return null;
       const content = pcs.getPropertyValue("content");
       const display = pcs.getPropertyValue("display");
@@ -531,21 +899,122 @@
         (bgColor && bgColor !== "rgba(0, 0, 0, 0)" && bgColor !== "transparent") ||
         (bgImage && bgImage !== "none");
       if (!hasContent && !hasBox) return null;
-      const w = parsePx(pcs.getPropertyValue("width")) || borderBox.width;
-      const h = parsePx(pcs.getPropertyValue("height")) || borderBox.height;
+      const w = parsePx(pcs.getPropertyValue("width")) || geo.borderBox.width;
+      const h = parsePx(pcs.getPropertyValue("height")) || geo.borderBox.height;
+      const origin = pseudoOrigin(el, which, pcs, geo, beforeEnd);
       return {
-        content: hasContent ? content.replace(/^["']|["']$/g, "") : "",
-        box: {
-          x: borderBox.x,
-          y: borderBox.y,
-          width: roundCoord(w),
-          height: roundCoord(h),
+        pseudo: {
+          content: hasContent ? content.replace(/^["']|["']$/g, "") : "",
+          box: {
+            x: roundCoord(origin.x),
+            y: roundCoord(origin.y),
+            width: roundCoord(w),
+            height: roundCoord(h),
+          },
+          styles: extractStyleSubset(pcs, CAPTURED_STYLE_PROPS),
         },
-        styles: extractStyleSubset(pcs, CAPTURED_STYLE_PROPS),
+        end: origin.inFlow
+          ? {
+              right: origin.x + w,
+              top: origin.y,
+              bottom: origin.y + h,
+              marginBottom: parsePx(pcs.getPropertyValue("margin-bottom")),
+            }
+          : null,
       };
     } catch (_e) {
       return null;
     }
+  }
+
+  function createsStackingContext(cs, position, zApplies, hasZ) {
+    return (
+      position === "fixed" ||
+      position === "sticky" ||
+      (zApplies && hasZ) ||
+      parseFloat(cs.getPropertyValue("opacity")) < 1 ||
+      ["transform", "translate", "rotate", "scale", "filter", "backdrop-filter", "perspective", "clip-path", "mask-image", "container-type"].some(
+        (p) => isSetValue(cs, p)
+      ) ||
+      isSetValue(cs, "mix-blend-mode") ||
+      cs.getPropertyValue("isolation") === "isolate" ||
+      /layout|paint|strict|content/.test(cs.getPropertyValue("contain")) ||
+      /transform|opacity|filter|perspective|clip-path|mask|isolation|mix-blend-mode/.test(
+        cs.getPropertyValue("will-change")
+      )
+    );
+  }
+
+  /**
+   * Stacking facts of one element used to order paint (T8.25 §3.2): whether it creates a stacking
+   * context, its `z-index` level in it, and whether it is positioned.
+   */
+  function stackingInfo(cs, parentCs, isRoot, embedded) {
+    const position = cs.getPropertyValue("position");
+    const positioned = position !== "static" && position !== "";
+    const parentDisplay = parentCs ? parentCs.getPropertyValue("display") : "";
+    const zApplies = positioned || /flex|grid/.test(parentDisplay);
+    const zNum = parseInt(cs.getPropertyValue("z-index"), 10);
+    const hasZ = Number.isFinite(zNum);
+    const context = isRoot || createsStackingContext(cs, position, zApplies, hasZ);
+    return { context, zi: zApplies && hasZ ? zNum : 0, positioned, embedded };
+  }
+
+  /**
+   * Replaces every captured node's `z` with its dense paint index, walking stacking contexts in
+   * paint order: the context root, negative `z-index` contexts, in-flow content in tree order,
+   * positioned `auto`/`0` content in tree order, then positive `z-index` contexts ascending. A
+   * context is painted as a unit, so descendants of a `z-index:1` parent stay with that parent.
+   * The raw `z-index` value remains in `styles`.
+   */
+  function assignPaintOrder(root, metaOf) {
+    let counter = 0;
+    const byLevel = (a, b) => a.zi - b.zi;
+
+    function gather(children, flow, layers) {
+      for (const child of children) {
+        const meta = metaOf(child);
+        if (meta.context) {
+          const item = { node: child, context: true, zi: meta.zi, flow: null };
+          if (meta.embedded) flow.push(item);
+          else if (meta.zi < 0) layers.neg.push(item);
+          else if (meta.zi > 0) layers.pos.push(item);
+          else layers.zero.push(item);
+        } else if (meta.positioned) {
+          // Painted atomically in the parent context, but its in-flow content paints with it.
+          const item = { node: child, context: false, zi: 0, flow: [] };
+          layers.zero.push(item);
+          gather(child.children || [], item.flow, layers);
+        } else {
+          flow.push({ node: child, context: false, zi: 0, flow: null });
+          gather(child.children || [], flow, layers);
+        }
+      }
+    }
+
+    function emit(item) {
+      if (item.context) {
+        paintContext(item.node);
+      } else {
+        item.node.z = counter++;
+        for (const inner of item.flow || []) emit(inner);
+      }
+    }
+
+    function paintContext(node) {
+      node.z = counter++;
+      const layers = { neg: [], zero: [], pos: [] };
+      const flow = [];
+      gather(node.children || [], flow, layers);
+      layers.neg.sort(byLevel);
+      layers.pos.sort(byLevel);
+      for (const item of layers.neg) emit(item);
+      for (const item of flow) emit(item);
+      for (const item of layers.zero) emit(item);
+      for (const item of layers.pos) emit(item);
+    }
+
+    paintContext(root);
   }
 
   function captureTextRunsForElement(el, cs, offsetX, offsetY, stats) {
@@ -738,7 +1207,17 @@
         : doc.documentElement;
 
     const unavailableSet = new Set();
-    const sheetRules = collectStylesheetRules(doc, unavailableSet);
+    // Author rules are indexed per tree scope: the document, each same-origin iframe document and
+    // each open shadow root read their own stylesheets.
+    const scopeRuleCache = new Map();
+    function rulesFor(el) {
+      const scope = el.getRootNode ? el.getRootNode() : el.ownerDocument;
+      const key = scope && (scope.nodeType === 9 || scope.nodeType === 11) ? scope : el.ownerDocument;
+      if (!scopeRuleCache.has(key)) {
+        scopeRuleCache.set(key, collectScopeRules(key, unavailableSet));
+      }
+      return scopeRuleCache.get(key);
+    }
 
     const stats = {
       elements: 0,
@@ -756,9 +1235,47 @@
       truncated: false,
     };
 
-    let paintCounter = 0;
+    // Stacking facts per captured node, consumed once by `assignPaintOrder` after the walk.
+    const stackingOf = new Map();
 
-    async function walkElement(el, parentCs, inheritedCustomDefs, pageOffsetX, pageOffsetY) {
+    /** Elements `walkElement` would capture under `el`; counts what the budget leaves unvisited. */
+    function countSubtree(el) {
+      const tag = (el.tagName || "div").toLowerCase();
+      if (SKIPPED_TAGS.has(tag)) return 0;
+      const elWin = el.ownerDocument.defaultView || win;
+      const cs = elWin.getComputedStyle(el);
+      const isHidden =
+        cs.getPropertyValue("display") === "none" || cs.getPropertyValue("visibility") === "hidden";
+      if (isHidden && !includeHidden) return 0;
+      let total = 1;
+      if (tag === "svg") return total;
+      if (el.shadowRoot) {
+        for (const child of nativeSlice.call(el.shadowRoot.children || [])) {
+          total += countSubtree(child);
+        }
+      }
+      if (tag === "iframe") {
+        let iframeDoc = null;
+        try {
+          iframeDoc = el.contentDocument;
+        } catch (_e) {
+          iframeDoc = null;
+        }
+        if (iframeDoc && iframeDoc.documentElement) total += countSubtree(iframeDoc.documentElement);
+      } else {
+        for (const child of nativeSlice.call(el.children || [])) total += countSubtree(child);
+      }
+      return total;
+    }
+
+    async function walkElement(
+      el,
+      parentCs,
+      inheritedCustomDefs,
+      pageOffsetX,
+      pageOffsetY,
+      embedded = false
+    ) {
       const tag = (el.tagName || "div").toLowerCase();
       if (SKIPPED_TAGS.has(tag)) {
         return null;
@@ -775,15 +1292,15 @@
 
       if (stats.elements >= budgetState.maxElements) {
         budgetState.truncated = true;
-        stats.skipped_elements++;
+        stats.skipped_elements += countSubtree(el);
         return null;
       }
       stats.elements++;
 
-      const scrollX =
-        cs.getPropertyValue("position") === "fixed" ? 0 : elWin.scrollX || elWin.pageXOffset || 0;
-      const scrollY =
-        cs.getPropertyValue("position") === "fixed" ? 0 : elWin.scrollY || elWin.pageYOffset || 0;
+      // Boxes are `getBoundingClientRect` plus scroll offsets for every element, `position: fixed`
+      // and `sticky` included (T8.25 §3.3, §8.3).
+      const scrollX = elWin.scrollX || elWin.pageXOffset || 0;
+      const scrollY = elWin.scrollY || elWin.pageYOffset || 0;
       const offX = pageOffsetX + scrollX;
       const offY = pageOffsetY + scrollY;
 
@@ -811,22 +1328,23 @@
         height: roundCoord(Math.max(0, borderBox.height - bt - pt - bb - pb)),
       };
 
-      const zIndexRaw = cs.getPropertyValue("z-index");
-      const zIndexNum = parseInt(zIndexRaw, 10);
-      const z = paintCounter++ + (Number.isFinite(zIndexNum) ? zIndexNum * 1000 : 0);
+      // `z` is filled in by `assignPaintOrder` once the whole tree is known.
+      const z = 0;
+      const stacking = stackingInfo(cs, parentCs, el === rootEl || embedded, embedded);
 
       const styles = extractStyleSubset(cs, CAPTURED_STYLE_PROPS);
       const { cssVarsDeclared, cssVarRefs, declarationSources, localCustomDefs } =
-        resolveElementCssVars(el, cs, parentCs, sheetRules, inheritedCustomDefs);
+        resolveElementCssVars(el, cs, parentCs, rulesFor(el), inheritedCustomDefs);
       const componentHint = extractComponentHint(el);
 
-      const beforePseudo = capturePseudo(el, "::before", borderBox);
-      const afterPseudo = capturePseudo(el, "::after", borderBox);
+      const geometry = { elWin, borderBox, contentBox, offX, offY, pageOffsetX, pageOffsetY };
+      const beforeResult = capturePseudo(el, "::before", geometry, null);
+      const afterResult = capturePseudo(el, "::after", geometry, beforeResult && beforeResult.end);
       const pseudo =
-        beforePseudo || afterPseudo
+        beforeResult || afterResult
           ? {
-              ...(beforePseudo ? { before: beforePseudo } : {}),
-              ...(afterPseudo ? { after: afterPseudo } : {}),
+              ...(beforeResult ? { before: beforeResult.pseudo } : {}),
+              ...(afterResult ? { after: afterResult.pseudo } : {}),
             }
           : undefined;
 
@@ -920,16 +1438,19 @@
             iframeDoc = null;
           }
           if (iframeDoc && iframeDoc.documentElement) {
+            // A frame is its own browsing context: no parent style, no inherited custom
+            // properties, and its content paints as part of the frame element.
             const subCap = await walkElement(
               iframeDoc.documentElement,
-              cs,
-              localCustomDefs,
+              null,
+              {},
               borderBox.x,
-              borderBox.y
+              borderBox.y,
+              true
             );
             if (subCap) children.push(subCap);
           } else if (el.getAttribute("src")) {
-            return {
+            const opaque = {
               tag,
               ...(el.id ? { id: el.id } : {}),
               classes: el.classList ? nativeFrom(el.classList) : [],
@@ -941,6 +1462,8 @@
               cross_origin: true,
               children: [],
             };
+            stackingOf.set(opaque, stacking);
+            return opaque;
           }
         } else {
           const domChildren = el.children ? nativeSlice.call(el.children) : [];
@@ -987,6 +1510,7 @@
         ...(hasClosedShadow ? { closed_shadow: true } : {}),
         children,
       };
+      stackingOf.set(out, stacking);
       return out;
     }
 
@@ -1001,6 +1525,9 @@
         styles: {},
         children: [],
       };
+
+    const plainFlow = { context: false, zi: 0, positioned: false, embedded: false };
+    assignPaintOrder(rootCapture, (node) => stackingOf.get(node) || plainFlow);
 
     stats.images = budgetState.images;
     stats.image_bytes = budgetState.imageBytes;

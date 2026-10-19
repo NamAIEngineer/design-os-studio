@@ -48,6 +48,24 @@ jobs:
       - name: Build workspace (designos-studio, designos, designos-mcp, designos-diff)
         run: cargo build --workspace --all-targets --locked
 
+      # The designos-webcapture tests drive crates/designos-webcapture/js/capture.js in headless
+      # Chromium through Playwright and fail when Node or Playwright is missing.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install Playwright and Chromium for the web capture harness
+        shell: bash
+        run: |
+          harness_dir="$RUNNER_TEMP/capture-harness"
+          npm install --no-audit --no-fund --prefix "$harness_dir" playwright@1.64.1
+          if [ "$RUNNER_OS" = "Linux" ]; then
+            node "$harness_dir/node_modules/playwright/cli.js" install --with-deps chromium
+          else
+            node "$harness_dir/node_modules/playwright/cli.js" install chromium
+          fi
+          echo "NODE_PATH=$harness_dir/node_modules" >> "$GITHUB_ENV"
+
       - name: Test workspace
         run: cargo test --workspace --locked
 

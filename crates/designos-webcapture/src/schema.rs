@@ -190,8 +190,11 @@ pub struct Element {
     pub border_box: BoxRect,
     #[serde(default)]
     pub content_box: BoxRect,
+    /// Dense paint index in stacking-context order (`T8.25` §3.2). The raw `z-index` stays in
+    /// `styles`. Stored as `i64` so an older capture that folded a huge `z-index` into this field
+    /// still loads.
     #[serde(default)]
-    pub z: i32,
+    pub z: i64,
     #[serde(default = "default_true", skip_serializing_if = "is_true")]
     pub visible: bool,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]

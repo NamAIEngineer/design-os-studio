@@ -1,7 +1,7 @@
 {
   "schema": "designos-webcapture",
   "version": 1,
-  "url": "file:///Users/jangtrinh/Products/dos-276/crates/designos-webcapture/tests/playwright/fixtures/card.html",
+  "url": "file:///fixtures/card.html",
   "title": "Pricing Card Fixture",
   "viewport": {
     "width": 1280,
@@ -12,7 +12,7 @@
     "width": 1280,
     "height": 800
   },
-  "captured_at": "2026-10-18T19:09:45.342Z",
+  "captured_at": "2026-10-19T01:20:51.465Z",
   "fonts": [],
   "root": {
     "tag": "html",
@@ -326,8 +326,8 @@
               "before": {
                 "content": "PRO",
                 "box": {
-                  "x": 24,
-                  "y": 24,
+                  "x": 44,
+                  "y": 44,
                   "width": 28,
                   "height": 13
                 },
@@ -1467,6 +1467,6 @@
     "text_runs": 3,
     "images": 5,
     "image_bytes": 418,
-    "elapsed_ms": 4.5
+    "elapsed_ms": 7.9
   }
 }

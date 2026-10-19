@@ -1,0 +1,24 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Stacking Fixture</title>
+  <style>
+    body { margin: 0; }
+    .box { width: 40px; height: 20px; }
+    #parent-z1 { position: relative; z-index: 1; }
+    #uncle-auto { position: relative; }
+    #overlay { position: absolute; top: 0; left: 200px; z-index: 2147483647; }
+    #behind { position: absolute; top: 0; left: 300px; z-index: -1; }
+  </style>
+</head>
+<body>
+  <div id="flow-first" class="box">flow</div>
+  <div id="parent-z1" class="box">
+    <div id="child-in-z1" class="box">child</div>
+  </div>
+  <div id="uncle-auto" class="box">uncle</div>
+  <div id="overlay" class="box">overlay</div>
+  <div id="behind" class="box">behind</div>
+</body>
+</html>
