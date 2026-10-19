@@ -619,10 +619,10 @@ fn hash_node_props(node: &Node) -> u64 {
         1u8.hash(&mut h);
         let _ = node.fills.serialize(HashSerializer(&mut h));
     }
-    if !node.stroke.paints.is_empty() || node.stroke.weight != 1.0 || node.stroke.side_weights.is_some() {
-        2u8.hash(&mut h);
-        let _ = node.stroke.serialize(HashSerializer(&mut h));
-    }
+    // Always hashed: a default-looking stroke (no paints, weight 1) still carries align, cap, join,
+    // miter limit and dashes, and `node_group_eq` compares all of them.
+    2u8.hash(&mut h);
+    let _ = node.stroke.serialize(HashSerializer(&mut h));
     if !node.effects.is_empty() {
         3u8.hash(&mut h);
         let _ = node.effects.serialize(HashSerializer(&mut h));

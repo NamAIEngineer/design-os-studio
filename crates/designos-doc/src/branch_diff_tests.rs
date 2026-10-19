@@ -1,7 +1,8 @@
 use crate::branch_diff::{diff3, Conflict, ConflictKind, Diff3, EntityChange, EntityConflict, EntityKey, Group, NodeChange};
 use crate::{
-    Affine, Color, Comment, CommentAnchor, CommentThread, Document, Flow, FrameProps, Node, NodeId, NodeKind, Paint, Rect, Style, Variable, VariableCollection,
-    VariableKind, VariableMode, VariableValue, Vec2,
+    Affine, Color, Comment, CommentAnchor, CommentThread, DevStatus, Document, Effect, ExportConstraint, ExportFileFormat, ExportPreset, Flow, FrameProps,
+    Node, NodeId, NodeKind, Overflow, Paint, Rect, SlideProps, Stroke, StrokeAlign, StrokeCap, StrokeJoin, Style, Variable, VariableCollection, VariableKind,
+    VariableMode, VariableValue, Vec2,
 };
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -306,6 +307,104 @@ fn edge_cases_tolerance_kind_reorder_instance_and_variables() {
     assert!(diff_entities.entity_conflicts.contains(&EntityConflict { key: EntityKey::Comment("t1".into()), kind: ConflictKind::ModifyModify }));
 }
 
+/// Applies `edit` to the stroke of `id` in `doc`.
+fn edit_stroke(doc: &mut Document, id: NodeId, edit: impl FnOnce(&mut Stroke)) {
+    edit(&mut doc.get_mut(id).unwrap().stroke);
+}
+
+/// A default rectangle has an empty paint list and weight 1, so none of the stroke edits below touch paints
+/// or weight: the equal-hash short-circuit must still see them.
+#[test]
+fn unpainted_stroke_edits_are_changes_in_every_field() {
+    let (base, _page, _f, _g, a, _b, _c) = base_fixture_with_frame_and_children();
+    type StrokeEdit = fn(&mut Stroke);
+    let edits: [(&str, StrokeEdit); 5] = [
+        ("align", |s| s.align = StrokeAlign::Outside),
+        ("cap", |s| s.cap = StrokeCap::Round),
+        ("join", |s| s.join = StrokeJoin::Round),
+        ("miter_limit", |s| s.miter_limit = 8.0),
+        ("dashes", |s| s.dashes = vec![4.0, 2.0]),
+    ];
+    for (field, edit) in edits {
+        let mut ours = base.clone();
+        edit_stroke(&mut ours, a, edit);
+        let diff = diff3(&base, &ours, &base);
+        let expected = NodeChange::Changed { groups: BTreeSet::from([Group::Stroke]) };
+        assert_eq!(diff.ours.nodes.get(&a), Some(&expected), "stroke.{field}-only edit was not reported: {:?}", diff.ours.nodes);
+        assert_eq!(diff.ours.nodes.len(), 1, "stroke.{field}: only the edited node may change");
+        assert!(diff.theirs.nodes.is_empty());
+    }
+}
+
+#[test]
+fn unpainted_stroke_align_conflict_when_sides_differ() {
+    let (base, _page, _f, _g, a, _b, _c) = base_fixture_with_frame_and_children();
+    let mut ours = base.clone();
+    let mut theirs = base.clone();
+    edit_stroke(&mut ours, a, |s| s.align = StrokeAlign::Outside);
+    edit_stroke(&mut theirs, a, |s| s.align = StrokeAlign::Center);
+
+    let diff = diff3(&base, &ours, &theirs);
+    assert_eq!(diff.conflicts, vec![Conflict { node: a, groups: BTreeSet::from([Group::Stroke]), kind: ConflictKind::ModifyModify }]);
+
+    // Both sides making the same edit is not a conflict.
+    let mut same = base.clone();
+    edit_stroke(&mut same, a, |s| s.align = StrokeAlign::Outside);
+    assert!(diff3(&base, &ours, &same).conflicts.is_empty());
+}
+
+/// Every property group whose value the node hash skips while it is at its default must still be seen once it
+/// leaves the default: a single edit from the default state has to surface as `Changed` for that group.
+#[test]
+fn edits_leaving_the_default_state_of_each_hash_guarded_group_are_changes() {
+    type Edit = fn(&mut Node);
+    let edits: Vec<(Group, &str, Edit)> = vec![
+        (Group::Fills, "fills", |n| n.fills = vec![Paint::solid(Color::rgb(1, 2, 3))]),
+        (Group::Effects, "effects", |n| {
+            n.effects = vec![Effect::DropShadow {
+                color: Color::rgb(0, 0, 0),
+                offset: Vec2::new(0.0, 2.0),
+                radius: 4.0,
+                spread: 0.0,
+                visible: true,
+                show_behind: false,
+            }]
+        }),
+        (Group::StyleRefs, "style_refs", |n| {
+            n.style_refs.insert("fill".into(), "S:primary".into());
+        }),
+        (Group::Vector, "fill_geometry", |n| n.fill_geometry = Some(Vec::new())),
+        (Group::Component, "component.layout_cleared", |n| n.component.layout_cleared = true),
+        (Group::Component, "component.description", |n| n.component.description = "d".into()),
+        (Group::Prototype, "prototype.overflow", |n| n.prototype.overflow = Overflow::Both),
+        (Group::Variables, "variables.modes", |n| {
+            n.variables.modes.insert("c".into(), "m".into());
+        }),
+        (Group::ExportSettings, "export_settings", |n| {
+            n.export_settings = vec![ExportPreset { format: ExportFileFormat::Png, constraint: ExportConstraint::Scale(2.0), suffix: "@2x".into() }]
+        }),
+        (Group::Dev, "dev.status", |n| n.dev.status = Some(DevStatus::ReadyForDev)),
+        (Group::PluginData, "plugin_data", |n| {
+            n.plugin_data.insert("k".into(), "v".into());
+        }),
+        (Group::Other, "hyperlink", |n| n.hyperlink = Some("https://example.com".into())),
+        (Group::Other, "fig_metadata", |n| {
+            n.fig_metadata.insert("k".into(), "v".into());
+        }),
+        (Group::Other, "source_id", |n| n.source_id = Some("1:2".into())),
+        (Group::Other, "detached_symbol_id", |n| n.detached_symbol_id = Some("1:2".into())),
+        (Group::Other, "slide", |n| n.slide = Some(SlideProps { notes: "n".into() })),
+    ];
+    let (base, _page, _f, _g, a, _b, _c) = base_fixture_with_frame_and_children();
+    for (group, what, edit) in edits {
+        let mut ours = base.clone();
+        edit(ours.get_mut(a).unwrap());
+        let diff = diff3(&base, &ours, &base);
+        let expected = NodeChange::Changed { groups: BTreeSet::from([group]) };
+        assert_eq!(diff.ours.nodes.get(&a), Some(&expected), "{what}: edit from the default state was hidden by the hash short-circuit");
+    }
+}
+
 /// Synthetic large fixture (T10.2 §10 & §11): `total_scene_nodes` rectangles spread over 100 frames, with 1%
 /// deterministic edits per side (every 100th leaf on `ours`, offset by 50 on `theirs`).
 /// Returns `(base, ours, theirs, edited_ours, edited_theirs)`.
@@ -375,10 +474,11 @@ fn large_fixture_within_budget() {
     assert_eq!(diff.theirs.nodes.len(), edited_theirs);
     assert!(diff.conflicts.is_empty());
     eprintln!("large_fixture diff3 elapsed_ms={} scanned={}", diff.stats.elapsed_ms, diff.stats.scanned);
-    // The 1.5 s budget binds optimized builds. Unoptimized debug builds and shared CI VMs run an order of
-    // magnitude slower, so they get the same 15x scale as the other perf tests in this repo
-    // (`designos-gpu/tests/large_file_perf.rs`); `diff3_scales_linearly_with_node_count` guards the algorithmic cost there.
-    let budget_scale = if cfg!(debug_assertions) || std::env::var("CI").is_ok() { 15 } else { 1 };
+    // The 1.5 s spec budget binds optimized builds and is enforced there (`cargo test --release`). Unoptimized
+    // debug builds run an order of magnitude slower, so only they get the 15x scale used by the other perf tests
+    // in this repo (`designos-gpu/tests/large_file_perf.rs`); `diff3_scales_linearly_with_node_count` guards the
+    // algorithmic cost there. A `CI` environment variable never relaxes the budget.
+    let budget_scale = if cfg!(debug_assertions) { 15 } else { 1 };
     let budget_ms = 1_500 * budget_scale;
     assert!(diff.stats.elapsed_ms <= budget_ms, "112,474-node diff3 took {} ms (budget <= {budget_ms} ms)", diff.stats.elapsed_ms);
 }
