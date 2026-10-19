@@ -741,6 +741,8 @@ impl ServerHandler for DesignOSServer {
     }
     async fn call_tool(&self, request: CallToolRequestParams, _: RequestContext<RoleServer>) -> Result<CallToolResponse, ErrorData> {
         let tool_name = request.name.to_string();
+        let is_design_context = matches!(tool_name.as_str(), "designos_get_design_context" | "get_design_context");
+        let is_metadata = matches!(tool_name.as_str(), "designos_get_metadata" | "get_metadata");
         let result = self
             .session
             .lock()
@@ -748,13 +750,6 @@ impl ServerHandler for DesignOSServer {
             .and_then(|mut session| session.call(&request.name, Value::Object(request.arguments.unwrap_or_default())));
         Ok(match result {
             Ok(mut value) => {
-                if matches!(tool_name.as_str(), "designos_get_metadata" | "get_metadata") {
-                    if let Some(xml) = value.get("xml").and_then(Value::as_str).map(str::to_owned) {
-                        let mut res = CallToolResult::structured(value);
-                        res.content = vec![ContentBlock::text(xml)];
-                        return Ok(res.into());
-                    }
-                }
                 let image_blocks: Vec<ContentBlock> = value
                     .get("content")
                     .and_then(Value::as_array)
@@ -776,9 +771,18 @@ impl ServerHandler for DesignOSServer {
                         obj.remove("content");
                     }
                 }
+                let xml_text = if is_metadata { value.get("xml").and_then(Value::as_str).map(str::to_owned) } else { None };
                 let mut res = CallToolResult::structured(value);
                 if !image_blocks.is_empty() {
-                    res.content = image_blocks;
+                    if is_design_context {
+                        let mut blocks = image_blocks;
+                        blocks.extend(res.content);
+                        res.content = blocks;
+                    } else {
+                        res.content = image_blocks;
+                    }
+                } else if let Some(xml) = xml_text {
+                    res.content = vec![ContentBlock::text(xml)];
                 }
                 res
             }
