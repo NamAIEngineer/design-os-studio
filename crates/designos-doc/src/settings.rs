@@ -165,7 +165,7 @@ mod tests {
         h.redo(&mut d).unwrap();
         assert_eq!(d.check_designs, next);
 
-        // Deleting the node removes its keys on save (garbage collection).
+        // Deleting the node drops its keys when the saved file is read back (garbage collection).
         d.remove(id).unwrap();
         let after_delete_json = d.to_json().unwrap();
         let after_delete = Document::from_json(&after_delete_json).unwrap();

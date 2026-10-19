@@ -714,11 +714,9 @@ impl Document {
 
     /// Like [`Document::to_json`], also returning how many non-finite numbers were replaced.
     pub fn to_json_counted(&self) -> serde_json::Result<(String, usize)> {
-        if self.check_designs.ignored.iter().any(|k| !self.nodes.contains_key(&k.node)) {
-            let mut pruned = self.clone();
-            pruned.check_designs.ignored.retain(|k| self.nodes.contains_key(&k.node));
-            return finite_json::to_string_finite(&pruned);
-        }
+        // Ignore keys of deleted layers are written as they are and dropped when the file is read
+        // back (`from_json_with_report`): pruning here would clone the whole document, images
+        // included, on every save after an ignored layer was deleted.
         finite_json::to_string_finite(self)
     }
 
