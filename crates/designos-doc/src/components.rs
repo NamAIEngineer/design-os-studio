@@ -1568,9 +1568,9 @@ struct SlotMigrationPlan {
     regions: Vec<SlotMigrationRegion>,
 }
 
-fn unique_slot_prop_name(doc: &Document, owner: NodeId, base: &str) -> String {
+fn unique_slot_prop_name(doc: &Document, comp: NodeId, base: &str) -> String {
     let base = if base.trim().is_empty() { "Slot" } else { base.trim() };
-    let taken: Vec<String> = doc.get(owner).map(|n| n.component.props.iter().map(|p| p.name.clone()).collect()).unwrap_or_default();
+    let taken: Vec<String> = prop_defs(doc, comp).into_iter().map(|p| p.name).collect();
     if !taken.contains(&base.to_string()) {
         return base.to_string();
     }
@@ -1585,7 +1585,8 @@ fn unique_slot_prop_name(doc: &Document, owner: NodeId, base: &str) -> String {
 }
 
 /// Classifies one region on its own: the main component it sits in, the owner of the property it is bound
-/// to (the component set unless the variant defines that property itself) and how it migrates.
+/// to (the component set unless the variant defines that property itself or the slot property is freshly
+/// invented for an unbound instance region) and how it migrates.
 fn classify_slot_region(doc: &Document, node: NodeId) -> Result<(NodeId, NodeId, MigrationMode), &'static str> {
     let Some(n) = doc.get(node) else {
         return Err("Selected layer was not found");
@@ -1615,6 +1616,7 @@ fn classify_slot_region(doc: &Document, node: NodeId) -> Result<(NodeId, NodeId,
     let set = doc.get(comp).and_then(|c| c.parent).filter(|p| matches!(doc.get(*p).map(|x| &x.kind), Some(NodeKind::ComponentSet(_))));
     let name_owner = set.unwrap_or(comp);
 
+    let mut invented_prop = false;
     let mode = match &n.kind {
         NodeKind::Instance { .. } => {
             let main_prop = n.component.bindings.get(&OverrideField::MainComponent).cloned();
@@ -1624,7 +1626,8 @@ fn classify_slot_region(doc: &Document, node: NodeId) -> Result<(NodeId, NodeId,
             } else if let Some(p) = vis_prop.clone() {
                 p
             } else {
-                unique_slot_prop_name(doc, name_owner, &n.name)
+                invented_prop = true;
+                unique_slot_prop_name(doc, comp, &n.name)
             };
             MigrationMode::InstanceLayer { prop_name, vis_prop }
         }
@@ -1654,7 +1657,7 @@ fn classify_slot_region(doc: &Document, node: NodeId) -> Result<(NodeId, NodeId,
         _ => return Err("Unsupported shape: select an instance-swap layer or a container with a boolean property"),
     };
     let defined_on_variant = doc.get(comp).is_some_and(|c| c.component.props.iter().any(|p| p.name == mode.prop_name()));
-    let owner = if defined_on_variant { comp } else { name_owner };
+    let owner = if defined_on_variant || invented_prop { comp } else { name_owner };
     Ok((comp, owner, mode))
 }
 
@@ -3240,6 +3243,98 @@ mod tests {
         assert!(f.d.get(set).unwrap().component.props.iter().all(|p| p.name != "Icon"), "no duplicate slot property lands on the set");
         assert!(same_ignoring_tree(f.d.get(large_icon).unwrap(), &large_before));
         assert_eq!(f.d.get(inst_large).unwrap().component.values, inst_large_before.component.values);
+    }
+
+    fn set_with_unbound_icon_in_each_variant() -> SetFx {
+        let mut f = fx();
+        let alt = f.d.alloc_id();
+        let mut alt_node = Node::frame(alt, Rect::new(0.0, 200.0, 200.0, 48.0));
+        alt_node.name = "Alt icon".into();
+        let alt = f.d.insert(f.page, alt_node).unwrap();
+        let c = create_component(&mut f.d, alt);
+        apply(&mut f.d, c);
+
+        let mut variants = Vec::new();
+        for (name, y) in [("Size=Small", 500.0), ("Size=Large", 700.0)] {
+            let id = f.d.alloc_id();
+            let mut v = Node::frame(id, Rect::new(0.0, y, 300.0, 100.0));
+            v.name = name.into();
+            let v = f.d.insert(f.page, v).unwrap();
+            let c = create_component(&mut f.d, v);
+            apply(&mut f.d, c);
+            variants.push(v);
+        }
+        let (small, large) = (variants[0], variants[1]);
+        let c = create_instance(&mut f.d, f.comp, small, Vec2::new(12.0, 16.0));
+        apply(&mut f.d, c);
+        let small_icon = *f.d.get(small).unwrap().children.last().unwrap();
+        let c = create_instance(&mut f.d, f.comp, large, Vec2::new(20.0, 24.0));
+        apply(&mut f.d, c);
+        let large_icon = *f.d.get(large).unwrap().children.last().unwrap();
+
+        let c = combine_as_variants(&mut f.d, &[small, large]);
+        apply(&mut f.d, c);
+        let set = f.d.get(small).unwrap().parent.unwrap();
+
+        let c = create_instance(&mut f.d, small, f.page, Vec2::new(900.0, 0.0));
+        apply(&mut f.d, c);
+        let inst_small = *f.d.get(f.page).unwrap().children.last().unwrap();
+
+        let c = create_instance(&mut f.d, large, f.page, Vec2::new(900.0, 200.0));
+        apply(&mut f.d, c);
+        let inst_large = *f.d.get(f.page).unwrap().children.last().unwrap();
+
+        SetFx { f, alt, set, small_icon, large_icon, inst_small, inst_large }
+    }
+
+    #[test]
+    fn unbound_region_in_one_variant_creates_no_set_level_slot() {
+        let SetFx { mut f, set, small_icon, large_icon, inst_large, .. } = set_with_unbound_icon_in_each_variant();
+        let small = f.d.get(small_icon).unwrap().parent.unwrap();
+        let large_before = f.d.get(large_icon).unwrap().clone();
+        let inst_large_before = f.d.get(inst_large).unwrap().clone();
+
+        assert!(can_migrate_region_to_slot(&f.d, small_icon));
+        let cmd = migrate_region_to_slot(&mut f.d, small_icon).expect("unbound instance in a variant should migrate");
+        apply(&mut f.d, cmd);
+
+        assert!(
+            f.d.get(set).unwrap().component.props.iter().all(|p| p.kind != PropKind::Slot),
+            "no set-level slot property may be created when migrating an unbound region in one variant"
+        );
+        assert_eq!(f.d.get(small).unwrap().component.props.iter().filter(|p| p.kind == PropKind::Slot).count(), 1);
+        assert!(f.d.get(small_icon).unwrap().component.is_slot);
+        assert!(same_ignoring_tree(f.d.get(large_icon).unwrap(), &large_before));
+        assert_eq!(f.d.get(inst_large).unwrap().component.values, inst_large_before.component.values);
+        assert_eq!(f.d.get(inst_large).unwrap().children, inst_large_before.children);
+    }
+
+    #[test]
+    fn unbound_region_in_a_standalone_component_unchanged() {
+        let mut f = fx();
+        let id = f.d.alloc_id();
+        let card = f.d.insert(f.page, Node::frame(id, Rect::new(0.0, 500.0, 300.0, 100.0))).unwrap();
+        let c = create_component(&mut f.d, card);
+        apply(&mut f.d, c);
+        let c = create_instance(&mut f.d, f.comp, card, Vec2::new(12.0, 16.0));
+        apply(&mut f.d, c);
+        let region = *f.d.get(card).unwrap().children.last().unwrap();
+
+        let cmd = migrate_region_to_slot(&mut f.d, region).expect("unbound instance in standalone component should migrate");
+        apply(&mut f.d, cmd);
+
+        assert_eq!(f.d.get(card).unwrap().component.props.iter().filter(|p| p.kind == PropKind::Slot).count(), 1);
+        assert!(f.d.get(region).unwrap().component.is_slot);
+    }
+
+    #[test]
+    fn undo_restores_everything() {
+        let SetFx { mut f, small_icon, .. } = set_with_unbound_icon_in_each_variant();
+        let before_nodes = f.d.nodes.clone();
+        let cmd = migrate_region_to_slot(&mut f.d, small_icon).expect("unbound instance in a variant should migrate");
+        let inv = apply(&mut f.d, cmd);
+        apply(&mut f.d, inv);
+        assert!(f.d.nodes == before_nodes, "one undo restores every variant, prop, and instance");
     }
 
     /// `card` holds a frame "icon wrap" with one instance of `f.comp` bound to the instance-swap prop "Icon"
