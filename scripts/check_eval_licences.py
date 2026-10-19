@@ -32,6 +32,17 @@ REQUIRED_FIELDS = (
     "notes",
     "consumers",
 )
+# Optional fields: `pin_source` (URL that proves the pin, required with a pin) and `licence_text_file`
+# (repo-relative file holding the full licence text, required for every ship-* entry).
+# Licence ids accepted in the register: this SPDX subset (grow it when a new source needs another id),
+# the SPDX custom form `LicenseRef-<name>` for terms that have no SPDX id, or `NONE`.
+SPDX_LICENCES = {"MIT", "Apache-2.0", "CC-BY-4.0", "ODC-By-1.0", "OFL-1.1"}
+LICENCE_REF_RE = re.compile(r"^LicenseRef-[A-Za-z0-9.-]+$")
+# A pin is an immutable upstream revision: a 40-hex git commit or Hugging Face revision, or `gcs-<generation>`
+# for an object in a Google Cloud Storage bucket (its generation number never changes for that object version).
+PIN_RE = re.compile(r"^(?:[0-9a-f]{40}|gcs-\d+)$")
+# Text files that count as eval task data: scanned line by line for banned client references.
+TEXT_SUFFIXES = {".toml", ".json", ".jsonl", ".md", ".txt"}
 CONSUMER_RE = re.compile(r"^(?:E\d+-\d+|T\d+\.\d+|RD-\d+|#\d+)$")
 DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 TOML_FENCE_RE = re.compile(r"```toml\s*\n(.*?)\n```", re.DOTALL)
@@ -124,7 +135,19 @@ def extract_register(md_text: str) -> tuple[dict[str, Any], list[tuple[str, str,
     return parsed, table_rows
 
 
-def render_third_party_licenses(sources: list[dict[str, Any]]) -> str:
+def read_licence_text(root: pathlib.Path, src: dict[str, Any]) -> str | None:
+    """Full licence text of a `licence_text_file`, or None when it is unset, missing or empty."""
+    rel = str(src.get("licence_text_file", "")).strip()
+    if not rel:
+        return None
+    path = root / rel
+    if not path.is_file():
+        return None
+    text = path.read_text(encoding="utf-8").strip("\n")
+    return text or None
+
+
+def render_third_party_licenses(root: pathlib.Path, sources: list[dict[str, Any]]) -> str:
     ship_sources = [s for s in sources if str(s.get("use", "")).startswith("ship-")]
     lines = [
         "# Third-Party Licenses & Attributions",
@@ -142,12 +165,42 @@ def render_third_party_licenses(sources: list[dict[str, Any]]) -> str:
                 f"- **Distribution scope:** `{src['use']}`",
                 f"- **SPDX Licence:** `{src['licence']}`",
                 f"- **Upstream URL:** {src['url']}",
-                f"- **Pinned Revision:** `{src['pinned']}`",
+                f"- **Pinned Revision:** `{src['pinned']}` (pin source: {src.get('pin_source', '')})",
                 f"- **Attribution:** {src['attribution']}",
+                "",
+                "Licence text:",
+                "",
+                "~~~~text",
+                read_licence_text(root, src) or "(licence text file missing: see the licence_text_file finding)",
+                "~~~~",
                 "",
             ]
         )
     return "\n".join(lines)
+
+
+def _ban_hit(text: str, ban_regexes: list[tuple[str, re.Pattern[str]]]) -> str | None:
+    """First ban pattern matching `text` in any separator form (Windows paths are matched with both slashes)."""
+    unescaped = text.replace("\\\\", "\\")
+    norm = unescaped.replace("\\", "/")
+    for form in (text, unescaped, norm, norm.replace("/", "\\")):
+        for pat_str, pat in ban_regexes:
+            if pat.search(form):
+                return pat_str
+    return None
+
+
+def _is_generated_design_file(norm: str, search_dirs: list[pathlib.Path]) -> bool:
+    """A `.fig`/`.designos` file counts as generated (E15-24) only with a `gen-` name AND its profile sidecar."""
+    basename = norm.rsplit("/", 1)[-1]
+    if not basename.startswith("gen-"):
+        return False
+    stem = basename.rsplit(".", 1)[0]
+    for base in search_dirs:
+        candidate = base / norm
+        if candidate.is_file() and (candidate.parent / f"{stem}.profile.json").is_file():
+            return True
+    return False
 
 
 def _check_path_against_bans(
@@ -155,22 +208,22 @@ def _check_path_against_bans(
     rel_file: str,
     ban_regexes: list[tuple[str, re.Pattern[str]]],
     findings: list[str],
+    search_dirs: list[pathlib.Path],
+    where: str = "",
+    design_files: bool = True,
 ) -> None:
-    unescaped = candidate.replace("\\\\", "\\")
-    norm = unescaped.replace("\\", "/")
-    for pat_str, pat in ban_regexes:
-        if pat.search(candidate) or pat.search(unescaped) or pat.search(norm):
-            findings.append(
-                f"client-file-ban: {rel_file} references banned client/home pattern {pat_str!r} in {candidate!r}"
-            )
-            return
-    lower = norm.lower()
-    if lower.endswith(".fig") or lower.endswith(".designos"):
-        basename = norm.rsplit("/", 1)[-1]
-        if not basename.startswith("gen-"):
-            findings.append(
-                f"client-file-ban: {rel_file} references non-generated design file {candidate!r} (must use 'gen-' prefix)"
-            )
+    """Flag a banned client/home pattern in `candidate`; with `design_files`, also a non-generated design file."""
+    pat_str = _ban_hit(candidate, ban_regexes)
+    ref = f"{rel_file}{where}"
+    if pat_str is not None:
+        findings.append(f"client-file-ban: {ref} references banned client/home pattern '{pat_str}' in {candidate!r}")
+        return
+    norm = candidate.replace("\\\\", "\\").replace("\\", "/")
+    if design_files and norm.lower().endswith((".fig", ".designos")) and not _is_generated_design_file(norm, search_dirs):
+        findings.append(
+            f"client-file-ban: {ref} references design file {candidate!r} that is not a generated file "
+            "(needs a 'gen-' name and its '<name>.profile.json' sidecar beside it)"
+        )
 
 
 def check_repo(root: pathlib.Path, write_third_party: bool = False) -> tuple[int, list[str]]:
@@ -196,8 +249,8 @@ def check_repo(root: pathlib.Path, write_third_party: bool = False) -> tuple[int
     for pat_str in ban_cfg["patterns"]:
         try:
             raw_pat = str(pat_str)
-            # Treat hyphenated words (e.g. "pcp-free.md") as a single token for whole-token \b...\b patterns.
-            compiled_pat = re.sub(r"\\b(\w+)\\b", r"(?<![A-Za-z0-9_-])\1(?![A-Za-z0-9_-])", raw_pat)
+            # A token is bounded by non-alphanumeric characters (spec edge 3): `pcpx` is clean, `pcp-free.md` is not.
+            compiled_pat = re.sub(r"\\b(\w+)\\b", r"(?<![A-Za-z0-9])\1(?![A-Za-z0-9])", raw_pat)
             ban_regexes.append((raw_pat, re.compile(compiled_pat)))
         except re.error as exc:
             findings.append(f"schema: invalid [ban] regex {pat_str!r}: {exc}")
@@ -259,14 +312,34 @@ def check_repo(root: pathlib.Path, write_third_party: bool = False) -> tuple[int
             if not isinstance(c, str) or not CONSUMER_RE.match(c):
                 findings.append(f"consumer-exists: {sid} has invalid consumer task id {c!r}")
 
+        if not (licence in SPDX_LICENCES or licence == "NONE" or LICENCE_REF_RE.match(licence)):
+            findings.append(
+                f"schema: {sid} has licence {licence!r}; use an SPDX id ({', '.join(sorted(SPDX_LICENCES))}), "
+                "'LicenseRef-<name>' for terms without an SPDX id, or 'NONE'"
+            )
+
+        # A pin is an immutable upstream revision, never a label such as a tag or a year.
+        pin_source = str(src.get("pin_source", "")).strip()
+        if pinned and not PIN_RE.match(pinned):
+            findings.append(f"schema: {sid} pinned {pinned!r} is not an immutable revision (40-hex commit or gcs-<generation>)")
+        if pinned and not pin_source.startswith("https://"):
+            findings.append(f"schema: {sid} has a pin but no https pin_source URL that proves it")
+
+        # Rule 5: every ship-* entry carries the full licence text, rendered into THIRD_PARTY_LICENSES.md
+        if use_cls.startswith("ship-") and read_licence_text(root, src) is None:
+            findings.append(
+                f"schema: ship entry {sid} needs a non-empty licence_text_file that exists "
+                f"(got {str(src.get('licence_text_file', ''))!r})"
+            )
+
         # Edge case 4: approved entries require reviewer, reviewed_on (YYYY-MM-DD), pinned, and attribution
         if review == "approved":
             if not reviewer or not DATE_RE.match(reviewed_on):
                 findings.append(
                     f"schema: approved entry {sid} must have non-empty reviewer and YYYY-MM-DD reviewed_on"
                 )
-            if use_cls != "excluded" and (not pinned or not attribution):
-                findings.append(f"schema: approved entry {sid} must specify pinned revision and attribution")
+            if use_cls != "excluded" and (not PIN_RE.match(pinned) or not attribution):
+                findings.append(f"schema: approved entry {sid} must specify an immutable pinned revision and attribution")
 
     # Rule 1: human summary table matches TOML [[source]] entries
     if table_rows != toml_triples:
@@ -281,19 +354,39 @@ def check_repo(root: pathlib.Path, write_third_party: bool = False) -> tuple[int
             rel = path.relative_to(root).as_posix()
             if path.is_dir():
                 continue
-            _check_path_against_bans(rel, rel, ban_regexes, findings)
+            # Relative references resolve against the repo root, the referencing file, or the eval crate.
+            search_dirs = [root, path.parent, eval_dir]
+            _check_path_against_bans(rel, rel, ban_regexes, findings, search_dirs)
+            # Design-file references are policed in task data under suites/; harness sources name their own
+            # run files (start.designos, output.designos) and are not task files.
+            in_suites = rel.startswith("crates/designos-eval/suites/")
 
-            if path.suffix in {".toml", ".json", ".jsonl", ".md", ".rs", ".txt"}:
+            if path.suffix in TEXT_SUFFIXES | {".rs"}:
                 try:
                     content = path.read_text(encoding="utf-8")
                 except UnicodeDecodeError:
                     continue
 
-                # Check quoted strings and path assignments against client-file ban
-                for quoted in re.findall(r'\'([^\'\n]+)\'|"([^"\n]+)"', content):
-                    val = quoted[0] or quoted[1]
-                    if "/" in val or "\\" in val or val.lower().endswith((".fig", ".designos")) or "vsf" in val.lower() or "pcp" in val.lower() or "untitled ui" in val.lower():
-                        _check_path_against_bans(val, rel, ban_regexes, findings)
+                # Rust sources: string literals only, banned client/home patterns only
+                if path.suffix == ".rs":
+                    for quoted in re.findall(r'\'([^\'\n]+)\'|"([^"\n]+)"', content):
+                        val = quoted[0] or quoted[1]
+                        _check_path_against_bans(val, rel, ban_regexes, findings, search_dirs, design_files=False)
+
+                # Task and doc text: every line and every token, quoted or not
+                if path.suffix in TEXT_SUFFIXES:
+                    for lineno, line in enumerate(content.splitlines(), start=1):
+                        where = f":{lineno}"
+                        pat_str = _ban_hit(line, ban_regexes)
+                        if pat_str is not None:
+                            findings.append(
+                                f"client-file-ban: {rel}{where} references banned client/home pattern '{pat_str}' in {line.strip()!r}"
+                            )
+                            continue
+                        for token in re.findall(r"[^\s\"'=,\[\]()<>]+", line):
+                            _check_path_against_bans(
+                                token, rel, ban_regexes, findings, search_dirs, where, design_files=in_suites
+                            )
 
                 # Also check tasks.toml source references
                 if path.name == "tasks.toml" or "suites/" in rel and path.suffix == ".toml":
@@ -331,7 +424,7 @@ def check_repo(root: pathlib.Path, write_third_party: bool = False) -> tuple[int
                     )
 
     # Rule 7: THIRD_PARTY_LICENSES.md
-    expected_tp = render_third_party_licenses(sources)
+    expected_tp = render_third_party_licenses(root, sources)
     tp_path = root / "THIRD_PARTY_LICENSES.md"
     if write_third_party:
         tp_path.write_text(expected_tp, encoding="utf-8")
