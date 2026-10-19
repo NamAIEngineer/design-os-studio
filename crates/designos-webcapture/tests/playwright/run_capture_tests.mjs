@@ -250,7 +250,15 @@ defineCase("paint_index_dense_and_stacking_aware", async ({ context }) => {
   // Paint order: negative layer, in-flow, positioned auto, then positive contexts. The child of
   // the z-index:1 parent paints with its parent, after the later positioned uncle.
   assert.ok(z("behind") < z("flow-first"), "z-index:-1 paints below in-flow content");
+  assert.ok(z("flow-first") < z("opacity-ctx"), "in-flow opacity context follows earlier sibling");
+  assert.ok(z("opacity-ctx") < z("opacity-child"), "opacity context paints its child atomically inside it");
+  assert.ok(z("opacity-child") < z("flow-after-opacity"), "opacity sibling and its child stay below the following in-flow sibling");
+  assert.ok(z("flow-after-opacity") < z("transform-ctx"), "transform context follows earlier in-flow sibling");
+  assert.ok(z("transform-ctx") < z("flow-after-transform"), "translateZ(0) sibling stays below the following in-flow sibling");
+  assert.ok(z("flex-opacity") < z("flex-plain"), "flex item with opacity only stays below following in-flow flex sibling");
+  assert.ok(z("flex-plain") < z("flex-z0"), "flex item with explicit z-index:0 paints in layers.zero above in-flow siblings");
   assert.ok(z("flow-first") < z("uncle-auto"), "positioned auto paints above in-flow content");
+  assert.ok(z("flow-after-transform") < z("uncle-auto"), "positioned auto paints above in-flow stacking contexts");
   assert.ok(z("uncle-auto") < z("parent-z1"), "z-index:1 context paints above positioned auto");
   assert.ok(z("parent-z1") < z("child-in-z1"), "a child paints after its stacking-context parent");
   assert.ok(z("child-in-z1") < z("overlay"), "the huge z-index context paints last");

@@ -961,9 +961,9 @@
     const parentDisplay = parentCs ? parentCs.getPropertyValue("display") : "";
     const zApplies = positioned || /flex|grid/.test(parentDisplay);
     const zNum = parseInt(cs.getPropertyValue("z-index"), 10);
-    const hasZ = Number.isFinite(zNum);
+    const hasZ = zApplies && Number.isFinite(zNum);
     const context = isRoot || createsStackingContext(cs, position, zApplies, hasZ);
-    return { context, zi: zApplies && hasZ ? zNum : 0, positioned, embedded };
+    return { context, zi: hasZ ? zNum : 0, hasZ, positioned, embedded };
   }
 
   /**
@@ -982,7 +982,7 @@
         const meta = metaOf(child);
         if (meta.context) {
           const item = { node: child, context: true, zi: meta.zi, flow: null };
-          if (meta.embedded) flow.push(item);
+          if (meta.embedded || (!meta.positioned && !meta.hasZ)) flow.push(item);
           else if (meta.zi < 0) layers.neg.push(item);
           else if (meta.zi > 0) layers.pos.push(item);
           else layers.zero.push(item);
