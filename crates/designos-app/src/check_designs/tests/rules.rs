@@ -286,8 +286,9 @@ fn horizontal_and_vertical_spacing_rules_follow_stack_axis() {
     let report = f.report();
     let horiz: Vec<(&str, &str)> = report.of(Rule::HorizontalSpacing).map(|x| (x.node_name.as_str(), x.property.as_str())).collect();
     let vert: Vec<(&str, &str)> = report.of(Rule::VerticalSpacing).map(|x| (x.node_name.as_str(), x.property.as_str())).collect();
-    assert_eq!(horiz, vec![("HRow", "itemSpacing"), ("VCol", "counterAxisSpacing")]);
-    assert_eq!(vert, vec![("HRow", "counterAxisSpacing"), ("VCol", "itemSpacing")]);
+    assert_eq!(horiz, vec![("HRow", "itemSpacing")]);
+    // Spec 158 section 3.1: every `counterAxisSpacing` is a vertical spacing field.
+    assert_eq!(vert, vec![("HRow", "counterAxisSpacing"), ("VCol", "itemSpacing"), ("VCol", "counterAxisSpacing")]);
 }
 
 #[test]

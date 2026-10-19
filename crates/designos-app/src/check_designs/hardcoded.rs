@@ -642,13 +642,12 @@ fn check_quad(
     }
 }
 
+/// Spec 158 section 3.1: the gap of a horizontal stack is a horizontal spacing field, the gap of a
+/// vertical stack and every `counterAxisSpacing` (the row gap) are vertical ones.
 fn spacing_rule_for(n: &Node, key: &str) -> Rule {
     let dir = n.kind.frame_props().and_then(|fp| fp.auto_layout.as_ref()).map(|al| al.direction).unwrap_or(designos_doc::LayoutDirection::Horizontal);
     match (dir, key) {
-        (designos_doc::LayoutDirection::Vertical, "itemSpacing") => Rule::VerticalSpacing,
-        (designos_doc::LayoutDirection::Vertical, "counterAxisSpacing") => Rule::HorizontalSpacing,
-        (_, "itemSpacing") => Rule::HorizontalSpacing,
-        (_, "counterAxisSpacing") => Rule::VerticalSpacing,
+        (_, "counterAxisSpacing") | (designos_doc::LayoutDirection::Vertical, "itemSpacing") => Rule::VerticalSpacing,
         _ => Rule::HorizontalSpacing,
     }
 }
