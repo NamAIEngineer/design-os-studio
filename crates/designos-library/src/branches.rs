@@ -73,9 +73,29 @@ pub enum BranchError {
     },
     #[error("json: {0}")]
     Json(#[from] serde_json::Error),
+    #[error("{0}")]
+    Merge(#[from] designos_doc::MergeError),
 }
 
 pub type BranchResult<T> = std::result::Result<T, BranchError>;
+
+/// Outcome returned by [`Library::merge_branch`] (`T10.3` §3.5, §3.6).
+#[derive(Debug, Clone)]
+pub struct MergedBranchOutcome {
+    pub branch: BranchMeta,
+    pub before_version: crate::FileVersion,
+    pub after_version: crate::FileVersion,
+    pub report: designos_doc::MergeReport,
+}
+
+/// Outcome returned by [`Library::update_branch_from_main`] (`T10.3` §3.6).
+#[derive(Debug, Clone)]
+pub struct UpdatedBranchOutcome {
+    pub branch: BranchMeta,
+    pub before_branch_version: crate::FileVersion,
+    pub new_base_version: crate::FileVersion,
+    pub report: designos_doc::MergeReport,
+}
 
 impl From<BranchError> for LibraryError {
     fn from(err: BranchError) -> Self {
@@ -349,6 +369,118 @@ impl Library {
         let manifest_path = self.path("projects").join(&m.project.id).join("project.json");
         self.save_manifest(&m).map_err(|e| map_lib_err(e, &manifest_path))
     }
+
+    /// Merges `branch_id` into `main_doc` on `file_id` (`T10.3` §3.5, §3.6):
+    /// 1. Refuses if the branch is archived or already merged (`BranchError::BranchArchived`).
+    /// 2. Loads `base` (`branch.base_version`) and `branch_doc` (`load_branch`).
+    /// 3. Computes `diff3(&base, main_doc, &branch_doc)` and `merge(&base, main_doc, &branch_doc, &diff, resolution)`
+    ///    (validating zero unresolved items and zero dangling references before mutating anything).
+    /// 4. Saves an auto version on main labelled `Before merge of <branch.name>`.
+    /// 5. Executes `plan.command` on `(main_doc, history)` as a single `Command::Batch` undo step.
+    /// 6. Saves the merged `main_doc` to disk (`save_file`) and saves an auto version on main
+    ///    labelled `After merge of <branch.name>`.
+    /// 7. Marks the branch `BranchStatus::Merged { into_version: after_version.n }`.
+    pub fn merge_branch(
+        &self,
+        file_id: &str,
+        branch_id: &str,
+        main_doc: &mut Document,
+        history: &mut designos_doc::History,
+        resolution: &designos_doc::Resolution,
+    ) -> BranchResult<MergedBranchOutcome> {
+        validate_library_file_id(file_id)?;
+        let branch_meta = {
+            let (m, i) = self.find_file(file_id).map_err(|e| map_lib_err(e, self.root()))?;
+            let b = m.files[i].branches.iter().find(|b| b.id == branch_id).ok_or_else(|| BranchError::NotFound(format!("branch {branch_id} of {file_id}")))?;
+            if b.status.is_read_only() {
+                return Err(BranchError::BranchArchived(b.name.clone()));
+            }
+            b.clone()
+        };
+
+        let base = self.load_version(file_id, branch_meta.base_version).map_err(|e| map_lib_err(e, &self.path("versions").join(file_id)))?;
+        let branch_doc = self.load_branch(file_id, branch_id)?;
+
+        let diff = designos_doc::diff3(&base, main_doc, &branch_doc);
+        let plan = designos_doc::merge(&base, main_doc, &branch_doc, &diff, resolution)?;
+
+        let before_label = format!("Before merge of {}", branch_meta.name);
+        let before_version =
+            self.save_version_described(file_id, main_doc, Some(before_label), None, true).map_err(|e| map_lib_err(e, &self.path("versions").join(file_id)))?;
+
+        history.exec(main_doc, plan.command).map_err(|e| BranchError::Invalid(e.to_string()))?;
+
+        self.save_file(file_id, main_doc).map_err(|e| map_lib_err(e, self.root()))?;
+
+        let after_label = format!("After merge of {}", branch_meta.name);
+        let after_version =
+            self.save_version_described(file_id, main_doc, Some(after_label), None, true).map_err(|e| map_lib_err(e, &self.path("versions").join(file_id)))?;
+
+        let merged_meta = self.mark_branch_merged(file_id, branch_id, after_version.n)?;
+
+        Ok(MergedBranchOutcome { branch: merged_meta, before_version, after_version, report: plan.report })
+    }
+
+    /// Updates `branch_id` with changes from `main_doc` (`T10.3` §3.6):
+    /// 1. Runs the 3-way merge with `branch_doc` as "ours" and `main_doc` as "theirs".
+    /// 2. Saves a `Before update from main` auto version on the branch.
+    /// 3. Executes the merge batch command on `(branch_doc, branch_history)` and saves the branch working copy.
+    /// 4. Saves a new `Branch point: <branch.name>` version on main and advances `branch.base_version`
+    ///    so subsequent merges use the new base.
+    pub fn update_branch_from_main(
+        &self,
+        file_id: &str,
+        branch_id: &str,
+        main_doc: &Document,
+        branch_doc: &mut Document,
+        branch_history: &mut designos_doc::History,
+        resolution: &designos_doc::Resolution,
+    ) -> BranchResult<UpdatedBranchOutcome> {
+        validate_library_file_id(file_id)?;
+        let branch_meta = {
+            let (m, i) = self.find_file(file_id).map_err(|e| map_lib_err(e, self.root()))?;
+            let b = m.files[i].branches.iter().find(|b| b.id == branch_id).ok_or_else(|| BranchError::NotFound(format!("branch {branch_id} of {file_id}")))?;
+            if b.status.is_read_only() {
+                return Err(BranchError::BranchArchived(b.name.clone()));
+            }
+            b.clone()
+        };
+
+        let base = self.load_version(file_id, branch_meta.base_version).map_err(|e| map_lib_err(e, &self.path("versions").join(file_id)))?;
+
+        let diff = designos_doc::diff3(&base, branch_doc, main_doc);
+        let plan = designos_doc::merge(&base, branch_doc, main_doc, &diff, resolution)?;
+
+        let before_branch_version = self
+            .save_branch_version(file_id, branch_id, branch_doc, Some("Before update from main".to_string()), true)
+            .map_err(|e| map_lib_err(e, &self.path("versions").join(format!("{file_id}~{branch_id}"))))?;
+
+        branch_history.exec(branch_doc, plan.command).map_err(|e| BranchError::Invalid(e.to_string()))?;
+
+        self.save_branch(file_id, branch_id, branch_doc)?;
+
+        let new_base_label = format!("Branch point: {}", branch_meta.name);
+        let new_base_version = self
+            .save_version_described(file_id, main_doc, Some(new_base_label), None, false)
+            .map_err(|e| map_lib_err(e, &self.path("versions").join(file_id)))?;
+
+        let updated_meta = {
+            let _guard = write_lock();
+            let (mut m, i) = self.find_file(file_id).map_err(|e| map_lib_err(e, self.root()))?;
+            let b =
+                m.files[i].branches.iter_mut().find(|b| b.id == branch_id).ok_or_else(|| BranchError::NotFound(format!("branch {branch_id} of {file_id}")))?;
+            let now = now_ms();
+            b.base_version = new_base_version.n;
+            b.modified = now;
+            let out = b.clone();
+            m.project.modified = now;
+            let manifest_path = self.path("projects").join(&m.project.id).join("project.json");
+            self.save_manifest(&m).map_err(|e| map_lib_err(e, &manifest_path))?;
+            out
+        };
+
+        Ok(UpdatedBranchOutcome { branch: updated_meta, before_branch_version, new_base_version, report: plan.report })
+    }
 }
 
 #[cfg(test)]
@@ -548,5 +680,104 @@ mod tests {
         lib.restore_file(&file.id).unwrap();
         assert!(lib.branch_path(&file.id, &b1.id).exists());
         assert_eq!(lib.list_branches(&file.id).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn versions_before_after_and_one_undo() {
+        let tmp = Tmp::new();
+        let lib = Library::open(&tmp.0).unwrap();
+        let proj = lib.create_project("Product").unwrap();
+        let mut main_doc = sample_doc();
+        let file = lib.create_file(&proj.id, None, "App", &main_doc).unwrap();
+        let branch = lib.create_branch(&file.id, &main_doc, "header-redesign", "Alice").unwrap();
+
+        // Main adds a layer; branch adds a colliding layer with the same raw NodeId.
+        let page = main_doc.pages[0];
+        let mut branch_doc = lib.load_branch(&file.id, &branch.id).unwrap();
+
+        let m_id = main_doc.alloc_id();
+        let mut m_rect = Node::rectangle(m_id, Rect::new(200.0, 20.0, 50.0, 50.0));
+        m_rect.name = "Main Card".into();
+        main_doc.insert(page, m_rect).unwrap();
+        lib.save_file(&file.id, &main_doc).unwrap();
+
+        let b_id = branch_doc.alloc_id();
+        assert_eq!(m_id, b_id, "both sides allocate the same raw NodeId after branch point");
+        let mut b_rect = Node::rectangle(b_id, Rect::new(300.0, 40.0, 80.0, 80.0));
+        b_rect.name = "Branch Hero".into();
+        branch_doc.insert(page, b_rect).unwrap();
+        lib.save_branch(&file.id, &branch.id, &branch_doc).unwrap();
+
+        let pre_merge_snapshot = main_doc.clone();
+        let mut history = designos_doc::History::default();
+        let resolution = designos_doc::Resolution::default();
+
+        let outcome = lib.merge_branch(&file.id, &branch.id, &mut main_doc, &mut history, &resolution).unwrap();
+
+        assert_eq!(outcome.before_version.label.as_deref(), Some("Before merge of header-redesign"));
+        assert!(outcome.before_version.auto);
+        assert_eq!(outcome.after_version.label.as_deref(), Some("After merge of header-redesign"));
+        assert!(outcome.after_version.auto);
+        assert!(outcome.after_version.n > outcome.before_version.n);
+
+        // Verify both versions exist in main's version index and match pre/post merge snapshots.
+        let before_loaded = lib.load_version(&file.id, outcome.before_version.n).unwrap();
+        assert_eq!(before_loaded.nodes.len(), pre_merge_snapshot.nodes.len());
+        let after_loaded = lib.load_version(&file.id, outcome.after_version.n).unwrap();
+        assert_eq!(after_loaded.nodes.len(), main_doc.nodes.len());
+        assert_eq!(main_doc.nodes.len(), pre_merge_snapshot.nodes.len() + 1);
+        assert!(designos_doc::validate_merged_references(&main_doc).is_empty());
+
+        // Single undo reverts the entire merge batch in one step.
+        assert!(history.can_undo());
+        assert!(history.undo(&mut main_doc).unwrap());
+        assert!(!history.can_undo(), "entire merge must be a single undo step");
+        assert_eq!(main_doc.nodes, pre_merge_snapshot.nodes);
+    }
+
+    #[test]
+    fn branch_archived_after_merge() {
+        let tmp = Tmp::new();
+        let lib = Library::open(&tmp.0).unwrap();
+        let proj = lib.create_project("Product").unwrap();
+        let mut main_doc = sample_doc();
+        let file = lib.create_file(&proj.id, None, "App", &main_doc).unwrap();
+        let branch = lib.create_branch(&file.id, &main_doc, "token-pass", "Bob").unwrap();
+
+        let page = main_doc.pages[0];
+        // First exercise update_branch_from_main when main advances.
+        let m_id = main_doc.alloc_id();
+        main_doc.insert(page, Node::rectangle(m_id, Rect::new(10.0, 120.0, 40.0, 40.0))).unwrap();
+        lib.save_file(&file.id, &main_doc).unwrap();
+
+        let mut branch_doc = lib.load_branch(&file.id, &branch.id).unwrap();
+        let mut branch_history = designos_doc::History::default();
+        let upd =
+            lib.update_branch_from_main(&file.id, &branch.id, &main_doc, &mut branch_doc, &mut branch_history, &designos_doc::Resolution::default()).unwrap();
+        assert_eq!(upd.before_branch_version.label.as_deref(), Some("Before update from main"));
+        assert_eq!(upd.branch.base_version, upd.new_base_version.n);
+        assert!(branch_doc.nodes.contains_key(&m_id));
+
+        // Now add a layer on the branch and merge into main.
+        let b_id = branch_doc.alloc_id();
+        branch_doc.insert(page, Node::rectangle(b_id, Rect::new(80.0, 120.0, 40.0, 40.0))).unwrap();
+        lib.save_branch(&file.id, &branch.id, &branch_doc).unwrap();
+
+        let mut history = designos_doc::History::default();
+        let outcome = lib.merge_branch(&file.id, &branch.id, &mut main_doc, &mut history, &designos_doc::Resolution::default()).unwrap();
+
+        assert_eq!(outcome.branch.status, BranchStatus::Merged { into_version: outcome.after_version.n });
+        assert!(outcome.branch.status.is_read_only());
+
+        // Saving or re-merging an archived/merged branch is refused with BranchArchived.
+        let save_err = lib.save_branch(&file.id, &branch.id, &branch_doc).unwrap_err();
+        assert!(matches!(save_err, BranchError::BranchArchived(_)));
+
+        let remerge_err = lib.merge_branch(&file.id, &branch.id, &mut main_doc, &mut history, &designos_doc::Resolution::default()).unwrap_err();
+        assert!(matches!(remerge_err, BranchError::BranchArchived(_)));
+
+        // Restoring the merged branch re-activates it.
+        let restored = lib.restore_branch(&file.id, &branch.id).unwrap();
+        assert_eq!(restored.status, BranchStatus::Active);
     }
 }
