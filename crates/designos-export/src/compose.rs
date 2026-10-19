@@ -535,4 +535,17 @@ mod tests {
             }
         }
     }
+
+    #[test]
+    fn compose_grid_fill_child_exports_solved_height() {
+        for (track, height) in [(None, 20), (Some(GridTrack::Fixed(100.0)), 100)] {
+            for (d, grid, _) in [fixture::grid_fill_child(track), fixture::grid_stretch_child(track, true)] {
+                let out = compose_for(&d, grid);
+                assert!(out.contains(&format!("width = 30.dp, height = {height}.dp")), "{track:?}: {out}");
+                for banned in ["fillMax", "weight"] {
+                    assert!(!out.contains(banned), "{track:?} has {banned}: {out}");
+                }
+            }
+        }
+    }
 }

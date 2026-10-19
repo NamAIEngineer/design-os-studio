@@ -767,7 +767,7 @@ mod tests {
             fixed_span.layout_child.row_span = 2;
             d.insert(gid, fixed_span).unwrap();
 
-            // 2. Fill child skips width and height so the grid stretches it
+            // 2. Fill child skips width so the grid stretches it horizontally and exports solved height
             let c2 = d.alloc_id();
             let mut fill_child = Node::rectangle(c2, Rect::new(0.0, 0.0, 80.0, 40.0));
             fill_child.layout_child.horizontal = Sizing::Fill;
@@ -798,7 +798,7 @@ mod tests {
         assert!(fixed_css.contains("width: 80px;") && fixed_css.contains("height: 40px;"), "spanning Fixed child in grid must keep its size: {fixed_css}");
 
         let fill_css = css_for(&d, children[1]);
-        assert!(!fill_css.contains("width:") && !fill_css.contains("height:"), "Fill child in grid must skip width/height: {fill_css}");
+        assert!(!fill_css.contains("width:") && fill_css.contains("height: 40px;"), "Fill child in grid skips width and exports solved height: {fill_css}");
 
         let hug_css = css_for(&d, children[2]);
         assert!(!hug_css.contains("width:") && !hug_css.contains("height:"), "Hug child in grid must skip width/height: {hug_css}");
@@ -1097,5 +1097,42 @@ mod tests {
             assert!(css.contains("align-self: stretch;"), "{track:?}: {css}");
             assert!(!css.contains("flex"), "{track:?}: {css}");
         }
+    }
+
+    #[test]
+    fn css_grid_fill_child_exports_solved_height() {
+        use crate::codegen::fixture;
+        for (track, height) in [(None, "20px"), (Some(GridTrack::Fixed(100.0)), "100px")] {
+            let (d, _, rect) = fixture::grid_fill_child(track);
+            let css = css_for(&d, rect);
+            assert!(css.contains("width: 30px;") && css.contains(&format!("height: {height};")), "{track:?}: {css}");
+            assert!(!css.contains("align-self:"), "{track:?}: {css}");
+            assert!(!css.contains("flex"), "{track:?}: {css}");
+        }
+    }
+
+    #[test]
+    fn css_grid_imported_fill_plus_stretch() {
+        use crate::codegen::fixture;
+        for (track, height) in [(None, "20px"), (Some(GridTrack::Fixed(100.0)), "100px")] {
+            let (d, _, rect) = fixture::grid_stretch_child(track, true);
+            let css = css_for(&d, rect);
+            assert!(css.contains("width: 30px;") && css.contains(&format!("height: {height};")), "{track:?}: {css}");
+            assert!(css.contains("align-self: stretch;"), "{track:?}: {css}");
+            assert!(!css.contains("flex"), "{track:?}: {css}");
+        }
+    }
+
+    #[test]
+    fn grid_child_horizontal_fill_unchanged() {
+        use crate::codegen::fixture;
+        let al = AutoLayout { grid_columns: 2, primary_sizing: Sizing::Fixed, counter_sizing: Sizing::Fixed, ..Default::default() };
+        let (mut d, grid) = fixture::grid_frame(al, Vec2::new(400.0, 300.0));
+        let rect = fixture::add_rect(&mut d, grid, Vec2::new(30.0, 20.0));
+        d.get_mut(rect).unwrap().layout_child.horizontal = Sizing::Fill;
+        d.relayout_subtree(grid);
+        let css = css_for(&d, rect);
+        assert!(!css.contains("width:"), "horizontal Fill in grid omits width: {css}");
+        assert!(css.contains("height: 20px;"), "{css}");
     }
 }
