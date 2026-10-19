@@ -150,6 +150,17 @@ impl AgentCliPreset {
         }
     }
 
+    /// True when this tab preset is an agent CLI tab (`Claude`, `Codex`, `Antigravity`, `Grok`)
+    /// rather than an interactive `Shell` or `DesignOsHelp` tab (`#685`).
+    pub fn is_agent(self) -> bool {
+        matches!(self, AgentCliPreset::Claude | AgentCliPreset::Codex | AgentCliPreset::Antigravity | AgentCliPreset::Grok)
+    }
+
+    /// True when this preset reserves `Ctrl+Z` inside the terminal on Windows/Linux (`#685`).
+    pub fn uses_ctrl_z(self) -> bool {
+        crate::terminal_undo_chord::preset_ctrl_z_policy(self).1
+    }
+
     /// Interactive CLI launch command with dangerous-permission prompts skipped (`DIR-29`)
     /// and per-file `designos-mcp` + live current-page system prompt pre-wired.
     pub fn cli_launch_command(self) -> &'static str {
@@ -389,6 +400,9 @@ pub struct TerminalTab {
     pub spawned_at: std::time::Instant,
     /// Why the agent CLI exited right after it was opened; shown instead of the dead terminal.
     pub start_failure: Option<StartFailure>,
+    /// Raw bytes written via [`Self::write_bytes`] during tests (`#685`).
+    #[cfg(test)]
+    pub written_bytes: Vec<u8>,
 }
 
 impl TerminalTab {
@@ -536,6 +550,8 @@ impl TerminalTab {
             exited_notice_shown: false,
             spawned_at: std::time::Instant::now(),
             start_failure: None,
+            #[cfg(test)]
+            written_bytes: Vec::new(),
         })
     }
 
@@ -564,6 +580,8 @@ impl TerminalTab {
 
     /// Writes raw bytes directly to the PTY master stdin.
     pub fn write_bytes(&mut self, bytes: &[u8]) {
+        #[cfg(test)]
+        self.written_bytes.extend_from_slice(bytes);
         let _ = self.writer.write_all(bytes);
         let _ = self.writer.flush();
     }
@@ -679,6 +697,12 @@ pub struct TerminalState {
     pub search_query: String,
     /// Whether `Cmd+F` terminal search is case-sensitive (`Aa`).
     pub search_case_sensitive: bool,
+    /// Test-only override for `cfg!(target_os = "macos")` when routing terminal undo/redo chords (`#685`).
+    #[cfg(test)]
+    pub platform_is_mac_override: Option<bool>,
+    /// Test-only override for `preset.uses_ctrl_z()` when routing terminal undo/redo chords (`#685`).
+    #[cfg(test)]
+    pub cli_uses_ctrl_z_override: Option<bool>,
 }
 
 impl Default for TerminalState {
@@ -752,6 +776,10 @@ impl TerminalState {
             search_open: false,
             search_query: String::new(),
             search_case_sensitive: false,
+            #[cfg(test)]
+            platform_is_mac_override: None,
+            #[cfg(test)]
+            cli_uses_ctrl_z_override: None,
         }
     }
 
@@ -998,6 +1026,38 @@ impl TerminalState {
     /// so single-key canvas shortcuts (`V`, `F`, `R`, `T`, `Backspace`, etc.) must be suppressed.
     pub fn is_capturing_keyboard(&self, agent_panel_open: bool) -> bool {
         ((agent_panel_open && self.side_panel_pty_open) || self.dock_open) && self.viewport_focused
+    }
+
+    /// Returns the currently active terminal tab when one exists.
+    pub fn focused_tab(&self) -> Option<&TerminalTab> {
+        self.tabs.get(self.active_tab.min(self.tabs.len().saturating_sub(1)))
+    }
+
+    /// Returns `(is_mac, tab_is_agent, cli_uses_ctrl_z)` for [`crate::terminal_undo_chord::terminal_undo_chord`].
+    pub fn undo_chord_context(&self) -> (bool, bool, bool) {
+        let is_mac = {
+            #[cfg(test)]
+            {
+                self.platform_is_mac_override.unwrap_or(cfg!(target_os = "macos"))
+            }
+            #[cfg(not(test))]
+            {
+                cfg!(target_os = "macos")
+            }
+        };
+        let preset = self.focused_tab().map(|t| t.preset).unwrap_or(self.active_runtime);
+        let tab_is_agent = preset.is_agent();
+        let cli_uses_ctrl_z = {
+            #[cfg(test)]
+            {
+                self.cli_uses_ctrl_z_override.unwrap_or_else(|| preset.uses_ctrl_z())
+            }
+            #[cfg(not(test))]
+            {
+                preset.uses_ctrl_z()
+            }
+        };
+        (is_mac, tab_is_agent, cli_uses_ctrl_z)
     }
 
     /// Ensures at least one interactive Shell PTY tab is running when the terminal UI is first shown (`DIR-29`).
@@ -3734,6 +3794,9 @@ fn render_vt100_viewport(state: &mut TerminalState, ui: &mut Ui, viewport_rect: 
                                             copy_selection = true;
                                         }
                                     }
+                                    Key::Z if modifiers.ctrl && !modifiers.mac_cmd && !modifiers.shift => {
+                                        raw_bytes.push(0x1a);
+                                    }
                                     Key::Backspace => raw_bytes.push(0x15),
                                     Key::ArrowLeft => raw_bytes.push(0x01),
                                     Key::ArrowRight => raw_bytes.push(0x05),
@@ -3761,6 +3824,7 @@ fn render_vt100_viewport(state: &mut TerminalState, ui: &mut Ui, viewport_rect: 
                                     Key::W => raw_bytes.push(0x17),
                                     Key::A => raw_bytes.push(0x01),
                                     Key::E => raw_bytes.push(0x05),
+                                    Key::Z if !modifiers.shift => raw_bytes.push(0x1a),
                                     _ => {}
                                 }
                             } else {
@@ -4075,6 +4139,7 @@ fn render_vt100_viewport(state: &mut TerminalState, ui: &mut Ui, viewport_rect: 
         let mut child_ui = ui.new_child(egui::UiBuilder::new().max_rect(input_r));
         let _ = child_ui.add(
             TextEdit::singleline(&mut state.search_query)
+                .id(Id::new((surface_id, "term-search-input")))
                 .hint_text(RichText::new("Find...").color(theme::TEXT_TERTIARY).font(theme::font_caption()))
                 .font(theme::font_caption())
                 .text_color(Color32::WHITE)

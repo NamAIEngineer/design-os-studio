@@ -44,6 +44,7 @@ mod specs;
 mod styles;
 mod tabs;
 mod terminal;
+mod terminal_undo_chord;
 #[cfg(test)]
 mod test_timing;
 mod textedit;

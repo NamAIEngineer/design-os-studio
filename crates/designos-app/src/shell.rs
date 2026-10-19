@@ -487,6 +487,7 @@ impl Shell {
         let agent_rail_open = !self.app.ui.left_collapsed && matches!(self.app.ui.rail, Some(crate::app::RailItem::Agents | crate::app::RailItem::Tools));
         let capturing_terminal = self.app.terminal.is_capturing_keyboard(agent_rail_open);
         if capturing_terminal {
+            self.handle_terminal_undo_keys(ctx);
             return;
         }
         let typing = ctx.egui_wants_keyboard_input();
@@ -538,6 +539,37 @@ impl Shell {
                 }
                 _ => {}
             }
+        }
+    }
+
+    /// Routes `Cmd+Z` / `Shift+Cmd+Z` / `Cmd+Y` on macOS (or `Ctrl+Z` / `Ctrl+Shift+Z` / `Ctrl+Y`
+    /// on Windows and Linux for agent tabs whose CLI does not reserve `Ctrl+Z`) to document
+    /// Undo / Redo while the terminal viewport captures the keyboard (`#685`).
+    fn handle_terminal_undo_keys(&mut self, ctx: &Context) {
+        if ctx.egui_wants_keyboard_input() || self.app.vars.open || self.app.ui.menu.is_some() || self.app.ui.ctx_menu.is_some() {
+            return;
+        }
+        let (is_mac, tab_is_agent, cli_uses_ctrl_z) = self.app.terminal.undo_chord_context();
+        let mut actions = Vec::new();
+        ctx.input_mut(|i| {
+            i.events.retain(|ev| match ev {
+                Event::Key { key, pressed: true, modifiers, .. } => {
+                    match crate::terminal_undo_chord::terminal_undo_chord(*key, *modifiers, is_mac, tab_is_agent, cli_uses_ctrl_z) {
+                        Some(act) => {
+                            actions.push(act);
+                            false
+                        }
+                        None => true,
+                    }
+                }
+                _ => true,
+            });
+        });
+        if crate::live_patch_apply::user_edit_in_progress(&self.app) {
+            return;
+        }
+        for act in actions {
+            menus::run(&mut self.app, ctx, act);
         }
     }
 
