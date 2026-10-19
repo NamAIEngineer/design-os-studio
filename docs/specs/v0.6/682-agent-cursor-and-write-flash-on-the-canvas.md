@@ -4,7 +4,7 @@
 |---|---|
 | Issue | #682 (parent #585; owner ruling 2026-10-19: default cursor size Small, labelled with the agent name) |
 | Size | L |
-| Depends on | #592 (in-progress flag), #572 (agent identity per run); soft: #653 (session identity), #683 (tab status carries the tab id) |
+| Depends on | #592 (in-progress flag); soft: #572 (agent identity per run, v0.6.1), #653 (session identity), #683 (tab status carries the tab id) |
 | Unblocks | #695 (the chip takes the agent colour), #693 (names the agent) |
 | Touches | new `crates/designos-app/src/agent_presence.rs` (state, follow and envelope math), new `crates/designos-app/src/canvas/agent_overlay.rs` (painting), `crates/designos-doc/src/live_patch/replay.rs` (report of touched ids), `crates/designos-app/src/live_patch_apply.rs` (`apply_live_patches` `:81-110`), `crates/designos-app/src/canvas/mod.rs` (one call after `draw::overlays`, `:387`), `crates/designos-app/src/comments/settings.rs` (one choice value), `crates/designos-app/src/theme.rs` (agent colours, if ratified) |
 
@@ -113,10 +113,11 @@ Run: `cargo test -p designos-app agent_presence`, `cargo test -p designos-doc li
 
 ## 12. Dependencies and build order
 
-After #592 and #572 (part 1, E15-7 and RD-3). The `touched` field lands with whichever of #677, #682 or #695 is first. New files hold all logic; `canvas/mod.rs`, `live_patch_apply.rs` and `replay.rs` get call sites only. Serialize `replay.rs` with part 3's #677 and part 1's RD-3.
+After #592 (part 1, E15-7). In v0.6.0 this ships for one active agent per file; #572 (RD-3, v0.6.1) is a soft follow-up that adds `run_id` for distinct per-agent colours when multiple agents write concurrently. The `touched` field lands with whichever of #677, #682 or #695 is first. New files hold all logic; `canvas/mod.rs`, `live_patch_apply.rs` and `replay.rs` get call sites only. Serialize `replay.rs` with part 3's #677 and part 1's RD-3.
 
 ## 13. Owner rulings
 
+- Owner ruling 2026-10-19 (`#698`, ruling 3): keep `#682` (`G1`) in `v0.6.0` for a single agent; per-agent multi-session colours wait for `#572` in `v0.6.1`.
 - Owner ruling 2026-10-19: four agent colours, added as tokens `agent-1`…`agent-4`: amber, emerald, pink, sky. They avoid purple (Purple Ban), cyan (components) and orange (primary actions). A fifth concurrent agent reuses `agent-1` and is told apart by its label.
 
 - Default cursor size Small, labelled with the agent name (2026-10-19). The behaviour numbers in the issue are the owner's and are used verbatim.
