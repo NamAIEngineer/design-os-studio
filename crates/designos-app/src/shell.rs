@@ -1370,6 +1370,9 @@ pub fn execute_terminal_actions(app: &mut App, actions: Vec<crate::terminal::Ter
                     app.show_toast(e, true);
                 }
             }
+            crate::terminal::TerminalAction::ReviewAutoFix => {
+                app.open_check_designs_auto_fix();
+            }
         }
     }
 }

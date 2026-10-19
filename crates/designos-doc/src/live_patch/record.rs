@@ -253,6 +253,7 @@ fn command_name(cmd: &Command) -> &'static str {
         Command::SetGuides { .. } => "Editing guides",
         Command::SetPrototypeDevice { .. } => "Editing the prototype device",
         Command::SetCheckDesignsSettings(_) => "Editing check designs settings",
+        Command::SetAutoFix { .. } => "Editing auto-fix settings",
         _ => "This edit",
     }
 }

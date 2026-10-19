@@ -23,6 +23,41 @@ use std::collections::BTreeMap;
 /// Format version written in every [`LivePatch`].
 pub const LIVE_PATCH_VERSION: u32 = 1;
 
+/// One row of an auto-fix diff report attached to a [`LivePatch`].
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct FixRow {
+    #[serde(alias = "node_id")]
+    pub node: NodeId,
+    pub node_name: String,
+    pub property: String,
+    pub before: Value,
+    pub after: Value,
+    pub rule: String,
+}
+
+/// Converts either `Option<String>`, `String`, or `&str` into an optional patch label.
+pub trait IntoPatchLabel {
+    fn into_patch_label(self) -> Option<String>;
+}
+
+impl IntoPatchLabel for Option<String> {
+    fn into_patch_label(self) -> Option<String> {
+        self
+    }
+}
+
+impl IntoPatchLabel for String {
+    fn into_patch_label(self) -> Option<String> {
+        Some(self)
+    }
+}
+
+impl IntoPatchLabel for &str {
+    fn into_patch_label(self) -> Option<String> {
+        Some(self.to_string())
+    }
+}
+
 /// The edits of one agent tool call: one line of the session's `doc-patch.jsonl`.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct LivePatch {
@@ -32,15 +67,19 @@ pub struct LivePatch {
     /// base: after the agent reloads a newer canvas it sees the editor's own ids.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base: Option<u64>,
-    /// Optional undo-group label shown in Studio's History panel (e.g. `Agent: <run>`).
+    /// Optional undo-group label shown in Studio's History panel (e.g. `Agent: <run>` or `Auto-fix`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
+    #[serde(default)]
     pub ops: Vec<LiveOp>,
+    /// Structured diff rows when this patch was produced by the post-apply auto-fix pass.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_fix_report: Option<Vec<FixRow>>,
 }
 
 impl LivePatch {
     pub fn new(ops: Vec<LiveOp>) -> Self {
-        Self { v: LIVE_PATCH_VERSION, base: None, label: None, ops }
+        Self { v: LIVE_PATCH_VERSION, base: None, label: None, ops, auto_fix_report: None }
     }
 
     pub fn with_base(mut self, base: Option<u64>) -> Self {
@@ -48,8 +87,13 @@ impl LivePatch {
         self
     }
 
-    pub fn with_label(mut self, label: Option<String>) -> Self {
-        self.label = label;
+    pub fn with_label(mut self, label: impl IntoPatchLabel) -> Self {
+        self.label = label.into_patch_label();
+        self
+    }
+
+    pub fn with_auto_fix_report(mut self, rows: Vec<FixRow>) -> Self {
+        self.auto_fix_report = Some(rows);
         self
     }
 }
