@@ -146,7 +146,7 @@ test for the card.
 |---|---|
 | `skip_mode_launch_commands_unchanged` | the four strings equal today's (`cli_launch_command`) |
 | `ask_mode_drops_each_skip_flag` | no `--dangerously-skip-permissions`, no `--dangerously-bypass-approvals-and-sandbox`, no `--always-approve` in the four strings; flags checked against the captured `--help` sets |
-| `ask_mode_session_settings_have_the_permission_request_hook_with_a_timeout` | `hooks.json` has the `PermissionRequest` entry with `timeout` |
+| `ask_mode_session_settings_have_the_permission_request_hook_with_a_timeout` | `hooks.json` has the `PermissionRequest` entry with `timeout` and carries no `permissions.allow` list before the live check |
 | `ask_mode_pre_allows_designos_tools` (gated on live check) | once the live run shows the rule works: `hooks.json` has `permissions.allow == ["mcp__designos__*"]` |
 | `hook_script_allow_prints_the_documented_decision` | run the script with a PermissionRequest JSON on stdin, write `allow`: stdout equals the documented JSON |
 | `hook_script_deny_carries_a_message` | `deny`: `behavior: "deny"` and `message` |
