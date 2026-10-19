@@ -99,11 +99,16 @@ pub(crate) fn snake(s: &str) -> String {
 }
 
 /// Name of the view/component a node becomes: the component for instances (the set for
-/// variants), else the node's own name.
+/// variants), the set for variant components, else the node's own name.
 pub(crate) fn view_name(doc: &Document, n: &Node) -> String {
     if let Some(c) = instance_component(n).and_then(|c| doc.get(c)) {
         let set = c.parent.and_then(|p| doc.get(p)).filter(|p| matches!(p.kind, NodeKind::ComponentSet(_)));
         return pascal(&set.unwrap_or(c).name);
+    }
+    if matches!(n.kind, NodeKind::Component(_)) {
+        if let Some(set) = n.parent.and_then(|p| doc.get(p)).filter(|p| matches!(p.kind, NodeKind::ComponentSet(_))) {
+            return pascal(&set.name);
+        }
     }
     pascal(&n.name)
 }
@@ -291,14 +296,78 @@ pub(crate) enum PropLit {
     Instance(String),
 }
 
+/// Property definitions of `comp` in declaration order (for a component set or one of its
+/// variants, the union by cleaned name of the set's own properties and its variants' properties).
+pub(crate) fn ordered_prop_defs(doc: &Document, comp: NodeId) -> Vec<ComponentPropDef> {
+    let Some(n) = doc.get(comp) else { return Vec::new() };
+    let set = if matches!(n.kind, NodeKind::ComponentSet(_)) {
+        Some(n)
+    } else {
+        n.parent.and_then(|p| doc.get(p)).filter(|p| matches!(p.kind, NodeKind::ComponentSet(_)))
+    };
+    let Some(set) = set else {
+        return n.component.props.clone();
+    };
+    let clean = |s: &str| camel(s.split('#').next().unwrap_or(s).trim());
+    let mut out = set.component.props.clone();
+    for cid in &set.children {
+        let Some(c) = doc.get(*cid).filter(|c| matches!(c.kind, NodeKind::Component(_))) else { continue };
+        for d in &c.component.props {
+            let k = clean(&d.name);
+            if !k.is_empty() && !out.iter().any(|o| clean(&o.name) == k) {
+                out.push(d.clone());
+            }
+        }
+    }
+    out
+}
+
+/// Component properties of an instance worth passing as arguments in `lang`: values that differ
+/// from the default, plus variant selections, renamed through `prop_ident`.
+pub(crate) fn instance_args_for(doc: &Document, n: &Node, lang: crate::slots::Lang) -> Vec<(String, PropLit)> {
+    let Some(comp) = instance_component(n) else { return Vec::new() };
+    let mut out: Vec<(String, PropLit)> = Vec::new();
+    let mut taken: Vec<String> = Vec::new();
+    for def in ordered_prop_defs(doc, comp) {
+        if matches!(def.kind, PropKind::Slot) {
+            continue;
+        }
+        let raw = camel(def.name.split('#').next().unwrap_or(&def.name).trim());
+        if raw.is_empty() {
+            continue;
+        }
+        let name = crate::slots::prop_ident(&raw, lang, &mut taken);
+        let value = prop_value(doc, n.id, &def);
+        let lit = match (&def.kind, &value) {
+            (PropKind::Variant { .. }, PropValue::Variant(v)) => PropLit::Text(v.clone()),
+            _ if value == def.default => continue,
+            (_, PropValue::Bool(b)) => PropLit::Bool(*b),
+            (_, PropValue::Text(t)) => PropLit::Text(t.clone()),
+            (_, PropValue::Variant(v)) => PropLit::Text(v.clone()),
+            (_, PropValue::Instance(c)) => PropLit::Instance(doc.get(*c).map(|c| pascal(&c.name)).unwrap_or_else(|| "Icon".into())),
+            (_, PropValue::Slot(_)) => continue,
+        };
+        out.push((name, lit));
+    }
+    out
+}
+
 /// Component properties of an instance worth passing as arguments: values that differ from the
 /// default, plus variant selections. Names are camelCased without Figma's `#id` suffix.
 pub(crate) fn instance_args(doc: &Document, n: &Node) -> Vec<(String, PropLit)> {
     let Some(comp) = instance_component(n) else { return Vec::new() };
-    let mut out = Vec::new();
-    for def in prop_defs(doc, comp) {
+    let mut out: Vec<(String, PropLit)> = Vec::new();
+    let mut seen: Vec<String> = Vec::new();
+    for def in ordered_prop_defs(doc, comp) {
+        if matches!(def.kind, PropKind::Slot) {
+            continue;
+        }
+        let name = camel(def.name.split('#').next().unwrap_or(&def.name).trim());
+        if name.is_empty() || seen.contains(&name) {
+            continue;
+        }
+        seen.push(name.clone());
         let value = prop_value(doc, n.id, &def);
-        let name = camel(def.name.split('#').next().unwrap_or(&def.name));
         let lit = match (&def.kind, &value) {
             (PropKind::Variant { .. }, PropValue::Variant(v)) => PropLit::Text(v.clone()),
             _ if value == def.default => continue,
