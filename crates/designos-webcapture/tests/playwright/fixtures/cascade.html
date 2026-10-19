@@ -15,6 +15,9 @@
       --base: #444444;
       --shadow-brand: #123456;
       --frame-brand: #abcdef;
+      --space: 0.5rem;
+      --radius: 0.75rem;
+      --gap: 1rem;
     }
     .m { background: var(--brand); }
     @media (max-width: 600px) { .m { background: var(--brand-mobile); } }
@@ -55,6 +58,8 @@
     @supports (not-a-property: nonsense) { .sup { background-color: var(--a); } }
 
     .bd { border: 1px solid var(--brand); }
+
+    .tok { padding: var(--space); border-radius: var(--radius); gap: var(--gap); }
   </style>
 </head>
 <body>
@@ -70,6 +75,7 @@
   <div class="cq-wrap"><div id="cq" class="cq">container override</div></div>
   <div id="sup" class="sup">supports</div>
   <div id="bd" class="bd">shorthand border</div>
+  <div id="tok" class="tok" style="display:flex">relative-unit tokens</div>
   <div id="host"></div>
   <iframe id="frame" width="400" height="120" srcdoc="<!DOCTYPE html><html><head><style>:root{--narrow:#555555;--frame-brand:#abcdef} body{margin:0} .ibtn{background:var(--frame-brand)} .m{background:#ffffff} @media (max-width:500px){.imed{background:var(--narrow)}}</style></head><body><button class='ibtn' id='ibtn'>x</button><div class='m' id='im'>m</div><div class='imed' id='imed'>narrow</div></body></html>"></iframe>
   <script>

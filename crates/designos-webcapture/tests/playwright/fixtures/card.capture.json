@@ -12,7 +12,7 @@
     "width": 1280,
     "height": 800
   },
-  "captured_at": "2026-10-19T01:20:51.465Z",
+  "captured_at": "2026-10-19T01:24:40.661Z",
   "fonts": [],
   "root": {
     "tag": "html",
@@ -1467,6 +1467,6 @@
     "text_runs": 3,
     "images": 5,
     "image_bytes": 418,
-    "elapsed_ms": 7.9
+    "elapsed_ms": 7.2
   }
 }

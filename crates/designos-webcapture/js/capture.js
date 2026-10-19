@@ -648,10 +648,16 @@
             continue;
           }
         } else {
-          const tokens = splitTopLevel(rawVal, " ")
-            .filter((t) => t.includes("var("))
-            .map((t) => substituteVars(t.trim(), lookup));
-          if (!tokens.some((t) => t !== null && sameValue(t, computed))) continue;
+          const words = splitTopLevel(rawVal.trim(), " ").filter(Boolean);
+          // A lone var() supplies every longhand, whatever it resolves to (`0.5rem` computes to
+          // `8px`). With several words, only a token equal to the longhand's value is attributed.
+          const single = words.length === 1 && words[0].startsWith("var(");
+          if (!single) {
+            const tokens = words
+              .filter((t) => t.includes("var("))
+              .map((t) => substituteVars(t, lookup));
+            if (!tokens.some((t) => t !== null && sameValue(t, computed))) continue;
+          }
         }
       } else if (
         resolved !== null &&

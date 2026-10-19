@@ -303,6 +303,19 @@ defineCase("css_var_refs_winning_declaration", async ({ context }) => {
   expect("border shorthand token feeds the colour longhand", border["border-top-color"], ["--brand"]);
   expect("border shorthand token does not feed the width longhand", border["border-top-width"], undefined);
 
+  // A shorthand that is one var() feeds every longhand it covers, even for rem/em tokens whose
+  // computed value (8px) never equals the token text (0.5rem).
+  const tok = need(byId, "tok").css_var_refs || {};
+  for (const side of ["top", "right", "bottom", "left"]) {
+    expect(`padding: var(--space) feeds padding-${side}`, tok[`padding-${side}`], ["--space"]);
+  }
+  for (const corner of ["top-left", "top-right", "bottom-right", "bottom-left"]) {
+    expect(`border-radius: var(--radius) feeds ${corner}`, tok[`border-${corner}-radius`], ["--radius"]);
+  }
+  for (const prop of ["gap", "row-gap", "column-gap"]) {
+    expect(`gap: var(--gap) feeds ${prop}`, tok[prop], ["--gap"]);
+  }
+
   // Shadow roots and same-origin iframes read their own stylesheets.
   expect("shadow root uses its own stylesheet", bg("inner-btn"), ["--shadow-brand"]);
   expect("iframe uses its own stylesheet", bg("ibtn"), ["--frame-brand"]);
