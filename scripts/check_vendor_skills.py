@@ -138,29 +138,44 @@ def sha1_text(text: str) -> str:
     return hashlib.sha1(text.encode("utf-8")).hexdigest()
 
 
-def load_approved_vendor_skills(repo_root: Path) -> Dict[str, str]:
-    """Return mapping of approved vendor folder name -> licence from E15-23 source register."""
-    approved: Dict[str, str] = {"jakubkrehel-skills": "MIT"}
-    reg_path = repo_root / "docs" / "legal" / "source-register.toml"
-    if reg_path.is_file():
-        try:
-            data = tomllib.loads(reg_path.read_text(encoding="utf-8"))
-            for src in data.get("source", []):
-                sid = src.get("id", "")
-                lic = src.get("licence", src.get("license", "NONE"))
-                status = src.get("status", "")
-                if sid:
-                    if status == "approved" and lic and lic.upper() != "NONE":
-                        approved[sid] = lic
-                    else:
-                        approved.pop(sid, None)
-        except Exception:
-            pass
-    return approved
+REGISTER_REL_PATH = Path("docs/eval-licences.md")
+
+
+def load_vendor_register(repo_root: Path) -> Tuple[Dict[str, dict], Optional[str]]:
+    """Read the E15-23 licence register (`docs/eval-licences.md`) and return `(approved, error)`.
+
+    `approved` maps an id to its register entry for every entry that may ship in the skills pack: reviewed
+    `approved`, a licence other than `NONE`, and use `ship-in-skills`. There is no built-in fallback: a missing or
+    unparsable register means nothing is licensed, and `error` says why.
+    """
+    reg_path = repo_root / REGISTER_REL_PATH
+    if not reg_path.is_file():
+        return {}, f"{REGISTER_REL_PATH.as_posix()} does not exist, so no vendored folder has a licence on record"
+    try:
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        import check_eval_licences  # the register parser lives with the register checker
+
+        parsed, _ = check_eval_licences.extract_register(reg_path.read_text(encoding="utf-8"))
+        sources = parsed.get("source")
+        if not isinstance(sources, list) or not sources:
+            raise ValueError("no [[source]] entries")
+    except Exception as exc:  # any parse failure must leave the vendor folders unlicensed
+        return {}, f"{REGISTER_REL_PATH.as_posix()} cannot be read ({exc}), so no vendored folder has a licence on record"
+    approved: Dict[str, dict] = {}
+    for src in sources:
+        licence = str(src.get("licence", "NONE")).strip()
+        if (
+            src.get("id")
+            and src.get("review") == "approved"
+            and licence.upper() not in ("", "NONE")
+            and src.get("use") == "ship-in-skills"
+        ):
+            approved[str(src["id"])] = src
+    return approved, None
 
 
 def load_lint_rule_ids(repo_root: Path) -> Set[str]:
-    """Read lint rule IDs from `designos-mcp --list-lint-rules` when available, else canonical set."""
+    """Lint rule IDs: the output of a built `designos-mcp --list-lint-rules` when there is one, else the canonical set."""
     ids = set(CANONICAL_LINT_RULE_IDS)
     target_dir = Path(os.environ.get("CARGO_TARGET_DIR", str(repo_root / "target")))
     for profile in ("debug", "release"):
@@ -176,7 +191,7 @@ def load_lint_rule_ids(repo_root: Path) -> Set[str]:
                 )
                 parsed = {line.strip() for line in proc.stdout.splitlines() if line.strip()}
                 if parsed:
-                    ids.update(parsed)
+                    ids = parsed  # the built binary is the authority: an id it dropped is no longer valid
                     break
             except Exception:
                 pass
@@ -339,9 +354,11 @@ def cmd_verify(repo_root: Path, online: bool = False) -> Tuple[int, List[str]]:
         return 2, [f"vendor-folder-missing: {vendor_dir} does not exist"]
 
     errors: List[str] = []
-    approved = load_approved_vendor_skills(repo_root)
+    approved, register_error = load_vendor_register(repo_root)
+    if register_error:
+        errors.append(f"unlicensed-file: {VENDOR_REL_DIR.as_posix()} ({register_error})")
 
-    # Check every item in skills/vendor/
+    # Every folder under skills/vendor/ needs an approved, licensed, ship-in-skills register entry of the same id
     for child in sorted(vendor_dir.iterdir()):
         if child.name.startswith("."):
             continue
@@ -350,13 +367,14 @@ def cmd_verify(repo_root: Path, online: bool = False) -> Tuple[int, List[str]]:
             errors.append(f"unlicensed-file: {rel} (stray file in skills/vendor)")
             continue
         if child.name not in approved:
-            for f in sorted(child.rglob("*")):
-                if f.is_file():
-                    rel = f.relative_to(repo_root).as_posix()
-                    errors.append(f"unlicensed-file: {rel} (package '{child.name}' is not an approved licensed source)")
-            if not any(child.rglob("*")):
-                rel = child.relative_to(repo_root).as_posix()
-                errors.append(f"unlicensed-file: {rel} (package '{child.name}' is not an approved licensed source)")
+            reason = f"package '{child.name}' has no approved licensed ship-in-skills entry in {REGISTER_REL_PATH.as_posix()}"
+            files = [f for f in sorted(child.rglob("*")) if f.is_file()]
+            for f in files[:5]:
+                errors.append(f"unlicensed-file: {f.relative_to(repo_root).as_posix()} ({reason})")
+            if len(files) > 5:
+                errors.append(f"unlicensed-file: {child.relative_to(repo_root).as_posix()} (and {len(files) - 5} more files; {reason})")
+            if not files:
+                errors.append(f"unlicensed-file: {child.relative_to(repo_root).as_posix()} ({reason})")
 
     # Scan all files under skills/vendor/ for excluded sources (e.g. transitions.dev)
     for f in sorted(vendor_dir.rglob("*")):
@@ -429,6 +447,22 @@ def cmd_verify(repo_root: Path, online: bool = False) -> Tuple[int, List[str]]:
         ):
             if needle not in attr_text:
                 errors.append(f"licence-mismatch: ATTRIBUTION.md missing {needle!r}")
+
+    # The register entry and THIRD_PARTY_LICENSES.md must agree with the vendored copy (E15-46 §3.2, §3.5)
+    entry = approved.get(JAKUB_REL_DIR.name)
+    if entry is not None:
+        if str(entry.get("pinned", "")) != PINNED_COMMIT:
+            errors.append(
+                f"licence-mismatch: {REGISTER_REL_PATH.as_posix()} pins {JAKUB_REL_DIR.name} at {entry.get('pinned')!r}, "
+                f"the vendored copy is {PINNED_COMMIT!r}"
+            )
+        third_party = repo_root / "THIRD_PARTY_LICENSES.md"
+        attribution = str(entry.get("attribution", "")).strip()
+        if not third_party.is_file() or not attribution or attribution not in third_party.read_text(encoding="utf-8"):
+            errors.append(
+                "licence-mismatch: THIRD_PARTY_LICENSES.md does not carry the register attribution of "
+                f"{JAKUB_REL_DIR.name} (run python3 scripts/check_eval_licences.py --write)"
+            )
 
     if online:
         url = f"https://raw.githubusercontent.com/jakubkrehel/skills/{PINNED_COMMIT}/LICENSE"

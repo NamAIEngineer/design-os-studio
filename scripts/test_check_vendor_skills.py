@@ -4,7 +4,9 @@
 from __future__ import annotations
 
 import hashlib
+import os
 import shutil
+import stat
 import sys
 import tempfile
 import tomllib
@@ -27,7 +29,16 @@ class TestCheckVendorSkills(unittest.TestCase):
             REPO_ROOT / "skills" / "vendor",
             tmp / "skills" / "vendor",
         )
+        # The licence gate reads the E15-23 register and the generated third-party notice.
+        (tmp / "docs").mkdir()
+        shutil.copy2(REPO_ROOT / "docs" / "eval-licences.md", tmp / "docs" / "eval-licences.md")
+        shutil.copy2(REPO_ROOT / "THIRD_PARTY_LICENSES.md", tmp / "THIRD_PARTY_LICENSES.md")
         return tmp
+
+    def _edit(self, path: Path, old: str, new: str) -> None:
+        raw = path.read_text(encoding="utf-8")
+        self.assertIn(old, raw)
+        path.write_text(raw.replace(old, new, 1), encoding="utf-8")
 
     def test_licence_and_pin_match_upstream(self) -> None:
         """AC1: `verify` exits 0; LICENSE SHA-1 equals recorded upstream hash; commit equals 4c66b1f…"""
@@ -105,6 +116,76 @@ class TestCheckVendorSkills(unittest.TestCase):
 
         code, msgs = cvs.cmd_extract(REPO_ROOT, write=False)
         self.assertEqual(code, 0, f"Expected extract exit 0, got: {msgs}")
+
+
+    def test_missing_register_leaves_the_vendor_folder_unlicensed(self) -> None:
+        tmp = self._copy_vendor_fixture()
+        (tmp / "docs" / "eval-licences.md").unlink()
+        code, errors = cvs.cmd_verify(tmp, online=False)
+        self.assertEqual(code, 1, "no register, no licence on record: verify must not fall back to a built-in approval")
+        self.assertTrue(any(e.startswith("unlicensed-file:") and "eval-licences.md" in e for e in errors), errors)
+
+    def test_unparsable_register_leaves_the_vendor_folder_unlicensed(self) -> None:
+        tmp = self._copy_vendor_fixture()
+        (tmp / "docs" / "eval-licences.md").write_text("# Register\n\nno toml block here\n", encoding="utf-8")
+        code, errors = cvs.cmd_verify(tmp, online=False)
+        self.assertEqual(code, 1)
+        self.assertTrue(any(e.startswith("unlicensed-file:") and "cannot be read" in e for e in errors), errors)
+
+    def test_register_entry_that_is_not_approved_or_is_unlicensed_fails(self) -> None:
+        for old, new in (
+            ('review = "approved"\nreviewer = "owner"\nreviewed_on = "2026-10-18"\nnotes = "Owner ruling 2026-10-18: adopt', 'review = "pending"\nreviewer = "owner"\nreviewed_on = "2026-10-18"\nnotes = "Owner ruling 2026-10-18: adopt'),
+            ('licence = "MIT"\nuse = "ship-in-skills"\nlicence_text_file = "docs/legal/licences/jakubkrehel-skills.txt"', 'licence = "NONE"\nuse = "ship-in-skills"\nlicence_text_file = "docs/legal/licences/jakubkrehel-skills.txt"'),
+        ):
+            with self.subTest(change=new[:24]):
+                tmp = self._copy_vendor_fixture()
+                self._edit(tmp / "docs" / "eval-licences.md", old, new)
+                code, errors = cvs.cmd_verify(tmp, online=False)
+                self.assertEqual(code, 1)
+                self.assertTrue(any(e.startswith("unlicensed-file:") and "jakubkrehel-skills" in e for e in errors), errors)
+
+    def test_register_pin_must_match_the_vendored_commit(self) -> None:
+        tmp = self._copy_vendor_fixture()
+        self._edit(tmp / "docs" / "eval-licences.md", f'pinned = "{cvs.PINNED_COMMIT}"', 'pinned = "0123456789abcdef0123456789abcdef01234567"')
+        code, errors = cvs.cmd_verify(tmp, online=False)
+        self.assertEqual(code, 1)
+        self.assertTrue(any(e.startswith("licence-mismatch:") and "pins jakubkrehel-skills" in e for e in errors), errors)
+
+    def test_third_party_notice_must_carry_the_attribution(self) -> None:
+        tmp = self._copy_vendor_fixture()
+        (tmp / "THIRD_PARTY_LICENSES.md").write_text("# Third-Party Licenses\n", encoding="utf-8")
+        code, errors = cvs.cmd_verify(tmp, online=False)
+        self.assertEqual(code, 1)
+        self.assertTrue(any("THIRD_PARTY_LICENSES.md does not carry" in e for e in errors), errors)
+
+    @unittest.skipIf(os.name == "nt", "the fake binary is a shell script")
+    def test_built_binary_listing_replaces_the_canonical_lint_ids(self) -> None:
+        tmp = Path(tempfile.mkdtemp(prefix="dos-636-bin-"))
+        self.addCleanup(lambda: shutil.rmtree(tmp, ignore_errors=True))
+        (tmp / "debug").mkdir()
+        fake = tmp / "debug" / "designos-mcp"
+        fake.write_text("#!/bin/sh\nprintf 'contrast\\noverflow-parent\\n'\n", encoding="utf-8")
+        fake.chmod(fake.stat().st_mode | stat.S_IXUSR)
+        old = os.environ.get("CARGO_TARGET_DIR")
+        os.environ["CARGO_TARGET_DIR"] = str(tmp)
+        try:
+            ids = cvs.load_lint_rule_ids(REPO_ROOT)
+        finally:
+            if old is None:
+                os.environ.pop("CARGO_TARGET_DIR")
+            else:
+                os.environ["CARGO_TARGET_DIR"] = old
+        self.assertEqual(ids, {"contrast", "overflow-parent"}, "a rule the binary no longer lists must stop being a valid target")
+
+    def test_ci_runs_every_vendor_skill_check(self) -> None:
+        ci = (REPO_ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+        for command in (
+            "python3 -B scripts/check_vendor_skills.py verify",
+            "python3 -B scripts/check_vendor_skills.py extract",
+            "python3 -B scripts/check_vendor_skills.py map-coverage",
+            "python3 -B -m unittest scripts/test_check_vendor_skills.py",
+        ):
+            self.assertIn(command, ci, f"CI must run `{command}` so deleting LICENSE or a rule block turns the build red")
 
     def test_fail_before_when_vendor_folder_missing(self) -> None:
         """When `skills/vendor` does not exist, `verify` exits 2."""
