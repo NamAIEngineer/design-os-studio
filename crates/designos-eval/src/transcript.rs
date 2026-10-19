@@ -93,3 +93,16 @@ pub fn compute_cost_metrics(lines: &[TranscriptLine], initial_undo_depth: usize)
 
     CostMetrics { tool_calls, tool_errors, error_rate, retries, retry_rate, undo_groups }
 }
+
+/// True when some successful call added an undo step, i.e. the agent really changed the document.
+/// Opening a file resets the history to zero, so reading and opening never count as an edit (E15-25 §8 edge 2).
+pub fn had_document_edits(lines: &[TranscriptLine]) -> bool {
+    let mut previous = 0usize;
+    for line in lines {
+        if !line.is_error && line.undo_depth > previous {
+            return true;
+        }
+        previous = line.undo_depth;
+    }
+    false
+}

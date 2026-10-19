@@ -14,6 +14,10 @@ pub struct Cli {
     #[arg(long, global = true)]
     pub suites_root: Option<PathBuf>,
 
+    /// `designos-mcp` binary the agent talks to (defaults to `$DESIGNOS_MCP_BIN`, then a sibling of this executable, then `PATH`).
+    #[arg(long, global = true)]
+    pub mcp_bin: Option<PathBuf>,
+
     #[command(subcommand)]
     pub command: Commands,
 }

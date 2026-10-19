@@ -1,144 +1,35 @@
-//! Integration and contract tests for `designos-eval` (E15-25 §10).
+//! Integration and contract tests for `designos-eval` (E15-25 §10). Runs go through a real `designos-mcp` process.
 
-use designos_eval::agent::EvalMcpSession;
+mod support;
+
 use designos_eval::jsonl::{validate_jsonl_line, EvalMode, EvalRecord};
 use designos_eval::rng::seed_for_metric;
-use designos_eval::runner::{check_or_write_split_lock, replay_transcript_file, run_harness, RunOptions};
-use designos_eval::split::{assign_split, build_split_lock, Split};
+use designos_eval::runner::{check_or_write_split_lock, run_harness};
+use designos_eval::split::build_split_lock;
 use designos_eval::stats::bootstrap_ci;
-use designos_eval::task::{Task, TasksFile};
-use serde_json::json;
+use designos_eval::task::TasksFile;
+use serde_json::{json, Value};
 use std::fs;
-use std::path::PathBuf;
+use std::path::Path;
+use std::process::Command;
+use support::*;
 
-fn temp_test_dir(tag: &str) -> PathBuf {
-    let nonce = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
-    let dir = std::env::temp_dir().join(format!("designos-eval-test-{tag}-{}-{nonce}", std::process::id()));
-    fs::create_dir_all(&dir).unwrap();
-    dir
-}
+const STUB_COMMAND: &str = r#"["stub-agent", "--script", "{workspace}/../create_frame.jsonl", "--mcp-config", "{mcp_config}"]"#;
 
-fn write_stub_suite(root: &std::path::Path, suite_name: &str) -> (PathBuf, String) {
-    let suites_root = root.join("suites");
-    let suite_dir = suites_root.join(suite_name);
-    fs::create_dir_all(&suite_dir).unwrap();
-
-    // Create a stub script that creates a frame with a boundEaseUI token and saves output.designos
-    let script_path = suite_dir.join("create_frame.jsonl");
-    let script_lines = [
-        json!({
-            "tool": "designos_apply_spec",
-            "args": {
-                "spec": {
-                    "name": "Hero Frame",
-                    "preset": "easeui-card",
-                    "width": 320,
-                    "height": 180,
-                    "children": [
-                        {
-                            "kind": "text",
-                            "name": "Heading",
-                            "text": "Hello Eval",
-                            "font_size": 18,
-                            "fill": "$easeui.text.primary"
-                        }
-                    ]
-                }
-            }
-        }),
-        json!({
-            "tool": "designos_save_file",
-            "args": {
-                "path": "output.designos",
-                "overwrite": true
-            }
-        }),
-    ];
-    let mut script_raw = String::new();
-    for l in &script_lines {
-        script_raw.push_str(&serde_json::to_string(l).unwrap());
-        script_raw.push('\n');
-    }
-    fs::write(&script_path, script_raw).unwrap();
-
-    // Find 2 dev IDs and 1 held_out ID under salt "designos-eval-v1"
-    let salt = "designos-eval-v1";
-    let mut dev_ids = Vec::new();
-    let mut held_out_id = String::new();
-    for i in 1..200 {
-        let candidate = format!("{suite_name}-{i:04}-shadcn");
-        match assign_split(salt, &candidate) {
-            Split::Dev if dev_ids.len() < 2 => dev_ids.push(candidate),
-            Split::HeldOut if held_out_id.is_empty() => held_out_id = candidate,
-            _ => {}
-        }
-        if dev_ids.len() == 2 && !held_out_id.is_empty() {
-            break;
-        }
-    }
-
-    let tasks = vec![
-        Task {
-            id: dev_ids[0].clone(),
-            suite: suite_name.to_string(),
-            source: "shadcn-ui".to_string(),
-            surface: "web-app".to_string(),
-            brief: "Create a hero card frame.".to_string(),
-            inputs: Vec::new(),
-            start: "blank".to_string(),
-            design_system: "none".to_string(),
-            checklist: vec!["Has a Hero Frame".to_string()],
-            scope: Vec::new(),
-            output: vec!["Hero Frame".to_string()],
-            budget: Default::default(),
-            stub_script: Some("create_frame.jsonl".to_string()),
-        },
-        Task {
-            id: dev_ids[1].clone(),
-            suite: suite_name.to_string(),
-            source: "shadcn-ui".to_string(),
-            surface: "web-app".to_string(),
-            brief: "Create a second hero card frame.".to_string(),
-            inputs: Vec::new(),
-            start: "blank".to_string(),
-            design_system: "none".to_string(),
-            checklist: vec!["Has a Hero Frame".to_string()],
-            scope: Vec::new(),
-            output: vec!["Hero Frame".to_string()],
-            budget: Default::default(),
-            stub_script: Some("create_frame.jsonl".to_string()),
-        },
-        Task {
-            id: held_out_id.clone(),
-            suite: suite_name.to_string(),
-            source: "shadcn-ui".to_string(),
-            surface: "web-app".to_string(),
-            brief: "Create a held-out hero card frame.".to_string(),
-            inputs: Vec::new(),
-            start: "blank".to_string(),
-            design_system: "none".to_string(),
-            checklist: vec!["Has a Hero Frame".to_string()],
-            scope: Vec::new(),
-            output: vec!["Hero Frame".to_string()],
-            budget: Default::default(),
-            stub_script: Some("create_frame.jsonl".to_string()),
-        },
-    ];
-
-    let tasks_file = TasksFile { tasks };
-    fs::write(suite_dir.join("tasks.toml"), toml::to_string_pretty(&tasks_file).unwrap()).unwrap();
-
-    check_or_write_split_lock(&suites_root, suite_name, salt, true, false).unwrap();
-
-    let cfg_path = root.join("designos-eval.toml");
-    let cfg_toml = r#"
-[agent.stub]
-command = ["stub-agent", "--script", "{workspace}/../create_frame.jsonl", "--mcp-config", "{mcp_config}"]
-model = "stub-v1"
-usage = "none"
-"#;
-    fs::write(&cfg_path, cfg_toml.trim()).unwrap();
-
+/// Three tasks (two dev, one held out) whose stub script creates and saves a "Hero Frame".
+fn write_stub_suite(root: &Path, suite: &str) -> (std::path::PathBuf, String) {
+    write_register(root);
+    let (dev_ids, held_out_id) = split_ids(suite);
+    let tasks = [dev_ids[0].clone(), dev_ids[1].clone(), held_out_id.clone()]
+        .into_iter()
+        .map(|id| {
+            let mut t = task(&id, suite);
+            t.stub_script = Some("create_frame.jsonl".to_string());
+            t
+        })
+        .collect();
+    let suites_root = write_suite(root, suite, tasks, &[("create_frame.jsonl", script(&[create_hero_frame_call(), save_output_call()]))]);
+    write_profile(root, "stub", STUB_COMMAND);
     (suites_root, held_out_id)
 }
 
@@ -146,45 +37,28 @@ usage = "none"
 fn stub_run_writes_valid_jsonl() {
     let root = temp_test_dir("stub-jsonl");
     let (suites_root, _) = write_stub_suite(&root, "s2");
-    let out_dir = root.join("results");
-
-    let opts = RunOptions {
-        suites_root,
-        suites: vec!["s2".to_string()],
-        agent: "stub".to_string(),
-        model_override: None,
-        runs: 2,
-        mode: EvalMode::Release,
-        task_filter: Vec::new(),
-        out_dir: out_dir.clone(),
-        release: "v0.6.0".to_string(),
-        jobs: 1,
-        config_path: Some(root.join("designos-eval.toml")),
-        mcp_bin: PathBuf::from("designos-mcp"),
-        repo_root: None,
-    };
-
+    let opts = run_options(&root, suites_root, "s2", "stub", 2);
     let failed = run_harness(&opts).expect("stub release run succeeds");
     assert!(!failed, "all stub tasks should exit Ok");
 
-    let jsonl_path = out_dir.join("v0.6.0").join("s2.jsonl");
-    let raw = fs::read_to_string(&jsonl_path).expect("results JSONL written");
-    let mut meta_count = 0usize;
-    let mut run_count = 0usize;
-    let mut task_count = 0usize;
-    let mut suite_count = 0usize;
-
+    let raw = fs::read_to_string(root.join("results/v0.6.0/s2.jsonl")).expect("results JSONL written");
+    let (mut meta_count, mut run_count, mut task_count, mut suite_count) = (0usize, 0usize, 0usize, 0usize);
     for line in raw.lines() {
-        let rec = validate_jsonl_line(line).expect("every JSONL line validates against results-v1.json");
-        match rec {
+        match validate_jsonl_line(line).expect("every JSONL line validates against results-v1.json") {
             EvalRecord::Meta(m) => {
                 assert_eq!(m.schema, 1);
                 assert_eq!(m.runs, 2);
+                assert!(
+                    m.started != "2026-10-19T00:00:00Z" && m.started.ends_with('Z') && m.started.len() == 20,
+                    "started must be the run time: {}",
+                    m.started
+                );
                 meta_count += 1;
             }
             EvalRecord::Run(r) => {
                 assert_eq!(r.metrics.get("render_success").copied().flatten(), Some(1.0));
                 assert!(!r.artefacts.renders.is_empty());
+                assert!(r.tool_calls >= 2, "the real server logged the stub's calls: {}", r.tool_calls);
                 run_count += 1;
             }
             EvalRecord::Task(t) => {
@@ -199,12 +73,8 @@ fn stub_run_writes_valid_jsonl() {
             }
         }
     }
-
-    assert_eq!(meta_count, 1);
-    assert_eq!(run_count, 6);
-    assert_eq!(task_count, 3);
+    assert_eq!((meta_count, run_count, task_count), (1, 6, 3));
     assert!(suite_count >= 1);
-
     let _ = fs::remove_dir_all(&root);
 }
 
@@ -212,67 +82,14 @@ fn stub_run_writes_valid_jsonl() {
 fn held_out_refused_in_tuning() {
     let root = temp_test_dir("held-out-refused");
     let (suites_root, held_out_id) = write_stub_suite(&root, "s2");
-    let out_dir = root.join("results");
-
-    let opts = RunOptions {
-        suites_root,
-        suites: vec!["s2".to_string()],
-        agent: "stub".to_string(),
-        model_override: None,
-        runs: 1,
-        mode: EvalMode::Tuning,
-        task_filter: vec![held_out_id.clone()],
-        out_dir,
-        release: "v0.6.0".to_string(),
-        jobs: 1,
-        config_path: Some(root.join("designos-eval.toml")),
-        mcp_bin: PathBuf::from("designos-mcp"),
-        repo_root: None,
-    };
+    let mut opts = run_options(&root, suites_root, "s2", "stub", 1);
+    opts.mode = EvalMode::Tuning;
+    opts.task_filter = vec![held_out_id.clone()];
 
     let err = run_harness(&opts).expect_err("held-out task in tuning mode must be refused");
     assert_eq!(err.code, 3);
     assert!(err.message.starts_with("held_out_refused:"), "unexpected message: {}", err.message);
     assert!(err.message.contains(&held_out_id));
-
-    let _ = fs::remove_dir_all(&root);
-}
-
-#[test]
-fn replay_reproduces_metrics() {
-    let root = temp_test_dir("replay-repro");
-    let (suites_root, held_out_id) = write_stub_suite(&root, "s2");
-    let out_dir = root.join("results");
-
-    let opts = RunOptions {
-        suites_root,
-        suites: vec!["s2".to_string()],
-        agent: "stub".to_string(),
-        model_override: None,
-        runs: 1,
-        mode: EvalMode::Release,
-        task_filter: vec![held_out_id.clone()],
-        out_dir: out_dir.clone(),
-        release: "v0.6.0".to_string(),
-        jobs: 1,
-        config_path: Some(root.join("designos-eval.toml")),
-        mcp_bin: PathBuf::from("designos-mcp"),
-        repo_root: None,
-    };
-    run_harness(&opts).unwrap();
-
-    let transcript_path = out_dir.join("v0.6.0").join(&held_out_id).join("1").join("transcript.jsonl");
-    assert!(transcript_path.exists());
-
-    let r1 = replay_transcript_file(&transcript_path, None, &root.join("replay1")).unwrap();
-    let r2 = replay_transcript_file(&transcript_path, None, &root.join("replay2")).unwrap();
-
-    assert_eq!(r1.metrics.len(), r2.metrics.len());
-    for (k, v1) in &r1.metrics {
-        let v2 = r2.metrics.get(k).expect("same metric key");
-        assert_eq!(v1.to_bits(), v2.to_bits(), "metric '{k}' must be bit-identical across replays ({v1} vs {v2})");
-    }
-
     let _ = fs::remove_dir_all(&root);
 }
 
@@ -281,29 +98,18 @@ fn split_fraction_within_bounds() {
     let root = temp_test_dir("split-bounds");
     let suite_dir = root.join("s2");
     fs::create_dir_all(&suite_dir).unwrap();
-
-    let tasks: Vec<Task> = (1..=100)
-        .map(|i| Task {
-            id: format!("s2-{i:04}-shadcn"),
-            suite: "s2".to_string(),
-            source: "shadcn-ui".to_string(),
-            surface: "web-app".to_string(),
-            brief: format!("Synthetic task {i}"),
-            inputs: Vec::new(),
-            start: "blank".to_string(),
-            design_system: "none".to_string(),
-            checklist: Vec::new(),
-            scope: Vec::new(),
-            output: Vec::new(),
-            budget: Default::default(),
-            stub_script: None,
+    let tasks: Vec<_> = (1..=100)
+        .map(|i| {
+            let mut t = task(&format!("s2-{i:04}-shadcn"), "s2");
+            t.brief = format!("Synthetic task {i}");
+            t.output = Vec::new();
+            t.checklist = Vec::new();
+            t
         })
         .collect();
-
-    let lock = build_split_lock("s2", "designos-eval-v1", &tasks, &suite_dir, true).expect("100 synthetic tasks lock within 0.30 ± 0.05 bounds");
-    let held_out_count = lock.tasks.iter().filter(|e| e.split == Split::HeldOut).count();
+    let lock = build_split_lock("s2", SALT, &tasks, &suite_dir, true).expect("100 synthetic tasks lock within 0.30 ± 0.05 bounds");
+    let held_out_count = lock.tasks.iter().filter(|e| e.split == designos_eval::split::Split::HeldOut).count();
     assert!((25..=35).contains(&held_out_count), "expected held_out_count in 25..=35, got {held_out_count}");
-
     let _ = fs::remove_dir_all(&root);
 }
 
@@ -312,8 +118,6 @@ fn split_lock_mismatch_refused() {
     let root = temp_test_dir("lock-mismatch");
     let (suites_root, held_out_id) = write_stub_suite(&root, "s2");
     let tasks_path = suites_root.join("s2").join("tasks.toml");
-
-    // Mutate the held-out task's brief without regenerating split.lock
     let mut tf: TasksFile = toml::from_str(&fs::read_to_string(&tasks_path).unwrap()).unwrap();
     for t in &mut tf.tasks {
         if t.id == held_out_id {
@@ -322,26 +126,9 @@ fn split_lock_mismatch_refused() {
     }
     fs::write(&tasks_path, toml::to_string_pretty(&tf).unwrap()).unwrap();
 
-    let opts = RunOptions {
-        suites_root,
-        suites: vec!["s2".to_string()],
-        agent: "stub".to_string(),
-        model_override: None,
-        runs: 1,
-        mode: EvalMode::Release,
-        task_filter: Vec::new(),
-        out_dir: root.join("results"),
-        release: "v0.6.0".to_string(),
-        jobs: 1,
-        config_path: Some(root.join("designos-eval.toml")),
-        mcp_bin: PathBuf::from("designos-mcp"),
-        repo_root: None,
-    };
-
-    let err = run_harness(&opts).expect_err("tampered held-out task must fail lock check");
+    let err = run_harness(&run_options(&root, suites_root, "s2", "stub", 1)).expect_err("tampered held-out task must fail lock check");
     assert_eq!(err.code, 3);
     assert!(err.message.starts_with("split_lock_mismatch:"), "unexpected message: {}", err.message);
-
     let _ = fs::remove_dir_all(&root);
 }
 
@@ -354,12 +141,10 @@ fn bootstrap_is_reproducible() {
         })
         .collect();
     let seed = seed_for_metric("v0.6.0", "s2", "token_coverage");
-
     let t0 = std::time::Instant::now();
     let (m1, lo1, hi1) = bootstrap_ci(&per_task, 10_000, seed);
     let elapsed_ms = t0.elapsed().as_millis();
     let (m2, lo2, hi2) = bootstrap_ci(&per_task, 10_000, seed);
-
     assert_eq!(m1.to_bits(), m2.to_bits());
     assert_eq!(lo1.to_bits(), lo2.to_bits());
     assert_eq!(hi1.to_bits(), hi2.to_bits());
@@ -369,29 +154,9 @@ fn bootstrap_is_reproducible() {
 
 #[test]
 fn bootstrap_known_case() {
-    let per_task = vec![vec![1.0, 1.0, 1.0], vec![1.0, 1.0, 1.0], vec![1.0, 1.0, 1.0], vec![1.0, 1.0, 1.0]];
+    let per_task = vec![vec![1.0, 1.0, 1.0]; 4];
     let (m, lo, hi) = bootstrap_ci(&per_task, 10_000, 42);
-    assert_eq!(m, 1.0);
-    assert_eq!(lo, 1.0);
-    assert_eq!(hi, 1.0);
-}
-
-#[test]
-fn transcript_logging_failure_fails_call() {
-    let root = temp_test_dir("transcript-fail");
-    let ws = root.join("ws");
-    fs::create_dir_all(&ws).unwrap();
-
-    // Place a regular file where the transcript's parent directory is expected so opening the transcript fails
-    let blocker = root.join("not_a_dir");
-    fs::write(&blocker, "blocker").unwrap();
-    let bad_transcript = blocker.join("transcript.jsonl");
-
-    let mut session = EvalMcpSession::new(&ws, Some(bad_transcript)).unwrap();
-    let err = session.call("designos_get_document", json!({})).expect_err("failing to append transcript line must fail the MCP tool call");
-    assert!(err.contains("Transcript logging failed"), "{err}");
-
-    let _ = fs::remove_dir_all(&root);
+    assert_eq!((m, lo, hi), (1.0, 1.0, 1.0));
 }
 
 #[test]
@@ -399,32 +164,204 @@ fn unapproved_source_refused() {
     let root = temp_test_dir("unapproved-source");
     let (suites_root, _) = write_stub_suite(&root, "s2");
     let tasks_path = suites_root.join("s2").join("tasks.toml");
-
     let mut tf: TasksFile = toml::from_str(&fs::read_to_string(&tasks_path).unwrap()).unwrap();
     tf.tasks[0].source = "pending-source".to_string();
     fs::write(&tasks_path, toml::to_string_pretty(&tf).unwrap()).unwrap();
-    // Re-lock so split.lock matches, ensuring the source gate is what rejects the run
-    check_or_write_split_lock(&suites_root, "s2", "designos-eval-v1", true, false).unwrap();
+    check_or_write_split_lock(&suites_root, "s2", SALT, true, false).unwrap();
 
-    let opts = RunOptions {
-        suites_root,
-        suites: vec!["s2".to_string()],
-        agent: "stub".to_string(),
-        model_override: None,
-        runs: 1,
-        mode: EvalMode::Release,
-        task_filter: Vec::new(),
-        out_dir: root.join("results"),
-        release: "v0.6.0".to_string(),
-        jobs: 1,
-        config_path: Some(root.join("designos-eval.toml")),
-        mcp_bin: PathBuf::from("designos-mcp"),
-        repo_root: None,
-    };
-
-    let err = run_harness(&opts).expect_err("task with pending source must be refused");
+    let err = run_harness(&run_options(&root, suites_root, "s2", "stub", 1)).expect_err("task with pending source must be refused");
     assert_eq!(err.code, 3);
     assert!(err.message.starts_with("source_not_approved:"), "unexpected message: {}", err.message);
+    let _ = fs::remove_dir_all(&root);
+}
 
+#[test]
+fn missing_register_refuses_the_run() {
+    let root = temp_test_dir("no-register");
+    let (suites_root, _) = write_stub_suite(&root, "s2");
+    fs::remove_file(root.join("docs/eval-licences.md")).unwrap();
+
+    let err = run_harness(&run_options(&root, suites_root.clone(), "s2", "stub", 1)).expect_err("no register, no run: there is no built-in approved list");
+    assert!(err.message.starts_with("register_missing:"), "unexpected message: {}", err.message);
+
+    let mut no_root = run_options(&root, suites_root, "s2", "stub", 1);
+    no_root.repo_root = None;
+    let err = run_harness(&no_root).expect_err("without a repository root the register cannot be read");
+    assert!(err.message.starts_with("register_missing:"), "unexpected message: {}", err.message);
+    let _ = fs::remove_dir_all(&root);
+}
+
+#[test]
+fn noop_agent_is_not_a_render_success() {
+    let root = temp_test_dir("noop-agent");
+    write_register(&root);
+    let mut declared = task("s2-noop-declared", "s2");
+    declared.start = "start.designos".to_string();
+    declared.stub_script = Some("noop.jsonl".to_string());
+    let mut undeclared = task("s2-noop-undeclared", "s2");
+    undeclared.start = "start.designos".to_string();
+    undeclared.output = Vec::new();
+    undeclared.stub_script = Some("noop.jsonl".to_string());
+    let noop = script(&[json!({"tool": "designos_open_file", "args": {"path": "start.designos"}}), json!({"tool": "designos_get_document", "args": {}})]);
+    let suites_root = write_suite(&root, "s2", vec![declared, undeclared], &[("noop.jsonl", noop)]);
+    write_start_document(&suites_root.join("s2").join("start.designos"));
+    write_profile(&root, "stub", STUB_COMMAND);
+    // The lock was written before the start document existed; refresh it so the inputs hash.
+    check_or_write_split_lock(&suites_root, "s2", SALT, true, false).unwrap();
+
+    run_harness(&run_options(&root, suites_root, "s2", "stub", 1)).expect("the run itself succeeds and is recorded");
+    let runs = read_run_records(&root, "s2");
+    assert_eq!(runs.len(), 2);
+    for run in &runs {
+        assert_eq!(run["exit"], "ok", "{run}");
+        assert_eq!(run["metrics"]["render_success"], json!(0.0), "an agent that only opens and reads the start document did nothing: {run}");
+    }
+    let _ = fs::remove_dir_all(&root);
+}
+
+#[cfg(unix)]
+#[test]
+fn chatty_agent_is_not_recorded_as_a_timeout() {
+    let root = temp_test_dir("chatty-agent");
+    write_register(&root);
+    let mut t = task("s2-chatty", "s2");
+    t.budget.timeout_s = 5;
+    let suites_root = write_suite(&root, "s2", vec![t], &[]);
+    write_profile(&root, "chatty", r#"["sh", "-c", "yes xxxxxxxxxxxxxxxx | head -c 3000000"]"#);
+
+    run_harness(&run_options(&root, suites_root, "s2", "chatty", 1)).unwrap();
+    let runs = read_run_records(&root, "s2");
+    assert_eq!(runs[0]["exit"], "ok", "3 MB on stdout must be drained while the agent runs: {}", runs[0]);
+    assert!(runs[0]["wall_ms"].as_u64().unwrap() < 4_000, "{}", runs[0]);
+    let _ = fs::remove_dir_all(&root);
+}
+
+#[cfg(unix)]
+#[test]
+fn timed_out_agent_gets_sigterm_before_sigkill() {
+    let root = temp_test_dir("sigterm-agent");
+    write_register(&root);
+    let mut t = task("s2-sigterm", "s2");
+    t.budget.timeout_s = 1;
+    let suites_root = write_suite(&root, "s2", vec![t], &[]);
+    write_profile(&root, "slow", r#"["sh", "-c", "trap 'touch \"$1/got-term\"; exit 0' TERM; while true; do sleep 0.2; done", "sh", "{output_dir}"]"#);
+
+    run_harness(&run_options(&root, suites_root, "s2", "slow", 1)).unwrap();
+    let runs = read_run_records(&root, "s2");
+    assert_eq!(runs[0]["exit"], "timeout", "{}", runs[0]);
+    assert!(root.join("results/v0.6.0/s2-sigterm/1/got-term").is_file(), "the agent must be told to stop (SIGTERM) so it can flush its work");
+    let _ = fs::remove_dir_all(&root);
+}
+
+#[cfg(unix)]
+#[test]
+fn unsaved_session_is_rebuilt_from_the_transcript() {
+    let root = temp_test_dir("unsaved-session");
+    write_register(&root);
+    let mut t = task("s2-unsaved", "s2");
+    t.budget.timeout_s = 30;
+    let suites_root = write_suite(&root, "s2", vec![t], &[]);
+    // The "agent" edits through the transcript only and never saves output.designos.
+    let apply = create_hero_frame_call();
+    let line = json!({"seq": 1, "t_ms": 1, "tool": apply["tool"], "args": apply["args"], "result": {}, "is_error": false, "undo_depth": 1});
+    let recorded = root.join("recorded.jsonl");
+    fs::write(&recorded, format!("{}\n", serde_json::to_string(&line).unwrap())).unwrap();
+    write_profile(&root, "silent", &format!(r#"["sh", "-c", "cat \"$1\" >> \"$DESIGNOS_MCP_TRANSCRIPT\"", "sh", "{}"]"#, recorded.display()));
+
+    run_harness(&run_options(&root, suites_root, "s2", "silent", 1)).unwrap();
+    let runs = read_run_records(&root, "s2");
+    assert_eq!(runs[0]["exit"], "ok", "{}", runs[0]);
+    assert_eq!(
+        runs[0]["metrics"]["render_success"],
+        json!(1.0),
+        "the unsaved session must be saved through the server, not replaced by a blank page: {}",
+        runs[0]
+    );
+    let saved = fs::read_to_string(root.join("results/v0.6.0/s2-unsaved/1/output.designos")).unwrap();
+    assert!(saved.contains("Hero Frame"), "output.designos holds the agent's frame");
+    let _ = fs::remove_dir_all(&root);
+}
+
+#[cfg(unix)]
+#[test]
+fn jobs_run_tasks_side_by_side_and_keep_record_order() {
+    let root = temp_test_dir("jobs");
+    write_register(&root);
+    let ids: Vec<String> = (1..=4).map(|i| format!("s2-job-{i}")).collect();
+    let tasks = ids.iter().map(|id| task(id, "s2")).collect();
+    let suites_root = write_suite(&root, "s2", tasks, &[]);
+    write_profile(&root, "sleepy", r#"["sh", "-c", "sleep 1"]"#);
+    let mut opts = run_options(&root, suites_root, "s2", "sleepy", 1);
+    opts.jobs = 4;
+
+    let t0 = std::time::Instant::now();
+    run_harness(&opts).unwrap();
+    let elapsed = t0.elapsed();
+    assert!(elapsed.as_millis() < 3_200, "four 1 s agents with --jobs 4 took {elapsed:?}: tasks ran one after another");
+    let order: Vec<String> = read_run_records(&root, "s2").iter().map(|r| r["task"].as_str().unwrap().to_string()).collect();
+    assert_eq!(order, ids, "records follow the task order whatever the finishing order");
+    let _ = fs::remove_dir_all(&root);
+}
+
+fn eval_cli(root: &Path) -> Command {
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_designos-eval"));
+    cmd.current_dir(root).env_remove("DESIGNOS_MCP_BIN");
+    cmd
+}
+
+#[test]
+fn unimplemented_subcommands_fail_instead_of_pretending() {
+    let root = temp_test_dir("cli-unimplemented");
+    for (command, task) in [("gen", "E15-24"), ("judge", "E15-31"), ("gate", "E15-33"), ("vote-sheet", "E15-32"), ("vote-import", "E15-32")] {
+        let out = eval_cli(&root).arg(command).output().unwrap();
+        assert_eq!(out.status.code(), Some(2), "{command} must not exit 0 without doing anything");
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(stderr.contains("not_implemented") && stderr.contains(task), "{command}: {stderr}");
+    }
+    let _ = fs::remove_dir_all(&root);
+}
+
+#[cfg(unix)]
+#[test]
+fn live_runs_wire_the_agent_to_designos_mcp_not_to_the_eval_binary() {
+    let root = temp_test_dir("mcp-wiring");
+    write_register(&root);
+    let suites_root = write_suite(&root, "s2", vec![task("s2-wiring", "s2")], &[]);
+    write_profile(&root, "peek", r#"["sh", "-c", "cp \"$1\" \"$2/seen-mcp-config.json\"", "sh", "{mcp_config}", "{output_dir}"]"#);
+    mcp_bin(); // make sure designos-mcp sits next to the test binaries, where a sibling lookup finds it
+
+    let out = eval_cli(&root)
+        .args(["--suites-root"])
+        .arg(&suites_root)
+        .arg("--config")
+        .arg(root.join("designos-eval.toml"))
+        .args(["run", "--suite", "s2", "--agent", "peek", "--runs", "1", "--mode", "release", "--out"])
+        .arg(root.join("results"))
+        .output()
+        .unwrap();
+    assert!(out.status.code().is_some_and(|c| c <= 1), "{}", String::from_utf8_lossy(&out.stderr));
+    let seen: Value = serde_json::from_str(&fs::read_to_string(root.join("results/v0.6.0/s2-wiring/1/seen-mcp-config.json")).unwrap()).unwrap();
+    let command = Path::new(seen["mcpServers"]["designos"]["command"].as_str().unwrap()).file_stem().unwrap().to_string_lossy().to_string();
+    assert_eq!(command, "designos-mcp", "the MCP server command must be designos-mcp, got {seen}");
+    let _ = fs::remove_dir_all(&root);
+}
+
+#[test]
+fn replay_cli_uses_the_current_engine_for_every_tool() {
+    let root = temp_test_dir("cli-replay");
+    let recorded = root.join("transcript.jsonl");
+    let line = json!({"seq": 1, "t_ms": 1, "tool": "designos_list_comments", "args": {}, "result": {"comments": []}, "is_error": false, "undo_depth": 0});
+    fs::write(&recorded, format!("{}\n", serde_json::to_string(&line).unwrap())).unwrap();
+
+    let out = eval_cli(&root)
+        .env("DESIGNOS_MCP_BIN", mcp_bin())
+        .arg("replay")
+        .arg("--transcript")
+        .arg(&recorded)
+        .arg("--out")
+        .arg(root.join("replayed"))
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(0), "a tool the real server knows must replay: {}", String::from_utf8_lossy(&out.stderr));
     let _ = fs::remove_dir_all(&root);
 }

@@ -110,35 +110,7 @@ impl Task {
     }
 }
 
-/// Built-in default approved source IDs from the E15-23 (`docs/eval-licences.md`) register when
-/// running in a standalone temporary directory that does not have `docs/eval-licences.md`.
-pub const DEFAULT_APPROVED_SOURCES: &[&str] = &[
-    "designos-synthetic",
-    "rico",
-    "webui-70k",
-    "crello",
-    "clay",
-    "webui-val-7k",
-    "uicrit",
-    "uibench",
-    "designbench",
-    "shadcn-ui",
-    "ibm-carbon",
-    "radix-themes",
-    "material-3-community",
-    "figma-official-mcp-server",
-    "jakubkrehel-skills",
-    "ease-design",
-    "font-inter",
-    "uiclip",
-    "openai-clip",
-    "qwen-2.5-vl-7b",
-];
-
-/// Default E15-23 ban patterns forbidding client files (`VSF`, `PCP`, `Untitled UI`, `/Users/`, `/home/`).
-pub const DEFAULT_BAN_PATTERNS: &[&str] = &[r"(?i)\bvsf\b", r"(?i)\bpcp\b", r"(?i)untitled ui", r"^/Users/", r"^/home/", r"^[A-Za-z]:\\Users\\"];
-
-/// Parsed source register from `docs/eval-licences.md` (or built-in defaults).
+/// Parsed source register from `docs/eval-licences.md`.
 #[derive(Clone, Debug)]
 pub struct SourceRegister {
     pub approved: BTreeSet<String>,
@@ -168,30 +140,18 @@ struct RawBanSection {
     patterns: Vec<String>,
 }
 
-impl Default for SourceRegister {
-    fn default() -> Self {
-        let approved = DEFAULT_APPROVED_SOURCES.iter().map(|s| (*s).to_string()).collect();
-        let mut known_non_approved = BTreeMap::new();
-        known_non_approved.insert("transitions-dev".to_string(), "rejected".to_string());
-        known_non_approved.insert("figma-client-files".to_string(), "rejected".to_string());
-        known_non_approved.insert("pending-source".to_string(), "pending".to_string());
-        let ban_regexes = DEFAULT_BAN_PATTERNS.iter().filter_map(|p| Regex::new(p).ok()).collect();
-        Self { approved, known_non_approved, ban_regexes }
-    }
-}
-
 impl SourceRegister {
-    /// Loads `docs/eval-licences.md` from `repo_root` if present; otherwise falls back to the
-    /// committed E15-23 defaults.
-    pub fn load_or_default(repo_root: Option<&Path>) -> Result<Self, String> {
-        if let Some(root) = repo_root {
-            let md_path = root.join("docs/eval-licences.md");
-            if md_path.exists() {
-                let raw = std::fs::read_to_string(&md_path).map_err(|e| format!("cannot read {}: {e}", md_path.display()))?;
-                return Self::from_markdown(&raw);
-            }
+    /// Loads `docs/eval-licences.md` from `repo_root`. The register is the only authority on which sources may
+    /// run, so a missing register or one without ban patterns is an error: there is no built-in fallback list.
+    pub fn load(repo_root: Option<&Path>) -> Result<Self, String> {
+        let root =
+            repo_root.ok_or_else(|| "register_missing: no repository root to read docs/eval-licences.md from; run from the repository root".to_string())?;
+        let md_path = root.join("docs/eval-licences.md");
+        if !md_path.is_file() {
+            return Err(format!("register_missing: '{}' does not exist; the E15-23 licence register is required to run tasks", md_path.display()));
         }
-        Ok(Self::default())
+        let raw = std::fs::read_to_string(&md_path).map_err(|e| format!("cannot read {}: {e}", md_path.display()))?;
+        Self::from_markdown(&raw)
     }
 
     /// Parses the fenced `toml` register block from `docs/eval-licences.md`.
@@ -225,8 +185,11 @@ impl SourceRegister {
                 known_non_approved.insert(src.id, src.review);
             }
         }
-        let patterns =
-            parsed.ban.map(|b| b.patterns).filter(|p| !p.is_empty()).unwrap_or_else(|| DEFAULT_BAN_PATTERNS.iter().map(|s| (*s).to_string()).collect());
+        let patterns = parsed
+            .ban
+            .map(|b| b.patterns)
+            .filter(|p| !p.is_empty())
+            .ok_or_else(|| "register_parse_error: no [ban].patterns in docs/eval-licences.md".to_string())?;
         let mut ban_regexes = Vec::with_capacity(patterns.len());
         for pat in patterns {
             let re = Regex::new(&pat).map_err(|e| format!("register_parse_error: invalid ban regex '{pat}': {e}"))?;

@@ -5,6 +5,7 @@ pub mod cli;
 pub mod config;
 pub mod hash;
 pub mod jsonl;
+pub mod mcp_client;
 pub mod rng;
 pub mod runner;
 pub mod sandbox;

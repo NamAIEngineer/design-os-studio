@@ -6,8 +6,15 @@ use std::path::{Path, PathBuf};
 
 /// Environment variables removed from child agent and MCP processes so an evaluation run can never
 /// write to an open Studio editor's live session files (E15-25 §3.3).
-pub const SCRUBBED_STUDIO_ENV_VARS: &[&str] =
-    &["DESIGNOS_SESSION_DIR", "DESIGNOS_LIVE_CANVAS", "DESIGNOS_LIVE_DOC_SYNC", "DESIGNOS_LIVE_DOC_PATCH", "DESIGNOS_LIVE_SPEC", "DESIGNOS_CONTEXT_JSON"];
+pub const SCRUBBED_STUDIO_ENV_VARS: &[&str] = &[
+    "DESIGNOS_SESSION_DIR",
+    "DESIGNOS_LIVE_CANVAS",
+    "DESIGNOS_LIVE_DOC_SYNC",
+    "DESIGNOS_LIVE_DOC_PATCH",
+    "DESIGNOS_LIVE_SPEC",
+    "DESIGNOS_CONTEXT_JSON",
+    "DESIGNOS_TARGET_PAGE_ID",
+];
 
 /// Isolated workspace directory and paths for a single task run.
 #[derive(Clone, Debug)]
@@ -29,26 +36,7 @@ impl RunSandbox {
         let workspace_dir = output_dir.join("workspace");
         std::fs::create_dir_all(&workspace_dir).map_err(|e| format!("sandbox_io_error: cannot create '{}': {e}", workspace_dir.display()))?;
 
-        // Copy start document if specified and not "blank" / "gen:..."
-        if task.start != "blank" && !task.start.is_empty() && !task.start.starts_with("gen:") {
-            let src = suite_dir.join(&task.start);
-            if src.exists() {
-                let dst = workspace_dir.join("start.designos");
-                std::fs::copy(&src, &dst).map_err(|e| format!("sandbox_io_error: cannot copy start doc '{}' -> '{}': {e}", src.display(), dst.display()))?;
-            }
-        }
-
-        // Copy declared task inputs preserving relative paths inside workspace_dir
-        for rel in &task.inputs {
-            let src = suite_dir.join(rel);
-            if src.exists() {
-                let dst = workspace_dir.join(rel);
-                if let Some(parent) = dst.parent() {
-                    std::fs::create_dir_all(parent).map_err(|e| format!("sandbox_io_error: cannot create '{}': {e}", parent.display()))?;
-                }
-                std::fs::copy(&src, &dst).map_err(|e| format!("sandbox_io_error: cannot copy input '{}' -> '{}': {e}", src.display(), dst.display()))?;
-            }
-        }
+        prepare_workspace(task, suite_dir, &workspace_dir)?;
 
         let transcript_path = output_dir.join("transcript.jsonl");
         let output_doc_path = output_dir.join("output.designos");
@@ -81,4 +69,27 @@ impl RunSandbox {
         }
         cmd.env("DESIGNOS_MCP_TRANSCRIPT", &self.transcript_path);
     }
+}
+
+/// Fills `workspace_dir` for a task: the start document as `start.designos` (unless `blank` or `gen:`) and the
+/// declared input files under their relative paths. Runs and replays prepare their workspace the same way.
+pub fn prepare_workspace(task: &Task, suite_dir: &Path, workspace_dir: &Path) -> Result<(), String> {
+    std::fs::create_dir_all(workspace_dir).map_err(|e| format!("sandbox_io_error: cannot create '{}': {e}", workspace_dir.display()))?;
+    // Copy start document if specified and not "blank" / "gen:..."
+    if task.start != "blank" && !task.start.is_empty() && !task.start.starts_with("gen:") {
+        let src = suite_dir.join(&task.start);
+        let dst = workspace_dir.join("start.designos");
+        std::fs::copy(&src, &dst).map_err(|e| format!("sandbox_io_error: cannot copy start doc '{}' -> '{}': {e}", src.display(), dst.display()))?;
+    }
+
+    // Copy declared task inputs preserving relative paths inside workspace_dir
+    for rel in &task.inputs {
+        let src = suite_dir.join(rel);
+        let dst = workspace_dir.join(rel);
+        if let Some(parent) = dst.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| format!("sandbox_io_error: cannot create '{}': {e}", parent.display()))?;
+        }
+        std::fs::copy(&src, &dst).map_err(|e| format!("sandbox_io_error: cannot copy input '{}' -> '{}': {e}", src.display(), dst.display()))?;
+    }
+    Ok(())
 }
