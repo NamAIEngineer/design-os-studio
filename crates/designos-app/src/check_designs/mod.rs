@@ -224,8 +224,8 @@ pub fn audit_with_libraries(doc: &Document, scope: &Scope, libs: &LibrarySources
         if detached_on {
             detached::check(doc, &components, n, &mut all_findings);
         }
-        if lib_assets_on && (n.component.source.is_none() || matches!(n.kind, NodeKind::Instance { .. })) {
-            library_assets::check(doc, libs, n, &mut all_findings);
+        if lib_assets_on {
+            library_assets::check(doc, libs, n, n.component.source.and_then(|s| doc.get(s)), &mut all_findings);
         }
         if n.component.source.is_none() || !n.component.overrides.is_empty() || all_findings.len() > before {
             report.scanned += 1;

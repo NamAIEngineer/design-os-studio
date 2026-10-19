@@ -19,7 +19,9 @@ fn resolve_library_name<'a>(doc: &'a Document, libs: &'a LibrarySources, lib_id:
     lib_id.strip_prefix(REMOTE_LIBRARY_PREFIX).unwrap_or(lib_id)
 }
 
-pub(super) fn check(doc: &Document, libs: &LibrarySources, n: &Node, out: &mut Vec<Finding>) {
+/// `src` is the main component's layer `n` mirrors, when it is inside an instance: what `n` has
+/// in common with it is reported on the main component, not again here.
+pub(super) fn check(doc: &Document, libs: &LibrarySources, n: &Node, src: Option<&Node>, out: &mut Vec<Finding>) {
     // 1. External component instance.
     if let NodeKind::Instance { component: Some(comp_id), .. } = &n.kind {
         let comp_parent = doc.get(*comp_id).and_then(|c| c.parent);
@@ -47,6 +49,9 @@ pub(super) fn check(doc: &Document, libs: &LibrarySources, n: &Node, out: &mut V
     let mut style_slots: Vec<(&String, &String)> = n.style_refs.iter().collect();
     style_slots.sort_by_key(|(slot, _)| *slot);
     for (slot, style_key) in style_slots {
+        if src.is_some_and(|s| s.style_refs.get(slot) == Some(style_key)) {
+            continue;
+        }
         if let Some(ext) = doc.library.external.values().find(|e| e.kind == LibraryAssetKind::Style && e.local_key.as_deref() == Some(style_key.as_str())) {
             if !is_library_enabled(doc, &ext.library_id) {
                 let asset = doc.style_name(style_key);
@@ -69,6 +74,9 @@ pub(super) fn check(doc: &Document, libs: &LibrarySources, n: &Node, out: &mut V
     bindings.sort_by_key(|(prop, _)| *prop);
     let mut seen_vars: BTreeSet<&str> = BTreeSet::new();
     for (prop, var_id) in bindings {
+        if src.is_some_and(|s| s.variables.bindings.get(prop) == Some(var_id)) {
+            continue;
+        }
         if !seen_vars.insert(var_id.as_str()) {
             continue;
         }
