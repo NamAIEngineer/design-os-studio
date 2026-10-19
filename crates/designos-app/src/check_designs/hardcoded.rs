@@ -464,9 +464,11 @@ pub(super) fn check(doc: &Document, index: &Index, n: &Node, out: &mut Vec<Findi
         }
     }
     numbers_rule(doc, index, rn, src, out);
-    let matched_text_number = check_typography_numbers(doc, index, rn, src, rule_on(doc, Rule::TypographyAndStroke), out);
+    if rule_on(doc, Rule::TypographyAndStroke) {
+        check_typography_numbers(doc, index, rn, src, out);
+    }
     if rule_on(doc, Rule::TextStyles) {
-        super::text_styles::check(doc, index, rn, src, matched_text_number, out);
+        super::text_styles::check(index, rn, src, out);
     }
     if rule_on(doc, Rule::HardCodedValue) {
         effects_rule(index, rn, src, out);
@@ -766,24 +768,6 @@ fn same_text_style(own: &TextStyle, style: &TextStyle) -> bool {
     TextStyle { fills: own.fills.clone(), ..style.clone() } == *own
 }
 
-pub(super) fn has_bound_text_number(n: &Node) -> bool {
-    n.variables.bindings.keys().any(|k| matches!(k.as_str(), "fontSize" | "lineHeight" | "fontWeight" | "letterSpacing"))
-}
-
-/// A text number is bound and the layer's stored text style already holds what the binding resolves
-/// to, so binding it was the deliberate fix and a text style is not offered on top of it. When the
-/// binding resolves to something else in the layer's mode (`n` is the resolved view), the layer is
-/// painted as the resolved values and a style that equals them is still a valid suggestion.
-pub(super) fn text_number_bound_in_place(doc: &Document, n: &Node) -> bool {
-    if !has_bound_text_number(n) {
-        return false;
-    }
-    match (doc.get(n.id).map(|raw| &raw.kind), &n.kind) {
-        (Some(NodeKind::Text(stored)), NodeKind::Text(resolved)) => stored.style == resolved.style,
-        _ => true,
-    }
-}
-
 /// Whether the text style of an instance's layer is exactly its main component's, so a text style
 /// finding belongs to the main component and not to the instance.
 pub(super) fn text_style_inherited(n: &Node, src: Option<&Node>) -> bool {
@@ -791,16 +775,13 @@ pub(super) fn text_style_inherited(n: &Node, src: Option<&Node>) -> bool {
     same_text_style(&t.style, &st.style) && t.runs.len() == st.runs.len() && t.runs.iter().zip(&st.runs).all(|(a, b)| same_text_style(&a.style, &b.style))
 }
 
-fn check_typography_numbers(doc: &Document, index: &Index, n: &Node, src: Option<&Node>, emit: bool, out: &mut Vec<Finding>) -> bool {
-    let NodeKind::Text(_) = &n.kind else { return false };
-    // A match of a disabled rule is not a finding, so it must not hide the text style either.
-    if !emit || n.style_refs.contains_key("text") || index.by_num.is_empty() || text_style_inherited(n, src) {
-        return false;
+fn check_typography_numbers(doc: &Document, index: &Index, n: &Node, src: Option<&Node>, out: &mut Vec<Finding>) {
+    let NodeKind::Text(_) = &n.kind else { return };
+    if n.style_refs.contains_key("text") || index.by_num.is_empty() || text_style_inherited(n, src) {
+        return;
     }
-    let mut matched = false;
-    matched |= check_single_number(doc, index, n, src, Rule::TypographyAndStroke, "fontSize", "Font size", emit, out);
-    matched |= check_single_number(doc, index, n, src, Rule::TypographyAndStroke, "lineHeight", "Line height", emit, out);
-    matched
+    check_single_number(doc, index, n, src, Rule::TypographyAndStroke, "fontSize", "Font size", true, out);
+    check_single_number(doc, index, n, src, Rule::TypographyAndStroke, "lineHeight", "Line height", true, out);
 }
 
 impl<'a> Index<'a> {
@@ -924,7 +905,7 @@ pub(super) fn library_bind_is_current(doc: &Document, snap: &LibrarySnapshot, id
         && matches!(resolved, Some(VariableValue::Number(vx)) if same_number(vx, val))
 }
 
-fn style_matches_node(doc: &Document, n: &Node, s: &Style, property: StyleProperty) -> bool {
+fn style_matches_node(_doc: &Document, n: &Node, s: &Style, property: StyleProperty) -> bool {
     match s {
         Style::Fill(ps) => {
             let slot = if property == StyleProperty::Stroke { Slot::Stroke } else { Slot::Fill };
@@ -932,12 +913,7 @@ fn style_matches_node(doc: &Document, n: &Node, s: &Style, property: StyleProper
             !n.style_refs.contains_key(slot.ref_key()) && !any_bound && slot.paints(n) == ps.as_slice()
         }
         Style::Text(ts) => match &n.kind {
-            NodeKind::Text(t) => {
-                !n.style_refs.contains_key("text")
-                    && !text_number_bound_in_place(doc, n)
-                    && same_text_style(&t.style, ts)
-                    && t.runs.iter().all(|r| same_text_style(&r.style, ts))
-            }
+            NodeKind::Text(t) => !n.style_refs.contains_key("text") && same_text_style(&t.style, ts) && t.runs.iter().all(|r| same_text_style(&r.style, ts)),
             _ => false,
         },
         Style::Effect(fx) => !n.style_refs.contains_key("effect") && !n.effects.is_empty() && n.effects == *fx,

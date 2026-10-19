@@ -261,10 +261,19 @@ fn deleting_a_node_prunes_its_ignore_keys_on_save_and_load() {
     assert_eq!(app.doc.check_designs.ignored.len(), 2);
 
     app.doc.remove(a).unwrap();
+    assert_eq!(app.doc.check_designs.ignored.len(), 1, "Document::remove prunes the deleted node's ignore keys in memory");
+    assert!(app.doc.check_designs.ignored.iter().all(|k| k.node == b));
     let json = app.doc.to_json().unwrap();
+    assert!(!json.contains(&format!("\"node\":{}", a.0)), "deleted node's ignore key is not written to JSON");
     let loaded = Document::from_json(&json).unwrap();
     assert_eq!(loaded.check_designs.ignored.len(), 1);
     assert!(loaded.check_designs.ignored.iter().all(|k| k.node == b));
+
+    // Orphaned nodes pruned by `prune_unreachable` also drop their ignore keys.
+    let mut doc = loaded;
+    doc.get_mut(doc.pages[0]).unwrap().children.retain(|c| *c != b);
+    assert_eq!(doc.prune_unreachable(), 1);
+    assert!(doc.check_designs.ignored.is_empty());
 }
 
 #[test]
@@ -390,17 +399,34 @@ fn two_text_styles_that_equal_the_text_offer_no_fix() {
 }
 
 #[test]
-fn a_typography_number_match_does_not_hide_the_text_style_when_that_rule_is_off() {
+fn a_typography_number_match_or_binding_does_not_hide_the_text_style_rule() {
     let mut f = fx();
     f.doc.check_designs.disabled_rules.remove(Rule::TextStyles.figma_id());
-    f.doc.check_designs.disabled_rules.insert(Rule::TypographyAndStroke.figma_id().into());
-    f.number_var("Size/Title", 32.0, 32.0);
+    let size_var = f.number_var("Size/Title", 32.0, 32.0);
     let card = f.frame(f.page, "Card", Some(Color::WHITE));
     let t = f.text(card, "Heading", 32.0, 700, gray(0x11));
     f.style("H1", "Heading/H1", Style::Text(TextStyle { font_size: 32.0, font_weight: 700, ..TextStyle::default() }), StyleProperty::Text);
+
+    // 1. Both TypographyAndStroke and TextStyles enabled: both rules emit independently.
     let report = f.report();
-    assert_eq!(report.of(Rule::TypographyAndStroke).count(), 0);
+    assert_eq!(report.of(Rule::TypographyAndStroke).count(), 1);
     let found = only(&report, Rule::TextStyles);
     assert_eq!(found.node, t);
     assert_eq!(found.fix, Some(Fix::ApplyStyle { style: "H1".into() }));
+
+    // 2. TypographyAndStroke disabled: TextStyles still emits ApplyStyle.
+    f.doc.check_designs.disabled_rules.insert(Rule::TypographyAndStroke.figma_id().into());
+    let report_off = f.report();
+    assert_eq!(report_off.of(Rule::TypographyAndStroke).count(), 0);
+    let found_off = only(&report_off, Rule::TextStyles);
+    assert_eq!(found_off.fix, Some(Fix::ApplyStyle { style: "H1".into() }));
+
+    // 3. After `fontSize` is bound to the variable, the unstyled layer still gets `ApplyStyle`.
+    f.doc.check_designs.disabled_rules.remove(Rule::TypographyAndStroke.figma_id());
+    f.doc.get_mut(t).unwrap().variables.bindings.insert("fontSize".into(), size_var);
+    let report_bound = f.report();
+    assert_eq!(report_bound.of(Rule::TypographyAndStroke).count(), 0);
+    let found_bound = only(&report_bound, Rule::TextStyles);
+    assert_eq!(found_bound.node, t);
+    assert_eq!(found_bound.fix, Some(Fix::ApplyStyle { style: "H1".into() }));
 }

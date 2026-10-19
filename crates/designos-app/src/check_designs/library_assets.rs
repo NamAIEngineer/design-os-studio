@@ -24,23 +24,26 @@ fn resolve_library_name<'a>(doc: &'a Document, libs: &'a LibrarySources, lib_id:
 pub(super) fn check(doc: &Document, libs: &LibrarySources, n: &Node, src: Option<&Node>, out: &mut Vec<Finding>) {
     // 1. External component instance.
     if let NodeKind::Instance { component: Some(comp_id), .. } = &n.kind {
+        let inherited_nested_instance = src.is_some_and(|s| matches!(&s.kind, NodeKind::Instance { component, .. } if *component == Some(*comp_id)));
         let comp_parent = doc.get(*comp_id).and_then(|c| c.parent);
-        if let Some(ext) = doc.library.external.values().find(|e| {
-            matches!(e.kind, LibraryAssetKind::Component | LibraryAssetKind::ComponentSet)
-                && (e.node == Some(*comp_id) || (comp_parent.is_some() && e.node == comp_parent))
-        }) {
-            if !is_library_enabled(doc, &ext.library_id) {
-                let asset = super::detached::instance_name(doc, *comp_id);
-                let lib_name = resolve_library_name(doc, libs, &ext.library_id);
-                out.push(Finding {
-                    node: n.id,
-                    node_name: n.name.clone(),
-                    rule: Rule::LibraryAssets,
-                    property: "component".into(),
-                    message: format!("Uses \"{asset}\" from library \"{lib_name}\", which isn't enabled in this file"),
-                    fix: None,
-                    fix_label: String::new(),
-                });
+        if !inherited_nested_instance {
+            if let Some(ext) = doc.library.external.values().find(|e| {
+                matches!(e.kind, LibraryAssetKind::Component | LibraryAssetKind::ComponentSet)
+                    && (e.node == Some(*comp_id) || (comp_parent.is_some() && e.node == comp_parent))
+            }) {
+                if !is_library_enabled(doc, &ext.library_id) {
+                    let asset = super::detached::instance_name(doc, *comp_id);
+                    let lib_name = resolve_library_name(doc, libs, &ext.library_id);
+                    out.push(Finding {
+                        node: n.id,
+                        node_name: n.name.clone(),
+                        rule: Rule::LibraryAssets,
+                        property: "component".into(),
+                        message: format!("Uses \"{asset}\" from library \"{lib_name}\", which isn't enabled in this file"),
+                        fix: None,
+                        fix_label: String::new(),
+                    });
+                }
             }
         }
     }

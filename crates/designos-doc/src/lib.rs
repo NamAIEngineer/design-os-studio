@@ -558,6 +558,9 @@ impl Document {
                 out.push(node);
             }
         }
+        if !self.check_designs.ignored.is_empty() {
+            self.check_designs.ignored.retain(|k| self.nodes.contains_key(&k.node));
+        }
         if out.len() <= REMOVED_RING_CAP && parent.is_some() {
             if let Some(p) = parent {
                 self.mark_node_dirty(p);
@@ -695,6 +698,9 @@ impl Document {
         self.nodes.retain(|id, _| reachable.contains(id));
         let removed = before - self.nodes.len();
         if removed > 0 {
+            if !self.check_designs.ignored.is_empty() {
+                self.check_designs.ignored.retain(|k| reachable.contains(&k.node));
+            }
             self.mark_tree_full_dirty();
         }
         removed
