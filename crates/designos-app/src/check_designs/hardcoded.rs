@@ -69,7 +69,7 @@ pub(super) struct Index<'a> {
 /// equals a Studio library id (enabled now or recorded by an earlier import). Figma's own
 /// `sourceLibraryKey`, which `.fig` and REST import store in the same field, names no Studio
 /// library, so such a variable stays a local candidate.
-fn variable_library_id<'a>(doc: &'a Document, v: &Variable) -> Option<&'a str> {
+pub(super) fn variable_library_id<'a>(doc: &'a Document, v: &Variable) -> Option<&'a str> {
     let imported = doc
         .library
         .external

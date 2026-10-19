@@ -2,7 +2,7 @@
 //! an external component, style, or variable whose library is not enabled in this file.
 
 use super::{Finding, LibrarySources, Rule};
-use designos_doc::{Document, LibraryAssetKind, Node, NodeKind, Variable, REMOTE_LIBRARY_PREFIX};
+use designos_doc::{Document, LibraryAssetKind, Node, NodeKind, REMOTE_LIBRARY_PREFIX};
 use std::collections::BTreeSet;
 
 fn is_library_enabled(doc: &Document, lib_id: &str) -> bool {
@@ -17,16 +17,6 @@ fn resolve_library_name<'a>(doc: &'a Document, libs: &'a LibrarySources, lib_id:
         return r.name.as_str();
     }
     lib_id.strip_prefix(REMOTE_LIBRARY_PREFIX).unwrap_or(lib_id)
-}
-
-fn variable_library_id<'a>(doc: &'a Document, v: &Variable) -> Option<&'a str> {
-    doc.variable_collections.get(&v.collection).and_then(|c| c.source_library_key.as_deref()).or_else(|| {
-        doc.library
-            .external
-            .values()
-            .find(|e| e.kind == LibraryAssetKind::Variable && e.local_key.as_deref() == Some(v.id.as_str()))
-            .map(|e| e.library_id.as_str())
-    })
 }
 
 pub(super) fn check(doc: &Document, libs: &LibrarySources, n: &Node, out: &mut Vec<Finding>) {
@@ -83,7 +73,7 @@ pub(super) fn check(doc: &Document, libs: &LibrarySources, n: &Node, out: &mut V
             continue;
         }
         let Some(v) = doc.variables.get(var_id) else { continue };
-        let Some(lib_id) = variable_library_id(doc, v) else { continue };
+        let Some(lib_id) = super::hardcoded::variable_library_id(doc, v) else { continue };
         if !is_library_enabled(doc, lib_id) {
             let lib_name = resolve_library_name(doc, libs, lib_id);
             out.push(Finding {

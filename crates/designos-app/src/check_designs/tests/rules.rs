@@ -358,3 +358,16 @@ fn text_without_text_style_is_flagged_with_apply_style_when_exact_match() {
 fn asset_from_disabled_library_is_flagged_without_fix() {
     library_assets_rule_flags_instance_style_and_variable_from_disabled_library();
 }
+
+#[test]
+fn a_figma_source_library_key_on_a_collection_is_not_a_disabled_studio_library() {
+    // A `.fig` import stores Figma's own `sourceLibraryKey` on the collection. It names no Studio
+    // library, so a binding to such a variable must not be reported as a disabled-library asset.
+    let mut f = fx();
+    let var_id = f.color_var("Brand/Primary", BLUE, BLUE);
+    f.doc.variable_collections.get_mut("theme").unwrap().source_library_key = Some("lk-83c0".into());
+    let bound = f.rect(f.page, "Bound", BLUE);
+    f.doc.get_mut(bound).unwrap().variables.bindings.insert("fills/0".into(), var_id);
+    let report = f.report();
+    assert_eq!(report.of(Rule::LibraryAssets).count(), 0, "{:#?}", report.findings);
+}
