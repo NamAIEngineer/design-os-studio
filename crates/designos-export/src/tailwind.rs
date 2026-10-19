@@ -794,4 +794,14 @@ mod tests {
         let child = out.lines().find(|l| l.contains("self-stretch")).unwrap_or_else(|| panic!("no stretch child in {out}"));
         assert!(!child.contains(" h-"), "{child}");
     }
+
+    #[test]
+    fn tailwind_hugging_row_all_fill_children() {
+        use crate::codegen::fixture::row_with_counter_children;
+        let (d, row, _) = row_with_counter_children(Sizing::Hug, &[20.0, 100.0], true, false);
+        let out = tailwind_for(&d, row);
+        let children: Vec<&str> = out.lines().filter(|l| l.contains("self-stretch")).collect();
+        assert_eq!(children.len(), 2, "{out}");
+        assert!(children.iter().all(|l| l.contains("h-[100px]")), "all-fill row must not collapse: {out}");
+    }
 }
