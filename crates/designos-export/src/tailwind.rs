@@ -520,7 +520,7 @@ fn escape_text(s: &str, jsx: bool) -> String {
 /// ` name="value"` attributes of an instance's component properties.
 pub(crate) fn instance_attrs(doc: &Document, n: &Node) -> String {
     let mut o = String::new();
-    for (name, lit) in instance_args(doc, n) {
+    for (name, lit) in instance_args_for(doc, n, Lang::React) {
         match lit {
             PropLit::Bool(true) => o.push_str(&format!(" {name}")),
             PropLit::Bool(false) => o.push_str(&format!(" {name}={{false}}")),
@@ -599,7 +599,7 @@ fn markup(doc: &Document, id: NodeId, parent: Parent, depth: usize, o: &mut Out,
     let me = Parent::of(n);
     if let Some(site) = &site {
         if jsx {
-            emit_react_slot(o, depth + 1, site, &|o, k, d| markup(doc, k, me, d, o, true));
+            emit_react_slot(doc, o, depth + 1, site, &|o, k, d| markup(doc, k, me, d, o, true));
         } else {
             o.line(depth + 1, format!("<!-- slot: {} -->", site.name));
         }

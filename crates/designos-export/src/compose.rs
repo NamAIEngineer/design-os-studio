@@ -26,20 +26,23 @@ fn slot_function(doc: &Document, n: &Node, slots: &[SlotInfo], o: &mut Out) {
     o.line(0, "@Composable");
     o.line(0, format!("fun {}(", view_name(doc, n)));
     o.line(1, "modifier: Modifier = Modifier,");
+    let mut taken: Vec<String> = Vec::new();
     for p in prop_params(doc, n.id) {
-        let name = &p.name;
+        let name = prop_ident(&p.name, Lang::Kotlin, &mut taken);
         o.line(
             1,
             match &p.default {
                 PropDefault::Bool(b) => format!("{name}: Boolean = {b},"),
-                PropDefault::Text(t) => format!("{name}: String = {},", quote(t)),
+                PropDefault::Text(t) | PropDefault::Variant { value: t, .. } => format!("{name}: String = {},", quote(t)),
                 PropDefault::Instance(Some(v)) => format!("{name}: @Composable () -> Unit = {{ {v}() }},"),
                 PropDefault::Instance(None) => format!("{name}: @Composable () -> Unit = {{}},"),
             },
         );
     }
+    let single = slots.len() == 1;
     for s in slots {
-        let head = format!("{}: @Composable () -> Unit = {{", slot_ident(&s.name, Lang::Kotlin));
+        let s_id = slot_ident_in(&s.name, single, Lang::Kotlin, &mut taken);
+        let head = format!("{s_id}: @Composable () -> Unit = {{");
         let defaults: Vec<&Node> = s.container.and_then(|c| doc.get(c)).map(|c| visible_children(doc, c)).unwrap_or_default();
         if defaults.is_empty() {
             o.line(1, format!("{head}}},"));
@@ -318,7 +321,10 @@ fn emit(doc: &Document, id: NodeId, parent: Parent<'_>, depth: usize, o: &mut Ou
     let rot = rotation_deg(n);
 
     if let NodeKind::Instance { .. } = n.kind {
-        let mut args: Vec<Arg> = instance_args(doc, n)
+        let comp = instance_component(n);
+        let slots = instance_slots(doc, n);
+        let single = slots.single();
+        let mut args: Vec<Arg> = instance_args_for(doc, n, Lang::Kotlin)
             .into_iter()
             .map(|(name, lit)| match lit {
                 PropLit::Bool(b) => arg(format!("{name} = {b}")),
@@ -329,9 +335,8 @@ fn emit(doc: &Document, id: NodeId, parent: Parent<'_>, depth: usize, o: &mut Ou
         size_mods(doc, n, &sz, parent, &mut mods);
         finish_mods(doc, n, rot, &mut mods);
         args.extend(modifier_arg(o, parent, &mods));
-        let slots = instance_slots(doc, n);
         let me = Parent::of(n);
-        if slots.single() && !slots.fills.is_empty() {
+        if single && !slots.fills.is_empty() {
             // The only slot is the trailing content lambda.
             open_call(o, depth, &view_name(doc, n), args, true);
             for k in slots.fills.iter().flat_map(|f| &f.ids) {
@@ -340,7 +345,7 @@ fn emit(doc: &Document, id: NodeId, parent: Parent<'_>, depth: usize, o: &mut Ou
             o.line(depth, "}");
         } else {
             for f in &slots.fills {
-                let name = slot_ident(&f.name, Lang::Kotlin);
+                let name = slot_ident_for(doc, comp, &f.name, single, Lang::Kotlin);
                 if f.ids.is_empty() {
                     args.push(arg(format!("{name} = {{}}")));
                     continue;
@@ -424,7 +429,7 @@ fn emit(doc: &Document, id: NodeId, parent: Parent<'_>, depth: usize, o: &mut Ou
     open_call(o, depth, name, args, block);
     if block {
         if let Some(site) = &site {
-            o.line(depth + 1, format!("{}()", slot_ident(&site.name, Lang::Kotlin)));
+            o.line(depth + 1, format!("{}()", slot_ident_for(doc, site.comp, &site.name, site.single, Lang::Kotlin)));
         }
         let me = Parent::of(n);
         for k in kids {
