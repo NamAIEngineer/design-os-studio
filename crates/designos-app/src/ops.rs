@@ -1819,6 +1819,13 @@ impl App {
     pub fn replace_document(&mut self, doc: Document, path: Option<PathBuf>) {
         crate::decks::ui::flush_notes(self);
         self.stop_plugin();
+        if !self.tabs.parked_in_home && self.home.is_none() && self.tabs.is_hist_in_app() {
+            self.cleanup_image_jobs_on_file_close();
+        } else if self.tabs.is_hist_in_app() && (!self.tabs.entries.is_empty() || !self.image_jobs.jobs.is_empty()) {
+            let mut tabs = std::mem::take(&mut self.tabs);
+            tabs.park_active_from_app(self);
+            self.tabs = tabs;
+        }
         // Pending edits of the library file being left are saved first (from the live state, not an old version).
         self.exit_version_view();
         self.flush_autosave();
