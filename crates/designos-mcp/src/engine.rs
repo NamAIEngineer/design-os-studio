@@ -41,7 +41,48 @@ impl Default for Engine {
     }
 }
 
+/// Every tool name and legacy alias accepted by [`Engine::call`].
+pub const DISPATCHED: &[&str] = &[
+    "designos_get_document",
+    "designos_get_libraries",
+    "designos_search_design_system",
+    "designos_get_metadata",
+    "get_metadata",
+    "designos_list_nodes",
+    "designos_get_node",
+    "designos_get_screenshot",
+    "designos_get_variables",
+    "designos_generate_code",
+    "designos_create_node",
+    "designos_update_node",
+    "designos_delete_node",
+    "designos_list_comments",
+    "designos_add_comment",
+    "designos_reply_comment",
+    "designos_resolve_comment",
+    "designos_apply_spec",
+    "designos_export_spec",
+    "designos_set_dev_status",
+    "designos_export_fig_file",
+    "export_fig_file",
+    "designos_get_guidelines",
+    "get_guidelines",
+    "designos_query_xpath",
+    "query_nodes",
+    "designos_lint",
+    "check_design",
+    "designos_undo",
+    "designos_redo",
+    "designos_apply_batch",
+];
+
+/// Non-prefixed compatibility aliases accepted by [`Engine::call`].
+pub const ALIASES: &[&str] = &["export_fig_file", "get_guidelines", "get_metadata", "query_nodes", "check_design"];
+
 impl Engine {
+    pub const DISPATCHED: &[&str] = DISPATCHED;
+    pub const ALIASES: &[&str] = ALIASES;
+
     /// Updates the per-node lint cache for `rev` by replacing `recomputed_rules` on `checked_nodes`
     /// with `fresh_hits` while preserving any other rule hits or unchecked nodes from the same revision.
     pub fn update_lint_cache(
@@ -75,6 +116,7 @@ impl Engine {
         self.lint_rules_cache = Some((rev, rules_map));
         self.lint_cache = Some((rev, counts));
     }
+
     /// Resolves the target page when a tool call omits `parent_id` / `page_id`:
     /// prefers `self.active_page_id` (the user's currently selected page in `design:os studio`)
     /// if valid in `self.doc.pages`, falling back to `self.doc.pages.first()`.
@@ -970,6 +1012,22 @@ pub fn tools() -> Vec<Value> {
             "platform":{"type":"string","enum":["web","ios","android"],"default":"web"},
             "max_tokens":{"type":"integer","minimum":500,"maximum":25000,"default":8000}
         }),
+        vec![],
+        true,
+        true,
+    );
+    add(
+        "query_xpath",
+        "Query layers on a page using an XPath-like selector (e.g. //FRAME, //FRAME[@name='Card'], //TEXT[contains(@name, 'Title')]) or a kind/name substring.",
+        json!({"selector":{"type":"string","maxLength":1024},"query":{"type":"string","maxLength":1024},"page_id":id}),
+        vec![],
+        true,
+        true,
+    );
+    add(
+        "lint",
+        "Audit layers on a page for zero-bounds geometry and default layer names, returning structured findings and pass status.",
+        json!({"page_id":id}),
         vec![],
         true,
         true,
