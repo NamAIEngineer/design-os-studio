@@ -515,6 +515,14 @@ mod tests {
     }
 
     #[test]
+    fn compose_hugging_row_all_fill_children() {
+        let (d, row, _) = fixture::row_with_counter_children(Sizing::Hug, &[20.0, 100.0], true, false);
+        let out = compose_for(&d, row);
+        assert_eq!(out.matches("height = 100.dp").count(), 2, "{out}");
+        assert!(!out.contains("fillMaxHeight"), "{out}");
+    }
+
+    #[test]
     fn grid_stretch_child_exports_its_solved_size() {
         // (row track, solved height): an auto row is sized by the child, a taller row is filled.
         for (track, height) in [(None, 20), (Some(GridTrack::Fixed(100.0)), 100)] {

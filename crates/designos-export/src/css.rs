@@ -995,6 +995,90 @@ mod tests {
     }
 
     #[test]
+    fn css_hugging_row_all_fill_children_print_the_solved_height() {
+        use crate::codegen::fixture::row_with_counter_children;
+        let (d, row, kids) = row_with_counter_children(Sizing::Hug, &[20.0, 100.0], true, false);
+        assert_eq!(d.get(row).unwrap().size.y, 100.0);
+        for k in &kids {
+            let css = css_for(&d, *k);
+            assert!(css.contains("height: 100px;") && css.contains("align-self: stretch;"), "all-fill row must not collapse: {css}");
+        }
+    }
+
+    #[test]
+    fn imported_fill_plus_stretch_same_output() {
+        use crate::codegen::fixture::row_with_counter_children;
+        let (d_fill, _, kids_fill) = row_with_counter_children(Sizing::Hug, &[20.0, 100.0], true, false);
+        let (d_both, _, kids_both) = row_with_counter_children(Sizing::Hug, &[20.0, 100.0], true, true);
+        for (kf, kb) in kids_fill.into_iter().zip(kids_both) {
+            assert_eq!(css_for(&d_fill, kf), css_for(&d_both, kb));
+        }
+    }
+
+    #[test]
+    fn fixed_parent_stays_fill_only() {
+        use crate::codegen::fixture::row_with_counter_children;
+        let (d, _, kids) = row_with_counter_children(Sizing::Fixed, &[40.0], true, false);
+        let css = css_for(&d, kids[0]);
+        assert!(css.contains("align-self: stretch;") && !css.contains("height:"), "{css}");
+    }
+
+    #[test]
+    fn plain_sibling_sets_the_line() {
+        use crate::codegen::fixture::add_rect;
+        let mut d = Document::new("t");
+        let page = d.add_page("p");
+        let fid = d.alloc_id();
+        let mut row = Node::frame(fid, Rect::new(0.0, 0.0, 200.0, 100.0));
+        row.fills.clear();
+        if let NodeKind::Frame(fp) = &mut row.kind {
+            fp.auto_layout = Some(AutoLayout {
+                direction: LayoutDirection::Horizontal,
+                counter_align: LayoutAlign::Start,
+                primary_sizing: Sizing::Fixed,
+                counter_sizing: Sizing::Hug,
+                ..Default::default()
+            });
+        }
+        let fid = d.insert(page, row).unwrap();
+        let _plain = add_rect(&mut d, fid, Vec2::new(30.0, 60.0));
+        let fill_kid = add_rect(&mut d, fid, Vec2::new(30.0, 20.0));
+        d.get_mut(fill_kid).unwrap().layout_child.vertical = Sizing::Fill;
+        d.relayout_subtree(fid);
+        let css = css_for(&d, fill_kid);
+        assert!(css.contains("height: 60px;") && css.contains("align-self: stretch;"), "{css}");
+    }
+
+    #[test]
+    fn vertical_stack_symmetric() {
+        use crate::codegen::fixture::add_rect;
+        let mut d = Document::new("t");
+        let page = d.add_page("p");
+        let fid = d.alloc_id();
+        let mut col = Node::frame(fid, Rect::new(0.0, 0.0, 200.0, 200.0));
+        col.fills.clear();
+        if let NodeKind::Frame(fp) = &mut col.kind {
+            fp.auto_layout = Some(AutoLayout {
+                direction: LayoutDirection::Vertical,
+                counter_align: LayoutAlign::Start,
+                primary_sizing: Sizing::Fixed,
+                counter_sizing: Sizing::Hug,
+                ..Default::default()
+            });
+        }
+        let fid = d.insert(page, col).unwrap();
+        let k1 = add_rect(&mut d, fid, Vec2::new(20.0, 30.0));
+        let k2 = add_rect(&mut d, fid, Vec2::new(100.0, 30.0));
+        d.get_mut(k1).unwrap().layout_child.horizontal = Sizing::Fill;
+        d.get_mut(k2).unwrap().layout_child.horizontal = Sizing::Fill;
+        d.relayout_subtree(fid);
+        for k in [k1, k2] {
+            let css = css_for(&d, k);
+            assert!(css.contains("width: 100px;") && css.contains("align-self: stretch;"), "{css}");
+        }
+    }
+
+    #[test]
     fn stretch_child_leaves_the_cross_size_to_a_fixed_parent() {
         use crate::codegen::fixture::row_with_stretch_children;
         let (d, _, kids) = row_with_stretch_children(Sizing::Fixed, &[40.0]);

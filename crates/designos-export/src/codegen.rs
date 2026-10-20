@@ -345,9 +345,9 @@ pub(crate) struct Sizes {
     pub in_flow: bool,
     /// Whether the parent lays out in a row (main axis horizontal).
     pub row_parent: bool,
-    /// A child that stretches across a parent hugging its counter axis (`AlignSelf::Stretch` on a
-    /// non-Fill child). The parent has nothing to stretch against, so the cross axis keeps the child's
-    /// own size (`w`/`h` are never `Fill` there); web output also keeps the stretch declaration.
+    /// A stretching child of a hugging flex parent (`Sizing::Fill` or `AlignSelf::Stretch` on the
+    /// counter axis). The parent has nothing to stretch against, so the cross axis keeps the child's
+    /// solved size (`w`/`h` are never `Fill` there); web output also keeps the stretch declaration.
     pub cross_stretch: bool,
 }
 
@@ -394,11 +394,10 @@ fn sizes_along(n: &Node, parent: Parent<'_>, row_parent: bool) -> Sizes {
     let counter_horiz = parent.al.filter(|_| in_flow && !grid_parent).map(|a| !a.primary_is_horizontal());
     let lc = &n.layout_child;
     // The solver sizes a stretch child to the line, and a hugging counter axis derives that line from
-    // the children, so the child's own size is what keeps the frame from collapsing.
+    // the children, so the child's solved size is what keeps the frame from collapsing.
     let cross_stretch = in_flow
-        && lc.align_self == AlignSelf::Stretch
         && parent.al.is_some_and(|a| a.direction != LayoutDirection::Grid && a.counter_sizing == Sizing::Hug)
-        && (if row_parent { lc.vertical } else { lc.horizontal }) != Sizing::Fill;
+        && lc.effective_sizing(!row_parent, counter_horiz) == Sizing::Fill;
     let keeps_w = cross_stretch && !row_parent;
     let keeps_h = cross_stretch && row_parent;
     let fill_w = in_flow && ((lc.effective_sizing(true, counter_horiz) == Sizing::Fill && !keeps_w) || (grows && row_parent));
@@ -769,6 +768,13 @@ pub(crate) mod fixture {
     /// A horizontal 200x100 auto-layout row whose counter axis is `counter_sizing`, holding one
     /// `AlignSelf::Stretch` rectangle per entry of `heights` (each 30 wide, fixed height), already solved.
     pub fn row_with_stretch_children(counter_sizing: Sizing, heights: &[f32]) -> (Document, NodeId, Vec<NodeId>) {
+        row_with_counter_children(counter_sizing, heights, false, true)
+    }
+
+    /// A horizontal 200x100 auto-layout row whose counter axis is `counter_sizing`, holding one
+    /// rectangle per entry of `heights` (each 30 wide) with `vertical = Sizing::Fill` when
+    /// `counter_fill` is true and/or `align_self = AlignSelf::Stretch` when `stretch` is true, already solved.
+    pub fn row_with_counter_children(counter_sizing: Sizing, heights: &[f32], counter_fill: bool, stretch: bool) -> (Document, NodeId, Vec<NodeId>) {
         let mut d = Document::new("t");
         let page = d.add_page("p");
         let fid = d.alloc_id();
@@ -788,7 +794,13 @@ pub(crate) mod fixture {
             .iter()
             .map(|h| {
                 let id = add_rect(&mut d, fid, Vec2::new(30.0, *h));
-                d.get_mut(id).unwrap().layout_child.align_self = AlignSelf::Stretch;
+                let lc = &mut d.get_mut(id).unwrap().layout_child;
+                if counter_fill {
+                    lc.vertical = Sizing::Fill;
+                }
+                if stretch {
+                    lc.align_self = AlignSelf::Stretch;
+                }
                 id
             })
             .collect();
