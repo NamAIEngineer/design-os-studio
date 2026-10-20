@@ -1103,6 +1103,48 @@
     }
   },
   {
+    "name": "designos_get_design_context",
+    "description": "Return generated code in the target language, Dev Mode hints (variables with CSS/platform code syntax, linked styles, component instances/properties, annotations, dev status, Code Connect stub), and an inline screenshot (scale 0.5, max_long_edge 1024), with an XML outline fallback when the subtree exceeds 5,000 nodes or generated code exceeds 40,000 characters.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "include_screenshot": {
+          "default": true,
+          "type": "boolean"
+        },
+        "language": {
+          "default": "css",
+          "type": "string"
+        },
+        "node_id": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "react_tailwind": {
+          "default": false,
+          "type": "boolean"
+        },
+        "response_format": {
+          "default": "concise",
+          "enum": [
+            "concise",
+            "detailed"
+          ]
+        }
+      },
+      "required": [
+        "node_id"
+      ],
+      "type": "object"
+    },
+    "annotations": {
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false,
+      "readOnlyHint": true
+    }
+  },
+  {
     "name": "designos_open_file",
     "description": "Import a .designos, .designos, .fig, SVG or Figma REST JSON file inside the workspace into this isolated session. Does not control an open editor. Unsaved changes require discard_changes=true.",
     "inputSchema": {
