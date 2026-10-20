@@ -104,9 +104,6 @@ graph LR
   T7_3 --> T7_29[T7.29 HTML codegen]
   T7_38[T7.38 libraries] --> T7_9[T7.9 search]
   T7_2 --> E15_16[E15-16 bootstrap]
-  T7_4 --> E15_16
-  T7_38 --> E15_16
-  T7_9 --> E15_16
   E15_15 --> E15_16
   E15_9 --> E15_17[E15-17 streaming query]
   E15_11 --> E15_17
