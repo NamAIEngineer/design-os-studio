@@ -174,27 +174,21 @@ pub fn merge(base: &Document, main: &Document, branch: &Document, diff: &Diff3, 
     }
 
     // 2. Verify every remaining conflict in `diff` has a caller resolution (`T10.3 §3.2`).
-    // Note: For `T10.3 §8.1` (branch deletes a component that `main` added a new instance of),
-    // if the caller did not specify a resolution for `main`'s added instance, `main`'s instance
-    // stays and post-merge reference validation (§3.7) refuses the merge with `MergeError::DanglingReference`.
     let mut unresolved = Vec::new();
     for conflict in &diff.conflicts {
-        let is_main_added_depends_on_removed = matches!(conflict.kind, ConflictKind::DependsOnRemoved)
-            && !base.nodes.contains_key(&conflict.node)
-            && main.nodes.contains_key(&conflict.node)
-            && !branch.nodes.contains_key(&conflict.node);
-        if !is_main_added_depends_on_removed && !resolution.per_layer.contains_key(&conflict.node) {
+        if !resolution.per_layer.contains_key(&conflict.node) {
             unresolved.push(UnresolvedItem::Layer(conflict.node));
         }
     }
     for conflict in &diff.entity_conflicts {
-        let is_auto_remapped = match &conflict.key {
-            EntityKey::Style(k) => auto_remap_styles.contains(k) && !resolution.per_entity.contains_key(&conflict.key),
-            EntityKey::Variable(k) => auto_remap_variables.contains(k) && !resolution.per_entity.contains_key(&conflict.key),
-            EntityKey::Collection(k) => auto_remap_collections.contains(k) && !resolution.per_entity.contains_key(&conflict.key),
-            EntityKey::Flow(_) | EntityKey::Comment(_) => false,
+        let is_resolved = match &conflict.key {
+            EntityKey::Style(k) => auto_remap_styles.contains(k) || resolution.per_entity.contains_key(&conflict.key),
+            EntityKey::Variable(k) => auto_remap_variables.contains(k) || resolution.per_entity.contains_key(&conflict.key),
+            EntityKey::Collection(k) => auto_remap_collections.contains(k) || resolution.per_entity.contains_key(&conflict.key),
+            EntityKey::Guides(page_id) => resolution.per_entity.contains_key(&conflict.key) || resolution.per_layer.contains_key(page_id),
+            EntityKey::Flow(_) | EntityKey::Comment(_) | EntityKey::Image(_) => resolution.per_entity.contains_key(&conflict.key),
         };
-        if !is_auto_remapped && !resolution.per_entity.contains_key(&conflict.key) {
+        if !is_resolved {
             unresolved.push(UnresolvedItem::Entity(conflict.key.clone()));
         }
     }
@@ -643,13 +637,22 @@ fn build_merge_commands(
     let mut add_images = BTreeMap::new();
     for (hash, bytes) in &remapped_branch.images {
         if !main.images.contains_key(hash) {
-            add_images.insert(hash.clone(), bytes.clone());
+            let key = EntityKey::Image(hash.clone());
+            let is_conflicting = diff.entity_conflicts.iter().any(|c| c.key == key);
+            let take_branch = if is_conflicting { resolution.per_entity.get(&key) == Some(&Side::Branch) } else { !base.images.contains_key(hash) };
+            if take_branch {
+                add_images.insert(hash.clone(), bytes.clone());
+            }
         }
     }
     let mut remove_images = Vec::new();
     for hash in base.images.keys() {
         if !remapped_branch.images.contains_key(hash) && main.images.contains_key(hash) {
-            remove_images.push(hash.clone());
+            let key = EntityKey::Image(hash.clone());
+            let is_conflicting = diff.entity_conflicts.iter().any(|c| c.key == key);
+            if !is_conflicting || resolution.per_entity.get(&key) == Some(&Side::Branch) {
+                remove_images.push(hash.clone());
+            }
         }
     }
     if !add_images.is_empty() || !remove_images.is_empty() {
@@ -864,7 +867,7 @@ fn build_merge_commands(
         flow_guide_comment_cmds.push(Command::SetFlows { flows: merged_flows });
     }
 
-    let merged_guides = merge_guides(base, main, remapped_branch, &all_removed_in_main, &nodes_to_add, resolution);
+    let merged_guides = merge_guides(base, main, remapped_branch, diff, id_remap, &all_removed_in_main, &nodes_to_add, resolution);
     if merged_guides != main.guides {
         let all_guide_pages: BTreeSet<NodeId> = main.guides.keys().chain(merged_guides.keys()).copied().collect();
         for page_id in all_guide_pages {
@@ -1357,10 +1360,13 @@ fn merge_flows(base: &Document, main: &Document, raw_branch: &Document, remapped
     merged_by_key.into_values().collect()
 }
 
+#[allow(clippy::too_many_arguments)]
 fn merge_guides(
-    base: &Document,
+    _base: &Document,
     main: &Document,
     remapped_branch: &Document,
+    diff: &Diff3,
+    id_remap: &BTreeMap<NodeId, NodeId>,
     removed_in_main: &BTreeSet<NodeId>,
     added_from_branch: &BTreeSet<NodeId>,
     resolution: &Resolution,
@@ -1369,20 +1375,33 @@ fn merge_guides(
     out.retain(|page_id, _| !removed_in_main.contains(page_id));
 
     for (&page_id, branch_guides) in &remapped_branch.guides {
-        if removed_in_main.contains(&page_id) {
-            continue;
-        }
-        if added_from_branch.contains(&page_id) {
+        if added_from_branch.contains(&page_id) && !removed_in_main.contains(&page_id) {
             out.insert(page_id, branch_guides.clone());
+        }
+    }
+
+    let conflict_keys: BTreeSet<&EntityKey> = diff.entity_conflicts.iter().map(|c| &c.key).collect();
+    for (&raw_page_id, &change) in &diff.theirs.guides {
+        let page_id = id_remap.get(&raw_page_id).copied().unwrap_or(raw_page_id);
+        if removed_in_main.contains(&page_id) || added_from_branch.contains(&page_id) || page_id != raw_page_id {
             continue;
         }
-        let base_g = base.guides.get(&page_id);
-        let main_g = main.guides.get(&page_id);
-        if base_g == Some(branch_guides) {
+        let entity_key = EntityKey::Guides(raw_page_id);
+        let is_conflicting = conflict_keys.contains(&entity_key);
+        let side_choice = resolution.per_entity.get(&entity_key).copied().or_else(|| resolution.per_layer.get(&raw_page_id).copied());
+        let take_branch = if is_conflicting { side_choice == Some(Side::Branch) } else { true };
+        if !take_branch {
             continue;
         }
-        if base_g == main_g || resolution.per_layer.get(&page_id) == Some(&Side::Branch) {
-            out.insert(page_id, branch_guides.clone());
+        match change {
+            EntityChange::Added | EntityChange::Changed => {
+                if let Some(branch_guides) = remapped_branch.guides.get(&page_id) {
+                    out.insert(page_id, branch_guides.clone());
+                }
+            }
+            EntityChange::Removed => {
+                out.remove(&page_id);
+            }
         }
     }
 
@@ -1597,6 +1616,40 @@ pub fn validate_merged_references(doc: &Document) -> Vec<DanglingReference> {
         for style_key in node.style_refs.values() {
             if !doc.styles.contains_key(style_key) {
                 dangling.push(DanglingReference { owner: owner.clone(), field: "Node.style_refs", target: format!("style {style_key}") });
+            }
+        }
+
+        // Image hash references in node fills, stroke paints, and text style fills (`T10.3 §2`).
+        for paint in &node.fills {
+            if let crate::PaintKind::Image { image_ref, .. } = &paint.kind {
+                if !doc.images.contains_key(image_ref) {
+                    dangling.push(DanglingReference { owner: owner.clone(), field: "Node.fills", target: format!("image {image_ref}") });
+                }
+            }
+        }
+        for paint in &node.stroke.paints {
+            if let crate::PaintKind::Image { image_ref, .. } = &paint.kind {
+                if !doc.images.contains_key(image_ref) {
+                    dangling.push(DanglingReference { owner: owner.clone(), field: "Node.stroke.paints", target: format!("image {image_ref}") });
+                }
+            }
+        }
+        if let Some(tp) = node.kind.any_text() {
+            for paint in &tp.style.fills {
+                if let crate::PaintKind::Image { image_ref, .. } = &paint.kind {
+                    if !doc.images.contains_key(image_ref) {
+                        dangling.push(DanglingReference { owner: owner.clone(), field: "TextStyle.fills", target: format!("image {image_ref}") });
+                    }
+                }
+            }
+            for run in &tp.runs {
+                for paint in &run.style.fills {
+                    if let crate::PaintKind::Image { image_ref, .. } = &paint.kind {
+                        if !doc.images.contains_key(image_ref) {
+                            dangling.push(DanglingReference { owner: owner.clone(), field: "TextRunStyle.fills", target: format!("image {image_ref}") });
+                        }
+                    }
+                }
             }
         }
 
@@ -2074,8 +2127,141 @@ mod tests {
         branch.remove(comp_id).unwrap();
 
         let diff = diff3(&base, &main, &branch);
-        let err = merge(&base, &main, &branch, &diff, &Resolution::default()).expect_err("deleting component referenced by main instance must fail validation");
-        assert!(matches!(err, MergeError::DanglingReference(_)));
+        assert!(
+            diff.conflicts.iter().any(|c| c.node == comp_id && c.kind == ConflictKind::DeleteModify),
+            "component referenced by surviving main instance must record DeleteModify conflict"
+        );
+
+        // 1) Unresolved without a choice on `comp_id`:
+        let unresolved_err = merge(&base, &main, &branch, &diff, &Resolution::default()).expect_err("missing component choice must be Unresolved");
+        assert!(matches!(unresolved_err, MergeError::Unresolved(ref items) if items.contains(&UnresolvedItem::Layer(comp_id))));
+
+        // 2) Choosing `Side::Branch` removes the component and fails reference validation naming `inst_id`:
+        let res_branch = Resolution::new().with_layer(comp_id, Side::Branch);
+        let err = merge(&base, &main, &branch, &diff, &res_branch).expect_err("deleting component referenced by main instance must fail validation");
+        match err {
+            MergeError::DanglingReference(refs) => {
+                assert!(
+                    refs.iter().any(|r| r.owner == format!("node {}", inst_id.0) && r.field == "NodeKind::Instance.component"),
+                    "DanglingReference must name main's instance, got: {refs:?}"
+                );
+            }
+            other => panic!("expected DanglingReference, got {other:?}"),
+        }
+
+        // 3) Choosing `Side::Main` on the component keeps BOTH the component and main's instance:
+        let res_main = Resolution::new().with_layer(comp_id, Side::Main);
+        let plan_main = merge(&base, &main, &branch, &diff, &res_main).expect("Side::Main on component must keep both component and instance");
+        assert!(plan_main.merged_document.nodes.contains_key(&comp_id), "component must survive when Side::Main is chosen");
+        assert!(plan_main.merged_document.nodes.contains_key(&inst_id), "main instance must survive when Side::Main is chosen");
+
+        // 4) Same when the instance already existed in `base` (unmodified on `main`) and `branch` deletes `comp_id`:
+        let base_with_inst = main.clone();
+        let main_untouched = base_with_inst.clone();
+        let mut branch_del_comp = base_with_inst.clone();
+        branch_del_comp.remove(comp_id).unwrap();
+        let diff_existing = diff3(&base_with_inst, &main_untouched, &branch_del_comp);
+        assert!(
+            diff_existing.conflicts.iter().any(|c| c.node == comp_id && c.kind == ConflictKind::DeleteModify),
+            "component referenced by unmodified base instance must also record DeleteModify conflict"
+        );
+        let plan_keep = merge(&base_with_inst, &main_untouched, &branch_del_comp, &diff_existing, &res_main)
+            .expect("Side::Main must keep component referenced by unmodified base instance");
+        assert!(plan_keep.merged_document.nodes.contains_key(&comp_id));
+        assert!(plan_keep.merged_document.nodes.contains_key(&inst_id));
+    }
+
+    #[test]
+    fn guides_diffed_per_page_conflict_and_branch_deletion() {
+        let (mut base, page) = new_doc_with_page();
+        base.guides.insert(page, vec![Guide { axis: GuideAxis::X, offset: 5.0, frame: None }]);
+
+        // Case 1: Branch deletes the page's guide entry (key removed from `Document.guides`), main untouched -> deletion lands.
+        let main_untouched = base.clone();
+        let mut branch_del = base.clone();
+        branch_del.guides.remove(&page);
+        let (merged_del, _) =
+            merge_branch(&base, &main_untouched, &branch_del, &Resolution::default()).expect("one-sided branch guide deletion should succeed");
+        assert!(!merged_del.guides.contains_key(&page), "branch-side deletion of page guide entry must remove key from main");
+
+        // Case 2: Main adds a guide at y=10 and branch adds one at y=40 on the same page -> conflict!
+        let (base_empty, page2) = new_doc_with_page();
+        let mut main_add = base_empty.clone();
+        let mut branch_add = base_empty.clone();
+        main_add.guides.insert(page2, vec![Guide { axis: GuideAxis::Y, offset: 10.0, frame: None }]);
+        branch_add.guides.insert(page2, vec![Guide { axis: GuideAxis::Y, offset: 40.0, frame: None }]);
+
+        let diff_add = diff3(&base_empty, &main_add, &branch_add);
+        assert!(diff_add.entity_conflicts.iter().any(|c| c.key == EntityKey::Guides(page2)), "add/add guides on the same page must record EntityConflict");
+        let err = merge(&base_empty, &main_add, &branch_add, &diff_add, &Resolution::default()).expect_err("conflicting guide edits must require resolution");
+        assert_eq!(err, MergeError::Unresolved(vec![UnresolvedItem::Entity(EntityKey::Guides(page2))]));
+
+        let res_branch = Resolution::new().with_entity(EntityKey::Guides(page2), Side::Branch);
+        let plan_branch = merge(&base_empty, &main_add, &branch_add, &diff_add, &res_branch).expect("resolving guides via per_entity should succeed");
+        assert_eq!(plan_branch.merged_document.guides[&page2], vec![Guide { axis: GuideAxis::Y, offset: 40.0, frame: None }]);
+
+        let res_page_main = Resolution::new().with_layer(page2, Side::Main);
+        let plan_main = merge(&base_empty, &main_add, &branch_add, &diff_add, &res_page_main).expect("resolving guides via page choice should succeed");
+        assert_eq!(plan_main.merged_document.guides[&page2], vec![Guide { axis: GuideAxis::Y, offset: 10.0, frame: None }]);
+    }
+
+    #[test]
+    fn branch_deleted_image_still_referenced_on_main_conflicts_and_validates() {
+        use crate::{ImageScaleMode, PaintKind};
+
+        let (mut base, page) = new_doc_with_page();
+        let hash = "img_shared_hash".to_string();
+        base.images.insert(hash.clone(), vec![1, 2, 3, 4]);
+
+        let main_rect = add_rect(&mut base, page, "Main Painted Rect", 0.0, 0.0);
+        base.nodes.get_mut(&main_rect).unwrap().fills = vec![Paint {
+            kind: PaintKind::Image { image_ref: hash.clone(), scale_mode: ImageScaleMode::Fill },
+            opacity: 1.0,
+            visible: true,
+            blend: crate::BlendMode::Normal,
+        }];
+        let branch_rect = add_rect(&mut base, page, "Branch Painted Rect", 120.0, 0.0);
+        base.nodes.get_mut(&branch_rect).unwrap().fills = vec![Paint {
+            kind: PaintKind::Image { image_ref: hash.clone(), scale_mode: ImageScaleMode::Fill },
+            opacity: 1.0,
+            visible: true,
+            blend: crate::BlendMode::Normal,
+        }];
+
+        let main = base.clone();
+        let mut branch = base.clone();
+        // Branch replaces its own rect's fill and drops `hash` from `branch.images`, while `main_rect` still paints `hash`.
+        branch.nodes.get_mut(&branch_rect).unwrap().fills = vec![Paint::solid(Color::rgb(255, 0, 0))];
+        branch.images.remove(&hash);
+
+        let diff = diff3(&base, &main, &branch);
+        assert!(
+            diff.entity_conflicts.iter().any(|c| c.key == EntityKey::Image(hash.clone()) && c.kind == ConflictKind::DeleteModify),
+            "dropping an image hash still referenced by a surviving node must raise DeleteModify conflict"
+        );
+
+        // Unresolved without a choice:
+        let unresolved = merge(&base, &main, &branch, &diff, &Resolution::default()).expect_err("must require resolution when branch deletes referenced image");
+        assert_eq!(unresolved, MergeError::Unresolved(vec![UnresolvedItem::Entity(EntityKey::Image(hash.clone()))]));
+
+        // Choosing Side::Branch removes the image and fails reference validation naming `main_rect`:
+        let res_branch = Resolution::new().with_entity(EntityKey::Image(hash.clone()), Side::Branch);
+        let err = merge(&base, &main, &branch, &diff, &res_branch).expect_err("removing image referenced by surviving fill must fail validation");
+        match err {
+            MergeError::DanglingReference(refs) => {
+                assert!(
+                    refs.iter().any(|r| r.owner == format!("node {}", main_rect.0) && r.target == format!("image {hash}")),
+                    "validator must report dangling fill image hash on main_rect, got {refs:?}"
+                );
+            }
+            other => panic!("expected DanglingReference, got {other:?}"),
+        }
+
+        // Choosing Side::Main keeps the image bytes and succeeds:
+        let res_main = Resolution::new().with_entity(EntityKey::Image(hash.clone()), Side::Main);
+        let plan_main = merge(&base, &main, &branch, &diff, &res_main).expect("Side::Main must keep referenced image bytes");
+        assert!(plan_main.merged_document.images.contains_key(&hash));
+        assert!(validate_merged_references(&plan_main.merged_document).is_empty());
     }
 
     #[test]
