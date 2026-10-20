@@ -113,16 +113,13 @@ impl Engine {
                 let a: CodeArgs = parse(args)?;
                 let id = self.node(a.node_id)?.id;
                 let doc = designos_doc::apply_bound_variables(&self.doc);
-                let code = match a.language.as_str() {
-                    "css" => designos_export::css_for(&doc, id),
-                    "tailwind" => designos_export::tailwind_for(&doc, id),
-                    "react" => designos_export::react_for(&doc, id),
-                    "swiftui" => designos_export::swiftui_for(&doc, id),
-                    "uikit" => designos_export::uikit_for(&doc, id),
-                    "compose" => designos_export::compose_for(&doc, id),
-                    "android-xml" => designos_export::android_xml_for(&doc, id),
-                    "svg" => designos_export::export_svg(&doc, id, &Default::default()),
-                    _ => return Err("language must be css, tailwind, react, swiftui, uikit, compose, android-xml, or svg".into()),
+                let code = if let Some(lang) = designos_export::language::CodeLanguage::from_id(a.language.as_str()) {
+                    lang.generate(&doc, id, false)
+                } else if a.language == "svg" {
+                    designos_export::export_svg(&doc, id, &Default::default())
+                } else {
+                    let ids: Vec<&str> = designos_export::language::CodeLanguage::ALL.iter().map(|l| l.id()).collect();
+                    return Err(format!("language must be {}, or svg", ids.join(", ")));
                 };
                 Ok(json!({"node_id":id,"language":a.language,"code":code}))
             }
@@ -741,10 +738,11 @@ pub fn tools() -> Vec<Value> {
         true,
         true,
     );
+    let generate_code_langs: Vec<&str> = designos_export::language::CodeLanguage::ALL.iter().map(|l| l.id()).chain(["svg"]).collect();
     add(
         "generate_code",
         "Generate developer handoff code or SVG for a layer using resolved variable values. Returns source text; writes no files.",
-        json!({"node_id":id,"language":{"type":"string","enum":["css","tailwind","react","swiftui","uikit","compose","android-xml","svg"]}}),
+        json!({"node_id":id,"language":{"type":"string","enum":generate_code_langs}}),
         vec!["node_id", "language"],
         true,
         true,
@@ -968,16 +966,17 @@ mod tests {
         assert_eq!(result["total"], 2);
         assert_eq!(result["nodes"][0]["node_id"], id);
         assert_eq!(result["next_offset"], 1);
-        for language in ["css", "tailwind", "react", "swiftui", "uikit", "compose", "android-xml", "svg"] {
+        for language in designos_export::language::CodeLanguage::ALL.iter().map(|l| l.id()).chain(["svg"]) {
             let output = e.call("designos_generate_code", json!({"node_id":id,"language":language})).unwrap();
             assert!(!output["code"].as_str().unwrap().is_empty());
         }
         let uikit = e.call("designos_generate_code", json!({"node_id":id,"language":"uikit"})).unwrap();
         assert!(uikit["code"].as_str().unwrap().starts_with("let card = "), "{uikit}");
-        let xml = e.call("designos_generate_code", json!({"node_id":id,"language":"android-xml"})).unwrap();
+        let android_id = designos_export::language::CodeLanguage::AndroidXml.id();
+        let xml = e.call("designos_generate_code", json!({"node_id":id,"language":android_id})).unwrap();
         assert!(xml["code"].as_str().unwrap().starts_with("<!-- res/layout/card.xml -->"), "{xml}");
         let err = e.call("designos_generate_code", json!({"node_id":id,"language":"vue"})).unwrap_err();
-        assert!(err.contains("uikit") && err.contains("android-xml"), "{err}");
+        assert!(err.contains("uikit") && err.contains(android_id), "{err}");
         assert!(e.call("designos_list_nodes", json!({"limit":501})).is_err());
         assert!(e.call("designos_get_node", json!({"node_id":"2"})).is_err());
     }
@@ -1192,5 +1191,42 @@ mod tests {
             assert_settled(&e, last, tool);
         }
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn no_duplicate_language_list() {
+        let src_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let needle = format!("\"{}\"", designos_export::language::CodeLanguage::AndroidXml.id());
+        fn scan_dir(dir: &std::path::Path, needle: &str) {
+            for entry in std::fs::read_dir(dir).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    scan_dir(&path, needle);
+                } else if path.extension().and_then(|e| e.to_str()) == Some("rs") {
+                    let content = std::fs::read_to_string(&path).unwrap();
+                    for (idx, line) in content.lines().enumerate() {
+                        if line.contains(needle) && !line.contains("CodeLanguage") {
+                            panic!("{}:{} contains literal {needle} outside a CodeLanguage call", path.display(), idx + 1);
+                        }
+                    }
+                }
+            }
+        }
+        scan_dir(&src_dir, &needle);
+    }
+
+    #[test]
+    fn mcp_generate_code_ids_match_dropdown() {
+        let list = tools();
+        let gen_tool = list.iter().find(|t| t["name"] == "designos_generate_code").unwrap();
+        let enum_vals: Vec<String> = gen_tool["inputSchema"]["properties"]["language"]["enum"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap().to_string())
+            .filter(|v| v != "svg")
+            .collect();
+        let expected: Vec<String> = designos_export::language::CodeLanguage::ALL.iter().map(|l| l.id().to_string()).collect();
+        assert_eq!(enum_vals, expected);
     }
 }
