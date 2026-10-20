@@ -82,7 +82,8 @@ pub const DISPATCHED: &[&str] = &[
 ];
 
 /// Non-prefixed compatibility aliases accepted by [`Engine::call`].
-pub const ALIASES: &[&str] = &["export_fig_file", "get_guidelines", "get_metadata", "get_screenshot", "get_design_context", "import_web_capture", "query_nodes", "check_design"];
+pub const ALIASES: &[&str] =
+    &["export_fig_file", "get_guidelines", "get_metadata", "get_screenshot", "get_design_context", "import_web_capture", "query_nodes", "check_design"];
 
 impl Engine {
     pub const DISPATCHED: &[&str] = DISPATCHED;
