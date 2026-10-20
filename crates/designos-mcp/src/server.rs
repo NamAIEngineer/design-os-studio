@@ -215,6 +215,7 @@ impl Session {
     /// Reloads `self.engine.doc` from `live_canvas_path` if `design:os studio` wrote a newer canvas
     /// snapshot, and updates `self.engine.active_page_id` from `context.json` (`current_page_id`).
     pub fn sync_from_live_canvas_if_newer(&mut self) {
+        let mut reloaded_live_canvas = false;
         if let Some(canvas_path) = self.bridge.live_canvas_path.clone() {
             if let Ok(meta) = fs::metadata(&canvas_path) {
                 if let Ok(mtime) = meta.modified() {
@@ -235,6 +236,7 @@ impl Session {
                                     self.history_dropped = true;
                                 }
                                 self.bridge.last_canvas_mtime = Some(mtime);
+                                reloaded_live_canvas = true;
                             }
                         }
                     }
@@ -243,10 +245,12 @@ impl Session {
         }
 
         let mut loaded_page_id: Option<u64> = None;
+        let mut context_scoped = false;
         if let Some(ctx_path) = &self.bridge.context_json_path {
             if let Ok(raw) = fs::read_to_string(ctx_path) {
                 if let Ok(val) = serde_json::from_str::<Value>(&raw) {
                     loaded_page_id = val.get("current_page_id").and_then(Value::as_u64);
+                    context_scoped = val.get("scoped").and_then(Value::as_bool).unwrap_or(false);
                 }
             }
         }
@@ -259,6 +263,13 @@ impl Session {
             self.engine.active_page_id = Some(designos_doc::NodeId(pid));
         } else if self.engine.active_page_id.is_none() {
             self.engine.active_page_id = self.engine.doc.pages.first().copied();
+        }
+        if reloaded_live_canvas && context_scoped {
+            if let Some(pid) = self.engine.active_page_id {
+                if let Some(page_node) = self.engine.doc.get_mut(pid) {
+                    page_node.fig_metadata.insert("designos:scoped".into(), "true".into());
+                }
+            }
         }
     }
 
@@ -534,12 +545,16 @@ impl Session {
                 }
                 let path = self.png_output_path(&a.path)?;
                 self.engine.settle_layout();
-                let doc = designos_doc::apply_bound_variables(&self.engine.doc);
                 let id = designos_doc::NodeId(a.node_id);
-                if doc.get(id).is_none() {
+                if self.engine.doc.get(id).is_none() {
                     return Err(format!("Node {} does not exist", a.node_id));
                 }
-                let png = designos_export::export_png(&doc, id, a.scale);
+                let rendered = crate::tools::screenshot::render_target(&self.engine.doc, crate::tools::screenshot::ScreenshotTarget::Node(id), a.scale, 0)
+                    .map_err(|e| match e.code {
+                        "IMAGE_TOO_LARGE" => format!("IMAGE_TOO_LARGE: {}", e.message),
+                        _ => format!("Node {} produced an empty image", a.node_id),
+                    })?;
+                let png = designos_export::encode_png_pixmap(&rendered.pixmap);
                 if png.is_empty() {
                     return Err(format!("Node {} produced an empty image", a.node_id));
                 }
@@ -707,12 +722,28 @@ impl ServerHandler for DesignOSServer {
         Ok(ListToolsResult { tools: tools(), ..Default::default() })
     }
     async fn call_tool(&self, request: CallToolRequestParams, _: RequestContext<RoleServer>) -> Result<CallToolResponse, ErrorData> {
+        let is_screenshot = request.name == "designos_get_screenshot" || request.name == "get_screenshot";
         let result = self
             .session
             .lock()
             .map_err(|_| "Session unavailable; restart the MCP server".to_string())
             .and_then(|mut session| session.call(&request.name, Value::Object(request.arguments.unwrap_or_default())));
         Ok(match result {
+            Ok(mut value) if is_screenshot => {
+                let image_content = value.get("content").and_then(Value::as_array).and_then(|arr| arr.first()).and_then(|item| {
+                    let data = item.get("data")?.as_str()?.to_string();
+                    let mime_type = item.get("mimeType")?.as_str()?.to_string();
+                    Some(ContentBlock::image(data, mime_type))
+                });
+                if let Some(obj) = value.as_object_mut() {
+                    obj.remove("content");
+                }
+                let mut res = CallToolResult::structured(value);
+                if let Some(img) = image_content {
+                    res.content = vec![img];
+                }
+                res
+            }
             Ok(value) => CallToolResult::structured(value),
             Err(message) => CallToolResult::structured_error(json!({"error":message})),
         }
