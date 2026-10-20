@@ -474,6 +474,16 @@ impl App {
         self.doc.get(comp).and_then(|n| n.parent).filter(|p| matches!(self.doc.get(*p).map(|n| &n.kind), Some(NodeKind::ComponentSet(_)))).unwrap_or(comp)
     }
 
+    /// Node that defines property `name` for `comp`: `comp` itself when defined on the variant,
+    /// otherwise `prop_owner(comp)`.
+    pub fn prop_def_owner(&self, comp: NodeId, name: &str) -> NodeId {
+        if self.doc.get(comp).is_some_and(|n| n.component.props.iter().any(|p| p.name == name)) {
+            comp
+        } else {
+            self.prop_owner(comp)
+        }
+    }
+
     fn comp_edit(&mut self, f: impl FnOnce(&mut Document) -> Command) {
         let mut tx = Tx::new();
         let cmd = f(&mut self.doc);
