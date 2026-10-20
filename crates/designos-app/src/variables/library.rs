@@ -34,6 +34,7 @@ pub fn first_collection_of(collections: &BTreeMap<String, VariableCollection>) -
 }
 
 /// What an import of variables did.
+#[allow(dead_code)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct VariablesImport {
     /// Variables of the payload that were merged into the file.
@@ -44,6 +45,7 @@ pub struct VariablesImport {
     pub skipped_library: usize,
 }
 
+#[allow(dead_code)]
 impl VariablesImport {
     /// The toast text.
     pub fn message(&self) -> String {
@@ -120,6 +122,7 @@ mod tests {
             variables: vec![],
             key: None,
             source_library_key: lib.map(String::from),
+            extensions: BTreeMap::new(),
         }
     }
 

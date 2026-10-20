@@ -862,6 +862,7 @@ mod tests {
                     variables: vec![],
                     key: None,
                     source_library_key: None,
+                    extensions: Default::default(),
                 },
             );
         }
@@ -883,6 +884,8 @@ mod tests {
                     key: None,
 
                     code_syntax: Default::default(),
+                    extensions: Default::default(),
+                    mode_extensions: Default::default(),
                 },
             );
         }
