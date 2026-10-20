@@ -558,9 +558,6 @@ impl Document {
                 out.push(node);
             }
         }
-        if !self.check_designs.ignored.is_empty() {
-            self.check_designs.ignored.retain(|k| self.nodes.contains_key(&k.node));
-        }
         if out.len() <= REMOVED_RING_CAP && parent.is_some() {
             if let Some(p) = parent {
                 self.mark_node_dirty(p);
