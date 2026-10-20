@@ -960,6 +960,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "designos-eval"
+version = "0.5.0"
+dependencies = [
+ "clap",
+ "designos-doc",
+ "designos-export",
+ "designos-fig",
+ "designos-library",
+ "designos-render",
+ "dirs",
+ "image",
+ "regex",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.21",
+ "toml",
+]
+
+[[package]]
 name = "designos-export"
 version = "0.5.0"
 dependencies = [
