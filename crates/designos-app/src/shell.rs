@@ -996,22 +996,26 @@ impl Shell {
             return;
         }
         let screen = ctx.content_rect();
-        let w = 440.0_f32.min((screen.width() - 48.0).max(320.0));
+        let w = 480.0_f32.min((screen.width() - 48.0).max(320.0));
         let row_h = 28.0;
         let header_h = 36.0;
         let summary_rows = 4usize;
-        let font_rows = rep.font_substitutions.len().min(3);
-        let style_rows = rep.unsupported_css.len().min(3);
-        let img_rows = rep.images_not_captured.len().min(2);
-        let total_rows = summary_rows + font_rows.max(1) + style_rows.max(1) + img_rows;
-        let h = header_h + 12.0 + (total_rows as f32 * row_h);
+        let fb_rows = 1 + rep.absolute_fallbacks.len();
+        let font_rows = 1 + rep.font_substitutions.len();
+        let style_rows = 1 + rep.unsupported_css.len();
+        let img_rows = 1 + rep.images_not_captured.len();
+        let note_rows = if rep.notes.is_empty() { 0 } else { 1 + rep.notes.len() };
+        let total_rows = summary_rows + fb_rows + font_rows + style_rows + img_rows + note_rows;
+        let content_h = total_rows as f32 * row_h;
+        let max_body_h = (screen.height() - 140.0).clamp(180.0, 460.0);
+        let body_h = content_h.min(max_body_h);
+        let h = header_h + 12.0 + body_h;
         let rect = Rect::from_min_size(
             Pos2::new((screen.right() - theme::RIGHT_PANEL_WIDTH - w - 20.0).max(screen.left() + 24.0), screen.top() + 56.0),
             Vec2::new(w, h),
         );
         let mut close_clicked = false;
         egui::Area::new(egui::Id::new("web-capture-report-sheet")).order(egui::Order::Foreground).fixed_pos(rect.min).interactable(true).show(ctx, |ui| {
-            ui.allocate_exact_size(rect.size(), egui::Sense::hover());
             let p = ui.painter().clone();
             widgets::elevation_400(&p, rect, theme::RADIUS_FRAME);
             p.rect_filled(rect, theme::cr(theme::RADIUS_FRAME), theme::BG_MENU);
@@ -1025,38 +1029,78 @@ impl Shell {
             }
             widgets::hline(&p, rect.left(), rect.right(), hdr.bottom(), theme::BORDER_SUBTLE);
 
-            let mut y = hdr.bottom() + 6.0;
-            let mut draw_kv = |label: &str, value: &str, mono_val: bool| {
-                let r = Rect::from_min_size(Pos2::new(rect.left() + 14.0, y), Vec2::new(rect.width() - 28.0, row_h));
-                p.text(Pos2::new(r.left(), r.center().y), Align2::LEFT_CENTER, label, theme::font_body(), theme::TEXT_SECONDARY);
-                let f = if mono_val { theme::font_mono() } else { theme::font_body() };
-                let elided = widgets::elide(&p, value, &f, (r.width() * 0.62).max(120.0));
-                p.text(Pos2::new(r.right(), r.center().y), Align2::RIGHT_CENTER, elided, f, theme::TEXT);
-                y += row_h;
-            };
+            let body_rect = Rect::from_min_size(Pos2::new(rect.left(), hdr.bottom() + 6.0), Vec2::new(rect.width(), body_h));
+            ui.scope_builder(egui::UiBuilder::new().max_rect(body_rect), |ui| {
+                egui::ScrollArea::vertical().id_salt("web-capture-report-scroll").max_height(body_h).show(ui, |ui| {
+                    let draw_kv = |ui: &mut egui::Ui, label: &str, value: &str, mono_val: bool, strong_label: bool| {
+                        let (r, _) = ui.allocate_exact_size(Vec2::new(body_rect.width() - 28.0, row_h), egui::Sense::hover());
+                        let row_p = ui.painter();
+                        let lf = if strong_label { theme::font_body_strong() } else { theme::font_body() };
+                        let lc = if strong_label { theme::TEXT } else { theme::TEXT_SECONDARY };
+                        let elided_lbl = widgets::elide(row_p, label, &lf, (r.width() * 0.48).max(100.0));
+                        row_p.text(Pos2::new(r.left() + 14.0, r.center().y), Align2::LEFT_CENTER, elided_lbl, lf, lc);
+                        let vf = if mono_val { theme::font_mono() } else { theme::font_body() };
+                        let elided_val = widgets::elide(row_p, value, &vf, (r.width() * 0.50).max(110.0));
+                        row_p.text(Pos2::new(r.right(), r.center().y), Align2::RIGHT_CENTER, elided_val, vf, theme::TEXT);
+                    };
 
-            draw_kv("Imported frame", &rep.root_name, false);
-            draw_kv("Layers created", &format!("{} layers ({} DOM elements)", rep.nodes_created, rep.elements), true);
-            draw_kv("Layout mapping", &format!("{} flattened · {} abs fallbacks", rep.flattened_wrappers, rep.absolute_fallbacks.len()), true);
-            draw_kv("Capture status", if rep.truncated { "truncated (budget reached)" } else { "complete" }, true);
+                    draw_kv(ui, "Imported frame", &rep.root_name, false, false);
+                    draw_kv(ui, "Layers created", &format!("{} layers ({} DOM elements)", rep.nodes_created, rep.elements), true, false);
+                    draw_kv(ui, "Flattened wrappers", &format!("{} inline wrappers", rep.flattened_wrappers), true, false);
+                    draw_kv(ui, "Capture status", if rep.truncated { "truncated (budget reached)" } else { "complete" }, true, false);
 
-            if rep.font_substitutions.is_empty() {
-                draw_kv("Substituted fonts", "0 (all matched)", true);
-            } else {
-                for sf in rep.font_substitutions.iter().take(3) {
-                    draw_kv("Font fallback", &format!("{} -> {}", sf.requested, sf.substituted), true);
-                }
-            }
-            if rep.unsupported_css.is_empty() {
-                draw_kv("Unsupported CSS", "0 declarations skipped", true);
-            } else {
-                for us in rep.unsupported_css.iter().take(3) {
-                    draw_kv(&format!("{} ({})", us.property, us.element_id), &us.value, true);
-                }
-            }
-            for bi in rep.images_not_captured.iter().take(2) {
-                draw_kv(&format!("Placeholder ({})", bi.reason), &bi.src, true);
-            }
+                    draw_kv(
+                        ui,
+                        &format!("Absolute fallbacks ({})", rep.absolute_fallbacks.len()),
+                        if rep.absolute_fallbacks.is_empty() { "none" } else { "element · reason" },
+                        true,
+                        true,
+                    );
+                    for fb in &rep.absolute_fallbacks {
+                        draw_kv(ui, &fb.element_id, &fb.reason, true, false);
+                    }
+
+                    draw_kv(
+                        ui,
+                        &format!("Font substitutions ({})", rep.font_substitutions.len()),
+                        if rep.font_substitutions.is_empty() { "all matched" } else { "requested -> substituted" },
+                        true,
+                        true,
+                    );
+                    for sf in &rep.font_substitutions {
+                        draw_kv(ui, &sf.requested, &format!("-> {}", sf.substituted), true, false);
+                    }
+
+                    draw_kv(
+                        ui,
+                        &format!("Unsupported CSS ({})", rep.unsupported_css.len()),
+                        if rep.unsupported_css.is_empty() { "0 declarations" } else { "property (element) · value" },
+                        true,
+                        true,
+                    );
+                    for us in &rep.unsupported_css {
+                        draw_kv(ui, &format!("{} ({})", us.property, us.element_id), &us.value, true, false);
+                    }
+
+                    draw_kv(
+                        ui,
+                        &format!("Uncaptured images ({})", rep.images_not_captured.len()),
+                        if rep.images_not_captured.is_empty() { "0 placeholders" } else { "element (reason) · src" },
+                        true,
+                        true,
+                    );
+                    for bi in &rep.images_not_captured {
+                        draw_kv(ui, &format!("{} ({})", bi.element_id, bi.reason), &bi.src, true, false);
+                    }
+
+                    if !rep.notes.is_empty() {
+                        draw_kv(ui, &format!("Notes ({})", rep.notes.len()), "details", true, true);
+                        for note in &rep.notes {
+                            draw_kv(ui, "Note", note, true, false);
+                        }
+                    }
+                });
+            });
         });
         if close_clicked {
             self.app.web_capture_report_open = false;

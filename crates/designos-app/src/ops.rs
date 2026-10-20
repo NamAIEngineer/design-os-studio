@@ -1895,7 +1895,11 @@ impl App {
         }
         self.doc.ensure_page_hydrated(self.page);
         let opts = designos_webcapture::ImportOptions { origin: origin.map(|v| (v.x, v.y)), ..designos_webcapture::ImportOptions::default() };
-        let (cmd, report) = designos_webcapture::import_capture_json(&self.doc, self.page, raw_json, &opts).map_err(|e| {
+        let doc_ref = &self.doc;
+        let page_id = self.page;
+        let built = std::thread::scope(|s| s.spawn(move || designos_webcapture::import_capture_json(doc_ref, page_id, raw_json, &opts)).join())
+            .map_err(|_| "Web capture import worker thread panicked".to_string())?;
+        let (cmd, report) = built.map_err(|e| {
             let msg = format!("Web capture import failed: {e}");
             self.show_toast(msg.clone(), true);
             msg

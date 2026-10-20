@@ -49,30 +49,124 @@ pub fn parse_margins(styles: &BTreeMap<String, String>, font_size: f32) -> [f32;
     [m("margin-top"), m("margin-right"), m("margin-bottom"), m("margin-left")]
 }
 
-/// Sorts flow children into visual order when `flex-direction` is `*-reverse` or any child sets CSS `order != 0`.
+/// Sorts flow children into visual order along the primary axis when `flex-direction` is `*-reverse`,
+/// any child sets CSS `order != 0`, or non-wrapping flex children appear out of primary-axis box order (§3.2, §8.3).
 pub fn sort_flow_children_visually<'a>(parent: &Element, children: Vec<&'a Element>) -> Vec<&'a Element> {
+    if children.len() < 2 {
+        return children;
+    }
+    let display = parent.styles.get("display").map(|s| s.trim().to_ascii_lowercase()).unwrap_or_default();
+    let is_flex = display == "flex" || display == "inline-flex";
     let flex_dir = parent.styles.get("flex-direction").map(|s| s.trim().to_ascii_lowercase()).unwrap_or_default();
     let is_reverse = flex_dir.ends_with("-reverse");
+    let is_col = flex_dir.starts_with("column");
+    let wrap_raw = parent.styles.get("flex-wrap").map(|s| s.trim().to_ascii_lowercase()).unwrap_or_default();
+    let is_wrap = wrap_raw == "wrap" || wrap_raw == "wrap-reverse";
     let has_order = children.iter().any(|c| c.styles.get("order").and_then(|o| o.trim().parse::<i32>().ok()).is_some_and(|v| v != 0));
 
-    if !is_reverse && !has_order {
+    let primary_pos = |c: &Element| -> f32 {
+        if is_col {
+            c.border_box.y
+        } else {
+            c.border_box.x
+        }
+    };
+
+    let first_pos = primary_pos(children[0]);
+    let distinct_boxes = children.iter().any(|c| (primary_pos(c) - first_pos).abs() > 0.5);
+    let boxes_out_of_order = is_flex && !is_wrap && distinct_boxes && children.windows(2).any(|w| primary_pos(w[0]) > primary_pos(w[1]) + 0.5);
+
+    if !is_reverse && !has_order && !boxes_out_of_order {
         return children;
     }
 
-    let mut indexed: Vec<(usize, i32, &'a Element)> = children
+    let mut indexed: Vec<(usize, i32, f32, &'a Element)> = children
         .into_iter()
         .enumerate()
         .map(|(i, c)| {
             let ord = c.styles.get("order").and_then(|o| o.trim().parse::<i32>().ok()).unwrap_or(0);
-            (i, ord, c)
+            (i, ord, primary_pos(c), c)
         })
         .collect();
 
-    indexed.sort_by(|a, b| a.1.cmp(&b.1).then_with(|| a.0.cmp(&b.0)));
-    if is_reverse {
-        indexed.reverse();
+    if is_flex && !is_wrap && distinct_boxes {
+        let dom_monotonic = indexed.windows(2).all(|w| w[0].2 <= w[1].2 + 0.5);
+        if is_reverse && !has_order && dom_monotonic {
+            indexed.reverse();
+        } else {
+            indexed.sort_by(|a, b| a.2.partial_cmp(&b.2).unwrap_or(std::cmp::Ordering::Equal).then_with(|| a.1.cmp(&b.1)).then_with(|| a.0.cmp(&b.0)));
+        }
+    } else {
+        indexed.sort_by(|a, b| a.1.cmp(&b.1).then_with(|| a.0.cmp(&b.0)));
+        if is_reverse {
+            indexed.reverse();
+        }
     }
-    indexed.into_iter().map(|(_, _, c)| c).collect()
+    indexed.into_iter().map(|(_, _, _, c)| c).collect()
+}
+
+/// Checks whether margins on `flow_children` are uniform inter-item margins along `dir`.
+/// Returns `Some(uniform_margin)` when all outer/cross margins are zero and every adjacent pair
+/// has the same inter-item margin (within 1 px), or `None` when children carry non-uniform margins
+/// that must be preserved on `LayoutChild::margin`.
+pub fn flex_uniform_inter_item_margin(flow_children: &[&Element], dir: LayoutDirection) -> Option<f32> {
+    let child_margins: Vec<[f32; 4]> = flow_children
+        .iter()
+        .map(|c| {
+            let fs = c.styles.get("font-size").and_then(|s| parse_css_px(s, 16.0)).unwrap_or(16.0);
+            parse_margins(&c.styles, fs)
+        })
+        .collect();
+
+    let any_nonzero = child_margins.iter().any(|m| m.iter().any(|v| v.abs() > 0.5));
+    if !any_nonzero {
+        return Some(0.0);
+    }
+    if flow_children.len() < 2 {
+        return None;
+    }
+
+    for (idx, m) in child_margins.iter().enumerate() {
+        let (lead, trail, cross1, cross2) = match dir {
+            LayoutDirection::Horizontal | LayoutDirection::Grid => (m[3], m[1], m[0], m[2]),
+            LayoutDirection::Vertical => (m[0], m[2], m[3], m[1]),
+        };
+        if cross1.abs() > 0.5 || cross2.abs() > 0.5 {
+            return None;
+        }
+        if idx == 0 && lead.abs() > 0.5 {
+            return None;
+        }
+        if idx + 1 == child_margins.len() && trail.abs() > 0.5 {
+            return None;
+        }
+    }
+
+    let mut pair_margins = Vec::with_capacity(child_margins.len() - 1);
+    for i in 0..child_margins.len() - 1 {
+        let m_cur = &child_margins[i];
+        let m_next = &child_margins[i + 1];
+        let (trail, lead) = match dir {
+            LayoutDirection::Horizontal | LayoutDirection::Grid => (m_cur[1], m_next[3]),
+            LayoutDirection::Vertical => (m_cur[2], m_next[0]),
+        };
+        if trail > 0.5 && lead > 0.5 && (trail - lead).abs() > 1.0 {
+            return None;
+        }
+        let pair = trail + lead;
+        if pair < -0.5 {
+            return None;
+        }
+        pair_margins.push(pair.max(0.0));
+    }
+
+    let min_m = pair_margins.iter().copied().fold(f32::INFINITY, f32::min);
+    let max_m = pair_margins.iter().copied().fold(0.0f32, f32::max);
+    if (max_m - min_m) <= 1.0 {
+        Some((pair_margins.iter().sum::<f32>() / (pair_margins.len() as f32)).round())
+    } else {
+        None
+    }
 }
 
 /// Infers an [`AutoLayout`] for `el` from CSS `display: flex | inline-flex`, `display: grid | inline-grid`,
@@ -149,10 +243,15 @@ fn infer_flex_layout(el: &Element, flow_children: &[&Element], report: &mut Impo
         LayoutDirection::Vertical | LayoutDirection::Grid => (row_gap, col_gap),
     };
 
-    if item_spacing == 0.0 && flow_children.len() >= 2 {
-        if let Some(inferred_gap) = uniform_primary_gap(flow_children, direction) {
-            if inferred_gap > 0.0 {
-                item_spacing = inferred_gap;
+    let uniform_margin = flex_uniform_inter_item_margin(flow_children, direction);
+    if let Some(m) = uniform_margin {
+        if m > 0.0 {
+            item_spacing += m;
+        } else if item_spacing == 0.0 && flow_children.len() >= 2 {
+            if let Some(inferred_gap) = uniform_primary_gap(flow_children, direction) {
+                if inferred_gap > 0.0 {
+                    item_spacing = inferred_gap;
+                }
             }
         }
     }
@@ -498,5 +597,26 @@ pub fn infer_layout_child(child: &Element, parent: &Element, parent_al: Option<&
     let min_h = child.styles.get("min-height").and_then(|s| parse_css_px_or_percent(s, content_h, font_size)).filter(|&v| v > 0.0);
     let max_h = child.styles.get("max-height").and_then(|s| parse_css_px_or_percent(s, content_h, font_size)).filter(|&v| v > 0.0 && v < 100_000.0);
 
-    LayoutChild { absolute, horizontal, vertical, grow, align_self, min_w, max_w, min_h, max_h, ..Default::default() }
+    let margin = if !absolute {
+        if let Some(al) = parent_al {
+            let parent_display = parent.styles.get("display").map(|s| s.trim().to_ascii_lowercase()).unwrap_or_default();
+            if parent_display == "flex" || parent_display == "inline-flex" {
+                let flow_siblings: Vec<&Element> = parent.children.iter().filter(|c| !is_out_of_flow(c) && c.visible).collect();
+                let flow_siblings = sort_flow_children_visually(parent, flow_siblings);
+                if flex_uniform_inter_item_margin(&flow_siblings, al.direction).is_none() {
+                    parse_margins(&child.styles, font_size)
+                } else {
+                    [0.0; 4]
+                }
+            } else {
+                [0.0; 4]
+            }
+        } else {
+            [0.0; 4]
+        }
+    } else {
+        [0.0; 4]
+    };
+
+    LayoutChild { absolute, horizontal, vertical, grow, align_self, min_w, max_w, min_h, max_h, margin, ..Default::default() }
 }

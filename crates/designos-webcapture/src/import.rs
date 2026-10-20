@@ -1160,24 +1160,23 @@ mod tests {
     fn screenshot_diff_within_threshold() {
         use designos_diff::{compare, DiffOptions};
 
-        let card_capture = Capture::from_json(CARD_FIXTURE_JSON).expect("parse card fixture");
-        let playwright_card = Capture::from_json(include_str!("../tests/playwright/fixtures/card.capture.json")).expect("parse playwright card fixture");
-        for (name, cap) in [
-            ("card", card_capture),
-            ("playwright_card", playwright_card),
-            ("nav", build_nav_fixture()),
-            ("pricing_grid", build_pricing_grid_fixture()),
-            ("article", build_article_fixture()),
-            ("form", build_form_fixture()),
-        ] {
+        let cases: [(&str, Capture, &[u8]); 5] = [
+            ("card", build_card_fixture(), include_bytes!("../tests/playwright/fixtures/ref_card.png")),
+            ("nav", build_nav_fixture(), include_bytes!("../tests/playwright/fixtures/ref_nav.png")),
+            ("pricing_grid", build_pricing_grid_fixture(), include_bytes!("../tests/playwright/fixtures/ref_pricing_grid.png")),
+            ("article", build_article_fixture(), include_bytes!("../tests/playwright/fixtures/ref_article.png")),
+            ("form", build_form_fixture(), include_bytes!("../tests/playwright/fixtures/ref_form.png")),
+        ];
+
+        for (name, cap, ref_png_bytes) in cases {
             let (doc, _report) = import_capture_into_document(&cap, &ImportOptions::default()).unwrap_or_else(|e| panic!("import {name}: {e}"));
             let page = doc.pages[0];
             let w = cap.viewport.width.max(1.0) as u32;
             let h = cap.viewport.height.max(1.0) as u32;
             let rendered = render_document_rgba(&doc, page, w, h);
-            let reference = render_capture_reference_rgba(&cap, w, h);
-            let d = compare(&rendered, &reference, &DiffOptions { tolerance: 32, detect_aa: true, ignore: Vec::new() });
-            assert!(d.ratio <= 0.12, "fixture {name} diff ratio {:.4} exceeded 0.12 threshold", d.ratio);
+            let reference = image::load_from_memory(ref_png_bytes).unwrap_or_else(|e| panic!("decode ref_{name}.png: {e}")).to_rgba8();
+            let d = compare(&rendered, &reference, &DiffOptions { tolerance: 16, detect_aa: true, ignore: Vec::new() });
+            assert!(d.ratio <= 0.03, "fixture {name} diff ratio {:.4} exceeded 0.03 threshold", d.ratio);
         }
     }
 
@@ -1187,20 +1186,110 @@ mod tests {
         image::RgbaImage::from_raw(w, h, pm.take()).expect("rgba image")
     }
 
-    /// Produces a reference `RgbaImage` for a capture fixture by rendering the exact captured
-    /// `border_box` geometry (with `auto_layout` disabled so `relayout` does not move any box
-    /// from its captured DOM coordinates).
-    fn render_capture_reference_rgba(cap: &Capture, w: u32, h: u32) -> image::RgbaImage {
-        let mut doc = Document::new("Ref");
-        let page = doc.add_page("Page 1");
-        let (cmd, _report) = import_capture(&doc, page, cap, &ImportOptions::default()).unwrap();
-        cmd.apply(&mut doc).unwrap();
-        for node in doc.nodes.values_mut() {
-            if let Some(fp) = node.kind.frame_props_mut() {
-                fp.auto_layout = None;
-            }
+    fn build_card_fixture() -> Capture {
+        let title = elem(
+            Some("title"),
+            "h2",
+            BoxRect { x: 40.0, y: 40.0, width: 280.0, height: 24.0 },
+            &[
+                ("display", "block"),
+                ("font-family", "Inter"),
+                ("font-size", "20px"),
+                ("font-weight", "700"),
+                ("line-height", "24px"),
+                ("color", "rgb(15, 23, 42)"),
+            ],
+            "Pro Workspace",
+            vec![],
+        );
+        let desc = elem(
+            Some("desc"),
+            "p",
+            BoxRect { x: 40.0, y: 76.0, width: 280.0, height: 20.0 },
+            &[
+                ("display", "block"),
+                ("font-family", "Inter"),
+                ("font-size", "14px"),
+                ("font-weight", "400"),
+                ("line-height", "20px"),
+                ("color", "rgb(71, 85, 105)"),
+            ],
+            "Unlimited projects and shared libraries.",
+            vec![],
+        );
+        let btn = elem(
+            Some("btn"),
+            "div",
+            BoxRect { x: 40.0, y: 108.0, width: 120.0, height: 36.0 },
+            &[
+                ("display", "flex"),
+                ("background-color", "rgb(37, 99, 235)"),
+                ("color", "rgb(255, 255, 255)"),
+                ("font-family", "Inter"),
+                ("font-size", "14px"),
+                ("font-weight", "600"),
+                ("line-height", "20px"),
+                ("padding-top", "8px"),
+                ("padding-bottom", "8px"),
+                ("padding-left", "16px"),
+                ("padding-right", "16px"),
+                ("border-top-left-radius", "8px"),
+                ("border-top-right-radius", "8px"),
+                ("border-bottom-right-radius", "8px"),
+                ("border-bottom-left-radius", "8px"),
+            ],
+            "Upgrade",
+            vec![],
+        );
+        let card = elem(
+            Some("card"),
+            "article",
+            BoxRect { x: 20.0, y: 20.0, width: 320.0, height: 160.0 },
+            &[
+                ("display", "flex"),
+                ("flex-direction", "column"),
+                ("row-gap", "12px"),
+                ("padding-top", "20px"),
+                ("padding-right", "20px"),
+                ("padding-bottom", "20px"),
+                ("padding-left", "20px"),
+                ("background-color", "rgb(255, 255, 255)"),
+                ("border-top-width", "1px"),
+                ("border-right-width", "1px"),
+                ("border-bottom-width", "1px"),
+                ("border-left-width", "1px"),
+                ("border-top-style", "solid"),
+                ("border-right-style", "solid"),
+                ("border-bottom-style", "solid"),
+                ("border-left-style", "solid"),
+                ("border-top-color", "rgb(226, 232, 240)"),
+                ("border-right-color", "rgb(226, 232, 240)"),
+                ("border-bottom-color", "rgb(226, 232, 240)"),
+                ("border-left-color", "rgb(226, 232, 240)"),
+                ("border-top-left-radius", "12px"),
+                ("border-top-right-radius", "12px"),
+                ("border-bottom-right-radius", "12px"),
+                ("border-bottom-left-radius", "12px"),
+            ],
+            "",
+            vec![title, desc, btn],
+        );
+        let root = elem(
+            None,
+            "html",
+            BoxRect { x: 0.0, y: 0.0, width: 360.0, height: 200.0 },
+            &[("display", "block"), ("background-color", "rgb(241, 245, 249)")],
+            "",
+            vec![card],
+        );
+        Capture {
+            url: "https://designos.dev/card".into(),
+            title: "Card Fixture".into(),
+            viewport: Viewport { width: 360.0, height: 200.0, dpr: 1.0 },
+            scroll: ScrollSize { width: 360.0, height: 200.0 },
+            root,
+            ..Default::default()
         }
-        render_document_rgba(&doc, page, w, h)
     }
 
     fn build_nav_fixture() -> Capture {
@@ -1363,15 +1452,22 @@ mod tests {
         let h1 = elem(
             None,
             "h1",
-            BoxRect { x: 40.0, y: 32.0, width: 520.0, height: 36.0 },
-            &[("display", "block"), ("font-family", "Inter"), ("font-size", "28px"), ("font-weight", "700"), ("color", "rgb(15, 23, 42)")],
+            BoxRect { x: 40.0, y: 32.0, width: 560.0, height: 36.0 },
+            &[
+                ("display", "block"),
+                ("font-family", "Inter"),
+                ("font-size", "28px"),
+                ("line-height", "36px"),
+                ("font-weight", "700"),
+                ("color", "rgb(15, 23, 42)"),
+            ],
             "Editable Web Captures",
             vec![],
         );
         let p1 = elem(
             None,
             "p",
-            BoxRect { x: 40.0, y: 84.0, width: 520.0, height: 48.0 },
+            BoxRect { x: 40.0, y: 84.0, width: 560.0, height: 24.0 },
             &[("display", "block"), ("font-family", "Inter"), ("font-size", "16px"), ("line-height", "24px"), ("color", "rgb(51, 65, 85)")],
             "Every heading, paragraph, and inline link imports as a native text layer.",
             vec![],
@@ -1379,7 +1475,7 @@ mod tests {
         let article = elem(
             Some("post"),
             "article",
-            BoxRect { x: 0.0, y: 0.0, width: 600.0, height: 164.0 },
+            BoxRect { x: 0.0, y: 0.0, width: 640.0, height: 200.0 },
             &[("display", "block"), ("padding-top", "32px"), ("padding-left", "40px"), ("padding-right", "40px"), ("padding-bottom", "32px")],
             "",
             vec![h1, p1],
@@ -1387,7 +1483,7 @@ mod tests {
         let root = elem(
             None,
             "html",
-            BoxRect { x: 0.0, y: 0.0, width: 600.0, height: 164.0 },
+            BoxRect { x: 0.0, y: 0.0, width: 640.0, height: 200.0 },
             &[("display", "block"), ("background-color", "rgb(255, 255, 255)")],
             "",
             vec![article],
@@ -1395,8 +1491,8 @@ mod tests {
         Capture {
             url: "https://designos.dev/blog".into(),
             title: "Article".into(),
-            viewport: Viewport { width: 600.0, height: 164.0, dpr: 1.0 },
-            scroll: ScrollSize { width: 600.0, height: 164.0 },
+            viewport: Viewport { width: 640.0, height: 200.0, dpr: 1.0 },
+            scroll: ScrollSize { width: 640.0, height: 200.0 },
             root,
             ..Default::default()
         }
@@ -1414,9 +1510,11 @@ mod tests {
         let mut input = elem(
             Some("url-input"),
             "input",
-            BoxRect { x: 24.0, y: 52.0, width: 312.0, height: 40.0 },
+            BoxRect { x: 24.0, y: 56.0, width: 312.0, height: 40.0 },
             &[
                 ("display", "block"),
+                ("font-family", "Inter"),
+                ("font-size", "13px"),
                 ("background-color", "rgb(255, 255, 255)"),
                 ("border-top-width", "1px"),
                 ("border-right-width", "1px"),
@@ -1499,5 +1597,83 @@ mod tests {
             root,
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn css_order_and_flex_margins_and_scale_transform_reported() {
+        // 1. CAPTURE_JS must capture "order" in CAPTURED_STYLE_PROPS.
+        assert!(crate::CAPTURE_JS.contains("\"order\""), "CAPTURE_JS must include \"order\" in CAPTURED_STYLE_PROPS");
+
+        // 2. Flex row children reordered visually by border_box.x (even without styles["order"]) and with non-uniform margins + transform: scale()
+        let dom_first_visually_second = elem(
+            Some("second-visual"),
+            "div",
+            BoxRect { x: 140.0, y: 0.0, width: 100.0, height: 40.0 },
+            &[("display", "block"), ("margin-left", "20px"), ("transform", "scale(1.1)")],
+            "",
+            vec![],
+        );
+        let dom_second_visually_first = elem(
+            Some("first-visual"),
+            "div",
+            BoxRect { x: 0.0, y: 0.0, width: 100.0, height: 40.0 },
+            &[("display", "block"), ("margin-right", "8px")],
+            "",
+            vec![],
+        );
+        let row = elem(
+            Some("reordered-row"),
+            "div",
+            BoxRect { x: 0.0, y: 0.0, width: 260.0, height: 40.0 },
+            &[("display", "flex"), ("flex-direction", "row")],
+            "",
+            vec![dom_first_visually_second, dom_second_visually_first],
+        );
+
+        // 3. Flex row with uniform inter-item margins (margin-right: 12px on child 0, 12px on child 1, 0px on child 2) and column-gap: 8px -> item_spacing = 20px, child margins zeroed.
+        let u1 = elem(Some("u1"), "div", BoxRect { x: 0.0, y: 50.0, width: 50.0, height: 30.0 }, &[("display", "block"), ("margin-right", "12px")], "", vec![]);
+        let u2 =
+            elem(Some("u2"), "div", BoxRect { x: 70.0, y: 50.0, width: 50.0, height: 30.0 }, &[("display", "block"), ("margin-right", "12px")], "", vec![]);
+        let u3 = elem(Some("u3"), "div", BoxRect { x: 140.0, y: 50.0, width: 50.0, height: 30.0 }, &[("display", "block")], "", vec![]);
+        let uniform_row = elem(
+            Some("uniform-row"),
+            "div",
+            BoxRect { x: 0.0, y: 50.0, width: 190.0, height: 30.0 },
+            &[("display", "flex"), ("flex-direction", "row"), ("column-gap", "8px")],
+            "",
+            vec![u1, u2, u3],
+        );
+
+        let root = elem(None, "html", BoxRect { x: 0.0, y: 0.0, width: 300.0, height: 100.0 }, &[("display", "block")], "", vec![row, uniform_row]);
+        let cap = Capture {
+            url: "https://example.com".into(),
+            title: "Order & Margin Test".into(),
+            viewport: Viewport { width: 300.0, height: 100.0, dpr: 1.0 },
+            scroll: ScrollSize { width: 300.0, height: 100.0 },
+            root,
+            ..Default::default()
+        };
+
+        let (doc, report) = import_capture_into_document(&cap, &ImportOptions::default()).unwrap();
+
+        let reordered = doc.nodes.values().find(|n| n.name == "div#reordered-row").unwrap();
+        let c0 = doc.get(reordered.children[0]).unwrap();
+        let c1 = doc.get(reordered.children[1]).unwrap();
+        assert_eq!(c0.name, "div#first-visual", "visually leftmost child must be first");
+        assert_eq!(c1.name, "div#second-visual", "visually rightmost child must be second");
+        assert_eq!(c0.layout_child.margin, [0.0, 8.0, 0.0, 0.0], "non-uniform margin-right preserved on layout_child");
+        assert_eq!(c1.layout_child.margin, [0.0, 0.0, 0.0, 20.0], "non-uniform margin-left preserved on layout_child");
+
+        let u_row = doc.nodes.values().find(|n| n.name == "div#uniform-row").unwrap();
+        let u_al = u_row.kind.frame_props().unwrap().auto_layout.as_ref().unwrap();
+        assert_eq!(u_al.item_spacing, 20.0, "uniform 12px margin between flex children added to 8px column-gap");
+        let uc0 = doc.get(u_row.children[0]).unwrap();
+        assert_eq!(uc0.layout_child.margin, [0.0, 0.0, 0.0, 0.0], "folded uniform margin must not double-apply on layout_child");
+
+        assert!(
+            report.unsupported_css.iter().any(|u| u.property == "transform" && u.value.contains("scale(1.1)")),
+            "transform: scale(1.1) must be recorded in report.unsupported_css, got: {:?}",
+            report.unsupported_css
+        );
     }
 }

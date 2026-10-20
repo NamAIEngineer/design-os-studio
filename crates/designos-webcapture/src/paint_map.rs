@@ -731,7 +731,7 @@ fn split_whitespace_preserving_parens(s: &str) -> Vec<&str> {
 }
 
 /// Maps CSS `transform` 2D `matrix(a, b, c, d, tx, ty)` or `rotate(...)` into a rotation in radians,
-/// recording a note in `report.unsupported_css` if a 3D or skew transform is flattened.
+/// recording a note in `report.unsupported_css` if a scale, 3D, or skew transform is flattened (§3.3, §8.5).
 pub fn map_rotation_rad(el_id: &str, styles: &BTreeMap<String, String>, report: &mut ImportReport) -> Option<f32> {
     let raw = styles.get("transform")?.trim();
     if raw.is_empty() || raw.eq_ignore_ascii_case("none") {
@@ -751,6 +751,16 @@ pub fn map_rotation_rad(el_id: &str, styles: &BTreeMap<String, String>, report: 
                     note: "2D skew flattened to bounding box rotation".into(),
                 });
             }
+            let scale_x = (a * a + b * b).sqrt();
+            let scale_y = (c * c + d * d).sqrt();
+            if (scale_x - 1.0).abs() > 1e-2 || (scale_y - 1.0).abs() > 1e-2 {
+                report.unsupported_css.push(UnsupportedCssEntry {
+                    element_id: el_id.to_string(),
+                    property: "transform".into(),
+                    value: raw.into(),
+                    note: format!("transform scale({scale_x:.2}, {scale_y:.2}) applied via captured bounding box"),
+                });
+            }
             let rad = b.atan2(a);
             if rad.abs() > 1e-4 {
                 return Some(rad);
@@ -766,6 +776,15 @@ pub fn map_rotation_rad(el_id: &str, styles: &BTreeMap<String, String>, report: 
             }
             return None;
         }
+    }
+    if lower.contains("scale(") || lower.contains("scalex(") || lower.contains("scaley(") || lower.contains("scale3d(") {
+        report.unsupported_css.push(UnsupportedCssEntry {
+            element_id: el_id.to_string(),
+            property: "transform".into(),
+            value: raw.into(),
+            note: "transform scale applied via captured bounding box".into(),
+        });
+        return None;
     }
     if lower.starts_with("matrix3d(") || lower.contains("3d") || lower.contains("perspective") {
         report.unsupported_css.push(UnsupportedCssEntry {

@@ -10,13 +10,20 @@ pub use designos_webcapture::{
     UncapturedImage, UnsupportedCssEntry, CAPTURE_SCHEMA_ID,
 };
 
-/// Returns `true` if `json` looks like a `designos-webcapture` bundle.
+/// Returns `true` if `json` has a top-level `"schema"` field matching `designos-webcapture`.
 pub fn looks_like_web_capture_json(json: &str) -> bool {
+    #[derive(serde::Deserialize)]
+    struct SchemaProbe {
+        schema: Option<String>,
+    }
     let trimmed = json.trim_start_matches('\u{feff}').trim_start();
     if !trimmed.starts_with('{') {
         return false;
     }
-    trimmed.contains("\"designos-webcapture\"") || trimmed.contains("\"designos-web-capture/v1\"") || trimmed.contains("\"designos-webcapture/v1\"")
+    serde_json::from_str::<SchemaProbe>(trimmed)
+        .ok()
+        .and_then(|p| p.schema)
+        .is_some_and(|s| matches!(s.as_str(), "designos-webcapture" | "designos-web-capture/v1" | "designos-webcapture/v1"))
 }
 
 /// Imports a `.webcapture.json` / `.capture.json` payload into a standalone [`Document`]
@@ -78,5 +85,13 @@ mod tests {
         let (doc, report) = import_web_capture_json_with_report(json, &ImportOptions::default()).unwrap();
         assert_eq!(report.root_name, "Demo Page \u{2014} designos.dev");
         assert!(doc.get(report.root_node_id).is_some());
+    }
+
+    #[test]
+    fn looks_like_web_capture_ignores_nested_substring() {
+        let figma_rest_with_mention = r#"{"document":{"id":"0:0","name":"designos-webcapture"}}"#;
+        assert!(!looks_like_web_capture_json(figma_rest_with_mention), "nested substring must not trigger web capture detection");
+        let valid_top_level = r#"{"schema":"designos-webcapture","version":1}"#;
+        assert!(looks_like_web_capture_json(valid_top_level));
     }
 }
