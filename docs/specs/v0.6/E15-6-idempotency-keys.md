@@ -98,13 +98,17 @@ for a different payload, I get a named error and nothing changes.
    nodes created and deleted inside one batch are not listed). On lookup, before the stored reply is
    returned: every `live` id must exist with the same `kind`, and no `gone` id may exist. Any miss →
    `IDEMPOTENCY_KEY_STALE`, nothing runs. On a reconnect (`Session::with_session_dir`), the server
-   loads `canvas.designos` (`server.rs:194-214`) and replays any pending lines in `doc-patch.jsonl`
-   (defined as patch lines whose changes/inserted root ids are not already present in the loaded
-   `canvas.designos` snapshot, using `designos_doc::live_patch::replay` which skips duplicate inserts
-   already present in the document) onto the loaded document before running the presence check, so a
-   write that appended to `doc-patch.jsonl` before `canvas.designos` was rewritten (or on a >25,000-node
-   scoped canvas) is present once and never duplicated when both files already contain node `N`. Only
-   when neither `canvas.designos` nor `doc-patch.jsonl`
+   loads `canvas.designos` (`server.rs:194-214`) and replays **every** line in `doc-patch.jsonl`
+   onto the loaded document through `designos_doc::live_patch::replay_live_patch` before running the
+   presence check (`Update` and `Remove` lines are never dropped when target node `N` already exists in
+   `canvas.designos`; `replay_live_patch` treats an `Insert` as a no-op with `report.duplicates += 1`,
+   `replay.rs:270-274`, **only** when `doc.get(root.id)` already exists with the same `parent` and
+   matching `same_props(existing, &root)`, and if `canvas.designos` already holds an unrelated or
+   modified node with the same `id` where `!same_props`, `replay_live_patch` at `replay.rs:276-292`
+   remaps the inserted subtree to a fresh id so no existing node is overwritten), so a write that
+   appended to `doc-patch.jsonl` before `canvas.designos` was rewritten (or on a >25,000-node scoped
+   canvas) is applied once and never duplicated when both files already contain an identical node `N`.
+   Only when neither `canvas.designos` nor `doc-patch.jsonl`
    contains the write's result does the check return `IDEMPOTENCY_KEY_STALE`. An entry with empty `live`
    and `gone` (variables-only batch, a comment on no node) has nothing to check: it replays inside the
    process by the depth rule and is `IDEMPOTENCY_KEY_STALE` once reloaded. The check compares ids and
@@ -191,8 +195,10 @@ Seam: `cargo test -p designos-mcp`.
 |---|---|---|
 | `same_key_same_payload_applies_once` | send batch twice with key `k1` | node count +1 once; replies byte-identical structuredContent; second has replay `_meta` |
 | `key_reuse_with_changed_payload_refused` | `k1` with a different name | `IDEMPOTENCY_KEY_REUSED`; revision and undo depth unchanged |
-| `ledger_survives_reconnect` | session dir in temp; batch with `k1` creates node N (appending to `doc-patch.jsonl` even before `canvas.designos` is rewritten); drop `Session`; new `Session::with_session_dir`; resend `k1` | pending `doc-patch.jsonl` lines are replayed onto `canvas.designos` on start; N exists in the new session; no new nodes; stored reply returned |
-| `reconnect_when_both_canvas_and_patch_hold_node_does_not_duplicate` | both `canvas.designos` and `doc-patch.jsonl` already contain node N from `k1`; new `Session::with_session_dir`; resend `k1` | pending-patch replay skips already-present N (node count unchanged, no second copy); stored reply returned |
+| `ledger_survives_reconnect` | session dir in temp; batch with `k1` creates node N (appending to `doc-patch.jsonl` even before `canvas.designos` is rewritten); drop `Session`; new `Session::with_session_dir`; resend `k1` | every line in `doc-patch.jsonl` is replayed onto `canvas.designos` on start via `replay_live_patch`; N exists in the new session; no new nodes; stored reply returned |
+| `reconnect_when_both_canvas_and_patch_hold_node_does_not_duplicate` | both `canvas.designos` and `doc-patch.jsonl` already contain an identical node N (`parent` and `same_props` match) from `k1`; new `Session::with_session_dir`; resend `k1` | `replay_live_patch` counts the matching insert as `duplicates` (`report.duplicates == 1`, node count unchanged, no second copy); stored reply returned |
+| `reconnect_replays_pending_update_and_delete_patches` | nodes N and M exist in `canvas.designos`; `k1` updates N and `k2` deletes M (both appended to `doc-patch.jsonl` before `canvas.designos` is rewritten); drop `Session`; new `Session::with_session_dir`; resend `k1` and `k2` | `replay_live_patch` applies both patch lines on start (N has the updated props, M is gone); both `k1` and `k2` replay their stored replies without re-running or returning `IDEMPOTENCY_KEY_STALE` |
+| `reconnect_when_canvas_node_props_differ_from_patch_insert_remaps_id` | `canvas.designos` already holds a node at id N with different props (`!same_props`) while `doc-patch.jsonl` has an `Insert` of N from `k1`; new `Session::with_session_dir` | `replay_live_patch` allocates a fresh id for the patch insert (`state.remap`) instead of treating it as `duplicates`, preserving both nodes without overwriting the existing node at N |
 | `reconnect_without_document_or_patch_state_is_stale` | same, but neither `canvas.designos` nor `doc-patch.jsonl` holds N | `IDEMPOTENCY_KEY_STALE`; no node created; `designos_get_node` N is `NODE_NOT_FOUND`; undo depth unchanged |
 | `reconnect_after_node_deleted_is_stale` | as `ledger_survives_reconnect`, then `designos_delete_node` N in the new session; resend `k1` | `IDEMPOTENCY_KEY_STALE`; no new node |
 | `replay_after_created_node_deleted_is_stale` | one process: `k1` creates N; `designos_delete_node` N; resend `k1` | `IDEMPOTENCY_KEY_STALE`; N stays absent |

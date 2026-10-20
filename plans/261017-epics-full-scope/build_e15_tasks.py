@@ -73,10 +73,10 @@ task("E15-2", "Fill component slots from apply_spec, validated against each slot
      ["#150", "E15-1"],
      "Slots get recommended component ids (#150 extension). The spec path must fill them without breaking the slot contract.",
      ["`slots:{\"Content\":[<NodeSpec>...]}` on an instance replaces that slot's children as a descendant override",
-      "Fills outside the slot's recommended list are accepted with a lint warning (a strict-refusal SlotMode is a non-goal per E15-2 spec §9)",
+      "Fills outside a non-strict slot's recommended list pass with a `slot-non-recommended` lint warning; when `allow_preferred_values_only == Some(true)` (strict slot), a non-recommended fill fails the call with `SLOT_FILL_NOT_ALLOWED`",
       "An unused slot can be disabled from the spec"],
      ["A Card instance with a filled Content slot round-trips through .designos and the JSON scene format",
-      "A non-recommended fill returns a warning naming the recommended components",
+      "A non-recommended fill on a non-strict slot returns a `slot-non-recommended` warning naming the recommended components, while a non-recommended fill on a strict slot fails with `SLOT_FILL_NOT_ALLOWED` and leaves the document unchanged",
       "Disabling a slot hides it in the instance without detaching"],
      "designos-doc unit test with the synthetic slot fixture (E3-15)")
 
@@ -87,10 +87,10 @@ task("E15-3", "Bind fills, strokes, numbers and styles to document variables fro
      ["`var:Collection/Group/Name` on fill, stroke, gap, padding, radius, stroke width, font size, line height and opacity creates a real variable binding",
       "`style:\"Text/Heading L\"` (text, colour, effect styles) applies the document style by name",
       "Mode-aware: a frame-level `mode:{Collection:\"Dark\"}` sets the explicit variable mode",
-      "Back-compat: `$easeui.*` and `easeui-*` presets keep working as deprecated aliases resolved to their existing fixed RGB values without inserting a synthetic EaseUI variable collection into the user's document; each use adds a deprecation warning to the response"],
+      "Back-compat: `$easeui.*` and `easeui-*` presets keep working as deprecated aliases; on first use in a document the engine inserts a collection named `EaseUI (deprecated)` (`id: \"easeui-deprecated\"`) with one mode `Default` and one Color variable per canonical token holding the exact RGB in the existing table (`spec.rs:148-166`), binds that variable (persisted in `.designos` and exported to `.fig`), and adds a `DEPRECATED_EASEUI_TOKEN` warning per use"],
      ["A spec with `fill:\"var:Color/Primary\"` produces a bound fill; changing the variable recolours the node",
       "An unknown variable returns a named error listing the 5 closest names",
-      "An existing spec using `$easeui.bg.panel` renders bit-identically to today, leaves `doc.variable_collections` unchanged, and reports a deprecation warning",
+      "An existing spec using `$easeui.bg.panel` binds the `EaseUI (deprecated)` variable with the exact legacy RGB so it renders bit-identically to today, and reports one `DEPRECATED_EASEUI_TOKEN` warning per use",
       "Hard-coded hex where an exact-match variable exists is flagged by the per-call issues block (E15-12)"],
      "designos-doc unit tests + CPU render snapshot for the alias path", [R_FULL, R_EXACT])
 
@@ -125,12 +125,12 @@ task("E15-6", "Deduplicate replayed agent writes with idempotency keys", "S",
      "designos-mcp/src/tools/batch.rs, designos-mcp session ledger",
      ["E15-4"],
      "Agent CLIs retry on timeouts; a replayed write must not duplicate layers.",
-     ["Optional `idempotency_key` on every mutating tool; the session ledger stores key, payload hash, created root ids, `pre_auto_fix_reply` and the original reply",
-      "Same key + same payload returns the stored reply without re-applying while the ledger epoch is valid and created roots still exist; same key + different payload returns a named error (`E_IDEMPOTENCY_CONFLICT`)",
-      "Ledger lives for the document session, survives an MCP reconnect by replaying `doc-patch.jsonl` onto `canvas.designos` before the presence check, and invalidates (bumps epoch) on undo, redo or any unkeyed write (except undoing only a trailing `Auto-fix` step, which replays `pre_auto_fix_reply`); cleared when the document closes"],
+     ["Optional `idempotency_key` on every mutating tool; the session ledger stores key, tool, payload hash, `undo_depth`, `auto_fix_undo_depth`, `dead`, `live` (`[{id, kind}]`), `gone` (`[id]`), `pre_auto_fix_reply` and the original reply",
+      "Same key + same payload returns the stored reply without re-applying while the write is still applied (`history.undo_depth() >= entry.undo_depth` and every `live`/`gone` presence check passes); same key + different payload returns a named error (`IDEMPOTENCY_KEY_REUSED`)",
+      "Ledger lives for the document session, survives an MCP reconnect by replaying every line in `doc-patch.jsonl` onto `canvas.designos` through `replay_live_patch` (which treats an insert whose id, parent, and props already match `canvas.designos` as `duplicates` without skipping updates or deletes) before the presence check; undoing a keyed write via MCP (`history.undo_depth() < entry.undo_depth`) marks it stale (`IDEMPOTENCY_KEY_STALE`, not re-applied), redo back to `entry.undo_depth` makes it valid again, a new write while the redo stack is non-empty marks undone entries dead for good, while an unkeyed write with an empty redo stack does not invalidate other keys (and undoing only a trailing `Auto-fix` step keeps the write key valid and replays `pre_auto_fix_reply`); cleared when the document closes or when `canvas.designos` is reloaded from a newer Studio snapshot"],
      ["Sending the same batch twice with one key creates the layers once and returns identical replies",
-      "Key reuse with a changed payload fails with the named error and changes nothing",
-      "Undoing a keyed write invalidates the ledger so re-sending with the same key re-applies the write"],
+      "Key reuse with a changed payload fails with `IDEMPOTENCY_KEY_REUSED` and changes nothing",
+      "Undoing a keyed write via `designos_undo` marks the key stale (`IDEMPOTENCY_KEY_STALE`) so re-sending with the same key is refused and the undone node stays absent"],
      "cargo test -p designos-mcp")
 
 task("E15-7", "Flag frames as in progress while an agent works and clear the flag when it finishes", "M",
@@ -138,7 +138,7 @@ task("E15-7", "Flag frames as in progress while an agent works and clear the fla
      ["E15-4", "#570"],
      "Reviewers, critics and other agents need to know which frames are unfinished.",
      ["Node flag `in_progress` settable from spec/batch and by the agent runtime on root frames being worked on",
-      "Canvas shows a badge on flagged frames; critique (E15-23) and variant ranking skip them",
+      "Canvas shows a badge on flagged frames; critique (E15-34) and variant ranking skip them",
       "Cleared by the agent at the end of the frame, automatically when the agent run ends or exits, and after a configurable stale timeout",
       "Round-trips through .designos and maps to the JSON scene format `placeholder` field (#570)"],
      ["A frame flagged by a batch shows the badge and loses it when the run ends",
@@ -270,11 +270,11 @@ task("E15-17", "Query large documents with a streaming visitor: paging, node bud
      "Dumping a 723k-node document is impossible; agents need targeted queries.",
      ["XPath and predicate queries stream results with a cursor; `limit` and a hard node budget per call",
       "Compact rows: id, name, type, bounds, lint problems, in-progress flag",
-      "Predicates on lint problems (e.g. all clipped text) and on hard-coded values (`hardcoded-color` and `hardcoded-spacing` from E15-11)",
+      "Predicates on lint problems (`has-problem('<rule>')`, e.g. all clipped text) and on hard-coded values (`has-hardcoded('<prop>')`, e.g. `//*[has-hardcoded('fills/0')]`, matching the `hardcoded-value` rule from E15-11)",
       "Runs off the UI thread; reports scanned and remaining counts"],
      ["Paging through all text nodes of the large fixture returns each node exactly once",
       "A query for clipped text returns the same set as the linter",
-      "A query with `hardcoded: true` returns the same set as the linter's `hardcoded-color` and `hardcoded-spacing` rules",
+      "A query with `has-hardcoded` returns the same set as the linter's `hardcoded-value` rule",
       "No page exceeds the node budget"],
      "MCP test on the large fixture + perf record")
 
@@ -812,7 +812,7 @@ def main():
     hits = [x[:80] for x in texts if BANNED.search(x)]
     if hits:
         sys.exit(f"BANNED NAME HIT: {hits}")
-    (HERE / "e15-tasks.json").write_text(json.dumps(out, indent=2, ensure_ascii=False) + "\n")
+    (HERE / "e15-tasks.json").write_text(json.dumps(out, indent=1, ensure_ascii=False) + "\n")
     print(f"tasks={len(TASKS)} amend={len(AMEND)} moves={len(moves)} banned_hits=0")
     print(f"pack check: {len(violations)} violations; {len(external)} external issue deps checked; unknown={unknown}")
     for v in violations:

@@ -76,7 +76,7 @@ Described in words; checked against `design/principles.md` and `design/soul.md`.
 4. A burst of 300 patches in one poll: one flash per touched node, capped at 64; the cursor goes to the last node.
 5. The agent switches document (`DocEpoch`): sessions reset; no cursor on the new document until its first write.
 6. A comment-only patch: no cursor movement.
-7. Two agents write the same node in one frame: both flashes draw, in two colours.
+7. Two agents write the same node in one frame (`#572` `v0.6.1` follow-up): in `v0.6.0` all writes share the single active session (`agent-1`, rule 5); once `#572` lands in `v0.6.1`, both flashes draw in their respective session colours.
 8. Window unfocused: animations still end; no extra wake-ups.
 
 ## 9. Non-goals
