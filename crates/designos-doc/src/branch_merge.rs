@@ -1886,7 +1886,6 @@ mod tests {
                 variables: vec![var_id.clone()],
                 key: None,
                 source_library_key: None,
-                extensions: Default::default(),
             },
         );
         main.variables.insert(
@@ -1902,8 +1901,6 @@ mod tests {
                 hidden_from_publishing: false,
                 key: None,
                 code_syntax: BTreeMap::new(),
-                extensions: Default::default(),
-                mode_extensions: Default::default(),
             },
         );
 
@@ -1980,7 +1977,6 @@ mod tests {
                 variables: vec![var_id.clone(), alias_var_id.clone()],
                 key: None,
                 source_library_key: None,
-                extensions: Default::default(),
             },
         );
         branch.variables.insert(
@@ -1996,8 +1992,6 @@ mod tests {
                 hidden_from_publishing: false,
                 key: None,
                 code_syntax: BTreeMap::new(),
-                extensions: Default::default(),
-                mode_extensions: Default::default(),
             },
         );
         branch.variables.insert(
@@ -2013,8 +2007,6 @@ mod tests {
                 hidden_from_publishing: false,
                 key: None,
                 code_syntax: BTreeMap::new(),
-                extensions: Default::default(),
-                mode_extensions: Default::default(),
             },
         );
 
@@ -2324,7 +2316,6 @@ mod tests {
                 variables: Vec::new(),
                 key: None,
                 source_library_key: None,
-                extensions: Default::default(),
             },
         );
 
@@ -2344,8 +2335,6 @@ mod tests {
                 hidden_from_publishing: false,
                 key: None,
                 code_syntax: BTreeMap::new(),
-                extensions: Default::default(),
-                mode_extensions: Default::default(),
             },
         );
         branch.variables.insert(
@@ -2361,8 +2350,6 @@ mod tests {
                 hidden_from_publishing: false,
                 key: None,
                 code_syntax: BTreeMap::new(),
-                extensions: Default::default(),
-                mode_extensions: Default::default(),
             },
         );
 

@@ -604,8 +604,6 @@ mod tests {
             hidden_from_publishing: false,
             key: None,
             code_syntax: Default::default(),
-            extensions: Default::default(),
-            mode_extensions: Default::default(),
         }
     }
 
@@ -628,7 +626,6 @@ mod tests {
                 variables: vec![],
                 key: None,
                 source_library_key: None,
-                extensions: Default::default(),
             },
         );
         let n = |x: f32| VariableValue::Number(x);

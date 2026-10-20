@@ -13,7 +13,6 @@ fn collection(id: &str, mode: &str, key: &str, source_library_key: Option<&str>)
         variables: Vec::new(),
         key: Some(key.into()),
         source_library_key: source_library_key.map(String::from),
-        extensions: Default::default(),
     }
 }
 

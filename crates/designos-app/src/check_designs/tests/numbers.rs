@@ -16,7 +16,6 @@ impl Fx {
             variables: vec![],
             key: None,
             source_library_key: None,
-            extensions: Default::default(),
         });
         let id = format!("var:{name}");
         if !coll.variables.contains(&id) {
@@ -36,8 +35,6 @@ impl Fx {
                 hidden_from_publishing: false,
                 key: None,
                 code_syntax: Default::default(),
-                extensions: Default::default(),
-                mode_extensions: Default::default(),
             },
         );
         id

@@ -622,8 +622,6 @@ pub fn sanitize_token_name(name: &str, platform_label: &str) -> String {
             hidden_from_publishing: false,
             key: None,
             code_syntax: BTreeMap::new(),
-            extensions: Default::default(),
-            mode_extensions: Default::default(),
         };
         return designos_export::css_variable_reference(&dummy);
     }
@@ -955,7 +953,6 @@ mod tests {
                 variables: vec!["v_blue".into(), "v_space_md".into(), "v_secret".into()],
                 key: None,
                 source_library_key: None,
-                extensions: Default::default(),
             },
         );
 
@@ -980,8 +977,6 @@ mod tests {
                 hidden_from_publishing: false,
                 key: None,
                 code_syntax: blue_syntax,
-                extensions: Default::default(),
-                mode_extensions: Default::default(),
             },
         );
 
@@ -999,8 +994,6 @@ mod tests {
                 hidden_from_publishing: false,
                 key: None,
                 code_syntax: BTreeMap::new(),
-                extensions: Default::default(),
-                mode_extensions: Default::default(),
             },
         );
 
@@ -1018,8 +1011,6 @@ mod tests {
                 hidden_from_publishing: true,
                 key: None,
                 code_syntax: BTreeMap::new(),
-                extensions: Default::default(),
-                mode_extensions: Default::default(),
             },
         );
 
@@ -1035,7 +1026,6 @@ mod tests {
                 variables: vec!["v_primary".into()],
                 key: Some("col_lib_key".into()),
                 source_library_key: Some("lib_brand".into()),
-                extensions: Default::default(),
             },
         );
 
@@ -1054,8 +1044,6 @@ mod tests {
                 hidden_from_publishing: false,
                 key: None,
                 code_syntax: primary_syntax,
-                extensions: Default::default(),
-                mode_extensions: Default::default(),
             },
         );
 
@@ -1168,7 +1156,6 @@ mod tests {
                 variables: vec!["v_lib_prim".into()],
                 key: None,
                 source_library_key: Some("lib_brand".into()),
-                extensions: Default::default(),
             },
         );
         doc.variables.insert(
@@ -1184,8 +1171,6 @@ mod tests {
                 hidden_from_publishing: false,
                 key: None,
                 code_syntax: BTreeMap::new(),
-                extensions: Default::default(),
-                mode_extensions: Default::default(),
             },
         );
 
@@ -1241,8 +1226,6 @@ mod tests {
                     hidden_from_publishing: false,
                     key: None,
                     code_syntax: BTreeMap::new(),
-                    extensions: Default::default(),
-                    mode_extensions: Default::default(),
                 },
             );
         }
@@ -1280,7 +1263,6 @@ mod tests {
                 variables: vec!["v_surface".into()],
                 key: None,
                 source_library_key: None,
-                extensions: Default::default(),
             },
         );
         doc.variables.insert(
@@ -1301,8 +1283,6 @@ mod tests {
                 hidden_from_publishing: false,
                 key: None,
                 code_syntax: BTreeMap::new(),
-                extensions: Default::default(),
-                mode_extensions: Default::default(),
             },
         );
 
@@ -1317,7 +1297,6 @@ mod tests {
                 variables: vec!["v_bg".into()],
                 key: None,
                 source_library_key: None,
-                extensions: Default::default(),
             },
         );
         doc.variables.insert(
@@ -1335,8 +1314,6 @@ mod tests {
                 hidden_from_publishing: false,
                 key: None,
                 code_syntax: BTreeMap::new(),
-                extensions: Default::default(),
-                mode_extensions: Default::default(),
             },
         );
 

@@ -382,9 +382,9 @@ impl Engine {
                 if path.extension().and_then(|x| x.to_str()) != Some("fig") {
                     return Err("output_path must end in .fig".into());
                 }
-                let (bytes, omitted) = designos_fig::export_fig_with_report(&self.doc).map_err(|e| format!("Failed to export .fig: {e}"))?;
+                let bytes = designos_fig::export_fig(&self.doc).map_err(|e| format!("Failed to export .fig: {e}"))?;
                 std::fs::write(path, &bytes).map_err(|e| format!("Cannot write .fig file: {e}"))?;
-                Ok(json!({"output_path": a.output_path, "path": a.output_path, "bytes": bytes.len(), "saved": true, "omitted_extensions": omitted}))
+                Ok(json!({"output_path": a.output_path, "path": a.output_path, "bytes": bytes.len(), "saved": true}))
             }
             "designos_query_xpath" | "query_nodes" => {
                 let a: QueryXpathArgs = parse(args)?;
@@ -988,7 +988,6 @@ mod tests {
                     variables: vec![],
                     key: None,
                     source_library_key: None,
-                    extensions: Default::default(),
                 },
             );
         }
@@ -1010,8 +1009,6 @@ mod tests {
                     key: None,
 
                     code_syntax: Default::default(),
-                    extensions: Default::default(),
-                    mode_extensions: Default::default(),
                 },
             );
         }
