@@ -55,6 +55,13 @@ mod settings;
 #[cfg(test)]
 mod slot_model_tests;
 pub mod spec;
+pub mod spec_bind;
+#[cfg(test)]
+mod spec_bind_reference_forms_tests;
+#[cfg(test)]
+mod spec_bind_rollback_label_tests;
+mod spec_data;
+pub use spec_data::SpecDataSnapshot;
 pub mod spec_instance;
 mod styles_ops;
 mod text_fills;
@@ -89,6 +96,7 @@ pub use paint::*;
 pub use prototype::*;
 pub use settings::*;
 pub use spec::*;
+pub use spec_bind::*;
 pub use spec_instance::*;
 pub use styles_ops::*;
 pub use text_fills::set_text_fills_everywhere;
@@ -100,12 +108,18 @@ pub use vector::{HandleMirror, VectorNetwork};
 pub use vector_fit::{fit_polyline, Anchor};
 pub use writer_command::*;
 
+/// Shared spec test fixtures (`tokens_doc`, `button_library`, `card_with_slots`).
+pub mod fixtures {
+    pub use crate::spec_bind::fixtures::*;
+    pub use crate::spec_instance::fixtures::*;
+}
+
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 /// Stable node identifier. Imported Figma ids ("12:34") are kept in
 /// [`Node::source_id`]; `NodeId` is our own dense key.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct NodeId(pub u64);
 
 #[derive(Debug, thiserror::Error)]
