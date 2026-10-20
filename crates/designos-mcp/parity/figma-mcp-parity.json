@@ -34,10 +34,9 @@
     },
     {
       "figma_tool": "get_design_context",
-      "status": "task",
+      "status": "implemented",
       "studio_tool": "designos_get_design_context",
-      "task_id": "T7.4",
-      "note": "Codegen exists via designos_generate_code; T7.4 adds unified code, variable hints, and screenshot context (designos_get_design_context)"
+      "note": "Returns unified code, variable hints, and screenshot context for a node (designos_get_design_context); codegen also available via designos_generate_code"
     },
     {
       "figma_tool": "get_figjam",
@@ -162,9 +161,8 @@
     },
     {
       "figma_tool": "generate_figma_design",
-      "status": "task",
+      "status": "implemented",
       "studio_tool": "designos_import_web_capture",
-      "task_id": "T7.14",
       "note": "Import live web UI captures into editable design layers (R6.22)"
     },
     {
@@ -176,16 +174,14 @@
     },
     {
       "figma_tool": "html_to_figma",
-      "status": "task",
+      "status": "implemented",
       "studio_tool": "designos_import_web_capture",
-      "task_id": "T7.14",
       "note": "Convert captured HTML into editable design layers via Studio's web-capture importer (R6.22)"
     },
     {
       "figma_tool": "send_code_to_figma",
-      "status": "task",
+      "status": "implemented",
       "studio_tool": "designos_import_web_capture",
-      "task_id": "T7.14",
       "note": "Import local web/code capture into editable design layers (T7.14, R6.22)"
     },
     {

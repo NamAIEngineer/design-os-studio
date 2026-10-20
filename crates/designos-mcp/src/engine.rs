@@ -51,6 +51,11 @@ pub const DISPATCHED: &[&str] = &[
     "designos_list_nodes",
     "designos_get_node",
     "designos_get_screenshot",
+    "get_screenshot",
+    "designos_get_design_context",
+    "get_design_context",
+    "designos_import_web_capture",
+    "import_web_capture",
     "designos_get_variables",
     "designos_generate_code",
     "designos_create_node",
@@ -77,7 +82,7 @@ pub const DISPATCHED: &[&str] = &[
 ];
 
 /// Non-prefixed compatibility aliases accepted by [`Engine::call`].
-pub const ALIASES: &[&str] = &["export_fig_file", "get_guidelines", "get_metadata", "query_nodes", "check_design"];
+pub const ALIASES: &[&str] = &["export_fig_file", "get_guidelines", "get_metadata", "get_screenshot", "get_design_context", "import_web_capture", "query_nodes", "check_design"];
 
 impl Engine {
     pub const DISPATCHED: &[&str] = DISPATCHED;
