@@ -387,9 +387,10 @@ fn sizes_along(n: &Node, parent: Parent<'_>, row_parent: bool) -> Sizes {
     let grows = in_flow && n.layout_child.grow > 0.0;
     // A flow parent stretches its children along its counter axis; `AlignSelf::Stretch` and counter
     // `Sizing::Fill` are the same stretch there. A grid is different: its auto row sizes from the
-    // child, so a stretch child only fills that row and solves to its own size. Codegen therefore never
-    // turns `AlignSelf::Stretch` into a fill for a grid child and exports the solved pixels, as it does
-    // for a hug flex parent (`keeps_h`). `row_parent` only picks `grow` and the emitted stack kind.
+    // child, so a stretch or vertical-Fill child only fills that row and solves to its own size. Codegen
+    // therefore never turns `AlignSelf::Stretch` or vertical `Sizing::Fill` into a fill for a grid child
+    // and exports the solved pixels, as it does for a hug flex parent (`keeps_h`). `row_parent` only
+    // picks `grow` and the emitted stack kind.
     let grid_parent = parent.al.is_some_and(|a| a.direction == LayoutDirection::Grid);
     let counter_horiz = parent.al.filter(|_| in_flow && !grid_parent).map(|a| !a.primary_is_horizontal());
     let lc = &n.layout_child;
@@ -399,11 +400,13 @@ fn sizes_along(n: &Node, parent: Parent<'_>, row_parent: bool) -> Sizes {
         && parent.al.is_some_and(|a| a.direction != LayoutDirection::Grid && a.counter_sizing == Sizing::Hug)
         && lc.effective_sizing(!row_parent, counter_horiz) == Sizing::Fill;
     let keeps_w = cross_stretch && !row_parent;
-    let keeps_h = cross_stretch && row_parent;
+    let keeps_h = (cross_stretch && row_parent) || (in_flow && grid_parent && lc.effective_sizing(false, Some(false)) == Sizing::Fill);
     let fill_w = in_flow && ((lc.effective_sizing(true, counter_horiz) == Sizing::Fill && !keeps_w) || (grows && row_parent));
     let fill_h = in_flow && ((lc.effective_sizing(false, counter_horiz) == Sizing::Fill && !keeps_h) || (grows && !row_parent));
     let w = if fill_w {
         Dim::Fill
+    } else if keeps_w {
+        Dim::Fixed(n.size.x)
     } else if hug_w || text_w {
         Dim::Hug
     } else {
@@ -411,10 +414,12 @@ fn sizes_along(n: &Node, parent: Parent<'_>, row_parent: bool) -> Sizes {
     };
     let h = if fill_h {
         Dim::Fill
-    } else if hug_h || text_h {
-        Dim::Hug
     } else if matches!(n.kind, NodeKind::Line) {
         Dim::Fixed(0.0)
+    } else if keeps_h {
+        Dim::Fixed(n.size.y)
+    } else if hug_h || text_h {
+        Dim::Hug
     } else {
         Dim::Fixed(n.size.y)
     };
@@ -758,6 +763,41 @@ pub(crate) mod fixture {
         }
         d.relayout_subtree(grid);
         (d, grid, rect)
+    }
+
+    /// A fixed 400x300 two-column grid holding one 30x20 rectangle with `vertical = Sizing::Fill`
+    /// and default `AlignSelf::Auto`, already solved.
+    pub fn grid_fill_child(row_track: Option<GridTrack>) -> (Document, NodeId, NodeId) {
+        let mut al = AutoLayout { grid_columns: 2, primary_sizing: Sizing::Fixed, counter_sizing: Sizing::Fixed, ..Default::default() };
+        if let Some(track) = row_track {
+            al.grid_rows = 1;
+            al.grid_row_tracks.0[0] = track;
+        }
+        let (mut d, grid) = grid_frame(al, Vec2::new(400.0, 300.0));
+        let rect = add_rect(&mut d, grid, Vec2::new(30.0, 20.0));
+        d.get_mut(rect).unwrap().layout_child.vertical = Sizing::Fill;
+        d.relayout_subtree(grid);
+        (d, grid, rect)
+    }
+
+    /// A fixed 400x300 two-column grid holding one 30x20 `TextAutoResize::Height` text child with
+    /// `vertical = Sizing::Fill`, already solved.
+    pub fn grid_text_fill_child(row_track: Option<GridTrack>) -> (Document, NodeId, NodeId) {
+        let mut al = AutoLayout { grid_columns: 2, primary_sizing: Sizing::Fixed, counter_sizing: Sizing::Fixed, ..Default::default() };
+        if let Some(track) = row_track {
+            al.grid_rows = 1;
+            al.grid_row_tracks.0[0] = track;
+        }
+        let (mut d, grid) = grid_frame(al, Vec2::new(400.0, 300.0));
+        let tid = d.alloc_id();
+        let mut txt = Node::text(tid, Rect::new(0.0, 0.0, 30.0, 20.0), "Label", TextStyle::default());
+        if let NodeKind::Text(t) = &mut txt.kind {
+            t.auto_resize = TextAutoResize::Height;
+        }
+        txt.layout_child.vertical = Sizing::Fill;
+        let tid = d.insert(grid, txt).unwrap();
+        d.relayout_subtree(grid);
+        (d, grid, tid)
     }
 
     pub fn add_rect(d: &mut Document, parent: NodeId, size: Vec2) -> NodeId {
