@@ -3328,10 +3328,10 @@ mod tests {
         };
         let set_before = f.d.get(set).unwrap().clone();
         let noop_cmd = set_slot_config(&mut f.d, set, &slot_prop_name, cfg.clone());
-        assert_eq!(noop_cmd, Command::Batch(Vec::new()));
+        assert!(matches!(noop_cmd, Command::Batch(ref v) if v.is_empty()));
         apply(&mut f.d, noop_cmd);
         assert_eq!(f.d.get(set).unwrap(), &set_before);
-        assert_eq!(slot_config_of(&f.d, small_icon), Some(SlotPropConfig::default()));
+        assert_eq!(slot_config_of(&f.d, small_icon), None);
 
         let var_cmd = set_slot_config(&mut f.d, small, &slot_prop_name, cfg.clone());
         apply(&mut f.d, var_cmd);
