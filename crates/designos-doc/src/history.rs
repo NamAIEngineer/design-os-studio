@@ -213,6 +213,100 @@ impl Command {
             }
         })
     }
+
+    /// Returns `true` when this command (or its inverse stored on the undo stack) directly targets `id`,
+    /// ignoring passive auto-layout reflow updates on `id` (flow-child translation or Hug/Fill/Stretch size
+    /// adjustments) while still treating direct user drags of auto-layout frames and fixed-axis resizes as
+    /// targeting `id`.
+    pub fn targets_node(&self, doc: &Document, id: NodeId, current: Option<&Node>) -> bool {
+        match self {
+            Command::Insert { nodes, .. } | Command::InsertPage { nodes, .. } => nodes.iter().any(|n| n.id == id),
+            Command::Remove { id: rid } | Command::Reparent { id: rid, .. } | Command::RemovePage { id: rid } => *rid == id,
+            Command::Update { node } => {
+                if node.id != id {
+                    return false;
+                }
+                let Some(after) = current.or_else(|| doc.get(id)) else {
+                    return true;
+                };
+                if node.as_ref() == after {
+                    return false;
+                }
+                if is_auto_layout_reflow(doc, node, after) {
+                    return false;
+                }
+                true
+            }
+            Command::Batch(cmds) => cmds.iter().any(|c| c.targets_node(doc, id, current)),
+            Command::SetFlows { .. }
+            | Command::SetStyles { .. }
+            | Command::SetComments { .. }
+            | Command::SetLibraryState { .. }
+            | Command::SetGuides { .. }
+            | Command::SetPrototypeDevice { .. }
+            | Command::SetVariables { .. }
+            | Command::SetImages { .. }
+            | Command::SetCheckDesignsSettings(_) => false,
+        }
+    }
+}
+
+fn is_auto_layout_reflow(doc: &Document, before: &Node, after: &Node) -> bool {
+    if !only_layout_fields_differ(before, after) {
+        return false;
+    }
+    let linear_same = (before.transform.a - after.transform.a).abs() <= 1e-5
+        && (before.transform.b - after.transform.b).abs() <= 1e-5
+        && (before.transform.c - after.transform.c).abs() <= 1e-5
+        && (before.transform.d - after.transform.d).abs() <= 1e-5;
+    if !linear_same {
+        return false;
+    }
+
+    let parent_al = after.parent.or(before.parent).and_then(|pid| doc.get(pid)).and_then(|p| p.kind.frame_props()).and_then(|f| f.auto_layout.as_ref());
+    let in_auto_layout_flow = parent_al.is_some() && !after.layout_child.absolute;
+
+    let translated = (before.transform.tx - after.transform.tx).abs() > 1e-5 || (before.transform.ty - after.transform.ty).abs() > 1e-5;
+    if translated && !in_auto_layout_flow {
+        return false;
+    }
+
+    let (self_hug_w, self_hug_h) = match &after.kind {
+        crate::NodeKind::Group => (true, true),
+        crate::NodeKind::Text(tp) => (
+            tp.auto_resize == crate::TextAutoResize::WidthAndHeight,
+            matches!(tp.auto_resize, crate::TextAutoResize::WidthAndHeight | crate::TextAutoResize::Height),
+        ),
+        _ => after.kind.frame_props().and_then(|f| f.auto_layout.as_ref()).map_or((false, false), crate::layout_solver::hugged_axes),
+    };
+
+    let parent_stretches_w = in_auto_layout_flow
+        && (matches!(after.layout_child.horizontal, crate::Sizing::Hug | crate::Sizing::Fill)
+            || parent_al.is_some_and(|al| al.direction == crate::LayoutDirection::Vertical && after.layout_child.align_self == crate::AlignSelf::Stretch));
+    let parent_stretches_h = in_auto_layout_flow
+        && (matches!(after.layout_child.vertical, crate::Sizing::Hug | crate::Sizing::Fill)
+            || parent_al.is_some_and(|al| al.direction == crate::LayoutDirection::Horizontal && after.layout_child.align_self == crate::AlignSelf::Stretch));
+
+    let dx = (before.size.x - after.size.x).abs() > 1e-5;
+    let dy = (before.size.y - after.size.y).abs() > 1e-5;
+    if dx && !(self_hug_w || parent_stretches_w) {
+        return false;
+    }
+    if dy && !(self_hug_h || parent_stretches_h) {
+        return false;
+    }
+
+    in_auto_layout_flow || self_hug_w || self_hug_h
+}
+
+fn only_layout_fields_differ(before: &Node, after: &Node) -> bool {
+    let mut normalized = before.clone();
+    normalized.parent = after.parent;
+    normalized.children = after.children.clone();
+    normalized.transform = after.transform;
+    normalized.size = after.size;
+    normalized.layout_child.stretched = after.layout_child.stretched;
+    normalized == *after
 }
 
 impl Document {
@@ -269,6 +363,10 @@ impl History {
     /// The command [`Self::undo`] would apply next.
     pub fn peek_undo(&self) -> Option<&Command> {
         self.undo.last()
+    }
+    /// The undo command stored at 1-based depth `depth` (`self.undo[depth - 1]`).
+    pub fn undo_at_depth(&self, depth: usize) -> Option<&Command> {
+        depth.checked_sub(1).and_then(|i| self.undo.get(i))
     }
     /// The command [`Self::redo`] would apply next.
     pub fn peek_redo(&self) -> Option<&Command> {
