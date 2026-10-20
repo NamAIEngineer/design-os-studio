@@ -3819,3 +3819,86 @@ fn radial_gradient_transform_imports_centred_handles_and_roundtrips() {
     let rt = import_fig(&bytes).expect("re-import RadialDoc");
     check(&rt);
 }
+
+#[test]
+fn resized_instance_scales_rotated_vector_and_boolean_geometry_without_derived_data() {
+    let mut doc = Document::new("RotatedVecInst");
+    let page = doc.add_page("Page 1");
+
+    let comp_id = doc.alloc_id();
+    let mut comp = Node::new(comp_id, NodeKind::Component(FrameProps::default()));
+    comp.name = "IconComp".into();
+    comp.size = Vec2::new(200.0, 200.0);
+    doc.insert(page, comp).unwrap();
+
+    let vec_id = doc.alloc_id();
+    let rect_path = Path {
+        cmds: vec![
+            PathCmd::MoveTo(Vec2::new(0.0, 0.0)),
+            PathCmd::LineTo(Vec2::new(100.0, 0.0)),
+            PathCmd::LineTo(Vec2::new(100.0, 40.0)),
+            PathCmd::LineTo(Vec2::new(0.0, 40.0)),
+            PathCmd::Close,
+        ],
+        fill_rule: FillRule::NonZero,
+    };
+    let net = VectorNetwork::from_paths(std::slice::from_ref(&rect_path));
+    let mut vec_node = Node::new(vec_id, NodeKind::Vector { paths: vec![rect_path.clone()], network: Some(net) });
+    vec_node.name = "RotatedGlyph".into();
+    vec_node.size = Vec2::new(100.0, 40.0);
+    vec_node.transform = Affine::rotate(30.0_f32.to_radians());
+    vec_node.constraints = Constraints { horizontal: Constraint::Stretch, vertical: Constraint::Stretch };
+    vec_node.fills = vec![Paint::solid(Color::BLACK)];
+    doc.insert(comp_id, vec_node).unwrap();
+
+    let bool_id = doc.alloc_id();
+    let mut bool_node = Node::new(bool_id, NodeKind::BooleanOp(BooleanOp::Union));
+    bool_node.name = "BadgeUnion".into();
+    bool_node.size = Vec2::new(100.0, 40.0);
+    bool_node.constraints = Constraints { horizontal: Constraint::Stretch, vertical: Constraint::Stretch };
+    bool_node.fill_geometry = Some(vec![rect_path.clone()]);
+    bool_node.fills = vec![Paint::solid(Color::BLACK)];
+    doc.insert(comp_id, bool_node).unwrap();
+
+    let inst_id = doc.alloc_id();
+    let mut inst = Node::new(inst_id, NodeKind::Instance { frame: FrameProps::default(), component: Some(comp_id), component_key: None });
+    inst.name = "ResizedIconInst".into();
+    inst.size = Vec2::new(300.0, 200.0);
+    inst.transform = Affine::translate(260.0, 0.0);
+    doc.insert(page, inst).unwrap();
+
+    // Export and re-import through .fig (no derivedSymbolData is written by export_fig).
+    let bytes = export_fig(&doc).expect("export_fig RotatedVecInst");
+    let imported = import_fig(&bytes).expect("import_fig RotatedVecInst");
+
+    let imp_inst = find(&imported, "ResizedIconInst");
+    let glyph = imp_inst.children.iter().filter_map(|&cid| imported.get(cid)).find(|n| n.name == "RotatedGlyph").expect("RotatedGlyph child");
+    assert!((glyph.size.x - 175.130).abs() < 1e-2, "expected glyph w≈175.130, got {}", glyph.size.x);
+    assert!((glyph.size.y - 44.266).abs() < 1e-2, "expected glyph h≈44.266, got {}", glyph.size.y);
+
+    let NodeKind::Vector { paths, .. } = &glyph.kind else { panic!("expected Vector") };
+    let max_pt = paths[0]
+        .cmds
+        .iter()
+        .filter_map(|c| match *c {
+            PathCmd::MoveTo(p) | PathCmd::LineTo(p) => Some(p),
+            _ => None,
+        })
+        .fold(Vec2::ZERO, |acc, p| Vec2::new(acc.x.max(p.x), acc.y.max(p.y)));
+    assert!((max_pt.x - glyph.size.x).abs() < 1e-2, "vector path max_x={} vs glyph.size.x={}", max_pt.x, glyph.size.x);
+    assert!((max_pt.y - glyph.size.y).abs() < 1e-2, "vector path max_y={} vs glyph.size.y={}", max_pt.y, glyph.size.y);
+
+    let badge = imp_inst.children.iter().filter_map(|&cid| imported.get(cid)).find(|n| n.name == "BadgeUnion").expect("BadgeUnion child");
+    assert!((badge.size.x - 200.0).abs() < 1e-2);
+    if let Some(fg) = &badge.fill_geometry {
+        let bmax = fg[0]
+            .cmds
+            .iter()
+            .filter_map(|c| match *c {
+                PathCmd::MoveTo(p) | PathCmd::LineTo(p) => Some(p),
+                _ => None,
+            })
+            .fold(Vec2::ZERO, |acc, p| Vec2::new(acc.x.max(p.x), acc.y.max(p.y)));
+        assert!((bmax.x - badge.size.x).abs() < 1e-2, "boolean fill_geometry max_x={} vs size.x={}", bmax.x, badge.size.x);
+    }
+}

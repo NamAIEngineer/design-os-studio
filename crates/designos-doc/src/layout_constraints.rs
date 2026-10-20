@@ -4,7 +4,7 @@
 //! `Stretch`, and `Scale` across both unrotated and rotated/skewed children,
 //! including half-away-from-zero extent rounding and sub-1px sizes.
 
-use crate::{Affine, Constraint, Document, Node, NodeId, Vec2};
+use crate::{Affine, Constraint, Document, Node, NodeId, NodeKind, Path, PathCmd, Vec2};
 
 /// Minimum axis extent (`2^-12`) below which per-axis scale falls back to `1.0`.
 const MIN_EXTENT: f64 = 1.0 / 4096.0;
@@ -29,7 +29,7 @@ fn move_axis_edges(constraint: Constraint, e0: f64, e1: f64, old_p: f64, new_p: 
         }
         Constraint::Stretch => {
             let delta = round_half_away_from_zero(new_p) - round_half_away_from_zero(old_p);
-            (e0, e1 + delta)
+            (e0, (e1 + delta).max(e0))
         }
         Constraint::Scale => {
             if old_p.abs() < MIN_EXTENT {
@@ -81,12 +81,19 @@ pub fn constrain_child(child: &Node, old: Vec2, new: Vec2) -> Option<(Affine, Ve
     let new_ext_y = nby1 - nby0;
     let sy = if old_ext_y < MIN_EXTENT { 1.0 } else { new_ext_y / old_ext_y };
 
+    let stretch_collapsed_x = matches!(child.constraints.horizontal, Constraint::Stretch) && old_ext_x >= MIN_EXTENT && new_ext_x <= 0.0;
+    let stretch_collapsed_y = matches!(child.constraints.vertical, Constraint::Stretch) && old_ext_y >= MIN_EXTENT && new_ext_y <= 0.0;
+
     // 4. Apply map p -> B'.min + s * (p - B.min) after child's matrix.
-    let ma = sx * a;
-    let mc = sx * c;
+    // When a Stretch axis collapses to 0, keep the un-collapsed basis direction so the child
+    // collapses in place to 0 extent instead of mirroring or returning None with its old size.
+    let sx_dir = if stretch_collapsed_x { 1.0 } else { sx };
+    let sy_dir = if stretch_collapsed_y { 1.0 } else { sy };
+    let ma = sx_dir * a;
+    let mc = sx_dir * c;
     let mtx = nbx0 + sx * (tx - bx0);
-    let mb = sy * b;
-    let md = sy * d;
+    let mb = sy_dir * b;
+    let md = sy_dir * d;
     let mty = nby0 + sy * (ty - by0);
 
     let det = ma * md - mb * mc;
@@ -104,9 +111,86 @@ pub fn constrain_child(child: &Node, old: Vec2, new: Vec2) -> Option<(Affine, Ve
         return None;
     }
 
-    let new_size = Vec2::new((w * kx) as f32, (h * ky) as f32);
+    let size_kx = if stretch_collapsed_x { 0.0 } else { kx };
+    let size_ky = if stretch_collapsed_y { 0.0 } else { ky };
+    let new_size = Vec2::new((w * size_kx) as f32, (h * size_ky) as f32);
     let new_transform = Affine { a: (ma / kx) as f32, b: (mb / kx) as f32, c: (mc / ky) as f32, d: (md / ky) as f32, tx: mtx as f32, ty: mty as f32 };
     Some((new_transform, new_size))
+}
+
+#[inline]
+fn scale_vec2(p: Vec2, kx: f32, ky: f32) -> Vec2 {
+    Vec2::new(p.x * kx, p.y * ky)
+}
+
+fn scale_paths(paths: &mut [Path], kx: f32, ky: f32) {
+    for path in paths {
+        for cmd in &mut path.cmds {
+            match cmd {
+                PathCmd::MoveTo(p) | PathCmd::LineTo(p) => *p = scale_vec2(*p, kx, ky),
+                PathCmd::QuadTo(c, p) => {
+                    *c = scale_vec2(*c, kx, ky);
+                    *p = scale_vec2(*p, kx, ky);
+                }
+                PathCmd::CubicTo(c1, c2, p) => {
+                    *c1 = scale_vec2(*c1, kx, ky);
+                    *c2 = scale_vec2(*c2, kx, ky);
+                    *p = scale_vec2(*p, kx, ky);
+                }
+                PathCmd::Close => {}
+            }
+        }
+    }
+}
+
+/// Applies `(new_transform, new_size)` from [`constrain_child`] / [`plan_constraint_pass`]
+/// to `node`, scaling local vector/boolean path geometry or clearing stale analytical outlines
+/// whenever `node.size` changes.
+pub fn apply_constrained_geometry(node: &mut Node, new_transform: Affine, new_size: Vec2) {
+    let old_size = node.size;
+    let size_changed = (new_size.x - old_size.x).abs() > 1e-4 || (new_size.y - old_size.y).abs() > 1e-4;
+    node.transform = new_transform;
+    node.size = new_size;
+    if !size_changed {
+        return;
+    }
+    let kx = if old_size.x.abs() > 1e-6 { new_size.x / old_size.x } else { 1.0 };
+    let ky = if old_size.y.abs() > 1e-6 { new_size.y / old_size.y } else { 1.0 };
+    match &mut node.kind {
+        NodeKind::Vector { paths, network } => {
+            scale_paths(paths, kx, ky);
+            if let Some(net) = network {
+                for v in &mut net.vertices {
+                    v.pos = scale_vec2(v.pos, kx, ky);
+                }
+                for s in &mut net.segments {
+                    s.ta = scale_vec2(s.ta, kx, ky);
+                    s.tb = scale_vec2(s.tb, kx, ky);
+                }
+                if net.vertices.iter().any(|v| v.corner_radius > 0.0) && net.is_valid() {
+                    *paths = net.to_paths();
+                }
+            }
+            if let Some(fg) = &mut node.fill_geometry {
+                scale_paths(fg, kx, ky);
+            }
+            if let Some(sg) = &mut node.stroke_geometry {
+                scale_paths(sg, kx, ky);
+            }
+        }
+        NodeKind::BooleanOp(_) => {
+            if let Some(fg) = &mut node.fill_geometry {
+                scale_paths(fg, kx, ky);
+            }
+            if let Some(sg) = &mut node.stroke_geometry {
+                scale_paths(sg, kx, ky);
+            }
+        }
+        _ => {
+            node.fill_geometry = None;
+            node.stroke_geometry = None;
+        }
+    }
 }
 
 /// Plans a recursive constraint pass rooted at `parent` when `parent` resizes
@@ -245,5 +329,33 @@ mod tests {
         assert!(!prod_layout.contains("Constraint::Stretch =>"), "layout.rs production code must not hold a local per-axis match on Constraint");
         assert!(rest_import.contains("plan_constraint_pass"), "rest_import.rs must call plan_constraint_pass");
         assert!(prod_layout.contains("plan_constraint_pass"), "layout.rs must call plan_constraint_pass");
+    }
+
+    #[test]
+    fn shrink_past_inset_stretch_child_collapses_without_mirroring_or_overflow() {
+        let mut bar = Node::rectangle(NodeId(2), Rect::new(16.0, 10.0, 168.0, 20.0));
+        bar.constraints = Constraints { horizontal: Constraint::Stretch, vertical: Constraint::Min };
+
+        // Shrinking a 200px parent down to 20px (past the 32px total horizontal insets)
+        // must collapse the bar width to 0 without flipping transform.a negative.
+        let (t20, sz20) = constrain_child(&bar, Vec2::new(200.0, 100.0), Vec2::new(20.0, 100.0)).expect("stretch collapse at 20px");
+        assert!(t20.a > 0.0, "transform.a must not flip negative, got {}", t20.a);
+        assert_eq!(t20.tx, 16.0);
+        assert_eq!(sz20, Vec2::new(0.0, 20.0));
+
+        // Shrinking to 32px lands exactly at new_ext_x == 0; must collapse to 0 instead of returning None.
+        let (t32, sz32) = constrain_child(&bar, Vec2::new(200.0, 100.0), Vec2::new(32.0, 100.0)).expect("stretch collapse at 32px");
+        assert!(t32.a > 0.0, "transform.a must not flip negative, got {}", t32.a);
+        assert_eq!(t32.tx, 16.0);
+        assert_eq!(sz32, Vec2::new(0.0, 20.0));
+
+        // Shrinking a 200px parent with a Stretch child at x=10, w=40 (right inset 150) to w=150:
+        let mut pill = Node::rectangle(NodeId(3), Rect::new(10.0, 8.0, 40.0, 24.0));
+        pill.constraints = Constraints { horizontal: Constraint::Stretch, vertical: Constraint::Stretch };
+        let (tp, szp) = constrain_child(&pill, Vec2::new(200.0, 100.0), Vec2::new(150.0, 10.0)).expect("stretch collapse on both axes");
+        assert!(tp.a > 0.0 && tp.d > 0.0, "basis must not mirror: {:?}", tp);
+        assert_eq!(tp.tx, 10.0);
+        assert_eq!(tp.ty, 8.0);
+        assert_eq!(szp, Vec2::new(0.0, 0.0));
     }
 }

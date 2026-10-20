@@ -2095,7 +2095,7 @@ impl<'a> Ctx<'a> {
             let old = self.doc.get(comp).map(|n| n.size).unwrap_or_default();
             let new = self.doc.get(inst).map(|n| n.size).unwrap_or_default();
             if (new.x - old.x).abs() > 1e-4 || (new.y - old.y).abs() > 1e-4 {
-                self.apply_instance_constraints(inst, old, new, 16);
+                self.apply_instance_constraints(inst, old, new, MAX_TREE_DEPTH);
             }
         }
     }
@@ -2106,13 +2106,7 @@ impl<'a> Ctx<'a> {
     fn apply_instance_constraints(&mut self, parent: NodeId, old: Vec2, new: Vec2, depth: usize) {
         for (c, new_transform, new_size) in designos_doc::plan_constraint_pass(&self.doc, parent, old, new, depth) {
             if let Some(km) = self.doc.get_mut(c) {
-                let size_changed = (new_size.x - km.size.x).abs() > 1e-4 || (new_size.y - km.size.y).abs() > 1e-4;
-                km.transform = new_transform;
-                km.size = new_size;
-                if size_changed && !matches!(km.kind, NodeKind::Vector { .. } | NodeKind::BooleanOp(_)) {
-                    km.fill_geometry = None;
-                    km.stroke_geometry = None;
-                }
+                designos_doc::apply_constrained_geometry(km, new_transform, new_size);
             }
         }
     }

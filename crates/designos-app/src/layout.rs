@@ -184,10 +184,9 @@ pub fn apply_constraints(doc: &mut Document, ed: &mut Edit, frame: NodeId, old: 
     if (new.x - old.x).abs() < 1e-4 && (new.y - old.y).abs() < 1e-4 {
         return;
     }
-    for (c, new_transform, new_size) in designos_doc::plan_constraint_pass(doc, frame, old, new, 16) {
+    for (c, new_transform, new_size) in designos_doc::plan_constraint_pass(doc, frame, old, new, 64) {
         if let Some(k) = ed.node(doc, c) {
-            k.transform = new_transform;
-            k.size = new_size;
+            designos_doc::apply_constrained_geometry(k, new_transform, new_size);
         }
     }
 }
@@ -675,6 +674,87 @@ mod tests {
         let ys_auto: Vec<f32> = out_auto.rects.iter().map(|r| r.y).collect();
         assert_eq!(ys_auto, vec![0.0, 0.0, 0.0, 40.0, 40.0, 40.0, 100.0]);
         assert_eq!(out_auto.frame.y, 150.0);
+    }
+
+    #[test]
+    fn apply_constraints_scales_rotated_vector_geometry_and_reaches_deep_children() {
+        use designos_doc::{FillRule, Path, PathCmd, VectorNetwork};
+
+        let mut d = Document::new("t");
+        let page = d.add_page("p");
+        let fid = d.alloc_id();
+        let f = d.insert(page, Node::frame(fid, Rect::new(0.0, 0.0, 200.0, 200.0))).unwrap();
+
+        // 1. Rotated Stretch Vector with paths, network, fill_geometry, and stroke_geometry.
+        let vid = d.alloc_id();
+        let path = Path {
+            cmds: vec![
+                PathCmd::MoveTo(v2(0.0, 0.0)),
+                PathCmd::LineTo(v2(100.0, 0.0)),
+                PathCmd::LineTo(v2(100.0, 40.0)),
+                PathCmd::LineTo(v2(0.0, 40.0)),
+                PathCmd::Close,
+            ],
+            fill_rule: FillRule::NonZero,
+        };
+        let net = VectorNetwork::from_paths(std::slice::from_ref(&path));
+        let mut vec_node = Node::new(vid, NodeKind::Vector { paths: vec![path.clone()], network: Some(net) });
+        vec_node.size = v2(100.0, 40.0);
+        vec_node.transform = Affine::rotate(30.0_f32.to_radians());
+        vec_node.constraints.horizontal = Constraint::Stretch;
+        vec_node.constraints.vertical = Constraint::Stretch;
+        vec_node.fill_geometry = Some(vec![path.clone()]);
+        vec_node.stroke_geometry = Some(vec![path.clone()]);
+        let v = d.insert(f, vec_node).unwrap();
+
+        // 2. Rectangle with stale fill_geometry and a 20-level deep Stretch chain.
+        let mut cur_parent = f;
+        let mut leaf = f;
+        for depth in 0..20 {
+            let cid = d.alloc_id();
+            let mut n = if depth == 19 { Node::rectangle(cid, Rect::new(0.0, 0.0, 100.0, 40.0)) } else { Node::frame(cid, Rect::new(0.0, 0.0, 100.0, 40.0)) };
+            n.constraints.horizontal = Constraint::Stretch;
+            n.constraints.vertical = Constraint::Stretch;
+            n.fill_geometry = Some(vec![path.clone()]);
+            leaf = d.insert(cur_parent, n).unwrap();
+            cur_parent = leaf;
+        }
+
+        let mut ed = Edit::new();
+        apply_constraints(&mut d, &mut ed, f, v2(200.0, 200.0), v2(300.0, 200.0));
+
+        let vn = d.get(v).unwrap();
+        assert!((vn.size.x - 175.130).abs() < 1e-3);
+        assert!((vn.size.y - 44.266).abs() < 1e-3);
+        let NodeKind::Vector { paths, network } = &vn.kind else { panic!("expected Vector") };
+        let max_pt = paths[0]
+            .cmds
+            .iter()
+            .filter_map(|c| match *c {
+                PathCmd::MoveTo(p) | PathCmd::LineTo(p) => Some(p),
+                _ => None,
+            })
+            .fold(v2(0.0, 0.0), |acc, p| v2(acc.x.max(p.x), acc.y.max(p.y)));
+        assert!((max_pt.x - vn.size.x).abs() < 1e-3, "vector path max_x={} vs size.x={}", max_pt.x, vn.size.x);
+        assert!((max_pt.y - vn.size.y).abs() < 1e-3, "vector path max_y={} vs size.y={}", max_pt.y, vn.size.y);
+        let net_max = network.as_ref().unwrap().vertices.iter().fold(v2(0.0, 0.0), |acc, vtx| v2(acc.x.max(vtx.pos.x), acc.y.max(vtx.pos.y)));
+        assert!((net_max.x - vn.size.x).abs() < 1e-3);
+        assert!((net_max.y - vn.size.y).abs() < 1e-3);
+        let fg_max = vn.fill_geometry.as_ref().unwrap()[0]
+            .cmds
+            .iter()
+            .filter_map(|c| match *c {
+                PathCmd::MoveTo(p) | PathCmd::LineTo(p) => Some(p),
+                _ => None,
+            })
+            .fold(v2(0.0, 0.0), |acc, p| v2(acc.x.max(p.x), acc.y.max(p.y)));
+        assert!((fg_max.x - vn.size.x).abs() < 1e-3);
+        assert!((fg_max.y - vn.size.y).abs() < 1e-3);
+
+        // Deep leaf at depth 20 resized and cleared its stale fill_geometry.
+        let leaf_node = d.get(leaf).unwrap();
+        assert_eq!(leaf_node.size, v2(200.0, 40.0));
+        assert!(leaf_node.fill_geometry.is_none());
     }
 }
 

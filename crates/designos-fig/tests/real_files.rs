@@ -379,31 +379,90 @@ fn untitled_ui_pie_chart_resized_instances_match() {
 #[test]
 #[ignore = "needs private reference .fig kits"]
 fn kit_resized_instances_match_shared_constraint_solver() {
-    let Some(bytes) = reference("shadcn-ui.fig").or_else(|| reference("private-ui-kit.fig")) else {
+    let Some(bytes) =
+        reference("shadcn-ui.fig").or_else(|| reference("private-ui-kit.fig")).or_else(|| reference("untitled-ui.fig")).or_else(|| reference(UNTITLED_UI_KIT))
+    else {
         eprintln!("reference kit not found: skipped");
         return;
     };
+    let derived_by_inst = designos_fig::extract_fig_derived_symbol_data(&bytes).expect("extract derivedSymbolData");
     let mut doc = import_fig(&bytes).expect("import kit");
     doc.hydrate_all_pages();
     let mut checked = 0usize;
     for inst in doc.nodes.values().filter(|n| matches!(n.kind, NodeKind::Instance { .. })) {
+        let Some(inst_guid) = inst.source_id.as_deref().filter(|s| !s.starts_with('I')) else { continue };
+        let Some(inst_derived) = derived_by_inst.get(inst_guid) else { continue };
+        if (inst_derived.uniform_scale - 1.0).abs() > 1e-4 {
+            continue;
+        }
         let Some(comp_id) = instance_component(inst) else { continue };
         let Some(comp) = doc.get(comp_id) else { continue };
         if comp.kind.frame_props().and_then(|f| f.auto_layout.as_ref()).is_some() {
             continue;
         }
+        if matches!(comp.kind, NodeKind::Group | NodeKind::BooleanOp(_) | NodeKind::Unknown { .. }) {
+            continue;
+        }
         if (inst.size.x - comp.size.x).abs() <= 1e-4 && (inst.size.y - comp.size.y).abs() <= 1e-4 {
             continue;
         }
-        let plan = plan_constraint_pass(&doc, comp_id, comp.size, inst.size, 1);
-        for ((_, _, expected_sz), &inst_child_id) in plan.iter().zip(inst.children.iter()) {
-            let Some(inst_child) = doc.get(inst_child_id) else { continue };
-            if inst_child.component.overrides.is_empty() {
-                checked += 1;
-                let err = (inst_child.size.x - expected_sz.x).abs().max((inst_child.size.y - expected_sz.y).abs());
-                assert!(err < 2e-3, "child {:?} size {:?} vs solver {:?}", inst_child.name, inst_child.size, expected_sz);
+        for entry in &inst_derived.entries {
+            if entry.path.len() != 1 {
+                continue;
             }
+            let target_guid = entry.path[0].as_str();
+            let Some(comp_child) = comp
+                .children
+                .iter()
+                .filter_map(|&cid| doc.get(cid))
+                .find(|c| c.source_id.as_deref().is_some_and(|s| s == target_guid || s.rsplit(';').next() == Some(target_guid)))
+            else {
+                continue;
+            };
+            if matches!(comp_child.kind, NodeKind::Text(_) | NodeKind::Group | NodeKind::BooleanOp(_) | NodeKind::Unknown { .. }) {
+                continue;
+            }
+            if comp_child.kind.frame_props().and_then(|f| f.auto_layout.as_ref()).is_some() {
+                continue;
+            }
+            let Some(inst_child) = inst.children.iter().filter_map(|&cid| doc.get(cid)).find(|c| c.component.source == Some(comp_child.id)) else {
+                continue;
+            };
+            if !inst_child.component.overrides.is_empty() {
+                continue;
+            }
+            let (solver_tf, solver_sz) = constrain_child(comp_child, comp.size, inst.size).unwrap_or((comp_child.transform, comp_child.size));
+            if let Some(dsz) = entry.size {
+                let err = (solver_sz.x - dsz.x).abs().max((solver_sz.y - dsz.y).abs());
+                assert!(
+                    err < 2e-3,
+                    "instance {:?} ({inst_guid}) child {:?} ({target_guid}) solver size {:?} vs derivedSymbolData {:?}",
+                    inst.name,
+                    comp_child.name,
+                    solver_sz,
+                    dsz
+                );
+            }
+            if let Some(dtf) = entry.transform {
+                let err = (solver_tf.a - dtf.a)
+                    .abs()
+                    .max((solver_tf.b - dtf.b).abs())
+                    .max((solver_tf.c - dtf.c).abs())
+                    .max((solver_tf.d - dtf.d).abs())
+                    .max((solver_tf.tx - dtf.tx).abs())
+                    .max((solver_tf.ty - dtf.ty).abs());
+                assert!(
+                    err < 2e-3,
+                    "instance {:?} ({inst_guid}) child {:?} ({target_guid}) solver transform {:?} vs derivedSymbolData {:?}",
+                    inst.name,
+                    comp_child.name,
+                    solver_tf,
+                    dtf
+                );
+            }
+            checked += 1;
         }
     }
-    eprintln!("checked {checked} resized-instance child rows");
+    eprintln!("checked {checked} resized-instance derivedSymbolData child entries");
+    assert!(checked > 0, "expected at least one qualifying resized-instance derivedSymbolData entry");
 }
