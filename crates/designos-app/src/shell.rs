@@ -92,7 +92,7 @@ impl Shell {
         opts.home = opts.wants_home();
         let screenshot = opts.screenshot.is_some();
         let panel_was_none = opts.panel.is_none();
-        let has_file = opts.file.is_some() || opts.open_id.is_some();
+        let has_file = opts.file.is_some() || opts.import_capture.is_some() || opts.open_id.is_some();
         let (gpu_flag, library) = (opts.gpu, opts.library.clone());
         let mut shell = Self::build(&cc.egui_ctx, opts);
         if !screenshot && panel_was_none && !has_file {
@@ -131,7 +131,7 @@ impl Shell {
             Some("board") => crate::board::demo::document(),
             Some("board-empty") => crate::board::create::new_document("Untitled"),
             Some(f) if crate::vecfixture::FIXTURES.contains(&f) => crate::vecfixture::document(),
-            None if opts.file.is_some() || opts.open_id.is_some() || opts.home => designos_doc::Document::new("Untitled"),
+            None if opts.file.is_some() || opts.import_capture.is_some() || opts.open_id.is_some() || opts.home => designos_doc::Document::new("Untitled"),
             _ => demo::demo_document(),
         });
         // A shell started during build (`--panel agents`, `terminal`, `agents-chat`) captures its
@@ -160,6 +160,9 @@ impl Shell {
         }
         if let Some(f) = &opts.file {
             app.open_path(f.clone());
+        }
+        if let Some(cap) = &opts.import_capture {
+            app.import_web_capture_path(cap.clone());
         }
         if let Some(id) = &opts.open_id {
             app.open_library_file(id);
@@ -327,6 +330,9 @@ impl Shell {
                     // the capture of a library collection: start on it rather than on the file's own
                     app.vars.collection = app.doc.variable_collections.values().find(|c| c.is_library()).map(|c| c.id.clone());
                 }
+            }
+            Some("web-capture-report") => {
+                app.web_capture_report_open = true;
             }
             Some(p) if p.starts_with("micro-") => {
                 if !p.contains(":seq:") {
@@ -968,7 +974,137 @@ impl Shell {
         p.rect_filled(r, theme::cr(theme::RADIUS_FRAME), theme::BG_MENU);
         p.circle_filled(Pos2::new(r.left() + 16.0, r.center().y), 4.0, if t.error { theme::DANGER } else { theme::BG_BRAND });
         p.text(Pos2::new(r.left() + 28.0, r.center().y), Align2::LEFT_CENTER, &t.text, font, theme::TEXT);
+        if self.app.web_capture_report.is_some() && t.text.ends_with("Details") {
+            let resp = ui.interact(r, egui::Id::new("web-capture-toast-details"), egui::Sense::click());
+            if resp.clicked() {
+                self.app.web_capture_report_open = !self.app.web_capture_report_open;
+            }
+        }
         ui.ctx().request_repaint_after(std::time::Duration::from_millis(200));
+    }
+
+    fn show_web_capture_report(&mut self, ctx: &Context) {
+        if !self.app.web_capture_report_open {
+            return;
+        }
+        let Some(rep) = self.app.web_capture_report.clone() else {
+            self.app.web_capture_report_open = false;
+            return;
+        };
+        if ctx.input(|i| i.key_pressed(Key::Escape)) {
+            self.app.web_capture_report_open = false;
+            return;
+        }
+        let screen = ctx.content_rect();
+        let w = 480.0_f32.min((screen.width() - 48.0).max(320.0));
+        let row_h = 28.0;
+        let header_h = 36.0;
+        let summary_rows = 4usize;
+        let fb_rows = 1 + rep.absolute_fallbacks.len();
+        let font_rows = 1 + rep.font_substitutions.len();
+        let style_rows = 1 + rep.unsupported_css.len();
+        let img_rows = 1 + rep.images_not_captured.len();
+        let note_rows = if rep.notes.is_empty() { 0 } else { 1 + rep.notes.len() };
+        let total_rows = summary_rows + fb_rows + font_rows + style_rows + img_rows + note_rows;
+        let content_h = total_rows as f32 * row_h;
+        let max_body_h = (screen.height() - 140.0).clamp(180.0, 460.0);
+        let body_h = content_h.min(max_body_h);
+        let h = header_h + 12.0 + body_h;
+        let rect = Rect::from_min_size(
+            Pos2::new((screen.right() - theme::RIGHT_PANEL_WIDTH - w - 20.0).max(screen.left() + 24.0), screen.top() + 56.0),
+            Vec2::new(w, h),
+        );
+        let mut close_clicked = false;
+        egui::Area::new(egui::Id::new("web-capture-report-sheet")).order(egui::Order::Foreground).fixed_pos(rect.min).interactable(true).show(ctx, |ui| {
+            let p = ui.painter().clone();
+            widgets::elevation_400(&p, rect, theme::RADIUS_FRAME);
+            p.rect_filled(rect, theme::cr(theme::RADIUS_FRAME), theme::BG_MENU);
+            p.rect_stroke(rect, theme::cr(theme::RADIUS_FRAME), egui::Stroke::new(1.0, theme::BORDER_MENU), egui::StrokeKind::Inside);
+
+            let hdr = Rect::from_min_size(rect.min, Vec2::new(rect.width(), header_h));
+            p.text(Pos2::new(hdr.left() + 14.0, hdr.center().y), Align2::LEFT_CENTER, "Web Capture Import Report", theme::font_body_strong(), theme::TEXT);
+            let close_r = Rect::from_min_size(Pos2::new(hdr.right() - 30.0, hdr.center().y - 12.0), Vec2::splat(24.0));
+            if widgets::icon_button(ui, close_r, "close-web-capture-report", Icon::Close, false, "Close").clicked() {
+                close_clicked = true;
+            }
+            widgets::hline(&p, rect.left(), rect.right(), hdr.bottom(), theme::BORDER_SUBTLE);
+
+            let body_rect = Rect::from_min_size(Pos2::new(rect.left(), hdr.bottom() + 6.0), Vec2::new(rect.width(), body_h));
+            ui.scope_builder(egui::UiBuilder::new().max_rect(body_rect), |ui| {
+                egui::ScrollArea::vertical().id_salt("web-capture-report-scroll").max_height(body_h).show(ui, |ui| {
+                    let draw_kv = |ui: &mut egui::Ui, label: &str, value: &str, mono_val: bool, strong_label: bool| {
+                        let (r, _) = ui.allocate_exact_size(Vec2::new(body_rect.width() - 28.0, row_h), egui::Sense::hover());
+                        let row_p = ui.painter();
+                        let lf = if strong_label { theme::font_body_strong() } else { theme::font_body() };
+                        let lc = if strong_label { theme::TEXT } else { theme::TEXT_SECONDARY };
+                        let elided_lbl = widgets::elide(row_p, label, &lf, (r.width() * 0.48).max(100.0));
+                        row_p.text(Pos2::new(r.left() + 14.0, r.center().y), Align2::LEFT_CENTER, elided_lbl, lf, lc);
+                        let vf = if mono_val { theme::font_mono() } else { theme::font_body() };
+                        let elided_val = widgets::elide(row_p, value, &vf, (r.width() * 0.50).max(110.0));
+                        row_p.text(Pos2::new(r.right(), r.center().y), Align2::RIGHT_CENTER, elided_val, vf, theme::TEXT);
+                    };
+
+                    draw_kv(ui, "Imported frame", &rep.root_name, false, false);
+                    draw_kv(ui, "Layers created", &format!("{} layers ({} DOM elements)", rep.nodes_created, rep.elements), true, false);
+                    draw_kv(ui, "Flattened wrappers", &format!("{} inline wrappers", rep.flattened_wrappers), true, false);
+                    draw_kv(ui, "Capture status", if rep.truncated { "truncated (budget reached)" } else { "complete" }, true, false);
+
+                    draw_kv(
+                        ui,
+                        &format!("Absolute fallbacks ({})", rep.absolute_fallbacks.len()),
+                        if rep.absolute_fallbacks.is_empty() { "none" } else { "element · reason" },
+                        true,
+                        true,
+                    );
+                    for fb in &rep.absolute_fallbacks {
+                        draw_kv(ui, &fb.element_id, &fb.reason, true, false);
+                    }
+
+                    draw_kv(
+                        ui,
+                        &format!("Font substitutions ({})", rep.font_substitutions.len()),
+                        if rep.font_substitutions.is_empty() { "all matched" } else { "requested -> substituted" },
+                        true,
+                        true,
+                    );
+                    for sf in &rep.font_substitutions {
+                        draw_kv(ui, &sf.requested, &format!("-> {}", sf.substituted), true, false);
+                    }
+
+                    draw_kv(
+                        ui,
+                        &format!("Unsupported CSS ({})", rep.unsupported_css.len()),
+                        if rep.unsupported_css.is_empty() { "0 declarations" } else { "property (element) · value" },
+                        true,
+                        true,
+                    );
+                    for us in &rep.unsupported_css {
+                        draw_kv(ui, &format!("{} ({})", us.property, us.element_id), &us.value, true, false);
+                    }
+
+                    draw_kv(
+                        ui,
+                        &format!("Uncaptured images ({})", rep.images_not_captured.len()),
+                        if rep.images_not_captured.is_empty() { "0 placeholders" } else { "element (reason) · src" },
+                        true,
+                        true,
+                    );
+                    for bi in &rep.images_not_captured {
+                        draw_kv(ui, &format!("{} ({})", bi.element_id, bi.reason), &bi.src, true, false);
+                    }
+
+                    if !rep.notes.is_empty() {
+                        draw_kv(ui, &format!("Notes ({})", rep.notes.len()), "details", true, true);
+                        for note in &rep.notes {
+                            draw_kv(ui, "Note", note, true, false);
+                        }
+                    }
+                });
+            });
+        });
+        if close_clicked {
+            self.app.web_capture_report_open = false;
+        }
     }
 }
 
@@ -1010,6 +1146,7 @@ impl eframe::App for Shell {
 
 impl Shell {
     /// Files dropped on the window: `.svg` files are placed at the drop point,
+    /// `.webcapture` / `.capture.json` files are imported at the drop point,
     /// anything else (the first file) is opened as a document.
     fn handle_drops(&mut self, ctx: &Context) {
         let (files, pos) = ctx.input(|i| (i.raw.dropped_files.clone(), i.pointer.hover_pos().or(i.pointer.latest_pos())));
@@ -1018,7 +1155,12 @@ impl Shell {
             name.rsplit('.').next().is_some_and(|e| e.eq_ignore_ascii_case("svg"))
         };
         if let Some(path) = files.iter().filter(|f| !is_svg(f)).find_map(|f| f.path.clone()) {
-            self.app.open_path(path);
+            if crate::io::is_web_capture_path(&path) {
+                let page_pos = pos.map(|s| self.app.view.to_page(self.app.canvas_rect.min, s));
+                self.app.import_web_capture_path_at(path, page_pos);
+            } else {
+                self.app.open_path(path);
+            }
             return;
         }
         for (nth, f) in files.iter().filter(|f| is_svg(f)).enumerate() {
@@ -1319,6 +1461,7 @@ impl Shell {
         crate::dev::compare::show(&mut self.app, &ctx);
         crate::libraries::show(&mut self.app, &ctx);
         crate::plugins::ui::show(&mut self.app, &ctx);
+        self.show_web_capture_report(&ctx);
         self.toast(ui, full);
         crate::agent_a11y::poll_and_step(&mut self.app, &ctx);
 
@@ -3155,13 +3298,13 @@ fn paint_micro_seq_hud(ui: &egui::Ui, app: &App, canvas_rect: Rect, _right_rect:
         let tw = widgets::text_width(&p, &hud.badge_text, &font);
         let pill_w = tw + 24.0;
         let pill_h = 28.0;
-        let mut px = (tip.x + 22.0).min(canvas_rect.right() - pill_w - 12.0).max(canvas_rect.left() + 12.0);
-        let mut py = (tip.y - 34.0).max(canvas_rect.top() + 16.0);
-        if py + pill_h > canvas_rect.bottom() - 64.0 {
-            py = tip.y - pill_h - 12.0;
+        let mut px = (tip.x + 22.0).min(canvas_rect.right() - pill_w - theme::SPACE_GROUP).max(canvas_rect.left() + theme::SPACE_GROUP);
+        let mut py = (tip.y - 34.0).max(canvas_rect.top() + theme::SPACE_BLOCK);
+        if py + pill_h > canvas_rect.bottom() - (theme::SPACE_REGION + theme::SPACE_BLOCK) {
+            py = tip.y - pill_h - theme::SPACE_GROUP;
         }
-        if px < canvas_rect.left() + 12.0 {
-            px = canvas_rect.left() + 12.0;
+        if px < canvas_rect.left() + theme::SPACE_GROUP {
+            px = canvas_rect.left() + theme::SPACE_GROUP;
         }
         let pill_rect = Rect::from_min_size(Pos2::new(px, py), Vec2::new(pill_w, pill_h));
         widgets::elevation_shadow(&p, pill_rect, 8);
@@ -3178,16 +3321,28 @@ fn paint_micro_seq_hud(ui: &egui::Ui, app: &App, canvas_rect: Rect, _right_rect:
         let cw = widgets::text_width(&p, &hud.caption, &font_cap);
         let bar_w = (kw + cw + 46.0).min(canvas_rect.width() - 24.0);
         let bar_h = 38.0;
-        let bar_rect = Rect::from_center_size(Pos2::new(canvas_rect.center().x, canvas_rect.top() + 48.0), Vec2::new(bar_w, bar_h));
+        let bar_rect = Rect::from_center_size(Pos2::new(canvas_rect.center().x, canvas_rect.top() + theme::SPACE_REGION), Vec2::new(bar_w, bar_h));
         widgets::elevation_shadow(&p, bar_rect, 10);
         p.rect_filled(bar_rect, 10.0, egui::Color32::from_rgba_unmultiplied(17, 18, 22, 238));
         p.rect_stroke(bar_rect, 10.0, egui::Stroke::new(1.0, egui::Color32::from_rgba_unmultiplied(255, 255, 255, 36)), egui::StrokeKind::Outside);
-        let key_rect = Rect::from_min_size(Pos2::new(bar_rect.left() + 10.0, bar_rect.top() + 7.0), Vec2::new(kw, 24.0));
+        let key_rect = Rect::from_min_size(
+            Pos2::new(bar_rect.left() + theme::INSET_CONTROL + theme::INSET_SEGMENT, bar_rect.top() + theme::SPACE_INLINE - theme::BORDER_WIDTH),
+            Vec2::new(kw, 24.0),
+        );
         p.rect_filled(key_rect, 6.0, accent);
         p.text(key_rect.center(), Align2::CENTER_CENTER, &hud.keycap, font_key, egui::Color32::WHITE);
-        p.text(Pos2::new(key_rect.right() + 12.0, bar_rect.center().y), Align2::LEFT_CENTER, &hud.caption, font_cap, egui::Color32::from_rgb(0xF4, 0xF4, 0xF6));
+        p.text(
+            Pos2::new(key_rect.right() + theme::SPACE_GROUP, bar_rect.center().y),
+            Align2::LEFT_CENTER,
+            &hud.caption,
+            font_cap,
+            egui::Color32::from_rgb(0xF4, 0xF4, 0xF6),
+        );
         let prog = if total <= 1 { 1.0 } else { (cur as f32 + 1.0) / (total as f32) };
-        let prog_rect = Rect::from_min_size(Pos2::new(bar_rect.left() + 8.0, bar_rect.bottom() - 3.0), Vec2::new((bar_w - 16.0) * prog, 2.0));
+        let prog_rect = Rect::from_min_size(
+            Pos2::new(bar_rect.left() + theme::SPACE_INLINE, bar_rect.bottom() - (theme::SPACE_ROW - theme::BORDER_WIDTH)),
+            Vec2::new((bar_w - 16.0) * prog, 2.0),
+        );
         p.rect_filled(prog_rect, 1.0, accent);
     }
 }

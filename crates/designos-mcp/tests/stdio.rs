@@ -98,6 +98,30 @@ async fn stdio_handshake_discovery_edit_and_error_recovery() {
         let batch_body = batch_res.structured_content.unwrap();
         assert_eq!(batch_body["created_count"], 2);
         assert!(batch_body["name_to_id"]["hero/Title"].as_u64().is_some());
+        let imported = client
+            .call_tool(call(
+                "designos_import_web_capture",
+                json!({
+                    "capture": {
+                        "schema": "designos-webcapture",
+                        "version": 1,
+                        "url": "https://designos.dev/mcp",
+                        "title": "MCP Capture",
+                        "viewport": { "width": 320.0, "height": 180.0, "dpr": 1.0 },
+                        "scroll": { "width": 320.0, "height": 180.0 },
+                        "root": {
+                            "tag": "div",
+                            "id": "card",
+                            "box": { "x": 0.0, "y": 0.0, "width": 320.0, "height": 180.0 },
+                            "styles": { "display": "flex", "flex-direction": "column", "row-gap": "12px" },
+                            "children": []
+                        }
+                    }
+                }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(imported.is_error, Some(false));
         let comments = client.call_tool(call("designos_list_comments", json!({}))).await.unwrap();
         assert_eq!(comments.is_error, Some(false));
         client.cancel().await.unwrap();
