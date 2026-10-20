@@ -18,6 +18,4 @@ tiny-skia.workspace = true
 
 [dev-dependencies]
 # Live tests fetch the Noto script fonts (ignored unless run with --ignored).
-designos-fig.workspace = true
 designos-fonts = { path = "../designos-fonts" }
-serde_json.workspace = true
