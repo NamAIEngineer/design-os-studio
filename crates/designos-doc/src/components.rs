@@ -3302,11 +3302,40 @@ mod tests {
             f.d.get(set).unwrap().component.props.iter().all(|p| p.kind != PropKind::Slot),
             "no set-level slot property may be created when migrating an unbound region in one variant"
         );
+        let slot_prop_name =
+            f.d.get(small)
+                .unwrap()
+                .component
+                .props
+                .iter()
+                .find(|p| p.kind == PropKind::Slot)
+                .expect("small variant must own the migrated slot property")
+                .name
+                .clone();
         assert_eq!(f.d.get(small).unwrap().component.props.iter().filter(|p| p.kind == PropKind::Slot).count(), 1);
         assert!(f.d.get(small_icon).unwrap().component.is_slot);
         assert!(same_ignoring_tree(f.d.get(large_icon).unwrap(), &large_before));
         assert_eq!(f.d.get(inst_large).unwrap().component.values, inst_large_before.component.values);
         assert_eq!(f.d.get(inst_large).unwrap().children, inst_large_before.children);
+
+        // `set_slot_config` on the component set changes nothing; on the variant it updates what `slot_config_of` returns.
+        let cfg = SlotPropConfig {
+            min_children: Some(1),
+            max_children: Some(3),
+            stretch_child_on_insert: Some(true),
+            display_by_default: Some(false),
+            ..SlotPropConfig::default()
+        };
+        let set_before = f.d.get(set).unwrap().clone();
+        let noop_cmd = set_slot_config(&mut f.d, set, &slot_prop_name, cfg.clone());
+        assert_eq!(noop_cmd, Command::Batch(Vec::new()));
+        apply(&mut f.d, noop_cmd);
+        assert_eq!(f.d.get(set).unwrap(), &set_before);
+        assert_eq!(slot_config_of(&f.d, small_icon), Some(SlotPropConfig::default()));
+
+        let var_cmd = set_slot_config(&mut f.d, small, &slot_prop_name, cfg.clone());
+        apply(&mut f.d, var_cmd);
+        assert_eq!(slot_config_of(&f.d, small_icon), Some(cfg));
     }
 
     #[test]
