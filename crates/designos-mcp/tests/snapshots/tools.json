@@ -774,6 +774,49 @@
     }
   },
   {
+    "name": "designos_import_web_capture",
+    "description": "Import a .webcapture.json / .capture.json bundle (or inline capture JSON) into a page as an editable auto-layout frame tree in one undoable step, returning the ImportReport.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "capture": {
+          "description": "Inline web capture JSON object or JSON string (alternative to path)."
+        },
+        "infer_block_auto_layout": {
+          "default": true,
+          "type": "boolean"
+        },
+        "page_id": {
+          "description": "DesignOS numeric node ID; obtain from list_nodes/get_document.",
+          "minimum": 1,
+          "type": "integer"
+        },
+        "path": {
+          "description": "Path to a .webcapture.json or .capture.json file inside the workspace.",
+          "type": "string"
+        },
+        "x": {
+          "maximum": 1000000,
+          "minimum": -1000000,
+          "type": "number"
+        },
+        "y": {
+          "maximum": 1000000,
+          "minimum": -1000000,
+          "type": "number"
+        }
+      },
+      "required": [],
+      "type": "object"
+    },
+    "annotations": {
+      "destructiveHint": true,
+      "idempotentHint": false,
+      "openWorldHint": false,
+      "readOnlyHint": false
+    }
+  },
+  {
     "name": "designos_undo",
     "description": "Undo the latest successful edit in this session; returns changed=false if the stack is empty.",
     "inputSchema": {
