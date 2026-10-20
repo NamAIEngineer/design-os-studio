@@ -17,7 +17,7 @@ use designos_export::{
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::cell::Cell;
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 
 /// Maximum number of entries per hint array (`variables`, `styles`, `components`, `annotations`, `box_models`).
 pub const MAX_HINT_ENTRIES: usize = 200;
@@ -27,6 +27,9 @@ pub const MAX_CODEGEN_SUBTREE_NODES: usize = 5_000;
 
 /// Maximum number of characters in generated code before falling back to the T7.2 XML outline.
 pub const MAX_CODE_CHARS: usize = 40_000;
+
+/// Maximum number of serialized JSON characters in the structured text response (excluding image blocks).
+pub const MAX_STRUCTURED_TEXT_CHARS: usize = 100_000;
 
 thread_local! {
     /// Per-thread monotonic counter of codegen invocations inside `execute_get_design_context`
@@ -386,18 +389,48 @@ fn css_selector_for_name(name: &str, id: NodeId) -> String {
     }
 }
 
-/// Generates `.class { ... }` CSS rule blocks across `root`'s subtree.
+/// Allocates a collision-free CSS class selector within a subtree (`".card"`, `".card-2"`, ...).
+fn alloc_css_selector(base: String, used: &mut HashMap<String, usize>) -> String {
+    let count = used.entry(base.clone()).or_insert(0);
+    *count += 1;
+    if *count == 1 {
+        return base;
+    }
+    let mut idx = *count;
+    loop {
+        let candidate = format!("{base}-{idx}");
+        if !used.contains_key(&candidate) {
+            used.insert(candidate.clone(), 1);
+            *used.get_mut(&base).unwrap() = idx;
+            return candidate;
+        }
+        idx += 1;
+    }
+}
+
+/// Walks `id`'s subtree in pre-order, skipping any non-root node (and its entire subtree) when `!n.visible`.
+fn walk_visible_subtree(doc: &Document, id: NodeId, root: NodeId, f: &mut impl FnMut(&designos_doc::Node)) {
+    let Some(n) = doc.get(id) else { return };
+    if id != root && !n.visible {
+        return;
+    }
+    f(n);
+    for &cid in &n.children {
+        walk_visible_subtree(doc, cid, root, f);
+    }
+}
+
+/// Generates `.class { ... }` CSS rule blocks across `root`'s visible subtree.
 fn css_rules_for_subtree(doc: &Document, root: NodeId) -> String {
     let mut blocks = Vec::new();
-    doc.walk(root, |n, _| {
-        if n.id != root && !n.visible {
-            return;
-        }
+    let mut used_selectors: HashMap<String, usize> = HashMap::new();
+    walk_visible_subtree(doc, root, root, &mut |n| {
         let decls = designos_export::css_for(doc, n.id);
         if decls.is_empty() {
             return;
         }
-        let selector = css_selector_for_name(&n.name, n.id);
+        let base = css_selector_for_name(&n.name, n.id);
+        let selector = alloc_css_selector(base, &mut used_selectors);
         let mut block = String::new();
         if let Some(tp) = n.kind.any_text() {
             if !tp.content.is_empty() {
@@ -415,6 +448,49 @@ fn css_rules_for_subtree(doc: &Document, root: NodeId) -> String {
         blocks.push(block);
     });
     blocks.join("\n\n")
+}
+
+/// Trims hint arrays (preserving `*_total` counts) and, if still necessary, truncates `code`
+/// so the serialized structured JSON text never exceeds [`MAX_STRUCTURED_TEXT_CHARS`].
+fn enforce_structured_text_budget(out: &mut Value) {
+    let serialized_len = |v: &Value| serde_json::to_string(v).map(|s| s.len()).unwrap_or(0);
+    if serialized_len(out) <= MAX_STRUCTURED_TEXT_CHARS {
+        return;
+    }
+    out["truncated"] = json!(true);
+    if out.get("truncated_reason").and_then(Value::as_str).is_none() {
+        out["truncated_reason"] = json!("structured text over 100000 chars");
+    }
+
+    const HINT_ARRAYS: [&str; 5] = ["box_models", "annotations", "components", "styles", "variables"];
+    while serialized_len(out) > MAX_STRUCTURED_TEXT_CHARS {
+        let mut popped = false;
+        for key in HINT_ARRAYS {
+            if let Some(arr) = out.get_mut(key).and_then(Value::as_array_mut) {
+                if !arr.is_empty() {
+                    arr.pop();
+                    popped = true;
+                    break;
+                }
+            }
+        }
+        if !popped {
+            break;
+        }
+    }
+
+    let current_len = serialized_len(out);
+    if current_len > MAX_STRUCTURED_TEXT_CHARS {
+        let excess = current_len - MAX_STRUCTURED_TEXT_CHARS;
+        if let Some(code_str) = out.get("code").and_then(Value::as_str).map(str::to_string) {
+            let target_len = code_str.len().saturating_sub(excess + 64);
+            let mut cut = target_len.min(code_str.len());
+            while cut > 0 && !code_str.is_char_boundary(cut) {
+                cut -= 1;
+            }
+            out["code"] = json!(&code_str[..cut]);
+        }
+    }
 }
 
 /// Executes `designos_get_design_context` on `doc`.
@@ -570,6 +646,7 @@ pub fn execute_get_design_context(doc: &Document, raw_args: Value) -> Result<Val
     if hidden {
         out["hidden"] = json!(true);
     }
+    enforce_structured_text_budget(&mut out);
     if let Some(img) = image_content {
         out["content"] = json!([img]);
     }
@@ -876,6 +953,7 @@ mod tests {
             doc.insert(largest_id, r).unwrap();
         }
 
+        let _ = execute_get_design_context(&doc, json!({ "node_id": largest_id.0 })).unwrap();
         let start = Instant::now();
         let mut reply = execute_get_design_context(&doc, json!({ "node_id": largest_id.0 })).unwrap();
         let elapsed = start.elapsed();
@@ -886,7 +964,8 @@ mod tests {
         }
         let structured_json = serde_json::to_string(&reply).unwrap();
         assert!(structured_json.len() < 100_000, "structured text must stay under 100,000 chars, got {}", structured_json.len());
-        assert!(elapsed <= Duration::from_millis(500), "2,000-node frame context took {:?}", elapsed);
+        let budget_ms = if cfg!(target_os = "macos") { 150 } else { 300 };
+        assert!(elapsed <= Duration::from_millis(budget_ms), "2,000-node frame context took {:?}", elapsed);
     }
 
     #[test]
@@ -936,8 +1015,10 @@ mod tests {
         let (mut doc, card_id) = fixture_card_with_primary_fill();
         doc.variables.get_mut("primary").unwrap().code_syntax.insert(CodeSyntaxPlatform::Web, "var(--color-primary)".into());
         doc.styles.insert("fill-brand".into(), Style::Fill(vec![Paint::solid(Color::rgb(0x0D, 0x99, 0xFF))]));
-        doc.style_meta
-            .insert("fill-brand".into(), StyleMeta { name: "Brand/Primary".into(), key: None, description: String::new(), property: StyleProperty::Fill });
+        doc.style_meta.insert(
+            "fill-brand".into(),
+            StyleMeta { name: "Brand/Primary".into(), key: None, description: String::new(), property: StyleProperty::Fill, bindings: Default::default() },
+        );
         let card_mut = doc.get_mut(card_id).unwrap();
         card_mut.style_refs.insert("fill".into(), "fill-brand".into());
         card_mut.dev.status = Some(DevStatus::ReadyForDev);
@@ -985,5 +1066,73 @@ mod tests {
         // Missing node error
         let err_node = execute_get_design_context(&doc, json!({ "node_id": 999_999 })).unwrap_err();
         assert!(err_node.contains("NODE_NOT_FOUND"), "{err_node}");
+    }
+
+    #[test]
+    fn duplicate_layer_names_disambiguate_css_selectors_and_skip_hidden_group_descendants() {
+        let mut doc = Document::new("DupCss");
+        let page = doc.add_page("Page 1");
+        let frame_id = doc.alloc_id();
+        let mut frame = Node::frame(frame_id, Rect::new(0.0, 0.0, 300.0, 200.0));
+        frame.name = "Container".into();
+        let frame_id = doc.insert(page, frame).unwrap();
+
+        let r1_id = doc.alloc_id();
+        let mut r1 = Node::rectangle(r1_id, Rect::new(0.0, 0.0, 100.0, 40.0));
+        r1.name = "Rectangle".into();
+        doc.insert(frame_id, r1).unwrap();
+
+        let r2_id = doc.alloc_id();
+        let mut r2 = Node::rectangle(r2_id, Rect::new(0.0, 50.0, 20.0, 20.0));
+        r2.name = "Rectangle".into();
+        doc.insert(frame_id, r2).unwrap();
+
+        let grp_id = doc.alloc_id();
+        let mut grp = Node::frame(grp_id, Rect::new(0.0, 100.0, 50.0, 50.0));
+        grp.kind = NodeKind::Group;
+        grp.name = "HiddenGroup".into();
+        grp.visible = false;
+        let grp_id = doc.insert(frame_id, grp).unwrap();
+
+        let hidden_child_id = doc.alloc_id();
+        let mut hidden_child = Node::rectangle(hidden_child_id, Rect::new(0.0, 100.0, 50.0, 50.0));
+        hidden_child.name = "SecretChild".into();
+        hidden_child.visible = true;
+        doc.insert(grp_id, hidden_child).unwrap();
+
+        let reply = execute_get_design_context(&doc, json!({ "node_id": frame_id.0, "language": "css", "include_screenshot": false })).unwrap();
+        let code = reply["code"].as_str().unwrap();
+        assert!(
+            code.contains(".rectangle {\n  position: absolute;\n  left: 0px;\n  top: 0px;\n  width: 100px;\n  height: 40px;"),
+            "expected first .rectangle with 100x40 in:\n{code}"
+        );
+        assert!(
+            code.contains(".rectangle-2 {\n  position: absolute;\n  left: 0px;\n  top: 50px;\n  width: 20px;\n  height: 20px;"),
+            "expected disambiguated .rectangle-2 with 20x20 in:\n{code}"
+        );
+        assert!(!code.contains(".secretchild"), "visible child inside hidden group must not be emitted in CSS:\n{code}");
+    }
+
+    #[test]
+    fn structured_json_text_capped_at_100k_chars_with_large_annotations() {
+        let mut doc = Document::new("LargeAnnotations");
+        let page = doc.add_page("Page 1");
+        let frame_id = doc.alloc_id();
+        let mut frame = Node::frame(frame_id, Rect::new(0.0, 0.0, 200.0, 100.0));
+        frame.name = "AnnotatedFrame".into();
+        let long_note = "A".repeat(10_000);
+        for _ in 0..12 {
+            frame.dev.annotations.push(Annotation { text: long_note.clone(), properties: vec!["Width".into()], category: Some("Implementation".into()) });
+        }
+        let frame_id = doc.insert(page, frame).unwrap();
+
+        let mut reply = execute_get_design_context(&doc, json!({ "node_id": frame_id.0, "include_screenshot": false })).unwrap();
+        if let Some(obj) = reply.as_object_mut() {
+            obj.remove("content");
+        }
+        let structured_json = serde_json::to_string(&reply).unwrap();
+        assert!(structured_json.len() <= 100_000, "structured text must stay <= 100,000 chars, got {}", structured_json.len());
+        assert_eq!(reply["truncated"], true);
+        assert_eq!(reply["annotations_total"], 12);
     }
 }
