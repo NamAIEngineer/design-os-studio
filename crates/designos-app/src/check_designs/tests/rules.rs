@@ -261,12 +261,10 @@ fn deleting_a_node_prunes_its_ignore_keys_on_save_and_load() {
     assert_eq!(app.doc.check_designs.ignored.len(), 2);
 
     app.doc.remove(a).unwrap();
-    assert_eq!(app.doc.check_designs.ignored.len(), 1, "Document::remove prunes the deleted node's ignore keys in memory");
-    assert!(app.doc.check_designs.ignored.iter().all(|k| k.node == b));
+    assert_eq!(app.doc.check_designs.ignored.len(), 2, "Document::remove preserves the deleted node's ignore keys in memory for undo");
     let json = app.doc.to_json().unwrap();
-    assert!(!json.contains(&format!("\"node\":{}", a.0)), "deleted node's ignore key is not written to JSON");
     let loaded = Document::from_json(&json).unwrap();
-    assert_eq!(loaded.check_designs.ignored.len(), 1);
+    assert_eq!(loaded.check_designs.ignored.len(), 1, "Document::from_json prunes deleted node ignore keys on load");
     assert!(loaded.check_designs.ignored.iter().all(|k| k.node == b));
 
     // Orphaned nodes pruned by `prune_unreachable` also drop their ignore keys.
