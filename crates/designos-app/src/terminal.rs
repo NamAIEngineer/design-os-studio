@@ -532,6 +532,11 @@ pub struct TerminalTab {
     pub session_uuid: Option<String>,
     /// True when this tab was opened by resuming an entry from `sessions.json`.
     pub is_resumed: bool,
+    /// Explicit shell command passed when opening this tab (`spawn_tab_running` / `spawn_custom_cli_tab`), if any.
+    pub spawned_command: Option<String>,
+    /// Slave PTY handle retained until the reader drains the first chunk (or the child exits silently)
+    /// so macOS XNU `ptsclose`/`ttyflush` cannot discard unread output on immediate child exit (`#782`).
+    slave: Arc<Mutex<Option<Box<dyn portable_pty::SlavePty + Send>>>>,
     /// Set to `true` once the background PTY reader thread has reached EOF or exited.
     pub reader_eof: Arc<std::sync::atomic::AtomicBool>,
     /// Timestamp when the child process was first observed dead while waiting for `reader_eof`.
@@ -580,7 +585,10 @@ impl TerminalTab {
                         let mut c = CommandBuilder::new(&shell_bin);
                         if cfg!(test) {
                             if shell_bin.ends_with("zsh") {
+                                c.arg("-d");
                                 c.arg("-f");
+                                #[cfg(test)]
+                                isolate_zsh_from_home(&mut c);
                             } else if shell_bin.ends_with("bash") || shell_bin.ends_with("bash.exe") {
                                 c.arg("--norc");
                                 c.arg("--noprofile");
@@ -602,11 +610,11 @@ impl TerminalTab {
 
         configure_pty_env_with_session(&mut cmd, preset, file_path, session);
 
-        let child = pair.slave.spawn_command(cmd).map_err(|e| format!("spawn_command failed: {e}"))?;
-        drop(pair.slave);
-
         let mut reader = pair.master.try_clone_reader().map_err(|e| format!("try_clone_reader failed: {e}"))?;
         let writer = pair.master.take_writer().map_err(|e| format!("take_writer failed: {e}"))?;
+
+        let child = pair.slave.spawn_command(cmd).map_err(|e| format!("spawn_command failed: {e}"))?;
+        let slave = Arc::new(Mutex::new(Some(pair.slave)));
 
         let init_parser = vt100::Parser::new(rows, cols, 5000);
         let parser = Arc::new(Mutex::new(init_parser));
@@ -622,6 +630,7 @@ impl TerminalTab {
         let status_bg = Arc::clone(&agent_status);
         let output_at_bg = Arc::clone(&last_output_at);
         let eof_bg = Arc::clone(&reader_eof);
+        let slave_bg = Arc::downgrade(&slave);
 
         std::thread::Builder::new()
             .name(format!("designos-pty-reader-{id}"))
@@ -661,6 +670,11 @@ impl TerminalTab {
                                     }
                                 }
                             }
+                            if let Some(s_arc) = slave_bg.upgrade() {
+                                if let Ok(mut s) = s_arc.lock() {
+                                    *s = None;
+                                }
+                            }
                         }
                         Err(_) => break,
                     }
@@ -693,6 +707,8 @@ impl TerminalTab {
             written_bytes: Vec::new(),
             session_uuid: None,
             is_resumed: false,
+            spawned_command: None,
+            slave,
             reader_eof,
             exited_at: None,
         })
@@ -743,7 +759,17 @@ impl TerminalTab {
 
     /// True when the child has not yet exited (`child.try_wait() == Ok(None)`).
     pub fn is_alive(&mut self) -> bool {
-        matches!(self.child.try_wait(), Ok(None))
+        let alive = matches!(self.child.try_wait(), Ok(None));
+        if !alive {
+            let first_dead = *self.exited_at.get_or_insert_with(std::time::Instant::now);
+            let has_output = self.raw_log.lock().map(|l| !l.is_empty()).unwrap_or(false);
+            if has_output || first_dead.elapsed() >= std::time::Duration::from_millis(50) {
+                if let Ok(mut s) = self.slave.lock() {
+                    *s = None;
+                }
+            }
+        }
+        alive
     }
 
     /// True when this tab is a live agent CLI (not a shell process, and the child is still running).
@@ -1663,6 +1689,7 @@ impl TerminalState {
         match TerminalTab::spawn_with_session_cmd(id, AgentCliPreset::Shell, 28, 100, file_path, Some(&env), Some(cmd)) {
             Ok(mut tab) => {
                 tab.title = clean_title.to_string();
+                tab.spawned_command = Some(command.to_string());
                 self.tabs.push(tab);
                 self.active_tab = self.tabs.len() - 1;
                 self.viewport_focused = true;
@@ -1728,6 +1755,7 @@ impl TerminalState {
             Ok(mut tab) => {
                 tab.session_uuid = session_uuid.clone();
                 tab.is_resumed = is_resumed;
+                tab.spawned_command = command.map(str::to_string);
                 if let Some(title) = custom_title {
                     tab.title = title;
                 }
@@ -6396,22 +6424,26 @@ Done!
 
     #[test]
     fn start_fixes_open_a_shell_or_run_the_login_command() {
-        let mut st = TerminalState::default();
+        let mut st = TerminalState::for_tab(782);
         st.apply_start_fix(FixAction::OpenShell, None);
         assert_eq!(st.tabs.last().map(|t| t.spawn_preset), Some(AgentCliPreset::Shell));
+        assert_eq!(st.tabs.last().and_then(|t| t.spawned_command.as_deref()), None);
 
         st.apply_start_fix(FixAction::RunLogin("echo LOGIN-RAN-HERE"), None);
         let tab = st.tabs.last().expect("login tab");
         assert_eq!(tab.title, "echo LOGIN-RAN-HERE (login)");
         assert_eq!(tab.spawn_preset, AgentCliPreset::Shell, "a login is not an agent tab");
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(8);
+        assert_eq!(tab.spawned_command.as_deref(), Some("echo LOGIN-RAN-HERE"));
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
         let mut shown = false;
         while std::time::Instant::now() < deadline && !shown {
-            std::thread::sleep(std::time::Duration::from_millis(50));
+            std::thread::sleep(std::time::Duration::from_millis(25));
+            let _ = st.tabs.last_mut().map(|t| t.is_alive());
             shown = st.tabs.last().and_then(|t| t.raw_log.lock().ok().map(|l| l.contains("LOGIN-RAN-HERE"))).unwrap_or(false);
         }
         assert!(shown, "login command output never reached the tab");
         kill_tabs(&mut st);
+        let _ = std::fs::remove_dir_all(&st.session_dir);
     }
 
     #[test]
