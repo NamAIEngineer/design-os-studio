@@ -119,6 +119,7 @@ impl Options {
 pub const PANELS: [&str; 51] = [
     "agents",
     "agents-chat",
+    "agents-picker",
     "agents-start-failure",
     "specs",
     "terminal",
