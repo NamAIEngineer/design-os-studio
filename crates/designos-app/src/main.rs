@@ -301,7 +301,7 @@ fn run_agent_cli(opts: &cli::Options) -> Result<(), String> {
             .or_else(|| doc.pages.first().and_then(|p| doc.get(*p)).and_then(|p| p.children.first()).copied())
             .or_else(|| doc.pages.first().copied())
             .ok_or("No node found to generate code for")?;
-        let resolved = designos_doc::apply_bound_variables(&doc);
+        let (resolved, _) = designos_export::apply_bound_variables_subtree(&doc, target_id);
         println!("{}", lang.generate(&resolved, target_id, false));
     }
 

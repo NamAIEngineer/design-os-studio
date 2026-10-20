@@ -1,6 +1,7 @@
 //! Shared tool validation helpers and modular MCP tool implementations (`v0.6 AI design`).
 
 pub mod batch;
+pub mod design_context;
 pub mod guidelines;
 pub mod libraries;
 pub mod library_source;
