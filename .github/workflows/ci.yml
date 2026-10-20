@@ -45,6 +45,11 @@ jobs:
           bash -n scripts/package-macos.sh scripts/package.sh scripts/build-release.sh
           sh -n packaging/linux/install.sh packaging/linux/uninstall.sh packaging/linux/AppRun
 
+      - name: Validate eval and third-party licence register
+        run: |
+          python3 -B scripts/check_eval_licences.py
+          python3 -B -m unittest scripts/test_check_eval_licences.py
+
       - name: Build workspace (designos-studio, designos, designos-mcp, designos-diff)
         run: cargo build --workspace --all-targets --locked
 
