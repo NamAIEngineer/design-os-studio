@@ -630,7 +630,7 @@ mod tests {
     #[test]
     fn swiftui_grid_fill_child_exports_solved_height() {
         for (track, height) in [(None, 20), (Some(GridTrack::Fixed(100.0)), 100)] {
-            for (d, grid, _) in [fixture::grid_fill_child(track), fixture::grid_stretch_child(track, true)] {
+            for (d, grid, _) in [fixture::grid_fill_child(track), fixture::grid_stretch_child(track, true), fixture::grid_text_fill_child(track)] {
                 let out = swiftui_for(&d, grid);
                 assert!(out.contains(&format!("width: 30, height: {height}")), "{track:?}: {out}");
                 for banned in ["maxWidth", "maxHeight"] {
@@ -638,6 +638,12 @@ mod tests {
                 }
             }
         }
+        // A real Hug text child (vertical != Fill, align_self != Stretch) stays on the Hug path.
+        let (mut d, grid, tid) = fixture::grid_text_fill_child(Some(GridTrack::Fixed(100.0)));
+        d.get_mut(tid).unwrap().layout_child.vertical = Sizing::Fixed;
+        d.relayout_subtree(grid);
+        let out = swiftui_for(&d, grid);
+        assert!(out.contains(".frame(width: 30)"), "real Hug text omits height: {out}");
     }
 
     #[test]

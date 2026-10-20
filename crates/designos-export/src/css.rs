@@ -1103,11 +1103,53 @@ mod tests {
     fn css_grid_fill_child_exports_solved_height() {
         use crate::codegen::fixture;
         for (track, height) in [(None, "20px"), (Some(GridTrack::Fixed(100.0)), "100px")] {
-            let (d, _, rect) = fixture::grid_fill_child(track);
-            let css = css_for(&d, rect);
-            assert!(css.contains("width: 30px;") && css.contains(&format!("height: {height};")), "{track:?}: {css}");
-            assert!(!css.contains("align-self:"), "{track:?}: {css}");
-            assert!(!css.contains("flex"), "{track:?}: {css}");
+            for (d, _, kid) in [fixture::grid_fill_child(track), fixture::grid_text_fill_child(track)] {
+                let css = css_for(&d, kid);
+                assert!(css.contains("width: 30px;") && css.contains(&format!("height: {height};")), "{track:?}: {css}");
+                assert!(!css.contains("align-self:"), "{track:?}: {css}");
+                assert!(!css.contains("flex"), "{track:?}: {css}");
+            }
+        }
+        // A real Hug text child (vertical != Fill, align_self != Stretch) stays on the Hug path.
+        let (mut d, grid, tid) = fixture::grid_text_fill_child(Some(GridTrack::Fixed(100.0)));
+        d.get_mut(tid).unwrap().layout_child.vertical = Sizing::Fixed;
+        d.relayout_subtree(grid);
+        let css = css_for(&d, tid);
+        assert!(css.contains("width: 30px;") && !css.lines().any(|l| l.starts_with("height:")), "real Hug text omits height: {css}");
+        assert!(css.contains("align-self: start;"), "real Hug text emits align-self: start: {css}");
+    }
+
+    #[test]
+    fn css_hugging_row_fill_text_children_print_the_solved_height() {
+        let mut d = Document::new("t");
+        let page = d.add_page("p");
+        let fid = d.alloc_id();
+        let mut row = Node::frame(fid, Rect::new(0.0, 0.0, 200.0, 100.0));
+        row.fills.clear();
+        if let NodeKind::Frame(fp) = &mut row.kind {
+            fp.auto_layout = Some(AutoLayout {
+                direction: LayoutDirection::Horizontal,
+                counter_align: LayoutAlign::Start,
+                primary_sizing: Sizing::Fixed,
+                counter_sizing: Sizing::Hug,
+                ..Default::default()
+            });
+        }
+        let fid = d.insert(page, row).unwrap();
+        let mut kids = Vec::new();
+        for h in [20.0, 100.0] {
+            let tid = d.alloc_id();
+            let mut txt = Node::text(tid, Rect::new(0.0, 0.0, 30.0, h), "Label", TextStyle::default());
+            if let NodeKind::Text(t) = &mut txt.kind {
+                t.auto_resize = TextAutoResize::Height;
+            }
+            txt.layout_child.vertical = Sizing::Fill;
+            kids.push(d.insert(fid, txt).unwrap());
+        }
+        d.relayout_subtree(fid);
+        for k in kids {
+            let css = css_for(&d, k);
+            assert!(css.contains("height: 100px;") && css.contains("align-self: stretch;"), "fill text in hugging row must keep solved height: {css}");
         }
     }
 
