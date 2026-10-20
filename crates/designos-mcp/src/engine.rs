@@ -54,6 +54,10 @@ impl Engine {
                     }).collect::<Vec<_>>(),
                     "can_undo":self.history.can_undo(),"can_redo":self.history.can_redo()}))
             }
+            "designos_get_libraries" => {
+                let _: Empty = parse(args)?;
+                Ok(crate::tools::libraries::get_libraries(&self.doc))
+            }
             "designos_list_nodes" => {
                 let a: ListArgs = parse(args)?;
                 if a.limit == 0 || a.limit > 500 {
@@ -716,6 +720,14 @@ pub fn tools() -> Vec<Value> {
     add(
         "get_document",
         "Summarize the current in-memory document: pages, counts, shared styles (fill, text, effect, grid) with their values, and undo state.",
+        json!({}),
+        vec![],
+        true,
+        true,
+    );
+    add(
+        "get_libraries",
+        "List this file's local publishable assets, enabled libraries (with pinned and latest versions and update_available), and disabled libraries in the active library root.",
         json!({}),
         vec![],
         true,
