@@ -66,15 +66,17 @@ fn library_variable_is_suggested_with_its_library_name() {
 
     app.open_check_designs();
     app.refresh_check_designs(false);
-    let findings: Vec<Finding> = app.check_designs.report.of(Rule::HardCodedValue).cloned().collect();
+    let findings: Vec<Finding> = app.check_designs.report.findings.clone();
     assert_eq!(findings.len(), 2);
 
     let fill_finding = findings.iter().find(|x| x.node == card).unwrap();
+    assert_eq!(fill_finding.rule, Rule::HardCodedValue);
     assert_eq!(fill_finding.message, "Fill #1A73E8 matches variable \"Brand/Primary\" from library \"Brand DS\"");
     assert_eq!(fill_finding.fix_label, "Bind to variable Brand/Primary from library Brand DS");
     assert!(fill_finding.is_from_library());
 
     let gap_finding = findings.iter().find(|x| x.node == row).unwrap();
+    assert_eq!(gap_finding.rule, Rule::HorizontalSpacing);
     assert_eq!(gap_finding.message, "Gap 16 matches variable \"space/4\" from library \"Brand DS\"");
     assert_eq!(gap_finding.fix_label, "Bind to variable space/4 from library Brand DS");
     assert!(gap_finding.is_from_library());
@@ -98,7 +100,7 @@ fn library_fix_imports_and_binds_in_one_undo_step() {
     app.set_library_enabled(&lib_id, true);
     app.open_check_designs();
     app.refresh_check_designs(false);
-    let findings: Vec<Finding> = app.check_designs.report.of(Rule::HardCodedValue).cloned().collect();
+    let findings: Vec<Finding> = app.check_designs.report.findings.clone();
     let fill_finding = findings.iter().find(|x| x.node == card).unwrap();
 
     // Single finding fix imports + binds in one undo step.
@@ -144,6 +146,7 @@ fn library_fill_text_and_effect_styles_are_suggested_with_their_library_name_and
     let lib_id = lib_app.doc.library.published.as_ref().unwrap().library_id.clone();
 
     let mut f = fx();
+    f.doc.check_designs.disabled_rules.remove(Rule::TextStyles.figma_id());
     white_page(&mut f);
     let card = f.rect(f.page, "Card", BLUE);
     f.doc.get_mut(card).unwrap().effects = fx_list;
@@ -162,7 +165,7 @@ fn library_fill_text_and_effect_styles_are_suggested_with_their_library_name_and
 
     app.open_check_designs();
     app.refresh_check_designs(false);
-    let findings: Vec<Finding> = app.check_designs.report.of(Rule::HardCodedValue).cloned().collect();
+    let findings: Vec<Finding> = app.check_designs.report.findings.clone();
     assert_eq!(findings.len(), 3);
 
     let fill_f = findings.iter().find(|x| x.node == card && x.message.starts_with("Fill ")).unwrap();
@@ -423,8 +426,10 @@ fn refused_library_bind_in_fix_all_leaves_no_imported_variable() {
     app.set_library_enabled(&lib_id, true);
     app.open_check_designs();
     app.refresh_check_designs(false);
-    let findings: Vec<Finding> = app.check_designs.report.of(Rule::HardCodedValue).cloned().collect();
+    let findings: Vec<Finding> = app.check_designs.report.findings.clone();
     assert_eq!(findings.len(), 2, "{findings:#?}");
+    assert!(findings.iter().any(|f| f.rule == Rule::HardCodedValue && f.node == stale), "the stale fill is reported under colours");
+    assert!(findings.iter().any(|f| f.rule == Rule::HorizontalSpacing && f.node == row), "the horizontal stack's gap is reported under horizontal spacing");
 
     // The group switches the library collection to dark mode after the audit, so once imported the
     // variable resolves to red there and the bind is refused.

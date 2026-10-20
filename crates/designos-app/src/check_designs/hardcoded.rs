@@ -69,7 +69,7 @@ pub(super) struct Index<'a> {
 /// equals a Studio library id (enabled now or recorded by an earlier import). Figma's own
 /// `sourceLibraryKey`, which `.fig` and REST import store in the same field, names no Studio
 /// library, so such a variable stays a local candidate.
-fn variable_library_id<'a>(doc: &'a Document, v: &Variable) -> Option<&'a str> {
+pub(super) fn variable_library_id<'a>(doc: &'a Document, v: &Variable) -> Option<&'a str> {
     let imported = doc
         .library
         .external
@@ -396,13 +396,13 @@ impl Slot {
     }
 }
 
-fn finding(n: &Node, message: String, fix: Fix, fix_label: String) -> Finding {
-    Finding { node: n.id, node_name: n.name.clone(), rule: Rule::HardCodedValue, message, fix: Some(fix), fix_label }
+fn finding(n: &Node, rule: Rule, property: impl Into<String>, message: String, fix: Fix, fix_label: String) -> Finding {
+    Finding { node: n.id, node_name: n.name.clone(), rule, property: property.into(), message, fix: Some(fix), fix_label }
 }
 
 /// A finding that is reported but cannot be fixed without a choice only the user can make.
-fn report_only(n: &Node, message: String) -> Finding {
-    Finding { node: n.id, node_name: n.name.clone(), rule: Rule::HardCodedValue, message, fix: None, fix_label: String::new() }
+fn report_only(n: &Node, rule: Rule, property: impl Into<String>, message: String) -> Finding {
+    Finding { node: n.id, node_name: n.name.clone(), rule, property: property.into(), message, fix: None, fix_label: String::new() }
 }
 
 fn fmt_var_quoted(e: &Entry) -> String {
@@ -442,6 +442,10 @@ fn name_list(vars: &[&Entry]) -> String {
     names.join(", ")
 }
 
+fn rule_on(doc: &Document, rule: Rule) -> bool {
+    !doc.check_designs.disabled_rules.contains(rule.figma_id())
+}
+
 pub(super) fn check(doc: &Document, index: &Index, n: &Node, out: &mut Vec<Finding>) {
     if matches!(n.kind, NodeKind::Unknown { .. }) {
         return;
@@ -453,32 +457,57 @@ pub(super) fn check(doc: &Document, index: &Index, n: &Node, out: &mut Vec<Findi
         return;
     }
     let src = src_resolved.as_deref();
-    paints_rule(doc, index, rn, src, Slot::Fill, out);
-    if rn.stroke.weight > 0.0 {
-        paints_rule(doc, index, rn, src, Slot::Stroke, out);
+    if rule_on(doc, Rule::HardCodedValue) {
+        paints_rule(doc, index, rn, src, Slot::Fill, out);
+        if rn.stroke.weight > 0.0 {
+            paints_rule(doc, index, rn, src, Slot::Stroke, out);
+        }
     }
     numbers_rule(doc, index, rn, src, out);
-    text_rule(doc, index, rn, src, out);
-    effects_rule(index, rn, src, out);
+    if rule_on(doc, Rule::TypographyAndStroke) {
+        check_typography_numbers(doc, index, rn, src, out);
+    }
+    if rule_on(doc, Rule::TextStyles) {
+        super::text_styles::check(index, rn, src, out);
+    }
+    if rule_on(doc, Rule::HardCodedValue) {
+        effects_rule(index, rn, src, out);
+    }
 }
 
-fn check_number_prop(doc: &Document, index: &Index, n: &Node, keys: &[&str], label: &str, val: f32, out: &mut Vec<Finding>) -> bool {
+#[allow(clippy::too_many_arguments)]
+fn check_number_prop(
+    doc: &Document,
+    index: &Index,
+    n: &Node,
+    rule: Rule,
+    prop_key: &str,
+    keys: &[&str],
+    label: &str,
+    val: f32,
+    emit: bool,
+    out: &mut Vec<Finding>,
+) -> bool {
     let Some(&first_key) = keys.first() else { return false };
     match index.find_number(doc, n, first_key, val) {
         Match::None => false,
         Match::One(e) => {
-            let message = format!("{label} {} matches variable {}", fmt_num(val), fmt_var_quoted(e));
-            let fix = if keys.len() == 1 {
-                Fix::BindVariable { key: first_key.into(), variable: e.fix_id.clone() }
-            } else {
-                Fix::BindVariables { keys: keys.iter().map(|k| (*k).to_string()).collect(), variable: e.fix_id.clone() }
-            };
-            out.push(finding(n, message, fix, fmt_var_bind_label(e)));
+            if emit {
+                let message = format!("{label} {} matches variable {}", fmt_num(val), fmt_var_quoted(e));
+                let fix = if keys.len() == 1 {
+                    Fix::BindVariable { key: first_key.into(), variable: e.fix_id.clone() }
+                } else {
+                    Fix::BindVariables { keys: keys.iter().map(|k| (*k).to_string()).collect(), variable: e.fix_id.clone() }
+                };
+                out.push(finding(n, rule, prop_key, message, fix, fmt_var_bind_label(e)));
+            }
             true
         }
         Match::Ambiguous(vars) => {
-            let message = format!("{label} {} matches {} variables: {}", fmt_num(val), vars.len(), name_list(&vars));
-            out.push(report_only(n, message));
+            if emit {
+                let message = format!("{label} {} matches {} variables: {}", fmt_num(val), vars.len(), name_list(&vars));
+                out.push(report_only(n, rule, prop_key, message));
+            }
             true
         }
     }
@@ -565,16 +594,38 @@ fn number_inherited(n: &Node, src: Option<&Node>, key: &str) -> bool {
     src.is_some_and(|s| n.variables.bindings.get(key) == s.variables.bindings.get(key) && number_value_at(n, key) == number_value_at(s, key))
 }
 
-fn check_single_number(doc: &Document, index: &Index, n: &Node, src: Option<&Node>, key: &str, label: &str, out: &mut Vec<Finding>) -> bool {
+#[allow(clippy::too_many_arguments)]
+fn check_single_number(
+    doc: &Document,
+    index: &Index,
+    n: &Node,
+    src: Option<&Node>,
+    rule: Rule,
+    key: &str,
+    label: &str,
+    emit: bool,
+    out: &mut Vec<Finding>,
+) -> bool {
     if n.variables.bindings.contains_key(key) || number_inherited(n, src, key) {
         return false;
     }
     let Some(val) = number_value_at(n, key) else { return false };
-    check_number_prop(doc, index, n, &[key], label, val, out)
+    check_number_prop(doc, index, n, rule, key, &[key], label, val, emit, out)
 }
 
-fn check_quad(doc: &Document, index: &Index, n: &Node, src: Option<&Node>, uniform_label: &str, sides: [(&str, &str); 4], out: &mut Vec<Finding>) {
-    if sides.iter().all(|(k, _)| number_inherited(n, src, k)) {
+#[allow(clippy::too_many_arguments)]
+fn check_quad(
+    doc: &Document,
+    index: &Index,
+    n: &Node,
+    src: Option<&Node>,
+    rule: Rule,
+    uniform_key: &str,
+    uniform_label: &str,
+    sides: [(&str, &str); 4],
+    out: &mut Vec<Finding>,
+) {
+    if !rule_on(doc, rule) || sides.iter().all(|(k, _)| number_inherited(n, src, k)) {
         return;
     }
     let all_unbound = sides.iter().all(|(k, _)| !n.variables.bindings.contains_key(*k));
@@ -583,13 +634,23 @@ fn check_quad(doc: &Document, index: &Index, n: &Node, src: Option<&Node>, unifo
             let all_equal = sides[1..].iter().all(|(k, _)| number_value_at(n, k).is_some_and(|v| same_number(v, v0)));
             if all_equal {
                 let keys = [sides[0].0, sides[1].0, sides[2].0, sides[3].0];
-                check_number_prop(doc, index, n, &keys, uniform_label, v0, out);
+                check_number_prop(doc, index, n, rule, uniform_key, &keys, uniform_label, v0, true, out);
                 return;
             }
         }
     }
     for (k, label) in sides {
-        check_single_number(doc, index, n, src, k, label, out);
+        check_single_number(doc, index, n, src, rule, k, label, true, out);
+    }
+}
+
+/// Spec 158 section 3.1: the gap of a horizontal stack is a horizontal spacing field, the gap of a
+/// vertical stack and every `counterAxisSpacing` (the row gap) are vertical ones.
+fn spacing_rule_for(n: &Node, key: &str) -> Rule {
+    let dir = n.kind.frame_props().and_then(|fp| fp.auto_layout.as_ref()).map(|al| al.direction).unwrap_or(designos_doc::LayoutDirection::Horizontal);
+    match (dir, key) {
+        (_, "counterAxisSpacing") | (designos_doc::LayoutDirection::Vertical, "itemSpacing") => Rule::VerticalSpacing,
+        _ => Rule::HorizontalSpacing,
     }
 }
 
@@ -597,13 +658,21 @@ fn numbers_rule(doc: &Document, index: &Index, n: &Node, src: Option<&Node>, out
     if index.by_num.is_empty() {
         return;
     }
-    check_single_number(doc, index, n, src, "itemSpacing", "Gap", out);
-    check_single_number(doc, index, n, src, "counterAxisSpacing", "Row gap", out);
+    let gap_rule = spacing_rule_for(n, "itemSpacing");
+    if rule_on(doc, gap_rule) {
+        check_single_number(doc, index, n, src, gap_rule, "itemSpacing", "Gap", true, out);
+    }
+    let rgap_rule = spacing_rule_for(n, "counterAxisSpacing");
+    if rule_on(doc, rgap_rule) {
+        check_single_number(doc, index, n, src, rgap_rule, "counterAxisSpacing", "Row gap", true, out);
+    }
     check_quad(
         doc,
         index,
         n,
         src,
+        Rule::Padding,
+        "padding",
         "Padding",
         [("paddingTop", "Top padding"), ("paddingRight", "Right padding"), ("paddingBottom", "Bottom padding"), ("paddingLeft", "Left padding")],
         out,
@@ -613,6 +682,8 @@ fn numbers_rule(doc: &Document, index: &Index, n: &Node, src: Option<&Node>, out
         index,
         n,
         src,
+        Rule::CornerRadius,
+        "cornerRadius",
         "Corner radius",
         [
             ("topLeftRadius", "Top-left radius"),
@@ -622,14 +693,16 @@ fn numbers_rule(doc: &Document, index: &Index, n: &Node, src: Option<&Node>, out
         ],
         out,
     );
-    check_single_number(doc, index, n, src, "strokeWeight", "Stroke weight", out);
-    for (k, label) in [
-        ("strokeTopWeight", "Stroke top weight"),
-        ("strokeRightWeight", "Stroke right weight"),
-        ("strokeBottomWeight", "Stroke bottom weight"),
-        ("strokeLeftWeight", "Stroke left weight"),
-    ] {
-        check_single_number(doc, index, n, src, k, label, out);
+    if rule_on(doc, Rule::TypographyAndStroke) {
+        check_single_number(doc, index, n, src, Rule::TypographyAndStroke, "strokeWeight", "Stroke weight", true, out);
+        for (k, label) in [
+            ("strokeTopWeight", "Stroke top weight"),
+            ("strokeRightWeight", "Stroke right weight"),
+            ("strokeBottomWeight", "Stroke bottom weight"),
+            ("strokeLeftWeight", "Stroke left weight"),
+        ] {
+            check_single_number(doc, index, n, src, Rule::TypographyAndStroke, k, label, true, out);
+        }
     }
 }
 
@@ -663,12 +736,12 @@ fn paints_rule(doc: &Document, index: &Index, n: &Node, src: Option<&Node>, slot
             Match::One(e) => {
                 matched_variable = true;
                 let message = format!("{} #{} matches variable {}", slot.label(), c.to_hex(), fmt_var_quoted(e));
-                out.push(finding(n, message, Fix::BindVariable { key, variable: e.fix_id.clone() }, fmt_var_bind_label(e)));
+                out.push(finding(n, Rule::HardCodedValue, key.clone(), message, Fix::BindVariable { key, variable: e.fix_id.clone() }, fmt_var_bind_label(e)));
             }
             Match::Ambiguous(vars) => {
                 matched_variable = true;
                 let message = format!("{} #{} matches {} variables: {}", slot.label(), c.to_hex(), vars.len(), name_list(&vars));
-                out.push(report_only(n, message));
+                out.push(report_only(n, Rule::HardCodedValue, key, message));
             }
         }
     }
@@ -681,6 +754,8 @@ fn paints_rule(doc: &Document, index: &Index, n: &Node, src: Option<&Node>, slot
     if let Some(s) = style {
         out.push(finding(
             n,
+            Rule::HardCodedValue,
+            slot.ref_key(),
             format!("{} matches style {}", slot.label(), fmt_style_quoted(s)),
             Fix::ApplyStyle { style: s.fix_key.clone() },
             fmt_style_apply_label(s),
@@ -693,51 +768,31 @@ fn same_text_style(own: &TextStyle, style: &TextStyle) -> bool {
     TextStyle { fills: own.fills.clone(), ..style.clone() } == *own
 }
 
-fn has_bound_text_number(n: &Node) -> bool {
-    n.variables.bindings.keys().any(|k| matches!(k.as_str(), "fontSize" | "lineHeight" | "fontWeight" | "letterSpacing"))
+/// Whether the text style of an instance's layer is exactly its main component's, so a text style
+/// finding belongs to the main component and not to the instance.
+pub(super) fn text_style_inherited(n: &Node, src: Option<&Node>) -> bool {
+    let (NodeKind::Text(t), Some(NodeKind::Text(st))) = (&n.kind, src.map(|s| &s.kind)) else { return false };
+    same_text_style(&t.style, &st.style) && t.runs.len() == st.runs.len() && t.runs.iter().zip(&st.runs).all(|(a, b)| same_text_style(&a.style, &b.style))
 }
 
-/// A text number is bound and the layer's stored text style already holds what the binding resolves
-/// to, so binding it was the deliberate fix and a text style is not offered on top of it. When the
-/// binding resolves to something else in the layer's mode (`n` is the resolved view), the layer is
-/// painted as the resolved values and a style that equals them is still a valid suggestion.
-fn text_number_bound_in_place(doc: &Document, n: &Node) -> bool {
-    if !has_bound_text_number(n) {
-        return false;
+fn check_typography_numbers(doc: &Document, index: &Index, n: &Node, src: Option<&Node>, out: &mut Vec<Finding>) {
+    let NodeKind::Text(_) = &n.kind else { return };
+    if n.style_refs.contains_key("text") || index.by_num.is_empty() || text_style_inherited(n, src) {
+        return;
     }
-    match (doc.get(n.id).map(|raw| &raw.kind), &n.kind) {
-        (Some(NodeKind::Text(stored)), NodeKind::Text(resolved)) => stored.style == resolved.style,
-        _ => true,
-    }
+    check_single_number(doc, index, n, src, Rule::TypographyAndStroke, "fontSize", "Font size", true, out);
+    check_single_number(doc, index, n, src, Rule::TypographyAndStroke, "lineHeight", "Line height", true, out);
 }
 
-fn text_rule(doc: &Document, index: &Index, n: &Node, src: Option<&Node>, out: &mut Vec<Finding>) {
-    let NodeKind::Text(t) = &n.kind else { return };
-    if n.style_refs.contains_key("text") {
-        return;
-    }
-    if let Some(NodeKind::Text(st)) = src.map(|s| &s.kind) {
-        if same_text_style(&t.style, &st.style)
-            && t.runs.len() == st.runs.len()
-            && t.runs.iter().zip(&st.runs).all(|(a, b)| same_text_style(&a.style, &b.style))
-        {
-            return;
-        }
-    }
-    let mut matched_variable = false;
-    if !index.by_num.is_empty() {
-        matched_variable |= check_single_number(doc, index, n, src, "fontSize", "Font size", out);
-        matched_variable |= check_single_number(doc, index, n, src, "lineHeight", "Line height", out);
-    }
-    if matched_variable || text_number_bound_in_place(doc, n) {
-        return;
-    }
-    let style = index
-        .styles
-        .iter()
-        .find(|s| matches!(s.style, Style::Text(ts) if same_text_style(&t.style, ts) && t.runs.iter().all(|r| same_text_style(&r.style, ts))));
-    if let Some(s) = style {
-        out.push(finding(n, format!("Text matches style {}", fmt_style_quoted(s)), Fix::ApplyStyle { style: s.fix_key.clone() }, fmt_style_apply_label(s)));
+impl<'a> Index<'a> {
+    pub(super) fn find_matching_text_style(&self, t: &designos_doc::TextProps) -> Option<(String, String, String)> {
+        let mut matches = self
+            .styles
+            .iter()
+            .filter(|s| matches!(s.style, Style::Text(ts) if same_text_style(&t.style, ts) && t.runs.iter().all(|r| same_text_style(&r.style, ts))));
+        // Two equal styles leave the choice to the user, so none is offered.
+        let s = matches.next().filter(|_| matches.next().is_none())?;
+        Some((s.fix_key.clone(), fmt_style_quoted(s), fmt_style_apply_label(s)))
     }
 }
 
@@ -750,7 +805,14 @@ fn effects_rule(index: &Index, n: &Node, src: Option<&Node>, out: &mut Vec<Findi
     }
     let style = index.styles.iter().find(|s| matches!(s.style, Style::Effect(fx) if *fx == n.effects));
     if let Some(s) = style {
-        out.push(finding(n, format!("Effects match style {}", fmt_style_quoted(s)), Fix::ApplyStyle { style: s.fix_key.clone() }, fmt_style_apply_label(s)));
+        out.push(finding(
+            n,
+            Rule::HardCodedValue,
+            "effect",
+            format!("Effects match style {}", fmt_style_quoted(s)),
+            Fix::ApplyStyle { style: s.fix_key.clone() },
+            fmt_style_apply_label(s),
+        ));
     }
 }
 
@@ -843,7 +905,7 @@ pub(super) fn library_bind_is_current(doc: &Document, snap: &LibrarySnapshot, id
         && matches!(resolved, Some(VariableValue::Number(vx)) if same_number(vx, val))
 }
 
-fn style_matches_node(doc: &Document, n: &Node, s: &Style, property: StyleProperty) -> bool {
+fn style_matches_node(_doc: &Document, n: &Node, s: &Style, property: StyleProperty) -> bool {
     match s {
         Style::Fill(ps) => {
             let slot = if property == StyleProperty::Stroke { Slot::Stroke } else { Slot::Fill };
@@ -851,12 +913,7 @@ fn style_matches_node(doc: &Document, n: &Node, s: &Style, property: StyleProper
             !n.style_refs.contains_key(slot.ref_key()) && !any_bound && slot.paints(n) == ps.as_slice()
         }
         Style::Text(ts) => match &n.kind {
-            NodeKind::Text(t) => {
-                !n.style_refs.contains_key("text")
-                    && !text_number_bound_in_place(doc, n)
-                    && same_text_style(&t.style, ts)
-                    && t.runs.iter().all(|r| same_text_style(&r.style, ts))
-            }
+            NodeKind::Text(t) => !n.style_refs.contains_key("text") && same_text_style(&t.style, ts) && t.runs.iter().all(|r| same_text_style(&r.style, ts)),
             _ => false,
         },
         Style::Effect(fx) => !n.style_refs.contains_key("effect") && !n.effects.is_empty() && n.effects == *fx,
