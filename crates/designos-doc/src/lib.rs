@@ -19,6 +19,7 @@ mod board;
 pub mod branch_diff;
 #[cfg(test)]
 mod branch_diff_tests;
+pub mod branch_merge;
 pub mod changelog_features;
 mod comments;
 mod components;
@@ -62,6 +63,9 @@ mod vector_fit;
 
 pub use board::*;
 pub use branch_diff::{diff3, Conflict, ConflictKind, Diff3, DiffStats, EntityChange, EntityConflict, EntityKey, Group, SideChanges};
+pub use branch_merge::{
+    merge, merge_branch, validate_merged_references, ConflictSide, DanglingReference, MergeError, MergePlan, MergeReport, Resolution, Side, UnresolvedItem,
+};
 pub use changelog_features::*;
 pub use comments::*;
 pub use components::*;

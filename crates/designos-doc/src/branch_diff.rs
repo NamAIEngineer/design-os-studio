@@ -140,6 +140,10 @@ pub struct SideChanges {
     pub collections: BTreeMap<String, EntityChange>,
     pub flows: BTreeMap<String, EntityChange>,
     pub comments: BTreeMap<String, EntityChange>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub guides: BTreeMap<NodeId, EntityChange>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub images: BTreeMap<String, EntityChange>,
 }
 
 /// Kind of conflict on a layer or non-node entity (`T10.2` §3.4, §10).
@@ -170,6 +174,8 @@ pub enum EntityKey {
     Collection(String),
     Flow(String),
     Comment(String),
+    Guides(NodeId),
+    Image(String),
 }
 
 /// A conflict on a non-node entity (`styles`, `variables`, `collections`, `flows`, `comments`).
@@ -1196,6 +1202,153 @@ fn has_modified_or_added_descendant_in(root: NodeId, side_doc: &Document, side_c
     false
 }
 
+fn action_references_target(action: &crate::Action, target: NodeId) -> bool {
+    match action {
+        crate::Action::Navigate { dest, .. }
+        | crate::Action::OpenOverlay { dest, .. }
+        | crate::Action::SwapOverlay { dest }
+        | crate::Action::ScrollTo { dest, .. }
+        | crate::Action::ChangeTo { dest }
+        | crate::Action::MediaControl { dest, .. } => *dest == target,
+        crate::Action::Conditional { branches, otherwise } => {
+            branches.iter().any(|(_, actions)| actions.iter().any(|a| action_references_target(a, target)))
+                || otherwise.iter().any(|a| action_references_target(a, target))
+        }
+        crate::Action::SetVariable { .. }
+        | crate::Action::SetVariableMode { .. }
+        | crate::Action::CloseOverlay
+        | crate::Action::Back
+        | crate::Action::OpenUrl { .. } => false,
+    }
+}
+
+fn prop_value_references_target(val: &crate::PropValue, target: NodeId) -> bool {
+    match val {
+        crate::PropValue::Instance(id) => *id == target,
+        crate::PropValue::Slot(ids) => ids.contains(&target),
+        crate::PropValue::Bool(_) | crate::PropValue::Text(_) | crate::PropValue::Variant(_) => false,
+    }
+}
+
+fn node_references_target(node: &Node, target: NodeId) -> bool {
+    match &node.kind {
+        NodeKind::Instance { component: Some(comp_id), .. } if *comp_id == target => return true,
+        NodeKind::Connector(conn) if conn.start.node == Some(target) || conn.end.node == Some(target) => return true,
+        _ => {}
+    }
+    if node.component.source == Some(target) {
+        return true;
+    }
+    for prop in &node.component.props {
+        if prop_value_references_target(&prop.default, target) {
+            return true;
+        }
+        if let crate::PropKind::InstanceSwap { preferred } = &prop.kind {
+            if preferred.contains(&target) {
+                return true;
+            }
+        }
+    }
+    if node.component.values.values().any(|v| prop_value_references_target(v, target)) {
+        return true;
+    }
+    if node.component.slot_configs.values().any(|cfg| cfg.preferred.contains(&target)) {
+        return true;
+    }
+    if node.prototype.fixed_children.contains(&target) {
+        return true;
+    }
+    if node.prototype.reactions.iter().any(|r| r.actions.iter().any(|a| action_references_target(a, target))) {
+        return true;
+    }
+    false
+}
+
+fn has_referencing_node_outside_subtree(
+    root: NodeId,
+    side_doc: &Document,
+    other_side_changes: &BTreeMap<NodeId, NodeChange>,
+    side_changes: &BTreeMap<NodeId, NodeChange>,
+) -> bool {
+    let mut subtree = BTreeSet::new();
+    let mut stack = vec![root];
+    while let Some(curr) = stack.pop() {
+        if !subtree.insert(curr) {
+            continue;
+        }
+        if let Some(node) = side_doc.nodes.get(&curr) {
+            for &child in &node.children {
+                stack.push(child);
+            }
+        }
+    }
+    for (&nid, node) in &side_doc.nodes {
+        if subtree.contains(&nid) {
+            continue;
+        }
+        if matches!(other_side_changes.get(&nid), Some(NodeChange::Removed)) && !side_changes.contains_key(&nid) {
+            continue;
+        }
+        if node_references_target(node, root) {
+            return true;
+        }
+    }
+    false
+}
+
+fn paints_reference_image(paints: &[crate::Paint], hash: &str) -> bool {
+    paints.iter().any(|p| matches!(&p.kind, crate::PaintKind::Image { image_ref, .. } if image_ref == hash))
+}
+
+fn text_references_image(tp: &TextProps, hash: &str) -> bool {
+    paints_reference_image(&tp.style.fills, hash) || tp.runs.iter().any(|r| paints_reference_image(&r.style.fills, hash))
+}
+
+fn effective_side_references_image(
+    hash: &str,
+    primary: &Document,
+    primary_nodes: &BTreeMap<NodeId, NodeChange>,
+    other: &Document,
+    other_nodes: &BTreeMap<NodeId, NodeChange>,
+) -> bool {
+    for (&nid, p_node) in &primary.nodes {
+        if matches!(other_nodes.get(&nid), Some(NodeChange::Removed)) && !primary_nodes.contains_key(&nid) {
+            continue;
+        }
+        let p_groups = primary_nodes.get(&nid).and_then(NodeChange::groups);
+        let o_groups = other_nodes.get(&nid).and_then(NodeChange::groups);
+        let o_node = other.nodes.get(&nid);
+
+        let fills_ref = if o_groups.is_some_and(|g| g.contains(&Group::Fills)) && !p_groups.is_some_and(|g| g.contains(&Group::Fills)) {
+            o_node.is_some_and(|n| paints_reference_image(&n.fills, hash))
+        } else {
+            paints_reference_image(&p_node.fills, hash)
+        };
+        if fills_ref {
+            return true;
+        }
+
+        let stroke_ref = if o_groups.is_some_and(|g| g.contains(&Group::Stroke)) && !p_groups.is_some_and(|g| g.contains(&Group::Stroke)) {
+            o_node.is_some_and(|n| paints_reference_image(&n.stroke.paints, hash))
+        } else {
+            paints_reference_image(&p_node.stroke.paints, hash)
+        };
+        if stroke_ref {
+            return true;
+        }
+
+        let text_ref = if o_groups.is_some_and(|g| g.contains(&Group::TextStyle)) && !p_groups.is_some_and(|g| g.contains(&Group::TextStyle)) {
+            o_node.and_then(|n| n.kind.any_text()).is_some_and(|tp| text_references_image(tp, hash))
+        } else {
+            p_node.kind.any_text().is_some_and(|tp| text_references_image(tp, hash))
+        };
+        if text_ref {
+            return true;
+        }
+    }
+    false
+}
+
 // ============================================================================
 // Three-Way Diff Entrypoint (T10.2 §3.1)
 // ============================================================================
@@ -1349,7 +1502,7 @@ pub fn diff3(base: &Document, ours: &Document, theirs: &Document) -> Diff3 {
                 conflicts.push(Conflict { node: id, groups, kind: ConflictKind::DeleteModify });
             }
             (None, Some(NodeChange::Removed)) => {
-                if has_modified_or_added_descendant_in(id, ours, &ours_nodes) {
+                if has_modified_or_added_descendant_in(id, ours, &ours_nodes) || has_referencing_node_outside_subtree(id, ours, &theirs_nodes, &ours_nodes) {
                     conflicts.push(Conflict { node: id, groups: BTreeSet::new(), kind: ConflictKind::DeleteModify });
                 }
             }
@@ -1409,22 +1562,13 @@ pub fn diff3(base: &Document, ours: &Document, theirs: &Document) -> Diff3 {
         }
     }
 
-    // Also check if either side added an Instance pointing at a Component the other side removed (`T10.3` §8.2).
+    // Also check if `theirs` added an Instance pointing at a Component that `ours` removed (`T10.3` §8.2).
+    // (When `theirs` removes a component that `ours` still references — via an existing or newly-added
+    // node — `has_referencing_node_outside_subtree` above already records `DeleteModify` on the component.)
     for (&id, change) in &theirs_nodes {
         if change.is_added() {
             if let Some(NodeKind::Instance { component: Some(comp_id), .. }) = theirs.nodes.get(&id).map(|n| &n.kind) {
                 if matches!(ours_nodes.get(comp_id), Some(NodeChange::Removed)) {
-                    let mut groups = BTreeSet::new();
-                    groups.insert(Group::Component);
-                    conflicts.push(Conflict { node: id, groups, kind: ConflictKind::DependsOnRemoved });
-                }
-            }
-        }
-    }
-    for (&id, change) in &ours_nodes {
-        if change.is_added() && !id_collisions.contains(&id) {
-            if let Some(NodeKind::Instance { component: Some(comp_id), .. }) = ours.nodes.get(&id).map(|n| &n.kind) {
-                if matches!(theirs_nodes.get(comp_id), Some(NodeChange::Removed)) {
                     let mut groups = BTreeSet::new();
                     groups.insert(Group::Component);
                     conflicts.push(Conflict { node: id, groups, kind: ConflictKind::DependsOnRemoved });
@@ -1442,7 +1586,7 @@ pub fn diff3(base: &Document, ours: &Document, theirs: &Document) -> Diff3 {
         }
     }
 
-    // 6. Diff non-node entities (`styles`, `variables`, `collections`, `flows`, `comments`).
+    // 6. Diff non-node entities (`styles`, `variables`, `collections`, `flows`, `comments`, `guides`, `images`).
     let ours_styles = diff_styles_side(base, ours);
     let theirs_styles = diff_styles_side(base, theirs);
     let ours_variables = diff_variables_side(&base.variables, &ours.variables);
@@ -1501,6 +1645,52 @@ pub fn diff3(base: &Document, ours: &Document, theirs: &Document) -> Diff3 {
     };
     let ours_comments = diff_comments(&ours_comments_map);
     let theirs_comments = diff_comments(&theirs_comments_map);
+
+    let diff_guides = |side_guides: &BTreeMap<NodeId, Vec<crate::Guide>>| -> BTreeMap<NodeId, EntityChange> {
+        let mut out = BTreeMap::new();
+        for (&page_id, bg) in &base.guides {
+            match side_guides.get(&page_id) {
+                None => {
+                    out.insert(page_id, EntityChange::Removed);
+                }
+                Some(sg) if bg != sg => {
+                    out.insert(page_id, EntityChange::Changed);
+                }
+                _ => {}
+            }
+        }
+        for &page_id in side_guides.keys() {
+            if !base.guides.contains_key(&page_id) {
+                out.insert(page_id, EntityChange::Added);
+            }
+        }
+        out
+    };
+    let ours_guides = diff_guides(&ours.guides);
+    let theirs_guides = diff_guides(&theirs.guides);
+
+    let diff_images = |side_images: &BTreeMap<String, Vec<u8>>| -> BTreeMap<String, EntityChange> {
+        let mut out = BTreeMap::new();
+        for (k, bi) in &base.images {
+            match side_images.get(k) {
+                None => {
+                    out.insert(k.clone(), EntityChange::Removed);
+                }
+                Some(si) if bi != si => {
+                    out.insert(k.clone(), EntityChange::Changed);
+                }
+                _ => {}
+            }
+        }
+        for k in side_images.keys() {
+            if !base.images.contains_key(k) {
+                out.insert(k.clone(), EntityChange::Added);
+            }
+        }
+        out
+    };
+    let ours_images = diff_images(&ours.images);
+    let theirs_images = diff_images(&theirs.images);
 
     let mut entity_conflicts = Vec::new();
 
@@ -1603,6 +1793,54 @@ pub fn diff3(base: &Document, ours: &Document, theirs: &Document) -> Diff3 {
         }
     }
 
+    // Guide conflicts (per shared page in `base.nodes`)
+    for (&page_id, &oc) in &ours_guides {
+        if !base.nodes.contains_key(&page_id) {
+            continue;
+        }
+        if let Some(&tc) = theirs_guides.get(&page_id) {
+            match (oc, tc) {
+                (EntityChange::Removed, EntityChange::Changed) | (EntityChange::Changed, EntityChange::Removed) => {
+                    if ours.nodes.contains_key(&page_id) && theirs.nodes.contains_key(&page_id) {
+                        entity_conflicts.push(EntityConflict { key: EntityKey::Guides(page_id), kind: ConflictKind::DeleteModify });
+                    }
+                }
+                (EntityChange::Changed, EntityChange::Changed) | (EntityChange::Added, EntityChange::Added) => {
+                    if ours.guides.get(&page_id) != theirs.guides.get(&page_id) {
+                        entity_conflicts.push(EntityConflict { key: EntityKey::Guides(page_id), kind: ConflictKind::ModifyModify });
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    // Image conflicts (including when one side removes an image hash still referenced on the other side)
+    let all_image_keys: BTreeSet<&String> = ours_images.keys().chain(theirs_images.keys()).collect();
+    for k in all_image_keys {
+        match (ours_images.get(k).copied(), theirs_images.get(k).copied()) {
+            (Some(EntityChange::Removed), Some(EntityChange::Changed)) | (Some(EntityChange::Changed), Some(EntityChange::Removed)) => {
+                entity_conflicts.push(EntityConflict { key: EntityKey::Image(k.clone()), kind: ConflictKind::DeleteModify });
+            }
+            (Some(EntityChange::Changed), Some(EntityChange::Changed)) | (Some(EntityChange::Added), Some(EntityChange::Added)) => {
+                if ours.images.get(k) != theirs.images.get(k) {
+                    entity_conflicts.push(EntityConflict { key: EntityKey::Image(k.clone()), kind: ConflictKind::ModifyModify });
+                }
+            }
+            (None, Some(EntityChange::Removed)) => {
+                if effective_side_references_image(k, ours, &ours_nodes, theirs, &theirs_nodes) {
+                    entity_conflicts.push(EntityConflict { key: EntityKey::Image(k.clone()), kind: ConflictKind::DeleteModify });
+                }
+            }
+            (Some(EntityChange::Removed), None) => {
+                if effective_side_references_image(k, theirs, &theirs_nodes, ours, &ours_nodes) {
+                    entity_conflicts.push(EntityConflict { key: EntityKey::Image(k.clone()), kind: ConflictKind::DeleteModify });
+                }
+            }
+            _ => {}
+        }
+    }
+
     let scanned = base.nodes.len().max(ours.nodes.len()).max(theirs.nodes.len());
     let changed_ours = ours_nodes.len() + ours_styles.len() + ours_variables.len() + ours_collections.len() + ours_flows.len() + ours_comments.len();
     let changed_theirs =
@@ -1618,6 +1856,8 @@ pub fn diff3(base: &Document, ours: &Document, theirs: &Document) -> Diff3 {
             collections: ours_collections,
             flows: ours_flows,
             comments: theirs_or_ours(ours_comments),
+            guides: ours_guides,
+            images: ours_images,
         },
         theirs: SideChanges {
             nodes: theirs_nodes,
@@ -1626,6 +1866,8 @@ pub fn diff3(base: &Document, ours: &Document, theirs: &Document) -> Diff3 {
             collections: theirs_collections,
             flows: theirs_flows,
             comments: theirs_or_ours(theirs_comments),
+            guides: theirs_guides,
+            images: theirs_images,
         },
         conflicts,
         entity_conflicts,
