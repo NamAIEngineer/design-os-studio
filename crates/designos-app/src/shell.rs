@@ -1370,6 +1370,9 @@ pub fn execute_terminal_actions(app: &mut App, actions: Vec<crate::terminal::Ter
                     app.show_toast(e, true);
                 }
             }
+            crate::terminal::TerminalAction::RollbackAgentRun { run_id, reason } => {
+                crate::live_patch_apply::rollback_agent_run(app, &run_id, &reason);
+            }
         }
     }
 }

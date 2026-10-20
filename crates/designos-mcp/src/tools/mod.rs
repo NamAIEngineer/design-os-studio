@@ -1,7 +1,11 @@
-//! Shared tool validation helpers and modular MCP tool implementations (`v0.6 AI design`).
+//! Shared tool validation helpers, batched transaction dispatcher (`tools::batch`),
+//! frame lease write guard (`tools::lease`), multi-agent orchestration (`tools::agents`),
+//! and modular MCP tool implementations (`v0.6 AI design`).
 
+pub mod agents;
 pub mod batch;
 pub mod guidelines;
+pub mod lease;
 pub mod libraries;
 pub mod library_source;
 pub mod metadata;
