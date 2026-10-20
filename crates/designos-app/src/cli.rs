@@ -109,9 +109,10 @@ impl Options {
 
 /// Values of `--panel`: `agents`, `agents-chat`, `specs`, `assets`, `variables` / `variables-floating` open the local views,
 /// `libraries` the Libraries modal; the others are inspector popups opened on the selection for screenshots.
-pub const PANELS: [&str; 50] = [
+pub const PANELS: [&str; 51] = [
     "agents",
     "agents-chat",
+    "agents-picker",
     "agents-start-failure",
     "specs",
     "terminal",

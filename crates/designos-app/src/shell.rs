@@ -256,10 +256,10 @@ impl Shell {
             }
         }
         match opts.panel.as_deref() {
-            Some("agents") => {
+            Some("agents" | "agents-picker") => {
                 app.ui.rail = Some(crate::app::RailItem::Agents);
                 app.ui.left_collapsed = false;
-                app.terminal.ensure_default_tab(app.file_path.as_deref());
+                app.terminal.open_for_agent_use(app.file_path.as_deref());
             }
             Some("agents-chat") => {
                 app.ui.rail = Some(crate::app::RailItem::Agents);
@@ -289,7 +289,7 @@ impl Shell {
                 app.ui.rail = Some(crate::app::RailItem::Agents);
                 app.ui.left_collapsed = false;
                 app.terminal.dock_open = true;
-                app.terminal.ensure_default_tab(app.file_path.as_deref());
+                app.terminal.open_for_agent_use(app.file_path.as_deref());
             }
             Some(p @ ("check-designs" | "check-designs-fixed")) => {
                 app.open_check_designs();
@@ -726,7 +726,7 @@ impl Shell {
                 (Key::Backtick, _, _) => {
                     app.terminal.dock_open = !app.terminal.dock_open;
                     if app.terminal.dock_open {
-                        app.terminal.ensure_default_tab(app.file_path.as_deref());
+                        app.terminal.open_for_agent_use(app.file_path.as_deref());
                     }
                     None
                 }
@@ -1175,9 +1175,6 @@ impl Shell {
         let notes_rect = Rect::from_min_max(Pos2::new(canvas_left, canvas_rect.bottom()), Pos2::new(right_rect.left(), full.bottom()));
 
         let full_vars = self.app.vars.open && self.app.vars.full;
-        if self.shot.is_none() && (is_ai_panel || self.app.terminal.dock_open) {
-            self.app.terminal.ensure_default_tab(self.app.file_path.as_deref());
-        }
         crate::live_patch_apply::publish_live_context(&mut self.app);
         if let Some(ai_copy) = self.app.specs.last_ai_copy.take() {
             self.app.terminal.send_copy_for_ai(&ai_copy);
@@ -1386,17 +1383,15 @@ pub fn execute_terminal_actions(app: &mut App, actions: Vec<crate::terminal::Ter
 pub fn execute_cmdk_action(app: &mut App, action: crate::cmdk::CmdKAction) {
     match action {
         crate::cmdk::CmdKAction::ApplySpec(spec) => {
-            if !app.terminal.tabs.is_empty() {
-                let fp = app.file_path.clone();
-                app.terminal.dispatch_figma_ai_prompt("Make Design", &spec.name, fp.as_deref());
-            }
+            let fp = app.file_path.clone();
+            app.terminal.dispatch_figma_ai_prompt("Make Design", &spec.name, fp.as_deref());
             app.apply_node_spec(&spec, "Cmd+K Synthesizer");
         }
         crate::cmdk::CmdKAction::OpenSpecReader => {
             app.ui.rail = Some(crate::app::RailItem::Agents);
             app.ui.left_collapsed = false;
             app.specs.open = false;
-            app.terminal.ensure_default_tab(app.file_path.as_deref());
+            app.terminal.open_for_agent_use(app.file_path.as_deref());
             app.cmdk.open = false;
         }
         crate::cmdk::CmdKAction::OpenTerminal(preset) => {
@@ -1440,10 +1435,8 @@ pub fn execute_cmdk_action(app: &mut App, action: crate::cmdk::CmdKAction) {
             let fixed_count = crate::cmdk::auto_fix_design_gate(&mut app.doc, page, &sel);
             app.changed();
             app.cmdk.last_audit = Some(crate::cmdk::run_design_gate_audit(&app.doc, app.page, &app.selection));
-            if !app.terminal.tabs.is_empty() {
-                let fp = app.file_path.clone();
-                app.terminal.dispatch_figma_ai_prompt("Figma AI Action", &format!("Applied {fixed_count} Canvas changes (Undo with Cmd+Z)"), fp.as_deref());
-            }
+            let fp = app.file_path.clone();
+            app.terminal.dispatch_figma_ai_prompt("Figma AI Action", &format!("Applied {fixed_count} Canvas changes (Undo with Cmd+Z)"), fp.as_deref());
             app.show_toast(format!("Applied {fixed_count} Figma AI change(s) (Cmd+Z to Undo)"), false);
         }
     }

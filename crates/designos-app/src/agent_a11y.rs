@@ -468,7 +468,10 @@ pub fn try_focus_shortcut(app: &mut App, ctx: &Context) -> bool {
     } else {
         app.ui.rail = Some(RailItem::Agents);
         app.ui.left_collapsed = false;
-        app.terminal.ensure_default_tab(app.file_path.as_deref());
+        if app.terminal.tabs.is_empty() && !app.terminal.picker_open {
+            let file = app.file_path.as_deref();
+            app.terminal.open_for_agent_use(file);
+        }
         app.terminal.viewport_focused = app.terminal.side_panel_pty_open;
         ctx.memory_mut(|m| m.request_focus(composer_id()));
     }

@@ -1273,6 +1273,7 @@ mod agent_a11y {
         s.shell.app.ui.rail = Some(crate::app::RailItem::Agents);
         s.shell.app.terminal.side_panel_pty_open = false;
         s.shell.app.terminal.active_runtime = crate::terminal::AgentCliPreset::Claude;
+        s.shell.app.terminal.ensure_default_tab(None);
         s.frame(vec![]);
         if let Some(tab) = s.shell.app.terminal.tabs.get_mut(0) {
             tab.preset = crate::terminal::AgentCliPreset::Claude;
@@ -1585,6 +1586,7 @@ mod agent_a11y {
         crate::agent_a11y::disable_accesskit(&s.ctx);
         s.shell.app.ui.left_collapsed = false;
         s.shell.app.ui.rail = Some(crate::app::RailItem::Agents);
+        s.shell.app.terminal.ensure_default_tab(None);
         s.frame(vec![]);
 
         for status in [
