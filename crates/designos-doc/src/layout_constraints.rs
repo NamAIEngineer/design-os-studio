@@ -85,16 +85,45 @@ pub fn constrain_child(child: &Node, old: Vec2, new: Vec2) -> Option<(Affine, Ve
     let stretch_collapsed_y = matches!(child.constraints.vertical, Constraint::Stretch) && old_ext_y >= MIN_EXTENT && new_ext_y <= 0.0;
 
     // 4. Apply map p -> B'.min + s * (p - B.min) after child's matrix.
-    // When a Stretch axis collapses to 0, keep the un-collapsed basis direction so the child
-    // collapses in place to 0 extent instead of mirroring or returning None with its old size.
-    let sx_dir = if stretch_collapsed_x { 1.0 } else { sx };
-    let sy_dir = if stretch_collapsed_y { 1.0 } else { sy };
-    let ma = sx_dir * a;
-    let mc = sx_dir * c;
+    let ma = sx * a;
+    let mc = sx * c;
     let mtx = nbx0 + sx * (tx - bx0);
-    let mb = sy_dir * b;
-    let md = sy_dir * d;
+    let mb = sy * b;
+    let md = sy * d;
     let mty = nby0 + sy * (ty - by0);
+    if !mtx.is_finite() || !mty.is_finite() {
+        return None;
+    }
+
+    if stretch_collapsed_x || stretch_collapsed_y {
+        // Decompose the rank-deficient map column by column so the transformed corners have
+        // zero extent on the collapsed parent axis while keeping the original column signs.
+        let col0_len = ma.hypot(mb);
+        let (size_kx, na, nb) = if col0_len.is_finite() && col0_len > 1e-18 {
+            (col0_len, ma / col0_len, mb / col0_len)
+        } else {
+            let orig0 = a.hypot(b);
+            if orig0.is_finite() && orig0 > 1e-18 {
+                (0.0, a / orig0, b / orig0)
+            } else {
+                (0.0, 1.0, 0.0)
+            }
+        };
+        let col1_len = mc.hypot(md);
+        let (size_ky, nc, nd) = if col1_len.is_finite() && col1_len > 1e-18 {
+            (col1_len, mc / col1_len, md / col1_len)
+        } else {
+            let orig1 = c.hypot(d);
+            if orig1.is_finite() && orig1 > 1e-18 {
+                (0.0, c / orig1, d / orig1)
+            } else {
+                (0.0, 0.0, 1.0)
+            }
+        };
+        let new_size = Vec2::new((w * size_kx) as f32, (h * size_ky) as f32);
+        let new_transform = Affine { a: na as f32, b: nb as f32, c: nc as f32, d: nd as f32, tx: mtx as f32, ty: mty as f32 };
+        return Some((new_transform, new_size));
+    }
 
     let det = ma * md - mb * mc;
     if !det.is_finite() || det.abs() <= 1e-18 {
@@ -111,9 +140,7 @@ pub fn constrain_child(child: &Node, old: Vec2, new: Vec2) -> Option<(Affine, Ve
         return None;
     }
 
-    let size_kx = if stretch_collapsed_x { 0.0 } else { kx };
-    let size_ky = if stretch_collapsed_y { 0.0 } else { ky };
-    let new_size = Vec2::new((w * size_kx) as f32, (h * size_ky) as f32);
+    let new_size = Vec2::new((w * kx) as f32, (h * ky) as f32);
     let new_transform = Affine { a: (ma / kx) as f32, b: (mb / kx) as f32, c: (mc / ky) as f32, d: (md / ky) as f32, tx: mtx as f32, ty: mty as f32 };
     Some((new_transform, new_size))
 }
@@ -357,5 +384,26 @@ mod tests {
         assert_eq!(tp.tx, 10.0);
         assert_eq!(tp.ty, 8.0);
         assert_eq!(szp, Vec2::new(0.0, 0.0));
+
+        // A 100x40 rectangle at 90 degrees (a=0, b=1, c=-1, d=0, tx=60, ty=20), Stretch/Stretch,
+        // in a 200x200 frame resized to 150x200 has parent bounds x=20..60, y=20..120.
+        // The 50px horizontal shrink collapses parent-X extent to 0 at x=20 while keeping y=20..120.
+        let mut rot90 = Node::rectangle(NodeId(4), Rect::new(0.0, 0.0, 100.0, 40.0));
+        rot90.transform = Affine { a: 0.0, b: 1.0, c: -1.0, d: 0.0, tx: 60.0, ty: 20.0 };
+        rot90.constraints = Constraints { horizontal: Constraint::Stretch, vertical: Constraint::Stretch };
+        let (tr90, sz90) = constrain_child(&rot90, Vec2::new(200.0, 200.0), Vec2::new(150.0, 200.0)).expect("90-deg stretch collapse");
+        assert_eq!(sz90, Vec2::new(100.0, 0.0));
+        assert!((tr90.a - 0.0).abs() < 1e-5 && (tr90.b - 1.0).abs() < 1e-5, "col0 must stay (0, 1): {:?}", tr90);
+        assert!((tr90.c - (-1.0)).abs() < 1e-5 && (tr90.d - 0.0).abs() < 1e-5, "col1 must stay (-1, 0): {:?}", tr90);
+        assert_eq!(tr90.tx, 20.0);
+        assert_eq!(tr90.ty, 20.0);
+        let corners90 =
+            [tr90.apply(Vec2::new(0.0, 0.0)), tr90.apply(Vec2::new(sz90.x, 0.0)), tr90.apply(Vec2::new(sz90.x, sz90.y)), tr90.apply(Vec2::new(0.0, sz90.y))];
+        let min_x = corners90.iter().map(|p| p.x).fold(f32::INFINITY, f32::min);
+        let max_x = corners90.iter().map(|p| p.x).fold(f32::NEG_INFINITY, f32::max);
+        let min_y = corners90.iter().map(|p| p.y).fold(f32::INFINITY, f32::min);
+        let max_y = corners90.iter().map(|p| p.y).fold(f32::NEG_INFINITY, f32::max);
+        assert!((max_x - min_x).abs() < 1e-5 && (min_x - 20.0).abs() < 1e-5, "parent-X extent must collapse at x=20: {:?}", corners90);
+        assert!((min_y - 20.0).abs() < 1e-5 && (max_y - 120.0).abs() < 1e-5, "parent-Y extent must remain 20..120: {:?}", corners90);
     }
 }
