@@ -112,7 +112,6 @@ pub fn import_variables_value(doc: &mut Document, v: &Value) -> usize {
                 variables: farr(c, "variableIds").iter().filter_map(|s| s.as_str().map(String::from)).collect(),
                 key: fstr(c, "key").map(String::from),
                 source_library_key: library_key_of(c),
-                extensions: Default::default(),
             },
         );
     }
@@ -144,8 +143,6 @@ pub fn import_variables_value(doc: &mut Document, v: &Value) -> usize {
                 hidden_from_publishing: fbool(v, "hiddenFromPublishing").unwrap_or(false),
                 key: fstr(v, "key").map(String::from),
                 code_syntax: parse_code_syntax(v.get("codeSyntax")),
-                extensions: Default::default(),
-                mode_extensions: Default::default(),
             },
         );
     }
@@ -573,7 +570,6 @@ mod tests {
                 variables: vec!["v_num".into(), "v_col".into()],
                 key: None,
                 source_library_key: None,
-                extensions: Default::default(),
             },
         );
         doc.variables.insert(
@@ -589,8 +585,6 @@ mod tests {
                 hidden_from_publishing: false,
                 key: None,
                 code_syntax: CodeSyntax::new(),
-                extensions: Default::default(),
-                mode_extensions: Default::default(),
             },
         );
         doc.variables.insert(
@@ -606,8 +600,6 @@ mod tests {
                 hidden_from_publishing: false,
                 key: None,
                 code_syntax: CodeSyntax::new(),
-                extensions: Default::default(),
-                mode_extensions: Default::default(),
             },
         );
 

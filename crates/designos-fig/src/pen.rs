@@ -146,8 +146,6 @@ fn import_pen_variables(doc: &mut Document, obj: &Map<String, Value>) {
                 key: None,
 
                 code_syntax: Default::default(),
-                extensions: Default::default(),
-                mode_extensions: Default::default(),
             },
         );
     }
@@ -162,7 +160,6 @@ fn import_pen_variables(doc: &mut Document, obj: &Map<String, Value>) {
             variables: var_ids,
             key: None,
             source_library_key: None,
-            extensions: Default::default(),
         },
     );
 }
