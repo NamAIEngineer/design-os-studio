@@ -157,9 +157,6 @@ impl Shell {
         }
         if let Some(root) = opts.library.clone() {
             app.attach_library(root);
-            if let Some(lib) = &app.lib {
-                app.agent_presence.cursor_size = crate::agent_presence::AgentCursorSize::load(lib.root());
-            }
         }
         if let Some(f) = &opts.file {
             app.open_path(f.clone());
