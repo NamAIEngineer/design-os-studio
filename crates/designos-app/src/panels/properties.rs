@@ -1766,13 +1766,7 @@ fn create_style(app: &mut App, pk: &mut Picker) {
     styles.insert(key.clone(), Style::Fill(vec![Paint { visible: true, ..pk.paint.clone() }]));
     style_meta.insert(
         key.clone(),
-        StyleMeta {
-            name: key.clone(),
-            key: None,
-            description: String::new(),
-            property: if stroke { StyleProperty::Stroke } else { StyleProperty::Fill },
-            bindings: Default::default(),
-        },
+        StyleMeta { name: key.clone(), key: None, description: String::new(), property: if stroke { StyleProperty::Stroke } else { StyleProperty::Fill } },
     );
     if let Err(e) = pk.tx.cmd(&mut app.doc, Command::SetStyles { styles, style_meta }) {
         app.show_toast(format!("Edit failed: {e}"), true);
