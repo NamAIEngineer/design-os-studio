@@ -2,13 +2,13 @@
 //! Fix per finding, Fix all, per-finding Ignore / Dismiss, and a Rules & contrast threshold popover.
 
 use crate::app::App;
-use crate::check_designs::{Finding, Report, Rule, MAX_SCANNED_LAYERS};
+use crate::check_designs::{Finding, Phase, Report, Rule};
 use crate::icons::{self, Icon};
-use crate::terminal::{STATUS_BAD_TEXT, STATUS_INFO_TEXT, STATUS_OK_TEXT, STATUS_WARN_BG, STATUS_WARN_BORDER, STATUS_WARN_TEXT};
+use crate::terminal::{STATUS_BAD_TEXT, STATUS_INFO_TEXT, STATUS_OK_TEXT, STATUS_WARN_TEXT};
 use crate::theme;
 use crate::widgets;
 use designos_doc::{ContrastLevel, IgnoreKey, NodeId};
-use egui::{Align2, Area, Color32, Context, Id, Order, Pos2, Rect, Sense, Stroke, StrokeKind, Ui, Vec2};
+use egui::{Align2, Area, Color32, Context, FontId, Id, Order, Pos2, Rect, Sense, Stroke, StrokeKind, TextFormat, Ui, Vec2};
 
 const PANEL_W: f32 = 320.0;
 const PAD: f32 = 12.0;
@@ -18,10 +18,10 @@ const GROUP_H: f32 = 28.0;
 /// A row is name + a message of at most two lines, so every row has the same height and a long
 /// list only lays out the rows in view.
 const ROW_H: f32 = 60.0;
+const PROGRESS_H: f32 = 32.0;
 const IGNORED_BAR_H: f32 = 32.0;
 const IGNORED_ROW_H: f32 = 44.0;
 const EMPTY_H: f32 = 112.0;
-const NOTE_H: f32 = 44.0;
 const BTN_H: f32 = 24.0;
 const FIX_W: f32 = 44.0;
 const RESTORE_W: f32 = 56.0;
@@ -43,6 +43,10 @@ const ICON_BTN_GAP: f32 = 2.0;
 const EMPTY_ICON_Y: f32 = 28.0;
 const EMPTY_TITLE_Y: f32 = 52.0;
 const EMPTY_NOTE_Y: f32 = 66.0;
+/// Progress row: where the bar and its label sit, and the bar's thickness.
+const PROGRESS_BAR_Y: f32 = 7.0;
+const PROGRESS_LABEL_Y: f32 = 15.0;
+const PROGRESS_BAR_H: f32 = 4.0;
 
 const POPOVER_RULES: [(Rule, &str); 9] = [
     (Rule::HardCodedValue, "Colours & contrast"),
@@ -98,8 +102,8 @@ fn message_job(f: &Finding, color: Color32) -> egui::text::LayoutJob {
     job
 }
 
-fn list_height(report: &Report, show_ignored: bool) -> f32 {
-    let notes_h = (report.unreadable_libraries.len() as f32) * 28.0 + if report.truncated { NOTE_H } else { 0.0 };
+fn list_height(report: &Report, show_ignored: bool, scanning: bool) -> f32 {
+    let notes_h = (report.unreadable_libraries.len() as f32) * 28.0 + if scanning { PROGRESS_H } else { 0.0 };
     let ignored_h = if report.ignored.is_empty() {
         0.0
     } else if show_ignored {
@@ -108,7 +112,8 @@ fn list_height(report: &Report, show_ignored: bool) -> f32 {
         IGNORED_BAR_H
     };
     if report.findings.is_empty() {
-        return EMPTY_H + notes_h + ignored_h;
+        let base_h = if report.complete { EMPTY_H } else { 0.0 };
+        return (base_h + notes_h + ignored_h).max(PROGRESS_H);
     }
     let groups = Rule::ALL.iter().filter(|r| report.of(**r).next().is_some()).count() as f32;
     groups * GROUP_H + report.findings.len() as f32 * ROW_H + notes_h + ignored_h
@@ -120,7 +125,9 @@ pub fn show(app: &mut App, ctx: &Context) {
     }
     // A drag or a scrub changes the document every frame; the list catches up when the pointer is released.
     let interacting = ctx.input(|i| i.pointer.any_down());
-    app.refresh_check_designs(interacting);
+    app.refresh_check_designs(interacting, ctx);
+    let progress_info = app.check_designs.cursor.as_ref().map(|c| (c.phase, c.scanned, c.total, c.updating));
+    let scanning = progress_info.is_some();
     let report = std::mem::take(&mut app.check_designs.report);
     let scope_label = app.check_designs.scope_label.clone();
     let rules_open = app.check_designs.rules_open;
@@ -128,7 +135,7 @@ pub fn show(app: &mut App, ctx: &Context) {
     let settings = app.doc.check_designs.clone();
     let canvas = app.canvas_rect;
     let max_h = (canvas.height() - 2.0 * MARGIN).max(HEADER_H + SUMMARY_H + 96.0);
-    let list_h = list_height(&report, show_ignored).min(max_h - HEADER_H - SUMMARY_H);
+    let list_h = list_height(&report, show_ignored, scanning).min(max_h - HEADER_H - SUMMARY_H);
     let size = Vec2::new(PANEL_W, HEADER_H + SUMMARY_H + list_h);
     let pos = Pos2::new((canvas.right() - PANEL_W - MARGIN).max(canvas.left() + MARGIN), canvas.top() + MARGIN);
     let mut act: Option<Act> = None;
@@ -158,7 +165,14 @@ pub fn show(app: &mut App, ctx: &Context) {
         // Summary: scope, counts, Fix all.
         let top = rect.top() + HEADER_H;
         let fixable = report.fixable().len();
-        let counts = if report.findings.is_empty() {
+        let can_fix_all = !scanning && fixable > 0;
+        let counts = if scanning && !report.complete {
+            match progress_info {
+                Some((Phase::Prepare, _, _, _)) => "Preparing…".to_string(),
+                Some((_, scanned, total, _)) => format!("Checking… {scanned} of {total} layers"),
+                None => String::new(),
+            }
+        } else if report.findings.is_empty() {
             format!("No issues · {} layers checked", report.scanned)
         } else {
             let n = report.findings.len();
@@ -171,15 +185,17 @@ pub fn show(app: &mut App, ctx: &Context) {
         p.text(Pos2::new(rect.left() + PAD, top + 30.0), Align2::LEFT_CENTER, counts_txt, theme::font_body(), theme::TEXT_SECONDARY);
         let fix_all = Rect::from_min_size(Pos2::new(rect.right() - PAD - FIX_ALL_W, top + (SUMMARY_H - BTN_H) / 2.0), Vec2::new(FIX_ALL_W, BTN_H));
         widgets::record(ui, "check-designs-fix-all", fix_all);
-        let resp = ui.interact(fix_all, Id::new("check-designs-fix-all"), if fixable > 0 { Sense::click() } else { Sense::hover() });
-        let (bg, fg) = match (fixable > 0, resp.hovered()) {
+        let resp = ui.interact(fix_all, Id::new("check-designs-fix-all"), if can_fix_all { Sense::click() } else { Sense::hover() });
+        let (bg, fg) = match (can_fix_all, resp.hovered()) {
             (true, true) => (theme::BG_BRAND_HOVER, Color32::WHITE),
             (true, false) => (theme::BG_BRAND, Color32::WHITE),
             (false, _) => (theme::BG_TERTIARY, theme::TEXT_DISABLED),
         };
         p.rect_filled(fix_all, theme::cr(theme::RADIUS_CONTROL), bg);
         p.text(fix_all.center(), Align2::CENTER_CENTER, "Fix all", theme::font_body_medium(), fg);
-        if fixable > 0 && resp.on_hover_text(format!("Apply {fixable} fixes as one undo step")).clicked() {
+        if scanning {
+            resp.on_hover_text("Wait for the check to finish");
+        } else if can_fix_all && resp.on_hover_text(format!("Apply {fixable} fixes as one undo step")).clicked() {
             act = Some(Act::FixAll);
         }
         widgets::hline(&p, rect.left(), rect.right(), top + SUMMARY_H, theme::BORDER_SUBTLE);
@@ -190,10 +206,13 @@ pub fn show(app: &mut App, ctx: &Context) {
             egui::ScrollArea::vertical().id_salt("check-designs-list").max_height(list_h).auto_shrink([false, false]).show(ui, |ui| {
                 ui.set_width(PANEL_W);
                 ui.spacing_mut().item_spacing = Vec2::ZERO;
+                if let Some((phase, scanned, total, updating)) = progress_info {
+                    progress_row(ui, phase, scanned, total, updating);
+                }
                 for lib_name in &report.unreadable_libraries {
                     unreadable_library_note(ui, lib_name);
                 }
-                if report.findings.is_empty() {
+                if report.findings.is_empty() && report.complete {
                     empty_state(ui, report.scanned);
                 }
                 for rule in Rule::ALL {
@@ -207,9 +226,6 @@ pub fn show(app: &mut App, ctx: &Context) {
                             act = Some(a);
                         }
                     }
-                }
-                if report.truncated {
-                    truncation_note(ui);
                 }
                 if !report.ignored.is_empty() {
                     if let Some(a) = ignored_footer(ui, &report.ignored, show_ignored) {
@@ -233,6 +249,7 @@ pub fn show(app: &mut App, ctx: &Context) {
         Some(Act::Close) => {
             app.check_designs.open = false;
             app.check_designs.rules_open = false;
+            app.check_designs.cursor = None;
         }
         Some(Act::ToggleRules) => {
             app.check_designs.rules_open = !app.check_designs.rules_open;
@@ -497,15 +514,45 @@ fn empty_state(ui: &mut Ui, scanned: usize) {
     p.galley(Pos2::new(rect.center().x - galley.size().x / 2.0, rect.top() + EMPTY_NOTE_Y), galley, theme::TEXT_SECONDARY);
 }
 
-fn truncation_note(ui: &mut Ui) {
-    let (rect, _) = ui.allocate_exact_size(Vec2::new(PANEL_W, NOTE_H), Sense::hover());
-    let p = ui.painter();
-    let inner = rect.shrink2(Vec2::new(PAD, 6.0));
-    p.rect_filled(inner, theme::cr(theme::RADIUS_CONTROL), STATUS_WARN_BG);
-    p.rect_stroke(inner, theme::cr(theme::RADIUS_CONTROL), Stroke::new(1.0, STATUS_WARN_BORDER), StrokeKind::Inside);
-    let note = format!("Stopped after {MAX_SCANNED_LAYERS} layers. Select fewer layers to check the rest.");
-    let galley = p.layout(note, theme::font_body(), STATUS_WARN_TEXT, inner.width() - theme::SPACE_BLOCK);
-    p.galley(Pos2::new(inner.left() + theme::SPACE_INLINE, inner.center().y - galley.size().y / 2.0), galley, STATUS_WARN_TEXT);
+fn progress_row(ui: &mut Ui, phase: Phase, scanned: usize, total: usize, updating: bool) {
+    let (rect, _) = ui.allocate_exact_size(Vec2::new(PANEL_W, PROGRESS_H), Sense::hover());
+    widgets::record(ui, "check-designs-progress", rect);
+    let p = ui.painter().clone();
+    let bar_w = PANEL_W - 2.0 * PAD;
+    let bar = Rect::from_min_size(Pos2::new(rect.left() + PAD, rect.top() + PROGRESS_BAR_Y), Vec2::new(bar_w, PROGRESS_BAR_H));
+    widgets::record(ui, "check-designs-progress-bar", bar);
+    p.rect_filled(bar, theme::cr(theme::RADIUS_MARK), theme::BG_TERTIARY);
+    let frac = if phase == Phase::Prepare || total == 0 { 0.08 } else { (scanned as f32 / total as f32).clamp(0.0, 1.0) };
+    let fill = Rect::from_min_size(bar.min, Vec2::new((bar_w * frac).max(PROGRESS_BAR_H), PROGRESS_BAR_H));
+    p.rect_filled(fill, theme::cr(theme::RADIUS_MARK), theme::BG_BRAND);
+
+    let prop_font = theme::font_caption();
+    let mono_font = FontId::new(theme::FONT_SIZE_CAPTION, egui::FontFamily::Monospace);
+    let mut job = egui::text::LayoutJob::default();
+    let prop_fmt = TextFormat { font_id: prop_font, color: theme::TEXT_SECONDARY, ..Default::default() };
+    let mono_fmt = TextFormat { font_id: mono_font, color: theme::TEXT, ..Default::default() };
+    if updating {
+        if phase == Phase::Prepare {
+            job.append("Updating…", 0.0, prop_fmt);
+        } else {
+            job.append("Updating… ", 0.0, prop_fmt.clone());
+            job.append(&scanned.to_string(), 0.0, mono_fmt.clone());
+            job.append(" of ", 0.0, prop_fmt.clone());
+            job.append(&total.to_string(), 0.0, mono_fmt);
+            job.append(" layers", 0.0, prop_fmt);
+        }
+    } else if phase == Phase::Prepare {
+        job.append("Preparing…", 0.0, prop_fmt);
+    } else {
+        job.append("Checking… ", 0.0, prop_fmt.clone());
+        job.append(&scanned.to_string(), 0.0, mono_fmt.clone());
+        job.append(" of ", 0.0, prop_fmt.clone());
+        job.append(&total.to_string(), 0.0, mono_fmt);
+        job.append(" layers", 0.0, prop_fmt);
+    }
+    let galley = p.layout_job(job);
+    p.galley(Pos2::new(rect.left() + PAD, rect.top() + PROGRESS_LABEL_Y), galley, theme::TEXT_SECONDARY);
+    widgets::hline(&p, rect.left() + PAD, rect.right() - PAD, rect.bottom() - HAIRLINE, theme::BORDER_SUBTLE);
 }
 
 #[cfg(test)]

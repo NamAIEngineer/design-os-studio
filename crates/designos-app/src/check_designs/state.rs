@@ -1,10 +1,11 @@
 //! Panel state: what is being checked, session dismissals, and the cached report.
 
-use super::{audit_with_libraries, Finding, LibrarySources, Report, Rule, Scope};
+use super::{audit_step, Finding, LibrarySources, Report, Rule, ScanCursor, Scope, SLICE_BUDGET};
 use crate::app::App;
 use crate::edit::Tx;
 use designos_doc::{CheckDesignsSettings, Command, ContrastLevel, IgnoreKey, LibraryRef, REMOTE_LIBRARY_PREFIX};
 use std::collections::{BTreeSet, HashMap};
+use std::time::Duration;
 
 impl LibrarySources {
     /// Collects pinned snapshots for every enabled library in `app.doc.library.enabled`, plus the
@@ -36,13 +37,16 @@ impl LibrarySources {
 
 /// Check designs panel state. The scope is fixed when the panel opens, so selecting a finding's
 /// layer does not change what is being listed.
-#[derive(Default)]
 pub struct CheckDesignsState {
     pub open: bool,
     pub scope: Option<Scope>,
     /// "Selection (3 layers)" or "Page 1", shown under the title.
     pub scope_label: String,
     pub report: Report,
+    /// Active incremental scan cursor while a scan is in flight.
+    pub cursor: Option<ScanCursor>,
+    /// Per-frame time budget for [`audit_step`] (defaults to [`SLICE_BUDGET`] = 2.0 ms).
+    pub slice_budget: Duration,
     /// Session-only dismissed findings; cleared when the panel is reopened.
     pub dismissed: BTreeSet<IgnoreKey>,
     /// Whether the Rules popover is open.
@@ -53,10 +57,34 @@ pub struct CheckDesignsState {
     audited: Option<(u64, Scope, Vec<LibraryRef>, CheckDesignsSettings)>,
 }
 
+impl Default for CheckDesignsState {
+    fn default() -> Self {
+        Self {
+            open: false,
+            scope: None,
+            scope_label: String::new(),
+            report: Report::default(),
+            cursor: None,
+            slice_budget: SLICE_BUDGET,
+            dismissed: BTreeSet::new(),
+            rules_open: false,
+            show_ignored: false,
+            audited: None,
+        }
+    }
+}
+
 impl CheckDesignsState {
     /// Forces the next frame to audit again.
     pub fn invalidate(&mut self) {
         self.audited = None;
+        self.cursor = None;
+    }
+
+    /// Whether an incremental scan is currently in progress.
+    #[cfg(test)]
+    pub fn is_scanning(&self) -> bool {
+        self.cursor.is_some()
     }
 }
 
@@ -75,9 +103,14 @@ impl App {
         self.cmdk.open = false;
     }
 
-    /// Re-audits when the document or the scope changed since the cached report. While the user is
-    /// mid-gesture (`interacting`) an existing report is kept, so a drag does not audit every frame.
-    pub fn refresh_check_designs(&mut self, interacting: bool) {
+    /// Advances or starts the incremental audit when the document or the scope changed since the
+    /// cached report. While the user is mid-gesture (`interacting`), slicing pauses and any
+    /// existing report is kept so a drag does not audit every frame.
+    pub fn refresh_check_designs(&mut self, interacting: bool, ctx: &egui::Context) {
+        if !self.check_designs.open {
+            self.check_designs.cursor = None;
+            return;
+        }
         // A page scope whose page was deleted would list nothing for ever; follow the page on screen.
         if matches!(self.check_designs.scope, Some(Scope::Page(p)) if self.doc.get(p).is_none()) {
             let name = self.doc.get(self.page).map(|p| p.name.clone()).unwrap_or_default();
@@ -86,16 +119,38 @@ impl App {
             self.check_designs.invalidate();
         }
         let Some(scope) = self.check_designs.scope.clone() else { return };
-        let key = (self.canvas.tiles.rev(), scope, self.doc.library.enabled.clone(), self.doc.check_designs.clone());
-        if self.check_designs.audited.as_ref() == Some(&key) || (interacting && self.check_designs.audited.is_some()) {
+        let key = (self.canvas.tiles.rev(), scope.clone(), self.doc.library.enabled.clone(), self.doc.check_designs.clone());
+        if self.check_designs.cursor.is_none() && self.check_designs.audited.as_ref() == Some(&key) {
             return;
         }
-        let (libs, unreadable) = LibrarySources::collect(self);
-        let mut report = audit_with_libraries(&self.doc, &key.1, &libs);
-        report.findings.retain(|f| !self.check_designs.dismissed.contains(&f.ignore_key()));
-        report.unreadable_libraries = unreadable;
-        self.check_designs.report = report;
-        self.check_designs.audited = Some(key);
+        if interacting && (self.check_designs.audited.is_some() || self.check_designs.cursor.is_some()) {
+            return;
+        }
+        let need_new_cursor = match self.check_designs.cursor.as_ref() {
+            Some(cur) => cur.full_key.as_ref() != Some(&key),
+            None => true,
+        };
+        if need_new_cursor {
+            let (libs, unreadable) = LibrarySources::collect(self);
+            let mut cur = ScanCursor::with_libraries(&self.doc, scope, libs);
+            cur.full_key = Some(key.clone());
+            cur.unreadable_libraries = unreadable;
+            cur.updating = self.check_designs.report.complete;
+            self.check_designs.cursor = Some(cur);
+        }
+        let budget = self.check_designs.slice_budget;
+        let done = if let Some(cur) = self.check_designs.cursor.as_mut() { audit_step(&self.doc, cur, budget) } else { true };
+        if done {
+            if let Some(cur) = self.check_designs.cursor.take() {
+                let full_key = cur.full_key.clone().unwrap_or(key);
+                let mut report = cur.into_report(&self.doc);
+                report.findings.retain(|f| !self.check_designs.dismissed.contains(&f.ignore_key()));
+                self.check_designs.report = report;
+                self.check_designs.audited = Some(full_key);
+            }
+        } else {
+            ctx.request_repaint();
+        }
     }
 
     fn apply_check_designs_settings(&mut self, next: CheckDesignsSettings) -> bool {

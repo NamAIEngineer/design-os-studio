@@ -206,7 +206,7 @@ fn dismiss_hides_for_session_without_touching_document_or_undo_stack() {
     f.color_var("Color/Primary", BLUE, BLUE);
     let mut app = f.app();
     app.open_check_designs();
-    app.refresh_check_designs(false);
+    app.refresh_check_designs(false, &egui::Context::default());
     assert_eq!(app.check_designs.report.findings.len(), 1);
     let finding = app.check_designs.report.findings[0].clone();
 
@@ -217,12 +217,12 @@ fn dismiss_hides_for_session_without_touching_document_or_undo_stack() {
 
     // Re-refreshing in the same session keeps it dismissed.
     app.check_designs.invalidate();
-    app.refresh_check_designs(false);
+    app.refresh_check_designs(false, &egui::Context::default());
     assert!(app.check_designs.report.findings.is_empty());
 
     // Reopening the panel clears session dismissals.
     app.open_check_designs();
-    app.refresh_check_designs(false);
+    app.refresh_check_designs(false, &egui::Context::default());
     assert_eq!(app.check_designs.report.findings.len(), 1);
 }
 
@@ -261,12 +261,10 @@ fn deleting_a_node_prunes_its_ignore_keys_on_save_and_load() {
     assert_eq!(app.doc.check_designs.ignored.len(), 2);
 
     app.doc.remove(a).unwrap();
-    assert_eq!(app.doc.check_designs.ignored.len(), 1, "Document::remove prunes the deleted node's ignore keys in memory");
-    assert!(app.doc.check_designs.ignored.iter().all(|k| k.node == b));
+    assert_eq!(app.doc.check_designs.ignored.len(), 2, "Document::remove preserves the deleted node's ignore keys in memory for undo");
     let json = app.doc.to_json().unwrap();
-    assert!(!json.contains(&format!("\"node\":{}", a.0)), "deleted node's ignore key is not written to JSON");
     let loaded = Document::from_json(&json).unwrap();
-    assert_eq!(loaded.check_designs.ignored.len(), 1);
+    assert_eq!(loaded.check_designs.ignored.len(), 1, "Document::from_json prunes deleted node ignore keys on load");
     assert!(loaded.check_designs.ignored.iter().all(|k| k.node == b));
 
     // Orphaned nodes pruned by `prune_unreachable` also drop their ignore keys.

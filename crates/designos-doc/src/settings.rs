@@ -165,6 +165,11 @@ mod tests {
         h.redo(&mut d).unwrap();
         assert_eq!(d.check_designs, next);
 
+        // Deleting a node via History and undoing the delete must preserve its ignored keys.
+        h.exec(&mut d, Command::Remove { id }).unwrap();
+        h.undo(&mut d).unwrap();
+        assert_eq!(d.check_designs, next, "undoing node delete must preserve its ignored check-designs keys");
+
         // Deleting the node drops its keys when the saved file is read back (garbage collection).
         d.remove(id).unwrap();
         let after_delete_json = d.to_json().unwrap();

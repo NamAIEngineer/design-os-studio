@@ -465,19 +465,6 @@ fn hidden_layers_and_instance_contents_are_skipped_and_scope_is_honoured() {
     assert!(audit(&f.doc, &Scope::Layers(vec![])).findings.is_empty());
 }
 
-#[test]
-fn an_oversized_page_is_cut_off_and_says_so() {
-    let mut f = fx();
-    let frame = f.frame(f.page, "Bulk", None);
-    for _ in 0..MAX_SCANNED_LAYERS + 5 {
-        let id = f.doc.alloc_id();
-        f.doc.insert(frame, Node::rectangle(id, Rect::new(0.0, 0.0, 4.0, 4.0))).unwrap();
-    }
-    let report = f.report();
-    assert!(report.truncated);
-    assert_eq!(report.scanned, MAX_SCANNED_LAYERS);
-}
-
 // ---------------------------------------------------------------- fixes
 
 fn snapshot(app: &App, ids: &[NodeId]) -> Vec<Option<Node>> {
@@ -639,6 +626,7 @@ mod painted_behind;
 mod resolved_styles;
 mod rules;
 mod safety;
+mod scale;
 mod subtree_bounds;
 mod text_run_fills;
 mod under_an_opaque_fill;
