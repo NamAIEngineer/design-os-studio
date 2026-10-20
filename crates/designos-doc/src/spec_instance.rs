@@ -2930,6 +2930,7 @@ mod tests {
                 variables: vec!["v_radius".into()],
                 key: None,
                 source_library_key: None,
+                extensions: Default::default(),
             },
         );
         lib_doc.variables.insert(
@@ -2945,6 +2946,8 @@ mod tests {
                 hidden_from_publishing: false,
                 key: None,
                 code_syntax: BTreeMap::new(),
+                extensions: Default::default(),
+                mode_extensions: Default::default(),
             },
         );
         lib_doc.images.insert("img_hash_1".into(), vec![1, 2, 3, 4]);
