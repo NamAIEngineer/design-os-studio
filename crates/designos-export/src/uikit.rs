@@ -142,7 +142,7 @@ impl Cx<'_> {
 
         if let NodeKind::Instance { .. } = n.kind {
             self.line(format!("let {v} = {}()", view_name(doc, n)));
-            for (name, lit) in instance_args(doc, n) {
+            for (name, lit) in instance_args_for(doc, n, crate::slots::Lang::Swift) {
                 let value = match lit {
                     PropLit::Bool(b) => b.to_string(),
                     PropLit::Text(t) => swift_quote(&t),

@@ -419,7 +419,7 @@ pub(crate) fn prop_params(doc: &Document, root: NodeId) -> Vec<PropParam> {
             (_, PropValue::Bool(b)) => PropDefault::Bool(*b),
             (_, PropValue::Text(t)) => PropDefault::Text(t.clone()),
             (_, PropValue::Variant(t)) => PropDefault::Variant { value: t.clone(), options: Vec::new() },
-            (_, PropValue::Instance(c)) => PropDefault::Instance(doc.get(*c).map(|c| pascal(&c.name))),
+            (_, PropValue::Instance(c)) => PropDefault::Instance(doc.get(*c).map(|c| view_name(doc, c))),
             (PropKind::Boolean, _) => PropDefault::Bool(false),
             (PropKind::InstanceSwap { .. }, _) => PropDefault::Instance(None),
             _ => PropDefault::Text(String::new()),

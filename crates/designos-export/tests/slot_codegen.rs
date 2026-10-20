@@ -651,6 +651,73 @@ fn react_tailwind_uses_the_same_signature() {
     assert!(call_tw.contains("<Dialog label=\"Go\" disabled size=\"L\" icon={<Heart />}"), "{call_tw}");
 }
 
+/// Extracts the inner JSX expression inside `export function Name(...) {\n  return (\n...\n  );\n}`.
+fn extract_jsx_call(react_fn: &str) -> String {
+    let lines: Vec<&str> = react_fn.lines().collect();
+    assert!(lines.len() >= 5 && lines[0].starts_with("export function ") && lines[1].trim() == "return (", "unexpected react_with wrapper: {react_fn}");
+    lines[2..lines.len() - 2].join("\n")
+}
+
+#[test]
+fn instance_swap_pointing_at_variant_uses_component_set_view_name_and_uikit_keeps_colliding_props() {
+    let (mut d, comp, inst) = dialog(&[("Content", None)]);
+
+    let page = d.pages[0];
+    let make_variant_set = |d: &mut Document, set_name: &str, variant_name: &str| -> NodeId {
+        let set_id = d.alloc_id();
+        let mut set_node = Node::new(set_id, NodeKind::ComponentSet(FrameProps::default()));
+        set_node.name = set_name.into();
+        let set_id = d.insert(page, set_node).unwrap();
+
+        let var_id = d.alloc_id();
+        let mut var_node = Node::new(var_id, NodeKind::Component(FrameProps::default()));
+        var_node.name = variant_name.into();
+        d.insert(set_id, var_node).unwrap()
+    };
+
+    let star_regular = make_variant_set(&mut d, "Star", "Size=Regular");
+    let heart_bold = make_variant_set(&mut d, "Heart", "Weight=Bold");
+
+    d.get_mut(comp).unwrap().component.props.extend([
+        ComponentPropDef {
+            name: "Icon#2:0".into(),
+            kind: PropKind::InstanceSwap { preferred: vec![star_regular, heart_bold] },
+            default: PropValue::Instance(star_regular),
+        },
+        ComponentPropDef { name: "Label#2:1".into(), kind: PropKind::Text, default: PropValue::Text("a".into()) },
+        ComponentPropDef { name: "label#2:2".into(), kind: PropKind::Text, default: PropValue::Text("b".into()) },
+    ]);
+    let values = &mut d.get_mut(inst).unwrap().component.values;
+    values.insert("Icon#2:0".into(), PropValue::Instance(heart_bold));
+    values.insert("Label#2:1".into(), PropValue::Text("a2".into()));
+    values.insert("label#2:2".into(), PropValue::Text("b2".into()));
+
+    let react_def = react_for(&d, comp);
+    let react_call = react_for(&d, inst);
+    assert!(react_def.contains("icon = <Star />"), "default variant swap must resolve set name Star: {react_def}");
+    assert!(!react_def.contains("SizeRegular"), "must not use variant node name: {react_def}");
+    assert!(react_call.contains("icon={<Heart />}"), "overridden variant swap must resolve set name Heart: {react_call}");
+    assert!(!react_call.contains("WeightBold"), "must not use variant node name: {react_call}");
+
+    let jsx_call = extract_jsx_call(&react_call);
+    assert!(jsx_call.trim_start().starts_with("<Dialog "), "extracted JSX call must be a <Dialog ...> element: {jsx_call}");
+
+    let sw_def = swiftui_for(&d, comp);
+    let sw_call = swiftui_for(&d, inst);
+    assert!(sw_def.contains("Star()"), "{sw_def}");
+    assert!(sw_call.contains("Heart()"), "{sw_call}");
+
+    let kt_def = compose_for(&d, comp);
+    let kt_call = compose_for(&d, inst);
+    assert!(kt_def.contains("Star()"), "{kt_def}");
+    assert!(kt_call.contains("Heart()"), "{kt_call}");
+
+    let uk_call = designos_export::uikit_for(&d, inst);
+    assert!(uk_call.contains(".icon = Heart()"), "UIKit must resolve variant set name Heart: {uk_call}");
+    assert!(uk_call.contains(".label = \"a2\""), "UIKit must emit first colliding prop: {uk_call}");
+    assert!(uk_call.contains(".label2 = \"b2\""), "UIKit must emit renamed colliding prop label2: {uk_call}");
+}
+
 /// Type-checks the generated React (TSX) with `tsc --noEmit --jsx preserve --strict`.
 /// Needs `npx` and network on first use, so it is opt-in: `cargo test -p designos-export -- --ignored`.
 #[test]
@@ -661,13 +728,17 @@ fn generated_react_type_checks() {
     add_props(&mut d, comp, inst);
     let dir = std::env::temp_dir().join(format!("designos-slot-tsx-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
-    const STUBS: &str = "declare namespace React { type ReactNode = unknown; type CSSProperties = Record<string, unknown>; }\ndeclare namespace JSX { interface IntrinsicElements { [elem: string]: Record<string, unknown>; } }\nfunction Star() { return null; }\nfunction Heart() { return null; }\n";
+    const STUBS: &str = "declare namespace React { type ReactNode = unknown; type CSSProperties = Record<string, unknown>; }\ndeclared_jsx:\n";
+    let stubs = STUBS.replace(
+        "declared_jsx:\n",
+        "declare namespace JSX { interface IntrinsicElements { [elem: string]: Record<string, unknown>; } }\nfunction Star() { return null; }\nfunction Heart() { return null; }\n",
+    );
     let mut failures = Vec::new();
     for (label, def, call) in [
-        ("inline", react_for(&d, comp), react_for(&d, inst)),
-        ("tailwind", react_with(&d, comp, &ReactOptions { tailwind: true }), react_with(&d, inst, &ReactOptions { tailwind: true })),
+        ("inline", react_for(&d, comp), extract_jsx_call(&react_for(&d, inst))),
+        ("tailwind", react_with(&d, comp, &ReactOptions { tailwind: true }), extract_jsx_call(&react_with(&d, inst, &ReactOptions { tailwind: true }))),
     ] {
-        let src = format!("{STUBS}\n{def}\nexport function Screen() {{\n  return (\n{call}\n  );\n}}\n");
+        let src = format!("{stubs}\n{def}\nexport function Screen() {{\n  return (\n{call}\n  );\n}}\n");
         let file = dir.join(format!("{label}.tsx"));
         std::fs::write(&file, &src).unwrap();
         let out = Proc::new("npx")
