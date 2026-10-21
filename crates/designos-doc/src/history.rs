@@ -464,6 +464,24 @@ impl History {
         Some((fold_start, fold_end))
     }
 
+    /// Applies `cmd` to `doc` and folds its inverse into the latest undo step so a single
+    /// [`Self::undo`] reverts both `cmd` and the step it was folded into (`E15-13` §3.3).
+    /// The folded step keeps its origin and label.
+    pub fn fold_into_last(&mut self, doc: &mut Document, cmd: Command) -> Result<(), DocError> {
+        let inv = cmd.apply(doc)?;
+        self.sync_meta_lengths();
+        match self.undo.pop() {
+            Some(prev_inv) => self.undo.push(Command::Batch(vec![inv, prev_inv])),
+            None => {
+                self.undo.push(inv);
+                self.undo_meta.push(UndoStepMeta::default());
+            }
+        }
+        self.redo.clear();
+        self.redo_meta.clear();
+        Ok(())
+    }
+
     /// Reverts the latest step. Any deferred auto-layout queue from the superseded edit is dropped
     /// before applying the inverse command, and affected auto-layout containers are re-solved from
     /// their restored state so descendants return to the pre-edit layout.

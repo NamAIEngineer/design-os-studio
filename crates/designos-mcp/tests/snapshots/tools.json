@@ -1609,11 +1609,25 @@
   },
   {
     "name": "designos_configure_session",
-    "description": "Configure per-session MCP options for the automatic mutating-call lint issues block (issues.mode: preset | errors_only | off, issues.preset, issues.max_items: 1..=100) and auto_fix settings. Persists across reconnects in the session directory and resets on document switch.",
+    "description": "Configure per-session MCP options for the automatic mutating-call lint issues block (issues.mode: preset | errors_only | off, issues.preset, issues.max_items: 1..=100) and auto_fix settings (auto_fix.mode: on | report_only | off, auto_fix.rules: sizing-conflict, hardcoded-value). Persists across reconnects in the session directory and resets on document switch.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
         "auto_fix": {
+          "additionalProperties": false,
+          "properties": {
+            "mode": {
+              "enum": [
+                "on",
+                "report_only",
+                "off"
+              ],
+              "type": "string"
+            },
+            "rules": {
+              "type": "object"
+            }
+          },
           "type": "object"
         },
         "issues": {
