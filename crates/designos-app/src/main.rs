@@ -1,7 +1,6 @@
 mod agent_a11y;
 mod agent_approval_card;
 pub mod agent_cli_catalog;
-mod agent_failure_redact;
 mod agent_mention;
 mod agent_mention_popup;
 pub mod agent_notify;
@@ -10,7 +9,6 @@ pub mod agent_permissions;
 pub mod agent_picker;
 mod agent_presence;
 mod agent_selection_chip;
-mod agent_session_failure;
 pub mod agent_sessions;
 mod agent_start_failure;
 mod agent_stop;
