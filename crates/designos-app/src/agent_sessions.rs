@@ -15,7 +15,8 @@ pub const ANOTHER_WINDOW_OWNS_SESSION_MSG: &str = "Another window owns this file
 /// How a `TerminalState` is bound to disk.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SessionKey {
-    /// Bound to a library file at `<lib_root>/agent-sessions/<file_id>/`.
+    /// Bound to `<lib_root>/agent-sessions/<file_id>/`: `file_id` is the library file id, or
+    /// `path-<hex>` ([`disk_file_session_key`]) for a file opened from disk.
     LibraryFile { lib_root: PathBuf, file_id: String },
     /// Ephemeral fallback at `/tmp/designos-sessions/<session_id>`.
     Fallback(String),
@@ -149,6 +150,40 @@ pub fn generate_session_uuid() -> String {
 pub fn stable_session_dir(lib_root: &Path, file_id: &str) -> PathBuf {
     let safe_id: String = file_id.chars().filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_').collect();
     lib_root.join("agent-sessions").join(safe_id)
+}
+
+/// Session key for a file opened from disk without a library id: `path-<16 hex digits>`, the
+/// FNV-1a 64-bit hash of its canonical path (the path itself when it cannot be canonicalised).
+/// FNV-1a is spelled out here, not taken from `DefaultHasher`, because the key names a folder that
+/// must keep its name across Studio and Rust upgrades. Renaming or moving the file changes the key
+/// and so starts a fresh history (`#653` rule 2). The result only uses `[0-9a-z-]`, so
+/// [`stable_session_dir`] keeps it as is.
+pub fn disk_file_session_key(path: &Path) -> String {
+    let canonical = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in canonical.as_os_str().as_encoded_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    format!("path-{hash:016x}")
+}
+
+/// What [`crate::terminal::TerminalState::bind_open_file`] last bound: its inputs and the session
+/// key they produced (the library file id, or the `path-<hex>` key of the disk path).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OpenFileBinding {
+    pub lib_root: PathBuf,
+    pub lib_file_id: Option<String>,
+    pub disk_path: Option<PathBuf>,
+    pub window_id: String,
+    pub file_id: String,
+}
+
+impl OpenFileBinding {
+    /// Whether a new `bind_open_file` call carries exactly the inputs of this binding.
+    pub fn same_inputs(&self, lib_root: &Path, lib_file_id: Option<&str>, disk_path: Option<&Path>, window_id: &str) -> bool {
+        self.lib_root == lib_root && self.lib_file_id.as_deref() == lib_file_id && self.disk_path.as_deref() == disk_path && self.window_id == window_id
+    }
 }
 
 /// Interprets `/bin/kill -0 <pid>` exit status and stderr: exit 0 or `EPERM` ("Operation not permitted")
@@ -493,6 +528,166 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    // 1b. `disk_file_session_key_is_a_stable_hash_of_the_canonical_path`
+    #[test]
+    fn disk_file_session_key_is_a_stable_hash_of_the_canonical_path() {
+        let dir = temp_test_dir("disk-key");
+        let file = dir.join("brand.designos");
+        std::fs::write(&file, b"{}").expect("write file");
+        let other = dir.join("other.designos");
+        std::fs::write(&other, b"{}").expect("write other");
+
+        let key = disk_file_session_key(&file);
+        assert!(key.starts_with("path-"), "key shape: {key}");
+        let hex = &key["path-".len()..];
+        assert_eq!(hex.len(), 16, "16 lowercase hex digits: {key}");
+        assert!(hex.chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()), "hex digits only: {key}");
+        assert_eq!(key, disk_file_session_key(&file), "deterministic");
+        assert_ne!(key, disk_file_session_key(&other), "a different path is a different key (rename/move starts fresh)");
+        let dotted = dir.join("sub").join("..").join("brand.designos");
+        std::fs::create_dir_all(dir.join("sub")).expect("sub dir");
+        assert_eq!(key, disk_file_session_key(&dotted), "the canonical path is hashed, not the spelling");
+        // Pinned value: a changed hash would orphan every existing disk-file session after an upgrade.
+        assert_eq!(disk_file_session_key(Path::new("/designos-pinned/does-not-exist.fig")), "path-236811fb7f1c15f7");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // 1c. `disk_file_session_dir_survives_a_restart`
+    #[test]
+    fn disk_file_session_dir_survives_a_restart() {
+        let root = temp_test_dir("disk-restart-lib");
+        let work = temp_test_dir("disk-restart-files");
+        let file = work.join("poster.designos");
+        crate::io::save_path(&Document::new("Poster"), &file).expect("save disk file");
+        let key = disk_file_session_key(&file);
+        let expected = root.join("agent-sessions").join(&key);
+
+        let first_dir = {
+            let mut app = App::new(Document::new("Scratch"));
+            app.attach_library(root.clone());
+            app.open_path(file.clone());
+            let mut tabs = std::mem::take(&mut app.tabs);
+            tabs.reconcile_frame(&mut app);
+            app.tabs = tabs;
+            assert_eq!(app.terminal.session_dir, expected, "a disk file lives under agent-sessions/path-<hex>, not the temp folder");
+            assert!(expected.join("session.lock").is_file(), "the folder is locked while open");
+            app.terminal.shutdown();
+            app.terminal.session_dir.clone()
+        };
+
+        // A new process: new App, same file, same folder.
+        let mut app2 = App::new(Document::new("Scratch"));
+        app2.attach_library(root.clone());
+        app2.open_path(file.clone());
+        let mut tabs = std::mem::take(&mut app2.tabs);
+        tabs.reconcile_frame(&mut app2);
+        app2.tabs = tabs;
+        assert_eq!(app2.terminal.session_dir, first_dir);
+
+        // Renaming (here: another path) starts a fresh history in another folder.
+        let moved = work.join("poster-renamed.designos");
+        std::fs::rename(&file, &moved).expect("rename");
+        app2.terminal.shutdown();
+        app2.open_path(moved.clone());
+        let mut tabs = std::mem::take(&mut app2.tabs);
+        tabs.reconcile_frame(&mut app2);
+        app2.tabs = tabs;
+        assert_eq!(app2.terminal.session_dir, root.join("agent-sessions").join(disk_file_session_key(&moved)));
+        assert_ne!(app2.terminal.session_dir, first_dir);
+
+        app2.terminal.shutdown();
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&work);
+    }
+
+    // 1d. an unsaved scratch document (no library id, no disk path) has no stable key
+    #[test]
+    fn unsaved_scratch_document_keeps_its_per_process_folder() {
+        let root = temp_test_dir("scratch-no-key");
+        let mut st = TerminalState::for_tab(1);
+        st.bind_session("scratch-sid");
+        let before = st.session_dir.clone();
+        st.bind_open_file(&root, None, None, "scratch-sid");
+        assert_eq!(st.session_dir, before);
+        assert!(matches!(st.key, SessionKey::Fallback(_)));
+        assert!(!root.join("agent-sessions").exists(), "no stable folder is created for a scratch document");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    // An unchanged open file must cost no filesystem work per frame (#653 spec section 11).
+    #[cfg(unix)]
+    #[test]
+    fn unchanged_disk_path_does_no_filesystem_work_between_frames() {
+        let root = temp_test_dir("frame-cache-lib");
+        let work = temp_test_dir("frame-cache-files");
+        let real = work.join("real");
+        std::fs::create_dir_all(&real).expect("create real dir");
+        std::os::unix::fs::symlink(&real, work.join("link")).expect("symlink");
+        crate::io::save_path(&Document::new("Poster"), &real.join("poster.designos")).expect("save disk file");
+        let via_link = work.join("link").join("poster.designos");
+
+        let mut app = App::new(Document::new("Scratch"));
+        app.attach_library(root.clone());
+        app.open_path(via_link);
+        let mut tabs = std::mem::take(&mut app.tabs);
+        tabs.reconcile_frame(&mut app);
+        let bound_key = app.terminal.key.clone();
+        let bound_dir = app.terminal.session_dir.clone();
+        assert!(matches!(bound_key, SessionKey::LibraryFile { .. }));
+        assert!(app.terminal.lock_owner.is_some());
+        let mode_before = app.terminal.permission_mode;
+
+        // The file vanishes (an external unlink + rename save) and settings.json changes: a frame that
+        // touched the filesystem would canonicalise the link path differently or reload the mode.
+        std::fs::remove_file(real.join("poster.designos")).expect("remove file");
+        crate::agent_permissions::save_permission_mode(&root, crate::agent_permissions::AgentPermissionMode::Ask).expect("save mode");
+        for _ in 0..3 {
+            tabs.reconcile_frame(&mut app);
+        }
+        app.tabs = tabs;
+        assert_eq!(app.terminal.key, bound_key, "a transient canonicalize failure must not flip the key");
+        assert_eq!(app.terminal.session_dir, bound_dir);
+        assert!(app.terminal.lock_owner.is_some(), "the lock stays held");
+        assert_eq!(app.terminal.permission_mode, mode_before, "settings.json is not re-read while nothing changed");
+        app.terminal.shutdown();
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&work);
+    }
+
+    // File > Open of a disk file, then of an .svg (a scratch document): the SVG must not inherit
+    // the file's session (rule 2 last sentence).
+    #[test]
+    fn disk_file_followed_by_scratch_document_drops_the_file_session() {
+        let root = temp_test_dir("file-to-scratch-lib");
+        let work = temp_test_dir("file-to-scratch-files");
+        let file = work.join("poster.designos");
+        crate::io::save_path(&Document::new("Poster"), &file).expect("save disk file");
+        let stable = root.join("agent-sessions").join(disk_file_session_key(&file));
+
+        let mut app = App::new(Document::new("Scratch"));
+        app.attach_library(root.clone());
+        app.open_path(file.clone());
+        let mut tabs = std::mem::take(&mut app.tabs);
+        tabs.reconcile_frame(&mut app);
+        app.tabs = tabs;
+        assert_eq!(app.terminal.session_dir, stable);
+        assert!(stable.join("session.lock").is_file());
+
+        app.replace_document(Document::new("Svg"), None);
+        let mut tabs = std::mem::take(&mut app.tabs);
+        tabs.reconcile_frame(&mut app);
+        tabs.reconcile_frame(&mut app);
+        app.tabs = tabs;
+        assert!(matches!(app.terminal.key, SessionKey::Fallback(_)), "a scratch document leaves the file's key: {:?}", app.terminal.key);
+        assert_ne!(app.terminal.session_dir, stable);
+        assert!(app.terminal.lock_owner.is_none());
+        assert!(!stable.join("session.lock").exists(), "the file's lock is released");
+        assert!(!app.terminal.session_dir.starts_with(root.join("agent-sessions")));
+        app.terminal.shutdown();
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&work);
+    }
+
     // 2. `registry_round_trip_keeps_unknown_fields`
     #[test]
     fn registry_round_trip_keeps_unknown_fields() {
@@ -562,6 +757,61 @@ mod tests {
         assert_eq!(on_disk.sessions[0].cli, "claude");
         assert_eq!(on_disk.sessions[0].session_id.as_deref(), Some(uuid.as_str()));
         assert_eq!(on_disk.sessions[0].status, SessionEntryStatus::Active);
+
+        st.shutdown();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A Claude tab bound to a library with a stub `claude` on its PATH, started while the library still holds Skip.
+    #[cfg(unix)]
+    fn claude_window_started_in_skip(tag: &str) -> (PathBuf, TerminalState) {
+        use crate::agent_permissions::AgentPermissionMode;
+        let dir = temp_test_dir(tag);
+        let bin_dir = dir.join("bin");
+        std::fs::create_dir_all(&bin_dir).expect("bin dir");
+        write_executable_script(&bin_dir, "claude", "#!/bin/sh\nsleep 30\n");
+        let mut st = TerminalState::for_tab(1);
+        st.bind_library_file(&dir, "file-perm", "p1-w1-tab-1");
+        st.path_prepend.push(bin_dir);
+        assert_eq!(st.permission_mode, AgentPermissionMode::Skip, "this window cached Skip when it bound");
+        (dir, st)
+    }
+
+    /// Another window (its own process) saves Ask after this window bound: the next Claude tab launches without
+    /// the skip-permissions flag, not just with `tab.permission_mode` set.
+    #[cfg(unix)]
+    #[test]
+    fn a_claude_tab_launches_in_ask_when_another_window_saved_ask() {
+        use crate::agent_permissions::{save_permission_mode, AgentPermissionMode};
+        let (dir, mut st) = claude_window_started_in_skip("claude-ask-launch");
+        save_permission_mode(&dir, AgentPermissionMode::Ask).expect("the other window saves Ask");
+
+        let idx = st.spawn_tab(AgentCliPreset::Claude, None).expect("spawn claude");
+        let launched = st.tabs[idx].spawned_command.clone().expect("an agent tab records its launch command");
+        assert!(launched.starts_with("claude --session-id "), "a new session starts: {launched}");
+        assert!(!launched.contains("--dangerously-skip-permissions"), "Ask must not launch with the skip flag: {launched}");
+
+        st.shutdown();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Resuming a recorded Claude session also honours the Ask another window saved.
+    #[cfg(unix)]
+    #[test]
+    fn a_resumed_claude_tab_launches_in_ask_when_another_window_saved_ask() {
+        use crate::agent_permissions::{save_permission_mode, AgentPermissionMode};
+        let (dir, mut st) = claude_window_started_in_skip("claude-ask-resume");
+        let first = st.spawn_tab(AgentCliPreset::Claude, None).expect("spawn claude in Skip");
+        let first_launch = st.tabs[first].spawned_command.clone().expect("launch command");
+        assert!(first_launch.contains("--dangerously-skip-permissions"), "the Skip window launches with the flag: {first_launch}");
+        let recorded = st.session_registry.sessions.first().cloned().expect("the tab is recorded in sessions.json");
+        st.session_registry.sessions[0].status = SessionEntryStatus::Exited;
+
+        save_permission_mode(&dir, AgentPermissionMode::Ask).expect("the other window saves Ask");
+        let resumed = st.resume_session_by_tab_id(recorded.tab_id, None).expect("resume the recorded session");
+        let launched = st.tabs[resumed].spawned_command.clone().expect("a resumed tab records its launch command");
+        assert!(launched.starts_with("claude --resume "), "the recorded session resumes: {launched}");
+        assert!(!launched.contains("--dangerously-skip-permissions"), "Ask must not resume with the skip flag: {launched}");
 
         st.shutdown();
         let _ = std::fs::remove_dir_all(&dir);

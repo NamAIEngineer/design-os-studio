@@ -992,6 +992,8 @@ pub struct TerminalState {
     pub session_registry: crate::agent_sessions::SessionRegistry,
     /// Window identifier holding `<session_dir>/session.lock` when bound to a library file (`None` on fallback).
     pub lock_owner: Option<String>,
+    /// Inputs and resulting key of the last [`Self::bind_open_file`], so a steady frame does no IO.
+    pub open_file_binding: Option<crate::agent_sessions::OpenFileBinding>,
     /// Whether `codex resume --last` has passed the runtime cwd-scoping check (`#653` §6).
     pub codex_cwd_scoped: bool,
     /// Whether `agy --continue` has passed the runtime cwd-scoping check (`#653` §6).
@@ -1151,6 +1153,7 @@ impl TerminalState {
             path_override: None,
             session_registry: crate::agent_sessions::SessionRegistry::default(),
             lock_owner: None,
+            open_file_binding: None,
             codex_cwd_scoped: false,
             agy_cwd_scoped: false,
             path_prepend: Vec::new(),
@@ -1432,7 +1435,6 @@ impl TerminalState {
         F: Fn(u32) -> bool,
     {
         self.library_root = Some(lib_root.to_path_buf());
-        self.permission_mode = crate::agent_permissions::load_permission_mode(lib_root);
         let clean_file_id = file_id.trim();
         if clean_file_id.is_empty() {
             return;
@@ -1442,6 +1444,9 @@ impl TerminalState {
         if self.key == target_key && self.lock_owner.as_deref() == Some(win.as_str()) {
             return;
         }
+        // Read after the already-bound early return so a steady frame never touches settings.json;
+        // a mode another window saves later is picked up when an agent starts (`refresh_permission_mode_from_disk`).
+        self.permission_mode = crate::agent_permissions::load_permission_mode(lib_root);
         if self.key != target_key {
             self.shutdown();
             self.next_tab_id = 1;
@@ -1467,6 +1472,56 @@ impl TerminalState {
                 self.status_msg = Some(message);
             }
         }
+    }
+
+    /// Re-reads the saved permission mode of the bound library so a mode another window (a separate
+    /// process) saved applies to the agent about to start. Called per spawn or prompt, never per frame.
+    /// Without a library, or without a saved mode, the in-memory mode stays.
+    fn refresh_permission_mode_from_disk(&mut self) {
+        if let Some(mode) = self.library_root.as_deref().and_then(crate::agent_permissions::load_saved_permission_mode) {
+            self.permission_mode = mode;
+        }
+    }
+
+    /// Binds to the stable folder of the open file (`#653` rules 1 and 2): the library file id when
+    /// there is one, else the hash key of its disk path ([`crate::agent_sessions::disk_file_session_key`]).
+    /// A document with neither (an unsaved scratch, or an `.svg` opened over a file) gets the
+    /// per-process temp folder again, so it never inherits the previous file's session.
+    ///
+    /// Runs every painted frame while no agent tab is open, so it does no filesystem work when the
+    /// inputs are the ones it last bound: the path key is computed once per path, and a transient
+    /// `canonicalize` failure (an external unlink + rename save) cannot flip an already-bound key.
+    pub fn bind_open_file(&mut self, lib_root: &Path, lib_file_id: Option<&str>, disk_path: Option<&Path>, window_id: &str) {
+        let cached = self.open_file_binding.as_ref().filter(|b| b.same_inputs(lib_root, lib_file_id, disk_path, window_id));
+        if let Some(b) = cached {
+            let still_bound =
+                matches!(&self.key, crate::agent_sessions::SessionKey::LibraryFile { lib_root: r, file_id } if r == lib_root && *file_id == b.file_id);
+            if still_bound && self.lock_owner.is_some() {
+                return;
+            }
+        }
+        let file_id = match (lib_file_id, disk_path) {
+            (Some(id), _) => id.to_string(),
+            (None, Some(path)) => match cached {
+                Some(b) => b.file_id.clone(),
+                None => crate::agent_sessions::disk_file_session_key(path),
+            },
+            (None, None) => {
+                self.open_file_binding = None;
+                if matches!(self.key, crate::agent_sessions::SessionKey::LibraryFile { .. }) {
+                    self.unbind_library_file(window_id);
+                }
+                return;
+            }
+        };
+        self.bind_library_file(lib_root, &file_id, window_id);
+        self.open_file_binding = Some(crate::agent_sessions::OpenFileBinding {
+            lib_root: lib_root.to_path_buf(),
+            lib_file_id: lib_file_id.map(str::to_string),
+            disk_path: disk_path.map(Path::to_path_buf),
+            window_id: window_id.to_string(),
+            file_id,
+        });
     }
 
     /// Releases `<session_dir>/session.lock` if owned by this `TerminalState`.
@@ -1968,6 +2023,7 @@ impl TerminalState {
     /// Spawns a new tab with `preset` bound to this file's isolated [`SessionEnv`] and switches `active_tab` to it.
     /// For registrable agent CLIs, records a new entry in `sessions.json` (`#653`) and updates `last_cli` (`#652`).
     pub fn spawn_tab(&mut self, preset: AgentCliPreset, file_path: Option<&Path>) -> Result<usize, String> {
+        self.refresh_permission_mode_from_disk();
         if crate::agent_sessions::is_agent_cli_preset(preset) {
             let session_uuid =
                 if crate::agent_sessions::uses_preassigned_session_id(preset) { Some(crate::agent_sessions::generate_session_uuid()) } else { None };
@@ -1998,6 +2054,7 @@ impl TerminalState {
         custom_title: Option<String>,
         register_new_entry: bool,
     ) -> Result<usize, String> {
+        self.refresh_permission_mode_from_disk();
         let id = self.next_tab_id.max(1);
         self.next_tab_id = id + 1;
         let run_seq = self.next_run_seq.max(1);
@@ -2108,6 +2165,7 @@ impl TerminalState {
     }
 
     fn resume_session_entry(&mut self, entry_clone: &crate::agent_sessions::SessionEntry, file_path: Option<&Path>) -> Result<usize, String> {
+        self.refresh_permission_mode_from_disk();
         let preset =
             crate::agent_sessions::preset_from_cli_name(&entry_clone.cli).ok_or_else(|| format!("Unsupported CLI '{}' in sessions.json", entry_clone.cli))?;
         let cmd_str = crate::agent_permissions::build_resume_command_for_mode(entry_clone, self.codex_cwd_scoped, self.agy_cwd_scoped, self.permission_mode)
@@ -9426,5 +9484,172 @@ Done!
 
         kill_tabs(&mut st);
         let _ = std::fs::remove_dir_all(&st.session_dir);
+    }
+
+    fn permission_window_root(tag: &str) -> PathBuf {
+        let root = std::env::temp_dir().join(format!("dos-653-perm-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("create library root");
+        root
+    }
+
+    /// Another window (its own process) switches the library to Ask: this window's next agent tab honours it.
+    #[test]
+    fn new_agent_tab_honours_the_permission_mode_another_window_saved() {
+        use crate::agent_permissions::{save_permission_mode, AgentPermissionMode};
+        let root = permission_window_root("other-window");
+        let mut window_a = TerminalState::for_tab(1);
+        window_a.bind_library_file(&root, "file-a", "win-a");
+        let mut window_b = TerminalState::for_tab(2);
+        window_b.bind_library_file(&root, "file-b", "win-b");
+        assert_eq!(window_b.permission_mode, AgentPermissionMode::Skip, "window B cached the default when it bound");
+
+        window_a.permission_mode = AgentPermissionMode::Ask;
+        save_permission_mode(&root, AgentPermissionMode::Ask).expect("window A persists Ask");
+
+        let idx = window_b.spawn_tab(AgentCliPreset::Shell, None).expect("spawn tab in window B");
+        assert_eq!(window_b.permission_mode, AgentPermissionMode::Ask, "the spawn re-reads the saved mode");
+        assert_eq!(window_b.tabs[idx].permission_mode, AgentPermissionMode::Ask, "the new tab runs in Ask mode");
+
+        kill_tabs(&mut window_b);
+        window_a.shutdown();
+        window_b.shutdown();
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// No saved mode (or no library): a mode set in memory keeps applying to new tabs.
+    #[test]
+    fn new_agent_tab_keeps_the_in_memory_mode_when_nothing_is_saved() {
+        use crate::agent_permissions::AgentPermissionMode;
+        let root = permission_window_root("no-saved-mode");
+        let mut bound = TerminalState::for_tab(3);
+        bound.bind_library_file(&root, "file-c", "win-c");
+        bound.permission_mode = AgentPermissionMode::Ask;
+        assert!(!root.join("settings.json").exists());
+        let idx = bound.spawn_tab(AgentCliPreset::Shell, None).expect("spawn bound tab");
+        assert_eq!(bound.tabs[idx].permission_mode, AgentPermissionMode::Ask);
+        kill_tabs(&mut bound);
+        bound.shutdown();
+
+        let mut detached = isolated_683_state(68490);
+        detached.permission_mode = AgentPermissionMode::Ask;
+        let idx = detached.spawn_tab(AgentCliPreset::Shell, None).expect("spawn detached tab");
+        assert_eq!(detached.tabs[idx].permission_mode, AgentPermissionMode::Ask);
+        kill_tabs(&mut detached);
+        let _ = std::fs::remove_dir_all(&detached.session_dir);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Restores write access to a library root on drop, so a failed assertion cannot leave a folder the temp cleaner cannot delete.
+    #[cfg(unix)]
+    struct ReadOnlyRoot(PathBuf);
+
+    #[cfg(unix)]
+    impl ReadOnlyRoot {
+        fn lock(root: &Path) -> Self {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(root, std::fs::Permissions::from_mode(0o555)).expect("make the root read-only");
+            Self(root.to_path_buf())
+        }
+    }
+
+    #[cfg(unix)]
+    impl Drop for ReadOnlyRoot {
+        fn drop(&mut self) {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&self.0, std::fs::Permissions::from_mode(0o755));
+        }
+    }
+
+    /// The user picks Ask but `settings.json` cannot be written: the agent about to start must still run in Ask,
+    /// not fall back to the Skip that is still on disk.
+    #[cfg(unix)]
+    #[test]
+    fn a_failed_mode_save_keeps_ask_for_the_next_agent_tab() {
+        use crate::agent_permissions::{save_permission_mode, AgentPermissionMode};
+        let root = permission_window_root("failed-save");
+        let mut st = TerminalState::for_tab(5);
+        st.bind_library_file(&root, "file-e", "win-e");
+        save_permission_mode(&root, AgentPermissionMode::Skip).expect("Skip is saved while the root is writable");
+        {
+            let _read_only = ReadOnlyRoot::lock(&root);
+            st.permission_mode = AgentPermissionMode::Ask;
+            if save_permission_mode(&root, AgentPermissionMode::Ask).is_ok() {
+                eprintln!("the root stayed writable (running as root?): nothing to prove here");
+                return;
+            }
+            let idx = st.spawn_tab(AgentCliPreset::Shell, None).expect("spawn tab");
+            assert_eq!(st.permission_mode, AgentPermissionMode::Ask, "the unsaved Ask survives the spawn");
+            assert_eq!(st.tabs[idx].permission_mode, AgentPermissionMode::Ask, "the new tab runs in Ask mode");
+            kill_tabs(&mut st);
+            st.shutdown();
+        }
+        assert_eq!(
+            crate::agent_permissions::load_saved_permission_mode(&root),
+            Some(AgentPermissionMode::Ask),
+            "the unsaved choice is what the next window of this process reads"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The picker path: the app setter tells the user the save failed, the unsaved Ask still reaches the next
+    /// agent tab and a project tab opened afterwards, and a later successful save clears the memory of it.
+    #[cfg(unix)]
+    #[test]
+    fn the_app_setter_reports_a_failed_save_and_keeps_ask_until_a_save_works() {
+        use crate::agent_permissions::{save_permission_mode, AgentPermissionMode};
+        let root = permission_window_root("app-setter");
+        let mut app = crate::app::App::new(designos_doc::Document::new("Scratch"));
+        app.lib = Some(designos_library::Library::open(&root).expect("open library"));
+        app.terminal.bind_library_file(&root, "file-f", "win-f");
+        save_permission_mode(&root, AgentPermissionMode::Skip).expect("Skip is saved while the root is writable");
+
+        let read_only = ReadOnlyRoot::lock(&root);
+        if std::fs::write(root.join("probe"), b"x").is_ok() {
+            eprintln!("the root stayed writable (running as root?): nothing to prove here");
+            return;
+        }
+        app.set_agent_permission_mode(AgentPermissionMode::Ask);
+        assert_eq!(app.terminal.status_msg.as_deref(), Some("Mode not saved. Check folder permissions."));
+        let idx = app.terminal.spawn_tab(AgentCliPreset::Shell, None).expect("spawn tab");
+        assert_eq!(app.terminal.tabs[idx].permission_mode, AgentPermissionMode::Ask, "the active window keeps Ask");
+
+        let mut opened_later = TerminalState::for_tab(6);
+        opened_later.bind_library_file(&root, "file-g", "win-g");
+        assert_eq!(opened_later.permission_mode, AgentPermissionMode::Ask, "a project tab opened later reads the unsaved Ask, not the Skip on disk");
+
+        drop(read_only);
+        app.set_agent_permission_mode(AgentPermissionMode::Ask);
+        assert_eq!(crate::comments::settings::load_choice(&root, crate::agent_permissions::SETTING_KEY).as_deref(), Some("ask"), "the retry reaches the disk");
+        save_permission_mode(&root, AgentPermissionMode::Skip).expect("Skip is saved again");
+        let mut after = TerminalState::for_tab(7);
+        after.bind_library_file(&root, "file-h", "win-h");
+        assert_eq!(after.permission_mode, AgentPermissionMode::Skip, "a successful save clears the unsaved mode");
+
+        kill_tabs(&mut app.terminal);
+        app.terminal.shutdown();
+        opened_later.shutdown();
+        after.shutdown();
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A mode set through the normal path (in memory and saved) wins on the next spawn.
+    #[test]
+    fn new_agent_tab_uses_the_mode_set_and_saved_in_this_window() {
+        use crate::agent_permissions::{save_permission_mode, AgentPermissionMode};
+        let root = permission_window_root("same-window");
+        let mut st = TerminalState::for_tab(4);
+        st.bind_library_file(&root, "file-d", "win-d");
+        st.permission_mode = AgentPermissionMode::Ask;
+        save_permission_mode(&root, AgentPermissionMode::Ask).expect("save Ask");
+        let idx = st.spawn_tab(AgentCliPreset::Shell, None).expect("spawn tab");
+        assert_eq!(st.tabs[idx].permission_mode, AgentPermissionMode::Ask);
+        st.permission_mode = AgentPermissionMode::Skip;
+        save_permission_mode(&root, AgentPermissionMode::Skip).expect("save Skip");
+        let idx = st.spawn_tab(AgentCliPreset::Shell, None).expect("spawn second tab");
+        assert_eq!(st.tabs[idx].permission_mode, AgentPermissionMode::Skip);
+        kill_tabs(&mut st);
+        st.shutdown();
+        let _ = std::fs::remove_dir_all(&root);
     }
 }
