@@ -1328,8 +1328,8 @@ impl Document {
     }
 
     /// Applies the explicit `font_size`, `line_height` and `font_weight` of `spec` to the text node
-    /// `id` after its text style, so they override the style. An explicit `font_size` together with
-    /// `text_style` also detaches the style link (`STYLE_DETACHED_BY_SPEC`).
+    /// `id` after its text style, so they override the style. Binding `font_size` to a variable
+    /// together with `text_style` detaches the style link (`STYLE_DETACHED_BY_SPEC`).
     #[allow(clippy::too_many_arguments)]
     fn apply_text_overrides(
         &mut self,
@@ -1348,8 +1348,7 @@ impl Document {
                         tp.style.font_size = v.max(1.0);
                     }
                 }
-            }
-            if spec.text_style.is_some() {
+            } else if spec.text_style.is_some() {
                 if let Some(n) = self.get_mut(id) {
                     if n.style_refs.remove("text").is_some() {
                         report.warnings.push(SpecWarning {
@@ -1357,7 +1356,7 @@ impl Document {
                             path: format!("{path}.font_size"),
                             token: spec.text_style.clone(),
                             replacement: None,
-                            message: Some("Explicit font_size overrides and detaches text_style.".to_string()),
+                            message: Some("A variable-bound font_size overrides and detaches text_style.".to_string()),
                         });
                     }
                 }
@@ -1553,16 +1552,20 @@ impl Document {
 
         let (text, font_size, line_height, font_weight, text_color) = match &n.kind {
             NodeKind::Text(tp) => {
+                let linked_ts = text_style.as_ref().and_then(|_| n.style_refs.get("text")).and_then(|k| match self.styles.get(k) {
+                    Some(Style::Text(ts)) => Some(ts),
+                    _ => None,
+                });
                 let fs = if let Some(vid) = n.variables.bindings.get("fontSize") {
                     self.export_var_ref(index, vid).map(NumberOrVar::Ref)
-                } else if text_style.is_none() {
+                } else if text_style.is_none() || linked_ts.is_some_and(|ts| ts.font_size != tp.style.font_size) {
                     Some(NumberOrVar::Num(tp.style.font_size))
                 } else {
                     None
                 };
                 let lh = if let Some(vid) = n.variables.bindings.get("lineHeight") {
                     self.export_var_ref(index, vid).map(NumberOrVar::Ref)
-                } else if text_style.is_none() {
+                } else if text_style.is_none() || linked_ts.is_some_and(|ts| ts.line_height != tp.style.line_height) {
                     match tp.style.line_height {
                         LineHeight::Pixels(px) => Some(NumberOrVar::Num(px)),
                         _ => None,
@@ -1570,7 +1573,7 @@ impl Document {
                 } else {
                     None
                 };
-                let fw = text_style.is_none().then_some(tp.style.font_weight);
+                let fw = (text_style.is_none() || linked_ts.is_some_and(|ts| ts.font_weight != tp.style.font_weight)).then_some(tp.style.font_weight);
                 let tc = if let Some(skey) = n.style_refs.get("fill") {
                     self.export_style_ref(skey, true)
                 } else if let Some(vid) = n.variables.bindings.get("fills/0") {
