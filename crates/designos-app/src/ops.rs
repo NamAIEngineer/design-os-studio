@@ -193,8 +193,16 @@ impl App {
             self.changed();
             return true;
         }
+        let before_nodes = tx.ed.before_nodes().clone();
         match tx.commit(&mut self.doc, &mut self.hist) {
             Ok(changed) => {
+                if changed {
+                    for (id, before) in &before_nodes {
+                        if let Some(after) = self.doc.get(*id) {
+                            self.agent_busy_frames.record_user_node_update(before, after);
+                        }
+                    }
+                }
                 self.changed();
                 self.sanitize();
                 changed
@@ -304,6 +312,11 @@ impl App {
     pub fn scrub_end(&mut self) {
         let Some(base) = self.scrub.take() else { return };
         let changed: Vec<NodeId> = base.iter().filter(|(id, old)| self.doc.nodes.get(id).is_some_and(|cur| cur != *old)).map(|(id, _)| *id).collect();
+        for id in &changed {
+            if let (Some(old), Some(cur)) = (base.get(id), self.doc.get(*id)) {
+                self.agent_busy_frames.record_user_node_update(old, cur);
+            }
+        }
         let mut updates: Vec<Command> = changed.iter().filter_map(|id| self.doc.get(*id)).map(|n| Command::Update { node: Box::new(n.clone()) }).collect();
         crate::comp_ops::record_overrides(&self.doc, &base, &mut updates);
         for id in &changed {
@@ -327,8 +340,18 @@ impl App {
         if self.try_undo_restore() {
             return;
         }
+        let copy_undo_match =
+            self.agent_busy_frames.last_copy_undo.as_ref().is_some_and(|(cid, _, depth)| self.hist.undo_depth() == *depth && self.doc.get(*cid).is_some());
         match self.hist.undo(&mut self.doc) {
             Ok(true) => {
+                if copy_undo_match {
+                    if let Some((copy_id, prev_sel, _)) = self.agent_busy_frames.last_copy_undo.clone() {
+                        if self.doc.get(copy_id).is_none() {
+                            self.selection = prev_sel;
+                            self.agent_busy_frames.last_copy_undo = None;
+                        }
+                    }
+                }
                 self.relayout_moved_geometry();
                 self.sanitize();
             }
@@ -567,6 +590,67 @@ impl App {
         if !new_sel.is_empty() {
             self.selection = new_sel;
         }
+    }
+
+    /// Duplicates `frame_id` into the same parent, placing the copy in the nearest free spot to
+    /// the right (`#693` §3.3), stripping any busy / in-progress metadata, and selecting the copy
+    /// in a single undo step (`Tx`).
+    pub fn duplicate_into_free_spot(&mut self, frame_id: NodeId) -> Option<NodeId> {
+        let orig = self.doc.get(frame_id)?;
+        let parent = orig.parent?;
+        let orig_rect = crate::canvas::affine_rect_aabb(&orig.transform, orig.size);
+        let prev_selection = self.selection.clone();
+
+        let mut copies = clipboard::capture(&self.doc, &[frame_id]).map(|c| clipboard::instantiate(&mut self.doc, &c)).unwrap_or_default();
+        let mut nodes = copies.pop()?;
+        if let Some(root) = nodes.first() {
+            if !self.slot_insert_allowed(parent, &[root]) {
+                return None;
+            }
+        }
+        crate::agent_busy_frames::strip_busy_metadata_from_copy(&mut self.doc, &mut self.agent_busy_frames.frame_owners, &mut nodes);
+
+        let index = self.doc.get(parent).and_then(|p| p.children.iter().position(|c| *c == frame_id)).map(|i| i + 1).unwrap_or(usize::MAX);
+        let in_al = self.doc.get(parent).and_then(|p| p.kind.frame_props()).map(|f| f.auto_layout.is_some()).unwrap_or(false);
+        let sibling_bounds: Vec<Rect> = if in_al {
+            Vec::new()
+        } else {
+            self.doc
+                .get(parent)
+                .map(|p| {
+                    p.children
+                        .iter()
+                        .filter(|&&cid| cid != frame_id)
+                        .filter_map(|&cid| self.doc.get(cid))
+                        .map(|sib| crate::canvas::affine_rect_aabb(&sib.transform, sib.size))
+                        .collect()
+                })
+                .unwrap_or_default()
+        };
+
+        let copy_id = nodes.first()?.id;
+        if let Some(root) = nodes.first_mut() {
+            if !in_al {
+                let spot = crate::agent_busy_frames::find_free_spot_to_right(orig_rect, &sibling_bounds, crate::agent_busy_frames::FREE_SPOT_GAP);
+                root.transform.tx = spot.x;
+                root.transform.ty = spot.y;
+            }
+            root.name = self.doc.get(frame_id).map(|n| n.name.clone()).unwrap_or_default();
+            apply_slot_stretch_on_insert(&self.doc, parent, root);
+        }
+
+        let mut tx = Tx::new();
+        if tx.cmd(&mut self.doc, Command::Insert { parent, index, nodes }).is_ok() {
+            Self::mark_slot_content_override(&mut self.doc, &mut tx.ed, parent);
+            layout::relayout_around(&mut self.doc, &mut tx.ed, parent);
+        }
+        if !self.run_tx(tx) {
+            return None;
+        }
+        self.agent_busy_frames.last_copy_undo = Some((copy_id, prev_selection, self.hist.undo_depth()));
+        self.selection = vec![copy_id];
+        self.sync_busy_frame_banner();
+        Some(copy_id)
     }
 
     // ------------------------------------------------------------ clipboard

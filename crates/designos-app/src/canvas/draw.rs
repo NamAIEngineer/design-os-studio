@@ -448,7 +448,7 @@ pub fn in_progress_badge_rect(doc: &designos_doc::Document, id: NodeId, n: &Node
     let label = ip.badge_text();
     let text_w = label.chars().count() as f32 * theme::FONT_SIZE_CAPTION * 0.62 + 12.0;
     let h = 18.0;
-    let left_x = dev_status_badge_rect(id, n, label_rect).map_or(label_rect.right() + 6.0, |(dr, _)| dr.right() + 6.0);
+    let left_x = dev_status_badge_rect(id, n, label_rect).map_or(label_rect.right(), |(dr, _)| dr.right()) + theme::SPACE_ROW;
     let r = ERect::from_min_size(Pos2::new(left_x, label_rect.center().y - h * 0.5), EV::new(text_w, h));
     Some((r, ip))
 }
@@ -1658,7 +1658,7 @@ mod tests {
         let node = app.doc.get(frame_id).unwrap();
         let (badge_r, ip) = in_progress_badge_rect(&app.doc, frame_id, node, label_r).expect("flagged frame must produce an in_progress badge rect");
         assert_eq!(badge_r.height(), 18.0);
-        assert!((badge_r.left() - (label_r.right() + 6.0)).abs() < 1e-4);
+        assert!((badge_r.left() - (label_r.right() + theme::SPACE_ROW)).abs() < 1e-4);
         assert_eq!(ip.badge_text(), "Claude Code working");
 
         // Transitioning agent run to done emits ClearInProgress and clears the badge.
