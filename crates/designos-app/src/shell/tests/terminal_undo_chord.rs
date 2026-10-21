@@ -352,14 +352,10 @@ fn chord_is_ignored_during_a_user_edit() {
     finish(s, workspace);
 }
 
-#[test]
-fn granularity_is_one_step_per_tool_call() {
-    let (mut s, mut session, workspace) = live_terminal_sim(AgentCliPreset::Claude);
-    s.shell.app.terminal.platform_is_mac_override = Some(true);
-    let before = s.count();
-    let page_id = s.app().page.0;
-
-    // Tool call 1: `designos_apply_spec` creating 3 nodes in a single MCP tool call.
+/// Tool call 1 of the granularity tests: `designos_apply_spec` creating 3 nodes in a single MCP tool call.
+/// `BatchFrame` keeps the default white fill, which the hardcoded-value auto-fix binds to the
+/// `Gray/50` token in the live Studio fixture.
+fn apply_batch_frame(session: &mut designos_mcp::server::Session, page_id: u64) -> serde_json::Value {
     session
         .call(
             "designos_apply_spec",
@@ -377,7 +373,21 @@ fn granularity_is_one_step_per_tool_call() {
                 }
             }),
         )
-        .expect("tool call 1 apply_spec");
+        .expect("tool call 1 apply_spec")
+}
+
+#[test]
+fn granularity_is_one_step_per_tool_call() {
+    let (mut s, mut session, workspace) = live_terminal_sim(AgentCliPreset::Claude);
+    s.shell.app.terminal.platform_is_mac_override = Some(true);
+    // Auto-fix is its own undo step (see `auto_fix_adds_its_own_undo_step_after_the_write`), so it
+    // stays off here to keep proving one undo step per plain tool call.
+    session.call("designos_configure_session", serde_json::json!({ "auto_fix": { "mode": "off" } })).expect("auto-fix off");
+    let before = s.count();
+    let page_id = s.app().page.0;
+
+    // Tool call 1: `designos_apply_spec` creating 3 nodes in a single MCP tool call.
+    apply_batch_frame(&mut session, page_id);
     s.frame(vec![]);
     let after_call_1 = s.count();
     assert_eq!(after_call_1, before + 3, "tool call 1 created 3 nodes in one batch");
@@ -413,6 +423,51 @@ fn granularity_is_one_step_per_tool_call() {
     assert_eq!(s.count(), after_call_1);
     send_chord(&mut s, MAC_SHIFT_CMD, Key::Z);
     assert_eq!(s.count(), before + 4);
+
+    finish(s, workspace);
+}
+
+/// Whether `BatchFrame`'s first fill is bound to a variable, and whether its literal paint is still #FFFFFF.
+fn batch_frame_fill_state(s: &Sim) -> (bool, bool) {
+    let node = s.app().doc.get(s.by_name("BatchFrame")).expect("BatchFrame exists");
+    let white = node.fills[0].kind == designos_doc::PaintKind::Solid(designos_doc::Color::rgb(0xFF, 0xFF, 0xFF));
+    (node.variables.bindings.contains_key("fills/0"), white)
+}
+
+/// Auto-fix stays on (the default). One Studio undo after a write with fixes removes only the
+/// fixes; a second removes the agent's write.
+#[test]
+fn auto_fix_adds_its_own_undo_step_after_the_write() {
+    let (mut s, mut session, workspace) = live_terminal_sim(AgentCliPreset::Claude);
+    s.shell.app.terminal.platform_is_mac_override = Some(true);
+    let before = s.count();
+    let page_id = s.app().page.0;
+
+    let reply = apply_batch_frame(&mut session, page_id);
+    let applied = reply["auto_fix"]["applied"].as_array().expect("auto_fix.applied");
+    assert!(
+        applied.iter().any(|f| f["rule"] == "hardcoded-value" && f["node_name"] == "BatchFrame" && f["property"] == "fills/0" && f["before"] == "#FFFFFF"),
+        "the write must trigger the white-fill binding fix: {reply}"
+    );
+    s.frame(vec![]);
+    assert_eq!(s.count(), before + 3, "the write created 3 nodes");
+    assert_eq!(batch_frame_fill_state(&s), (true, true), "the fix bound BatchFrame's #FFFFFF fill to a token");
+
+    // First Cmd+Z removes only the fix: the fill is back to a literal #FFFFFF, the write's nodes remain.
+    send_chord(&mut s, MAC_CMD, Key::Z);
+    assert_eq!(s.count(), before + 3, "first Cmd+Z keeps the agent's write");
+    assert_eq!(batch_frame_fill_state(&s), (false, true), "first Cmd+Z removed the binding; the fill is a literal #FFFFFF again");
+
+    // Second Cmd+Z removes the agent's write.
+    send_chord(&mut s, MAC_CMD, Key::Z);
+    assert_eq!(s.count(), before, "second Cmd+Z reverts the agent's write");
+
+    // Shift+Cmd+Z redoes the write, then the fix.
+    send_chord(&mut s, MAC_SHIFT_CMD, Key::Z);
+    assert_eq!(s.count(), before + 3);
+    assert_eq!(batch_frame_fill_state(&s), (false, true), "redo of the write alone has no binding yet");
+    send_chord(&mut s, MAC_SHIFT_CMD, Key::Z);
+    assert_eq!(batch_frame_fill_state(&s), (true, true), "second redo restores the fix");
 
     finish(s, workspace);
 }
