@@ -89,6 +89,19 @@ pub struct TurnRecord {
     pub approx_bytes: usize,
 }
 
+/// Where the 1-based undo depth `depth` lands after `History::fold_since_range` collapsed the depths
+/// `start + 1..=end` into `start + 1` (`#684`). Depths above `end` drop by the number of removed steps.
+pub fn depth_after_fold(depth: usize, start: usize, end: usize) -> usize {
+    let removed = end.saturating_sub(start).saturating_sub(1);
+    if depth > end {
+        depth - removed
+    } else if depth > start {
+        start + 1
+    } else {
+        depth
+    }
+}
+
 impl TurnRecord {
     fn new(id: u64, cli: Option<String>, start_patch_bytes: u64, approximate: bool, now: Instant) -> Self {
         Self {
@@ -334,6 +347,28 @@ impl AgentTurnLedger {
                     turn.ended_at = Some(now);
                 }
             }
+        }
+    }
+
+    /// Ends the open turn because the user stopped it from the panel (`#684`). The turn closes at
+    /// `current_patch_bytes`, like a tab exit, whether or not a hook wrote an end mark.
+    ///
+    /// `stop_sent` is when the stop key went out. A turn that opened after it is the next prompt's turn (its
+    /// start mark can land in the same poll that notices the stop) and stays open.
+    pub fn on_turn_stopped(&mut self, current_patch_bytes: u64, now: Instant, stop_sent: Option<Instant>) {
+        let opened_after_stop = stop_sent.is_some_and(|sent| self.turns.last().is_some_and(|t| t.end_patch_bytes.is_none() && t.created_at > sent));
+        if opened_after_stop {
+            return;
+        }
+        self.on_tab_exited(current_patch_bytes, now);
+    }
+
+    /// Re-maps recorded history depths after `History::fold_since_range` collapsed the 1-based undo
+    /// depths `start + 1..=end` into the single depth `start + 1` (`#684`). Without this the revert
+    /// logic would mistake later user edits for steps of the folded turn.
+    pub fn on_history_fold(&mut self, start: usize, end: usize) {
+        for step in self.turns.iter_mut().flat_map(|t| t.steps.iter_mut()) {
+            step.hist_depth = depth_after_fold(step.hist_depth, start, end);
         }
     }
 
@@ -772,7 +807,8 @@ pub fn snapshot_pre_step(doc: &Document, patch: &designos_doc::live_patch::LiveP
             | designos_doc::live_patch::LiveOp::Styles { .. }
             | designos_doc::live_patch::LiveOp::Variables { .. }
             | designos_doc::live_patch::LiveOp::LibraryState { .. }
-            | designos_doc::live_patch::LiveOp::Images { .. } => {}
+            | designos_doc::live_patch::LiveOp::Images { .. }
+            | designos_doc::live_patch::LiveOp::SetInProgress { .. } => {}
         }
     }
     (names, fps)
@@ -1691,5 +1727,20 @@ mod tests {
         let report = r.app.terminal.active_turn_ledger().turns.last().unwrap().last_revert_report.as_ref().unwrap();
         assert!(report.kept_user_changed.iter().any(|(id, _)| *id == card), "Card must be reported in kept_user_changed");
         assert!(!report.kept_user_changed.iter().any(|(id, _)| *id == hero), "Hero only reflowed and must not be in kept_user_changed");
+    }
+
+    #[test]
+    fn a_turn_opened_after_the_stop_stays_open_when_the_stop_closes() {
+        let mut ledger = AgentTurnLedger::default();
+        let stop_sent = Instant::now();
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        let start = TurnMarkLine { v: LIVE_PATCH_VERSION, turn_mark: TurnPhase::Start, cli: Some("claude".to_string()), patch_bytes: 10 };
+        ledger.ingest_marks([start], Instant::now());
+
+        ledger.on_turn_stopped(10, Instant::now(), Some(stop_sent));
+        assert!(ledger.turns.last().is_some_and(|t| t.end_patch_bytes.is_none()), "the next prompt's turn must not be closed by the stop");
+
+        ledger.on_turn_stopped(10, Instant::now(), None);
+        assert!(ledger.turns.is_empty(), "without a stop time the open (empty) turn closes as before");
     }
 }
