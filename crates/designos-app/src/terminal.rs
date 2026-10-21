@@ -1692,6 +1692,17 @@ impl TerminalState {
         };
         let key = (doc.mutation_epoch(), page.0, selection_key);
         if self.last_synced_key != Some(key) {
+            // The agent may have appended an edit the editor has not read yet (the log is polled
+            // after this runs in a frame). A canvas written now would lack it, and the agent's
+            // session would take that for the user undoing it. Ask before the slow serialization
+            // (so a held publish throws nothing away), again after it, and a last time between
+            // writing the canvas file and renaming it into place (a file's modification time is its
+            // last write, so that is the moment that orders it against the agent's append).
+            // `last_synced_key` stays as it was: the same frame polls the log, applies the edit and
+            // publishes again.
+            if self.live_patch.has_unread_complete_line() {
+                return;
+            }
             let selected_ids: Vec<u64> = selection.iter().map(|n| n.0).collect();
             let is_scoped = doc.nodes.len() > 25_000;
             let ctx_val = serde_json::json!({
@@ -1705,6 +1716,14 @@ impl TerminalState {
                 "selected_node_ids": selected_ids,
                 "scoped": is_scoped,
             });
+            let canvas_json =
+                if !is_scoped { doc.to_json().ok() } else { crate::live_canvas_scope::scoped_canvas(doc, page, selection, &self.doc_name).to_json().ok() };
+
+            // Checked again: the serialization above takes time.
+            if self.live_patch.has_unread_complete_line() {
+                return;
+            }
+
             if let Ok(ctx_bytes) = serde_json::to_vec_pretty(&ctx_val) {
                 let _ = atomic_write_session_file(&self.context_json_path, &ctx_bytes);
                 if !cfg!(test) {
@@ -1712,10 +1731,14 @@ impl TerminalState {
                 }
             }
 
-            let canvas_json =
-                if !is_scoped { doc.to_json().ok() } else { crate::live_canvas_scope::scoped_canvas(doc, page, selection, &self.doc_name).to_json().ok() };
             if let Some(json_str) = canvas_json {
-                let _ = atomic_write_session_file(&self.live_canvas_path, json_str.as_bytes());
+                let live_patch = &self.live_patch;
+                if let Ok(true) = write_session_file_unless(&self.live_canvas_path, json_str.as_bytes(), || {
+                    run_before_rename_test_hook();
+                    live_patch.has_unread_complete_line()
+                }) {
+                    return;
+                }
                 if !cfg!(test) {
                     let _ = atomic_write_session_file(Path::new("/tmp/designos-live-canvas.designos"), json_str.as_bytes());
                 }
@@ -3833,13 +3856,46 @@ fn write_grok_session_config(session_dir: &Path, mcp_config: &serde_json::Value)
     let _ = atomic_write_session_file(&session_dir.join(".grok").join("config.toml"), toml.as_bytes());
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Runs once between the temporary canvas file being complete and the rename, so a test can
+    /// place an agent append in that window.
+    static BEFORE_RENAME_TEST_HOOK: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+pub(crate) fn set_before_rename_test_hook(hook: Box<dyn FnOnce()>) {
+    BEFORE_RENAME_TEST_HOOK.with(|h| *h.borrow_mut() = Some(hook));
+}
+
+#[cfg(test)]
+fn run_before_rename_test_hook() {
+    if let Some(hook) = BEFORE_RENAME_TEST_HOOK.with(|h| h.borrow_mut().take()) {
+        hook();
+    }
+}
+
+#[cfg(not(test))]
+fn run_before_rename_test_hook() {}
+
 fn atomic_write_session_file(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    write_session_file_unless(path, bytes, || false).map(|_| ())
+}
+
+/// Like [`atomic_write_session_file`], but `hold` is asked after the temporary file is complete
+/// and just before it replaces `path`. When it says yes the temporary file is removed, `path`
+/// is left as it was and `Ok(true)` comes back.
+fn write_session_file_unless(path: &Path, bytes: &[u8], hold: impl FnOnce() -> bool) -> std::io::Result<bool> {
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
     let tmp = path.with_extension(format!("tmp.{}", std::process::id()));
     std::fs::write(&tmp, bytes)?;
-    std::fs::rename(&tmp, path)
+    if hold() {
+        let _ = std::fs::remove_file(&tmp);
+        return Ok(true);
+    }
+    std::fs::rename(&tmp, path).map(|()| false)
 }
 
 /// Shell command that appends one wrapped hook record to `<session_dir>/agent-events.jsonl` (`#683` §3.1)
