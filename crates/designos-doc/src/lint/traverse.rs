@@ -3,11 +3,14 @@
 use super::config::LintConfig;
 use super::finding::{Finding, LintReport, LintSummary, SkippedRule};
 use super::registry::{Category, RuleNeeds, RULES};
-use super::rules::{aabb_of_transformed_rect, detached, evaluate_node, severity_rank, ActiveRules, NodeEvalCtx, ParentEvalCtx};
+use super::rules::{aabb_of_transformed_rect, contrast, detached, evaluate_node, severity_rank, ActiveRules, NodeEvalCtx, ParentEvalCtx};
 use super::LintEnv;
 use crate::{Affine, Document, Node, NodeId, NodeKind};
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::{Duration, Instant};
+
+/// Maximum number of pixel-path contrast renders per `lint_subtree` call before yielding a continuation cursor.
+const MAX_PIXEL_EVALS: usize = 2_000;
 
 /// Execution budget for [`lint_subtree`], capping visited nodes and/or wall-clock duration.
 #[derive(Clone, Debug)]
@@ -235,11 +238,18 @@ fn scan_stack_slice<'a>(
     scales: &super::rules::scale::Scales,
     token_index: &super::token_match::Index,
     shallow_nodes: &BTreeSet<NodeId>,
+    contrast_bounds: &contrast::SubtreeBounds,
     max_nodes: usize,
     max_duration: Option<Duration>,
+    // The call has no later slice to carry the contrast warm-up over to: do it whole while nothing
+    // has been scanned yet, so a call always makes progress.
+    warm_whole_first: bool,
     raw_findings: &mut Vec<Finding>,
 ) -> (usize, bool, Option<String>) {
     let mut scanned = 0usize;
+    let mut pixel_evals = 0usize;
+    // A pixel-path evaluation renders; one can use up the slice by itself.
+    let mut out_of_time = false;
     let mut complete = true;
     let mut next_cursor: Option<String> = None;
     let loop_start = Instant::now();
@@ -253,7 +263,25 @@ fn scan_stack_slice<'a>(
             continue;
         }
 
-        if scanned >= max_nodes || max_duration.is_some_and(|max_d| scanned >= 32 && (scanned & 31) == 0 && loop_start.elapsed() >= max_d) {
+        if scanned >= max_nodes
+            || pixel_evals >= MAX_PIXEL_EVALS
+            || out_of_time
+            || max_duration.is_some_and(|max_d| scanned >= 32 && (scanned & 31) == 0 && loop_start.elapsed() >= max_d)
+        {
+            stack.push(item);
+            complete = false;
+            next_cursor = Some(format!("stack:{}", item.id.0));
+            break;
+        }
+
+        // The contrast rule reads the bounds and sibling indexes around a text: ready them within
+        // the slice's time, and carry on in the next slice when they are not.
+        let is_instance_mirror = n.component.source.is_some() && n.component.overrides.is_empty();
+        if active.contrast
+            && matches!(n.kind, NodeKind::Text(_))
+            && (!is_instance_mirror || config.include_instances)
+            && !contrast_bounds.warm_for_text(doc, n.id, max_duration.filter(|_| !(warm_whole_first && scanned == 0)).map(|d| loop_start + d))
+        {
             stack.push(item);
             complete = false;
             next_cursor = Some(format!("stack:{}", item.id.0));
@@ -267,7 +295,6 @@ fn scan_stack_slice<'a>(
 
         let node_world = item.parent_world * n.transform;
         let page_bounds = aabb_of_transformed_rect(node_world, n.size);
-        let is_instance_mirror = n.component.source.is_some() && n.component.overrides.is_empty();
 
         if !is_instance_mirror || config.include_instances {
             scanned += 1;
@@ -287,8 +314,12 @@ fn scan_stack_slice<'a>(
                 components,
                 scales,
                 token_index,
+                contrast_bounds,
             };
-            evaluate_node(&ctx, raw_findings);
+            if evaluate_node(&ctx, raw_findings) {
+                pixel_evals += 1;
+                out_of_time = max_duration.is_some_and(|max_d| loop_start.elapsed() >= max_d);
+            }
         }
 
         if !shallow_nodes.contains(&item.id) {
@@ -337,6 +368,9 @@ pub fn lint_subtree_with_components(
     let scales = super::rules::scale::scales_for(doc, config.archetype.as_ref());
     let token_index = if config.is_enabled("hardcoded-value") { super::token_match::Index::new(doc) } else { super::token_match::Index::default() };
 
+    // No `prepare_pass` here: this runs one slice, often over a single layer, and the environment
+    // builds what it needs on the first pixel-path text, once per call.
+    let contrast_bounds = contrast::SubtreeBounds::default();
     let active_cursor = budget.cursor.as_deref().or(config.cursor.as_deref());
     let mut page_offset = 0usize;
     let mut stack = build_initial_stack(doc, roots, active_cursor, &active, &mut page_offset);
@@ -352,8 +386,10 @@ pub fn lint_subtree_with_components(
         &scales,
         &token_index,
         &budget.shallow_nodes,
+        &contrast_bounds,
         budget.max_nodes,
         budget.max_duration,
+        true,
         &mut raw_findings,
     );
 
@@ -491,6 +527,11 @@ pub fn lint_in_slices_with_budget(
     let components = if active.detached_instance { detached::Components::new(doc) } else { detached::Components::default() };
     let scales = super::rules::scale::scales_for(doc, config.archetype.as_ref());
     let token_index = if config.is_enabled("hardcoded-value") { super::token_match::Index::new(doc) } else { super::token_match::Index::default() };
+    // Shared across slices so each layer's bounds are computed once for the whole run.
+    let contrast_bounds = contrast::SubtreeBounds::default();
+    if active.contrast {
+        env.prepare_pass(doc, roots, contrast_bounds.pass());
+    }
 
     let initial_cursor = total_budget.cursor.as_deref().or_else(|| config.cursor.as_deref().filter(|c| c.starts_with("stack:")));
     let mut unused_offset = 0usize;
@@ -522,8 +563,10 @@ pub fn lint_in_slices_with_budget(
             &scales,
             &token_index,
             &total_budget.shallow_nodes,
+            &contrast_bounds,
             slice_nodes,
             Some(max_slice_duration),
+            false,
             &mut raw_findings,
         );
         worst_slice_duration = worst_slice_duration.max(t_slice.elapsed());
@@ -534,7 +577,9 @@ pub fn lint_in_slices_with_budget(
             cursor = None;
             break;
         }
-        if total_scanned >= total_budget.max_nodes || total_budget.max_duration.is_some_and(|max_d| start.elapsed() >= max_d) {
+        // The warm-up of the contrast rule is kept from one slice to the next only within this call, so
+        // a call that ran out of time before scanning anything would be resumed from the same place.
+        if total_scanned >= total_budget.max_nodes || (total_scanned > 0 && total_budget.max_duration.is_some_and(|max_d| start.elapsed() >= max_d)) {
             complete = false;
             break;
         }

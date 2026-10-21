@@ -23,16 +23,18 @@ use std::sync::Arc;
 pub struct LazyXPath<'a> {
     doc: &'a Document,
     id: crate::NodeId,
+    /// Where the sibling positions of the lint pass are kept, so the walk is not repeated per finding.
+    pass: &'a crate::lint::PassCache,
     cell: OnceCell<String>,
 }
 
 impl<'a> LazyXPath<'a> {
-    pub fn new(doc: &'a Document, id: crate::NodeId) -> Self {
-        Self { doc, id, cell: OnceCell::new() }
+    pub fn new(doc: &'a Document, id: crate::NodeId, pass: &'a crate::lint::PassCache) -> Self {
+        Self { doc, id, pass, cell: OnceCell::new() }
     }
 
     pub fn get(&self) -> &str {
-        self.cell.get_or_init(|| crate::openpencil::node_to_xpath(self.doc, self.id))
+        self.cell.get_or_init(|| super::contrast::xpath::xpath_in_pass(self.doc, self.id, self.pass))
     }
 }
 
@@ -354,6 +356,14 @@ fn check_scale_property(
                 nearest: Some(step_json),
                 scale_source: Some(scale.source),
                 candidates: None,
+                measured_ratio: None,
+                required_ratio: None,
+                level: None,
+                large: None,
+                method: None,
+                worst_sample: None,
+                foreground_hex: None,
+                backdrop_hex: None,
                 ignored: false,
             });
         }
@@ -381,6 +391,14 @@ fn check_scale_property(
                 nearest: Some(nearest_json),
                 scale_source: Some(scale.source),
                 candidates: None,
+                measured_ratio: None,
+                required_ratio: None,
+                level: None,
+                large: None,
+                method: None,
+                worst_sample: None,
+                foreground_hex: None,
+                backdrop_hex: None,
                 ignored: false,
             });
         }
@@ -544,6 +562,14 @@ fn emit_number_match(
                 nearest: None,
                 scale_source: None,
                 candidates: None,
+                measured_ratio: None,
+                required_ratio: None,
+                level: None,
+                large: None,
+                method: None,
+                worst_sample: None,
+                foreground_hex: None,
+                backdrop_hex: None,
                 ignored: false,
             });
         }
@@ -576,6 +602,14 @@ fn emit_number_match(
                 nearest: None,
                 scale_source: None,
                 candidates: Some(cands),
+                measured_ratio: None,
+                required_ratio: None,
+                level: None,
+                large: None,
+                method: None,
+                worst_sample: None,
+                foreground_hex: None,
+                backdrop_hex: None,
                 ignored: false,
             });
         }
@@ -700,6 +734,14 @@ fn check_paints_lint(
                     nearest: None,
                     scale_source: None,
                     candidates: None,
+                    measured_ratio: None,
+                    required_ratio: None,
+                    level: None,
+                    large: None,
+                    method: None,
+                    worst_sample: None,
+                    foreground_hex: None,
+                    backdrop_hex: None,
                     ignored: false,
                 });
             }
@@ -725,6 +767,14 @@ fn check_paints_lint(
                     nearest: None,
                     scale_source: None,
                     candidates: Some(cands),
+                    measured_ratio: None,
+                    required_ratio: None,
+                    level: None,
+                    large: None,
+                    method: None,
+                    worst_sample: None,
+                    foreground_hex: None,
+                    backdrop_hex: None,
                     ignored: false,
                 });
             }
@@ -765,6 +815,14 @@ fn check_paints_lint(
             nearest: None,
             scale_source: None,
             candidates: None,
+            measured_ratio: None,
+            required_ratio: None,
+            level: None,
+            large: None,
+            method: None,
+            worst_sample: None,
+            foreground_hex: None,
+            backdrop_hex: None,
             ignored: false,
         });
     }
@@ -838,6 +896,14 @@ pub fn evaluate_hardcoded_value(
                                 nearest: None,
                                 scale_source: None,
                                 candidates: None,
+                                measured_ratio: None,
+                                required_ratio: None,
+                                level: None,
+                                large: None,
+                                method: None,
+                                worst_sample: None,
+                                foreground_hex: None,
+                                backdrop_hex: None,
                                 ignored: false,
                             });
                         }
@@ -861,6 +927,14 @@ pub fn evaluate_hardcoded_value(
                                 nearest: None,
                                 scale_source: None,
                                 candidates: Some(cands),
+                                measured_ratio: None,
+                                required_ratio: None,
+                                level: None,
+                                large: None,
+                                method: None,
+                                worst_sample: None,
+                                foreground_hex: None,
+                                backdrop_hex: None,
                                 ignored: false,
                             });
                         }
@@ -954,6 +1028,14 @@ pub fn evaluate_hardcoded_value(
                         nearest: None,
                         scale_source: None,
                         candidates: None,
+                        measured_ratio: None,
+                        required_ratio: None,
+                        level: None,
+                        large: None,
+                        method: None,
+                        worst_sample: None,
+                        foreground_hex: None,
+                        backdrop_hex: None,
                         ignored: false,
                     });
                 }
@@ -978,6 +1060,14 @@ pub fn evaluate_hardcoded_value(
                         nearest: None,
                         scale_source: None,
                         candidates: Some(cands),
+                        measured_ratio: None,
+                        required_ratio: None,
+                        level: None,
+                        large: None,
+                        method: None,
+                        worst_sample: None,
+                        foreground_hex: None,
+                        backdrop_hex: None,
                         ignored: false,
                     });
                 }
@@ -1008,6 +1098,14 @@ pub fn evaluate_hardcoded_value(
                 nearest: None,
                 scale_source: None,
                 candidates: None,
+                measured_ratio: None,
+                required_ratio: None,
+                level: None,
+                large: None,
+                method: None,
+                worst_sample: None,
+                foreground_hex: None,
+                backdrop_hex: None,
                 ignored: false,
             });
         } else {
@@ -1045,6 +1143,14 @@ pub fn evaluate_hardcoded_value(
                             nearest: None,
                             scale_source: None,
                             candidates: None,
+                            measured_ratio: None,
+                            required_ratio: None,
+                            level: None,
+                            large: None,
+                            method: None,
+                            worst_sample: None,
+                            foreground_hex: None,
+                            backdrop_hex: None,
                             ignored: false,
                         });
                     }
@@ -1075,6 +1181,14 @@ pub fn evaluate_hardcoded_value(
                             nearest: None,
                             scale_source: None,
                             candidates: Some(cands),
+                            measured_ratio: None,
+                            required_ratio: None,
+                            level: None,
+                            large: None,
+                            method: None,
+                            worst_sample: None,
+                            foreground_hex: None,
+                            backdrop_hex: None,
                             ignored: false,
                         });
                     }

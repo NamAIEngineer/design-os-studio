@@ -3,6 +3,8 @@
 pub mod config;
 pub mod finding;
 pub mod fix;
+pub mod pass_cache;
+pub mod rect_tree;
 pub mod registry;
 pub mod rules;
 pub mod style_bindings;
@@ -10,8 +12,9 @@ pub mod token_match;
 pub mod traverse;
 
 pub use config::{LintConfig, LintConfigError, LintThresholds, RuleSeverityConfig, RuleSeverityLevel};
-pub use finding::{Finding, FixSuggestion, LintFinding, LintFix, LintPage, LintReport, LintSummary, ScaleSource, SkippedRule};
+pub use finding::{Finding, FixSuggestion, LintFinding, LintFix, LintPage, LintReport, LintSummary, SamplePoint, ScaleSource, SkippedRule};
 pub use fix::{lint_fix_commands, lint_fix_document, lint_fix_with_history};
+pub use pass_cache::PassCache;
 pub use registry::{
     all_preset_names, all_rule_ids, canonical_rule_id, preset_rule_ids, resolve_rule, rule_aliases, Category, LintPreset, RuleNeeds, RuleSpec, Severity, RULES,
 };
@@ -32,11 +35,21 @@ pub struct TextMetrics {
     pub substituted_family: Option<String>,
 }
 
-/// Sampled backdrop color behind a node.
+/// Sampled backdrop and foreground contrast result behind a node.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Backdrop {
+    /// Worst-case sampled backdrop color (`B_{argmin}`).
     pub color: Color,
+    /// Whether the backdrop is uniform across the sampled region.
     pub uniform: bool,
+    /// Worst-case sampled foreground color (`C_{argmin}`) when evaluated via the pixel path.
+    pub foreground: Option<Color>,
+    /// Worst-case contrast ratio (`min_i contrast(C_i, B_i)`) when evaluated via the pixel path.
+    pub worst_ratio: Option<f32>,
+    /// Page-space coordinates of the worst sample (`argmin_i ratio_i`).
+    pub worst_sample: Option<SamplePoint>,
+    /// True when `C == B` across all glyph interior samples (the text is completely covered by an opaque layer above it).
+    pub covered: bool,
 }
 
 /// Optional measurement environment supplied by the caller.
@@ -58,6 +71,18 @@ pub trait LintEnv {
     /// Sample the effective rendered backdrop color behind `rect` on `node`'s page.
     fn backdrop(&self, _doc: &Document, _node: NodeId, _rect: Rect) -> Option<Backdrop> {
         None
+    }
+
+    /// Called once before a sliced lint run ([`lint_in_slices_with_budget`]) over `roots` of `doc`, so
+    /// an environment can build what [`LintEnv::backdrop_in_pass`] will reuse for every node (kept
+    /// in `pass`) ahead of the first time slice. A single-call lint does not call it: the first
+    /// [`LintEnv::backdrop_in_pass`] builds the same on demand. Does nothing by default.
+    fn prepare_pass(&self, _doc: &Document, _roots: &[NodeId], _pass: &PassCache) {}
+
+    /// [`LintEnv::backdrop`] for a node of the pass that owns `pass`. An environment may keep
+    /// per-document structures in `pass`; the answer must equal that of [`LintEnv::backdrop`].
+    fn backdrop_in_pass(&self, doc: &Document, node: NodeId, rect: Rect, _pass: &PassCache) -> Option<Backdrop> {
+        self.backdrop(doc, node, rect)
     }
 }
 
@@ -137,6 +162,9 @@ pub fn lint(doc: &Document, config: &LintConfig, env: &dyn LintEnv) -> LintRepor
 }
 
 #[cfg(test)]
+mod progress_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::{AutoLayout, Color, Document, FrameProps, History, LayoutDirection, Node, NodeKind, Paint, Rect, Sizing, TextAutoResize, TextStyle};
@@ -151,6 +179,8 @@ mod tests {
             ("collapsed-size", "zero-bounds"),
             ("non-4px-grid", "non-integer-bounds"),
             ("non-4px-grid", "subpixel-position"),
+            ("contrast", "low-contrast-text"),
+            ("contrast", "low-contrast"),
             ("tiny-text", "small-text"),
             ("small-touch-target", "touch-target"),
             ("misaligned-siblings", "unaligned-siblings"),
@@ -207,17 +237,20 @@ mod tests {
         assert!(agent.is_enabled("placeholder-text"));
         assert!(agent.is_enabled("off-scale"));
         assert!(agent.is_enabled("hardcoded-value"));
+        assert!(agent.is_enabled("contrast"));
         assert!(!agent.is_enabled("detached-instance"));
         assert!(!agent.is_enabled("hardcoded-color"));
 
         let check_designs = LintConfig::from_preset_str("check-designs").unwrap();
         assert!(check_designs.is_enabled("detached-instance"));
         assert!(check_designs.is_enabled("hardcoded-value"));
+        assert!(check_designs.is_enabled("contrast"));
         assert!(!check_designs.is_enabled("default-layer-name"));
 
         let recommended = LintConfig::from_preset_str("recommended").unwrap();
         assert!(recommended.is_enabled("overflow-parent"));
         assert!(recommended.is_enabled("detached-instance"));
+        assert!(recommended.is_enabled("contrast"));
         assert!(recommended.is_enabled("default-layer-name"));
         assert!(recommended.is_enabled("empty-container"));
         assert!(!recommended.is_enabled("hardcoded-color"));
