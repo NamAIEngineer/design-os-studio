@@ -120,10 +120,19 @@ fn a_shell_started_while_the_window_is_built_keeps_its_session_after_the_first_f
         let ctx = Context::default();
         let mut shell = Shell::build(&ctx, Options { panel: Some(panel.into()), ..Options::default() });
         shell.app.system_html = no_system_clipboard;
-        assert_eq!(shell.app.terminal.tabs.len(), 1, "precondition: --panel {panel} starts the shell during build");
+        assert!(shell.app.terminal.picker_open || !shell.app.terminal.tabs.is_empty(), "precondition: --panel {panel} opens the agent surface during build");
         let started_with = shell.app.terminal.session_env();
 
-        let mut s = Sim { ctx, shell, t: 0.0, pos: Pos2::new(700.0, 500.0), mods: Modifiers::NONE, cursor: egui::CursorIcon::Default, shapes: Vec::new() };
+        let mut s = Sim {
+            ctx,
+            shell,
+            t: 0.0,
+            pos: Pos2::new(700.0, 500.0),
+            mods: Modifiers::NONE,
+            cursor: egui::CursorIcon::Default,
+            shapes: Vec::new(),
+            accesskit_update: None,
+        };
         s.frame(vec![]);
         s.frame(vec![]);
 
@@ -143,4 +152,16 @@ fn a_shell_started_while_the_window_is_built_keeps_its_session_after_the_first_f
         s.shell.app.terminal.shutdown();
         let _ = std::fs::remove_dir_all(dir);
     }
+}
+
+/// The frame that handles the close request shuts the terminal down and then still runs the rest of the
+/// frame, which publishes the document: the folder the shutdown removed must stay gone (spec rule 4, AC 2).
+#[test]
+fn closing_the_window_leaves_no_session_folder_behind() {
+    let mut s = Sim::new();
+    let dir = s.app().terminal.session_dir.clone();
+    assert!(crate::agent_session_files::is_ephemeral_session_dir(&dir), "precondition: a window without a library file keeps a scratch folder");
+    assert!(dir.join("canvas.designos").is_file(), "precondition: the window published its canvas before it closed");
+    s.close_frame();
+    assert!(!dir.exists(), "the close frame re-created the session folder {}", dir.display());
 }

@@ -18,6 +18,15 @@ pub fn pointer_over_popup(ctx: &egui::Context) -> bool {
     ctx.input(|i| i.pointer.latest_pos()).is_some_and(|p| ctx.layer_id_at(p).is_some_and(|l| l.order == egui::Order::Foreground))
 }
 
+/// `one` when `n == 1`, `many` otherwise, so a count never reads `1 layers`.
+pub fn plural<'a>(n: usize, one: &'a str, many: &'a str) -> &'a str {
+    if n == 1 {
+        one
+    } else {
+        many
+    }
+}
+
 /// Width of a string in the given font.
 pub fn text_width(p: &Painter, s: &str, font: &FontId) -> f32 {
     p.layout_no_wrap(s.to_string(), font.clone(), Color32::WHITE).size().x
@@ -217,6 +226,20 @@ pub fn swatch_circle(p: &Painter, c: Pos2, r: f32, colors: &[Color32]) {
     p.circle_stroke(c, r - 0.5, Stroke::new(1.0, theme::BORDER_TRANSLUCENT));
 }
 
+/// Sets the AccessKit role and accessible name on `id` when AccessKit is active.
+///
+/// Returns immediately without locking `Context` when AccessKit is disabled.
+#[inline]
+pub fn labelled(ui: &Ui, id: Id, role: egui::accesskit::Role, name: &str) {
+    if !crate::agent_a11y::is_accesskit_active() {
+        return;
+    }
+    ui.ctx().accesskit_node_builder(id, |node| {
+        node.set_role(role);
+        node.set_label(name);
+    });
+}
+
 /// Test hook: remembers where a named widget was drawn so UI tests can find it.
 #[cfg(test)]
 pub fn record(ui: &Ui, name: &str, rect: Rect) {
@@ -226,15 +249,7 @@ pub fn record(ui: &Ui, name: &str, rect: Rect) {
 #[inline]
 pub fn record(_ui: &Ui, _name: &str, _rect: Rect) {}
 
-pub fn fmt_num(v: f32) -> String {
-    let s = format!("{:.2}", v);
-    let s = s.trim_end_matches('0').trim_end_matches('.').to_string();
-    if s == "-0" || s.is_empty() {
-        "0".into()
-    } else {
-        s
-    }
-}
+pub use designos_export::util::fmt_num;
 
 #[cfg(test)]
 mod tests {
