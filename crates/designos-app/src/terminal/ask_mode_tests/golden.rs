@@ -23,11 +23,19 @@ fn golden_launches(cli: &str, mode: PermissionMode) -> [String; 4] {
     match cli {
         "claude" => {
             let flag = if skip { " --dangerously-skip-permissions" } else { "" };
+            // Skip keeps the tail as pinned above. In Ask mode only the `--settings` value differs: the hooks file is the
+            // private one Studio names in `DESIGNOS_CLAUDE_SETTINGS`, never `hooks.json` in the session folder.
+            let tail = if skip {
+                CLAUDE_TAIL.to_string()
+            } else {
+                assert_eq!(CLAUDE_TAIL.matches("--settings \"$DESIGNOS_SESSION_DIR/hooks.json\"").count(), 1, "the tail names the hooks file once");
+                CLAUDE_TAIL.replace("--settings \"$DESIGNOS_SESSION_DIR/hooks.json\"", "--settings \"$DESIGNOS_CLAUDE_SETTINGS\"")
+            };
             [
-                format!("claude{flag}{CLAUDE_TAIL}"),
-                format!("claude --session-id {ids}{flag}{CLAUDE_TAIL}"),
-                format!("claude --resume {ids}{flag}{CLAUDE_TAIL}"),
-                format!("claude --continue{flag}{CLAUDE_TAIL}"),
+                format!("claude{flag}{tail}"),
+                format!("claude --session-id {ids}{flag}{tail}"),
+                format!("claude --resume {ids}{flag}{tail}"),
+                format!("claude --continue{flag}{tail}"),
             ]
         }
         "codex" => {
@@ -230,9 +238,11 @@ fn claude_launch_and_config_match_the_golden() {
             let script_path = crate::agent_approval_channel::hook_script_path(&st.session_dir).expect("a private channel folder");
             assert!(!script_path.starts_with(&st.session_dir), "the approval hook must not sit in the session folder: {}", script_path.display());
             let script = script_path.display().to_string();
+            // Unix names the interpreter by path, so a `sh` earlier on Claude's PATH is never what runs the script.
+            let interpreter = if cfg!(windows) { "sh" } else { "/bin/sh" };
             assert_eq!(
                 approve,
-                [&serde_json::json!({ "type": "command", "command": format!("sh '{script}'"), "timeout": 300 })],
+                [&serde_json::json!({ "type": "command", "command": format!("{interpreter} '{script}'"), "timeout": 300 })],
                 "Claude Ask: the only handler with a decision is the in-panel approval hook"
             );
             let script = std::fs::read_to_string(&script_path).expect("approve-hook.sh");
