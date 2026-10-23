@@ -14,6 +14,11 @@ use egui::{Align2, Context, Event, Key, Pos2, Rect, Vec2};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+mod toast_layout;
+
+/// The toast action that shows an exported file in its folder.
+const REVEAL_LABEL: &str = "Show in folder";
+
 /// Set once an `--screenshot` run has written its PNG.
 pub static SHOT_OK: AtomicBool = AtomicBool::new(false);
 
@@ -105,9 +110,12 @@ impl Shell {
                 shell.app.canvas.gpu.set_max_texture(max);
             }
         }
-        // GPU canvas on by default; small test fixture screenshots stay on the deterministic CPU path unless --gpu
+        // GPU canvas on by default, except on a software renderer; small test fixture screenshots stay on the deterministic CPU path unless --gpu
         let saved = library.as_deref().and_then(|l| crate::comments::settings::load_flag(l, "use_gpu"));
-        shell.app.canvas.gpu.pref = if screenshot { gpu_flag || shell.app.doc.nodes.len() > 5_000 } else { gpu_flag || saved.unwrap_or(true) };
+        let software = cc.wgpu_render_state.as_ref().is_some_and(canvas::gpu_default::adapter_is_software);
+        let start = canvas::gpu_default::decide(saved, gpu_flag, software);
+        shell.app.canvas.gpu.pref = if screenshot { gpu_flag || shell.app.doc.nodes.len() > 5_000 } else { start.is_on() };
+        shell.app.canvas.gpu.off_for_software = !screenshot && start == canvas::gpu_default::Start::SoftwareOff;
         shell.app.tabs.always_visible = true;
         if shell.app.home.is_none() {
             let mut tabs = std::mem::take(&mut shell.app.tabs);
@@ -313,9 +321,7 @@ impl Shell {
                 app.specs.ensure_loaded();
             }
             Some("terminal") => {
-                app.ui.rail = Some(crate::app::RailItem::Agents);
-                app.ui.left_collapsed = false;
-                app.terminal.dock_open = true;
+                app.show_agents_panel();
                 app.terminal.open_for_agent_use(app.file_path.as_deref());
             }
             Some(p @ ("check-designs" | "check-designs-fixed")) => {
@@ -520,7 +526,9 @@ impl Shell {
             self.handle_terminal_undo_keys(ctx);
             return;
         }
-        let typing = crate::agent_a11y::non_canvas_has_focus(ctx);
+        // A click on a text field gives it the focus only while the panel draws, after this runs: the keys
+        // that arrive in the same frame are the field's.
+        let typing = crate::agent_a11y::non_canvas_has_focus(ctx) || crate::widgets::field_tab::press_lands_on_field(ctx);
         if self.app.vars.open {
             // The Variables view handles its own keys (and undo / redo).
             return;
@@ -539,9 +547,7 @@ impl Shell {
             // egui-winit emits `Event::Paste` only for a non-empty `text/plain` and never a V press for a paste chord;
             // a Figma copy can carry HTML alone, which only the V release reveals (see `PasteChord`).
             if self.paste_chord.on_event(&ev) && !editing_text {
-                if let Some(html) = (self.app.system_html)() {
-                    self.app.paste_with_html(None, Some(&html));
-                }
+                self.app.paste_from_system(None);
                 continue;
             }
             match ev {
@@ -762,10 +768,7 @@ impl Shell {
                 (Key::Backslash, _, _) => Some(Action::ToggleSidebar),
                 (Key::K, false, false) => Some(Action::OpenPalette),
                 (Key::Backtick, _, _) => {
-                    app.terminal.dock_open = !app.terminal.dock_open;
-                    if app.terminal.dock_open {
-                        app.terminal.open_for_agent_use(app.file_path.as_deref());
-                    }
+                    app.toggle_agents_panel();
                     None
                 }
                 (Key::P, false, false) => {
@@ -792,9 +795,8 @@ impl Shell {
                     None
                 }
                 (Key::W, false, false) => {
-                    if !app.tabs.entries.is_empty() {
-                        let idx = app.tabs.active_idx;
-                        app.close_tab(idx);
+                    if let Some(id) = app.tabs.entries.get(app.tabs.active_idx).map(|t| t.id) {
+                        app.request_leave(Some(ctx), crate::home::Leave::CloseTab(id));
                     }
                     None
                 }
@@ -907,6 +909,8 @@ impl Shell {
             Key::W if m.alt && !m.shift => menus::run(app, ctx, Action::Align(crate::ops::Align::Top)),
             Key::S if m.alt && !m.shift => menus::run(app, ctx, Action::Align(crate::ops::Align::Bottom)),
             Key::D if m.alt && !m.shift => menus::run(app, ctx, Action::Align(crate::ops::Align::Right)),
+            // A board has no `</>` button and no Inspect panel, so it has no Dev Mode to switch.
+            Key::D if m.shift && !m.alt && !app.is_board() => app.set_dev_mode(!app.ui.dev_mode),
             Key::H if m.shift && !m.alt => app.flip_selection(true),
             Key::V if m.shift && !m.alt => app.flip_selection(false),
             Key::H | Key::V if m.shift && m.alt => menus::run(app, ctx, Action::Distribute),
@@ -995,21 +999,35 @@ impl Shell {
             self.app.toast = None;
             return;
         }
-        let p = ui.painter();
-        let font = theme::font_body();
-        let w = widgets::text_width(p, &t.text, &font) + 48.0;
-        let r = Rect::from_center_size(
-            Pos2::new(screen.center().x, screen.bottom() - theme::TOAST_BOTTOM - theme::TOAST_HEIGHT / 2.0),
-            Vec2::new(w, theme::TOAST_HEIGHT),
-        );
-        widgets::elevation_shadow(p, r, theme::RADIUS_FRAME);
+        let (text, error, reveal) = (t.text.clone(), t.error, t.reveal.clone());
+        let details = self.app.web_capture_report.is_some() && text.ends_with("Details");
+        let lay = toast_layout::layout(ui.painter(), &text, &theme::font_body(), screen, reveal.as_ref().map(|_| REVEAL_LABEL));
+        let (r, ctx) = (lay.rect, ui.ctx().clone());
+        // Only the "Details" link and the action take clicks, each as its own small Area. The body has no widget at all:
+        // any widget in the layer, even a hover-only one, hides the canvas and the cards below it from the pointer.
+        let details_clicked = details && toast_click_target(&ctx, "toast-details", r, "Details").clicked();
+        let action = lay.action.map(|(target, label)| (toast_click_target(&ctx, "toast-reveal", target, REVEAL_LABEL), target, label));
+        // Painted on its own top-most layer: the full-screen Variables view is an Area above the root layer and would
+        // hide the toast. No fade-in: the toast has always appeared at full strength.
+        let p = ctx.layer_painter(egui::LayerId::new(egui::Order::Tooltip, egui::Id::new("shell-toast")));
+        widgets::elevation_shadow(&p, r, theme::RADIUS_FRAME);
         p.rect_filled(r, theme::cr(theme::RADIUS_FRAME), theme::BG_MENU);
-        p.circle_filled(Pos2::new(r.left() + 16.0, r.center().y), 4.0, if t.error { theme::DANGER } else { theme::BG_BRAND });
-        p.text(Pos2::new(r.left() + 28.0, r.center().y), Align2::LEFT_CENTER, &t.text, font, theme::TEXT);
-        if self.app.web_capture_report.is_some() && t.text.ends_with("Details") {
-            let resp = ui.interact(r, egui::Id::new("web-capture-toast-details"), egui::Sense::click());
-            if resp.clicked() {
-                self.app.web_capture_report_open = !self.app.web_capture_report_open;
+        p.circle_filled(lay.dot, 4.0, if error { theme::DANGER } else { theme::BG_BRAND });
+        p.galley(lay.text_pos, lay.text, theme::TEXT);
+        let mut reveal_clicked = false;
+        if let Some((button, target, label)) = action {
+            if button.hovered() {
+                p.rect_filled(target, theme::cr(theme::RADIUS_CONTROL), theme::BG_HOVER);
+            }
+            p.galley(Pos2::new(target.left() + (target.width() - label.size().x) / 2.0, target.center().y - label.size().y / 2.0), label, theme::TEXT_BRAND);
+            reveal_clicked = button.clicked();
+        }
+        if details_clicked {
+            self.app.web_capture_report_open = !self.app.web_capture_report_open;
+        }
+        if let (true, Some(file)) = (reveal_clicked, reveal) {
+            if let Err(e) = (self.app.reveal_file)(&file) {
+                self.app.show_toast(e, true);
             }
         }
         ui.ctx().request_repaint_after(std::time::Duration::from_millis(200));
@@ -1023,7 +1041,10 @@ impl Shell {
             self.app.web_capture_report_open = false;
             return;
         };
-        if ctx.input(|i| i.key_pressed(Key::Escape)) {
+        // A floating sheet, not a dialog: while the agent's terminal holds the keyboard Esc is the terminal's key, so one
+        // press never closes the sheet and interrupts the agent at once (`#923`).
+        let agent_rail_open = !self.app.ui.left_collapsed && matches!(self.app.ui.rail, Some(crate::app::RailItem::Agents | crate::app::RailItem::Tools));
+        if !self.app.terminal.is_capturing_keyboard(agent_rail_open) && ctx.input(|i| i.key_pressed(Key::Escape)) {
             self.app.web_capture_report_open = false;
             return;
         }
@@ -1184,8 +1205,16 @@ impl eframe::App for Shell {
     /// Tab belongs to the text session (it nests list items) or to sibling layer traversal on the
     /// canvas: take it out of the input before egui uses it to move keyboard focus between widgets.
     fn raw_input_hook(&mut self, ctx: &egui::Context, raw: &mut egui::RawInput) {
+        // macOS: a Quit chosen while the window is hidden waits a few seconds for it. The wait starts at the first frame
+        // after the request, and eframe runs this hook for hidden frames too; `ctx.input` still shows the previous one.
+        #[cfg(target_os = "macos")]
+        crate::macos_menu::stamp_pending_quit(ctx, raw.time);
         if self.app.plugins.open {
             return;
+        }
+        // A layer being renamed in the Layers panel moves its rename to the next row on Tab, so Tab is left to it.
+        if self.app.layers.renaming.is_none() {
+            crate::widgets::field_tab::take_tab_press(ctx, raw);
         }
         if crate::agent_a11y::non_canvas_has_focus(ctx) {
             return;
@@ -1209,20 +1238,36 @@ impl eframe::App for Shell {
             ui.ctx().request_repaint_after(std::time::Duration::from_millis(100));
         }
         self.draw(ui);
+        if self.app.text_refit_pending() {
+            // The next slice of the re-fit after a face arrived. A gesture holds it: look again a few times
+            // a second, so the pass goes on once the gesture ends. Nothing is asked for once it is done.
+            if self.app.text_refit_held() {
+                ui.ctx().request_repaint_after(std::time::Duration::from_millis(250));
+            } else {
+                ui.ctx().request_repaint();
+            }
+        }
     }
 }
 
 impl Shell {
-    /// Files dropped on the window: `.svg` files are placed at the drop point,
+    /// Files dropped on the window: `.svg`, `.png`, `.jpg` and `.webp` files are placed at the drop point,
     /// `.webcapture` / `.capture.json` files are imported at the drop point,
     /// anything else (the first file) is opened as a document.
     fn handle_drops(&mut self, ctx: &Context) {
+        // A question is modal: a file dropped while one is open is ignored, as on Home. It must not replace the
+        // action that is pending (a quit, a close) or put content on the canvas behind the question.
+        if self.app.dialog.is_some() || self.app.leave.is_asking() {
+            return;
+        }
         let (files, pos) = ctx.input(|i| (i.raw.dropped_files.clone(), i.pointer.hover_pos().or(i.pointer.latest_pos())));
-        let is_svg = |f: &egui::DroppedFile| {
+        let extension_of = |f: &egui::DroppedFile| {
             let name = f.path.as_ref().and_then(|p| p.to_str()).unwrap_or(&f.name);
-            name.rsplit('.').next().is_some_and(|e| e.eq_ignore_ascii_case("svg"))
+            name.rsplit('.').next().map(str::to_ascii_lowercase).unwrap_or_default()
         };
-        if let Some(path) = files.iter().filter(|f| !is_svg(f)).find_map(|f| f.path.clone()) {
+        let is_svg = |f: &egui::DroppedFile| extension_of(f) == "svg";
+        let is_placed = |f: &egui::DroppedFile| crate::canvas::interact::IMAGE_EXTENSIONS.contains(&extension_of(f).as_str());
+        if let Some(path) = files.iter().filter(|f| !is_placed(f)).find_map(|f| f.path.clone()) {
             if crate::io::is_web_capture_path(&path) {
                 let page_pos = pos.map(|s| self.app.view.to_page(self.app.canvas_rect.min, s));
                 self.app.import_web_capture_path_at(path, page_pos);
@@ -1231,26 +1276,46 @@ impl Shell {
             }
             return;
         }
-        for (nth, f) in files.iter().filter(|f| is_svg(f)).enumerate() {
-            let text = match (&f.path, &f.bytes) {
-                (Some(p), _) => std::fs::read_to_string(p).map_err(|e| format!("Cannot read {}: {e}", p.display())),
-                (None, Some(b)) => String::from_utf8(b.to_vec()).map_err(|_| "The SVG is not valid UTF-8".to_string()),
-                (None, None) => continue,
-            };
+        // Every file of the drop goes through one transaction: one undo step, and all the new layers are selected.
+        let mut tx = crate::edit::Tx::new();
+        let (mut placed, mut any_image) = (Vec::new(), false);
+        for (nth, f) in files.iter().filter(|f| is_placed(f)).enumerate() {
             let stem = f
                 .path
                 .as_deref()
                 .and_then(|p| p.file_stem())
                 .and_then(|s| s.to_str())
-                .or_else(|| f.name.strip_suffix(".svg"))
+                .or_else(|| f.name.rsplit_once('.').map(|(stem, _)| stem))
                 .filter(|s| !s.is_empty())
-                .unwrap_or("svg")
+                .unwrap_or(if is_svg(f) { "svg" } else { "Image" })
                 .to_string();
-            match text {
-                Ok(t) => crate::clipboard::drop_svg(&mut self.app, &t, &stem, pos, nth),
-                Err(e) => self.app.show_toast(e, true),
+            if is_svg(f) {
+                let text = match (&f.path, &f.bytes) {
+                    (Some(p), _) => std::fs::read_to_string(p).map_err(|e| format!("Cannot read {}: {e}", p.display())),
+                    (None, Some(b)) => String::from_utf8(b.to_vec()).map_err(|_| "The SVG is not valid UTF-8".to_string()),
+                    (None, None) => continue,
+                };
+                match text {
+                    Ok(t) => placed.extend(crate::clipboard::drop_svg(&mut self.app, &mut tx, &t, &stem, pos, nth)),
+                    Err(e) => self.app.show_toast(e, true),
+                }
+            } else {
+                let bytes = match (&f.path, &f.bytes) {
+                    (Some(p), _) => std::fs::read(p).map_err(|e| format!("Cannot read {}: {e}", p.display())),
+                    (None, Some(b)) => Ok(b.to_vec()),
+                    (None, None) => continue,
+                };
+                match bytes {
+                    Ok(b) => {
+                        let id = crate::clipboard::drop_image(&mut self.app, &mut tx, b, &stem, pos, nth);
+                        any_image |= id.is_some();
+                        placed.extend(id);
+                    }
+                    Err(e) => self.app.show_toast(e, true),
+                }
             }
         }
+        crate::clipboard::commit_dropped(&mut self.app, tx, placed, any_image);
     }
 
     fn sync_title(&mut self, ctx: &Context) {
@@ -1290,26 +1355,43 @@ impl Shell {
     pub fn draw(&mut self, ui: &mut egui::Ui) {
         self.draw_window(ui);
         let ctx = ui.ctx().clone();
+        // A paste that started during this frame (the key or the menu ran after the poll) waits for its clipboard
+        // worker; an idle window draws nothing more, so ask for the frame that finishes it.
+        if !self.app.paste_jobs.is_empty() {
+            ctx.request_repaint_after(std::time::Duration::from_millis(16));
+        }
+        self.app.repaint_if_dot_moved(&ctx);
         self.request_screenshot(&ctx);
     }
 
     fn draw_window(&mut self, ui: &mut egui::Ui) {
         let ctx = ui.ctx().clone();
         crate::agent_a11y::sync_frame(&ctx);
+        crate::widgets::field_tab::start_frame(&ctx);
         self.app.now = ctx.input(|i| i.time);
         self.app.poll_plugins();
         self.app.poll_image_jobs();
+        self.app.poll_paste_jobs();
         if self.app.image_jobs.has_active_jobs() || self.app.tabs.entries.iter().any(|e| e.image_jobs.has_active_jobs()) {
             ctx.request_repaint_after(std::time::Duration::from_millis(100));
         }
         self.drive_screenshot(&ctx);
+        // macOS: a Quit chosen while the window was hidden brought it back and waits here for a frame that can draw the
+        // question; the close it asks for comes round to the branch below on the next frame.
+        #[cfg(target_os = "macos")]
+        crate::macos_menu::send_pending_quit(&ctx);
         if ctx.input(|i| i.viewport().close_requested()) {
-            crate::decks::ui::flush_notes(&mut self.app);
-            self.app.save_close_version();
-            self.app.flush_autosave();
-            self.app.terminal.shutdown();
-            for tab in &mut self.app.tabs.entries {
-                tab.terminal.shutdown();
+            if !self.app.may_quit(&ctx) {
+                // Edits no save has written are being asked about: the window stays open, and the close comes round again.
+                ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            } else {
+                crate::decks::ui::flush_notes(&mut self.app);
+                self.app.save_close_version();
+                self.app.flush_autosave();
+                self.app.terminal.shutdown();
+                for tab in &mut self.app.tabs.entries {
+                    tab.terminal.shutdown();
+                }
             }
         }
         self.app.scrub_sync(&ctx);
@@ -1404,7 +1486,10 @@ impl Shell {
         }
         let win_focused = ctx.input(|i| i.viewport().focused).unwrap_or(true);
         self.app.terminal.set_window_focused(win_focused);
-        self.app.terminal.surface_visible = (!self.app.ui.left_collapsed && is_ai_panel) || self.app.terminal.dock_open;
+        self.app.terminal.surface_visible = !self.app.ui.left_collapsed && is_ai_panel;
+        // An agent that writes while no frame runs (Agents panel closed, no input) still reaches the canvas.
+        self.app.terminal.live_patch.wake_on_writes(&ctx, &self.app.terminal.live_spec_path);
+        self.app.terminal.overlay_owns_keyboard = crate::terminal::overlay_owns_keyboard(&self.app, &ctx);
         let bridge_actions = self.app.terminal.poll_live_agent_bridge();
         if !bridge_actions.is_empty() {
             execute_terminal_actions_with_ctx(&mut self.app, bridge_actions, Some(&ctx));
@@ -1422,50 +1507,25 @@ impl Shell {
             crate::variables::view::show(&mut self.app, ui, content);
         } else {
             let specs_reader_open = false;
-            let max_dock_h = (canvas_rect.height() - 100.0).max(200.0);
-            let dock_h = if self.app.terminal.dock_open { self.app.terminal.dock_height.clamp(160.0, max_dock_h) } else { 0.0 };
-            let main_canvas_rect =
-                Rect::from_min_max(canvas_rect.min, Pos2::new(canvas_rect.right(), (canvas_rect.bottom() - dock_h).max(canvas_rect.top() + 80.0)));
-            let dock_rect = Rect::from_min_max(Pos2::new(canvas_rect.left(), main_canvas_rect.bottom()), canvas_rect.max);
             if specs_reader_open {
-                self.app.canvas_rect = main_canvas_rect;
-                crate::specs::show_reader(&mut self.app, ui, main_canvas_rect);
+                self.app.canvas_rect = canvas_rect;
+                crate::specs::show_reader(&mut self.app, ui, canvas_rect);
             } else {
                 if let Some(seq) = self.shot.as_ref().and_then(|s| s.seq.as_ref()) {
                     if seq.hud.zoom > 0.0 {
                         self.app.first_fit_done = true;
-                        let aspect_scale = (main_canvas_rect.width() / 1080.0).clamp(0.70, 1.05);
+                        let aspect_scale = (canvas_rect.width() / 1080.0).clamp(0.70, 1.05);
                         let z = (seq.hud.zoom * aspect_scale).max(0.25);
                         self.app.view.zoom = z;
                         self.app.view.offset = designos_doc::Vec2::new(
-                            seq.hud.focus_page.x - (main_canvas_rect.width() * 0.5) / z,
-                            seq.hud.focus_page.y - (main_canvas_rect.height() * 0.5) / z,
+                            seq.hud.focus_page.x - (canvas_rect.width() * 0.5) / z,
+                            seq.hud.focus_page.y - (canvas_rect.height() * 0.5) / z,
                         );
                     }
                 }
-                canvas::show(&mut self.app, ui, main_canvas_rect);
+                canvas::show(&mut self.app, ui, canvas_rect);
                 if deck {
                     crate::decks::ui::notes(&mut self.app, ui, notes_rect);
-                }
-            }
-            if self.app.terminal.dock_open && dock_rect.height() >= 80.0 {
-                let file_path = self.app.file_path.clone();
-                let term_actions = crate::agent_selection_chip::with_selection_summary(&self.app.doc, self.app.page, &self.app.selection, |summary| {
-                    crate::terminal::show_dock_with_doc(&mut self.app.terminal, ui, dock_rect, file_path.as_deref(), summary, &self.app.doc, self.app.page)
-                });
-                execute_terminal_actions_with_ctx(&mut self.app, term_actions, Some(&ctx));
-                let dock_handle_rect =
-                    Rect::from_min_max(Pos2::new(dock_rect.left(), dock_rect.top() - 3.0), Pos2::new(dock_rect.right(), dock_rect.top() + 3.0));
-                widgets::record(ui, "dock-resize-handle", dock_handle_rect);
-                let dock_drag = ui.interact(dock_handle_rect, ui.id().with("dock-resize-handle"), egui::Sense::drag());
-                if dock_drag.hovered() || dock_drag.dragged() {
-                    ctx.set_cursor_icon(egui::CursorIcon::ResizeVertical);
-                    ui.painter().hline(dock_rect.x_range(), dock_rect.top(), egui::Stroke::new(2.0, theme::BG_BRAND));
-                }
-                if dock_drag.dragged() {
-                    if let Some(pointer) = ctx.input(|i| i.pointer.interact_pos()) {
-                        self.app.terminal.dock_height = (canvas_rect.bottom() - pointer.y).clamp(160.0, max_dock_h);
-                    }
                 }
             }
             rail::show(&mut self.app, ui, rail_rect);
@@ -1508,10 +1568,10 @@ impl Shell {
                 }
             }
             if board {
-                if !specs_reader_open && !self.app.terminal.dock_open {
+                if !specs_reader_open {
                     crate::board::toolbar::show(&mut self.app, ui, canvas_rect_for_toolbar(full));
-                    crate::board::bar::show(&mut self.app, ui, main_canvas_rect);
-                    crate::board::canvas::zoom_pill(&mut self.app, ui, main_canvas_rect);
+                    crate::board::bar::show(&mut self.app, ui, canvas_rect);
+                    crate::board::canvas::zoom_pill(&mut self.app, ui, canvas_rect);
                 }
             } else {
                 if specs_reader_open {
@@ -1520,13 +1580,13 @@ impl Shell {
                     right::show(&mut self.app, ui, right_rect);
                 }
                 if !specs_reader_open {
-                    let tb_rect = if deck || self.app.terminal.dock_open { main_canvas_rect } else { canvas_rect_for_toolbar(full) };
+                    let tb_rect = if deck { canvas_rect } else { canvas_rect_for_toolbar(full) };
                     toolbar::show(&mut self.app, ui, tb_rect);
                 }
             }
             if !specs_reader_open {
-                crate::history::banner::show(&mut self.app, ui, main_canvas_rect);
-                self.context_menu(ui, main_canvas_rect);
+                crate::history::banner::show(&mut self.app, ui, canvas_rect);
+                self.context_menu(ui, canvas_rect);
             }
             menus::show(&mut self.app, &ctx);
             panels::context::show(&mut self.app, &ctx);
@@ -1535,7 +1595,7 @@ impl Shell {
             // the floating panel (or only the inspector's binding picker when closed)
             crate::variables::view::show(&mut self.app, ui, full);
             if let Some(seq) = self.shot.as_ref().and_then(|s| s.seq.as_ref()) {
-                paint_micro_seq_hud(ui, &self.app, main_canvas_rect, right_rect, &seq.hud, seq.cur, seq.total);
+                paint_micro_seq_hud(ui, &self.app, canvas_rect, right_rect, &seq.hud, seq.cur, seq.total);
             }
         }
         if let Some(cmdk_act) = crate::cmdk::show(&ctx, &mut self.app.cmdk, &self.app.doc, self.app.page, &self.app.selection) {
@@ -1592,7 +1652,7 @@ pub fn execute_terminal_actions_with_ctx(app: &mut App, actions: Vec<crate::term
                     Ok(spec) => {
                         let label = path.file_name().and_then(|s| s.to_str()).unwrap_or("Spec");
                         let before = app.hist.undo_depth();
-                        app.apply_node_spec(&spec, label);
+                        app.apply_live_spec(&path, &raw, &spec, label);
                         if app.hist.undo_depth() > before {
                             app.hist.mark_last_undo_as_agent();
                             app.terminal.current_undo_depth = app.hist.undo_depth();
@@ -1612,14 +1672,6 @@ pub fn execute_terminal_actions_with_ctx(app: &mut App, actions: Vec<crate::term
                 }
             }
             crate::terminal::TerminalAction::LiveSyncError(msg) => app.show_toast(msg, true),
-            crate::terminal::TerminalAction::ReloadFromDisk => {
-                if let Some(p) = app.file_path.clone() {
-                    app.open_path(p);
-                    app.show_toast("Synced Canvas from disk", false);
-                } else {
-                    app.show_toast("No file path open to sync", true);
-                }
-            }
             crate::terminal::TerminalAction::ExportSelectionToTerminal => {
                 match crate::terminal::export_selection_and_comments_to_pty(&mut app.terminal, &app.doc, app.page, &app.selection, app.file_path.as_deref()) {
                     Ok(p) => app.show_toast(format!("Sent selection & comments -> {}", p.display()), false),
@@ -1673,6 +1725,7 @@ pub fn execute_cmdk_action(app: &mut App, action: crate::cmdk::CmdKAction) {
     match action {
         crate::cmdk::CmdKAction::ApplySpec(spec) => {
             let fp = app.file_path.clone();
+            app.show_agents_panel();
             app.terminal.dispatch_figma_ai_prompt("Make Design", &spec.name, fp.as_deref());
             app.apply_node_spec(&spec, "Cmd+K Synthesizer");
         }
@@ -1686,15 +1739,11 @@ pub fn execute_cmdk_action(app: &mut App, action: crate::cmdk::CmdKAction) {
         crate::cmdk::CmdKAction::OpenTerminal(preset) => {
             let file_path = app.file_path.clone();
             let _ = app.terminal.spawn_tab(preset, file_path.as_deref());
-            app.terminal.dock_open = true;
-            app.ui.rail = Some(crate::app::RailItem::Agents);
-            app.ui.left_collapsed = false;
+            app.show_agents_panel();
             app.cmdk.open = false;
         }
         crate::cmdk::CmdKAction::SendSelectionToTerminal => {
-            app.terminal.dock_open = true;
-            app.ui.rail = Some(crate::app::RailItem::Agents);
-            app.ui.left_collapsed = false;
+            app.show_agents_panel();
             match crate::terminal::export_selection_and_comments_to_pty(&mut app.terminal, &app.doc, app.page, &app.selection, app.file_path.as_deref()) {
                 Ok(p) => app.show_toast(format!("Sent selection & comments -> {}", p.display()), false),
                 Err(e) => app.show_toast(e, true),
@@ -1702,16 +1751,7 @@ pub fn execute_cmdk_action(app: &mut App, action: crate::cmdk::CmdKAction) {
             app.cmdk.open = false;
         }
         crate::cmdk::CmdKAction::ExportFig => {
-            let out_path = app.file_path.as_ref().map(|p| p.with_extension("fig")).unwrap_or_else(|| std::path::PathBuf::from("/tmp/designos-export.fig"));
-            match designos_fig::export_fig_with_report(&app.doc) {
-                Ok((bytes, omitted)) => {
-                    if std::fs::write(&out_path, bytes).is_ok() {
-                        let note = if omitted.is_empty() { String::new() } else { format!(" ({} extension keys not carried)", omitted.len()) };
-                        app.show_toast(format!("Exported Figma .fig to {}{note}", out_path.display()), false);
-                    }
-                }
-                Err(e) => app.show_toast(format!("Export .fig failed: {e}"), true),
-            }
+            app.export_fig_copy();
             app.cmdk.open = false;
         }
         crate::cmdk::CmdKAction::SelectNode(id) => {
@@ -1720,14 +1760,22 @@ pub fn execute_cmdk_action(app: &mut App, action: crate::cmdk::CmdKAction) {
         }
         crate::cmdk::CmdKAction::OpenCheckDesigns => app.open_check_designs(),
         crate::cmdk::CmdKAction::AutoFixDesignGate => {
-            let sel = app.selection.clone();
-            let page = app.page;
-            let fixed_count = crate::cmdk::auto_fix_design_gate(&mut app.doc, page, &sel);
-            app.changed();
+            let (op, fixed_count) = match crate::cmdk::run_auto_fix_design_gate(app) {
+                crate::cmdk::AutoFixOutcome::Committed { op, count } => (op, count),
+                // A refused edit (old version, failed commit) was explained by `run_tx`; only a clean no-op needs words.
+                crate::cmdk::AutoFixOutcome::Refused => return,
+                crate::cmdk::AutoFixOutcome::NoChange => {
+                    app.show_toast("Nothing changed", false);
+                    return;
+                }
+            };
             app.cmdk.last_audit = Some(crate::cmdk::run_design_gate_audit(&app.doc, app.page, &app.selection));
+            // The palette's search field keeps the keyboard while it is open, so Cmd+Z would not reach the canvas.
+            app.cmdk.open = false;
             let fp = app.file_path.clone();
+            app.show_agents_panel();
             app.terminal.dispatch_figma_ai_prompt("Figma AI Action", &format!("Applied {fixed_count} Canvas changes (Undo with Cmd+Z)"), fp.as_deref());
-            app.show_toast(format!("Applied {fixed_count} Figma AI change(s) (Cmd+Z to Undo)"), false);
+            app.show_toast(crate::cmdk::done_toast(op), false);
         }
     }
 }
@@ -3485,6 +3533,24 @@ fn paint_micro_seq_hud(ui: &egui::Ui, app: &App, canvas_rect: Rect, _right_rect:
         );
         p.rect_filled(prog_rect, 1.0, accent);
     }
+}
+
+/// An invisible click target over `rect` on the top-most layer, named `name` for screen readers. It is its own small
+/// Area so the toast around it, which registers no widget, lets pointer input through.
+fn toast_click_target(ctx: &Context, id: &str, rect: Rect, name: &str) -> egui::Response {
+    egui::Area::new(egui::Id::new(id))
+        .order(egui::Order::Tooltip)
+        .fixed_pos(rect.min)
+        .constrain(false)
+        .fade_in(false)
+        .interactable(true)
+        .show(ctx, |ui| {
+            let (_, response) = ui.allocate_exact_size(rect.size(), egui::Sense::click());
+            widgets::record(ui, id, rect);
+            widgets::labelled(ui, response.id, egui::accesskit::Role::Button, name);
+            response.on_hover_cursor(egui::CursorIcon::PointingHand)
+        })
+        .inner
 }
 
 /// The toolbar is centered on the window (not the canvas).

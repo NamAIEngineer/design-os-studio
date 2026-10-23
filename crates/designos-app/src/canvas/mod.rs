@@ -8,6 +8,7 @@ pub mod builder;
 pub mod create;
 pub mod draw;
 pub mod gpu;
+pub mod gpu_default;
 pub mod grids;
 pub mod handles;
 pub mod hit;
@@ -48,6 +49,9 @@ pub struct MoveState {
     /// `Some` while dragging Alt-copies (`ids` are the copies). Holds the slots whose limit a copy
     /// breaks if it stays in them; the verdict is taken at release, once the drop is known.
     pub dup_blocked: Option<Vec<(NodeId, designos_doc::SlotConstraintError)>>,
+    /// Alt-copies of a main component or set, as (the main, its copy): what the copy is, an instance or a real
+    /// copy, is decided at release, once the drop is known.
+    pub main_copies: Vec<(NodeId, NodeId)>,
 }
 
 pub enum ResizeKind {
@@ -79,7 +83,10 @@ pub struct DrawState {
     pub tool: tools::Tool,
     pub id: NodeId,
     pub parent: NodeId,
+    /// Where the shape starts: the press, snapped.
     pub start: DV,
+    /// Where the pointer went down, unsnapped. Space moves it along with `start`.
+    pub press: DV,
     pub last_page: DV,
     pub targets: Vec<Rect>,
     pub dragged: bool,
@@ -345,6 +352,7 @@ impl App {
 
     /// Switches tool, finishing any pen path or text edit in progress.
     pub fn set_tool(&mut self, tool: tools::Tool) {
+        let tool = tool.or_fallback();
         interact::finish_pen(self);
         interact::finish_text(self, true);
         self.cancel_interaction();

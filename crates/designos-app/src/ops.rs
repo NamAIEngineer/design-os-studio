@@ -29,9 +29,8 @@ pub fn apply_resize(doc: &mut Document, ed: &mut Edit, id: NodeId, size: Vec2, t
     let counter_horiz = doc.get(id).and_then(|n| n.parent).and_then(|p| doc.get(p)).and_then(LayoutChild::counter_axis_is_horizontal);
     let w_changed = (size.x - old.x).abs() > 1e-4;
     let h_changed = (size.y - old.y).abs() > 1e-4;
+    layout::set_box(doc, ed, id, transform, size);
     if let Some(n) = ed.node(doc, id) {
-        n.size = size;
-        n.transform = transform;
         if w_changed {
             n.layout_child.set_axis_sizing(true, Sizing::Fixed, counter_horiz);
             if let Some(al) = n.kind.frame_props_mut().and_then(|f| f.auto_layout.as_mut()) {
@@ -56,8 +55,12 @@ pub fn apply_resize(doc: &mut Document, ed: &mut Edit, id: NodeId, size: Vec2, t
             }
         }
     }
-    if doc.get(id).map(|n| n.kind.is_container()).unwrap_or(false) {
-        layout::apply_constraints(doc, ed, id, old, size);
+    let (is_container, is_boolean) = doc.get(id).map(|n| (n.kind.is_container(), matches!(n.kind, NodeKind::BooleanOp(_)))).unwrap_or_default();
+    if is_container {
+        // a boolean group's operands are its shape: `set_box` scaled them, constraints do not apply
+        if !is_boolean {
+            layout::apply_constraints(doc, ed, id, old, size);
+        }
         layout::layout_node(doc, ed, id);
     }
     if relayout {
@@ -96,6 +99,18 @@ fn transform_nodes(doc: &mut Document, ed: &mut Edit, nodes: &[(NodeId, Affine)]
     }
     for (id, _) in &new {
         layout::relayout_up(doc, ed, *id);
+    }
+}
+
+/// The child of `parent` that is, or contains, `layer`.
+fn child_holding(doc: &Document, parent: NodeId, layer: NodeId) -> Option<NodeId> {
+    let mut cur = layer;
+    loop {
+        let up = doc.get(cur)?.parent?;
+        if up == parent {
+            return Some(cur);
+        }
+        cur = up;
     }
 }
 
@@ -194,14 +209,26 @@ impl App {
             return true;
         }
         let before_nodes = tx.ed.before_nodes().clone();
+        let opened_at = tx.ed.opened_at();
         match tx.commit(&mut self.doc, &mut self.hist) {
             Ok(changed) => {
                 if changed {
+                    // Every layout write of an editor edit goes through `tx.ed`, so the step holds the
+                    // finished layout and undo and redo replay it as stored. Agent edits, agent turn
+                    // reverts and image-job results commit their own `Tx` and never reach this line:
+                    // they lay out after the commit, or not at all, so their steps keep the re-solve.
+                    // An edit kept open across frames may also have seen layout written outside every
+                    // step (the drain of another step's deferred layout), which its "before" values
+                    // predate: the epoch it took when it began tells, and then the step is not marked.
+                    if let Some(opened_at) = opened_at {
+                        self.hist.mark_last_undo_as_layout_recorded(&self.doc, opened_at);
+                    }
                     for (id, before) in &before_nodes {
                         if let Some(after) = self.doc.get(*id) {
                             self.agent_busy_frames.record_user_node_update(before, after);
                         }
                     }
+                    self.note_text_measures(&before_nodes);
                 }
                 self.changed();
                 self.sanitize();
@@ -264,7 +291,7 @@ impl App {
         match (active, self.scrub.is_some()) {
             (true, false) => {
                 if self.doc.nodes.len() <= 5_000 {
-                    self.scrub = Some(self.doc.nodes.clone());
+                    self.begin_scrub(self.doc.nodes.clone());
                 } else {
                     let mut snap = std::collections::BTreeMap::new();
                     if let Some(pn) = self.doc.get(self.page) {
@@ -300,7 +327,7 @@ impl App {
                             stack.extend(n.children.iter().copied());
                         }
                     }
-                    self.scrub = Some(snap);
+                    self.begin_scrub(snap);
                 }
             }
             (false, true) => self.scrub_end(),
@@ -308,9 +335,20 @@ impl App {
         }
     }
 
+    /// Opens a scrub on `snapshot` of the document. The scrub's step is diffed against the snapshot
+    /// when it ends, so the document's layout epoch is taken here with it: layout written outside
+    /// every step while the scrub is open lands in that diff with "before" values that predate it.
+    pub(crate) fn begin_scrub(&mut self, snapshot: std::collections::BTreeMap<NodeId, Node>) {
+        self.scrub_opened_at = self.doc.layout_epoch();
+        self.scrub = Some(snapshot);
+    }
+
     /// Folds everything changed since the scrub began into one undo step.
     pub fn scrub_end(&mut self) {
         let Some(base) = self.scrub.take() else { return };
+        // A big document is only snapshotted around the selection, so layout it reflowed elsewhere is
+        // not in the step: only a step diffed against the whole document is layout-recorded.
+        let whole_doc = base.keys().eq(self.doc.nodes.keys());
         let changed: Vec<NodeId> = base.iter().filter(|(id, old)| self.doc.nodes.get(id).is_some_and(|cur| cur != *old)).map(|(id, _)| *id).collect();
         for id in &changed {
             if let (Some(old), Some(cur)) = (base.get(id), self.doc.get(*id)) {
@@ -329,8 +367,12 @@ impl App {
         }
         let cmd = if updates.len() == 1 { updates.into_iter().next().unwrap() } else { Command::Batch(updates) };
         let cmd = crate::comp_ops::with_sync(&mut self.doc, cmd);
-        if let Err(e) = self.hist.exec(&mut self.doc, cmd) {
-            self.show_toast(format!("Edit failed: {e}"), true);
+        match self.hist.exec(&mut self.doc, cmd) {
+            Ok(()) if whole_doc => {
+                self.hist.mark_last_undo_as_layout_recorded(&self.doc, self.scrub_opened_at);
+            }
+            Ok(()) => {}
+            Err(e) => self.show_toast(format!("Edit failed: {e}"), true),
         }
         self.changed();
         self.sanitize();
@@ -562,7 +604,9 @@ impl App {
         let mut tx = Tx::new();
         let mut new_sel = Vec::new();
         // one clip for the whole selection, so connectors between duplicated nodes join the copies
-        let copies = clipboard::capture(&self.doc, &tops).map(|c| clipboard::instantiate(&mut self.doc, &c)).unwrap_or_default();
+        let copies = clipboard::capture(&self.doc, &tops)
+            .map(|c| clipboard::instantiate_linking_mains(&mut self.doc, &c, |doc, id| doc.get(id).and_then(|n| n.parent)))
+            .unwrap_or_default();
         for (id, mut nodes) in tops.into_iter().zip(copies) {
             let Some(parent) = self.doc.get(id).and_then(|n| n.parent) else { continue };
             if let Some(root) = nodes.first() {
@@ -669,29 +713,61 @@ impl App {
         s
     }
 
-    /// Paste with the system clipboard's HTML flavour read through [`App::system_html`].
-    pub fn paste_from_system(&mut self, system_text: Option<&str>) {
+    /// Pastes what is on the system clipboard. `event_text` is the plain text egui-winit read for the paste chord;
+    /// `None` (Edit > Paste, or a clipboard that holds an image alone, for which egui-winit sends no text) reads the
+    /// text through [`App::system_text`].
+    pub fn paste_from_system(&mut self, event_text: Option<&str>) {
+        let text = event_text.map(str::to_owned).or_else(|| (self.system_text)());
+        // Studio's own markup is the whole clipboard: it replaced every other flavour when it was copied, so no
+        // newer image or HTML sits beside it and nothing else needs reading.
+        if let Some(clip) = text.as_deref().and_then(clipboard::from_json) {
+            self.paste_clip(clip);
+            return;
+        }
         let html = (self.system_html)();
-        self.paste_with_html(system_text, html.as_deref());
+        self.paste_with_html(text.as_deref(), html.as_deref());
     }
 
-    /// Paste with the system clipboard's HTML flavour at hand: a Figma payload wins over SVG and text.
+    /// Paste with the system clipboard's HTML flavour read through [`App::system_html`] at hand. The first of these
+    /// that the clipboard holds wins: a Figma payload, SVG markup, Studio's own layers, the clipboard image (a worker
+    /// reads it, see `system_paste`), plain text as a text layer, and last Studio's own copy when nothing on the
+    /// system clipboard can be read. Text from another app is newer than Studio's copy, so it never brings the
+    /// in-app layers back.
     pub fn paste_with_html(&mut self, system_text: Option<&str>, system_html: Option<&str>) {
         if system_html.is_some_and(|h| clipboard::paste_figma(self, h)) {
             return;
         }
-        self.paste(system_text);
+        if system_text.is_some_and(|t| clipboard::paste_svg(self, t)) {
+            return;
+        }
+        if let Some(clip) = system_text.and_then(clipboard::from_json) {
+            self.paste_clip(clip);
+            return;
+        }
+        self.start_system_paste(system_text);
     }
 
+    /// Pastes `system_text` when it is SVG markup or Studio's own layers; with `None`, Studio's own copy. Text of
+    /// any other kind pastes nothing here (see [`App::paste_with_html`] for the full order).
     pub fn paste(&mut self, system_text: Option<&str>) {
         // SVG markup on the system clipboard becomes layers.
         if system_text.is_some_and(|t| clipboard::paste_svg(self, t)) {
             return;
         }
-        let clip = system_text.and_then(clipboard::from_json).or_else(|| self.clip.clone());
-        let Some(clip) = clip else { return };
-        let parent = self.container_for_insert();
-        let lists = clipboard::instantiate(&mut self.doc, &clip);
+        // Text that is not Studio's own markup came from another app after the in-app copy, so it never brings the
+        // older in-app layers back. Only a clipboard with no text at all (`None`) pastes the in-app copy.
+        let clip = match system_text {
+            Some(text) => clipboard::from_json(text),
+            None => self.clip.clone(),
+        };
+        if let Some(clip) = clip {
+            self.paste_clip(clip);
+        }
+    }
+
+    fn paste_clip(&mut self, clip: clipboard::Clip) {
+        let parent = clipboard::paste_parent(&self.doc, &clip, self.container_for_insert());
+        let lists = clipboard::instantiate_linking_mains(&mut self.doc, &clip, |_, _| Some(parent));
         let roots: Vec<&Node> = lists.iter().filter_map(|l| l.first()).collect();
         if !self.slot_insert_allowed(parent, &roots) {
             return;
@@ -720,8 +796,12 @@ impl App {
     /// selection (or inside the selected container at its top-left `(0, 0)`).
     pub fn paste_over_selection(&mut self) {
         let Some(clip) = self.clip.clone() else { return };
-        let parent = self.container_for_insert();
-        let (target_local, base_idx) = if let Some(&sel_id) = self.selection.first() {
+        let container = self.container_for_insert();
+        // A layer that holds an instance of a main cannot go in that main: it goes beside it, as Ctrl+V does, over the
+        // layer that holds the selection there.
+        let parent = clipboard::paste_parent(&self.doc, &clip, container);
+        let over = if parent == container { self.selection.first().copied() } else { child_holding(&self.doc, parent, container) };
+        let (target_local, base_idx) = if let Some(sel_id) = over {
             if sel_id == parent {
                 (v2(0.0, 0.0), self.doc.get(parent).map(|p| p.children.len()).unwrap_or(0))
             } else if let Some(n) = self.doc.get(sel_id) {
@@ -775,12 +855,25 @@ impl App {
         let mut new_sel = Vec::new();
         let mut affected_parents = Vec::new();
         for target_id in tops {
-            let Some((parent, index, tx0, ty0)) = self.doc.get(target_id).and_then(|n| {
+            let Some((old_parent, index, tx0, ty0)) = self.doc.get(target_id).and_then(|n| {
                 let p = n.parent?;
                 let idx = self.doc.get(p)?.children.iter().position(|&c| c == target_id).unwrap_or(0);
                 Some((p, idx, n.transform.tx, n.transform.ty))
             }) else {
                 continue;
+            };
+            // A replacement that holds an instance of the main the target sits in cannot go there: it goes beside that
+            // main, as Ctrl+V does, and takes its place.
+            let parent = clipboard::paste_parent(&self.doc, &clip, old_parent);
+            let (index, tx0, ty0) = if parent == old_parent {
+                (index, tx0, ty0)
+            } else {
+                let Some(beside) = child_holding(&self.doc, parent, old_parent).and_then(|b| self.doc.get(b).map(|n| (b, n.transform.tx, n.transform.ty)))
+                else {
+                    continue;
+                };
+                let after = self.doc.get(parent).and_then(|p| p.children.iter().position(|&c| c == beside.0)).map_or(0, |i| i + 1);
+                (after, beside.1, beside.2)
             };
             if tx.cmd(&mut self.doc, Command::Remove { id: target_id }).is_err() {
                 continue;
@@ -803,8 +896,10 @@ impl App {
                 let ins_idx = (index + k).min(self.doc.get(parent).map(|p| p.children.len()).unwrap_or(0));
                 let _ = tx.cmd(&mut self.doc, Command::Insert { parent, index: ins_idx, nodes });
             }
-            if !affected_parents.contains(&parent) {
-                affected_parents.push(parent);
+            for p in [parent, old_parent] {
+                if !affected_parents.contains(&p) {
+                    affected_parents.push(p);
+                }
             }
         }
         for p in affected_parents {
@@ -1570,6 +1665,11 @@ impl App {
             if *id == new_parent || self.doc.is_ancestor(*id, new_parent) {
                 continue;
             }
+            // A layer that holds an instance of a main is not dropped into that main, nor into a layer in it: that
+            // main would hold itself.
+            if reparent_would_hold_itself(&self.doc, &[*id], new_parent) {
+                continue;
+            }
             let old_p = self.doc.get(*id).and_then(|n| n.parent);
             if !self.slot_move_allowed(&[*id], new_parent) {
                 continue;
@@ -1958,13 +2058,23 @@ impl App {
     }
 
     pub fn open_dialog(&mut self) {
-        if let Some(p) = io::pick_open() {
+        self.open_dialog_with(&io::SystemDialogs);
+    }
+
+    pub fn open_dialog_with(&mut self, dialogs: &dyn io::FileDialogs) {
+        let outcome = dialogs.pick(&io::open_request());
+        if let Some(p) = self.picked_path(outcome) {
             self.open_path(p);
         }
     }
 
     pub fn import_web_capture_dialog(&mut self) {
-        if let Some(p) = io::pick_web_capture() {
+        self.import_web_capture_dialog_with(&io::SystemDialogs);
+    }
+
+    pub fn import_web_capture_dialog_with(&mut self, dialogs: &dyn io::FileDialogs) {
+        let outcome = dialogs.pick(&io::web_capture_request());
+        if let Some(p) = self.picked_path(outcome) {
             self.import_web_capture_path(p);
         }
     }
@@ -2053,12 +2163,18 @@ impl App {
                 }
             }
         }
+        // The document on screen (or, from Home, the open tab of this same file) is replaced: unsaved edits are asked about first.
+        if self.ask_before_open(&p) {
+            return;
+        }
         match io::load_path_with_warning(&p) {
             Ok((doc, warning)) => {
                 let name = doc.name.clone();
                 // An SVG becomes a new unsaved document, never overwritten by Save.
                 let svg = p.extension().is_some_and(|e| e.eq_ignore_ascii_case("svg"));
                 self.replace_document(doc, (!svg).then_some(p));
+                // What the replaced document left (a change no history holds) is not this one's.
+                self.autosave.dot.adopt(false);
                 self.show_toast(io::opened_toast_text(&name, warning.as_deref()), warning.is_some());
             }
             Err(e) => self.show_toast(e, true),
@@ -2066,6 +2182,10 @@ impl App {
     }
 
     pub fn save(&mut self, as_new: bool) {
+        self.save_with(as_new, &io::SystemDialogs);
+    }
+
+    pub fn save_with(&mut self, as_new: bool, dialogs: &dyn io::FileDialogs) {
         crate::decks::ui::flush_notes(self);
         // Library files save back to the library; "Save as…" writes an external copy.
         if !as_new && self.lib_file.is_some() {
@@ -2074,7 +2194,10 @@ impl App {
         }
         let target = match (&self.file_path, as_new) {
             (Some(p), false) if p.extension().map(|e| e == io::NATIVE_EXT).unwrap_or(false) => Some(p.clone()),
-            _ => io::pick_save(&self.doc.name),
+            _ => {
+                let outcome = dialogs.pick(&io::save_request(&self.doc.name));
+                self.picked_path(outcome)
+            }
         };
         let Some(path) = target else { return };
         self.settle_pending_relayout();
@@ -2092,9 +2215,12 @@ impl App {
                     0
                 };
                 let fig_note = if fig_omitted == 0 { String::new() } else { format!(" ({fig_omitted} extension keys not carried)") };
+                // One toast per save: a `.fig` or `.pen` save tells again each time, because each one leaves the comments out again.
+                let comments_left_out = io::comment_threads_left_out(&self.doc, &p) > 0;
+                let comments_note = if comments_left_out { format!(". {}", io::COMMENTS_ONLY_IN_NATIVE_NOTICE) } else { String::new() };
                 match notice {
-                    Some(w) => self.show_toast(format!("Saved {} ({w}){fig_note}", p.display()), true),
-                    None => self.show_toast(format!("Saved {}{fig_note}", p.display()), false),
+                    Some(w) => self.show_toast(format!("Saved {} ({w}){fig_note}{comments_note}", p.display()), true),
+                    None => self.show_toast(format!("Saved {}{fig_note}{comments_note}", p.display()), comments_left_out),
                 }
                 if self.lib_file.is_none() {
                     if let Some(old) = self.file_path.replace(p.clone()) {
@@ -2103,6 +2229,9 @@ impl App {
                     self.autosave.saved_hash = crate::home::doc_hash(&self.doc);
                     self.autosave.seen_rev = self.canvas.tiles.rev();
                     self.autosave.disk_mtime = std::fs::metadata(&p).ok().and_then(|m| m.modified().ok());
+                    if io::writes_native_format(&p) {
+                        self.mark_saved();
+                    }
                 }
             }
             Err(e) => self.show_toast(e, true),
@@ -2121,17 +2250,30 @@ impl App {
     }
 
     pub fn export_selection(&mut self) {
+        self.export_selection_with(&io::SystemDialogs);
+    }
+
+    pub fn export_selection_with(&mut self, dialogs: &dyn io::FileDialogs) {
         let Some(id) = self.selection.first().copied() else {
             self.show_toast("Select a layer to export", true);
             return;
         };
         let name = self.doc.get(id).map(|n| n.name.clone()).unwrap_or_default();
-        let Some(path) = io::pick_export(&name) else { return };
+        let outcome = dialogs.pick(&io::export_request(&name));
+        let path = match outcome {
+            io::DialogOutcome::Picked(path) => Some(path),
+            io::DialogOutcome::Cancelled => return,
+            io::DialogOutcome::Unavailable => None,
+        };
         let png = designos_export::export_png(&self.export_doc(), id, 1.0);
         if png.is_empty() {
             self.show_toast("Nothing to export", true);
             return;
         }
+        let Some(path) = path else {
+            self.save_without_dialog(dialogs, &format!("{name}.png"), &png);
+            return;
+        };
         match std::fs::write(&path, png) {
             Ok(()) => self.show_toast(format!("Exported {}", path.display()), false),
             Err(e) => self.show_toast(format!("Export failed: {e}"), true),
@@ -2153,6 +2295,79 @@ mod tests {
             ids.push(r);
         }
         (App::new(d), ids)
+    }
+
+    /// A hugging column of two 30 px rectangles whose stored height (77) is not what the solver
+    /// writes (60), as in an imported file.
+    fn app_with_a_stored_column() -> (App, NodeId, NodeId) {
+        use designos_doc::{AutoLayout, FrameProps, LayoutDirection, Sizing};
+        let mut d = Document::new("t");
+        let page = d.add_page("p");
+        let column_id = d.alloc_id();
+        let mut column = Node::frame(column_id, Rect::new(0.0, 0.0, 100.0, 77.0));
+        let layout = AutoLayout { direction: LayoutDirection::Vertical, primary_sizing: Sizing::Hug, counter_sizing: Sizing::Fixed, ..AutoLayout::default() };
+        column.kind = NodeKind::Frame(FrameProps { auto_layout: Some(layout), ..FrameProps::default() });
+        let column = d.insert(page, column).unwrap();
+        let first_id = d.alloc_id();
+        let first = d.insert(column, Node::rectangle(first_id, Rect::new(0.0, 0.0, 100.0, 30.0))).unwrap();
+        let second_id = d.alloc_id();
+        d.insert(column, Node::rectangle(second_id, Rect::new(0.0, 30.0, 100.0, 30.0))).unwrap();
+        (App::new(d), column, first)
+    }
+
+    fn layout_snapshot(app: &App) -> Vec<(NodeId, Vec2, f32, f32)> {
+        app.doc.nodes.values().map(|n| (n.id, n.size, n.transform.tx, n.transform.ty)).collect()
+    }
+
+    #[test]
+    fn a_scrub_over_the_whole_document_is_one_recorded_step_that_undoes_and_redoes_exactly() {
+        let (mut app, column, first) = app_with_a_stored_column();
+        let before = layout_snapshot(&app);
+        app.begin_scrub(app.doc.nodes.clone());
+        app.edit_nodes(&[first], |n| n.size.y = 50.0);
+        let after = layout_snapshot(&app);
+        assert_eq!(app.doc.get(column).unwrap().size.y, 80.0, "precondition: the column hugged the taller rectangle while scrubbing");
+        assert!(!app.hist.can_undo(), "precondition: nothing is recorded until the scrub ends");
+        app.scrub_end();
+        assert_eq!(layout_snapshot(&app), after);
+        assert_eq!(app.hist.undo_depth(), 1);
+        assert!(app.hist.peek_undo_layout_recorded(), "the step holds every node the scrub changed");
+
+        app.undo();
+        assert_eq!(layout_snapshot(&app), before, "undo restores the stored 77 px column, not the 60 px the solver would write");
+        app.redo();
+        assert_eq!(layout_snapshot(&app), after);
+    }
+
+    #[test]
+    fn a_scrub_snapshot_of_part_of_the_document_is_not_recorded() {
+        let (mut app, column, first) = app_with_a_stored_column();
+        let partial: std::collections::BTreeMap<NodeId, Node> = [column, first].iter().map(|id| (*id, app.doc.get(*id).unwrap().clone())).collect();
+        app.begin_scrub(partial);
+        app.edit_nodes(&[first], |n| n.size.y = 50.0);
+        app.scrub_end();
+        assert_eq!(app.hist.undo_depth(), 1);
+        assert!(!app.hist.peek_undo_layout_recorded(), "layout reflowed outside the snapshot is not in the step, so undo keeps solving it");
+    }
+
+    #[test]
+    fn an_editor_edit_is_a_recorded_step_and_an_edit_that_changes_nothing_marks_no_step() {
+        let (mut app, _column, first) = app_with_a_stored_column();
+        let before = layout_snapshot(&app);
+        app.edit_nodes(&[first], |n| n.size.y = 50.0);
+        let after = layout_snapshot(&app);
+        assert!(app.hist.peek_undo_layout_recorded(), "an editor edit records its own layout writes");
+        app.undo();
+        assert_eq!(layout_snapshot(&app), before);
+        app.redo();
+        assert_eq!(layout_snapshot(&app), after);
+
+        let mut renamed = app.doc.get(first).unwrap().clone();
+        renamed.name = "Agent".into();
+        app.hist.exec_agent(&mut app.doc, Command::Update { node: Box::new(renamed) }).unwrap();
+        assert!(!app.hist.peek_undo_layout_recorded(), "precondition: an agent step is not recorded");
+        assert!(!app.run_tx(Tx::new()), "an empty transaction records nothing");
+        assert!(!app.hist.peek_undo_layout_recorded(), "a commit that pushed no step must not mark the step before it");
     }
 
     #[test]

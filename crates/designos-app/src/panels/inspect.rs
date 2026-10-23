@@ -271,6 +271,10 @@ fn ext_for(bytes: &[u8]) -> &'static str {
 }
 
 pub(crate) fn download(app: &mut App, id: NodeId, asset: &Asset) {
+    download_with(app, id, asset, &crate::io::SystemDialogs);
+}
+
+pub(crate) fn download_with(app: &mut App, id: NodeId, asset: &Asset, dialogs: &dyn crate::io::FileDialogs) {
     let name = app.doc.get(id).map(|n| designos_export::sanitize_file_name(&n.name)).unwrap_or_else(|| "asset".into());
     let (file, bytes, label, ext): (String, Vec<u8>, &str, &str) = match asset {
         Asset::Image(r) => {
@@ -287,7 +291,14 @@ pub(crate) fn download(app: &mut App, id: NodeId, asset: &Asset) {
         app.show_toast("Nothing to download", true);
         return;
     }
-    let Some(path) = rfd::FileDialog::new().add_filter(label, &[ext]).set_file_name(file).save_file() else { return };
+    let path = match dialogs.pick(&crate::io::FileRequest::save(file.as_str()).filter(label, &[ext])) {
+        crate::io::DialogOutcome::Picked(path) => path,
+        crate::io::DialogOutcome::Cancelled => return,
+        crate::io::DialogOutcome::Unavailable => {
+            app.save_without_dialog(dialogs, &file, &bytes);
+            return;
+        }
+    };
     match std::fs::write(&path, bytes) {
         Ok(()) => app.show_toast(format!("Saved {}", path.display()), false),
         Err(e) => app.show_toast(format!("Download failed: {e}"), true),
@@ -542,12 +553,12 @@ fn body(app: &mut App, ui: &mut Ui, c: &mut Cur, id: NodeId, count: usize) {
     c.y += cc_h + 8.0;
 
     let cc_r = c.rect(PAD, 0.0, c.w - 2.0 * PAD, 26.0);
-    if small_button(ui, cc_r, "code-connect-terminal", "Send to Agent Terminal") {
+    if small_button(ui, cc_r, "code-connect-terminal", "Send to agent") {
         match crate::terminal::export_selection_and_comments_to_pty(&mut app.terminal, &app.doc, app.page, &app.selection, app.file_path.as_deref()) {
-            Ok(p) => app.show_toast(format!("Sent selection to Agent Terminal ({})", p.display()), false),
+            Ok(_) => app.show_toast("Sent selection to agent", false),
             Err(e) => app.show_toast(e, true),
         }
-        app.terminal.dock_open = true;
+        app.show_agents_panel();
     }
     c.y += 32.0;
 

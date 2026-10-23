@@ -193,6 +193,12 @@ pub fn run(app: &mut App, ctx: &Context, a: Action) {
                 ctx.copy_text(s);
             }
         }
+        Action::Paste if app.canvas.text.is_some() => {
+            // Like Ctrl+V: while a text is being edited the clipboard text goes into it, and an image has no place there.
+            if let Some(text) = (app.system_text)() {
+                crate::canvas::textsession::insert_text(app, &text, crate::textedit::EditKind::Other);
+            }
+        }
         Action::Paste => app.paste_from_system(None),
         Action::PasteOverSelection => app.paste_over_selection(),
         Action::PasteToReplace => app.paste_to_replace(),
@@ -307,6 +313,7 @@ pub fn run(app: &mut App, ctx: &Context, a: Action) {
 
 /// Selects `t` and remembers it as its toolbar group's current pick.
 pub fn pick_tool(app: &mut App, t: Tool) {
+    let t = t.or_fallback();
     if let Some((g, i)) = GROUPS.iter().enumerate().find_map(|(g, tools)| tools.iter().position(|x| *x == t).map(|i| (g, i))) {
         app.group_pick[g] = i;
     }
@@ -353,6 +360,10 @@ impl Node {
     }
     fn icon(mut self, i: Icon) -> Self {
         self.item = self.item.icon(i);
+        self
+    }
+    fn tip(mut self, text: &str) -> Self {
+        self.item = self.item.tooltip(text);
         self
     }
 }
@@ -427,7 +438,7 @@ fn main_nodes(app: &App) -> Vec<Node> {
         leaf("Import web capture…", "", Action::ImportWebCapture),
         leaf("Save", "Ctrl+S", Action::Save),
         leaf("Save as…", "Ctrl+Shift+S", Action::SaveAs),
-        leaf("Save local .fig copy…", "", Action::ExportFig),
+        leaf("Save .fig copy", "", Action::ExportFig),
         leaf("Save to library…", "", Action::SaveToLibrary).off(app.lib.is_none() || app.lib_file.is_some()).sep(),
         leaf("Show version history", "", Action::ToggleVersionHistory).on(app.history.open),
         leaf("Save to version history…", "Ctrl+Alt+S", Action::SaveVersion).off(!app.has_history()).sep(),
@@ -441,7 +452,8 @@ fn main_nodes(app: &App) -> Vec<Node> {
         leaf("Undo", "Ctrl+Z", Action::Undo).off(!app.hist.can_undo()),
         leaf("Redo", "Ctrl+Shift+Z", Action::Redo).off(!app.hist.can_redo()).sep(),
         leaf("Copy", "Ctrl+C", Action::Copy).off(!has_sel),
-        leaf("Paste", "Ctrl+V", Action::Paste).off(app.clip.is_none()),
+        // always on: the system clipboard is read when it runs, not while the menu draws
+        leaf("Paste", "Ctrl+V", Action::Paste),
         leaf("Duplicate", "Ctrl+D", Action::Duplicate).off(!has_sel),
         leaf("Delete", "Del", Action::Delete).off(!has_sel).sep(),
         leaf("Select all", "Ctrl+A", Action::SelectAll),
@@ -547,7 +559,7 @@ fn main_nodes(app: &App) -> Vec<Node> {
             "Preferences",
             vec![
                 leaf("Your name…", "", Action::YourName),
-                leaf("Use GPU rendering", "", Action::ToggleGpu).on(app.canvas.gpu.active()).off(!app.canvas.gpu.available),
+                leaf("Use GPU rendering", "", Action::ToggleGpu).on(app.canvas.gpu.active()).off(!app.canvas.gpu.available).tip(gpu_off_reason(app)),
                 leaf("Agent permissions…", "", Action::AgentPermissions),
             ],
         ),
@@ -555,6 +567,15 @@ fn main_nodes(app: &App) -> Vec<Node> {
         leaf("AI balance", "", Action::OpenAgents).sep(),
         submenu("Help and account", help),
     ]
+}
+
+/// Why the GPU canvas is off when the app chose that (a software renderer); empty when the user did.
+fn gpu_off_reason(app: &App) -> &'static str {
+    if app.canvas.gpu.off_for_software && !app.canvas.gpu.pref {
+        crate::canvas::gpu_default::SOFTWARE_OFF_REASON
+    } else {
+        ""
+    }
 }
 
 fn tool_nodes(app: &App, g: usize) -> Vec<Node> {
@@ -618,7 +639,7 @@ fn file_items(app: &App) -> Vec<(MenuItem, Option<Action>)> {
         (MenuItem::new("Import web capture…"), Some(Action::ImportWebCapture)),
         (MenuItem::new("Save").shortcut("Ctrl+S"), Some(Action::Save)),
         (MenuItem::new("Save as…").shortcut("Ctrl+Shift+S"), Some(Action::SaveAs)),
-        (MenuItem::new("Save local .fig copy…"), Some(Action::ExportFig)),
+        (MenuItem::new("Save .fig copy"), Some(Action::ExportFig)),
         (MenuItem::new("Save to library…").disabled(app.lib.is_none() || app.lib_file.is_some()).sep(), Some(Action::SaveToLibrary)),
         (MenuItem::new("Show version history").checked(app.history.open), Some(Action::ToggleVersionHistory)),
         (MenuItem::new("Save to version history…").shortcut("Ctrl+Alt+S").disabled(!app.has_history()).sep(), Some(Action::SaveVersion)),
@@ -785,7 +806,8 @@ pub fn show(app: &mut App, ctx: &Context) {
             let nodes = tool_nodes(app, g);
             let items = to_items(&nodes);
             let h = theme::MENU_PADDING * 2.0 + items.len() as f32 * theme::MENU_ITEM_HEIGHT;
-            let pos = super::toolbar::tool_menu_pos(screen, g, h);
+            // Hung off the chevron that opened it; the window rect only stands in when nothing recorded one.
+            let pos = super::toolbar::tool_menu_pos(anchor.unwrap_or_else(|| super::toolbar::chevron_rect(screen, g)), h);
             match popup_tree(ctx, id, pos, theme::TOOL_MENU_WIDTH, &items, anchor) {
                 TreeResult::Picked(path) => {
                     app.ui.menu = None;
@@ -1067,11 +1089,83 @@ pub fn palette_entries(app: &App, query: &str) -> Vec<(String, String)> {
 mod tests {
     use super::*;
 
+    /// Whether the Edit menu's Paste row can be clicked.
+    fn edit_paste_enabled(app: &App) -> bool {
+        let nodes = main_nodes(app);
+        let edit = nodes.iter().find(|n| n.item.label == "Edit").expect("Edit submenu");
+        !edit.kids.iter().find(|n| n.item.label == "Paste").expect("Paste row").item.disabled
+    }
+
+    #[test]
+    fn edit_paste_is_not_greyed_out_before_anything_was_copied_in_studio() {
+        // the system clipboard may hold text or an image from another app, and it is read only when Paste runs
+        let mut app = App::new(designos_doc::Document::new("t"));
+        assert!(app.clip.is_none());
+        assert!(edit_paste_enabled(&app));
+        // the rows that work on Studio's own copy only stay off until it exists
+        let nodes = main_nodes(&app);
+        let edit = nodes.iter().find(|n| n.item.label == "Edit").unwrap();
+        assert!(edit.kids.iter().find(|n| n.item.label == "Paste over selection").unwrap().item.disabled);
+        app.copy_selection();
+        assert!(edit_paste_enabled(&app));
+    }
+
     #[test]
     fn query_matching_is_word_based() {
         assert!(matches_query("Zoom to fit", "zoom fit"));
         assert!(matches_query("Zoom to fit", ""));
         assert!(!matches_query("Zoom to fit", "pen"));
+    }
+
+    /// The tooltip of Preferences -> "Use GPU rendering" in the main menu.
+    fn gpu_row_tooltip(app: &App) -> String {
+        let nodes = main_nodes(app);
+        let prefs = nodes.iter().find(|n| n.item.label == "Preferences").expect("Preferences submenu");
+        prefs.kids.iter().find(|n| n.item.label == "Use GPU rendering").expect("Use GPU rendering row").item.tooltip.clone()
+    }
+
+    #[test]
+    fn preferences_says_why_the_gpu_canvas_is_off_for_a_software_renderer() {
+        let mut app = App::new(designos_doc::Document::new("t"));
+        app.canvas.gpu.available = true;
+        assert_eq!(gpu_row_tooltip(&app), "", "a real GPU needs no explanation");
+        app.canvas.gpu.pref = false;
+        assert_eq!(gpu_row_tooltip(&app), "", "a choice the user made needs no explanation");
+        app.canvas.gpu.off_for_software = true;
+        assert_eq!(gpu_row_tooltip(&app), crate::canvas::gpu_default::SOFTWARE_OFF_REASON);
+    }
+
+    #[test]
+    fn choosing_the_gpu_canvas_drops_the_software_explanation() {
+        let mut app = App::new(designos_doc::Document::new("t"));
+        app.canvas.gpu.available = true;
+        app.canvas.gpu.pref = false;
+        app.canvas.gpu.off_for_software = true;
+        app.toggle_gpu();
+        assert!(app.canvas.gpu.pref, "toggled on");
+        assert!(!app.canvas.gpu.off_for_software, "the user chose, so the default no longer applies");
+        assert_eq!(gpu_row_tooltip(&app), "");
+        app.toggle_gpu();
+        assert!(!app.canvas.gpu.pref && !app.canvas.gpu.off_for_software, "an explicit off is the user's own choice, not the adapter's");
+        assert_eq!(gpu_row_tooltip(&app), "");
+    }
+
+    #[test]
+    fn palette_and_dropdowns_do_not_offer_the_arrow_tool() {
+        let app = App::new(designos_doc::Document::new("t"));
+        assert!(commands(&app).iter().all(|c| !matches!(c.act, Action::Tool(Tool::Arrow))), "Cmd+K must not offer the Arrow tool");
+        assert!(palette_entries(&app, "").iter().all(|(_, shortcut)| shortcut != "Shift+L"), "no row advertises Shift+L");
+        for g in 0..GROUPS.len() {
+            assert!(tool_nodes(&app, g).iter().all(|n| n.item.label != "Arrow"), "toolbar group {g} lists Arrow");
+        }
+    }
+
+    #[test]
+    fn picking_the_hidden_arrow_tool_remembers_line_for_the_group() {
+        let mut app = App::new(designos_doc::Document::new("t"));
+        pick_tool(&mut app, Tool::Arrow);
+        assert_eq!(app.tool, Tool::Line);
+        assert_eq!(GROUPS[2][app.group_pick[2]], Tool::Line, "the shape button shows Line, never a stale Arrow");
     }
 
     #[test]

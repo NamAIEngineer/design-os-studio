@@ -141,6 +141,8 @@ pub struct Toast {
     pub text: String,
     pub until: f64,
     pub error: bool,
+    /// A file this toast can show in its folder (the toast then carries a "Show in folder" action).
+    pub reveal: Option<PathBuf>,
 }
 
 pub struct App {
@@ -173,6 +175,15 @@ pub struct App {
     /// Reads the system clipboard's Figma HTML payload. The seam the paste paths go through: production
     /// reads the OS pasteboard, tests script it (the pasteboard is global and not thread-safe).
     pub system_html: fn() -> Option<String>,
+    /// Shows a file in the system file manager. The seam the "Show in folder" action goes through:
+    /// production launches the file manager, tests record the path (a test never opens a window).
+    pub reveal_file: fn(&std::path::Path) -> Result<(), String>,
+    /// Reads the system clipboard's plain text, for the paste paths that egui-winit sends no text for (Edit > Paste).
+    pub system_text: fn() -> Option<String>,
+    /// Reads the system clipboard's image. Runs on a worker thread, see `system_paste`.
+    pub system_image: fn() -> Option<crate::system_paste::ClipImage>,
+    /// Pastes whose clipboard image is still being read.
+    pub paste_jobs: std::collections::VecDeque<crate::system_paste::PasteJob>,
     pub toast: Option<Toast>,
     pub file_path: Option<PathBuf>,
     pub now: f64,
@@ -181,6 +192,8 @@ pub struct App {
     pub fonts: FontLoader,
     /// Document snapshot while a numeric field is being scrubbed (see `widgets::field::SCRUB_FLAG`).
     pub scrub: Option<std::collections::BTreeMap<NodeId, designos_doc::Node>>,
+    /// `Document::layout_epoch` when the open scrub began; set by `App::begin_scrub` together with `scrub`.
+    pub(crate) scrub_opened_at: u64,
     /// Zoom (as a factor) to apply on the first frame instead of fitting the page (`--zoom`).
     pub startup_zoom: Option<f32>,
     /// The projects library (None until opened; tests run without one).
@@ -191,6 +204,8 @@ pub struct App {
     pub home: Option<crate::home::Home>,
     /// The open modal dialog (prompts, confirmations, shortcuts, About).
     pub dialog: Option<crate::home::Dialog>,
+    /// The questions "Save changes to <name>?" that stand between an action and the unsaved edits it would drop.
+    pub leave: crate::home::LeaveFlow,
     pub autosave: crate::home::Autosave,
     /// The header file name is being renamed (double-click).
     pub renaming_file: bool,
@@ -261,6 +276,10 @@ impl App {
             copied_style: None,
             paste_count: 0,
             system_html: crate::clipboard::system_figma_html,
+            reveal_file: crate::fig_export::reveal_file,
+            system_text: crate::system_paste::system_text,
+            system_image: crate::system_paste::system_image,
+            paste_jobs: Default::default(),
             toast: None,
             file_path: None,
             now: 0.0,
@@ -268,11 +287,13 @@ impl App {
             first_fit_done: false,
             fonts: FontLoader::default(),
             scrub: None,
+            scrub_opened_at: 0,
             startup_zoom: None,
             lib: None,
             lib_file: None,
             home: None,
             dialog: None,
+            leave: Default::default(),
             autosave: Default::default(),
             renaming_file: false,
             comments: Default::default(),
@@ -299,15 +320,19 @@ impl App {
 
     /// Registers fonts finished loading in the background and re-renders.
     pub fn poll_fonts(&mut self) {
-        let Some(done) = self.fonts.poll() else { return };
-        if done.loaded > 0 {
-            self.changed();
+        if let Some(done) = self.fonts.poll() {
+            if done.loaded > 0 {
+                self.changed();
+                // text measured with the stand-in keeps its old box until it is fitted to the face that arrived
+                self.start_text_refit(&done.families);
+            }
+            if let Some(first) = done.failed.first() {
+                let more = done.failed.len() - 1;
+                let suffix = if more > 0 { format!(" (+{more} more)") } else { String::new() };
+                self.show_toast(format!("Font unavailable: {first}{suffix}"), true);
+            }
         }
-        if let Some(first) = done.failed.first() {
-            let more = done.failed.len() - 1;
-            let suffix = if more > 0 { format!(" (+{more} more)") } else { String::new() };
-            self.show_toast(format!("Font unavailable: {first}{suffix}"), true);
-        }
+        self.step_text_refit();
     }
 
     pub fn show_toast(&mut self, text: impl Into<String>, error: bool) {
@@ -319,7 +344,16 @@ impl App {
                 error = true;
             }
         }
-        self.toast = Some(Toast { text, until: self.now + theme::TOAST_SECONDS, error });
+        self.toast = Some(Toast { text, until: self.now + theme::TOAST_SECONDS, error, reveal: None });
+    }
+
+    /// A toast that stays long enough to read and offers to show `path` in its folder.
+    pub fn show_toast_with_reveal(&mut self, text: impl Into<String>, path: PathBuf) {
+        self.show_toast(text, false);
+        if let Some(toast) = self.toast.as_mut() {
+            toast.reveal = Some(path);
+            toast.until = self.now + theme::TOAST_REVEAL_SECONDS;
+        }
     }
 
     /// Marks the document as modified so the canvas texture is re-rendered.

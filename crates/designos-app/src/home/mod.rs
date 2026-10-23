@@ -6,15 +6,24 @@
 //! and turns user interactions into [`Act`]s that [`apply`] runs against the library.
 
 pub mod dialog;
+mod leave;
 mod session;
+#[cfg(test)]
+mod spec_bundle_hidden_tests;
 pub mod thumb;
 pub mod time;
+mod unsaved;
 #[path = "../updater.rs"]
 pub mod updater;
 
 pub use dialog::{Dialog, Intent};
+#[cfg(test)]
+pub use leave::Answer;
+pub use leave::{Leave, LeaveFlow};
+pub(crate) use session::library_file_disk_path;
 pub(crate) use session::{doc_hash, node_fingerprint};
-pub use session::{Autosave, LibFile};
+pub use session::{Autosave, DiskState, LibFile};
+pub use unsaved::UnsavedDot;
 
 use crate::app::App;
 use crate::theme;
@@ -512,7 +521,7 @@ pub fn context_entries(h: &Home, target: &Target) -> Vec<(crate::widgets::menu::
                 (MenuItem::new(if starred { "Remove star" } else { "Star" }), Act::Star(id.clone(), !starred)),
                 (MenuItem::new("Show in folder").sep(), Act::Reveal(id.clone())),
                 (MenuItem::new("Move to trash").sep(), Act::Trash(id.clone())),
-                (MenuItem::new("Export .fig\u{2026}"), Act::ExportFig(id.clone())),
+                (MenuItem::new("Export .fig"), Act::ExportFig(id.clone())),
             ]
         }
         Target::Project(id) => vec![
@@ -556,6 +565,36 @@ fn drag_ghost(h: &mut Home, ui: &Ui, acts: &mut Vec<Act>) {
             acts.push(Act::Drop(id, to.clone()));
         }
         h.drag = None;
+    }
+}
+
+/// Import: asks for design files and brings them into the current project (or the first one, or a new one).
+pub fn import_files_dialog(app: &mut App, dialogs: &dyn crate::io::FileDialogs) {
+    let request = crate::io::FileRequest::open()
+        .filter("Design files", &["designos", "fig", "json", "svg"])
+        .filter("design:os studio", &["designos"])
+        .filter("Figma file", &["fig"])
+        .filter("SVG", &["svg"])
+        .filter("JSON", &["json"]);
+    let outcome = dialogs.pick_many(&request);
+    let Some(paths) = app.picked_paths(outcome) else { return };
+    let Some(lib) = app.lib.clone() else { return };
+    let target = match app.home_target() {
+        Some(t) => Some(t),
+        None => app.home.as_ref().and_then(|h| h.snap.projects.first().map(|p| (p.id.clone(), None))),
+    };
+    let target = match target {
+        Some(t) => Some(t),
+        None => match lib.create_project("My project") {
+            Ok(p) => Some((p.id, None)),
+            Err(e) => {
+                app.show_toast(e.to_string(), true);
+                None
+            }
+        },
+    };
+    if let Some((p, f)) = target {
+        app.import_into_library(&paths, &p, f.as_deref());
     }
 }
 
@@ -695,28 +734,7 @@ pub fn apply(app: &mut App, act: Act) {
             app.terminal.open_for_agent_use(app.file_path.as_deref());
             changed = false;
         }
-        Act::Import => {
-            let paths = rfd::FileDialog::new()
-                .add_filter("Design files", &["designos", "fig", "json", "svg"])
-                .add_filter("design:os studio", &["designos"])
-                .add_filter("Figma file", &["fig"])
-                .add_filter("SVG", &["svg"])
-                .add_filter("JSON", &["json"])
-                .pick_files();
-            if let Some(paths) = paths {
-                let target = match app.home_target() {
-                    Some(t) => Some(t),
-                    None => app.home.as_ref().and_then(|h| h.snap.projects.first().map(|p| (p.id.clone(), None))),
-                };
-                let target = match target {
-                    Some(t) => Some(t),
-                    None => ok(app, lib.create_project("My project")).map(|p| (p.id, None)),
-                };
-                if let Some((p, f)) = target {
-                    app.import_into_library(&paths, &p, f.as_deref());
-                }
-            }
-        }
+        Act::Import => import_files_dialog(app, &crate::io::SystemDialogs),
         Act::NewProject => {
             app.dialog = Some(Dialog::prompt(Intent::NewProject, "New project", "", "Create"));
         }
@@ -778,27 +796,8 @@ pub fn apply(app: &mut App, act: Act) {
         }
         Act::ExportFig(id) => {
             changed = false;
-            if let Ok(doc) = lib.load_file(&id) {
-                match designos_fig::export_fig_with_report(&doc) {
-                    Ok((bytes, omitted)) => {
-                        let safe_name: String = doc.name.chars().map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '_' }).collect();
-                        let stem = if safe_name.trim_matches('_').is_empty() { "export".to_string() } else { safe_name };
-                        let out_dir = lib.path("exports");
-                        let _ = std::fs::create_dir_all(&out_dir);
-                        let out_path = out_dir.join(format!("{stem}.fig"));
-                        let saved_path = if std::fs::write(&out_path, &bytes).is_ok() {
-                            out_path
-                        } else {
-                            let tmp_path = std::env::temp_dir().join(format!("{stem}.fig"));
-                            let _ = std::fs::write(&tmp_path, &bytes);
-                            tmp_path
-                        };
-                        let note = if omitted.is_empty() { String::new() } else { format!(" ({} extension keys not carried)", omitted.len()) };
-                        app.show_toast(format!("Exported {} ({} bytes .fig v106) -> {}{note}", doc.name, bytes.len(), saved_path.display()), false);
-                    }
-                    Err(e) => app.show_toast(format!("Export .fig failed: {e}"), true),
-                }
-            }
+            let result = lib.load_file(&id).map_err(|e| e.to_string()).and_then(|doc| crate::fig_export::export_new(&doc, &lib.path("exports"), &doc.name));
+            app.show_fig_export_result(result);
         }
         Act::Trash(id) => {
             let name = lib.file(&id).map(|f| f.name).unwrap_or_default();
@@ -1228,6 +1227,13 @@ mod main_view {
     const UI3_AMBER: Color32 = Color32::from_rgb(0xF5, 0x9E, 0x0B);
     const UI3_ORANGE: Color32 = Color32::from_rgb(0xFF, 0x6A, 0x3D);
 
+    /// Whether Home offers the spec bundle: the `+ Spec bundle` header button and the spec bundle
+    /// template card. Both push `Act::OpenSpecs`, which only switches the rail to the spec reader,
+    /// and that reader is switched off (`shell.rs`, `specs_reader_open`). With it off they led to a
+    /// blank canvas and no Recents entry, so Home hides them until spec files exist. Turn this on
+    /// together with the reader, never alone.
+    const SPEC_BUNDLE_ENTRY_ENABLED: bool = false;
+
     #[derive(Clone, Copy, PartialEq)]
     enum Kind {
         PrimaryBlue,
@@ -1241,7 +1247,7 @@ mod main_view {
         let pad = theme::HOME_PAD;
         let trash = h.section == Section::Trash && !h.searching();
 
-        // 1. Top Header & Creation Strip (`+ Design file`, `+ FigJam board`, `+ Spec bundle`, `Import`, context `+ New folder`)
+        // 1. Top Header & Creation Strip (`+ Design file`, `+ FigJam board`, `+ Spec bundle` while `SPEC_BUNDLE_ENTRY_ENABLED`, `Import`, context `+ New folder`)
         let head = Rect::from_min_size(rect.min, Vec2::new(rect.width(), theme::HOME_HEADER_H));
         breadcrumb(h, ui, &p, Pos2::new(rect.left() + pad, head.center().y), acts);
         let mut right = rect.right() - pad;
@@ -1263,11 +1269,13 @@ mod main_view {
                 acts.push(Act::NewBoard);
             }
             right -= 8.0;
-            let r = button(ui, &p, &mut right, head.center().y, "+ Spec bundle", Kind::Secondary, "home-new-spec");
-            if r.clicked() {
-                acts.push(Act::OpenSpecs);
+            if SPEC_BUNDLE_ENTRY_ENABLED {
+                let r = button(ui, &p, &mut right, head.center().y, "+ Spec bundle", Kind::Secondary, "home-new-spec");
+                if r.clicked() {
+                    acts.push(Act::OpenSpecs);
+                }
+                right -= 8.0;
             }
-            right -= 8.0;
             let r = button(ui, &p, &mut right, head.center().y, "Import", Kind::Secondary, "home-import");
             if r.clicked() {
                 acts.push(Act::Import);
@@ -1437,41 +1445,16 @@ mod main_view {
     }
 
     /// Dedicated view for `Section::Templates` (`"Templates & Specs"`):
-    /// 6 starter template & spec cards + user's matching template/spec files below.
+    /// 5 starter template cards (a 6th spec bundle card while `SPEC_BUNDLE_ENTRY_ENABLED`) + user's matching template/spec files below.
     fn templates_view(lib: &Library, h: &mut Home, ui: &mut Ui, content: Rect, acts: &mut Vec<Act>) {
         let files = h.files();
         let now = wall_ms();
         let pad = theme::HOME_PAD;
         let list = h.view == ViewMode::List;
         let inner_w = (content.width() - pad * 2.0).max(240.0);
-        let (tcw, tch, tgap_x, tgap_y) = (240.0_f32, 188.0_f32, 16.0_f32, 16.0_f32);
-        let tcols = (((inner_w + tgap_x) / (tcw + tgap_x)).floor() as usize).max(1);
-        let template_rows = 6usize.div_ceil(tcols) as f32 * (tch + tgap_y);
-
-        let (cw, ch, gap_x, gap_y) = (theme::HOME_CARD_W, theme::HOME_CARD_H, theme::HOME_CARD_GAP, 24.0);
-        let cols = (((inner_w + gap_x) / (cw + gap_x)).floor() as usize).max(1);
-        let file_rows = if files.is_empty() {
-            0.0
-        } else if list {
-            28.0 + files.len() as f32 * theme::HOME_LIST_ROW_H + 28.0
-        } else {
-            28.0 + files.len().div_ceil(cols) as f32 * (ch + gap_y)
-        };
-
-        let content_h = pad + 28.0 + template_rows + 12.0 + file_rows + pad;
-        crate::panels::wheel_scroll(ui, content, &mut h.scroll, content_h);
-        let scroll = h.scroll;
-        let dragging = h.drag.is_some();
-        let mut budget = 4u32;
-        let selected = h.selected.clone();
-        let mut new_selected = None;
-        let mut menu = None;
-        let mut drag = None;
-        let ctx = ui.ctx().clone();
-
         /// (title, badge, accent, icon, description, button label, action, record key)
         type TemplateCard<'a> = (&'a str, &'a str, Color32, Icon, &'a str, &'a str, Act, &'a str);
-        let cards: [TemplateCard; 6] = [
+        let mut cards: Vec<TemplateCard> = vec![
             (
                 "Marlow \u{2014} Mobile Banking Kit",
                 "Design Kit",
@@ -1522,7 +1505,9 @@ mod main_view {
                 Act::CreateFromTemplate(TemplateKind::SlideDeck),
                 "home-template-deck",
             ),
-            (
+        ];
+        if SPEC_BUNDLE_ENTRY_ENABLED {
+            cards.push((
                 "PRODUCT:OS Spec Bundle v2",
                 "Spec Driven",
                 UI3_TEAL,
@@ -1531,8 +1516,33 @@ mod main_view {
                 "Open Spec Hub",
                 Act::OpenSpecs,
                 "home-template-specs",
-            ),
-        ];
+            ));
+        }
+
+        let (tcw, tch, tgap_x, tgap_y) = (240.0_f32, 188.0_f32, 16.0_f32, 16.0_f32);
+        let tcols = (((inner_w + tgap_x) / (tcw + tgap_x)).floor() as usize).max(1);
+        let template_rows = cards.len().div_ceil(tcols) as f32 * (tch + tgap_y);
+
+        let (cw, ch, gap_x, gap_y) = (theme::HOME_CARD_W, theme::HOME_CARD_H, theme::HOME_CARD_GAP, 24.0);
+        let cols = (((inner_w + gap_x) / (cw + gap_x)).floor() as usize).max(1);
+        let file_rows = if files.is_empty() {
+            0.0
+        } else if list {
+            28.0 + files.len() as f32 * theme::HOME_LIST_ROW_H + 28.0
+        } else {
+            28.0 + files.len().div_ceil(cols) as f32 * (ch + gap_y)
+        };
+
+        let content_h = pad + 28.0 + template_rows + 12.0 + file_rows + pad;
+        crate::panels::wheel_scroll(ui, content, &mut h.scroll, content_h);
+        let scroll = h.scroll;
+        let dragging = h.drag.is_some();
+        let mut budget = 4u32;
+        let selected = h.selected.clone();
+        let mut new_selected = None;
+        let mut menu = None;
+        let mut drag = None;
+        let ctx = ui.ctx().clone();
 
         crate::panels::clipped(ui, content, |ui| {
             let p = ui.painter().clone();
@@ -1953,8 +1963,8 @@ mod main_view {
                 "Agent CLI & MCP Server",
                 Icon::Terminal,
                 UI3_ORANGE,
-                "Per-file Claude Code, Codex, Grok & Antigravity + 24 MCP tools",
-                ("Open Agent Terminal", Act::OpenAgents, "home-resource-agents"),
+                "Per-file Claude Code, Codex, Grok, Antigravity & Gemini CLI + the MCP server",
+                ("Open Agents", Act::OpenAgents, "home-resource-agents"),
                 None,
             ),
         ];
@@ -2004,6 +2014,7 @@ mod main_view {
                     p.rect_stroke(b1, theme::cr_pill(b1.height()), Stroke::new(1.0, *accent), StrokeKind::Inside);
                     p.text(b1.center(), Align2::CENTER_CENTER, *btn1_lbl, theme::font_caption_strong(), Color32::WHITE);
                     widgets::record(ui, btn1_key, b1);
+                    widgets::labelled(ui, r1.id, egui::accesskit::Role::Button, btn1_lbl);
                     if r1.clicked() {
                         acts.push(btn1_act.clone());
                     }
@@ -2012,6 +2023,7 @@ mod main_view {
                     p.rect_stroke(b2, theme::cr_pill(b2.height()), Stroke::new(1.0, UI3_BORDER), StrokeKind::Inside);
                     p.text(b2.center(), Align2::CENTER_CENTER, *btn2_lbl, theme::font_caption_strong(), theme::TEXT);
                     widgets::record(ui, btn2_key, b2);
+                    widgets::labelled(ui, r2.id, egui::accesskit::Role::Button, btn2_lbl);
                     if r2.clicked() {
                         acts.push(btn2_act.clone());
                     }
@@ -2022,6 +2034,7 @@ mod main_view {
                     p.rect_stroke(b1, theme::cr_pill(b1.height()), Stroke::new(1.0, *accent), StrokeKind::Inside);
                     p.text(b1.center(), Align2::CENTER_CENTER, *btn1_lbl, theme::font_caption_strong(), Color32::WHITE);
                     widgets::record(ui, btn1_key, b1);
+                    widgets::labelled(ui, r1.id, egui::accesskit::Role::Button, btn1_lbl);
                     if r1.clicked() {
                         acts.push(btn1_act.clone());
                     }

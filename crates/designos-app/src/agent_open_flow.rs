@@ -122,6 +122,25 @@ pub fn format_relative_time(last_active_at: u64, now_secs: u64) -> String {
     }
 }
 
+impl crate::app::App {
+    /// Shows the Agents panel on the left, without touching its sessions.
+    pub fn show_agents_panel(&mut self) {
+        self.ui.rail = Some(crate::app::RailItem::Agents);
+        self.ui.left_collapsed = false;
+    }
+
+    /// What a click on the Agents rail button and the Cmd+` shortcut do: an open Agents panel closes; a closed one opens
+    /// and then resumes the file's last session or shows the new-session list ([`TerminalState::open_for_agent_use`]).
+    pub fn toggle_agents_panel(&mut self) {
+        if self.ui.rail == Some(crate::app::RailItem::Agents) && !self.ui.left_collapsed {
+            self.ui.rail = None;
+        } else {
+            self.show_agents_panel();
+            self.terminal.open_for_agent_use(self.file_path.as_deref());
+        }
+    }
+}
+
 impl TerminalState {
     /// True when at least one tab in `self.tabs` has a running process or is still inside the
     /// 5-second startup window without a recorded start failure (`#651` §3 rule 2.1 & §8 edge case 4).
@@ -131,7 +150,7 @@ impl TerminalState {
         })
     }
 
-    /// Opens the Agent panel / `>_` dock / backtick surface for agent use (`#651` §3 rule 2):
+    /// Opens the Agents panel for agent use, from the rail button or Cmd+` (`#651` §3 rule 2):
     /// 1. If a live tab exists, keep it (`picker_open = false`).
     /// 2. Else if `resumable_sessions()` is non-empty, resume the most recent one (`picker_open = false`).
     /// 3. Else start nothing and set `picker_open = true`.
@@ -248,6 +267,7 @@ impl TerminalState {
         if let Some(entry) = self.session_registry.sessions.iter().find(|s| s.tab_id == entry_tab_id) {
             self.renaming_session_tab_id = Some(entry_tab_id);
             self.rename_session_input = entry.title.clone();
+            self.rename_session_focus_pending = true;
         }
     }
 
@@ -255,10 +275,12 @@ impl TerminalState {
     pub fn cancel_rename_session(&mut self) {
         self.renaming_session_tab_id = None;
         self.rename_session_input.clear();
+        self.rename_session_focus_pending = false;
     }
 
     /// Commits the current inline session rename (`Enter`, `#651` §3 rule 6 & §7).
     pub fn commit_rename_session(&mut self) {
+        self.rename_session_focus_pending = false;
         if let Some(tab_id) = self.renaming_session_tab_id.take() {
             let input = std::mem::take(&mut self.rename_session_input);
             self.rename_session_entry(tab_id, &input);
@@ -540,8 +562,15 @@ pub fn render_sessions_popover(state: &mut TerminalState, ui: &mut Ui, panel_rec
             p.rect_stroke(field_r, theme::cr(theme::RADIUS_CONTROL), Stroke::new(theme::BORDER_WIDTH, theme::BORDER_SELECTED), StrokeKind::Inside);
             let field_inset = Vec2::new(theme::INSET_SEGMENT, theme::SPACE_FACT);
             ui.scope_builder(egui::UiBuilder::new().max_rect(field_r.shrink2(field_inset)), |ui| {
+                let field_id = Id::new(("agents-session-rename-input", row.tab_id));
+                if std::mem::take(&mut state.rename_session_focus_pending) {
+                    // The caret goes into the field in the frame it appears, whoever held the keyboard before: the agent's
+                    // terminal, or a field of a form that is hidden now. The old title is selected for the letters to replace.
+                    ui.memory_mut(|m| m.request_focus(field_id));
+                    widgets::field::select_value(ui.ctx(), field_id, state.rename_session_input.chars().count());
+                }
                 let te = TextEdit::singleline(&mut state.rename_session_input)
-                    .id(Id::new(("agents-session-rename-input", row.tab_id)))
+                    .id(field_id)
                     .desired_width((label_avail_w - theme::INSET_CONTROL).max(theme::CONTROL_DENSE))
                     .frame(egui::Frame::NONE)
                     .font(theme::font_body())
@@ -749,7 +778,7 @@ mod tests {
         let dir = temp_test_dir("never-shell");
         let mut st = TerminalState::new_for_session("doc-never-shell", "Landing", Some(&dir));
 
-        // Simulate rail Agents, rail Tools, `>_`, backtick, home OpenAgents, and palette OpenSpecReader entry points
+        // Simulate the Agents rail button, Cmd+`, home OpenAgents, and palette OpenSpecReader entry points
         for _ in 0..6 {
             st.open_for_agent_use(None);
             assert!(!st.tabs.iter().any(|t| t.is_shell_process()), "open_for_agent_use must never spawn a Shell process");
@@ -783,10 +812,9 @@ mod tests {
             let raw = egui::RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1440.0, 900.0))), ..Default::default() };
             let _ = ctx.run_ui(raw, |ui| {
                 let _ = crate::terminal::show_left(&mut st, ui, panel_rect, None);
-                let _ = crate::terminal::show_dock(&mut st, ui, panel_rect, None);
             });
         }
-        assert!(st.tabs.is_empty(), "Rendering frames with the panel/dock open must never spawn a tab");
+        assert!(st.tabs.is_empty(), "Rendering frames with the panel open must never spawn a tab");
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1073,26 +1101,25 @@ mod tests {
         cmdk_with_no_live_tab_resumes_the_last_session();
     }
 
-    // 13. `dock_and_backtick_follow_the_panel_rules` / `dock_and_backtick_follow_same_open_rules`
+    // 13. `backtick_follows_the_panel_rules` / `backtick_follows_same_open_rules`
     #[test]
-    fn dock_and_backtick_follow_the_panel_rules() {
-        let dir = temp_test_dir("dock-backtick");
+    fn backtick_follows_the_panel_rules() {
+        let dir = temp_test_dir("backtick");
         let bin_dir = dir.join("bin");
         write_stub_cli(&bin_dir, "claude", "sleep 5");
 
-        let mut st = TerminalState::new_for_session("doc-dock", "Landing", Some(&dir));
+        let mut st = TerminalState::new_for_session("doc-backtick", "Landing", Some(&dir));
         st.path_prepend.push(bin_dir);
 
-        // Without session: `>_` / backtick sets dock_open + calls open_for_agent_use -> picker_open, 0 tabs
-        st.dock_open = true;
+        // Without session: the Agents rail button / Cmd+` call open_for_agent_use -> picker_open, 0 tabs
         st.open_for_agent_use(None);
         assert!(st.tabs.is_empty());
         assert!(st.picker_open);
 
-        // With a recorded session: `>_` / backtick resumes that session, never a Shell
+        // With a recorded session: the rail button / Cmd+` resume that session, never a Shell
         st.session_registry.sessions.push(make_session_entry(
             1,
-            "Claude Dock",
+            "Claude Backtick",
             "claude",
             Some("66666666-6666-4666-8666-666666666666"),
             100,
@@ -1112,8 +1139,8 @@ mod tests {
     }
 
     #[test]
-    fn dock_and_backtick_follow_same_open_rules() {
-        dock_and_backtick_follow_the_panel_rules();
+    fn backtick_follows_same_open_rules() {
+        backtick_follows_the_panel_rules();
     }
 
     // 14. `shell_is_never_registered_or_resumed`
@@ -1376,7 +1403,7 @@ mod tests {
         st.runtime_dropdown_open = true;
         let reopened = painted_texts(&frame(&mut st));
         assert!(!reopened.iter().any(|t| t == NOT_RESUMABLE_NOTICE), "reopened menu must not replay the old notice: {reopened:?}");
-        assert!(reopened.iter().any(|t| t == "Skip permissions"), "permission caption comes back: {reopened:?}");
+        assert!(reopened.iter().any(|t| t == "Ask before acting"), "permission caption comes back, Ask by default: {reopened:?}");
 
         st.shutdown();
         let _ = std::fs::remove_dir_all(&dir);
@@ -1518,8 +1545,14 @@ mod tests {
         assert!(app.terminal.picker_open, "execute_cmdk_action must open the picker when no resumable session exists");
         assert_eq!(app.terminal.pending_prompt, Some(("Make Design".to_string(), spec_name)));
 
-        // Case B: resumable session exists -> execute_cmdk_action resumes it and dispatches the prompt
-        let mut app_resumable = crate::app::App::new(designos_doc::Document::new("Test"));
+        // Case B: resumable session exists -> execute_cmdk_action resumes it and dispatches the prompt.
+        // The auto-fix only tells the agent about changes it made, so the document has copy under the 11px floor.
+        let mut doc = designos_doc::Document::new("Test");
+        let page = doc.add_page("Page 1");
+        let small_text = doc.alloc_id();
+        let style = designos_doc::TextStyle { font_size: 8.0, ..designos_doc::TextStyle::default() };
+        doc.insert(page, designos_doc::Node::text(small_text, designos_doc::Rect::new(0.0, 0.0, 80.0, 12.0), "Small", style)).expect("insert the small text");
+        let mut app_resumable = crate::app::App::new(doc);
         app_resumable.terminal = TerminalState::new_for_session("doc-shell-cmdk-b", "Landing", Some(&dir));
         app_resumable.terminal.path_prepend.push(bin_dir);
         app_resumable.terminal.session_registry.sessions.push(make_session_entry(
@@ -1533,7 +1566,11 @@ mod tests {
         ));
         save_registry(&app_resumable.terminal.session_dir, &app_resumable.terminal.session_registry).expect("save registry");
 
-        crate::shell::execute_cmdk_action(&mut app_resumable, crate::cmdk::CmdKAction::AutoFixDesignGate);
+        {
+            // the auto-fix takes the AI operation another test may have queued in this process
+            let _ai_ops = crate::cmdk::ai_op_test_lock();
+            crate::shell::execute_cmdk_action(&mut app_resumable, crate::cmdk::CmdKAction::AutoFixDesignGate);
+        }
         assert_eq!(app_resumable.terminal.tabs.len(), 1, "execute_cmdk_action must resume the last session when tabs is empty");
         assert!(app_resumable.terminal.tabs[0].is_resumed);
         assert!(!app_resumable.terminal.picker_open);

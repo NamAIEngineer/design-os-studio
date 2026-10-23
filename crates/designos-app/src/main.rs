@@ -2,6 +2,8 @@ mod agent_a11y;
 mod agent_approval_card;
 mod agent_busy_frames;
 pub mod agent_cli_catalog;
+#[cfg(test)]
+mod agent_cli_export_fig_tests;
 pub mod agent_composer;
 mod agent_failure_redact;
 mod agent_mention;
@@ -30,6 +32,7 @@ mod board;
 mod canvas;
 mod check_designs;
 mod cli;
+mod cli_export_write;
 mod clipboard;
 mod cmdk;
 mod comments;
@@ -38,7 +41,9 @@ mod decks;
 mod demo;
 mod dev;
 mod edit;
+mod fig_export;
 mod find;
+mod font_refit;
 mod fonts;
 mod history;
 mod home;
@@ -52,14 +57,19 @@ mod lint;
 mod live_canvas_scope;
 #[cfg(test)]
 mod live_doc_epoch_tests;
+mod live_log_wake;
 mod live_patch_apply;
 mod live_patch_log;
+mod live_spec_apply;
 #[cfg(test)]
 mod live_sync_interaction_tests;
 #[cfg(test)]
 mod live_sync_tests;
+#[cfg(target_os = "macos")]
+mod macos_menu;
 mod ops;
 mod panels;
+mod paste_placement;
 mod plugins;
 mod present;
 mod proto;
@@ -70,6 +80,7 @@ mod showcase;
 mod skills;
 mod specs;
 mod styles;
+mod system_paste;
 mod tabs;
 mod terminal;
 mod terminal_undo_chord;
@@ -109,6 +120,15 @@ fn main() {
         println!("{}", cli::USAGE);
         return;
     }
+    if opts.version {
+        println!("{}", cli::version_line());
+        return;
+    }
+    // Before any window or command: a name that is not a file (`designos doctor`) must not open an empty editor.
+    if let Some(message) = cli::missing_file_message(&opts) {
+        eprintln!("{message}");
+        std::process::exit(2);
+    }
     if let Some(dir) = &opts.seed_library {
         match showcase::seed_library(dir) {
             Ok(()) => println!("designos: wrote the showcase sample files to {}", dir.display()),
@@ -145,7 +165,21 @@ fn main() {
         }
     }
     let native = eframe::NativeOptions { viewport, ..Default::default() };
-    let result = eframe::run_native("design:os studio", native, Box::new(move |cc| Ok(Box::new(shell::Shell::new(cc, opts)))));
+    let result = eframe::run_native(
+        "design:os studio",
+        native,
+        Box::new(move |cc| {
+            // winit's default app menu quits through `terminate:`, which never raises a window close. Point its Quit
+            // item (and the Cmd+Q key it owns) at the close instead, so the Save changes questions run first.
+            #[cfg(target_os = "macos")]
+            {
+                if !macos_menu::install(&cc.egui_ctx) {
+                    eprintln!("designos: the app menu has no Quit item to route through the window close");
+                }
+            }
+            Ok(Box::new(shell::Shell::new(cc, opts)))
+        }),
+    );
     if let Err(e) = result {
         eprintln!("designos: {e}");
         std::process::exit(1);
@@ -205,6 +239,10 @@ fn resolve_select_node(doc: &designos_doc::Document, select: Option<&str>) -> Op
 }
 
 fn run_agent_cli(opts: &cli::Options) -> Result<(), String> {
+    // An unusable --export-fig target stops the command before it loads, applies or saves anything.
+    if let Some(out_path) = &opts.export_fig {
+        cli_export_write::check_target(out_path, "fig", opts.overwrite)?;
+    }
     let (mut doc, save_target) = if let Some(id) = &opts.open_id {
         let root = opts.library.clone().unwrap_or_else(designos_library::Library::default_root);
         let lib = designos_library::Library::open(&root).map_err(|e| format!("Cannot open library at {}: {e}", root.display()))?;
@@ -215,7 +253,7 @@ fn run_agent_cli(opts: &cli::Options) -> Result<(), String> {
         io::ensure_page(&mut d);
         (d, SaveTarget::Library(lib, id.clone()))
     } else if let Some(path) = &opts.file {
-        let d = if !path.exists() && (opts.apply_spec.is_some() || opts.import_capture.is_some() || opts.import_variables.is_some()) {
+        let d = if !path.exists() && opts.creates_missing_file() {
             let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("Untitled");
             let mut d = designos_doc::Document::new(stem);
             io::ensure_page(&mut d);
@@ -340,11 +378,15 @@ fn run_agent_cli(opts: &cli::Options) -> Result<(), String> {
 
     if let Some(out_path) = &opts.export_fig {
         let (bytes, omitted) = designos_fig::export_fig_with_report(&doc).map_err(|e| format!("Cannot export .fig: {e}"))?;
-        if let Some(parent) = out_path.parent().filter(|p| !p.as_os_str().is_empty()) {
-            let _ = std::fs::create_dir_all(parent);
-        }
-        std::fs::write(out_path, &bytes).map_err(|e| format!("Cannot write {}: {e}", out_path.display()))?;
-        let out = serde_json::json!({ "exported_fig": true, "path": out_path, "bytes": bytes.len(), "omitted_extensions": omitted });
+        cli_export_write::write_export(out_path, "fig", &bytes, opts.overwrite)?;
+        // A `.fig` has no place for comments: say how many threads this file left out (the native format keeps them).
+        let out = serde_json::json!({
+            "exported_fig": true,
+            "path": out_path,
+            "bytes": bytes.len(),
+            "omitted_extensions": omitted,
+            "omitted_comment_threads": doc.comments.len(),
+        });
         println!("{}", serde_json::to_string_pretty(&out).unwrap());
     }
 

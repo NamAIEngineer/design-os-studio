@@ -149,6 +149,9 @@ impl Default for Engine {
     }
 }
 
+/// What the `fill` input of `create_node` and `update_node` takes.
+const FILL_DESCRIPTION: &str = "A #RRGGBB or #RRGGBBAA hex color, a $easeui.* token, or var:<collection>/<name>.";
+
 /// Every tool name and legacy alias accepted by [`Engine::call`].
 pub const DISPATCHED: &[&str] = &[
     "designos_get_app_state",
@@ -901,7 +904,15 @@ impl Engine {
                 let (bytes, omitted) = designos_fig::export_fig_with_report(&self.doc)
                     .map_err(|e| ToolError::new(ErrorCode::IoError, "/output_path", format!("Failed to export .fig: {e}")))?;
                 std::fs::write(path, &bytes).map_err(|e| ToolError::new(ErrorCode::IoError, "/output_path", format!("Cannot write .fig file: {e}")))?;
-                Ok(json!({"output_path": a.output_path, "path": a.output_path, "bytes": bytes.len(), "saved": true, "omitted_extensions": omitted}))
+                // A `.fig` has no place for comments: the result says how many threads this file left out.
+                Ok(json!({
+                    "output_path": a.output_path,
+                    "path": a.output_path,
+                    "bytes": bytes.len(),
+                    "saved": true,
+                    "omitted_extensions": omitted,
+                    "omitted_comment_threads": self.doc.comments.len(),
+                }))
             }
             "designos_query_xpath" | "query_nodes" => {
                 self.settle_layout();
@@ -1218,25 +1229,18 @@ impl Engine {
             None => self.resolve_default_page()?,
         };
         self.check_owned_frames(parent_id, "/parent_id")?;
-        if let Some(fill_str) = &a.fill {
-            designos_doc::resolve_easeui_color(fill_str)
-                .ok_or_else(|| ToolError::new(ErrorCode::ValueOutOfRange, "/fill", format!("invalid fill color '{fill_str}'")))?;
-        }
+        crate::tools::fill_write::validate_fill_color(a.fill.as_deref())?;
         let before_doc = a.diff_image.then(|| self.doc.clone());
         let baseline = crate::tools::issues::PreCallBaseline::capture_container(&self.doc, parent_id, &self.session_options.issues, a.lint, self.lint_env());
         let (id, index, mut node) = crate::tools::build_created_node(&mut self.doc, parent_id, None, &a.kind, a.name, a.text, a.x, a.y, a.width, a.height)?;
-        if let Some(fills) = a.fills {
-            crate::tools::set_node_fills(&mut node, fills);
-        } else if let Some(fill_str) = &a.fill {
-            if let Some(color) = designos_doc::resolve_easeui_color(fill_str) {
-                crate::tools::set_node_fills(&mut node, vec![designos_doc::Paint::solid(color)]);
-            }
-        }
+        let mut warnings = Vec::new();
+        crate::tools::fill_write::write_fill(&mut self.doc, &mut node, parent_id, FillTarget::NewLayer, a.fill.as_deref(), a.fills, &mut warnings)?;
         self.exec(Command::Insert { parent: parent_id, index, nodes: vec![node] })?;
         if let Some(page_id) = self.doc.page_of(id) {
             self.relayout(page_id);
         }
         let mut out = json!({"node":self.doc.get(id),"parent_id":parent_id.0,"changed":true});
+        attach_warnings(&mut out, &warnings);
         crate::tools::issues::attach_issues_block(&self.doc, &[id], &self.session_options.issues, a.lint, &baseline, self.lint_env(), &[], &mut out);
         if let Some(before) = &before_doc {
             crate::tools::screenshot::attach_diff_to_reply(before, &self.doc, &[id], &mut out);
@@ -1247,8 +1251,8 @@ impl Engine {
     fn update(&mut self, a: UpdateArgs) -> Result<Value, ToolError> {
         crate::tools::ledger::validate_idempotency_key_opt(&a.idempotency_key)?;
         self.check_owned_frames(NodeId(a.node_id), "/node_id")?;
-        let (node, changed) = crate::tools::build_updated_node(
-            &self.doc,
+        let (node, changed, warnings) = crate::tools::build_updated_node(
+            &mut self.doc,
             NodeId(a.node_id),
             crate::tools::UpdateFields {
                 name: a.name,
@@ -1273,11 +1277,22 @@ impl Engine {
             }
         }
         let mut out = json!({"node":self.doc.get(NodeId(a.node_id)),"changed":changed});
+        attach_warnings(&mut out, &warnings);
         crate::tools::issues::attach_issues_block(&self.doc, &[id], &self.session_options.issues, a.lint, &baseline, self.lint_env(), &[], &mut out);
         if let Some(before) = &before_doc {
             crate::tools::screenshot::attach_diff_to_reply(before, &self.doc, &[id], &mut out);
         }
         Ok(out)
+    }
+}
+
+/// Adds the bind warnings (such as a variable that has no value in the node's mode) to a write reply, as `apply_spec` does.
+fn attach_warnings(out: &mut Value, warnings: &[designos_doc::SpecWarning]) {
+    if warnings.is_empty() {
+        return;
+    }
+    if let (Some(obj), Ok(v)) = (out.as_object_mut(), serde_json::to_value(warnings)) {
+        obj.insert("warnings".into(), v);
     }
 }
 
@@ -1304,6 +1319,7 @@ pub(crate) fn parse_spec<T: DeserializeOwned>(args: Value) -> Result<T, ToolErro
 }
 
 use crate::tools::bounded_text;
+use crate::tools::fill_write::FillTarget;
 fn default_limit() -> usize {
     100
 }
@@ -1680,7 +1696,7 @@ pub fn tools() -> Vec<Value> {
     add(
         "create_node",
         "Create one layer in a container; defaults to x/y=0, width/height=100. Supports undo. Text is only valid for text layers. Changes are in memory until saved. Content added to, removed from or moved in an instance slot is kept when the main component changes.",
-        json!({"parent_id":id,"kind":{"type":"string","enum":["frame","rectangle","ellipse","text"]},"name":name,"text":text,"x":coordinate,"y":coordinate,"width":size,"height":size,"fill":{"type":"string","maxLength":1024},"fills":{"type":"array","items":{"type":"object"}},"diff_image":{"type":"boolean","default":false},"lint":lint_opt,"idempotency_key":idempotency_key}),
+        json!({"parent_id":id,"kind":{"type":"string","enum":["frame","rectangle","ellipse","text"]},"name":name,"text":text,"x":coordinate,"y":coordinate,"width":size,"height":size,"fill":{"type":"string","maxLength":1024,"description":FILL_DESCRIPTION},"fills":{"type":"array","items":{"type":"object"}},"diff_image":{"type":"boolean","default":false},"lint":lint_opt,"idempotency_key":idempotency_key}),
         vec!["parent_id", "kind"],
         json!({
             "node": {"type": "object"},
@@ -1694,7 +1710,7 @@ pub fn tools() -> Vec<Value> {
     add(
         "update_node",
         "Update specified fields of one non-page layer. Coordinates are parent-relative. Replacing text clears text runs and list ranges. Supports undo; changes remain in memory until saved.",
-        json!({"node_id":id,"name":name,"text":text,"x":coordinate,"y":coordinate,"width":size,"height":size,"visible":{"type":"boolean"},"opacity":{"type":"number","minimum":0,"maximum":1},"fill":{"type":"string","maxLength":1024},"fills":{"type":"array","items":{"type":"object"}},"diff_image":{"type":"boolean","default":false},"lint":lint_opt,"idempotency_key":idempotency_key}),
+        json!({"node_id":id,"name":name,"text":text,"x":coordinate,"y":coordinate,"width":size,"height":size,"visible":{"type":"boolean"},"opacity":{"type":"number","minimum":0,"maximum":1},"fill":{"type":"string","maxLength":1024,"description":FILL_DESCRIPTION},"fills":{"type":"array","items":{"type":"object"}},"diff_image":{"type":"boolean","default":false},"lint":lint_opt,"idempotency_key":idempotency_key}),
         vec!["node_id"],
         json!({
             "node": {"type": "object"},
@@ -2479,6 +2495,21 @@ mod tests {
             e.call(tool, args).unwrap();
             assert_settled(&e, last, tool);
         }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn export_fig_file_reports_the_comment_threads_a_fig_leaves_out() {
+        let dir = std::env::temp_dir().join(format!("designos_engine_fig_comments_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut e = Engine::default();
+        let none = e.call("designos_export_fig_file", json!({"output_path": dir.join("none.fig").to_str().unwrap()})).unwrap();
+        assert_eq!(none["omitted_comment_threads"], 0);
+        e.call("designos_add_comment", json!({"text": "Make this bigger"})).unwrap();
+        e.call("designos_add_comment", json!({"text": "And this one"})).unwrap();
+        let two = e.call("designos_export_fig_file", json!({"output_path": dir.join("two.fig").to_str().unwrap()})).unwrap();
+        assert_eq!(two["omitted_comment_threads"], 2);
+        assert_eq!(e.doc.comments.len(), 2, "the session keeps its comments");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -3339,6 +3370,29 @@ mod tests {
         assert!(designos_doc::is_instance_slot(&e.doc, inst_slot));
         assert!(!e.doc.get(inst_slot).unwrap().component.overrides.contains(&designos_doc::OverrideField::SlotContent));
         (comp_id, inst_id, inst_slot)
+    }
+
+    #[test]
+    fn apply_spec_refuses_an_instance_that_would_make_a_main_hold_itself() {
+        let mut e = Engine::default();
+        let page = e.active_page_id.unwrap();
+        let main = |e: &mut Engine, name: &str, x: f32| {
+            let id = e.doc.alloc_id();
+            let mut frame = Node::frame(id, Rect::new(x, 0.0, 100.0, 100.0));
+            frame.name = name.into();
+            e.doc.insert(page, frame).unwrap();
+            designos_doc::create_component(&mut e.doc, id).apply(&mut e.doc).unwrap();
+            id
+        };
+        let (b, a) = (main(&mut e, "B", 0.0), main(&mut e, "A", 300.0));
+        // A holds an instance of B, so an instance of A inside B would make B hold itself
+        designos_doc::create_instance(&mut e.doc, b, a, Vec2::ZERO).apply(&mut e.doc).unwrap();
+        let nodes = e.doc.nodes.len();
+        let res = e.call("designos_apply_spec", json!({"parent_id": b.0, "spec": {"kind": "instance", "component": "A"}}));
+        assert!(res.is_err(), "an error, not an instance of A in B: {res:?}");
+        assert_eq!(e.doc.nodes.len(), nodes, "nothing was inserted");
+        // an instance of A on the page is fine
+        e.call("designos_apply_spec", json!({"parent_id": page.0, "spec": {"kind": "instance", "component": "A"}})).unwrap();
     }
 
     #[test]

@@ -1,5 +1,18 @@
 //! Opening and saving documents.
 
+#[cfg(test)]
+mod comments_in_saved_files_tests;
+mod dialog_probe;
+mod fallback_save;
+mod file_dialog;
+#[cfg(test)]
+mod file_dialog_flow_tests;
+
+pub use fallback_save::write_new_in;
+#[cfg(test)]
+pub use file_dialog::ScriptedDialogs;
+pub use file_dialog::{DialogOutcome, FileDialogs, FileRequest, SystemDialogs, NO_FALLBACK_FOLDER};
+
 use designos_doc::{Document, Vec2};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -311,11 +324,56 @@ pub fn clear_pending_repair_backup(path: &Path) {
     }
 }
 
+/// Whether `path` is a file of the native format, which holds everything the document does. A save to a `.fig`
+/// or `.pen` does not (those writers drop comments, and a `.fig` drops extension keys), and a save to any other
+/// extension is not a file this app opens as a design, so only the native extension leaves nothing out.
+/// Pass the path [`save_path_counted`] returned: it gives a path without an extension the native one.
+pub fn writes_native_format(path: &Path) -> bool {
+    path.extension().and_then(|e| e.to_str()).is_some_and(|e| e.eq_ignore_ascii_case(NATIVE_EXT))
+}
+
+/// What a save or export of a document that has comments tells the user when the file cannot keep them.
+pub const COMMENTS_ONLY_IN_NATIVE_NOTICE: &str = "Comments left out: only .designos files keep them";
+
+/// The writer [`save_path_counted`] picks for a path: the extension decides, case-insensitively. Anything that is
+/// not `.fig` or `.pen` is written by the native writer.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SaveFormat {
+    Native,
+    Fig,
+    Pen,
+}
+
+fn save_format(path: &Path) -> SaveFormat {
+    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+    if ext.eq_ignore_ascii_case("fig") {
+        SaveFormat::Fig
+    } else if ext.eq_ignore_ascii_case("pen") {
+        SaveFormat::Pen
+    } else {
+        SaveFormat::Native
+    }
+}
+
+/// How many comment threads a save of `doc` to `path` leaves out of the file: every thread (resolved ones too) for
+/// a `.fig` or `.pen`, whose writers have no place for comments, none for the native writer. A path without an
+/// extension is written natively, as [`save_path_counted`] does.
+pub fn comment_threads_left_out(doc: &Document, path: &Path) -> usize {
+    match save_format(path) {
+        SaveFormat::Fig | SaveFormat::Pen => doc.comments.len(),
+        SaveFormat::Native => 0,
+    }
+}
+
 /// Writes the native format (or `.fig` binary / `.pen` JSON when the extension matches); returns the final path.
+/// This is the headless save (the Agent CLI), so what the file leaves out goes to stderr.
 pub fn save_path(doc: &Document, path: &Path) -> Result<PathBuf, String> {
     let (p, replaced) = save_path_counted(doc, path)?;
     if replaced > 0 {
         eprintln!("designos: {}: wrote {replaced} non-finite numbers as their neutral value", p.display());
+    }
+    if comment_threads_left_out(doc, &p) > 0 {
+        eprintln!("designos: {}: {COMMENTS_ONLY_IN_NATIVE_NOTICE}", p.display());
     }
     Ok(p)
 }
@@ -328,15 +386,17 @@ pub fn save_path_counted(doc: &Document, path: &Path) -> Result<(PathBuf, usize)
         p.set_extension(NATIVE_EXT);
     }
     let mut replaced = 0;
-    let payload = if p.extension().and_then(|e| e.to_str()).is_some_and(|e| e.eq_ignore_ascii_case("fig")) {
-        let (bytes, _omitted) = designos_fig::export_fig_with_report(doc).map_err(|e| format!("Cannot export .fig: {e}"))?;
-        bytes
-    } else if p.extension().and_then(|e| e.to_str()).is_some_and(|e| e.eq_ignore_ascii_case("pen")) {
-        designos_fig::export_pen_json(doc).map_err(|e| format!("Cannot export .pen: {e}"))?.into_bytes()
-    } else {
-        let (json, n) = doc.to_json_counted().map_err(|e| format!("Cannot serialize: {e}"))?;
-        replaced = n;
-        json.into_bytes()
+    let payload = match save_format(&p) {
+        SaveFormat::Fig => {
+            let (bytes, _omitted) = designos_fig::export_fig_with_report(doc).map_err(|e| format!("Cannot export .fig: {e}"))?;
+            bytes
+        }
+        SaveFormat::Pen => designos_fig::export_pen_json(doc).map_err(|e| format!("Cannot export .pen: {e}"))?.into_bytes(),
+        SaveFormat::Native => {
+            let (json, n) = doc.to_json_counted().map_err(|e| format!("Cannot serialize: {e}"))?;
+            replaced = n;
+            json.into_bytes()
+        }
     };
 
     let wrote_backup = write_pending_repair_backup(&p)?;
@@ -347,33 +407,30 @@ pub fn save_path_counted(doc: &Document, path: &Path) -> Result<(PathBuf, usize)
     Ok((p, replaced))
 }
 
-pub fn pick_open() -> Option<PathBuf> {
-    rfd::FileDialog::new()
-        .add_filter("Design files", &[NATIVE_EXT, LEGACY_EXT, "fig", "pen", "json", "webcapture", "svg"])
-        .add_filter("design:os studio", &[NATIVE_EXT, LEGACY_EXT])
-        .add_filter("Figma file", &["fig"])
-        .add_filter("Pencil file", &["pen"])
-        .add_filter("Web capture", &["json", "webcapture"])
-        .add_filter("SVG", &["svg"])
-        .add_filter("JSON", &["json"])
-        .pick_file()
+pub fn open_request() -> FileRequest {
+    FileRequest::open()
+        .filter("Design files", &[NATIVE_EXT, LEGACY_EXT, "fig", "pen", "json", "webcapture", "svg"])
+        .filter("design:os studio", &[NATIVE_EXT, LEGACY_EXT])
+        .filter("Figma file", &["fig"])
+        .filter("Pencil file", &["pen"])
+        .filter("Web capture", &["json", "webcapture"])
+        .filter("SVG", &["svg"])
+        .filter("JSON", &["json"])
 }
 
-pub fn pick_web_capture() -> Option<PathBuf> {
-    rfd::FileDialog::new().add_filter("Web capture", &["json", "webcapture"]).pick_file()
+pub fn web_capture_request() -> FileRequest {
+    FileRequest::open().filter("Web capture", &["json", "webcapture"])
 }
 
-pub fn pick_save(default_name: &str) -> Option<PathBuf> {
-    rfd::FileDialog::new()
-        .add_filter("design:os studio", &[NATIVE_EXT, LEGACY_EXT])
-        .add_filter("Figma file", &["fig"])
-        .add_filter("Pencil file", &["pen"])
-        .set_file_name(format!("{default_name}.{NATIVE_EXT}"))
-        .save_file()
+pub fn save_request(default_name: &str) -> FileRequest {
+    FileRequest::save(format!("{default_name}.{NATIVE_EXT}"))
+        .filter("design:os studio", &[NATIVE_EXT, LEGACY_EXT])
+        .filter("Figma file", &["fig"])
+        .filter("Pencil file", &["pen"])
 }
 
-pub fn pick_export(default_name: &str) -> Option<PathBuf> {
-    rfd::FileDialog::new().add_filter("PNG", &["png"]).set_file_name(format!("{default_name}.png")).save_file()
+pub fn export_request(default_name: &str) -> FileRequest {
+    FileRequest::save(format!("{default_name}.png")).filter("PNG", &["png"])
 }
 
 /// Like [`save_path`], also returning the once-per-file notice when non-finite numbers were replaced.
@@ -394,6 +451,22 @@ mod tests {
         let mut p = std::env::temp_dir();
         p.push(format!("designos_test_{}_{name}", std::process::id()));
         p
+    }
+
+    #[test]
+    fn only_the_native_extension_is_the_native_format() {
+        for (name, native) in [
+            ("a.designos", true),
+            ("a.DESIGNOS", true),
+            ("dir.fig/a.designos", true),
+            ("a.fig", false),
+            ("a.FIG", false),
+            ("a.pen", false),
+            ("a.json", false),
+            ("a", false),
+        ] {
+            assert_eq!(writes_native_format(Path::new(name)), native, "{name}");
+        }
     }
 
     /// Chained `ref`s doubling at every level: 2^24 clones if unbudgeted, far past the import budget.

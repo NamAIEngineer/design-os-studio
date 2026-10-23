@@ -8,10 +8,22 @@ fn no_system_clipboard() -> Option<String> {
     None
 }
 
+fn no_system_image() -> Option<crate::system_paste::ClipImage> {
+    None
+}
+
+/// Hermetic: the OS pasteboard is global and not thread-safe, so no test window reads it. Tests script the clipboard
+/// flavours they need through `App::system_html`, `App::system_text` and `App::system_image`.
+fn script_empty_clipboard(app: &mut App) {
+    app.system_html = no_system_clipboard;
+    app.system_text = no_system_clipboard;
+    app.system_image = no_system_image;
+}
+
 /// Directory of stub agent CLIs (`claude`, `codex`, `agy`, `grok`, `gemini`, `opencode`). Every stub blocks reading
 /// its PTY, so it lives exactly as long as the tab that started it and never exits on its own. A timer-based stub
-/// would bring back the race this exists to remove: an agent that exits while the test is still clicking appends
-/// ` (exited)` to its tab title, and the `+` button moves out from under the pointer.
+/// would bring back the race this exists to remove: an agent that exits while the test is still clicking changes
+/// its tab and the panel under the pointer.
 /// The directory is shared by every test process, so a run leaves nothing new behind. Each script is written to a
 /// private name and renamed into place, so a process that execs a stub never sees a half-written file or a file
 /// that is still open for writing.
@@ -48,6 +60,10 @@ struct Sim {
     cursor: egui::CursorIcon,
     shapes: Vec<egui::epaint::ClippedShape>,
     accesskit_update: Option<egui::accesskit::TreeUpdate>,
+    /// The viewport commands the last frame sent (`Close`, `CancelClose`, ...).
+    commands: Vec<egui::ViewportCommand>,
+    /// Every viewport command sent since the test last cleared this.
+    sent_commands: Vec<egui::ViewportCommand>,
 }
 
 impl Sim {
@@ -57,8 +73,7 @@ impl Sim {
     fn with(opts: Options) -> Self {
         let ctx = Context::default();
         let mut shell = Shell::build(&ctx, opts);
-        // Hermetic: the OS pasteboard is global and not thread-safe; tests script the clipboard instead.
-        shell.app.system_html = no_system_clipboard;
+        script_empty_clipboard(&mut shell.app);
         let mut s = Sim {
             ctx,
             shell,
@@ -68,6 +83,8 @@ impl Sim {
             cursor: egui::CursorIcon::Default,
             shapes: Vec::new(),
             accesskit_update: None,
+            commands: Vec::new(),
+            sent_commands: Vec::new(),
         };
         s.frame(vec![]);
         s.frame(vec![]);
@@ -101,6 +118,10 @@ impl Sim {
         self.cursor = out.platform_output.cursor_icon;
         self.shapes = out.shapes;
         self.accesskit_update = out.platform_output.accesskit_update;
+        // a paste that waits for the clipboard worker lands before the test looks at the document
+        self.shell.app.settle_paste_jobs();
+        self.commands = out.viewport_output.get(&egui::ViewportId::ROOT).map(|v| v.commands.clone()).unwrap_or_default();
+        self.sent_commands.extend(self.commands.iter().cloned());
     }
     fn app(&self) -> &App {
         &self.shell.app
@@ -153,6 +174,19 @@ impl Sim {
     fn type_text(&mut self, s: &str) {
         self.frame(vec![Event::Text(s.into())]);
     }
+    /// Starts a frame that carries several input events at once; see [`OneFrame`].
+    fn one_frame(&mut self) -> OneFrame<'_> {
+        let pos = self.pos;
+        OneFrame { sim: self, events: Vec::new(), pos }
+    }
+    /// A whole drag, press to release, delivered in ONE frame, then one empty frame to settle.
+    /// `mv`, `button` and [`Sim::drag`] spread the same gesture over eight frames, which hides every bug that only
+    /// shows when the window is slow.
+    fn drag_in_one_frame(&mut self, a: Pos2, b: Pos2) {
+        let mid = a + (b - a) * 0.5;
+        self.one_frame().move_to(a).press().move_to(mid).move_to(b).release().send();
+        self.frame(vec![]);
+    }
     fn field_rect(&self, key: &str) -> Rect {
         self.ctx.data(|d| d.get_temp::<Rect>(egui::Id::new(("field-rect", format!("{key:?}"))))).unwrap_or_else(|| panic!("no field {key}"))
     }
@@ -182,6 +216,69 @@ impl Sim {
             dirs.extend(std::env::var_os("PATH").iter().flat_map(std::env::split_paths));
             self.shell.app.terminal.path_override = Some(std::env::join_paths(dirs).expect("a PATH made of existing dirs"));
         }
+    }
+}
+
+/// Input events that reach the window inside ONE egui frame, in the order they are chained.
+///
+/// Every other [`Sim`] helper (`mv`, `button`, `click`, `drag`, `key`, `type_text`) runs one frame per event. A
+/// real window is not that polite: on a slow frame, or a quick flick, the OS hands egui a whole
+/// "press, moves, release" gesture, or a click followed by keys, between two frames. egui then reports only the
+/// LAST pointer position of the frame, reports the button as pressed AND released but no longer down, and
+/// delivers the key and text events together. Code that samples the pointer once per frame sees a different
+/// gesture than the user made.
+///
+/// Chain the events in the order they arrived and finish with [`OneFrame::send`], which runs exactly one frame:
+///
+/// ```ignore
+/// s.mv(a);                                    // earlier frame: the pointer rests on `a`
+/// s.one_frame().press().move_to(b).release().send(); // press, move and release share one frame
+/// s.one_frame().key(Key::R).text("x").send();  // a key and typed text share one frame
+/// ```
+///
+/// Pointer events take the position of the last `move_to` (the pointer position of the previous frame when there
+/// is none), and every event carries the modifiers [`Sim::mods`] holds when it is chained.
+struct OneFrame<'a> {
+    sim: &'a mut Sim,
+    events: Vec<Event>,
+    pos: Pos2,
+}
+
+impl OneFrame<'_> {
+    fn move_to(mut self, p: Pos2) -> Self {
+        self.pos = p;
+        self.events.push(Event::PointerMoved(p));
+        self
+    }
+    fn button(mut self, button: PointerButton, pressed: bool) -> Self {
+        self.events.push(Event::PointerButton { pos: self.pos, button, pressed, modifiers: self.sim.mods });
+        self
+    }
+    /// Primary button down at the current position.
+    fn press(self) -> Self {
+        self.button(PointerButton::Primary, true)
+    }
+    /// Primary button up at the current position.
+    fn release(self) -> Self {
+        self.button(PointerButton::Primary, false)
+    }
+    /// A key going down and up again, like [`Sim::key`] but without a frame between the two.
+    fn key(mut self, key: Key) -> Self {
+        let modifiers = self.sim.mods;
+        for pressed in [true, false] {
+            self.events.push(Event::Key { key, physical_key: Some(key), pressed, repeat: false, modifiers });
+        }
+        self
+    }
+    /// Typed text, like [`Sim::type_text`].
+    fn text(mut self, s: &str) -> Self {
+        self.events.push(Event::Text(s.into()));
+        self
+    }
+    /// Runs the one frame that holds every chained event.
+    fn send(self) {
+        self.sim.pos = self.pos;
+        self.sim.frame(self.events);
     }
 }
 
@@ -1019,28 +1116,63 @@ mod board_home;
 mod check_designs;
 mod comments;
 mod components;
+mod components_cycles;
+mod components_main_copies;
 mod decks;
+mod deferred_page_instances;
 mod dev;
+mod dev_mode_shortcut;
+mod duplicate_order;
 mod effect_grid_styles;
 mod empty_slot_flows;
+mod fast_drag_draw;
+mod fast_drag_transform;
+mod fig_export_toast;
 mod figma_paste;
 mod find;
 mod gpu_screenshot_wait;
 mod grid_track_editing;
 mod history;
 mod home;
+mod home_agents_card;
+mod idle_repaint;
+mod layer_drag_fast;
+#[cfg(target_os = "macos")]
+mod leave_menu_quit;
+mod leave_prompt;
+mod leave_prompt_edges;
 mod live_agent_edits;
+mod live_patch_agent_switch;
+mod live_patch_agent_switch_edges;
+mod live_patch_agent_switch_guards;
 mod menus;
+mod palette_autofix_undo;
+mod panel_keys;
 mod proto;
 mod proto_vars;
 mod relayout_budget;
+mod resized_shape_geometry;
 mod slot_canvas_edits;
+mod stale_canvas_after_agent_edit;
+mod stray_layers;
 mod style_edit;
 mod svg;
+mod system_paste_and_drop;
+mod tab_disk_state;
 mod typography;
+mod undo_exact_layout;
+mod undo_layout_epoch;
+mod unsaved_dot;
 mod variables;
 mod vector;
 
+// Needs the stub agent CLIs of `Sim::use_stub_agent_clis`, which exist on unix only: on Windows the tab runs a real `claude`
+// that is not there, and dies at a moment that depends on machine load, so the terminal bytes the tests read are not stable.
+#[cfg(unix)]
+mod agent_panel_keyboard;
+mod agent_picker_return;
+mod agents_panel_only;
+mod agents_tab_strip;
 mod assets_thumbs;
 mod libraries;
 mod lint;
@@ -1499,10 +1631,10 @@ mod agent_a11y {
         s.frame(vec![]);
 
         let update_pty = s.accesskit_update.as_ref().expect("AccessKit TreeUpdate expected");
-        for label in ["New session", "Close tab", "Show terminal dock"] {
+        for label in ["New session", "Close tab"] {
             assert!(find_accesskit_node(update_pty, egui::accesskit::Role::Button, label).is_some(), "expected Role::Button with label {label:?} in PTY mode");
         }
-        for absent in ["Stop", "Send selection to agent", "Send"] {
+        for absent in ["Stop", "Send selection to agent", "Send", "Show terminal dock", "Hide terminal dock"] {
             assert!(find_accesskit_node(update_pty, egui::accesskit::Role::Button, absent).is_none(), "unexpected phantom button {absent:?} in PTY mode");
         }
 

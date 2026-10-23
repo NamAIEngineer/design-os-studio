@@ -1,5 +1,5 @@
 //! Native Embedded PTY Agent Terminal Runtime (`claude`, `codex`, `grok`, `$SHELL`)
-//! and Bidirectional Canvas <-> Terminal Spec Bridge (`RailItem::Terminal` + Bottom Dock).
+//! and Bidirectional Canvas <-> Terminal Spec Bridge (the Agents panel).
 //!
 //! Crafted to `es:designer` (`craft-floor.md` + `tokens.css`) and **EaseUI BrainWave 2.0**:
 //! - Zero emoji icons (`§2 Refuse by default`): uses crisp Lucide vector glyphs (`crate::icons::Icon`)
@@ -16,7 +16,7 @@ use crate::icons::{self, Icon};
 use crate::panels::clipped;
 use crate::theme;
 use crate::widgets;
-use designos_doc::{Document, NodeId, NodeSpec};
+use designos_doc::{Document, NodeId};
 use egui::text::LayoutJob;
 use egui::{
     Align2, Color32, CornerRadius, Event, FontFamily, FontId, Id, Key, Painter, Pos2, Rect, RichText, Sense, Stroke, StrokeKind, TextEdit, TextFormat, Ui, Vec2,
@@ -59,6 +59,13 @@ const CHAR_W: f32 = 7.8;
 const ROW_H: f32 = 16.0;
 const MAX_RAW_LOG_BYTES: usize = 128 * 1024;
 
+/// The command an agent tab runs when its caller prepared none. Every tab Studio starts passes a mode-aware command, so
+/// this is only the safety net behind a future caller that forgets to, and it asks: the plain
+/// [`AgentCliPreset::cli_launch_command`] carries the Skip flags (`#924`).
+fn fallback_agent_launch_command(preset: AgentCliPreset) -> &'static str {
+    preset.cli_launch_command_for_mode(PermissionMode::Ask)
+}
+
 /// The `-c` overrides that register `designos-mcp` with Codex (leading space included), shared by the
 /// interactive tab and the Agent Chat one-shot so both start the same server.
 macro_rules! codex_mcp_overrides {
@@ -74,13 +81,19 @@ macro_rules! codex_mcp_overrides {
     };
 }
 
+/// The command behind the `--panel agents-start-failure` screenshot fixture. `agy` rejects `--mcp-config` and
+/// exits at once, which is what the failure panel shows. It must never carry a skip or bypass flag: it runs
+/// whatever the user's permission mode is (`#841`).
+pub(crate) const START_FAILURE_FIXTURE_COMMAND: &str = "agy --mcp-config /nonexistent/mcp.json";
+
 /// How Studio launches an agent CLI with respect to tool-approval prompts (`#645`, `#679`).
+/// Ask is the default and the fail-closed answer for any unknown or unreadable setting (`#841`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum PermissionMode {
-    /// Skip approval prompts using the CLI's documented bypass flag (default in Studio).
-    #[default]
+    /// Skip approval prompts using the CLI's documented bypass flag. Only a saved `"skip"` selects it.
     Skip,
-    /// Ask for approval using the CLI's default interactive mode.
+    /// Ask for approval using the CLI's default interactive mode (default in Studio).
+    #[default]
     Ask,
 }
 
@@ -119,9 +132,6 @@ impl AgentCliPreset {
     pub const GeminiCli: AgentCliPreset = AgentCliPreset::Gemini;
     pub const OpenCodeCli: AgentCliPreset = AgentCliPreset::OpenCode;
     pub const DefaultShell: AgentCliPreset = AgentCliPreset::Shell;
-
-    pub const QUICK_LAUNCH: [AgentCliPreset; 5] =
-        [AgentCliPreset::Claude, AgentCliPreset::Codex, AgentCliPreset::Antigravity, AgentCliPreset::Grok, AgentCliPreset::Shell];
 
     pub fn label(self) -> &'static str {
         self.tab_title()
@@ -423,8 +433,6 @@ pub enum TerminalAction {
     ApplyLiveLog(Vec<designos_doc::live_patch::LiveLogLine>),
     /// An agent edit in `doc-patch.jsonl` could not be read (unreadable or over the size limit).
     LiveSyncError(String),
-    /// Triggers immediate hot-reload of `save_path` into the Canvas.
-    ReloadFromDisk,
     /// Serializes the currently selected Canvas node (or first top-level frame) to
     /// `selection.spec.json` and pipes its path + node summary +
     /// unresolved Canvas Pin-Comments directly into the active PTY stdin.
@@ -476,7 +484,6 @@ pub struct TerminalTab {
     pub child: Box<dyn Child + Send + Sync>,
     pub rows: u16,
     pub cols: u16,
-    pub last_spec_json: Arc<Mutex<Option<String>>>,
     pub raw_log: Arc<Mutex<String>>,
     /// Bytes the reader thread has trimmed off the front of `raw_log` so far (`MAX_RAW_LOG_BYTES`). A position in the
     /// output stream is `raw_log_drained` plus an index into `raw_log`; it only grows, so a stored position never goes stale.
@@ -653,10 +660,10 @@ impl TerminalTab {
                         {
                             "sh -c 'sleep 5'"
                         } else {
-                            preset.cli_launch_command()
+                            fallback_agent_launch_command(preset)
                         };
                         #[cfg(not(test))]
-                        let launch_cmd = preset.cli_launch_command();
+                        let launch_cmd = fallback_agent_launch_command(preset);
                         build_agent_shell_cmd(&shell_bin, launch_cmd)
                     }
                 }
@@ -685,7 +692,6 @@ impl TerminalTab {
 
         let init_parser = vt100::Parser::new(rows, cols, 5000);
         let parser = Arc::new(Mutex::new(init_parser));
-        let last_spec_json = Arc::new(Mutex::new(None));
         let raw_log = Arc::new(Mutex::new(String::new()));
         let raw_log_drained = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let agent_status = Arc::new(Mutex::new(AgentTabStatus::Idle));
@@ -695,7 +701,6 @@ impl TerminalTab {
         let stop_in_flight = Arc::new(std::sync::atomic::AtomicBool::new(false));
 
         let parser_bg = Arc::clone(&parser);
-        let spec_bg = Arc::clone(&last_spec_json);
         let log_bg = Arc::clone(&raw_log);
         let drained_bg = Arc::clone(&raw_log_drained);
         let status_bg = Arc::clone(&agent_status);
@@ -760,11 +765,6 @@ impl TerminalTab {
                                     // Counted while the log lock is held, so a reader of the log sees the log and the count change together.
                                     drained_bg.fetch_add(boundary, std::sync::atomic::Ordering::Release);
                                 }
-                                if let Some(spec) = extract_spec_json_from_log(&log) {
-                                    if let Ok(mut last) = spec_bg.lock() {
-                                        *last = Some(spec);
-                                    }
-                                }
                             }
                             if let Some(s_arc) = slave_bg.upgrade() {
                                 if let Ok(mut s) = s_arc.lock() {
@@ -794,7 +794,6 @@ impl TerminalTab {
             child,
             rows,
             cols,
-            last_spec_json,
             raw_log,
             raw_log_drained,
             selection: None,
@@ -821,7 +820,7 @@ impl TerminalTab {
             unread: false,
             doc_name,
             turn_tracker: crate::agent_turn_status::TabTurnTracker::default(),
-            permission_mode: crate::agent_permissions::AgentPermissionMode::Skip,
+            permission_mode: crate::agent_permissions::AgentPermissionMode::default(),
             approvals_dir,
             pending_approvals: Vec::new(),
             stop_state: None,
@@ -853,9 +852,14 @@ impl TerminalTab {
     /// Codex uses the PTY output-burst heuristic (`terminal.rs:510`, `2270`); Claude, Grok, and Antigravity
     /// are driven by `agent-events.jsonl` hook records.
     pub fn effective_status(&self) -> AgentTabStatus {
+        self.effective_status_at(std::time::Instant::now())
+    }
+
+    /// [`Self::effective_status`] judged at `now`: Codex counts as working while its PTY output is under 600 ms old at `now`.
+    pub(crate) fn effective_status_at(&self, now: std::time::Instant) -> AgentTabStatus {
         let explicit_status = self.agent_status.lock().ok().map(|g| g.clone()).unwrap_or_default();
         let recent_pty_activity = self.spawn_preset == AgentCliPreset::Codex
-            && self.last_output_at.lock().ok().and_then(|g| *g).is_some_and(|ts| ts.elapsed() < std::time::Duration::from_millis(600));
+            && self.last_output_at.lock().ok().and_then(|g| *g).is_some_and(|ts| now.saturating_duration_since(ts) < std::time::Duration::from_millis(600));
         match explicit_status {
             AgentTabStatus::Working(d) => AgentTabStatus::Working(d),
             AgentTabStatus::WaitingForInput(d) => AgentTabStatus::WaitingForInput(d),
@@ -918,6 +922,16 @@ impl TerminalTab {
     /// or `None` when no reading is available (`#678` §3.1, §7).
     pub fn header_usage_caption(&self) -> Option<String> {
         crate::agent_usage::header_usage_caption_for_tab(self.spawn_preset, self.usage_reading().as_ref())
+    }
+
+    /// The name of this tab for a reader: `title`, plus `(exited)` once the agent is gone. The strip never paints
+    /// the suffix (it would widen the tab and move the buttons after it); the tooltip and the screen-reader name carry it.
+    pub fn display_title(&self) -> String {
+        if self.exited_notice_shown {
+            format!("{} (exited)", self.title)
+        } else {
+            self.title.clone()
+        }
     }
 
     /// Hover tooltip text for this tab (`#678` §3.7, §7).
@@ -1080,6 +1094,9 @@ pub struct BootstrapJobState {
     pub markdown: Option<String>,
 }
 
+/// Work a background bootstrap build runs before it builds the full block (see [`TerminalState::start_bootstrap_job_held`]).
+pub(crate) type BootstrapHold = Box<dyn FnOnce() + Send>;
+
 /// Handle to an in-flight background bootstrap build job with a lazy `compact_bootstrap` fallback (`§8.5`).
 #[derive(Clone)]
 pub struct BootstrapJobHandle {
@@ -1125,8 +1142,6 @@ pub struct TerminalState {
     pub doc_name: String,
     pub tabs: Vec<TerminalTab>,
     pub active_tab: usize,
-    pub dock_open: bool,
-    pub dock_height: f32,
     /// Unattached composer state held while `tabs` is empty; moved into the first spawned tab (`#689` §4).
     pub unattached_composer: crate::agent_composer::ComposerState,
     /// Why the last sample-prompt click could not start an agent session; painted under the prompts until the next click.
@@ -1166,6 +1181,16 @@ pub struct TerminalState {
     pub search_case_sensitive: bool,
     /// True when the last pointer press was in the panel's non-terminal chrome (header, tab strip, composer) (`#684 §3.1`).
     pub chrome_focused: bool,
+    /// Whether the composer held egui focus when the previous frame painted it. A click elsewhere and a bare `Esc` both
+    /// take egui focus away before the panel code of the same frame runs, so the focus of the current frame cannot tell
+    /// "the user was typing" from "the user never was". The review card (`#922`) and the panel `Esc` (`#923`) read this.
+    pub composer_focused_last_frame: bool,
+    /// The composer's focus after it was painted this frame; it becomes [`Self::composer_focused_last_frame`] in the next.
+    composer_focused_now: bool,
+    /// True while a dialog, palette or menu that reads `Esc`, `Enter` and the arrows is open ([`overlay_owns_keyboard`]).
+    /// The shell sets it before the panels draw: those overlays draw after the Agents panel in the same frame, so the
+    /// terminal would already have sent the keys to the agent when they looked for them (`#923`).
+    pub overlay_owns_keyboard: bool,
     /// Deferred undo depth to fold once a user edit in progress finishes (`#684 §3.4`).
     pub pending_stop_fold_depth: Option<usize>,
     /// Deferred stop close metadata (`depth`, `pre_close_patch_count`, `run_id`, `agent`) (`#684 §3.4`, `§3.5`).
@@ -1191,7 +1216,11 @@ pub struct TerminalState {
     pub lock_owner: Option<String>,
     /// Inputs and resulting key of the last [`Self::bind_open_file`], so a steady frame does no IO.
     pub open_file_binding: Option<crate::agent_sessions::OpenFileBinding>,
-    /// Whether `codex resume --last` has passed the runtime cwd-scoping check (`#653` §6).
+    /// Whether `codex resume --last` is verified to stay in this file's session folder (`#653` §6). Nothing sets it
+    /// yet, and it does not decide whether a Codex tab is recorded: Codex is never recorded, so it always starts new.
+    /// Cwd scoping alone would not be enough: `resume --last` takes no session id, so it continues the newest Codex
+    /// conversation whichever session was picked. Recording Codex waits until it can be resumed by its own id
+    /// (`#926`); the flag only gates resuming an entry that already exists.
     pub codex_cwd_scoped: bool,
     /// Whether `agy --continue` has passed the runtime cwd-scoping check (`#653` §6).
     pub agy_cwd_scoped: bool,
@@ -1199,7 +1228,7 @@ pub struct TerminalState {
     pub path_prepend: Vec<PathBuf>,
     /// State for the new-session CLI picker, compact `+` menu, and inline `"Other CLI…"` form (`#652`).
     pub picker: crate::agent_picker::AgentPickerState,
-    /// True when the center of the Agent panel / `>_` dock shows the new-session picker (`#651`).
+    /// True when the center of the Agents panel shows the new-session picker (`#651`).
     pub picker_open: bool,
     /// True when the `"Sessions"` popover is open (`#651` §3 rule 5).
     pub sessions_popover_open: bool,
@@ -1209,6 +1238,8 @@ pub struct TerminalState {
     pub renaming_session_tab_id: Option<u64>,
     /// Draft text for the active inline session rename (`#651` §3 rule 6).
     pub rename_session_input: String,
+    /// The rename field has not been drawn yet since the rename started: its first frame takes the keyboard.
+    pub rename_session_focus_pending: bool,
     /// Prompt held by `dispatch_figma_ai_prompt` when no live tab and no resumable session exist (`#651` §3 rule 10).
     pub pending_prompt: Option<(String, String)>,
     /// Hook-written turn boundary marks reader (`<session_dir>/turn-marks.jsonl`, `#677`).
@@ -1223,7 +1254,7 @@ pub struct TerminalState {
     pub notifier: crate::agent_notify::AgentNotifier,
     /// True when the Studio OS window currently has focus (`#683` §3.7).
     pub window_focused: bool,
-    /// True when the Agents panel or Terminal dock is currently visible (`#683` §3.7).
+    /// True when the Agents panel is currently visible (`#683` §3.7).
     pub surface_visible: bool,
     /// Observed per-tab status transitions `(tab_id, new_status)` for tests and diagnostics (`#683` §10).
     pub status_changes: Vec<(usize, AgentTabStatus)>,
@@ -1438,8 +1469,6 @@ impl TerminalState {
             doc_name: "Untitled".to_string(),
             tabs: Vec::new(),
             active_tab: 0,
-            dock_open: false,
-            dock_height: 400.0,
             unattached_composer: crate::agent_composer::ComposerState::default(),
             sample_prompt_error: None,
             deferred_bridge_actions: Vec::new(),
@@ -1461,6 +1490,9 @@ impl TerminalState {
             search_query: String::new(),
             search_case_sensitive: false,
             chrome_focused: false,
+            composer_focused_last_frame: false,
+            composer_focused_now: false,
+            overlay_owns_keyboard: false,
             pending_stop_fold_depth: None,
             pending_stop_close: None,
             current_undo_depth: 0,
@@ -1482,6 +1514,7 @@ impl TerminalState {
             resume_notice: None,
             renaming_session_tab_id: None,
             rename_session_input: String::new(),
+            rename_session_focus_pending: false,
             pending_prompt: None,
             turn_marks,
             turn_ledger: crate::agent_turn_ledger::AgentTurnLedger::default(),
@@ -1491,7 +1524,7 @@ impl TerminalState {
             window_focused: true,
             surface_visible: true,
             status_changes: Vec::new(),
-            permission_mode: crate::agent_permissions::AgentPermissionMode::Skip,
+            permission_mode: crate::agent_permissions::AgentPermissionMode::default(),
             pending_approvals: Vec::new(),
             notification_latch: crate::agent_permissions::NotificationLatch::default(),
             approval_notifier,
@@ -1936,6 +1969,8 @@ impl TerminalState {
                 if !prior_fallback_sessions.is_empty() && reg.sessions.is_empty() {
                     reg.sessions = prior_fallback_sessions;
                     let _ = crate::agent_sessions::save_registry(&dir, &reg);
+                } else if reg.rename_legacy_default_titles() {
+                    let _ = crate::agent_sessions::save_registry(&dir, &reg);
                 }
                 self.session_registry = reg;
                 if let Some(max_id) = self.session_registry.sessions.iter().map(|s| s.tab_id as usize).max() {
@@ -1970,10 +2005,11 @@ impl TerminalState {
 
     /// Re-reads the saved permission mode of the bound library so a mode another window (a separate
     /// process) saved applies to the agent about to start. Called per spawn or prompt, never per frame.
-    /// Without a library, or without a saved mode, the in-memory mode stays.
+    /// A bound library whose saved mode is missing or unreadable means Ask (fail closed), so a stale in-memory
+    /// Skip never outlives the setting. Without a library the in-memory mode stays.
     fn refresh_permission_mode_from_disk(&mut self) {
-        if let Some(mode) = self.library_root.as_deref().and_then(crate::agent_permissions::load_saved_permission_mode) {
-            self.permission_mode = mode;
+        if let Some(root) = self.library_root.as_deref() {
+            self.permission_mode = crate::agent_permissions::load_permission_mode(root);
         }
     }
 
@@ -2120,6 +2156,14 @@ impl TerminalState {
     /// Spawns a background bootstrap build job (`E15-16 §3.2`, `§8.5`, `§11`) with a lazy
     /// `compact_bootstrap` fallback reply for the Claude hook, which prints it if the full block is not ready within `500 ms`.
     pub fn start_bootstrap_job(&mut self, doc: Document, page: NodeId, file_path: Option<PathBuf>, simulated_delay: Option<std::time::Duration>) {
+        let hold = simulated_delay.map(|delay| -> BootstrapHold { Box::new(move || std::thread::sleep(delay)) });
+        self.start_bootstrap_job_held(doc, page, file_path, hold);
+    }
+
+    /// [`Self::start_bootstrap_job`] with the full build held back by `hold` once the compact fallback is written.
+    /// A test passes a hold that waits on an event it controls, so a build is late or finishes after a newer one
+    /// by construction rather than by a sleep that a loaded machine can outrun.
+    pub(crate) fn start_bootstrap_job_held(&mut self, doc: Document, page: NodeId, file_path: Option<PathBuf>, hold: Option<BootstrapHold>) {
         // Studio builds its bootstrap block from the full document snapshot (never the scoped canvas copy, `§3.2`).
         let doc_rev = self.last_synced_key.map(|(e, _, _)| e).unwrap_or(0).max(doc.mutation_epoch());
         let opts = designos_export::agent_context::BootstrapOptions {
@@ -2157,8 +2201,8 @@ impl TerminalState {
                     write_compact_bootstrap_fallback(&session_dir, &compact, &page_ctx);
                 }
             }
-            if let Some(d) = simulated_delay {
-                std::thread::sleep(d);
+            if let Some(hold) = hold {
+                hold();
             }
             let boot = designos_export::agent_context::bootstrap(&doc_bg, &opts_bg, &doc_bg.library.enabled, &rules);
             if let Ok(_guard) = write_lock_bg.lock() {
@@ -2496,8 +2540,7 @@ impl TerminalState {
     /// Screenshot fixture (`--panel agents-start-failure`): opens an Antigravity tab on a real
     /// `agy` invocation that exits at once with a usage error, then waits for the failure panel.
     pub fn open_failed_start_fixture(&mut self, file_path: Option<&Path>) {
-        let command = "agy --dangerously-skip-permissions --mcp-config /nonexistent/mcp.json";
-        if self.spawn_tab_running(AgentCliPreset::Antigravity, file_path, Some(command)).is_err() {
+        if self.spawn_tab_running(AgentCliPreset::Antigravity, file_path, Some(START_FAILURE_FIXTURE_COMMAND)).is_err() {
             return;
         }
         let deadline = std::time::Instant::now() + agent_start_failure::START_FAILURE_WINDOW;
@@ -2687,7 +2730,18 @@ impl TerminalState {
     /// Returns `true` when the embedded terminal viewport is actively capturing raw keyboard input,
     /// so single-key canvas shortcuts (`V`, `F`, `R`, `T`, `Backspace`, etc.) must be suppressed.
     pub fn is_capturing_keyboard(&self, agent_panel_open: bool) -> bool {
-        self.mention_popup.is_open() || (((agent_panel_open && self.side_panel_pty_open) || self.dock_open) && self.viewport_focused)
+        self.mention_popup.is_open() || (agent_panel_open && self.side_panel_pty_open && self.viewport_focused)
+    }
+
+    /// Starts one frame of the Agents panel: the composer focus that ended the previous frame becomes the baseline for
+    /// this one (see [`Self::composer_focused_last_frame`]).
+    fn begin_composer_focus_frame(&mut self) {
+        self.composer_focused_last_frame = std::mem::take(&mut self.composer_focused_now);
+    }
+
+    /// Records whether the composer holds egui focus after it was painted this frame.
+    pub(crate) fn record_composer_focus(&mut self, focused: bool) {
+        self.composer_focused_now = focused;
     }
 
     /// Returns the currently active terminal tab when one exists.
@@ -2921,7 +2975,7 @@ impl TerminalState {
                 let has_queued = tab.composer.pending_send.is_some();
                 if register_new_entry && crate::agent_sessions::is_agent_cli_preset(preset) {
                     self.session_registry.last_cli = Some(preset.binary_name().to_string());
-                    if crate::agent_sessions::is_registrable_cli_scoped(preset, self.codex_cwd_scoped, self.agy_cwd_scoped) {
+                    if crate::agent_sessions::is_registrable_cli_scoped(preset, self.agy_cwd_scoped) {
                         let now = crate::agent_sessions::unix_timestamp_secs();
                         let entry = crate::agent_sessions::SessionEntry {
                             tab_id: id as u64,
@@ -3109,7 +3163,8 @@ impl TerminalState {
         self.tabs.get(idx)
     }
 
-    /// Live bridge polling (`<50ms` hot-apply):
+    /// Live bridge polling, once per frame (`<50ms` hot-apply while the Agents panel's timer keeps frames coming; with
+    /// the panel closed `LivePatchLog::wake_on_writes` starts the frame, at most 500 ms after the write):
     /// 1. Polls `self.live_spec_path` (`live-spec.json`) -> `TerminalAction::ApplySpecFile(...)`
     /// 2. Polls `doc-patch.jsonl` (agent edits and document switches written by `designos-mcp`) -> `TerminalAction::ApplyLiveLog(...)`
     pub fn poll_live_agent_bridge(&mut self) -> Vec<TerminalAction> {
@@ -3478,7 +3533,6 @@ impl TerminalState {
                         *st = AgentTabStatus::Idle;
                     }
                 }
-                tab.title.push_str(" (exited)");
                 tab.exited_notice_shown = true;
                 agent_exited = true;
                 stopped_exited |= was_stopped;
@@ -3604,7 +3658,6 @@ impl TerminalState {
     /// Dispatches a Figma AI task prompt into the active PTY session through [`Self::send_to_agent`]
     /// (`#651` §3 rule 10 & `#689` §3 rule 8).
     pub fn dispatch_figma_ai_prompt(&mut self, task_title: &str, cli_prompt: &str, file_path: Option<&Path>) {
-        self.dock_open = true;
         let outcome = self.send_to_agent(cli_prompt, file_path);
         if self.tabs.is_empty() && self.picker_open {
             self.pending_prompt = Some((task_title.to_string(), cli_prompt.to_string()));
@@ -3659,7 +3712,6 @@ impl TerminalState {
         let paste_line = format!("Read the design:os spec excerpt at {} and follow the request inside it.", excerpt_path.display());
         let pasted = self.paste_into_agent_tab(&paste_line);
         if pasted {
-            self.dock_open = true;
             self.status_msg = Some("Copied to clipboard & pasted file reference into agent tab (press Enter to send)".into());
         } else {
             self.status_msg = Some("Copied to clipboard (no agent tab open — nothing sent to the terminal)".into());
@@ -4213,6 +4265,10 @@ fn paint_orca_tab_status_and_provider(ui: &Ui, p: &Painter, tab: &TerminalTab, t
         AgentTabStatus::Error(_) => {
             p.circle_filled(status_center, 2.7, theme::DANGER);
         }
+        // An exited tab shows a hollow ring, so it never reads as an idle tab, which has the filled dot.
+        AgentTabStatus::Done | AgentTabStatus::Idle | AgentTabStatus::Stopped if tab.exited_notice_shown => {
+            p.circle_stroke(status_center, 3.0, Stroke::new(1.3, theme::TEXT_SECONDARY));
+        }
         AgentTabStatus::Done | AgentTabStatus::Idle => {
             p.circle_filled(status_center, 2.7, theme::TEXT_SECONDARY);
         }
@@ -4346,18 +4402,24 @@ fn write_agy_session_plugin(session_dir: &Path, mcp_config_bytes: &[u8]) -> std:
 }
 
 /// Publishes the session's MCP server config as Gemini CLI's project settings at
-/// `<session_dir>/.gemini/settings.json` (`"trust": true`, identical to the output of
-/// `gemini mcp add --scope project --trust`) plus `<session_dir>/.gemini/trustedFolders.json`
+/// `<session_dir>/.gemini/settings.json` plus `<session_dir>/.gemini/trustedFolders.json`
 /// (`GEMINI_CLI_TRUSTED_FOLDERS_PATH`), leaving `~/.gemini/` untouched (`#679` §3 rule 4).
+///
+/// The server entry never carries `"trust"`, in either permission mode (`#924`). In gemini-cli v0.35.3 a trusted server
+/// is an ALLOW rule for `mcp_designos_*` at the user policy tier, with no folder check
+/// (`packages/core/src/policy/config.ts:484-500`; `mcp-tool.ts:203` repeats it as a fallback). Left out, every `designos_*`
+/// call asks in `Ask` mode (the default decision is ASK_USER, `config.ts:524`). `Skip` launches with
+/// `--approval-mode yolo`, whose catch-all rule allows every tool, MCP ones included (`policies/yolo.toml:49-54`,
+/// priority 998), so it needs no `trust`. A file that does not depend on the mode also cannot start trusting a tab that
+/// launched in `Ask` when the mode changes later: the file is shared by the window's tabs and rewritten on every sync.
+/// The folder itself stays trusted in both modes: without it Gemini ignores the project settings and never starts the
+/// server, and `TRUST_FOLDER` adds no allow rule.
 pub fn write_gemini_session_config(session_dir: &Path, mcp_config: &serde_json::Value) {
     let _argv = build_gemini_mcp_add_argv(mcp_config);
     let mut gemini_cfg = mcp_config.clone();
     // `designos.enabled_tools` is read by `designos-mcp`; Gemini's settings file only takes the server entry.
     if let Some(obj) = gemini_cfg.as_object_mut() {
         obj.remove("designos");
-    }
-    if let Some(designos) = gemini_cfg.get_mut("mcpServers").and_then(|s| s.get_mut("designos")).and_then(|d| d.as_object_mut()) {
-        designos.insert("trust".to_string(), serde_json::Value::Bool(true));
     }
     if let Ok(bytes) = serde_json::to_vec_pretty(&gemini_cfg) {
         let settings_path = session_dir.join(".gemini").join("settings.json");
@@ -4376,14 +4438,14 @@ pub fn write_gemini_session_config(session_dir: &Path, mcp_config: &serde_json::
 }
 
 /// Builds the project-scoped `gemini mcp add` argv (`#679` §3 rule 4) using only flags
-/// documented in `gemini mcp add --help` (`--scope project`, `--trust`, `-e KEY=value`),
+/// documented in `gemini mcp add --help` (`--scope project`, `-e KEY=value`; never `--trust`, see [`write_gemini_session_config`]),
 /// separating trailing server flags (`--workspace <dir>`) with `--`.
 pub fn build_gemini_mcp_add_argv(mcp_config: &serde_json::Value) -> Vec<String> {
     let Some(server) = mcp_config.get("mcpServers").and_then(|s| s.get("designos")) else {
         return Vec::new();
     };
     let command = server.get("command").and_then(|v| v.as_str()).unwrap_or("designos-mcp");
-    let mut argv = vec!["gemini".to_string(), "mcp".to_string(), "add".to_string(), "--scope".to_string(), "project".to_string(), "--trust".to_string()];
+    let mut argv = vec!["gemini".to_string(), "mcp".to_string(), "add".to_string(), "--scope".to_string(), "project".to_string()];
     if let Some(env_obj) = server.get("env").and_then(|v| v.as_object()) {
         for (k, v) in env_obj {
             if let Some(val) = v.as_str() {
@@ -4840,78 +4902,6 @@ fn last_lines_for_classification(turn_output: &str) -> String {
     agent_session_failure::tail_slice_last_n_lines(turn_output, agent_session_failure::CLASSIFY_TAIL_LINES).to_string()
 }
 
-/// Scans terminal output for a ```json ... ``` fence or JSON object representing a `NodeSpec`.
-/// Returns the latest valid `NodeSpec` JSON string if found.
-pub fn extract_spec_json_from_log(log: &str) -> Option<String> {
-    let mut search_end = log.len();
-    while let Some(fence_start) = log[..search_end].rfind("```json") {
-        let after_tag = &log[fence_start + 7..search_end];
-        if let Some(fence_end) = after_tag.find("```") {
-            let candidate = after_tag[..fence_end].trim();
-            if is_valid_node_spec_json(candidate) {
-                return Some(candidate.to_string());
-            }
-        }
-        search_end = fence_start;
-    }
-
-    let bytes = log.as_bytes();
-    let mut i = bytes.len();
-    let mut checked = 0usize;
-    while i > 0 && checked < 12 {
-        i -= 1;
-        if bytes[i] == b'}' {
-            if let Some(open_idx) = find_matching_open_brace(&log[..=i]) {
-                let candidate = log[open_idx..=i].trim();
-                if (candidate.contains("\"name\"") || candidate.contains("\"preset\"")) && is_valid_node_spec_json(candidate) {
-                    return Some(candidate.to_string());
-                }
-                checked += 1;
-            }
-        }
-    }
-    None
-}
-
-fn find_matching_open_brace(slice_ending_with_close: &str) -> Option<usize> {
-    let mut depth = 0i32;
-    let mut in_str = false;
-    let mut prev_backslash = false;
-    let chars: Vec<(usize, char)> = slice_ending_with_close.char_indices().collect();
-    for &(idx, ch) in chars.iter().rev() {
-        if in_str {
-            if ch == '"' && !prev_backslash {
-                in_str = false;
-            }
-            prev_backslash = ch == '\\';
-            continue;
-        }
-        match ch {
-            '"' => in_str = true,
-            '}' => depth += 1,
-            '{' => {
-                depth -= 1;
-                if depth == 0 {
-                    return Some(idx);
-                }
-            }
-            _ => {}
-        }
-    }
-    None
-}
-
-fn is_valid_node_spec_json(candidate: &str) -> bool {
-    if !candidate.starts_with('{') || !candidate.ends_with('}') {
-        return false;
-    }
-    if let Ok(spec) = serde_json::from_str::<NodeSpec>(candidate) {
-        !spec.name.trim().is_empty() || spec.preset.is_some() || !spec.children.is_empty() || !spec.kind.trim().is_empty()
-    } else {
-        false
-    }
-}
-
 /// Serializes the active selection (or first top-level frame on `page`) to
 /// the session's `selection.spec.json` with a `designos_context` object (node name, id, open
 /// pin-comments). Pastes only a fixed file-reference sentence into a live agent tab (never node
@@ -5022,6 +5012,41 @@ pub fn show_left_with_selection(
     show_left_with_doc(state, ui, rect, file_path, selection_summary, &empty_doc, page)
 }
 
+/// True while a dialog, palette or popup that reads `Esc`, `Enter` and the arrows is open, so the Agents panel leaves the
+/// keyboard to it (`#923`, `#960`, `#981`).
+///
+/// Every popup the shared helpers draw (`widgets::menu::popup_tree`, `widgets::popover::show`, the Variables picker, the
+/// board popovers) marks itself open in the pass it is drawn, and [`crate::widgets::popup_open::open_recently`] reads that
+/// mark one frame later. So do six popovers built by hand: the colour picker, the font dropdown, the prototype popover and
+/// the Variables edit popover, cell colour picker and skipped-details popover. Each closes on `Esc` and on an outside press.
+/// That covers each of them whatever state it keeps its open flag in, and a popup whose host stops drawing counts for one
+/// frame at most, so it never leaves the terminal deaf.
+///
+/// Listed here is what does not mark itself: the dialogs and modals, the command palette, `ui.menu` (it also holds the zoom
+/// menu, which has its own text field, and the palette) and the overlapping layer picker (a custom area). Those are drawn every
+/// frame the flag can be set, and every press outside them closes them, so a stale flag cannot stick.
+///
+/// Not here, on purpose: the web capture report sheet, the image Expand and Erase popovers and the Check designs panel with
+/// its rules popover do not close on an outside press (the Check designs panel does not close on `Esc` either), so counting
+/// them would leave the terminal deaf until the user found their close button.
+///
+/// Not marked yet: the comment thread, which can also open from the Comments panel. The comment composer and the auto-layout
+/// gap and padding editor are not marked either; they open from a press on the canvas, which takes the keyboard from the
+/// terminal.
+pub fn overlay_owns_keyboard(app: &crate::app::App, ctx: &egui::Context) -> bool {
+    app.dialog.is_some()
+        || app.history.save_modal.is_some()
+        || app.dev.compare.is_some()
+        || app.plugins.open
+        || app.ui.permissions_modal_open
+        || app.cmdk.open
+        || app.ui.menu.is_some()
+        || app.ui.layer_picker.is_some()
+        || app.libs.open
+        || app.libs.review
+        || crate::widgets::popup_open::open_recently(ctx)
+}
+
 /// Renders the `Agents` Left Side Panel with live [`Document`] access for the `@`-mention picker (`#655`).
 pub fn show_left_with_doc(
     state: &mut TerminalState,
@@ -5037,6 +5062,7 @@ pub fn show_left_with_doc(
     crate::agent_a11y::label_agents_panel(state, ui);
     let p = ui.painter().clone();
     let composer_input_id = Id::new("agents-ask-for-changes-input");
+    state.begin_composer_focus_frame();
     if ui.memory(|m| m.has_focus(composer_input_id)) {
         state.viewport_focused = false;
     }
@@ -5063,21 +5089,7 @@ pub fn show_left_with_doc(
         p.rect_filled(bar_r, 0.0, TERM_BG_BAR);
         widgets::hline(&p, bar_r.left(), bar_r.right(), bar_r.bottom() - 1.0, TERM_BORDER);
 
-        // Right-aligned Dock/Expand toggle button (`agents-header-popout`)
-        let pop_rect = Rect::from_center_size(Pos2::new(bar_r.right() - 18.0, bar_r.center().y), Vec2::splat(24.0));
-        let pop_resp = ui.interact(pop_rect, Id::new("term-left-dock-toggle"), Sense::click());
-        if pop_resp.hovered() || state.dock_open {
-            p.rect_filled(pop_rect, CornerRadius::same(4), TERM_BG_HOVER);
-        }
-        paint_popout_icon(&p, pop_rect.center(), Color32::from_rgb(0xD4, 0xD4, 0xD4));
-        widgets::record(ui, "term-left-dock-toggle", pop_rect);
-        widgets::record(ui, "agents-popout-pty", pop_rect);
-        widgets::record(ui, "agents-header-popout", pop_rect);
-        if pop_resp.clicked() {
-            state.dock_open = !state.dock_open;
-        }
-
-        let stop_left = crate::agent_stop::paint_header_stop_controls(ui, &p, state, bar_r, pop_rect.left());
+        let stop_left = crate::agent_stop::paint_header_stop_controls(ui, &p, state, bar_r, bar_r.right());
 
         // The `Skills` button (`RD-4` §7) sits right of the `+` runtime selector: the tabs, `Sessions` and `+` end before it.
         let skills_w = state.skills.chip_width(&p);
@@ -5113,6 +5125,13 @@ pub fn show_left_with_doc(
                 (true, None) => Some(NEEDS_APPROVAL_LABEL.to_string()),
                 (false, usage) => usage,
             };
+            // The strip keeps an exited tab's width. It shows a hollow status ring and a title that is one step dimmer
+            // than an active tab's but still readable; the tooltip says it exited.
+            let tab_tip = match (tab.exited_notice_shown, tab_tip) {
+                (true, Some(tip)) => Some(format!("{}\n{tip}", tab.display_title())),
+                (true, None) => Some(tab.display_title()),
+                (false, tip) => tip,
+            };
             let tab_resp = if let Some(tip) = tab_tip { tab_resp.on_hover_text(tip) } else { tab_resp };
             let close_resp = if can_close { Some(ui.interact(close_rect, Id::new(("agents-left-tab-close", tab.id)), Sense::click())) } else { None };
 
@@ -5140,7 +5159,7 @@ pub fn show_left_with_doc(
                 Align2::LEFT_CENTER,
                 title_str,
                 theme::font_caption_medium(),
-                if is_active { theme::TEXT } else { theme::TEXT_SECONDARY },
+                if is_active && !tab.exited_notice_shown { theme::TEXT } else { theme::TEXT_SECONDARY },
             );
             if let Some(cr) = &close_resp {
                 icons::paint(&p, Icon::Close, close_rect.center(), 9.0, if cr.hovered() { STATUS_BAD_TEXT } else { theme::ICON_TERTIARY });
@@ -5194,11 +5213,16 @@ pub fn show_left_with_doc(
         icons::paint(&p, Icon::Plus, Pos2::new(add_rect.left() + 10.0, add_rect.center().y), 11.0, add_fg);
         icons::paint(&p, Icon::ChevronDown, Pos2::new(add_rect.right() - 7.0, add_rect.center().y), 8.0, add_fg);
         widgets::record(ui, "agents-runtime-add-btn", add_rect);
+        // The menu below reads these two, not the test hook: a press on `+` is not a press outside the menu, and the
+        // press of the click that opens the menu must not close it in the pass that opens it.
+        ui.ctx().data_mut(|d| d.insert_temp(Id::new("agents-runtime-add-btn-rect"), add_rect));
         if add_resp.clicked() {
             state.runtime_dropdown_open = !state.runtime_dropdown_open;
             state.resume_notice = None;
             if state.runtime_dropdown_open {
                 state.sessions_popover_open = false;
+                let pass_nr = ui.ctx().cumulative_pass_nr();
+                ui.ctx().data_mut(|d| d.insert_temp(Id::new("agents-runtime-opened-pass"), pass_nr));
             } else {
                 state.picker.on_close();
             }
@@ -5331,8 +5355,10 @@ pub fn show_left_with_doc(
         }
 
         render_vt100_viewport(state, ui, vp_r, file_path, "agents-left-pty");
-        if !state.viewport_focused && ui.input(|i| i.key_pressed(Key::Escape)) {
-            let composer_focused = ui.ctx().memory(|m| m.has_focus(Id::new("agents-ask-for-changes-input")));
+        if !state.viewport_focused && !state.overlay_owns_keyboard && ui.input(|i| i.key_pressed(Key::Escape)) {
+            // egui takes the caret out of the composer on a bare `Esc` before this code runs, so where the caret was a
+            // frame ago counts as well: an `Esc` that leaves the composer must not also stop the turn (`#684`, `#923`).
+            let composer_focused = state.composer_focused_last_frame || ui.ctx().memory(|m| m.has_focus(Id::new("agents-ask-for-changes-input")));
             crate::agent_stop::handle_panel_escape(state, composer_focused, designos_doc::now_ms());
         }
         if let Some(receipt) = &active_receipt {
@@ -5406,9 +5432,9 @@ pub fn show_left_with_doc(
         widgets::record(ui, "agents-needs-approval-pill", pill_r);
     }
 
-    // Header right controls: `AI` badge + Pop-out/PTY toggle. There is no `•••` More button: no spec defines a menu behind it (Zero Fake UI, P6).
+    // Header right control: the `AI` badge. There is no `•••` More button: no spec defines a menu behind it (Zero Fake UI, P6).
     let h_cy = header_rect.top() + 18.0;
-    let ai_rect = Rect::from_center_size(Pos2::new(header_rect.right() - 50.0, h_cy), Vec2::new(24.0, 18.0));
+    let ai_rect = Rect::from_center_size(Pos2::new(header_rect.right() - theme::SPACE_INLINE - 12.0, h_cy), Vec2::new(24.0, 18.0));
     let ai_resp = ui.interact(ai_rect, Id::new("agents-header-ai"), Sense::click());
     let ai_bg = if !state.chat_mode || state.side_panel_pty_open {
         Color32::from_rgb(0x16, 0x35, 0x52)
@@ -5425,20 +5451,6 @@ pub fn show_left_with_doc(
     if ai_resp.clicked() {
         state.chat_mode = !state.chat_mode;
         state.side_panel_pty_open = !state.chat_mode;
-    }
-
-    let pop_rect = Rect::from_center_size(Pos2::new(header_rect.right() - 18.0, h_cy), Vec2::splat(24.0));
-    let pop_resp = ui.interact(pop_rect, Id::new("term-left-dock-toggle"), Sense::click());
-    if pop_resp.hovered() || state.side_panel_pty_open || state.dock_open {
-        p.rect_filled(pop_rect, CornerRadius::same(4), TERM_BG_HOVER);
-    }
-    paint_popout_icon(&p, pop_rect.center(), Color32::from_rgb(0xD4, 0xD4, 0xD4));
-    widgets::record(ui, "term-left-dock-toggle", pop_rect);
-    widgets::record(ui, "agents-popout-pty", pop_rect);
-    widgets::record(ui, "agents-header-popout", pop_rect);
-    if pop_resp.clicked() {
-        state.dock_open = !state.dock_open;
-        state.side_panel_pty_open = state.dock_open;
     }
 
     let mut top_y = header_rect.bottom();
@@ -5566,382 +5578,6 @@ fn paint_open_book_icon(p: &egui::Painter, c: Pos2, col: Color32) {
     icons::paint(p, Icon::BookOpen, c, 14.0, col);
 }
 
-fn paint_popout_icon(p: &egui::Painter, c: Pos2, col: Color32) {
-    icons::paint(p, Icon::ArrowSquareOut, c, 14.0, col);
-}
-
-/// Alias for `show_full` used when rendering the full-workspace Agent Terminal view.
-#[allow(dead_code)]
-pub fn show_workspace(state: &mut TerminalState, ui: &mut Ui, rect: Rect, file_path: Option<&Path>) -> Vec<TerminalAction> {
-    show_full(state, ui, rect, file_path)
-}
-
-/// Renders the full-canvas Agent Terminal view (`RailItem::Terminal`).
-#[allow(dead_code)]
-pub fn show_full(state: &mut TerminalState, ui: &mut Ui, rect: Rect, file_path: Option<&Path>) -> Vec<TerminalAction> {
-    let summary = crate::agent_selection_chip::SelectionSummary::empty(&state.current_page_name);
-    let empty_doc = Document::new(&state.doc_name);
-    let page = NodeId(state.current_page_id.max(1));
-    render_terminal_surface(state, ui, rect, file_path, "full", &summary, &empty_doc, page)
-}
-
-/// Renders the docked bottom split-view Agent Terminal (`Ctrl+\`` / `dock_open`).
-pub fn show_dock(state: &mut TerminalState, ui: &mut Ui, rect: Rect, file_path: Option<&Path>) -> Vec<TerminalAction> {
-    let summary = crate::agent_selection_chip::SelectionSummary::empty(&state.current_page_name);
-    show_dock_with_selection(state, ui, rect, file_path, &summary)
-}
-
-/// Renders the docked bottom split-view Agent Terminal (`Ctrl+\`` / `dock_open`) with the live
-/// [`crate::agent_selection_chip::SelectionSummary`] computed in the current frame from `app`.
-pub fn show_dock_with_selection(
-    state: &mut TerminalState,
-    ui: &mut Ui,
-    rect: Rect,
-    file_path: Option<&Path>,
-    selection_summary: &crate::agent_selection_chip::SelectionSummary,
-) -> Vec<TerminalAction> {
-    let empty_doc = Document::new(&state.doc_name);
-    let page = NodeId(state.current_page_id.max(1));
-    show_dock_with_doc(state, ui, rect, file_path, selection_summary, &empty_doc, page)
-}
-
-/// Renders the docked bottom split-view Agent Terminal with live [`Document`] access for the `@`-mention picker (`#655`).
-pub fn show_dock_with_doc(
-    state: &mut TerminalState,
-    ui: &mut Ui,
-    rect: Rect,
-    file_path: Option<&Path>,
-    selection_summary: &crate::agent_selection_chip::SelectionSummary,
-    doc: &Document,
-    current_page: NodeId,
-) -> Vec<TerminalAction> {
-    let grip_rect = Rect::from_min_size(Pos2::new(rect.left(), rect.top() - 3.0), Vec2::new(rect.width(), 6.0));
-    widgets::record(ui, "dock-resize-grip", grip_rect);
-    let actions = render_terminal_surface(state, ui, rect, file_path, "dock", selection_summary, doc, current_page);
-    let p = ui.painter().clone();
-    let pill_r = Rect::from_center_size(Pos2::new(rect.center().x, rect.top() + 2.0), Vec2::new(36.0, 3.0));
-    p.rect_filled(pill_r, CornerRadius::same(2), Color32::from_rgb(0x52, 0x52, 0x5B));
-    actions
-}
-
-fn resolve_apply_spec_action(state: &mut TerminalState) -> Option<TerminalAction> {
-    let mut detected_from_guard = None;
-    let mut detected_from_log = None;
-    if let Some(tab) = state.active_tab() {
-        if let Ok(guard) = tab.last_spec_json.lock() {
-            detected_from_guard = guard.clone();
-        }
-        if detected_from_guard.is_none() {
-            if let Ok(log) = tab.raw_log.lock() {
-                detected_from_log = extract_spec_json_from_log(&log);
-            }
-        }
-    }
-    if let Some(json) = detected_from_guard {
-        state.status_msg = Some("Applied NodeSpec JSON detected from PTY output".into());
-        return Some(TerminalAction::ApplySpecJson(json));
-    }
-    if let Some(json) = detected_from_log {
-        state.status_msg = Some("Applied NodeSpec JSON parsed from PTY log".into());
-        return Some(TerminalAction::ApplySpecJson(json));
-    }
-    let fallback = PathBuf::from("examples/specs/easeui-agent-console.spec.json");
-    state.status_msg = Some(format!("Applied {}", fallback.display()));
-    Some(TerminalAction::ApplySpecFile(fallback))
-}
-
-#[allow(clippy::too_many_arguments)]
-fn render_terminal_surface(
-    state: &mut TerminalState,
-    ui: &mut Ui,
-    rect: Rect,
-    file_path: Option<&Path>,
-    surface_id: &'static str,
-    selection_summary: &crate::agent_selection_chip::SelectionSummary,
-    doc: &Document,
-    current_page: NodeId,
-) -> Vec<TerminalAction> {
-    state.poll_pending_online_retries(file_path);
-    let mut actions = state.poll_live_agent_bridge();
-    crate::agent_a11y::label_terminal_surface(state, ui, surface_id);
-    let p = ui.painter().clone();
-
-    if ui.input(|i| i.pointer.any_pressed()) {
-        if let Some(pos) = ui.input(|i| i.pointer.interact_pos()) {
-            if rect.contains(pos) {
-                state.viewport_focused = true;
-            }
-        }
-    }
-
-    p.rect_filled(rect, 0.0, TERM_BG_VIEWPORT);
-    widgets::hline(&p, rect.left(), rect.right(), rect.top(), TERM_BORDER);
-
-    // 1. Top Tab & Preset Bar (36px)
-    let tab_bar_h = 36.0;
-    let tab_bar_rect = Rect::from_min_size(rect.min, Vec2::new(rect.width(), tab_bar_h));
-    p.rect_filled(tab_bar_rect, 0.0, TERM_BG_BAR);
-    widgets::hline(&p, tab_bar_rect.left(), tab_bar_rect.right(), tab_bar_rect.bottom() - 1.0, TERM_BORDER);
-
-    // Bridge action buttons on the right of the tab bar (with vector icons, zero emojis)
-    let mut right_x = tab_bar_rect.right() - 8.0;
-    let btn_cy = tab_bar_rect.center().y;
-
-    let sync_r = draw_bar_icon_pill(
-        ui,
-        &p,
-        (surface_id, "term-bar-sync"),
-        Pos2::new(right_x, btn_cy),
-        Icon::Rotation,
-        "Sync Canvas",
-        TERM_BG_ELEVATED,
-        TERM_BORDER,
-        theme::TEXT,
-    );
-    right_x = sync_r.left() - 6.0;
-    if ui.interact(sync_r, Id::new((surface_id, "term-bar-sync")), Sense::click()).clicked() {
-        actions.push(TerminalAction::ReloadFromDisk);
-    }
-
-    let apply_r = draw_bar_icon_pill(
-        ui,
-        &p,
-        (surface_id, "term-bar-apply-spec"),
-        Pos2::new(right_x, btn_cy),
-        Icon::Sparkle,
-        "Apply Spec from Output",
-        STATUS_WARN_BG,
-        STATUS_WARN_BORDER,
-        STATUS_WARN_TEXT,
-    );
-    right_x = apply_r.left() - 6.0;
-    if ui.interact(apply_r, Id::new((surface_id, "term-bar-apply-spec")), Sense::click()).clicked() {
-        if let Some(act) = resolve_apply_spec_action(state) {
-            actions.push(act);
-        }
-    }
-
-    let send_r = draw_bar_icon_pill(
-        ui,
-        &p,
-        (surface_id, "term-bar-send-sel"),
-        Pos2::new(right_x, btn_cy),
-        Icon::Comment,
-        "Send Selection & Comments",
-        STATUS_INFO_BG,
-        STATUS_INFO_BORDER,
-        STATUS_INFO_TEXT,
-    );
-    right_x = send_r.left() - theme::SPACE_INLINE;
-    if ui.interact(send_r, Id::new((surface_id, "term-bar-send-sel")), Sense::click()).clicked() {
-        actions.push(TerminalAction::ExportSelectionToTerminal);
-    }
-
-    // `@ Mention` button in the terminal header (#655)
-    let min_tabs_left = tab_bar_rect.left() + 148.0;
-    if right_x - min_tabs_left >= theme::TARGET_MIN {
-        let (mention_btn_r, mention_clicked) = crate::agent_mention_popup::paint_terminal_mention_button(
-            ui,
-            "agent-mention-btn-dock",
-            right_x,
-            tab_bar_rect,
-            state.mention_popup.is_open_for_surface(surface_id),
-        );
-        right_x = mention_btn_r.left() - theme::SPACE_INLINE;
-        if mention_clicked {
-            state.mention_popup.toggle_terminal_mode_for(surface_id, doc, current_page);
-        }
-    }
-
-    // Live selection chip at the left of the bar's right-hand button group (#654)
-    if right_x - min_tabs_left >= theme::TARGET_MIN {
-        let chip_max_w = (right_x - min_tabs_left).min(260.0);
-        let chip_bounds = Rect::from_min_max(Pos2::new(right_x - chip_max_w, tab_bar_rect.top()), Pos2::new(right_x, tab_bar_rect.bottom()));
-        if let Some((chip_rect, chip_clicked)) =
-            crate::agent_selection_chip::paint_selection_chip(ui, "agent-selection-chip-dock", selection_summary, chip_bounds, true)
-        {
-            right_x = chip_rect.left() - theme::SPACE_INLINE;
-            if chip_clicked {
-                actions.push(TerminalAction::SendSelectionToAgent);
-            }
-        }
-    }
-
-    if let Some(cap) = state.active_tab().and_then(|t| t.header_usage_caption()) {
-        let cap_w = widgets::text_width(&p, &cap, &theme::font_mono());
-        if right_x - cap_w - theme::SPACE_GROUP > tab_bar_rect.left() + 180.0 {
-            let cap_rect = Rect::from_min_max(
-                Pos2::new(right_x - cap_w - theme::INSET_CONTROL, tab_bar_rect.top() + theme::SPACE_ROW),
-                Pos2::new(right_x, tab_bar_rect.bottom() - theme::SPACE_ROW),
-            );
-            p.text(Pos2::new(right_x - theme::INSET_SEGMENT, btn_cy), Align2::RIGHT_CENTER, cap, theme::font_mono(), theme::TEXT_SECONDARY);
-            let cap_resp = ui.interact(cap_rect, Id::new((surface_id, "agents-header-usage")), Sense::hover());
-            if let Some(tip) = state.active_tab().and_then(|t| t.usage_tooltip_text()) {
-                let _ = cap_resp.on_hover_text(tip);
-            }
-            widgets::record(ui, "agents-header-usage", cap_rect);
-            right_x = cap_rect.left() - theme::SPACE_INLINE;
-        } else {
-            ui.ctx().data_mut(|d| d.remove::<Rect>(Id::new(("test-rect", "agents-header-usage".to_string()))));
-        }
-    } else {
-        ui.ctx().data_mut(|d| d.remove::<Rect>(Id::new(("test-rect", "agents-header-usage".to_string()))));
-    }
-
-    // Left side of Tab Bar: Session Tabs + Quick-Launch Preset Buttons
-    let mut left_x = tab_bar_rect.left() + 8.0;
-    let mut tab_to_select: Option<usize> = None;
-    let mut tab_to_close: Option<usize> = None;
-
-    for (idx, tab) in state.tabs.iter().enumerate() {
-        if left_x + 120.0 > right_x {
-            break;
-        }
-        let is_active = idx == state.active_tab;
-        let tab_w = 136.0f32.min((right_x - left_x - 4.0).max(76.0));
-        let t_rect = Rect::from_min_size(Pos2::new(left_x, tab_bar_rect.center().y - 12.0), Vec2::new(tab_w, 24.0));
-        let close_rect = Rect::from_min_size(Pos2::new(t_rect.right() - 18.0, t_rect.center().y - 7.0), Vec2::new(14.0, 14.0));
-        let t_hit_rect = Rect::from_min_max(t_rect.min, Pos2::new((close_rect.left() - 2.0).max(t_rect.left() + 16.0), t_rect.max.y));
-        let tab_waiting = tab.needs_approval() || (is_active && !state.pending_approvals.is_empty());
-        let tab_resp = ui.interact(t_hit_rect, Id::new((surface_id, "term-tab-select", tab.id)), Sense::click());
-        let tab_tip = match (tab_waiting, tab.usage_tooltip_text()) {
-            (true, Some(usage)) => Some(format!("{NEEDS_APPROVAL_LABEL}\n{usage}")),
-            (true, None) => Some(NEEDS_APPROVAL_LABEL.to_string()),
-            (false, usage) => usage,
-        };
-        let tab_resp = if let Some(tip) = tab_tip { tab_resp.on_hover_text(tip) } else { tab_resp };
-        let close_resp = ui.interact(close_rect, Id::new((surface_id, "term-tab-close", tab.id)), Sense::click());
-
-        let bg = if is_active {
-            TERM_BG_ELEVATED
-        } else if tab_resp.hovered() {
-            TERM_BG_HOVER
-        } else {
-            TERM_BG_BAR
-        };
-        p.rect_filled(t_rect, CornerRadius::same(6), bg);
-        if is_active {
-            p.rect_stroke(t_rect, CornerRadius::same(6), Stroke::new(1.0, TERM_BORDER), StrokeKind::Inside);
-            p.rect_filled(
-                Rect::from_min_max(Pos2::new(t_rect.left() + 5.0, t_rect.bottom() - 2.0), Pos2::new(t_rect.right() - 5.0, t_rect.bottom())),
-                CornerRadius::same(1),
-                TERM_ORANGE,
-            );
-        }
-
-        paint_orca_tab_status_and_provider(ui, &p, tab, t_rect);
-        let title_str = widgets::elide(&p, &tab.title, &theme::font_caption_medium(), (tab_w - 44.0).max(20.0));
-        p.text(
-            Pos2::new(t_rect.left() + 22.0, t_rect.center().y),
-            Align2::LEFT_CENTER,
-            title_str,
-            theme::font_caption_medium(),
-            if is_active { theme::TEXT } else { theme::TEXT_SECONDARY },
-        );
-        icons::paint(&p, Icon::Close, close_rect.center(), 10.0, if close_resp.hovered() { STATUS_BAD_TEXT } else { theme::ICON_TERTIARY });
-
-        if close_resp.clicked() {
-            tab_to_close = Some(idx);
-        } else if tab_resp.clicked() {
-            tab_to_select = Some(idx);
-        }
-        left_x = t_rect.right() + 4.0;
-    }
-
-    if let Some(idx) = tab_to_select {
-        state.active_tab = idx;
-        if let Some(tab) = state.tabs.get_mut(idx) {
-            tab.unread = false;
-        }
-        state.sync_active_tab_approvals();
-        state.viewport_focused = true;
-        state.refresh_tab_usage(idx);
-    }
-    if state.surface_visible {
-        if let Some(tab) = state.active_tab_mut() {
-            tab.unread = false;
-        }
-    }
-    if let Some(idx) = tab_to_close {
-        state.close_tab(idx);
-    }
-
-    // Quick-launch preset buttons with crisp Plus icon
-    for preset in AgentCliPreset::QUICK_LAUNCH {
-        let label = preset.button_label();
-        let btn_w = (label.len() as f32 * 6.0 + 28.0).clamp(64.0, 98.0);
-        if left_x + btn_w > right_x {
-            break;
-        }
-        let b_rect = Rect::from_min_size(Pos2::new(left_x, tab_bar_rect.center().y - 11.0), Vec2::new(btn_w, 22.0));
-        let b_resp = ui.interact(b_rect, Id::new((surface_id, "term-preset-spawn", preset as usize)), Sense::click());
-        let is_agent = preset != AgentCliPreset::Shell;
-        let bg = if b_resp.hovered() {
-            TERM_BG_HOVER
-        } else if is_agent {
-            STATUS_INFO_BG
-        } else {
-            TERM_BG_ELEVATED
-        };
-        let border = if is_agent { STATUS_INFO_BORDER } else { TERM_BORDER };
-        let fg = if is_agent { STATUS_INFO_TEXT } else { theme::TEXT_SECONDARY };
-        p.rect_filled(b_rect, CornerRadius::same(6), bg);
-        p.rect_stroke(b_rect, CornerRadius::same(6), Stroke::new(1.0, border), StrokeKind::Inside);
-        icons::paint(&p, Icon::Plus, Pos2::new(b_rect.left() + 10.0, b_rect.center().y), 10.0, fg);
-        let elided = widgets::elide(&p, label, &theme::font_caption_medium(), (btn_w - 22.0).max(16.0));
-        p.text(Pos2::new(b_rect.left() + 18.0, b_rect.center().y), Align2::LEFT_CENTER, elided, theme::font_caption_medium(), fg);
-        if b_resp.clicked() {
-            let _ = state.spawn_tab(preset, file_path);
-        }
-        left_x = b_rect.right() + 4.0;
-    }
-
-    let now_secs = crate::agent_sessions::unix_timestamp_secs();
-    if let Some((dot_col, status_txt)) = state.active_tab().and_then(|t| t.header_status_indicator(now_secs)) {
-        let avail_w = (right_x - left_x - 16.0).max(0.0);
-        if avail_w >= 48.0 {
-            let status_elided = widgets::elide(&p, &status_txt, &theme::font_caption(), avail_w - 14.0);
-            p.circle_filled(Pos2::new(left_x + 7.0, tab_bar_rect.center().y), 3.0, dot_col);
-            p.text(Pos2::new(left_x + 16.0, tab_bar_rect.center().y), Align2::LEFT_CENTER, status_elided, theme::font_caption(), theme::TEXT_SECONDARY);
-        }
-    }
-
-    if state.mention_popup.is_open_for_surface(surface_id) {
-        state.mention_popup.sync_from_composer_text("", 0, doc, current_page);
-        let mut unused_text = String::new();
-        let kb_outcome = state.mention_popup.handle_keyboard(ui.ctx(), &mut unused_text, &mut state.active_mentions, doc, current_page);
-        if let crate::agent_mention_popup::MentionPopupOutcome::PickedTerminal(mention) = kb_outcome {
-            state.handle_terminal_mention_pick(&mention);
-        }
-    }
-
-    // 2. VT100 Screen Grid Renderer + Raw Keyboard Capture (full height)
-    let active_receipt =
-        state.active_tab().filter(|t| !matches!(t.effective_status(), AgentTabStatus::Working(_))).and_then(|t| t.last_turn_receipt().cloned());
-    let vp_bottom = if active_receipt.is_some() { (rect.bottom() - 24.0).max(tab_bar_rect.bottom()) } else { rect.bottom() };
-    let viewport_rect = Rect::from_min_max(Pos2::new(rect.left(), tab_bar_rect.bottom()), Pos2::new(rect.right(), vp_bottom));
-    render_vt100_viewport(state, ui, viewport_rect, file_path, surface_id);
-    if let Some(receipt) = &active_receipt {
-        let receipt_r = Rect::from_min_max(Pos2::new(rect.left(), vp_bottom), rect.max);
-        paint_turn_receipt_row(state, &mut actions, ui, &p, receipt_r, receipt);
-    }
-    if let Some(fix) = state.pending_start_fix.take() {
-        state.apply_start_fix(fix, file_path);
-    }
-
-    if state.mention_popup.is_open_for_surface(surface_id) {
-        let mut unused_text = String::new();
-        let show_outcome = state.mention_popup.show(ui, rect, tab_bar_rect, &mut unused_text, &mut state.active_mentions);
-        if let crate::agent_mention_popup::MentionPopupOutcome::PickedTerminal(mention) = show_outcome {
-            state.handle_terminal_mention_pick(&mention);
-        }
-    }
-
-    ui.ctx().request_repaint_after(std::time::Duration::from_millis(50));
-
-    actions
-}
-
 fn extract_selected_terminal_text(screen: &vt100::Screen, sel: ((u16, u16), (u16, u16)), rows: u16, cols: u16) -> String {
     let (start, end) = if sel.0 <= sel.1 { (sel.0, sel.1) } else { (sel.1, sel.0) };
     let r_start = start.0.min(rows.saturating_sub(1));
@@ -6017,9 +5653,9 @@ fn render_vt100_viewport(state: &mut TerminalState, ui: &mut Ui, viewport_rect: 
     };
     if state.picker_open || state.tabs.is_empty() {
         if !state.runtime_dropdown_open && !state.sessions_popover_open {
-            if state.tabs.is_empty() && surface_id == "agents-left-pty" {
+            if state.tabs.is_empty() {
                 // Agents panel with no session yet: the picker stays on top and the starter prompts sit below it
-                // (`#688` §3 rule 3). The dock terminal has no composer to fill, so it keeps the picker alone.
+                // (`#688` §3 rule 3).
                 crate::agent_sample_prompts::show_empty_state(state, ui, viewport_rect, file_path);
             } else {
                 crate::agent_picker::show_picker_panel(state, ui, viewport_rect, file_path);
@@ -6041,7 +5677,8 @@ fn render_vt100_viewport(state: &mut TerminalState, ui: &mut Ui, viewport_rect: 
     if vp_resp.clicked() || vp_resp.drag_started() {
         state.viewport_focused = true;
     }
-    let viewport_focused = state.viewport_focused && !state.mention_popup.is_open();
+    // An open dialog or menu owns the keys: the terminal neither sends them to the agent nor shows its caret as active.
+    let viewport_focused = state.viewport_focused && !state.mention_popup.is_open() && !state.overlay_owns_keyboard;
     let search_open = state.search_open;
     let search_query = state.search_query.clone();
     let search_case_sensitive = state.search_case_sensitive;
@@ -6521,31 +6158,6 @@ fn render_vt100_viewport(state: &mut TerminalState, ui: &mut Ui, viewport_rect: 
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-fn draw_bar_icon_pill(
-    ui: &mut Ui,
-    p: &Painter,
-    id: impl std::hash::Hash + std::fmt::Debug,
-    right_center: Pos2,
-    icon: Icon,
-    label: &str,
-    bg: Color32,
-    border: Color32,
-    fg: Color32,
-) -> Rect {
-    let w = (label.len() as f32 * 5.8 + 30.0).clamp(84.0, 184.0);
-    let h = 22.0;
-    let rect = Rect::from_min_size(Pos2::new(right_center.x - w, right_center.y - h / 2.0), Vec2::new(w, h));
-    let resp = ui.interact(rect, Id::new(id), Sense::hover());
-    let fill = if resp.hovered() { TERM_BG_HOVER } else { bg };
-    p.rect_filled(rect, CornerRadius::same(6), fill);
-    p.rect_stroke(rect, CornerRadius::same(6), Stroke::new(1.0, border), StrokeKind::Inside);
-    icons::paint(p, icon, Pos2::new(rect.left() + 11.0, rect.center().y), 11.0, fg);
-    let elided = widgets::elide(p, label, &theme::font_caption_medium(), (w - 24.0).max(20.0));
-    p.text(Pos2::new(rect.left() + 20.0, rect.center().y), Align2::LEFT_CENTER, elided, theme::font_caption_medium(), fg);
-    rect
-}
-
 /// Converts a `vt100::Color` (Default, 16-ANSI, 256-palette, or 24-bit TrueColor RGB) to `egui::Color32`.
 pub fn vt100_color_to_egui(c: vt100::Color, is_fg: bool) -> Color32 {
     match c {
@@ -6602,39 +6214,20 @@ fn ansi_256_to_color32(idx: u8) -> Color32 {
 }
 
 #[cfg(test)]
+mod ask_mode_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
-    use designos_doc::{Comment, CommentAnchor, CommentThread, Node};
-
-    #[test]
-    fn extract_spec_json_from_fenced_and_raw_terminal_output() {
-        let log = r#"
-$ claude "design an EaseUI card"
-Here is the NodeSpec blueprint:
-```json
-{
-  "name": "Agent Card",
-  "preset": "easeui-card",
-  "children": [
-    { "kind": "text", "name": "Title", "text": "Hello from Claude" }
-  ]
-}
-```
-Done!
-"#;
-        let extracted = extract_spec_json_from_log(log).expect("should extract fenced NodeSpec JSON");
-        let parsed: NodeSpec = serde_json::from_str(&extracted).expect("valid NodeSpec");
-        assert_eq!(parsed.name, "Agent Card");
-        assert_eq!(parsed.preset.as_deref(), Some("easeui-card"));
-        assert_eq!(parsed.children.len(), 1);
-    }
+    use crate::test_timing::ScopedTerminalState;
+    use designos_doc::{Comment, CommentAnchor, CommentThread, Node, NodeSpec};
 
     #[test]
     fn pty_spawn_and_vt100_screen_capture_work() {
         let mut tab = TerminalTab::spawn(1, AgentCliPreset::Shell, 24, 80, None).expect("should spawn shell PTY");
         tab.send_line("echo DESIGNOS_PTY_OK");
 
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        let deadline = std::time::Instant::now() + crate::test_timing::STUB_WAIT;
         let mut found = false;
         while std::time::Instant::now() < deadline {
             if let Ok(p) = tab.parser.lock() {
@@ -6650,7 +6243,7 @@ Done!
     }
 
     #[test]
-    fn send_copy_for_ai_formats_product_os_citation_and_opens_dock() {
+    fn send_copy_for_ai_formats_product_os_citation() {
         let payload = format_copy_for_ai_payload("## US-01: Native PTY Agent Terminal");
         assert!(payload.contains("- File: spec/"));
         assert!(payload.contains("- Mục:"));
@@ -6660,9 +6253,7 @@ Done!
     }
 
     #[test]
-    fn antigravity_preset_and_quick_launch_cover_all_five_cli_runtimes() {
-        assert_eq!(AgentCliPreset::QUICK_LAUNCH.len(), 5);
-        assert!(AgentCliPreset::QUICK_LAUNCH.contains(&AgentCliPreset::Antigravity));
+    fn antigravity_preset_names_the_agy_cli() {
         assert_eq!(AgentCliPreset::Antigravity.tab_title(), "Antigravity (agy)");
         assert_eq!(AgentCliPreset::Antigravity.button_label(), "Antigravity");
         assert_eq!(AgentCliPreset::Antigravity.badge(), "AGY");
@@ -6672,7 +6263,7 @@ Done!
 
     #[test]
     fn poll_live_agent_bridge_detects_updated_spec_file() {
-        let mut st = TerminalState::default();
+        let mut st = ScopedTerminalState::default();
         let _ = std::fs::create_dir_all(&st.session_dir);
         let live_path = st.live_spec_path.clone();
         st.last_watched_mtime = Some(std::time::UNIX_EPOCH);
@@ -6689,7 +6280,7 @@ Done!
         let ctx = egui::Context::default();
         crate::theme::install_fonts(&ctx);
         crate::theme::apply(&ctx);
-        let mut st = TerminalState::default();
+        let mut st = ScopedTerminalState::default();
         assert!(st.side_panel_pty_open, "Default Agents panel must open directly into live PTY Shell");
         assert_eq!(st.active_runtime, AgentCliPreset::Shell);
         let panel_rect = Rect::from_min_size(Pos2::new(48.0, 0.0), Vec2::new(240.0, 800.0));
@@ -6763,7 +6354,7 @@ Done!
 
     #[test]
     fn agents_chat_wrapper_executes_in_pty_shell_and_streams_clean_output() {
-        let mut st = TerminalState::default();
+        let mut st = ScopedTerminalState::default();
         assert_eq!(st.active_runtime, AgentCliPreset::Shell);
         st.side_panel_pty_open = false;
         st.chat_mode = true;
@@ -6812,7 +6403,7 @@ Done!
 
     #[test]
     fn all_four_agent_cli_runtimes_claude_codex_agy_grok_execute_in_pty() {
-        let mut st = TerminalState::default();
+        let mut st = ScopedTerminalState::default();
         st.spawn_tab(AgentCliPreset::Shell, None).expect("spawn");
         for (preset, prompt) in [
             (AgentCliPreset::Claude, "Audit layout in Claude"),
@@ -6839,7 +6430,7 @@ Done!
 
     #[test]
     fn agent_chat_supports_prd_and_spec_context_handoff() {
-        let mut st = TerminalState::default();
+        let mut st = ScopedTerminalState::default();
         st.spawn_tab(AgentCliPreset::Shell, None).expect("spawn");
         {
             let tab = st.active_tab_mut().unwrap();
@@ -6875,7 +6466,7 @@ Done!
         assert!(AgentCliPreset::Antigravity.cli_launch_command().starts_with("agy --dangerously-skip-permissions"));
         assert_eq!(AgentCliPreset::Shell.cli_launch_command(), "");
 
-        let mut st = TerminalState::default();
+        let mut st = ScopedTerminalState::default();
         st.spawn_tab(AgentCliPreset::Shell, None).expect("spawn");
         {
             let tab = st.active_tab_mut().unwrap();
@@ -6885,7 +6476,6 @@ Done!
         let rec = attach_recorder(st.active_tab_mut().unwrap());
         st.dispatch_figma_ai_prompt("Auto-rename layers to semantic names", "Auto-rename layers to semantic names", None);
         st.flush_pending_enter_now();
-        assert!(st.dock_open);
         let written = String::from_utf8_lossy(&rec.lock().unwrap()).into_owned();
         assert!(written.contains("Auto-rename layers to semantic names"));
         assert!(!written.trim_start().starts_with('#'));
@@ -6899,7 +6489,7 @@ Done!
         let ctx = egui::Context::default();
         crate::theme::install_fonts(&ctx);
         crate::theme::apply(&ctx);
-        let mut st = TerminalState::default();
+        let mut st = ScopedTerminalState::default();
         st.side_panel_pty_open = false;
         st.chat_mode = true;
         let panel_rect = Rect::from_min_size(Pos2::new(48.0, 0.0), Vec2::new(240.0, 800.0));
@@ -6963,8 +6553,8 @@ Done!
 
     /// Zero Fake UI (`design/principles.md` P6): a control the chat-view header draws must do something when clicked.
     /// The `More` button (`agents-more-menu`) lost its only effect when the "What's next?" category cards went away, and the
-    /// #688 spec defines no menu behind it (rule 7 keeps the real actions on the header and dock bar), so it is not drawn
-    /// and the pop-out toggle takes the right-edge slot, where the terminal view already puts it.
+    /// #688 spec defines no menu behind it, so it is not drawn. The pop-out toggle (`agents-header-popout`) only opened the
+    /// terminal dock, which is gone (#838), so it is not drawn either and the AI toggle takes the right-edge slot.
     #[test]
     fn chat_header_draws_no_control_that_does_nothing() {
         let screen = Rect::from_min_size(Pos2::ZERO, Vec2::new(1600.0, 900.0));
@@ -6973,7 +6563,7 @@ Done!
             let ctx = egui::Context::default();
             crate::theme::install_fonts(&ctx);
             crate::theme::apply(&ctx);
-            let mut st = TerminalState::default();
+            let mut st = ScopedTerminalState::default();
             st.side_panel_pty_open = false;
             st.chat_mode = true;
             let _ = ctx.run_ui(egui::RawInput { screen_rect: Some(screen), ..Default::default() }, |ui| {
@@ -6989,7 +6579,6 @@ Done!
                 (
                     st.chat_mode,
                     st.side_panel_pty_open,
-                    st.dock_open,
                     st.runtime_dropdown_open,
                     st.sessions_popover_open,
                     st.active_runtime,
@@ -7029,16 +6618,15 @@ Done!
             kill_tabs(&mut st);
         }
         assert!(inert.is_empty(), "header controls drawn in the chat view that do nothing when clicked: {inert:?}");
-        assert_eq!(drawn, ["agents-header-back", "agents-header-ai", "agents-header-popout"], "the chat header draws Back, AI and pop-out only");
+        assert_eq!(drawn, ["agents-header-back", "agents-header-ai"], "the chat header draws Back and AI only");
 
         let (ctx, mut st) = chat_view();
         let ai = rect_of(&ctx, "agents-header-ai").expect("AI toggle");
-        let popout = rect_of(&ctx, "agents-header-popout").expect("pop-out toggle");
-        assert!(ai.right() <= popout.left() && !ai.intersects(popout), "AI toggle {ai:?} sits left of pop-out {popout:?}");
         assert!(
-            panel_rect.right() - popout.right() <= 8.0,
-            "pop-out {popout:?} sits at the right edge of {panel_rect:?} like the terminal view's dock toggle, with no empty slot beside it"
+            panel_rect.right() - ai.right() <= theme::SPACE_INLINE,
+            "AI toggle {ai:?} sits at the right edge of {panel_rect:?}, with no empty slot beside it"
         );
+        assert!(rect_of(&ctx, "agents-header-popout").is_none(), "the pop-out toggle belonged to the removed dock");
         kill_tabs(&mut st);
     }
 
@@ -7050,7 +6638,7 @@ Done!
         crate::theme::install_fonts(&ctx);
         crate::theme::apply(&ctx);
         crate::agent_a11y::enable_accesskit(&ctx);
-        let mut st = TerminalState::default();
+        let mut st = ScopedTerminalState::default();
         st.side_panel_pty_open = false;
         st.chat_mode = true;
         let panel_rect = Rect::from_min_size(Pos2::new(48.0, 0.0), Vec2::new(320.0, 800.0));
@@ -7059,8 +6647,11 @@ Done!
         });
         let update = out.platform_output.accesskit_update.expect("AccessKit TreeUpdate expected");
         let buttons: Vec<&str> = update.nodes.iter().filter(|(_, n)| n.role() == egui::accesskit::Role::Button).filter_map(|(_, n)| n.label()).collect();
-        for named in ["Back", "Hide AI chat", "Show terminal dock"] {
+        for named in ["Back", "Hide AI chat"] {
             assert!(buttons.contains(&named), "the header control {named:?} stays announced: {buttons:?}");
+        }
+        for gone in ["Show terminal dock", "Hide terminal dock"] {
+            assert!(!buttons.contains(&gone), "the terminal dock is removed, so {gone:?} is not announced: {buttons:?}");
         }
         assert!(!buttons.contains(&"More options"), "a control that is not drawn must not be announced: {buttons:?}");
         kill_tabs(&mut st);
@@ -7068,12 +6659,11 @@ Done!
 
     #[test]
     fn per_file_session_isolation_auto_provisions_mcp_hooks_skills_and_syncs_live_doc() {
-        let mut st1 = TerminalState::for_tab(701);
-        let mut st2 = TerminalState::for_tab(702);
+        let mut st1 = isolated_683_state(701);
+        let mut st2 = isolated_683_state(702);
         assert_ne!(st1.session_dir, st2.session_dir);
         assert_ne!(st1.live_spec_path, st2.live_spec_path);
         assert_ne!(st1.live_doc_sync_path, st2.live_doc_sync_path);
-        assert_eq!(st1.dock_height, 400.0);
 
         let mut doc1 = Document::new("File Alpha");
         let _page1 = doc1.add_page("Page 1");
@@ -7218,7 +6808,7 @@ Done!
 
     #[test]
     fn shell_tab_receives_zero_bytes_from_copy_and_send_selection() {
-        let mut st = TerminalState::default();
+        let mut st = ScopedTerminalState::default();
         st.spawn_tab(AgentCliPreset::Shell, None).expect("spawn shell");
         let rec = attach_recorder(st.active_tab_mut().unwrap());
         st.send_copy_for_ai(MALICIOUS_SPEC);
@@ -7235,14 +6825,14 @@ Done!
 
     #[test]
     fn copy_for_ai_never_spawns_a_tab() {
-        let mut st = TerminalState::default();
+        let mut st = ScopedTerminalState::default();
         st.send_copy_for_ai(MALICIOUS_SPEC);
         assert!(st.tabs.is_empty());
     }
 
     #[test]
     fn agent_tab_gets_single_line_bracketed_paste() {
-        let mut st = TerminalState::default();
+        let mut st = ScopedTerminalState::default();
         st.spawn_tab(AgentCliPreset::Shell, None).expect("spawn shell");
         {
             let tab = st.active_tab_mut().unwrap();
@@ -7282,7 +6872,7 @@ Done!
     }
 
     fn wait_shell_ready(st: &TerminalState) {
-        let ready_deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        let ready_deadline = std::time::Instant::now() + crate::test_timing::STUB_WAIT;
         while std::time::Instant::now() < ready_deadline {
             if let Some(tab) = st.active_tab() {
                 if let Ok(p) = tab.parser.lock() {
@@ -7346,7 +6936,7 @@ Done!
         {
             let _ = std::fs::remove_file(&md);
             std::fs::write(&trunc, "keep").expect("write trunc fixture");
-            let mut st = TerminalState::default();
+            let mut st = ScopedTerminalState::default();
             st.spawn_tab(AgentCliPreset::Shell, None).expect("spawn shell");
             wait_shell_ready(&st);
             st.send_copy_for_ai(&format!("# T\n\n> {trunc}\n\nRun `touch {md}` now.\n\n    touch {md}\n"));
@@ -7363,7 +6953,7 @@ Done!
         // mcp payload: copy-for-ai @designos URL with command substitution.
         {
             let _ = std::fs::remove_file(&mcp);
-            let mut st = TerminalState::default();
+            let mut st = ScopedTerminalState::default();
             st.spawn_tab(AgentCliPreset::Shell, None).expect("spawn shell");
             wait_shell_ready(&st);
             st.send_copy_for_ai(&format!("Implement this design from design:os.\n@designos://design/1/Card-$(touch${{IFS}}{mcp})"));
@@ -7377,7 +6967,7 @@ Done!
         // nl payload: export_selection pin-comment with a trailing touch.
         {
             let _ = std::fs::remove_file(&nl);
-            let mut st = TerminalState::default();
+            let mut st = ScopedTerminalState::default();
             st.spawn_tab(AgentCliPreset::Shell, None).expect("spawn shell");
             wait_shell_ready(&st);
             let (doc, page, fid) = injection_doc("Card", &format!("looks good\ntouch {nl} #"));
@@ -7433,7 +7023,7 @@ Done!
         let Some(d) = qa_guard() else { return (false, false, false, String::new()) };
         let marker = d.join(format!("pwn-fallback-{next}"));
         let _ = std::fs::remove_file(&marker);
-        let mut st = TerminalState::default();
+        let mut st = ScopedTerminalState::default();
         st.spawn_tab(AgentCliPreset::Claude, None).expect("spawn claude preset");
         let fell_back = qa_wait_screen(&st, "QA-STUB-CLAUDE-EXIT", 8);
         let exit_deadline = std::time::Instant::now() + std::time::Duration::from_secs(8);
@@ -7497,7 +7087,7 @@ Done!
     /// (f) relabel race: Shell tab relabelled to Claude by set_active_runtime / submit_chat_prompt still gets 0 bytes.
     #[test]
     fn qa_p0_relabelled_shell_tab_gets_zero_bytes() {
-        let mut st = TerminalState::default();
+        let mut st = ScopedTerminalState::default();
         st.spawn_tab(AgentCliPreset::Shell, None).expect("spawn shell");
         st.set_active_runtime(AgentCliPreset::Claude, None);
         assert_eq!(st.active_tab().unwrap().preset, AgentCliPreset::Claude, "relabel happened");
@@ -7536,7 +7126,7 @@ Done!
     /// (d) send_copy_for_ai into an agent tab: only the fixed file-reference sentence, never payload text.
     #[test]
     fn qa_p0_copy_for_ai_agent_tab_carries_no_payload() {
-        let mut st = TerminalState::default();
+        let mut st = ScopedTerminalState::default();
         st.spawn_tab(AgentCliPreset::Shell, None).expect("spawn");
         st.active_tab_mut().unwrap().spawn_preset = AgentCliPreset::Claude;
         let rec = attach_recorder(st.active_tab_mut().unwrap());
@@ -7559,7 +7149,7 @@ Done!
         let Some(d) = qa_guard() else { return };
         let marker = d.join("pwn-fallback-comment-subst");
         let _ = std::fs::remove_file(&marker);
-        let mut st = TerminalState::default();
+        let mut st = ScopedTerminalState::default();
         st.spawn_tab(AgentCliPreset::Claude, None).expect("spawn claude preset");
         let exit_deadline = std::time::Instant::now() + std::time::Duration::from_secs(8);
         while std::time::Instant::now() < exit_deadline {
@@ -7597,8 +7187,8 @@ Done!
         st.active_tab = st.tabs.len() - 1;
     }
 
-    fn wait_until_tab_exits(st: &mut TerminalState, secs: u64) -> bool {
-        let dl = std::time::Instant::now() + std::time::Duration::from_secs(secs);
+    fn wait_until_tab_exits(st: &mut TerminalState) -> bool {
+        let dl = std::time::Instant::now() + crate::test_timing::STUB_WAIT;
         while std::time::Instant::now() < dl {
             if let Some(tab) = st.active_tab_mut() {
                 if !tab.is_alive() {
@@ -7612,7 +7202,7 @@ Done!
 
     #[test]
     fn export_selection_pastes_fixed_sentence_only() {
-        let mut st = TerminalState::default();
+        let mut st = ScopedTerminalState::default();
         st.spawn_tab(AgentCliPreset::Shell, None).expect("spawn");
         st.active_tab_mut().unwrap().spawn_preset = AgentCliPreset::Claude;
         let rec = attach_recorder(st.active_tab_mut().unwrap());
@@ -7669,9 +7259,9 @@ Done!
         let marker = pty_fixture_path(&format!("dos-p0-r2-dead-{pid}"));
         let _ = std::fs::remove_file(&marker);
 
-        let mut st = TerminalState::default();
+        let mut st = ScopedTerminalState::default();
         spawn_stub_exiting_agent_into(&mut st);
-        assert!(wait_until_tab_exits(&mut st, 8), "stub agent must exit");
+        assert!(wait_until_tab_exits(&mut st), "stub agent must exit");
         assert!(!st.active_tab_mut().unwrap().is_alive());
 
         let evil = format!("x'; touch {marker} #");
@@ -7706,7 +7296,7 @@ Done!
         let _ = std::fs::remove_file(&m_chat);
         let _ = std::fs::remove_file(&m_ai);
 
-        let mut st = TerminalState::default();
+        let mut st = ScopedTerminalState::default();
         st.spawn_tab(AgentCliPreset::Shell, None).expect("spawn shell");
         wait_shell_ready(&st);
 
@@ -7731,7 +7321,7 @@ Done!
 
     #[test]
     fn submit_chat_prompt_sanitizes_control_chars() {
-        let mut st = TerminalState::default();
+        let mut st = ScopedTerminalState::default();
         st.spawn_tab(AgentCliPreset::Shell, None).expect("spawn shell");
         {
             let tab = st.active_tab_mut().unwrap();
@@ -7853,7 +7443,7 @@ Done!
 
     #[test]
     fn antigravity_session_gets_a_workspace_plugin_carrying_the_designos_mcp_server() {
-        let mut st = TerminalState::for_tab(731);
+        let mut st = isolated_683_state(731);
         let mut doc = Document::new("Agy Plugin File");
         let page = doc.add_page("Page 1");
         st.sync_live_file_context(&doc, page, &[], Some(std::path::Path::new("/tmp/agy-plugin-file.designos")));
@@ -7882,7 +7472,7 @@ Done!
 
     #[test]
     fn grok_session_gets_a_project_config_with_the_designos_mcp_server() {
-        let mut st = TerminalState::for_tab(732);
+        let mut st = isolated_683_state(732);
         let mut doc = Document::new("Grok Project Config File");
         let page = doc.add_page("Page 1");
         st.sync_live_file_context(&doc, page, &[], Some(std::path::Path::new("/tmp/grok \"quoted\" file.designos")));
@@ -7899,7 +7489,7 @@ Done!
 
     #[test]
     fn grok_pty_env_disables_folder_trust_only_for_grok() {
-        let st = TerminalState::for_tab(733);
+        let st = isolated_683_state(733);
         let env = st.session_env();
         let grok_env = |preset| {
             let mut cmd = CommandBuilder::new("true");
@@ -7928,7 +7518,7 @@ Done!
         assert_eq!(args.first().map(String::as_str), Some("--workspace"), "{launch}");
         assert!(launch.contains("$DESIGNOS_WORKSPACE"), "workspace arg must come from the session env: {launch}");
 
-        let mut st = TerminalState::for_tab(734);
+        let mut st = isolated_683_state(734);
         let mut doc = Document::new("Codex Env File");
         let page = doc.add_page("Page 1");
         let file = std::env::temp_dir().join("codex-env-file.designos");
@@ -7987,7 +7577,7 @@ Done!
 
     #[test]
     fn spawned_agent_env_sets_cwd_to_the_session_dir() {
-        let st = TerminalState::for_tab(735);
+        let st = isolated_683_state(735);
         let env = st.session_env();
         let mut agent = CommandBuilder::new("true");
         configure_pty_env_with_session(&mut agent, AgentCliPreset::Claude, None, Some(&env));
@@ -8000,7 +7590,7 @@ Done!
 
     #[test]
     fn session_skill_and_instructions_are_laid_out_where_every_cli_discovers_them() {
-        let mut st = TerminalState::for_tab(736);
+        let mut st = isolated_683_state(736);
         let mut doc = Document::new("Skill Layout File");
         let page = doc.add_page("Page 1");
         st.sync_live_file_context(&doc, page, &[], None);
@@ -8014,7 +7604,7 @@ Done!
 
     #[test]
     fn session_agent_files_preserve_enabled_tools_and_filter_skill_md() {
-        let mut st = TerminalState::for_tab(799);
+        let mut st = isolated_683_state(799);
         let mut doc = Document::new("Enabled Tools Session File");
         let page1 = doc.add_page("Page 1");
         let page2 = doc.add_page("Page 2");
@@ -8055,7 +7645,7 @@ Done!
 
     #[test]
     fn session_written_before_a_tool_existed_gets_the_new_tool_on_the_next_sync() {
-        let mut st = TerminalState::for_tab(798);
+        let mut st = isolated_683_state(798);
         let mut doc = Document::new("Persistent Session File");
         let page = doc.add_page("Page 1");
         let mcp_cfg_path = st.session_dir.join("mcp-config.json");
@@ -8075,7 +7665,7 @@ Done!
         assert!(reloaded.is_tool_enabled("designos_lint") && !reloaded.is_tool_enabled("designos_create_node"));
 
         // A session on the default never gets a frozen copy of the tool list.
-        let mut default_st = TerminalState::for_tab(797);
+        let mut default_st = isolated_683_state(797);
         default_st.sync_live_file_context(&doc, page, &[], None);
         default_st.flush_live_sync();
         assert!(read_json(&default_st.session_dir.join("mcp-config.json")).get("designos").is_none());
@@ -8099,8 +7689,8 @@ Done!
         serde_json::from_str::<serde_json::Value>(&raw).ok()?.get("state")?.as_str().map(str::to_string)
     }
 
-    fn provisioned_session(tab: u64) -> TerminalState {
-        let mut st = TerminalState::for_tab(tab);
+    fn provisioned_session(tab: u64) -> ScopedTerminalState {
+        let mut st = isolated_683_state(tab);
         let mut doc = Document::new("Hooks File");
         let page = doc.add_page("Page 1");
         let a = doc.add_page("Page 2");
@@ -8200,8 +7790,8 @@ Done!
 
     /// A state whose stub agent has exited but whose exit the terminal has not yet observed: the
     /// bridge is not polled here, so each test decides the spawn time the exit is judged against.
-    fn exited_stub_state() -> TerminalState {
-        let mut st = TerminalState::default();
+    fn exited_stub_state() -> ScopedTerminalState {
+        let mut st = ScopedTerminalState::default();
         spawn_stub_exiting_agent_into(&mut st);
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
         while st.active_tab_mut().unwrap().is_alive() || !st.active_tab().unwrap().reader_eof.load(std::sync::atomic::Ordering::Acquire) {
@@ -8243,7 +7833,7 @@ Done!
 
     #[test]
     fn start_fixes_open_a_shell_or_run_the_login_command() {
-        let mut st = TerminalState::for_tab(782);
+        let mut st = isolated_683_state(782);
         st.apply_start_fix(FixAction::OpenShell, None);
         assert_eq!(st.tabs.last().map(|t| t.spawn_preset), Some(AgentCliPreset::Shell));
         assert_eq!(st.tabs.last().and_then(|t| t.spawned_command.as_deref()), None);
@@ -8347,7 +7937,7 @@ Done!
         let mut cmd = build_agent_shell_cmd(&default_shell_program(), &format!("'{}'", stub_path.display()));
         isolate_zsh_from_home(&mut cmd);
         let tab = TerminalTab::spawn_with_session_cmd(1, AgentCliPreset::Grok, 24, 80, None, None, Some(cmd)).expect("spawn stub tab");
-        let mut st = TerminalState::default();
+        let mut st = ScopedTerminalState::default();
         st.tabs = vec![tab];
         st.active_tab = 0;
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
@@ -8386,7 +7976,7 @@ Done!
         let ctx = egui::Context::default();
         crate::theme::install_fonts(&ctx);
         crate::theme::apply(&ctx);
-        let mut st = TerminalState::for_tab(68101);
+        let mut st = isolated_683_state(68101);
         st.side_panel_pty_open = false;
         st.chat_mode = true;
         st.active_runtime = AgentCliPreset::Claude;
@@ -8430,7 +8020,7 @@ Done!
         crate::theme::apply(&ctx);
         let panel_rect = Rect::from_min_size(Pos2::new(48.0, 0.0), Vec2::new(260.0, 800.0));
 
-        let mut st = TerminalState::for_tab(68102);
+        let mut st = isolated_683_state(68102);
         st.side_panel_pty_open = false;
         st.chat_mode = true;
         st.active_runtime = AgentCliPreset::Claude;
@@ -8469,15 +8059,11 @@ Done!
     #[test]
     fn missing_cli_shows_the_start_failure_surface_and_no_executed_text() {
         assert!(!runtime_binary_available_in("claude", Some(std::ffi::OsStr::new("")), false), "empty PATH must report claude as unavailable");
-        let mut st = TerminalState::for_tab(68103);
+        let mut st = isolated_683_state(68103);
         st.active_runtime = AgentCliPreset::Claude;
         st.path_override = Some(std::ffi::OsString::new());
         let _ = st.spawn_tab(AgentCliPreset::Claude, None);
-        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(2000);
-        while std::time::Instant::now() < deadline && st.active_tab_mut().is_some_and(|t| t.is_alive()) {
-            std::thread::sleep(std::time::Duration::from_millis(15));
-        }
-        let _ = st.poll_live_agent_bridge();
+        st.poll_until_start_failure(crate::test_timing::STUB_WAIT);
 
         let failure = st.active_tab().and_then(|t| t.start_failure.as_ref()).expect("missing CLI must populate start_failure on the active tab");
         assert_eq!(failure.preset, AgentCliPreset::Claude);
@@ -8487,7 +8073,7 @@ Done!
 
     #[test]
     fn no_planning_path_reaches_the_transcript() {
-        let mut st = TerminalState::for_tab(68104);
+        let mut st = isolated_683_state(68104);
         st.active_runtime = AgentCliPreset::Claude;
         spawn_live_claude_stub_tab(&mut st);
         st.submit_chat_prompt("@prd check req-01 and us-02 in fc-001", None);
@@ -8511,7 +8097,7 @@ Done!
         crate::theme::install_fonts(&ctx);
         crate::theme::apply(&ctx);
         let panel_rect = Rect::from_min_size(Pos2::new(48.0, 0.0), Vec2::new(260.0, 800.0));
-        let mut st = TerminalState::for_tab(68105);
+        let mut st = isolated_683_state(68105);
         st.side_panel_pty_open = false;
         st.chat_mode = true;
         spawn_live_claude_stub_tab(&mut st);
@@ -8556,7 +8142,7 @@ Done!
         crate::theme::install_fonts(&ctx);
         crate::theme::apply(&ctx);
         let panel_rect = Rect::from_min_size(Pos2::new(48.0, 0.0), Vec2::new(260.0, 800.0));
-        let mut st = TerminalState::for_tab(68106);
+        let mut st = isolated_683_state(68106);
         st.side_panel_pty_open = false;
         st.chat_mode = true;
 
@@ -8594,7 +8180,7 @@ Done!
         crate::theme::install_fonts(&ctx);
         crate::theme::apply(&ctx);
         let (doc, page, ids) = make_three_layer_doc();
-        let mut st = TerminalState::for_tab(65401);
+        let mut st = isolated_683_state(65401);
         let panel_rect = Rect::from_min_size(Pos2::new(48.0, 0.0), Vec2::new(280.0, 600.0));
 
         let run_one_frame = |st: &mut TerminalState, sel: &[NodeId]| -> Option<String> {
@@ -8624,7 +8210,7 @@ Done!
         crate::theme::install_fonts(&ctx);
         crate::theme::apply(&ctx);
         let (doc, page, ids) = make_three_layer_doc();
-        let mut st = TerminalState::for_tab(65402);
+        let mut st = isolated_683_state(65402);
         st.spawn_tab(AgentCliPreset::Shell, None).expect("spawn stub tab");
         st.active_tab_mut().unwrap().spawn_preset = AgentCliPreset::Claude;
         let rec = attach_recorder(st.active_tab_mut().unwrap());
@@ -8654,7 +8240,7 @@ Done!
         crate::theme::apply(&ctx);
         let (doc, page, ids) = make_three_layer_doc();
         let sel = [ids[0], ids[1]];
-        let mut st = TerminalState::for_tab(65403);
+        let mut st = isolated_683_state(65403);
         st.spawn_tab(AgentCliPreset::Shell, None).expect("spawn stub tab");
         st.active_tab_mut().unwrap().spawn_preset = AgentCliPreset::Claude;
         let rec = attach_recorder(st.active_tab_mut().unwrap());
@@ -8755,7 +8341,7 @@ Done!
     #[test]
     fn file_covers_the_whole_selection() {
         let (doc, page, ids) = make_three_layer_doc();
-        let mut st = TerminalState::for_tab(65404);
+        let mut st = isolated_683_state(65404);
         let path = send_selection_to_agent_pty(&mut st, &doc, page, &ids).expect("send selection").expect("selection path written");
         let val = read_json(&path);
         assert_eq!(val["page"]["id"].as_u64(), Some(page.0));
@@ -8778,12 +8364,11 @@ Done!
         crate::theme::install_fonts(&ctx);
         crate::theme::apply(&ctx);
         let (doc, page, ids) = make_three_layer_doc();
-        let mut st = TerminalState::for_tab(65405);
+        let mut st = isolated_683_state(65405);
         st.spawn_tab(AgentCliPreset::Shell, None).expect("spawn stub tab");
         st.active_tab_mut().unwrap().spawn_preset = AgentCliPreset::Claude;
         let rec = attach_recorder(st.active_tab_mut().unwrap());
         let panel_rect = Rect::from_min_size(Pos2::new(48.0, 0.0), Vec2::new(280.0, 600.0));
-        let dock_rect = Rect::from_min_size(Pos2::new(0.0, 500.0), Vec2::new(1200.0, 300.0));
         let _ = std::fs::remove_file(&st.selection_spec_path);
         let recorded = |ctx: &egui::Context, name: &str| -> (Option<Rect>, Option<String>) {
             ctx.data(|d| (d.get_temp(Id::new(("test-rect", name.to_string()))), d.get_temp(Id::new(("test-text", name.to_string())))))
@@ -8794,11 +8379,9 @@ Done!
         let _ = ctx.run_ui(raw0.clone(), |ui| {
             crate::agent_selection_chip::with_selection_summary(&doc, page, &[], |summary| {
                 emitted.extend(show_left_with_selection(&mut st, ui, panel_rect, None, summary));
-                emitted.extend(show_dock_with_selection(&mut st, ui, dock_rect, None, summary));
             });
         });
         assert_eq!(recorded(&ctx, "agent-selection-chip-left"), (None, None), "no chip in the panel header strip when nothing is selected");
-        assert_eq!(recorded(&ctx, "agent-selection-chip-dock"), (None, None), "no chip in the dock bar when nothing is selected");
         assert_eq!(recorded(&ctx, "agent-selection-chip"), (None, None));
 
         // Where the chip would have sat, a click raises nothing and writes nothing.
@@ -8821,19 +8404,16 @@ Done!
         assert!(rec.lock().unwrap().is_empty(), "an empty selection writes nothing to the PTY");
         assert!(!st.selection_spec_path.exists(), "an empty selection writes no selection.spec.json");
 
-        // A selection brings the chip back in both places.
+        // A selection brings the chip back.
         let sel = [ids[0]];
         let _ = ctx.run_ui(raw0, |ui| {
             crate::agent_selection_chip::with_selection_summary(&doc, page, &sel, |summary| {
                 let _ = show_left_with_selection(&mut st, ui, panel_rect, None, summary);
-                let _ = show_dock_with_selection(&mut st, ui, dock_rect, None, summary);
             });
         });
         let (left_rect, left_text) = recorded(&ctx, "agent-selection-chip-left");
-        let (dock_rect_chip, dock_text) = recorded(&ctx, "agent-selection-chip-dock");
-        assert!(left_rect.is_some() && dock_rect_chip.is_some(), "a selected layer shows the chip in the strip and in the dock");
+        assert!(left_rect.is_some(), "a selected layer shows the chip in the strip");
         assert_eq!(left_text.as_deref(), Some("Page 1 · 1 selected · A"));
-        assert_eq!(dock_text.as_deref(), Some("Page 1 · 1 selected · A"));
 
         kill_tabs(&mut st);
         let _ = std::fs::remove_dir_all(&st.session_dir);
@@ -8842,7 +8422,7 @@ Done!
     #[test]
     fn no_agent_tab_sends_nothing() {
         let (doc, page, ids) = make_three_layer_doc();
-        let mut st = TerminalState::for_tab(65406);
+        let mut st = isolated_683_state(65406);
         // 1. No tabs open at all:
         send_selection_to_agent_pty(&mut st, &doc, page, &[ids[0]]).expect("send with no tab");
         assert_eq!(st.status_msg.as_deref(), Some("Nothing sent. Open an agent tab first."));
@@ -9087,7 +8667,7 @@ Done!
         let mut clean_cmd = build_agent_shell_cmd(&default_shell_program(), "sh -c 'echo BYE; exit 0'");
         isolate_zsh_from_home(&mut clean_cmd);
         let tab = TerminalTab::spawn_with_session_cmd(2, AgentCliPreset::Claude, 24, 80, None, None, Some(clean_cmd)).expect("spawn clean stub");
-        let mut st_clean = TerminalState::default();
+        let mut st_clean = ScopedTerminalState::default();
         st_clean.tabs = vec![tab];
         st_clean.active_tab = 0;
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
@@ -9139,7 +8719,7 @@ Done!
         let home_settings = std::env::var("HOME").ok().filter(|h| !h.is_empty()).map(|h| PathBuf::from(h).join(".gemini").join("settings.json"));
         let home_before = home_settings.as_ref().and_then(|p| std::fs::read(p).ok());
 
-        let mut st = TerminalState::for_tab(779);
+        let mut st = isolated_683_state(779);
         let mut doc = Document::new("Gemini Session Settings File");
         let page = doc.add_page("Page 1");
         st.sync_live_file_context(&doc, page, &[], Some(std::path::Path::new("/tmp/gemini-session-file.designos")));
@@ -9149,7 +8729,7 @@ Done!
         let session_settings = std::fs::read_to_string(&session_settings_path).expect("<session_dir>/.gemini/settings.json");
         let parsed: serde_json::Value = serde_json::from_str(&session_settings).expect("parse .gemini/settings.json");
         assert!(parsed["mcpServers"]["designos"]["command"].as_str().is_some());
-        assert_eq!(parsed["mcpServers"]["designos"]["trust"].as_bool(), Some(true));
+        assert!(parsed["mcpServers"]["designos"].get("trust").is_none(), "Ask (the default) must leave the server untrusted so each tool call asks");
         assert!(parsed.get("designos").is_none(), "Gemini settings must not carry the designos.enabled_tools block");
         assert_eq!(parsed["mcpServers"]["designos"]["env"]["DESIGNOS_FILE"].as_str(), Some("/tmp/gemini-session-file.designos"));
         assert!(st.session_dir.join(".gemini").join("trustedFolders.json").is_file(), "trustedFolders.json must be written in session_dir/.gemini/");
@@ -9161,7 +8741,7 @@ Done!
 
     #[test]
     fn gemini_live_check() {
-        let mut st = TerminalState::for_tab(780);
+        let mut st = isolated_683_state(780);
         let mut doc = Document::new("Gemini Live Check File");
         let page = doc.add_page("Page 1");
         st.sync_live_file_context(&doc, page, &[], Some(std::path::Path::new("/tmp/gemini-live-check.designos")));
@@ -9234,11 +8814,12 @@ Done!
         assert_eq!(AgentCliPreset::OpenCode.cli_launch_command_for_mode(PermissionMode::Ask), "opencode \"$DESIGNOS_SESSION_DIR\"");
     }
 
-    fn isolated_683_state(tab_id: u64) -> TerminalState {
+    /// A terminal state on a cleared session folder, which is removed again when the test ends (see [`ScopedTerminalState`]).
+    fn isolated_683_state(tab_id: u64) -> ScopedTerminalState {
         let dir = std::env::temp_dir().join("designos-sessions").join(tab_session_id(&format!("p{}", std::process::id()), tab_id));
         let _ = std::fs::remove_dir_all(&dir);
         let _ = std::fs::create_dir_all(&dir);
-        TerminalState::for_tab(tab_id)
+        ScopedTerminalState::new(TerminalState::for_tab(tab_id))
     }
 
     fn spawn_mock_agent_tab(st: &mut TerminalState, preset: AgentCliPreset, session_uuid: Option<&str>) -> usize {
@@ -9314,7 +8895,7 @@ Done!
 
     #[test]
     fn records_route_by_session_id_not_by_active_tab() {
-        let mut st = isolated_683_state(68302);
+        let mut st = isolated_683_state(69302);
         let active_idx = spawn_mock_agent_tab(&mut st, AgentCliPreset::Claude, Some("sid-active"));
         let bg_idx = spawn_mock_agent_tab(&mut st, AgentCliPreset::Claude, Some("sid-bg"));
         st.active_tab = active_idx;
@@ -9424,6 +9005,8 @@ Done!
         let sink = std::sync::Arc::new(crate::agent_notify::StubNotificationSink::new());
         st.notifier = crate::agent_notify::AgentNotifier::with_sink(sink.clone());
         let idx = spawn_mock_agent_tab(&mut st, AgentCliPreset::Claude, Some("sid-notify-perm"));
+        // A Skip-mode tab: an Ask-mode tab leaves this notification to the approval latch (`#656`), and Ask is the default (`#841`).
+        st.tabs[idx].permission_mode = crate::agent_permissions::AgentPermissionMode::Skip;
         st.active_tab = idx;
         st.window_focused = false;
         st.surface_visible = true;
@@ -9447,7 +9030,7 @@ Done!
 
     #[test]
     fn the_header_names_the_status_not_the_hook_detail_or_the_raw_failure_slug() {
-        let mut st = TerminalState::default();
+        let mut st = ScopedTerminalState::default();
         let idx = spawn_mock_agent_tab(&mut st, AgentCliPreset::Claude, Some("sid-header-label"));
         let set = |st: &TerminalState, status: AgentTabStatus| *st.tabs[idx].agent_status.lock().unwrap() = status;
 
@@ -9477,7 +9060,7 @@ Done!
 
     #[test]
     fn notification_when_the_tab_is_hidden_but_window_focused() {
-        let mut st = isolated_683_state(68304);
+        let mut st = isolated_683_state(69304);
         let sink = std::sync::Arc::new(crate::agent_notify::StubNotificationSink::new());
         st.notifier = crate::agent_notify::AgentNotifier::with_sink(sink.clone());
         let active_idx = spawn_mock_agent_tab(&mut st, AgentCliPreset::Claude, Some("sid-fg"));
@@ -9762,7 +9345,6 @@ Done!
             let notice = rect_of("agents-header-turn-status").expect("still-running notice takes the right slot");
             let mention = rect_of("agent-mention-btn-left").expect("@ Mention button");
             let stop = rect_of("agents-header-stop-btn").expect("Stop button");
-            let popout = rect_of("agents-header-popout").expect("pop-out button");
             let strip = [("chip", chip), ("notice", notice), ("mention", mention)];
             for (i, (an, a)) in strip.iter().enumerate() {
                 assert!(a.left() >= panel_rect.left() && a.right() <= panel_rect.right(), "{an} {a:?} inside {width}px panel");
@@ -9771,8 +9353,7 @@ Done!
                 }
             }
             assert!(chip.right() <= notice.left() && notice.right() <= mention.left(), "chip | notice | mention order at {width}px");
-            assert!(stop.right() <= popout.left() && !stop.intersects(popout), "Stop {stop:?} left of pop-out {popout:?} at {width}px");
-            assert!(popout.right() <= panel_rect.right(), "pop-out inside panel");
+            assert!(stop.left() >= panel_rect.left() && stop.right() <= panel_rect.right(), "Stop {stop:?} inside the {width}px panel");
             assert!(stop.bottom() <= chip.top().min(mention.top()), "Stop sits in the chrome bar above the strip");
 
             // A token/cost readout (`#678`) joins the strip: it never overlaps the chip, the turn status or `@ Mention`,
@@ -9867,7 +9448,7 @@ Done!
 
     #[test]
     fn skill_text_documents_the_grammar() {
-        let mut st = TerminalState::for_tab(65501);
+        let mut st = isolated_683_state(65501);
         let _ = std::fs::create_dir_all(&st.session_dir);
         st.provision_session_agent_files(None);
         let skill_text = std::fs::read_to_string(st.session_dir.join("SKILL.md")).expect("read generated SKILL.md");
@@ -9880,17 +9461,24 @@ Done!
     #[test]
     fn antigravity_in_ask_mode_reports_an_approval_prompt_from_its_output() {
         let waiting_after = |ask: bool| -> bool {
-            let mut cmd = build_agent_shell_cmd(&default_shell_program(), "sleep 0.5; printf 'Allow this edit? (y/n)\\r\\n'; sleep 4 || true");
+            // The stub prints the approval prompt only once the test has set the mode and given the go-ahead, so the prompt cannot
+            // arrive before the mode is set however long a loaded machine takes to start the shell.
+            let go = pty_fixture_path(&format!("dos-agy-approval-go-{}-{ask}", std::process::id()));
+            let _ = std::fs::remove_file(&go);
+            let script = format!("while [ ! -f '{go}' ]; do sleep 0.05; done; printf 'Allow this edit? (y/n)\\r\\n'; sleep 60 || true");
+            let mut cmd = build_agent_shell_cmd(&default_shell_program(), &script);
             isolate_zsh_from_home(&mut cmd);
             let mut tab = TerminalTab::spawn_with_session_cmd(1, AgentCliPreset::Antigravity, 24, 80, None, None, Some(cmd)).expect("spawn stub agy");
             tab.pty_waiting_heuristic.store(ask, std::sync::atomic::Ordering::Release);
-            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
-            let mut waiting = false;
-            while std::time::Instant::now() < deadline && !waiting {
-                std::thread::sleep(std::time::Duration::from_millis(50));
-                waiting = matches!(tab.effective_status(), AgentTabStatus::WaitingForInput(_));
-            }
+            std::fs::write(&go, "go").expect("write go-ahead");
+            // The reader decides the status before it puts the chunk on the screen, so once the prompt is on screen the status is final.
+            let printed = crate::test_timing::poll_until(crate::test_timing::STUB_WAIT, || {
+                tab.parser.lock().is_ok_and(|p| p.screen().contents().contains("Allow this edit?"))
+            });
+            assert!(printed, "the stub agy must print its approval prompt");
+            let waiting = matches!(tab.effective_status(), AgentTabStatus::WaitingForInput(_));
             let _ = tab.child.kill();
+            let _ = std::fs::remove_file(&go);
             waiting
         };
         assert!(waiting_after(true), "Ask mode: the approval prompt in agy's output marks the tab as waiting");
@@ -9904,7 +9492,7 @@ Done!
         crate::theme::apply(&ctx);
         let (doc, page, ids) = make_three_layer_doc();
         let sel = [ids[0], ids[1]];
-        let mut st = isolated_683_state(68413);
+        let mut st = isolated_683_state(69413);
         st.permission_mode = crate::agent_permissions::AgentPermissionMode::Ask;
         let idx = spawn_mock_agent_tab(&mut st, AgentCliPreset::Claude, Some("sid-stack"));
         let approvals_dir = st.tabs[idx].approvals_dir.clone();
@@ -9996,21 +9584,27 @@ Done!
         let events_path = st.session_dir.join("agent-events.jsonl");
         std::fs::write(&events_path, "{\"t\":10.0,\"e\":\"UserPromptSubmit\",\"p\":{\"session_id\":\"codex-sid\"}}\n").unwrap();
         let _ = st.poll_live_agent_bridge();
-        // The backing shell prints its prompt on start; that output must not count as Codex activity here.
-        *st.tabs[codex_idx].last_output_at.lock().unwrap() = None;
-        assert_eq!(st.tabs[codex_idx].effective_status(), AgentTabStatus::Idle);
+        // The backing shell prints its prompt on start, and a loaded machine can deliver it at any moment during this test. That
+        // output is not Codex activity, so the quiet checks judge the tab a minute on, when no output of the shell is recent.
+        let quiet = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        assert_eq!(st.tabs[codex_idx].effective_status_at(quiet), AgentTabStatus::Idle);
+
+        // The heuristic itself: output that is under 600 ms old counts as Codex working, with no status reported.
+        let output_at = std::time::Instant::now();
+        *st.tabs[codex_idx].last_output_at.lock().unwrap() = Some(output_at);
+        assert_eq!(st.tabs[codex_idx].effective_status_at(output_at), AgentTabStatus::Working(None));
 
         // Heuristic / OSC status drives Codex Running -> Done.
         let (_, working) = parse_osc_agent_status_and_strip("\x1b]9999;working:Thinking\x07");
         if let Some(next) = working {
             *st.tabs[codex_idx].agent_status.lock().unwrap() = next;
         }
-        assert!(matches!(st.tabs[codex_idx].effective_status(), AgentTabStatus::Working(_)));
+        assert!(matches!(st.tabs[codex_idx].effective_status_at(quiet), AgentTabStatus::Working(_)));
         let (_, done) = parse_osc_agent_status_and_strip("\x1b]9999;done\x07");
         if let Some(next) = done {
             *st.tabs[codex_idx].agent_status.lock().unwrap() = next;
         }
-        assert_eq!(st.tabs[codex_idx].effective_status(), AgentTabStatus::Done);
+        assert_eq!(st.tabs[codex_idx].effective_status_at(quiet), AgentTabStatus::Done);
         kill_tabs(&mut st);
     }
 
@@ -10160,7 +9754,7 @@ Done!
         std::fs::write(&events_path, "{\"t\":10.0,\"e\":\"UserPromptSubmit\",\"p\":{\"session_id\":\"sid-exit-1\"}}\n").unwrap();
         let _ = st.poll_live_agent_bridge();
 
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        let deadline = std::time::Instant::now() + crate::test_timing::STUB_WAIT;
         while st.tabs[0].is_alive() && std::time::Instant::now() < deadline {
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
@@ -10228,15 +9822,23 @@ Done!
     fn os_notification_sink_reports_denied_immediately_and_click_focuses_tab() {
         use crate::agent_notify::{AgentNotification, NotificationOutcome, NotificationSink, NotifyKind, OsNotificationSink};
 
-        let slow_failing_sink = std::sync::Arc::new(OsNotificationSink::with_runner(|_notif| {
-            std::thread::sleep(std::time::Duration::from_millis(60));
+        // The delivery worker is held until the test lets it go, so a `send` that waited for it could not have returned yet.
+        let (release_delivery, delivery_gate) = std::sync::mpsc::channel::<()>();
+        let delivery_gate = std::sync::Mutex::new(delivery_gate);
+        let delivered = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let delivered_bg = std::sync::Arc::clone(&delivered);
+        let slow_failing_sink = std::sync::Arc::new(OsNotificationSink::with_runner(move |_notif| {
+            let _ = delivery_gate.lock().map(|gate| gate.recv_timeout(crate::test_timing::STUB_WAIT));
+            delivered_bg.store(true, std::sync::atomic::Ordering::SeqCst);
             false
         }));
-        let t0 = std::time::Instant::now();
         let outcome = slow_failing_sink.send(&AgentNotification::new(1, "Claude Code #1", "Untitled", NotifyKind::Finished));
-        let send_elapsed = t0.elapsed();
         assert_eq!(outcome, NotificationOutcome::Sent, "OsNotificationSink::send must return Sent immediately without blocking on worker");
-        assert!(send_elapsed < std::time::Duration::from_millis(30), "OsNotificationSink::send must not block the UI thread (took {send_elapsed:?})");
+        assert!(
+            !delivered.load(std::sync::atomic::Ordering::SeqCst),
+            "OsNotificationSink::send must not block the UI thread: it returned only after the worker finished"
+        );
+        let _ = release_delivery.send(());
 
         let failing_sink = std::sync::Arc::new(OsNotificationSink::with_runner(|_notif| false));
         let mut st_denied = isolated_683_state(68309);
@@ -10255,11 +9857,10 @@ Done!
             ),
         )
         .unwrap();
-        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(500);
-        while st_denied.status_msg.as_deref() != Some(crate::agent_notify::NOTIFICATIONS_OFF_STATUS_MSG) && std::time::Instant::now() < deadline {
+        crate::test_timing::poll_until(crate::test_timing::STUB_WAIT, || {
             let _ = st_denied.poll_live_agent_bridge();
-            std::thread::sleep(std::time::Duration::from_millis(5));
-        }
+            st_denied.status_msg.as_deref() == Some(crate::agent_notify::NOTIFICATIONS_OFF_STATUS_MSG)
+        });
         assert_eq!(
             st_denied.status_msg.as_deref(),
             Some(crate::agent_notify::NOTIFICATIONS_OFF_STATUS_MSG),
@@ -10322,7 +9923,7 @@ Done!
         let _ = std::fs::remove_dir_all(&tmp);
         std::fs::create_dir_all(&tmp).unwrap();
 
-        let mut st = TerminalState::default();
+        let mut st = ScopedTerminalState::default();
         st.bind_session(&format!("656-bridge-{}", std::process::id()));
         st.permission_mode = crate::agent_permissions::AgentPermissionMode::Ask;
         st.ensure_default_tab(None);
@@ -10414,7 +10015,7 @@ Done!
         crate::theme::install_fonts(&ctx);
         crate::theme::apply(&ctx);
 
-        let mut st = TerminalState::default();
+        let mut st = ScopedTerminalState::default();
         st.bind_session(&format!("656-status-{}", std::process::id()));
         st.open_approval_fixture("agents-approval-command", None);
         assert!(st.needs_approval());
@@ -10443,7 +10044,7 @@ Done!
             crate::theme::install_fonts(&ctx);
             crate::theme::apply(&ctx);
 
-            let mut st = TerminalState::default();
+            let mut st = ScopedTerminalState::default();
             st.bind_session(&format!("656-non-claude-{}-{:?}", std::process::id(), preset));
             st.permission_mode = crate::agent_permissions::AgentPermissionMode::Ask;
             st.ensure_default_tab(None);
@@ -10502,7 +10103,7 @@ Done!
     #[test]
     fn unfocused_window_sends_one_notification_without_the_command_text() {
         let recorder = crate::agent_permissions::RecordingNotifier::default();
-        let mut st = TerminalState::default();
+        let mut st = ScopedTerminalState::default();
         st.bind_session(&format!("656-notify-{}", std::process::id()));
         st.doc_name = "Checkout Flow".into();
         st.set_approval_notifier(Arc::new(recorder.clone()));
@@ -10540,7 +10141,7 @@ Done!
             let ctx = egui::Context::default();
             crate::theme::install_fonts(&ctx);
             crate::theme::apply(&ctx);
-            let mut st = TerminalState::default();
+            let mut st = ScopedTerminalState::default();
             st.bind_session(&format!("656-lint-{preset_slug}-{}", std::process::id()));
             st.open_approval_fixture(preset_slug, None);
 
@@ -10582,7 +10183,7 @@ Done!
 
     #[test]
     fn closing_or_exiting_one_tab_preserves_other_tab_pending_approvals() {
-        let mut st = TerminalState::default();
+        let mut st = ScopedTerminalState::default();
         st.bind_session(&format!("656-tab-isolation-{}", std::process::id()));
         st.permission_mode = crate::agent_permissions::AgentPermissionMode::Ask;
         st.ensure_default_tab(None);
@@ -10637,7 +10238,7 @@ Done!
         let env = st.session_env();
         let stub = TerminalTab::spawn_exiting_stub_agent(2, 24, 80, None, Some(&env)).expect("spawn stub tab 2");
         st.tabs.push(stub);
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        let deadline = std::time::Instant::now() + crate::test_timing::STUB_WAIT;
         while st.tabs.get(1).is_some_and(|t| !t.exited_notice_shown) && std::time::Instant::now() < deadline {
             let _ = st.poll_live_agent_bridge();
             std::thread::sleep(std::time::Duration::from_millis(20));
@@ -10658,7 +10259,7 @@ Done!
         crate::theme::apply(&ctx);
 
         let recorder = crate::agent_permissions::RecordingNotifier::default();
-        let mut st = TerminalState::default();
+        let mut st = ScopedTerminalState::default();
         st.bind_session(&format!("656-skip-guard-{}", std::process::id()));
         st.set_approval_notifier(Arc::new(recorder.clone()));
         st.set_window_focused(false);
@@ -10689,7 +10290,7 @@ Done!
 
     #[test]
     fn resumed_tab_preserves_login_and_install_fix_actions() {
-        let mut st = TerminalState::default();
+        let mut st = ScopedTerminalState::default();
         st.bind_session(&format!("656-resumed-fix-{}", std::process::id()));
         let env = st.session_env();
         let mut cmd = build_agent_shell_cmd(&default_shell_program(), "sh -c 'echo \"Not logged in · Please run /login\"; exit 1'");
@@ -10698,7 +10299,7 @@ Done!
         tab.is_resumed = true;
         st.tabs.push(tab);
 
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        let deadline = std::time::Instant::now() + crate::test_timing::STUB_WAIT;
         while st.tabs[0].start_failure.is_none() && std::time::Instant::now() < deadline {
             let _ = st.poll_live_agent_bridge();
             std::thread::sleep(std::time::Duration::from_millis(20));
@@ -10721,7 +10322,7 @@ Done!
         for tid in 0..8usize {
             let barrier = std::sync::Arc::clone(&barrier);
             handles.push(std::thread::spawn(move || {
-                let mut st = TerminalState::default();
+                let mut st = ScopedTerminalState::default();
                 barrier.wait();
                 for iter in 0..10usize {
                     let node_name = format!("x'; touch /tmp/never-t{tid}-i{iter} #");
@@ -10861,7 +10462,7 @@ Done!
 
     #[test]
     fn submit_chat_prompt_appends_references_and_prunes_deleted_mentions() {
-        let mut st = TerminalState::for_tab(65502);
+        let mut st = isolated_683_state(65502);
         st.spawn_tab(AgentCliPreset::Shell, None).expect("spawn");
         {
             let tab = st.active_tab_mut().unwrap();
@@ -10900,7 +10501,7 @@ Done!
         crate::theme::install_fonts(&ctx);
         crate::theme::apply(&ctx);
         let (doc, page, ids) = make_three_layer_doc();
-        let mut st = TerminalState::for_tab(65503);
+        let mut st = isolated_683_state(65503);
         st.spawn_tab(AgentCliPreset::Shell, None).expect("spawn shell tab");
         let rec = attach_recorder(st.active_tab_mut().unwrap());
         st.sync_live_file_context(&doc, page, &[], None);
@@ -10947,7 +10548,7 @@ Done!
         crate::theme::install_fonts(&ctx);
         crate::theme::apply(&ctx);
         let (doc, page, _ids) = make_three_layer_doc();
-        let mut st = TerminalState::for_tab(65504);
+        let mut st = isolated_683_state(65504);
         st.side_panel_pty_open = false;
         st.sync_live_file_context(&doc, page, &[], None);
         st.set_composer_draft("make @a red");
@@ -10995,33 +10596,28 @@ Done!
     }
 
     #[test]
-    fn mention_popup_renders_only_on_the_surface_that_opened_it() {
+    fn mention_popup_opens_inside_the_agents_panel_and_pastes_the_picked_layer() {
         let ctx = egui::Context::default();
         crate::theme::install_fonts(&ctx);
         crate::theme::apply(&ctx);
         let (doc, page, ids) = make_three_layer_doc();
-        let mut st = TerminalState::for_tab(65505);
+        let mut st = isolated_683_state(65505);
         st.spawn_tab(AgentCliPreset::Shell, None).expect("spawn tab");
         st.active_tab_mut().unwrap().spawn_preset = AgentCliPreset::Claude;
         let rec = attach_recorder(st.active_tab_mut().unwrap());
         st.sync_live_file_context(&doc, page, &[], None);
 
         let left_rect = Rect::from_min_size(Pos2::new(48.0, 0.0), Vec2::new(280.0, 600.0));
-        let dock_rect = Rect::from_min_size(Pos2::new(340.0, 500.0), Vec2::new(900.0, 360.0));
-
-        // Frame 1: paint both left PTY and dock surface to record `agent-mention-btn-dock`.
-        let raw0 = egui::RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1440.0, 900.0))), ..Default::default() };
-        let _ = ctx.run_ui(raw0, |ui| {
-            crate::agent_selection_chip::with_selection_summary(&doc, page, &[], |summary| {
-                let _ = show_left_with_doc(&mut st, ui, left_rect, None, summary, &doc, page);
-                let _ = render_terminal_surface(&mut st, ui, dock_rect, None, "agents-dock", summary, &doc, page);
+        let screen = Rect::from_min_size(Pos2::ZERO, Vec2::new(1440.0, 900.0));
+        let paint = |ctx: &egui::Context, st: &mut TerminalState, raw: egui::RawInput| {
+            let _ = ctx.run_ui(raw, |ui| {
+                crate::agent_selection_chip::with_selection_summary(&doc, page, &[], |summary| {
+                    let _ = show_left_with_doc(st, ui, left_rect, None, summary, &doc, page);
+                });
             });
-        });
-        let dock_btn: Rect = ctx.data(|d| d.get_temp(Id::new(("test-rect", "agent-mention-btn-dock".to_string())))).expect("dock mention button rect");
-
-        // Frame 2: click `agent-mention-btn-dock` while both surfaces are rendered.
+        };
         let click_ev = |pos: Pos2| egui::RawInput {
-            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1440.0, 900.0))),
+            screen_rect: Some(screen),
             events: vec![
                 egui::Event::PointerMoved(pos),
                 egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed: true, modifiers: egui::Modifiers::NONE },
@@ -11029,34 +10625,24 @@ Done!
             ],
             ..Default::default()
         };
-        let _ = ctx.run_ui(click_ev(dock_btn.center()), |ui| {
-            crate::agent_selection_chip::with_selection_summary(&doc, page, &[], |summary| {
-                let _ = show_left_with_doc(&mut st, ui, left_rect, None, summary, &doc, page);
-                let _ = render_terminal_surface(&mut st, ui, dock_rect, None, "agents-dock", summary, &doc, page);
-            });
-        });
-        assert!(st.mention_popup.is_open(), "clicking dock @ Mention must open popup");
 
-        // Frame 3: paint so dock popup records `agent-mention-row-0` inside `dock_rect`, then click it.
-        let raw1 = egui::RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1440.0, 900.0))), ..Default::default() };
-        let _ = ctx.run_ui(raw1, |ui| {
-            crate::agent_selection_chip::with_selection_summary(&doc, page, &[], |summary| {
-                let _ = show_left_with_doc(&mut st, ui, left_rect, None, summary, &doc, page);
-                let _ = render_terminal_surface(&mut st, ui, dock_rect, None, "agents-dock", summary, &doc, page);
-            });
-        });
+        // Frame 1: paint the panel to record `agent-mention-btn-left`.
+        paint(&ctx, &mut st, egui::RawInput { screen_rect: Some(screen), ..Default::default() });
+        let mention_btn: Rect = ctx.data(|d| d.get_temp(Id::new(("test-rect", "agent-mention-btn-left".to_string())))).expect("mention button rect");
+
+        // Frame 2: click `@ Mention`.
+        paint(&ctx, &mut st, click_ev(mention_btn.center()));
+        assert!(st.mention_popup.is_open(), "clicking @ Mention must open the popup");
+
+        // Frame 3: paint so the popup records `agent-mention-row-0` inside the panel, then click it.
+        paint(&ctx, &mut st, egui::RawInput { screen_rect: Some(screen), ..Default::default() });
         let row0: Rect = ctx.data(|d| d.get_temp(Id::new(("test-rect", "agent-mention-row-0".to_string())))).expect("row 0 rect");
-        assert!(dock_rect.contains(row0.center()), "popup must render inside the dock surface that opened it, got {row0:?}");
+        assert!(left_rect.contains(row0.center()), "the popup must render inside the Agents panel, got {row0:?}");
 
-        let _ = ctx.run_ui(click_ev(row0.center()), |ui| {
-            crate::agent_selection_chip::with_selection_summary(&doc, page, &[], |summary| {
-                let _ = show_left_with_doc(&mut st, ui, left_rect, None, summary, &doc, page);
-                let _ = render_terminal_surface(&mut st, ui, dock_rect, None, "agents-dock", summary, &doc, page);
-            });
-        });
-        assert!(!st.mention_popup.is_open(), "clicking a row in the dock popup must pick and close");
+        paint(&ctx, &mut st, click_ev(row0.center()));
+        assert!(!st.mention_popup.is_open(), "clicking a row in the popup must pick and close");
         let pasted = String::from_utf8_lossy(&rec.lock().unwrap()).to_string();
-        assert!(pasted.contains(&format!("@A (designos:node/{})", ids[0].0)), "dock row click must paste mention into Claude tab, got {pasted:?}");
+        assert!(pasted.contains(&format!("@A (designos:node/{})", ids[0].0)), "a row click must paste the mention into the Claude tab, got {pasted:?}");
 
         kill_tabs(&mut st);
         let _ = std::fs::remove_dir_all(&st.session_dir);
@@ -11074,11 +10660,12 @@ Done!
     fn new_agent_tab_honours_the_permission_mode_another_window_saved() {
         use crate::agent_permissions::{save_permission_mode, AgentPermissionMode};
         let root = permission_window_root("other-window");
-        let mut window_a = TerminalState::for_tab(1);
+        save_permission_mode(&root, AgentPermissionMode::Skip).expect("the library holds Skip (Ask is the default)");
+        let mut window_a = isolated_683_state(68491);
         window_a.bind_library_file(&root, "file-a", "win-a");
-        let mut window_b = TerminalState::for_tab(2);
+        let mut window_b = isolated_683_state(68492);
         window_b.bind_library_file(&root, "file-b", "win-b");
-        assert_eq!(window_b.permission_mode, AgentPermissionMode::Skip, "window B cached the default when it bound");
+        assert_eq!(window_b.permission_mode, AgentPermissionMode::Skip, "window B cached the saved Skip when it bound");
 
         window_a.permission_mode = AgentPermissionMode::Ask;
         save_permission_mode(&root, AgentPermissionMode::Ask).expect("window A persists Ask");
@@ -11098,7 +10685,7 @@ Done!
     fn new_agent_tab_keeps_the_in_memory_mode_when_nothing_is_saved() {
         use crate::agent_permissions::AgentPermissionMode;
         let root = permission_window_root("no-saved-mode");
-        let mut bound = TerminalState::for_tab(3);
+        let mut bound = isolated_683_state(3);
         bound.bind_library_file(&root, "file-c", "win-c");
         bound.permission_mode = AgentPermissionMode::Ask;
         assert!(!root.join("settings.json").exists());
@@ -11144,7 +10731,7 @@ Done!
     fn a_failed_mode_save_keeps_ask_for_the_next_agent_tab() {
         use crate::agent_permissions::{save_permission_mode, AgentPermissionMode};
         let root = permission_window_root("failed-save");
-        let mut st = TerminalState::for_tab(5);
+        let mut st = isolated_683_state(5);
         st.bind_library_file(&root, "file-e", "win-e");
         save_permission_mode(&root, AgentPermissionMode::Skip).expect("Skip is saved while the root is writable");
         {
@@ -11190,7 +10777,7 @@ Done!
         let idx = app.terminal.spawn_tab(AgentCliPreset::Shell, None).expect("spawn tab");
         assert_eq!(app.terminal.tabs[idx].permission_mode, AgentPermissionMode::Ask, "the active window keeps Ask");
 
-        let mut opened_later = TerminalState::for_tab(6);
+        let mut opened_later = isolated_683_state(6);
         opened_later.bind_library_file(&root, "file-g", "win-g");
         assert_eq!(opened_later.permission_mode, AgentPermissionMode::Ask, "a project tab opened later reads the unsaved Ask, not the Skip on disk");
 
@@ -11198,7 +10785,7 @@ Done!
         app.set_agent_permission_mode(AgentPermissionMode::Ask);
         assert_eq!(crate::comments::settings::load_choice(&root, crate::agent_permissions::SETTING_KEY).as_deref(), Some("ask"), "the retry reaches the disk");
         save_permission_mode(&root, AgentPermissionMode::Skip).expect("Skip is saved again");
-        let mut after = TerminalState::for_tab(7);
+        let mut after = isolated_683_state(7);
         after.bind_library_file(&root, "file-h", "win-h");
         assert_eq!(after.permission_mode, AgentPermissionMode::Skip, "a successful save clears the unsaved mode");
 
@@ -11214,7 +10801,7 @@ Done!
     fn new_agent_tab_uses_the_mode_set_and_saved_in_this_window() {
         use crate::agent_permissions::{save_permission_mode, AgentPermissionMode};
         let root = permission_window_root("same-window");
-        let mut st = TerminalState::for_tab(4);
+        let mut st = isolated_683_state(4);
         st.bind_library_file(&root, "file-d", "win-d");
         st.permission_mode = AgentPermissionMode::Ask;
         save_permission_mode(&root, AgentPermissionMode::Ask).expect("save Ask");
@@ -11241,7 +10828,7 @@ Done!
 
         let mut doc = Document::new("688 Three Contexts");
         let page = doc.add_page("Page 1");
-        let mut st = TerminalState::for_tab(68801);
+        let mut st = isolated_683_state(68801);
         st.side_panel_pty_open = false;
         st.chat_mode = true;
 
@@ -11318,7 +10905,7 @@ Done!
         };
         let hash_before = doc_hash(&doc);
 
-        let mut st = TerminalState::for_tab(68802);
+        let mut st = isolated_683_state(68802);
         st.side_panel_pty_open = false;
         st.chat_mode = true;
         st.spawn_tab(AgentCliPreset::Shell, None).expect("spawn shell tab");
@@ -11365,7 +10952,7 @@ Done!
         crate::theme::apply(&ctx);
         let panel_rect = Rect::from_min_size(Pos2::new(48.0, 0.0), Vec2::new(320.0, 800.0));
 
-        let mut st = TerminalState::for_tab(68803);
+        let mut st = isolated_683_state(68803);
         st.side_panel_pty_open = false;
         st.chat_mode = true;
         st.prompt_context = PromptContext::Frame;
@@ -11409,7 +10996,7 @@ Done!
         let panel_rect = Rect::from_min_size(Pos2::new(48.0, 0.0), Vec2::new(320.0, 1400.0));
         let screen = Rect::from_min_size(Pos2::ZERO, Vec2::new(1600.0, 1500.0));
 
-        let mut st = TerminalState::for_tab(68804);
+        let mut st = isolated_683_state(68804);
         st.side_panel_pty_open = false;
         st.chat_mode = true;
         st.path_override = Some(std::ffi::OsString::new());
@@ -11459,7 +11046,7 @@ Done!
         crate::theme::install_fonts(&ctx);
         crate::theme::apply(&ctx);
         let panel_rect = Rect::from_min_size(Pos2::new(48.0, 0.0), Vec2::new(320.0, 800.0));
-        let mut st = TerminalState::for_tab(68805);
+        let mut st = isolated_683_state(68805);
         st.side_panel_pty_open = false;
         st.chat_mode = true;
 
@@ -11521,7 +11108,7 @@ Done!
         let page = doc.add_page("Page 1");
         let doc_before = doc.to_json().expect("doc.to_json");
 
-        let mut st = TerminalState::for_tab(68806);
+        let mut st = isolated_683_state(68806);
         st.side_panel_pty_open = false;
         st.chat_mode = true;
         st.path_override = Some(stub_dir.as_os_str().to_os_string());
@@ -11567,20 +11154,31 @@ Done!
 
     #[test]
     fn missing_cli_send_does_not_drop_pending_bridge_actions_or_block_ui() {
-        let mut st = TerminalState::for_tab(68807);
-        st.active_runtime = AgentCliPreset::Claude;
-        st.path_override = Some(std::ffi::OsString::new());
-        st.last_watched_mtime = Some(std::time::UNIX_EPOCH);
-        std::fs::create_dir_all(&st.session_dir).expect("create session_dir");
-        std::fs::write(&st.live_spec_path, r#"{"name":"Pending Spec","preset":"easeui-card"}"#).expect("write live_spec_path");
+        // Process start-up and the missing CLI's exit are not what this test guards: only the send is timed. A send that a loaded machine
+        // stalls is quick on a later try, while a send that sleeps on the UI thread is over the budget on every try.
+        let budget = std::time::Duration::from_millis(500);
+        let give_up = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        let mut fastest = std::time::Duration::MAX;
+        let (mut st, outcome) = loop {
+            let mut st = isolated_683_state(68807);
+            st.active_runtime = AgentCliPreset::Claude;
+            st.path_override = Some(std::ffi::OsString::new());
+            st.last_watched_mtime = Some(std::time::UNIX_EPOCH);
+            std::fs::create_dir_all(&st.session_dir).expect("create session_dir");
+            std::fs::write(&st.live_spec_path, r#"{"name":"Pending Spec","preset":"easeui-card"}"#).expect("write live_spec_path");
 
-        // Process start-up and the missing CLI's exit are not what this test guards: only the send is timed.
-        let _ = st.spawn_tab(AgentCliPreset::Claude, None);
-        assert!(wait_until_tab_exits(&mut st, 10), "the missing CLI must exit at once");
+            let _ = st.spawn_tab(AgentCliPreset::Claude, None);
+            assert!(wait_until_tab_exits(&mut st), "the missing CLI must exit at once");
 
-        let started = std::time::Instant::now();
-        let outcome = st.send_to_agent("Design a card", None);
-        assert!(started.elapsed() < std::time::Duration::from_millis(500), "send_to_agent must not sleep-block the UI thread");
+            let started = std::time::Instant::now();
+            let outcome = st.send_to_agent("Design a card", None);
+            fastest = fastest.min(started.elapsed());
+            if fastest < budget || std::time::Instant::now() >= give_up {
+                break (st, outcome);
+            }
+            kill_tabs(&mut st);
+        };
+        assert!(fastest < budget, "send_to_agent must not sleep-block the UI thread (took {fastest:?} at best)");
         assert_eq!(outcome, crate::agent_composer::SendOutcome::Refused(crate::agent_composer::RefuseReason::StartFailed));
 
         let failure = st.active_tab().and_then(|t| t.start_failure.as_ref()).expect("NotInstalled diagnosed immediately");
@@ -11607,11 +11205,11 @@ Done!
         // launches a real agent CLI and does not depend on what the host has installed.
         let stub_dir = install_stub_claude("exited-tab-respawn");
 
-        let mut st = TerminalState::for_tab(68808);
+        let mut st = isolated_683_state(68808);
         st.side_panel_pty_open = false;
         st.chat_mode = true;
         spawn_stub_exiting_agent_into(&mut st);
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let deadline = std::time::Instant::now() + crate::test_timing::STUB_WAIT;
         while st.active_tab_mut().unwrap().is_alive() {
             assert!(std::time::Instant::now() < deadline, "stub agent must exit");
             std::thread::sleep(std::time::Duration::from_millis(20));
@@ -11699,7 +11297,7 @@ Done!
         let ctx = egui::Context::default();
         crate::theme::install_fonts(&ctx);
         crate::theme::apply(&ctx);
-        let mut st = TerminalState::for_tab(68812);
+        let mut st = isolated_683_state(68812);
         st.side_panel_pty_open = false;
         st.chat_mode = true;
         st.path_override = Some(stub_dir.as_os_str().to_os_string());
@@ -11737,7 +11335,7 @@ Done!
         let ctx = egui::Context::default();
         crate::theme::install_fonts(&ctx);
         crate::theme::apply(&ctx);
-        let mut st = TerminalState::for_tab(68809);
+        let mut st = isolated_683_state(68809);
         st.side_panel_pty_open = false;
         st.chat_mode = true;
         st.path_override = Some(stub_dir.as_os_str().to_os_string());
@@ -11784,7 +11382,7 @@ Done!
         let ctx = egui::Context::default();
         crate::theme::install_fonts(&ctx);
         crate::theme::apply(&ctx);
-        let mut st = TerminalState::for_tab(68810);
+        let mut st = isolated_683_state(68810);
         assert!(st.side_panel_pty_open, "precondition: the default view is the terminal");
         st.path_override = Some(stub_dir.as_os_str().to_os_string());
         let _ = ctx.run_ui(egui::RawInput { screen_rect: Some(screen), ..Default::default() }, |ui| {
@@ -11812,7 +11410,7 @@ Done!
                 std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).expect("chmod stub");
             }
         }
-        let mut st = TerminalState::for_tab(68811);
+        let mut st = isolated_683_state(68811);
         st.path_override = Some(dir.as_os_str().to_os_string());
         pin_installed_catalog_clis(&mut st, &[AgentCliPreset::Gemini]);
         assert_eq!(st.first_installed_agent_cli(), Some(AgentCliPreset::Gemini));
@@ -11864,7 +11462,7 @@ Done!
         let ctx = egui::Context::default();
         crate::theme::install_fonts(&ctx);
         crate::theme::apply(&ctx);
-        let mut st = TerminalState::for_tab(68813);
+        let mut st = isolated_683_state(68813);
         assert!(st.side_panel_pty_open, "precondition: the default view is the terminal");
         st.path_override = Some(stub_dir.as_os_str().to_os_string());
         pin_installed_catalog_clis(&mut st, &[AgentCliPreset::Claude]);
@@ -11900,7 +11498,7 @@ Done!
     #[test]
     fn the_install_check_reads_the_pickers_cached_probes_not_the_path() {
         let stub_dir = install_stub_claude("cached-probes");
-        let mut st = TerminalState::for_tab(68814);
+        let mut st = isolated_683_state(68814);
         st.path_override = Some(stub_dir.as_os_str().to_os_string());
         pin_installed_catalog_clis(&mut st, &[]);
         assert!(!st.any_agent_cli_installed(), "a claude binary on PATH does not count while the probes say it is not installed");
@@ -11922,7 +11520,7 @@ Done!
         let ctx = egui::Context::default();
         crate::theme::install_fonts(&ctx);
         crate::theme::apply(&ctx);
-        let mut st = TerminalState::for_tab(68815);
+        let mut st = isolated_683_state(68815);
         st.path_override = Some(std::ffi::OsString::new());
         st.picker.settings_root_override = Some(root.clone());
         pin_installed_catalog_clis(&mut st, &[]);
@@ -11950,7 +11548,7 @@ Done!
         let ctx = egui::Context::default();
         crate::theme::install_fonts(&ctx);
         crate::theme::apply(&ctx);
-        let mut st = TerminalState::for_tab(68816);
+        let mut st = isolated_683_state(68816);
         st.side_panel_pty_open = false;
         st.chat_mode = true;
         st.sample_prompt_error = Some("Couldn't start Claude Code.".to_string());
@@ -11974,13 +11572,13 @@ Done!
         let ctx = egui::Context::default();
         crate::theme::install_fonts(&ctx);
         crate::theme::apply(&ctx);
-        let mut st = TerminalState::for_tab(68817);
+        let mut st = isolated_683_state(68817);
         st.side_panel_pty_open = false;
         st.chat_mode = true;
         st.path_override = Some(stub_dir.as_os_str().to_os_string());
         st.spawn_tab(AgentCliPreset::Claude, None).expect("spawn the live claude stub");
         spawn_stub_exiting_agent_into(&mut st);
-        assert!(wait_until_tab_exits(&mut st, 10), "the second agent tab must exit");
+        assert!(wait_until_tab_exits(&mut st), "the second agent tab must exit");
         assert_eq!(st.active_tab, 1, "precondition: the exited tab is active");
         st.tabs[1].composer.draft = "Keep the header intact.".to_string();
 
@@ -12022,7 +11620,7 @@ Done!
         crate::theme::apply(&ctx);
         let panel_rect = Rect::from_min_size(Pos2::new(48.0, 0.0), Vec2::new(320.0, 800.0));
 
-        let mut st = TerminalState::for_tab(760);
+        let mut st = isolated_683_state(760);
         // Active Codex tab: no reading -> no agents-header-usage rect.
         let mut codex_tab = TerminalTab::spawn(1, AgentCliPreset::Shell, 24, 80, None).expect("spawn stub tab");
         codex_tab.spawn_preset = AgentCliPreset::Codex;
@@ -12165,9 +11763,10 @@ Done!
         raise_failure(&mut st);
         assert!(st.active_tab().and_then(|t| t.session_failure.as_ref()).is_some(), "the hook raises the banner");
 
-        // Fresh output keeps the tab busy, so the system prompt queues instead of being written.
+        // Fresh output keeps the tab busy, so the system prompt queues instead of being written. The output is stamped an hour ahead,
+        // so no stall of a loaded machine between this line and the send can let it go quiet.
         if let Some(t) = st.active_tab_mut() {
-            *t.last_output_at.lock().unwrap() = Some(std::time::Instant::now());
+            *t.last_output_at.lock().unwrap() = Some(std::time::Instant::now() + std::time::Duration::from_secs(3600));
         }
         let outcome = st.send_system_prompt("make the hero card blue", None);
         assert_eq!(outcome, crate::agent_composer::SendOutcome::Queued, "a busy tab queues the prompt");
@@ -12231,7 +11830,7 @@ Done!
 
     #[test]
     fn the_turn_start_moves_down_with_the_bytes_the_reader_trimmed() {
-        let mut st = TerminalState::default();
+        let mut st = ScopedTerminalState::default();
         quiet_claude_tab_into(&mut st);
         kill_tabs_after(&mut st, |st| {
             let tab = st.active_tab_mut().unwrap();
@@ -12483,11 +12082,15 @@ Done!
 
     #[test]
     fn retry_when_online_probes_on_worker_without_blocking_ui_thread() {
+        // The server takes the probe's connection and never answers until the test lets it go, so the probe can only end by its own
+        // read timeout (800 ms). The check right after the click still depends on this thread not stalling for those 800 ms between two
+        // statements: that holds by a wide margin, not by construction.
         let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind slow probe listener");
         let addr = listener.local_addr().unwrap();
+        let (release_server, server_gate) = std::sync::mpsc::channel::<()>();
         let server_handle = std::thread::spawn(move || {
             if let Ok((_stream, _)) = listener.accept() {
-                std::thread::sleep(std::time::Duration::from_millis(450));
+                let _ = server_gate.recv_timeout(crate::test_timing::STUB_WAIT);
             }
         });
 
@@ -12506,21 +12109,21 @@ Done!
         st.tabs = vec![tab];
         st.active_tab = 0;
 
-        let t0 = std::time::Instant::now();
         st.apply_start_fix(FixAction::RetryWhenOnline, None);
-        let ui_elapsed = t0.elapsed();
-        assert!(
-            ui_elapsed < std::time::Duration::from_millis(120),
-            "RetryWhenOnline must spawn probe on a worker thread without blocking UI thread (took {ui_elapsed:?})"
+        let probe_result = st.active_tab().and_then(|t| t.session_failure.as_ref()).and_then(|f| f.poll_retry_when_online_probe());
+        assert_eq!(
+            probe_result, None,
+            "RetryWhenOnline must spawn probe on a worker thread without blocking UI thread: the probe was already over when the click returned"
         );
+        assert_eq!(st.status_msg.as_deref(), Some("Checking network connection…"), "the click answers at once while the probe runs");
 
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-        while st.status_msg.as_deref() != Some("Still offline. Check your network.") {
-            assert!(std::time::Instant::now() < deadline, "worker probe must report offline result on subsequent bridge poll");
-            std::thread::sleep(std::time::Duration::from_millis(25));
+        let reported = crate::test_timing::poll_until(crate::test_timing::STUB_WAIT, || {
             let _ = st.poll_live_agent_bridge();
-        }
+            st.status_msg.as_deref() == Some("Still offline. Check your network.")
+        });
+        assert!(reported, "worker probe must report offline result on subsequent bridge poll");
         assert!(st.active_tab().and_then(|t| t.session_failure.as_ref()).is_some(), "failed probe must leave the banner up");
+        let _ = release_server.send(());
         let _ = server_handle.join();
         kill_tabs(&mut st);
     }
@@ -12654,17 +12257,48 @@ Done!
             reply["hookSpecificOutput"]["additionalContext"].as_str().expect("additionalContext").to_string()
         }
 
+        /// How long a test waits for a bootstrap build it expects to finish. The wait ends as soon as the build is done, so the
+        /// figure only matters when the build never finishes; the 500 ms of the production hook is a different thing (below).
+        const BUILD_WAIT: std::time::Duration = crate::test_timing::STUB_WAIT;
+
         /// Waits for the in-flight bootstrap job so the hook finds the full reply instead of the compact fallback.
         fn settle_bootstrap(st: &mut TerminalState) -> String {
             // The session files (`hooks.json`, `SKILL.md`) are written by the snapshot worker, not on the calling thread.
             st.flush_live_sync();
-            st.resolve_bootstrap_markdown(std::time::Duration::from_secs(20))
+            st.resolve_bootstrap_markdown(BUILD_WAIT)
+        }
+
+        /// A hold (see [`TerminalState::start_bootstrap_job_held`]) that keeps a background build back until the returned sender is
+        /// used or dropped. A safety timeout turns a build nobody releases into a failure instead of a hang.
+        fn held_bootstrap_build() -> (std::sync::mpsc::Sender<()>, BootstrapHold) {
+            let (release, gate) = std::sync::mpsc::channel::<()>();
+            (
+                release,
+                Box::new(move || {
+                    let _ = gate.recv_timeout(BUILD_WAIT * 2);
+                }),
+            )
+        }
+
+        /// The shared state of the job `st` has in flight, which stays valid after a newer job replaces it.
+        fn in_flight_job(st: &TerminalState) -> std::sync::Arc<(std::sync::Mutex<BootstrapJobState>, std::sync::Condvar)> {
+            std::sync::Arc::clone(&st.bootstrap_job.as_ref().expect("a bootstrap job is in flight").state)
+        }
+
+        fn job_is_done(job: &(std::sync::Mutex<BootstrapJobState>, std::sync::Condvar)) -> bool {
+            job.0.lock().expect("job state").done
+        }
+
+        /// Waits until the worker of `job` has finished, after its last write attempt. Returns whether it did within `BUILD_WAIT`.
+        fn wait_for_job(job: &(std::sync::Mutex<BootstrapJobState>, std::sync::Condvar)) -> bool {
+            let guard = job.0.lock().expect("job state");
+            job.1.wait_timeout_while(guard, BUILD_WAIT, |s| !s.done).map(|(guard, _)| guard.done).unwrap_or(false)
         }
 
         #[test]
         fn first_turn_contains_every_section() {
             let fx = build_tokens_fixture();
-            let mut st = TerminalState::for_tab(8601);
+            let mut st = isolated_683_state(8601);
             let file_path = std::env::temp_dir().join("bootstrap-fixture-8601.designos");
             st.sync_live_file_context(&fx.doc, fx.page1, &[], Some(&file_path));
             settle_bootstrap(&mut st);
@@ -12717,7 +12351,7 @@ Done!
         #[test]
         fn first_turn_rules_are_the_generated_pack_for_the_default_tools() {
             let (doc, page) = light_rules_doc();
-            let mut st = TerminalState::for_tab(8620);
+            let mut st = isolated_683_state(8620);
             st.sync_live_file_context(&doc, page, &[], None);
             settle_bootstrap(&mut st);
 
@@ -12735,7 +12369,7 @@ Done!
         #[test]
         fn first_turn_rules_leave_out_a_tool_the_session_disables() {
             let (doc, page) = light_rules_doc();
-            let mut st = TerminalState::for_tab(8621);
+            let mut st = isolated_683_state(8621);
             let enabled: std::collections::BTreeSet<String> =
                 designos_mcp::server::tools().into_iter().map(|t| t.name.to_string()).filter(|n| n != "designos_delete_node").collect();
             std::fs::create_dir_all(&st.session_dir).expect("session dir");
@@ -12767,10 +12401,9 @@ Done!
         fn selection_never_injected() {
             let fx = build_tokens_fixture();
             assert_eq!(fx.selected_ids.len(), 3);
-            let mut st = TerminalState::for_tab(8602);
+            let mut st = isolated_683_state(8602);
             st.sync_live_file_context(&fx.doc, fx.page1, &fx.selected_ids, None);
-            st.flush_live_sync();
-            let _ = st.resolve_bootstrap_markdown(std::time::Duration::from_millis(500));
+            settle_bootstrap(&mut st);
 
             // 1. Check bootstrap.json and bootstrap.md on disk
             let boot_json = read_json(&st.bootstrap_json_path);
@@ -12812,7 +12445,7 @@ Done!
         #[test]
         fn selection_only_by_explicit_argument() {
             let fx = build_tokens_fixture();
-            let mut st = TerminalState::for_tab(8603);
+            let mut st = isolated_683_state(8603);
             let workspace = std::env::temp_dir();
             let file_path = workspace.join("bootstrap-fixture-8603.designos");
             st.sync_live_file_context(&fx.doc, fx.page1, &fx.selected_ids, Some(&file_path));
@@ -12893,13 +12526,26 @@ Done!
                 },
             );
 
-            let mut st = TerminalState::for_tab(8604);
-            let t0 = std::time::Instant::now();
+            let mut st = isolated_683_state(8604);
             st.sync_live_file_context(&doc, page, &[], None);
-            st.flush_live_sync();
-            let _ = st.resolve_bootstrap_markdown(std::time::Duration::from_millis(500));
-            let elapsed_ms = t0.elapsed().as_secs_f64() * 1000.0;
-            assert!(elapsed_ms <= 300.0, "large fixture bootstrap build took {elapsed_ms:.2}ms (> 300ms budget)");
+            assert!(st.bootstrap_job.is_some(), "the sync started a bootstrap job");
+            // The build is delivered whole, not as the compact fallback, however long a loaded machine takes to write it out.
+            let md = settle_bootstrap(&mut st);
+            assert!(!md.contains("Bootstrap build exceeded 500 ms"), "the settled build must be the full block, not the compact fallback");
+
+            // The full block has to be on disk within the 500 ms the Claude hook waits for it, or the agent gets the compact one. That is
+            // the cost of the whole background job: the rules pack, the compact fallback and its write, the full build and its write. So the
+            // job itself is timed, from the call that starts it until its worker is done, and not any one stage of it: a delay anywhere in
+            // the worker (outside `agent_context::bootstrap` too) counts. A lone timing on a shared machine includes stalls that are not
+            // the job's cost, so it is timed until one run is within budget. Noise only adds time; a job that really got slower stays over
+            // the budget on every run. The budget is the hook's 500 ms less room for the hook's own scheduling.
+            let budget = std::time::Duration::from_millis(300);
+            let (fastest, finished) = crate::test_timing::fastest_within(budget, std::time::Duration::from_secs(30), || {
+                st.start_bootstrap_job_held(doc.clone_without_images(), page, None, None);
+                wait_for_job(&in_flight_job(&st))
+            });
+            assert!(finished, "the bootstrap worker must finish");
+            assert!(fastest <= budget, "large fixture bootstrap job took {fastest:?} at best (> {budget:?} budget)");
 
             let boot_json = read_json(&st.bootstrap_json_path);
             let total_tokens = boot_json["total_tokens"].as_u64().unwrap();
@@ -12912,6 +12558,7 @@ Done!
                 note.contains("designos_get_app_state") && !note.contains("designos_get_metadata"),
                 "outline truncation note must name designos_get_app_state: {note}"
             );
+            assert!(note.contains("more nodes in outline"), "the outline is truncated by the full build, not by the compact fallback: {note}");
             kill_tabs(&mut st);
         }
 
@@ -12919,7 +12566,7 @@ Done!
         fn stub_agent_zero_discovery_calls() {
             use std::io::Write;
             let fx = build_tokens_fixture();
-            let mut st = TerminalState::for_tab(8605);
+            let mut st = isolated_683_state(8605);
             let workspace = std::env::temp_dir();
             let file_path = workspace.join("bootstrap-fixture-8605.designos");
             st.sync_live_file_context(&fx.doc, fx.page1, &[], Some(&file_path));
@@ -12976,12 +12623,11 @@ Done!
         #[test]
         fn app_state_tool_matches_studio_block() {
             let fx = build_tokens_fixture();
-            let mut st = TerminalState::for_tab(8606);
+            let mut st = isolated_683_state(8606);
             let workspace = std::env::temp_dir();
             let file_path = workspace.join("bootstrap-fixture-8606.designos");
             st.sync_live_file_context(&fx.doc, fx.page1, &fx.selected_ids, Some(&file_path));
-            st.flush_live_sync();
-            let _ = st.resolve_bootstrap_markdown(std::time::Duration::from_millis(500));
+            settle_bootstrap(&mut st);
 
             let studio_boot = read_json(&st.bootstrap_json_path);
             assert_eq!(studio_boot["scoped"], json!(false));
@@ -13006,7 +12652,7 @@ Done!
         #[test]
         fn delivered_once_per_run() {
             let fx = build_tokens_fixture();
-            let mut st = TerminalState::for_tab(8607);
+            let mut st = isolated_683_state(8607);
             st.sync_live_file_context(&fx.doc, fx.page1, &[], None);
             settle_bootstrap(&mut st);
             assert!(!st.is_run_bootstrap_delivered());
@@ -13032,24 +12678,65 @@ Done!
         #[test]
         fn slow_bootstrap_falls_back_to_compact() {
             let fx = build_tokens_fixture();
-            let mut st = TerminalState::for_tab(8608);
+            let mut st = isolated_683_state(8608);
             st.sync_live_file_context(&fx.doc, fx.page1, &[], None);
             st.flush_live_sync();
-            st.start_bootstrap_job(fx.doc.clone(), fx.page1, None, Some(std::time::Duration::from_millis(1200)));
+            // The full build is held back until the test lets it go, so it is late by construction, however fast the machine is.
+            let (release_build, hold) = held_bootstrap_build();
+            st.start_bootstrap_job_held(fx.doc.clone(), fx.page1, None, Some(hold));
+            let build = in_flight_job(&st);
 
-            let t0 = std::time::Instant::now();
-            let prompt_sent = st.resolve_bootstrap_markdown(std::time::Duration::from_millis(500));
-            let waited_ms = t0.elapsed().as_secs_f64() * 1000.0;
-            assert!(waited_ms < 900.0, "resolve_bootstrap_markdown must bound wait to ~500ms (took {waited_ms:.1}ms)");
+            let prompt_sent = st.resolve_bootstrap_markdown(std::time::Duration::from_millis(100));
+            assert!(!job_is_done(&build), "resolve_bootstrap_markdown must bound its wait: it returned while the full build was still held back");
             assert!(prompt_sent.contains("## 1. Freshness") && prompt_sent.contains("## 2. Document") && prompt_sent.contains("## 7. Rules"));
             assert!(prompt_sent.contains("Bootstrap build exceeded 500 ms; call designos_get_app_state"), "compact fallback note missing:\n{prompt_sent}");
+
+            release_build.send(()).expect("the held build is still waiting");
+            assert!(wait_for_job(&build), "the released build must finish");
             kill_tabs(&mut st);
+        }
+
+        /// The longest the Claude prompt hook waits for the full bootstrap reply before it prints the compact one: the number of rounds of its
+        /// wait loop (`[ $i -lt N ]`) times the sleep of each (`sleep S`), read from the command text the session's `hooks.json` carries.
+        /// Panics when the command has no such loop, so a reshaped hook fails the test instead of passing it.
+        fn prompt_hook_wait_bound(command: &str) -> std::time::Duration {
+            // The command has other `while` loops (the event log's lock retry); the one that waits for the full reply is the one that tests for it.
+            let waits_for_full_reply: Vec<&str> = command
+                .split("i=0; while ")
+                .skip(1)
+                .filter_map(|after_while| after_while.split_once("; done").map(|(wait_loop, _)| wait_loop))
+                .filter(|wait_loop| wait_loop.contains("bootstrap-context-reply.json"))
+                .collect();
+            assert_eq!(waits_for_full_reply.len(), 1, "the prompt hook must have exactly one loop that waits for the full bootstrap reply:\n{command}");
+            let wait_loop = waits_for_full_reply[0];
+            let rounds: u32 = wait_loop
+                .split_once("[ $i -lt ")
+                .and_then(|(_, rest)| rest.split_once(" ]"))
+                .and_then(|(n, _)| n.trim().parse().ok())
+                .unwrap_or_else(|| panic!("the wait loop must count its rounds with `[ $i -lt N ]`:\n{wait_loop}"));
+            let pause: f64 = wait_loop
+                .split_once("do sleep ")
+                .and_then(|(_, rest)| rest.split_once(';'))
+                .and_then(|(s, _)| s.trim().parse().ok())
+                .unwrap_or_else(|| panic!("the wait loop must pause with `sleep S`:\n{wait_loop}"));
+            std::time::Duration::from_secs_f64(f64::from(rounds) * pause)
+        }
+
+        /// The hook promises the agent its first prompt within 500 ms, with the compact block if the full one is not ready. The wait is
+        /// read from the command and not timed: a timing needs a build that is late by a wall-clock margin, which a loaded machine can
+        /// turn either way, while the loop's bound is the thing the hook cannot exceed.
+        #[test]
+        fn claude_prompt_hook_waits_at_most_half_a_second_for_the_full_bootstrap() {
+            let st = provisioned_session(68493);
+            let command = claude_prompt_hook_command(&st);
+            let bound = prompt_hook_wait_bound(&command);
+            assert_eq!(bound.as_millis(), 500, "the Claude prompt hook must bound its wait for the full block to 500 ms, not {bound:?}:\n{command}");
         }
 
         #[test]
         fn first_prompt_during_edit_in_progress_or_slow_hook_delivers_real_document_bootstrap() {
             let fx = build_tokens_fixture();
-            let mut st = TerminalState::for_tab(8609);
+            let mut st = isolated_683_state(8609);
             let file_path = std::env::temp_dir().join("bootstrap-fixture-8609.designos");
             st.edit_in_progress = true;
             st.sync_live_file_context(&fx.doc, fx.page1, &[], Some(&file_path));
@@ -13063,19 +12750,19 @@ Done!
 
             // Slow bootstrap job (> 500ms) with Claude UserPromptSubmit hook must fall back to compact bootstrap on turn 1
             // and mark the run delivered so turn 2 only prints page context.
-            let mut st_claude = TerminalState::for_tab(8610);
+            let mut st_claude = isolated_683_state(8610);
             st_claude.sync_live_file_context(&fx.doc, fx.page1, &[], Some(&file_path));
-            st_claude.flush_live_sync();
-            let _ = st_claude.resolve_bootstrap_markdown(std::time::Duration::from_millis(500));
+            settle_bootstrap(&mut st_claude);
             st_claude.reset_agent_run(Some(&file_path));
-            st_claude.start_bootstrap_job(fx.doc.clone_without_images(), fx.page1, Some(file_path.clone()), Some(std::time::Duration::from_millis(4500)));
+            // The full build stays held back until the hook has answered, so the hook has to fall back to the compact block.
+            let (release_build, hold) = held_bootstrap_build();
+            st_claude.start_bootstrap_job_held(fx.doc.clone_without_images(), fx.page1, Some(file_path.clone()), Some(hold));
+            let build = in_flight_job(&st_claude);
 
             let claude_hooks = read_json(&st_claude.session_dir.join("hooks.json"));
             let hook_cmd = claude_hooks["hooks"]["UserPromptSubmit"][0]["hooks"][0]["command"].as_str().unwrap();
-            let t0 = std::time::Instant::now();
             let hook_turn_1 = run_hook_command(hook_cmd);
-            let waited_ms = t0.elapsed().as_secs_f64() * 1000.0;
-            assert!(waited_ms < 3500.0, "Claude hook must bound wait to ~500ms (took {waited_ms:.1}ms)");
+            assert!(!job_is_done(&build), "Claude hook must bound its wait: it answered while the full build was still held back");
             assert!(
                 hook_turn_1.contains("## 1. Freshness")
                     && hook_turn_1.contains("## 2. Document")
@@ -13088,6 +12775,8 @@ Done!
                 !hook_turn_2.contains("## 1. Freshness") && hook_turn_2.contains("DESIGN:OS Studio page context:"),
                 "Claude hook turn 2 must only deliver lightweight page context:\n{hook_turn_2}"
             );
+            release_build.send(()).expect("the held build is still waiting");
+            assert!(wait_for_job(&build), "the released build must finish");
             kill_tabs(&mut st);
             kill_tabs(&mut st_claude);
         }
@@ -13097,7 +12786,7 @@ Done!
             let mut fx = build_tokens_fixture();
             fx.doc.images.insert("img-heavy-hash".into(), vec![0xAB; 512 * 1024]);
 
-            let mut st = TerminalState::for_tab(8611);
+            let mut st = isolated_683_state(8611);
             st.sync_live_file_context(&fx.doc, fx.page1, &[], None);
             let job_doc = st.bootstrap_job.as_ref().expect("initial bootstrap job spawned").doc.clone();
             assert!(job_doc.images.is_empty(), "bootstrap job document clone must omit raw embedded images");
@@ -13142,14 +12831,19 @@ Done!
             n2.name = "New Fresh Frame".into();
             let _ = doc_v2.insert(page, n2);
 
-            let mut st = TerminalState::for_tab(8612);
-            st.start_bootstrap_job(doc_v1.clone_without_images(), page, None, Some(std::time::Duration::from_millis(220)));
+            let mut st = isolated_683_state(8612);
+            // The older build is held back until the newer one has published, so it finishes last by construction.
+            let (release_v1, hold_v1) = held_bootstrap_build();
+            st.start_bootstrap_job_held(doc_v1.clone_without_images(), page, None, Some(hold_v1));
+            let v1 = in_flight_job(&st);
             st.start_bootstrap_job(doc_v2.clone_without_images(), page, None, None);
-            let md = st.resolve_bootstrap_markdown(std::time::Duration::from_millis(500));
+            let md = st.resolve_bootstrap_markdown(BUILD_WAIT);
             assert!(md.contains("New Fresh Frame") && !md.contains("Old Stale Frame"));
+            assert!(!job_is_done(&v1), "precondition: the older worker is still held back, so it finishes after the newer one published");
 
-            // Wait for the older slow worker to finish and verify it did not overwrite the newer session files on disk.
-            std::thread::sleep(std::time::Duration::from_millis(300));
+            // Let the older worker go and wait for it to finish, then verify it did not overwrite the newer session files on disk.
+            release_v1.send(()).expect("the older build is still waiting");
+            assert!(wait_for_job(&v1), "the older worker must finish");
             let disk_md = std::fs::read_to_string(&st.bootstrap_md_path).expect("read bootstrap.md");
             assert!(disk_md.contains("New Fresh Frame") && !disk_md.contains("Old Stale Frame"), "stale bootstrap worker overwrote bootstrap.md:\n{disk_md}");
             let disk_json = read_json(&st.bootstrap_json_path);
@@ -13160,7 +12854,7 @@ Done!
         #[test]
         fn edits_before_first_prompt_do_not_rebuild_bootstrap_per_epoch() {
             let mut fx = build_tokens_fixture();
-            let mut st = TerminalState::for_tab(8613);
+            let mut st = isolated_683_state(8613);
             st.sync_live_file_context(&fx.doc, fx.page1, &[], None);
             assert_eq!(st.bootstrap_generation.load(std::sync::atomic::Ordering::SeqCst), 1, "initial sync should start exactly one bootstrap job for the run");
 
@@ -13197,7 +12891,7 @@ Done!
             }
             assert!(fx.doc.nodes.len() > 25_000, "fixture must exceed 25,000 nodes to trigger scoped canvas.designos");
 
-            let mut st = TerminalState::for_tab(8614);
+            let mut st = isolated_683_state(8614);
             let file_path = std::env::temp_dir().join("bootstrap-fixture-8614.designos");
             st.sync_live_file_context(&fx.doc, fx.page1, &[], Some(&file_path));
             st.flush_live_sync();

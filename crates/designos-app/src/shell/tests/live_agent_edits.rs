@@ -4,8 +4,8 @@
 use super::*;
 use designos_doc::live_patch::{LiveOp, LivePatch};
 
-/// A window bound to a live agent session (the dock stays closed, so no shell is spawned).
-fn live_sim() -> (Sim, designos_mcp::server::Session, std::path::PathBuf) {
+/// A window bound to a live agent session (the Agents panel stays closed, so no shell is spawned).
+pub(super) fn live_sim() -> (Sim, designos_mcp::server::Session, std::path::PathBuf) {
     let s = Sim::new();
     let session_id = format!("{}-tab-1", s.app().tabs.instance_id);
     assert_eq!(s.app().terminal.session_id, session_id, "precondition: the window keeps its own session");
@@ -15,7 +15,7 @@ fn live_sim() -> (Sim, designos_mcp::server::Session, std::path::PathBuf) {
     (s, session, workspace)
 }
 
-fn finish(mut s: Sim, workspace: std::path::PathBuf) {
+pub(super) fn finish(mut s: Sim, workspace: std::path::PathBuf) {
     let dir = s.app().terminal.session_dir.clone();
     s.shell.app.terminal.shutdown();
     let _ = std::fs::remove_dir_all(dir);
@@ -119,7 +119,7 @@ fn a_shell_started_while_the_window_is_built_keeps_its_session_after_the_first_f
     for panel in ["agents", "terminal", "agents-chat"] {
         let ctx = Context::default();
         let mut shell = Shell::build(&ctx, Options { panel: Some(panel.into()), ..Options::default() });
-        shell.app.system_html = no_system_clipboard;
+        script_empty_clipboard(&mut shell.app);
         assert!(shell.app.terminal.picker_open || !shell.app.terminal.tabs.is_empty(), "precondition: --panel {panel} opens the agent surface during build");
         let started_with = shell.app.terminal.session_env();
 
@@ -132,6 +132,8 @@ fn a_shell_started_while_the_window_is_built_keeps_its_session_after_the_first_f
             cursor: egui::CursorIcon::Default,
             shapes: Vec::new(),
             accesskit_update: None,
+            commands: Vec::new(),
+            sent_commands: Vec::new(),
         };
         s.frame(vec![]);
         s.frame(vec![]);

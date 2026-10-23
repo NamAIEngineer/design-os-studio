@@ -14,7 +14,7 @@ Verifies 17 hard invariants (`Z01..Z17`):
          without typing into the live PTY; `DESIGNOS_AGENT_RUNTIME` is set in `configure_pty_env`
          and `build_real_cli_command`.
   - Z03: `terminal.rs` `dispatch_figma_ai_prompt` does NOT prefix PTY commands with a `#` shell comment.
-  - Z04: `terminal.rs` header & composer buttons (`agents-header-ai`, `agents-header-popout`,
+  - Z04: `terminal.rs` header & composer buttons (`agents-header-ai`,
          `agents-composer-attach`, `agents-composer-context`) all have
          interactive click handlers (`Sense::click()`); `agents-composer-mic` stays removed.
          The chat header's `More` button was removed because it had no handler and no spec'd menu.
@@ -574,7 +574,6 @@ def check_z04(sources: "SourceSet") -> Tuple[bool, str]:
     combined = terminal_rs + "\n" + composer_rs
     required_ids = [
         "agents-header-ai",
-        "agents-header-popout",
         "agents-composer-attach",
         "agents-composer-context",
     ]
@@ -697,9 +696,12 @@ def check_z08(sources: "SourceSet") -> Tuple[bool, str]:
     )
 
 
-def check_z09(home_rs: str) -> Tuple[bool, str]:
+def check_z09(home_rs: str, fig_export_rs: str, fallback_save_rs: str) -> Tuple[bool, str]:
     has_export_fig = ("Act::ExportFig" in home_rs) or ("ExportFig" in home_rs)
-    has_fs_write = ("std::fs::write" in home_rs) or ("fs::write" in home_rs)
+    # The Home menu, the File menu and the palette write through `fig_export::export_new`, which hands the bytes to
+    # `io::write_new_in`: that claims a free file name with `create_new` and writes them. The handler holds no `fs::write`.
+    calls_writer = "fig_export::export_new" in home_rs and "write_new_in(" in fig_export_rs
+    has_fs_write = "create_new(true)" in fallback_save_rs and "write_all(" in fallback_save_rs
     collapsed_sections = bool(
         re.search(
             r"Section::Recents\s*\|\s*Section::AllProjects\s*\|\s*Section::Templates\s*\|\s*Section::Resources",
@@ -714,12 +716,12 @@ def check_z09(home_rs: str) -> Tuple[bool, str]:
             and "Section::Resources =>" in home_rs
         )
     )
-    ok = has_export_fig and has_fs_write and has_distinct_nav
+    ok = has_export_fig and calls_writer and has_fs_write and has_distinct_nav
     if ok:
-        return True, "`home/mod.rs` `Act::ExportFig` writes `.fig` bytes (`std::fs::write`) and `AllFolders`/`Templates`/`Libraries` filter distinctly"
+        return True, "`home/mod.rs` `Act::ExportFig` writes `.fig` bytes through `fig_export::export_new` and `io::write_new_in` (`create_new` + `write_all`) and `AllFolders`/`Templates`/`Libraries` filter distinctly"
     return (
         False,
-        f"ExportFig={has_export_fig}, fs::write={has_fs_write}, distinct_nav={has_distinct_nav}",
+        f"ExportFig={has_export_fig}, export_new+write_new_in={calls_writer}, create_new+write_all={has_fs_write}, distinct_nav={has_distinct_nav}",
     )
 
 
@@ -973,6 +975,8 @@ def run_all_checks(sources: Optional["SourceSet"] = None) -> List[Dict[str, Any]
     composer_rs = read_src("agent_composer.rs")
     specs_rs = read_src("specs.rs")
     home_rs = read_src("home/mod.rs")
+    fig_export_rs = read_src("fig_export.rs")
+    fallback_save_rs = read_src("io/fallback_save.rs")
     right_rs = read_src("panels/right.rs")
     inspect_rs = read_src("panels/inspect.rs")
     dev_sections_rs = read_src("dev/sections.rs")
@@ -985,12 +989,12 @@ def run_all_checks(sources: Optional["SourceSet"] = None) -> List[Dict[str, Any]
         ("Z01", "terminal.rs + agent_composer.rs", "Live PTY send_to_agent in submit_chat_prompt; zero one-shot (-p / exec) calls", lambda: check_z01(sources)),
         ("Z02", "terminal.rs", "set_active_runtime mutates tab.preset; DESIGNOS_AGENT_RUNTIME set at spawn; one-shot chat symbols removed", lambda: check_z02(sources)),
         ("Z03", "terminal.rs", "dispatch_figma_ai_prompt sends executable command without # comment prefix", lambda: check_z03(terminal_rs)),
-        ("Z04", "terminal.rs + agent_composer.rs", "All 4 Agents header & composer buttons have Sense::click() handlers; fake mic removed", lambda: check_z04(sources)),
+        ("Z04", "terminal.rs + agent_composer.rs", "All 3 Agents header & composer buttons have Sense::click() handlers; fake mic removed", lambda: check_z04(sources)),
         ("Z05", "specs.rs", "specs-ask-agent-bar hosts editable TextEdit::singleline(ask_input)", lambda: check_z05(specs_rs)),
         ("Z06", "specs.rs", "Right Inspector dynamic active_section_toc & interactive SpecComment", lambda: check_z06(specs_rs)),
         ("Z07", "specs.rs", "Unwrapped draw_wrapped_prose & render_tab_blueprints renders pkg.ui_contract", lambda: check_z07(specs_rs)),
         ("Z08", "panels/toolbar.rs + cmdk.rs", "Contextual sub-toolbar buttons mutate app.doc / app.tool; ctx-crop / ctx-remove-bg / cmdk Remove background stay removed", lambda: check_z08(sources)),
-        ("Z09", "home/mod.rs", "Act::ExportFig writes .fig to disk & Nav::AllFolders/Templates/Libraries filter distinctly", lambda: check_z09(home_rs)),
+        ("Z09", "home/mod.rs", "Act::ExportFig writes .fig to disk & Nav::AllFolders/Templates/Libraries filter distinctly", lambda: check_z09(home_rs, fig_export_rs, fallback_save_rs)),
         ("Z10", "panels/right.rs", "Share copies to clipboard & Dev Mode 2nd tab renders Dev Plugins inspector", lambda: check_z10(right_rs)),
         ("Z11", "panels/inspect.rs + properties.rs", "Dev Mode Code Connect/MCP/Redlines/Keyframes & Copy to Slides mutate state/clipboard", lambda: check_z11(inspect_rs, properties_rs, dev_sections_rs)),
         ("Z12", "widgets/picker.rs + panels/mod.rs + variables/view.rs", "Mode::Image creates Paint::Image/doc.images & scrollbars support Sense::click_and_drag()", lambda: check_z12(picker_rs, panels_mod_rs, vars_view_rs, properties_rs)),

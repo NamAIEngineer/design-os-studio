@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use egui::{Align2, Color32, Id, Key, Pos2, Rect, RichText, Sense, Stroke, StrokeKind, TextEdit, Ui, Vec2};
 
 use crate::agent_cli_catalog::{
-    build_picker_rows, CatalogProbeCache, CustomCliEntry, PickerRow, PickerRowKind, SignIn, CUSTOM_CLI_WARNING, DEFAULT_PERMISSION_CAPTION,
+    build_picker_rows, CatalogProbeCache, CustomCliEntry, PickerRow, PickerRowKind, SignIn, ASK_PERMISSION_CAPTION, CUSTOM_CLI_WARNING, SKIP_PERMISSION_CAPTION,
 };
 use crate::agent_start_failure::FixAction;
 use crate::comments::settings::{add_custom_cli, load_custom_clis};
@@ -26,7 +26,6 @@ pub struct AgentPickerState {
     pub open_row_order: Vec<String>,
     /// True once `open_row_order` was built from fully-probed rows (no catalog row left `Checking`).
     pub open_row_order_settled: bool,
-    pub selected_index: usize,
     pub other_form_open: bool,
     pub other_label_input: String,
     pub other_command_input: String,
@@ -48,11 +47,13 @@ impl AgentPickerState {
     }
 
     /// Resets the open-latch when the picker or `+` menu closes so the next open triggers a fresh
-    /// background probe while keeping the cached result on screen (`#652` §5).
+    /// background probe while keeping the cached result on screen (`#652` §5). Closing also drops the `Other CLI…`
+    /// form and what was typed in it, however the menu was closed (a press elsewhere, `+`, a tab, Esc, a pick).
     pub fn on_close(&mut self) {
         self.probe_started = false;
         self.open_row_order.clear();
         self.open_row_order_settled = false;
+        self.close_other_form();
     }
 
     /// Triggers a fresh background probe (e.g. when re-opening the picker).
@@ -121,11 +122,6 @@ pub fn rows_for_state(state: &mut TerminalState) -> Vec<PickerRow> {
     } else {
         let order = state.picker.open_row_order.clone();
         rows.sort_by_key(|r| order.iter().position(|id| id == &r.id).unwrap_or(usize::MAX));
-    }
-    if state.picker.selected_index >= rows.len() || !rows.get(state.picker.selected_index).is_some_and(|r| r.selectable) {
-        if let Some(first_sel) = rows.iter().position(|r| r.selectable) {
-            state.picker.selected_index = first_sel;
-        }
     }
     rows
 }
@@ -210,34 +206,54 @@ pub fn execute_row_selection(state: &mut TerminalState, row: &PickerRow, file_pa
     }
 }
 
-fn handle_picker_keyboard(state: &mut TerminalState, ui: &Ui, rows: &[PickerRow], file_path: Option<&Path>) {
-    if state.picker.other_form_open || ui.ctx().egui_wants_keyboard_input() {
-        if state.picker.other_form_open && ui.input(|i| i.key_pressed(Key::Escape)) {
+/// The row focus moves to from `from` on an arrow key: the next (`forward`) or previous selectable row, wrapping
+/// at both ends. `None` when no row is selectable.
+fn step_row(selectable: &[bool], from: usize, forward: bool) -> Option<usize> {
+    let n = selectable.len();
+    (1..=n).map(|step| if forward { (from + step) % n } else { (from + n - step % n) % n }).find(|&idx| selectable[idx])
+}
+
+/// Arrow keys move egui focus between the rows of the list, and Return is egui's own click on the focused row.
+/// Both act only while a row has focus (reached with Tab, or by a click): with nothing focused the picker ignores
+/// them, so a layer selected on the canvas keeps its arrow and Return shortcuts and a stray Return starts nothing.
+/// `row_id` is the widget id the surface draws a row with.
+fn handle_picker_keyboard(state: &mut TerminalState, ui: &Ui, rows: &[PickerRow], row_id: impl Fn(&PickerRow) -> Id) {
+    // An open dialog or menu owns the keys, Esc included: the Esc that closes it must not also close this list (`#923`).
+    if state.overlay_owns_keyboard {
+        return;
+    }
+    let ctx = ui.ctx();
+    if state.picker.other_form_open {
+        if ui.input(|i| i.key_pressed(Key::Escape)) {
             state.picker.close_other_form();
         }
         return;
     }
-    let selectable_indices: Vec<usize> = rows.iter().enumerate().filter_map(|(i, r)| r.selectable.then_some(i)).collect();
-    if selectable_indices.is_empty() {
-        return;
-    }
-    if ui.input(|i| i.key_pressed(Key::ArrowDown)) {
-        let cur_pos = selectable_indices.iter().position(|&idx| idx == state.picker.selected_index).unwrap_or(0);
-        let next_pos = (cur_pos + 1) % selectable_indices.len();
-        state.picker.selected_index = selectable_indices[next_pos];
-    } else if ui.input(|i| i.key_pressed(Key::ArrowUp)) {
-        let cur_pos = selectable_indices.iter().position(|&idx| idx == state.picker.selected_index).unwrap_or(0);
-        let prev_pos = if cur_pos == 0 { selectable_indices.len() - 1 } else { cur_pos - 1 };
-        state.picker.selected_index = selectable_indices[prev_pos];
-    } else if ui.input(|i| i.key_pressed(Key::Enter)) {
-        if let Some(row) = rows.get(state.picker.selected_index) {
-            if row.selectable {
-                let _ = execute_row_selection(state, row, file_path);
-            }
+    let focused = rows.iter().position(|r| ctx.memory(|m| m.has_focus(row_id(r))));
+    if let Some(from) = focused {
+        let forward = if ui.input(|i| i.key_pressed(Key::ArrowDown)) {
+            Some(true)
+        } else if ui.input(|i| i.key_pressed(Key::ArrowUp)) {
+            Some(false)
+        } else {
+            None
+        };
+        let selectable: Vec<bool> = rows.iter().map(|r| r.selectable).collect();
+        if let Some(to) = forward.and_then(|forward| step_row(&selectable, from, forward)) {
+            ctx.memory_mut(|m| m.request_focus(row_id(&rows[to])));
         }
-    } else if ui.input(|i| i.key_pressed(Key::Escape)) {
+    }
+    // egui drops a focused widget's focus on Escape before this runs, so Escape on a focused row lands here too.
+    if !ctx.egui_wants_keyboard_input() && ui.input(|i| i.key_pressed(Key::Escape)) {
         state.runtime_dropdown_open = false;
         state.picker.on_close();
+    }
+}
+
+/// Keeps arrow keys with the focused row: egui would otherwise also move focus to the nearest widget on its own.
+fn keep_arrows_on_row(ui: &Ui, resp: &egui::Response) {
+    if resp.has_focus() {
+        ui.memory_mut(|m| m.set_focus_lock_filter(resp.id, egui::EventFilter { vertical_arrows: true, ..Default::default() }));
     }
 }
 
@@ -252,7 +268,15 @@ fn state_pill_colors(signed_in: SignIn, installed: bool) -> (Color32, Color32, C
     }
 }
 
-const OTHER_FORM_HEIGHT: f32 = 108.0;
+/// Height of the `Other CLI…` form card: padding, the label and command fields, a caption block of two caption lines
+/// at `theme::LINE_CAPTION`, 8 px, and the button row at the 24 px target minimum. The card is the same in the full
+/// picker and in the `+` menu, and its height is a multiple of 4 px.
+const OTHER_FORM_CARD_HEIGHT: f32 = 128.0;
+/// Room the picker and the `+` menu give the open form: the 2 px inset above the card, the card, and a 6 px margin.
+const OTHER_FORM_HEIGHT: f32 = OTHER_FORM_CARD_HEIGHT + 8.0;
+/// Two lines of the caption at its line height. The caption wraps to this block and never runs under the buttons.
+const OTHER_FORM_CAPTION_HEIGHT: f32 = 2.0 * theme::LINE_CAPTION;
+const OTHER_FORM_BUTTON_HEIGHT: f32 = theme::TARGET_MIN;
 const PICKER_FOOTER_HEIGHT: f32 = 22.0;
 
 /// Height of the picker card for `row_count` rows (header, rows, optional `"Other CLI…"` form, footer).
@@ -278,7 +302,7 @@ pub fn show_picker_panel_with_rows(state: &mut TerminalState, ui: &mut Ui, rect:
     if state.picker.cache.is_probing() {
         ui.ctx().request_repaint_after(std::time::Duration::from_millis(50));
     }
-    handle_picker_keyboard(state, ui, &rows, file_path);
+    handle_picker_keyboard(state, ui, &rows, |row| Id::new(format!("picker-row-{}", row.id)));
 
     let p = ui.painter().clone();
     let pad = theme::INSET_POPOVER;
@@ -315,7 +339,10 @@ pub fn show_picker_panel_with_rows(state: &mut TerminalState, ui: &mut Ui, rect:
         let r_rect = Rect::from_min_size(Pos2::new(inner_left, y), Vec2::new(inner_w, row_h));
         let row_id = format!("picker-row-{}", row.id);
         let resp = ui.interact(r_rect, Id::new(&row_id), Sense::click());
-        let is_selected = idx == state.picker.selected_index && row.selectable;
+        // Focus ring on the row the keyboard stands on; the file's last chosen CLI keeps the neutral fill.
+        keep_arrows_on_row(ui, &resp);
+        let has_cursor = resp.has_focus();
+        let is_selected = has_cursor || (row.selectable && row.is_last_choice);
 
         let bg = if is_selected {
             theme::BG_SELECTED
@@ -328,7 +355,7 @@ pub fn show_picker_panel_with_rows(state: &mut TerminalState, ui: &mut Ui, rect:
         p.rect_stroke(
             r_rect,
             theme::cr(theme::RADIUS_CONTROL),
-            Stroke::new(theme::BORDER_WIDTH, if is_selected { STATUS_INFO_BORDER } else { theme::BORDER }),
+            Stroke::new(theme::BORDER_WIDTH, if has_cursor { STATUS_INFO_BORDER } else { theme::BORDER }),
             StrokeKind::Inside,
         );
 
@@ -407,12 +434,12 @@ pub fn show_picker_panel_with_rows(state: &mut TerminalState, ui: &mut Ui, rect:
     }
 
     if state.picker.other_form_open {
-        let form_r = Rect::from_min_size(Pos2::new(inner_left, y + theme::INSET_SEGMENT), Vec2::new(inner_w, 100.0));
+        let form_r = Rect::from_min_size(Pos2::new(inner_left, y + theme::INSET_SEGMENT), Vec2::new(inner_w, OTHER_FORM_CARD_HEIGHT));
         render_other_cli_inline_form(state, ui, form_r, &mut interaction);
         y += form_h;
     }
 
-    // Footer: Default permission caption (`Skip permissions`, `#652` §3 rule 9)
+    // Footer: caption of the active permission mode (`Ask before acting` by default, `#652` §3 rule 9, `#841`)
     let footer_y = (card_r.bottom() - theme::SPACE_GROUP).max(y + theme::SPACE_INLINE);
     let perm_elided = widgets::elide(&p, permission_caption(state.permission_mode), &theme::font_caption(), inner_w);
     p.text(Pos2::new(inner_left, footer_y), Align2::LEFT_CENTER, perm_elided, theme::font_caption(), theme::TEXT_TERTIARY);
@@ -420,11 +447,11 @@ pub fn show_picker_panel_with_rows(state: &mut TerminalState, ui: &mut Ui, rect:
     apply_picker_interaction(state, &rows, interaction, file_path);
 }
 
-/// Footer caption for the active launch mode (`Skip permissions` or `Ask before acting`, `#656`).
+/// Footer caption for the active launch mode (`Ask before acting` by default, `Skip permissions` once picked, `#656`, `#841`).
 fn permission_caption(mode: crate::terminal::PermissionMode) -> &'static str {
     match mode {
-        crate::terminal::PermissionMode::Skip => DEFAULT_PERMISSION_CAPTION,
-        crate::terminal::PermissionMode::Ask => "Ask before acting",
+        crate::terminal::PermissionMode::Skip => SKIP_PERMISSION_CAPTION,
+        crate::terminal::PermissionMode::Ask => ASK_PERMISSION_CAPTION,
     }
 }
 
@@ -442,7 +469,7 @@ pub fn render_runtime_dropdown_menu(state: &mut TerminalState, ui: &mut Ui, pane
     if state.picker.cache.is_probing() {
         ui.ctx().request_repaint_after(std::time::Duration::from_millis(50));
     }
-    handle_picker_keyboard(state, ui, &rows, file_path);
+    handle_picker_keyboard(state, ui, &rows, |row| Id::new(&row.id));
 
     let last_resume = state.resumable_sessions().first().map(|e| e.title.clone());
     let menu_inset = theme::SPACE_GROUP;
@@ -453,7 +480,7 @@ pub fn render_runtime_dropdown_menu(state: &mut TerminalState, ui: &mut Ui, pane
     let header_h = 22.0;
     let footer_h = 20.0;
     let resume_h = if last_resume.is_some() { row_h + row_gap } else { 0.0 };
-    let form_h = if state.picker.other_form_open { 104.0 } else { 0.0 };
+    let form_h = if state.picker.other_form_open { OTHER_FORM_HEIGHT } else { 0.0 };
     let menu_h = header_h + resume_h + rows.len() as f32 * (row_h + row_gap) + form_h + footer_h + theme::SPACE_INLINE;
     let menu_x = (panel_rect.right() - menu_w - menu_edge).max(panel_rect.left() + menu_edge);
     let menu_r = Rect::from_min_size(Pos2::new(menu_x, top_y), Vec2::new(menu_w, menu_h));
@@ -492,7 +519,8 @@ pub fn render_runtime_dropdown_menu(state: &mut TerminalState, ui: &mut Ui, pane
     for (idx, row) in rows.iter().enumerate() {
         let row_r = Rect::from_min_size(Pos2::new(inner_left, y), Vec2::new(inner_w, row_h));
         let resp = ui.interact(row_r, Id::new(&row.id), Sense::click());
-        let is_selected = idx == state.picker.selected_index && row.selectable;
+        keep_arrows_on_row(ui, &resp);
+        let is_selected = resp.has_focus() || (row.selectable && row.is_last_choice);
         if is_selected {
             p.rect_filled(row_r, theme::cr(theme::RADIUS_CONTROL), theme::BG_SELECTED);
         } else if resp.hovered() && row.selectable {
@@ -563,12 +591,12 @@ pub fn render_runtime_dropdown_menu(state: &mut TerminalState, ui: &mut Ui, pane
     }
 
     if state.picker.other_form_open {
-        let form_r = Rect::from_min_size(Pos2::new(inner_left, y + theme::INSET_SEGMENT), Vec2::new(inner_w, 98.0));
+        let form_r = Rect::from_min_size(Pos2::new(inner_left, y + theme::INSET_SEGMENT), Vec2::new(inner_w, OTHER_FORM_CARD_HEIGHT));
         render_other_cli_inline_form(state, ui, form_r, &mut interaction);
         y += form_h;
     }
 
-    // Footer permission caption (`Skip permissions`, `#652` §3 rule 9)
+    // Footer permission caption of the active mode (`#652` §3 rule 9, `#841`)
     let footer_y = (menu_r.bottom() - theme::INSET_CONTROL).max(y + theme::SPACE_FACT);
     let (footer_txt, footer_col) = footer_caption(state);
     let perm_str = widgets::elide(&p, footer_txt, &theme::font_caption(), inner_w - theme::SPACE_INLINE);
@@ -577,13 +605,15 @@ pub fn render_runtime_dropdown_menu(state: &mut TerminalState, ui: &mut Ui, pane
     if !matches!(interaction, PickerInteraction::None) {
         apply_picker_interaction(state, &rows, interaction, file_path);
     } else if ui.input(|i| i.pointer.any_pressed()) {
-        if let Some(pos) = ui.input(|i| i.pointer.interact_pos()) {
-            let add_btn = ui.ctx().data(|d| d.get_temp::<Rect>(Id::new(("test-rect", "agents-runtime-add-btn".to_string()))));
-            let in_add = add_btn.map(|r| r.contains(pos)).unwrap_or(false);
-            if !menu_r.contains(pos) && !in_add {
-                state.runtime_dropdown_open = false;
-                state.picker.on_close();
-                state.picker.close_other_form();
+        let opened_this_pass = ui.ctx().data(|d| d.get_temp::<u64>(Id::new("agents-runtime-opened-pass"))) == Some(ui.ctx().cumulative_pass_nr());
+        if !opened_this_pass {
+            if let Some(pos) = ui.input(|i| i.pointer.interact_pos()) {
+                let add_btn = ui.ctx().data(|d| d.get_temp::<Rect>(Id::new("agents-runtime-add-btn-rect")));
+                let in_add = add_btn.is_some_and(|r| r.contains(pos));
+                if !menu_r.contains(pos) && !in_add {
+                    state.runtime_dropdown_open = false;
+                    state.picker.on_close();
+                }
             }
         }
     }
@@ -594,6 +624,13 @@ fn render_other_cli_inline_form(state: &mut TerminalState, ui: &mut Ui, form_r: 
     p.rect_filled(form_r, theme::cr(theme::RADIUS_FRAME), theme::BG_SECONDARY);
     p.rect_stroke(form_r, theme::cr(theme::RADIUS_FRAME), Stroke::new(theme::BORDER_WIDTH, theme::BORDER), StrokeKind::Inside);
     widgets::record(ui, "agents-other-cli-form", form_r);
+    // Scrolled or clipped out of the panel's view (a short window puts it under the end of the list), nothing of the form is
+    // drawn below: a field that is not drawn cannot be reached with Tab and loses the caret it had, so no letter goes into
+    // a form that cannot be seen.
+    let view = ui.clip_rect();
+    if !view.intersects(form_r) {
+        return;
+    }
 
     let pad = theme::INSET_FRAME;
     let field_w = (form_r.width() - pad * 2.0).max(80.0);
@@ -603,54 +640,65 @@ fn render_other_cli_inline_form(state: &mut TerminalState, ui: &mut Ui, form_r: 
     let lbl_rect = Rect::from_min_size(Pos2::new(form_r.left() + pad, form_r.top() + pad), Vec2::new(field_w, field_h));
     p.rect_filled(lbl_rect, theme::cr(theme::RADIUS_CONTROL), theme::BG_TERTIARY);
     p.rect_stroke(lbl_rect, theme::cr(theme::RADIUS_CONTROL), Stroke::new(theme::BORDER_WIDTH, theme::BORDER), StrokeKind::Inside);
-    ui.scope_builder(egui::UiBuilder::new().max_rect(lbl_rect.shrink2(field_inset)), |ui| {
-        let te = TextEdit::singleline(&mut state.picker.other_label_input)
-            .id(Id::new("agents-other-cli-label-input"))
-            .desired_width(field_w - theme::SPACE_GROUP)
-            .frame(egui::Frame::NONE)
-            .font(theme::font_caption())
-            .text_color(theme::TEXT)
-            .hint_text(RichText::new("Label (e.g. Aider)").font(theme::font_caption()).color(theme::TEXT_TERTIARY));
-        let r = ui.add(te);
-        if r.clicked() || r.has_focus() {
-            state.viewport_focused = false;
-        }
-    });
+    if view.intersects(lbl_rect) {
+        ui.scope_builder(egui::UiBuilder::new().max_rect(lbl_rect.shrink2(field_inset)), |ui| {
+            let te = TextEdit::singleline(&mut state.picker.other_label_input)
+                .id(Id::new("agents-other-cli-label-input"))
+                .desired_width(field_w - theme::SPACE_GROUP)
+                .frame(egui::Frame::NONE)
+                .font(theme::font_caption())
+                .text_color(theme::TEXT)
+                .hint_text(RichText::new("Label (e.g. Aider)").font(theme::font_caption()).color(theme::TEXT_TERTIARY));
+            let r = ui.add(te);
+            if r.clicked() || r.has_focus() {
+                state.viewport_focused = false;
+            }
+        });
+    }
     widgets::record(ui, "agents-other-cli-label-input", lbl_rect);
 
     let cmd_rect = Rect::from_min_size(Pos2::new(form_r.left() + pad, lbl_rect.bottom() + theme::SPACE_ROW), Vec2::new(field_w, field_h));
     p.rect_filled(cmd_rect, theme::cr(theme::RADIUS_CONTROL), theme::BG_TERTIARY);
     p.rect_stroke(cmd_rect, theme::cr(theme::RADIUS_CONTROL), Stroke::new(theme::BORDER_WIDTH, theme::BORDER), StrokeKind::Inside);
     let mut enter_pressed = false;
-    ui.scope_builder(egui::UiBuilder::new().max_rect(cmd_rect.shrink2(field_inset)), |ui| {
-        let te = TextEdit::singleline(&mut state.picker.other_command_input)
-            .id(Id::new("agents-other-cli-command-input"))
-            .desired_width(field_w - theme::SPACE_GROUP)
-            .frame(egui::Frame::NONE)
-            .font(theme::font_mono())
-            .text_color(theme::TEXT)
-            .hint_text(RichText::new("Command (e.g. aider)").font(theme::font_mono()).color(theme::TEXT_TERTIARY));
-        let r = ui.add(te);
-        if r.clicked() || r.has_focus() {
-            state.viewport_focused = false;
-        }
-        if r.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) {
-            enter_pressed = true;
-        }
-    });
+    if view.intersects(cmd_rect) {
+        ui.scope_builder(egui::UiBuilder::new().max_rect(cmd_rect.shrink2(field_inset)), |ui| {
+            let te = TextEdit::singleline(&mut state.picker.other_command_input)
+                .id(Id::new("agents-other-cli-command-input"))
+                .desired_width(field_w - theme::SPACE_GROUP)
+                .frame(egui::Frame::NONE)
+                .font(theme::font_mono())
+                .text_color(theme::TEXT)
+                .hint_text(RichText::new("Command (e.g. aider)").font(theme::font_mono()).color(theme::TEXT_TERTIARY));
+            let r = ui.add(te);
+            if r.clicked() || r.has_focus() {
+                state.viewport_focused = false;
+            }
+            if r.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) {
+                enter_pressed = true;
+            }
+        });
+    }
     widgets::record(ui, "agents-other-cli-command-input", cmd_rect);
 
-    let warn_y = cmd_rect.bottom() + theme::SPACE_INLINE;
-    let warn_txt = state.picker.other_error.as_deref().unwrap_or(CUSTOM_CLI_WARNING);
-    let warn_col = if state.picker.other_error.is_some() { STATUS_WARN_TEXT } else { theme::TEXT_TERTIARY };
-    let warn_elided = widgets::elide(&p, warn_txt, &theme::font_caption(), (field_w - 96.0).max(36.0));
-    p.text(Pos2::new(form_r.left() + pad, warn_y), Align2::LEFT_CENTER, warn_elided, theme::font_caption(), warn_col);
+    // The caption has a row of its own under the fields and wraps to two lines at the field width, so it never
+    // shares the button row. The buttons sit 8 px under its block.
+    let caption_block =
+        Rect::from_min_size(Pos2::new(form_r.left() + pad, cmd_rect.bottom() + theme::SPACE_ROW), Vec2::new(field_w, OTHER_FORM_CAPTION_HEIGHT));
+    let caption_txt = state.picker.other_error.as_deref().unwrap_or(CUSTOM_CLI_WARNING);
+    let caption_col = if state.picker.other_error.is_some() { STATUS_WARN_TEXT } else { theme::TEXT_TERTIARY };
+    let caption_format = egui::TextFormat { line_height: Some(theme::LINE_CAPTION), ..egui::TextFormat::simple(theme::font_caption(), caption_col) };
+    let mut caption_job = egui::text::LayoutJob::single_section(caption_txt.to_string(), caption_format);
+    caption_job.wrap = egui::text::TextWrapping { max_width: field_w, max_rows: 2, break_anywhere: false, overflow_character: Some('…') };
+    let caption = p.layout_job(caption_job);
+    let caption_pos = Pos2::new(caption_block.left(), caption_block.center().y - caption.size().y * 0.5);
+    p.galley(caption_pos, caption, caption_col);
 
     let save_w = 48.0;
     let cancel_w = 44.0;
-    let btn_y = cmd_rect.bottom() + theme::SPACE_ROW;
-    let save_r = Rect::from_min_size(Pos2::new(form_r.right() - pad - save_w, btn_y), Vec2::new(save_w, 20.0));
-    let cancel_r = Rect::from_min_size(Pos2::new(save_r.left() - theme::SPACE_FACT - cancel_w, btn_y), Vec2::new(cancel_w, 20.0));
+    let btn_y = form_r.bottom() - pad - OTHER_FORM_BUTTON_HEIGHT;
+    let save_r = Rect::from_min_size(Pos2::new(form_r.right() - pad - save_w, btn_y), Vec2::new(save_w, OTHER_FORM_BUTTON_HEIGHT));
+    let cancel_r = Rect::from_min_size(Pos2::new(save_r.left() - theme::SPACE_FACT - cancel_w, btn_y), Vec2::new(cancel_w, OTHER_FORM_BUTTON_HEIGHT));
 
     let cancel_resp = ui.interact(cancel_r, Id::new("agents-other-cli-cancel"), Sense::click());
     p.rect_filled(cancel_r, theme::cr(theme::RADIUS_CONTROL), if cancel_resp.hovered() { theme::BG_HOVER } else { theme::BG_TERTIARY });
@@ -682,7 +730,6 @@ fn apply_picker_interaction(state: &mut TerminalState, rows: &[PickerRow], inter
             }
         }
         PickerInteraction::SelectRow(idx) => {
-            state.picker.selected_index = idx;
             if let Some(row) = rows.get(idx) {
                 let _ = execute_row_selection(state, row, file_path);
             }
@@ -812,7 +859,8 @@ mod tests {
         for lbl in &expected_labels {
             assert!(full_all.iter().any(|t| t.contains(lbl)), "Full picker missing '{lbl}': {full_all:?}");
         }
-        assert!(full_all.iter().any(|t| t.contains("Skip permissions")), "Full picker must show permission caption");
+        assert!(full_all.iter().any(|t| t.contains("Ask before acting")), "Full picker must show the permission caption, Ask by default (#841): {full_all:?}");
+        assert!(!full_all.iter().any(|t| t.contains("Skip permissions")), "a default picker must not offer Skip as the active mode (#841): {full_all:?}");
         let full_claude_rect =
             ctx.data(|d| d.get_temp::<Rect>(Id::new(("test-rect", "picker-row-agents-dropdown-claude".to_string())))).expect("full picker claude rect");
         assert!((full_claude_rect.height() - theme::CONTROL_ROW).abs() < 0.5, "Full picker row height must be CONTROL_ROW (40px)");
@@ -831,6 +879,37 @@ mod tests {
         let plus_claude_rect =
             ctx.data(|d| d.get_temp::<Rect>(Id::new(("test-rect", "agents-dropdown-claude".to_string())))).expect("compact + menu claude rect");
         assert!((plus_claude_rect.height() - theme::CONTROL_STANDARD).abs() < 0.5, "Compact + menu row height must be CONTROL_STANDARD (28px)");
+
+        st.shutdown();
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The footer names the mode that is active: Ask on a fresh state, Skip only after the user picked it (`#841`).
+    #[test]
+    fn picker_footer_names_the_active_permission_mode() {
+        let root = temp_test_dir("picker-footer-mode");
+        let mut st = TerminalState::for_tab(84_102);
+        st.picker.settings_root_override = Some(root.clone());
+        seed_test_probes(&mut st);
+        let ctx = egui::Context::default();
+        crate::theme::install_fonts(&ctx);
+        crate::theme::apply(&ctx);
+        let panel_rect = Rect::from_min_size(Pos2::new(48.0, 0.0), Vec2::new(260.0, 800.0));
+        let footer_texts = |st: &mut TerminalState| -> Vec<String> {
+            let out = ctx.run_ui(egui::RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1600.0, 900.0))), ..Default::default() }, |ui| {
+                show_picker_panel(st, ui, panel_rect, None);
+            });
+            crate::lint::scan_shapes(&out.shapes).0.into_iter().map(|t| t.text).collect()
+        };
+
+        let fresh = footer_texts(&mut st);
+        assert!(fresh.iter().any(|t| t == "Ask before acting"), "a fresh picker footer says Ask: {fresh:?}");
+        assert!(!fresh.iter().any(|t| t == "Skip permissions"), "{fresh:?}");
+
+        st.permission_mode = crate::terminal::PermissionMode::Skip;
+        let skipped = footer_texts(&mut st);
+        assert!(skipped.iter().any(|t| t == "Skip permissions"), "a user-picked Skip shows in the footer: {skipped:?}");
+        assert!(!skipped.iter().any(|t| t == "Ask before acting"), "{skipped:?}");
 
         st.shutdown();
         let _ = std::fs::remove_dir_all(&root);
@@ -1100,5 +1179,153 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(&st.session_dir);
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn arrow_steps_skip_disabled_rows_and_wrap() {
+        // rows: 0 on, 1 off, 2 off, 3 on, 4 on, 5 off
+        let rows = [true, false, false, true, true, false];
+        assert_eq!(step_row(&rows, 0, true), Some(3), "down skips the disabled rows");
+        assert_eq!(step_row(&rows, 3, true), Some(4));
+        assert_eq!(step_row(&rows, 4, true), Some(0), "down wraps from the last enabled row to the first");
+        assert_eq!(step_row(&rows, 0, false), Some(4), "up wraps from the first enabled row to the last");
+        assert_eq!(step_row(&rows, 4, false), Some(3));
+        assert_eq!(step_row(&rows, 3, false), Some(0), "up skips the disabled rows");
+        assert_eq!(step_row(&rows, 1, true), Some(3), "from a disabled row down goes to the next enabled row");
+        assert_eq!(step_row(&rows, 5, false), Some(4), "from a disabled row up goes to the previous enabled row");
+        assert_eq!(step_row(&[true], 0, true), Some(0), "a lone enabled row keeps focus");
+        assert_eq!(step_row(&[false, false], 0, true), None, "nothing to step to");
+        assert_eq!(step_row(&[], 0, true), None);
+    }
+
+    /// Where the open `Other CLI…` form is painted.
+    #[derive(Clone, Copy, Debug)]
+    enum FormSurface {
+        /// The `+` menu over a running session.
+        PlusMenu,
+        /// The Agents panel before any session exists.
+        Picker,
+    }
+
+    /// What one frame of the open `Other CLI…` form painted.
+    struct PaintedForm {
+        /// Text runs inside the form card, other than the two fields' own text.
+        texts: Vec<crate::lint::TextRun>,
+        card: Rect,
+        cancel: Rect,
+        save: Rect,
+    }
+
+    /// Distance between two rects along their widest gap: 0 when they touch or overlap.
+    fn gap_between(a: Rect, b: Rect) -> f32 {
+        let dx = (a.left() - b.right()).max(b.left() - a.right()).max(0.0);
+        let dy = (a.top() - b.bottom()).max(b.top() - a.bottom()).max(0.0);
+        dx.max(dy)
+    }
+
+    fn paint_other_form(surface: FormSurface, panel_w: f32, error: Option<&str>) -> PaintedForm {
+        let root = temp_test_dir("other-form-layout");
+        let mut st = TerminalState::for_tab(1);
+        st.picker.settings_root_override = Some(root.clone());
+        seed_test_probes(&mut st);
+        st.picker.open_other_form();
+        st.picker.other_error = error.map(str::to_string);
+        let ctx = egui::Context::default();
+        crate::theme::install_fonts(&ctx);
+        crate::theme::apply(&ctx);
+        let panel_rect = Rect::from_min_size(Pos2::new(48.0, 0.0), Vec2::new(panel_w, 800.0));
+        let raw = egui::RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1600.0, 900.0))), ..Default::default() };
+        let out = ctx.run_ui(raw, |ui| match surface {
+            FormSurface::PlusMenu => {
+                st.runtime_dropdown_open = true;
+                render_runtime_dropdown_menu(&mut st, ui, panel_rect, 40.0, None);
+            }
+            FormSurface::Picker => show_picker_panel(&mut st, ui, panel_rect, None),
+        });
+        let rect_of =
+            |name: &str| ctx.data(|d| d.get_temp::<Rect>(Id::new(("test-rect", name.to_string())))).unwrap_or_else(|| panic!("nothing recorded for {name}"));
+        let card = rect_of("agents-other-cli-form");
+        let fields = [rect_of("agents-other-cli-label-input"), rect_of("agents-other-cli-command-input")];
+        let (texts, _) = crate::lint::scan_shapes(&out.shapes);
+        let texts = texts.into_iter().filter(|t| card.contains(t.rect.center()) && !fields.iter().any(|f| f.contains(t.rect.center()))).collect();
+        let painted = PaintedForm { texts, card, cancel: rect_of("agents-other-cli-cancel"), save: rect_of("agents-other-cli-save") };
+        st.shutdown();
+        let _ = std::fs::remove_dir_all(&root);
+        painted
+    }
+
+    /// The caption of the form: every text run in the card that is not a button label.
+    fn caption_of(form: &PaintedForm) -> crate::lint::TextRun {
+        let mut runs = form.texts.iter().filter(|t| t.text != "Cancel" && t.text != "Save");
+        let caption = runs.next().expect("the form paints a caption").clone();
+        assert!(runs.next().is_none(), "the form paints one caption, found more: {:?}", form.texts);
+        caption
+    }
+
+    #[test]
+    fn closing_the_picker_discards_the_other_cli_draft() {
+        let mut st = TerminalState::for_tab(1);
+        st.picker.open_other_form();
+        st.picker.other_label_input = "Aider".into();
+        st.picker.other_command_input = "aider --draft".into();
+        st.picker.other_error = Some("Enter a command to run.".into());
+
+        st.picker.on_close();
+
+        assert!(!st.picker.other_form_open);
+        assert!(st.picker.other_label_input.is_empty() && st.picker.other_command_input.is_empty());
+        assert_eq!(st.picker.other_error, None);
+        st.shutdown();
+    }
+
+    fn one_line(s: &str) -> String {
+        s.split_whitespace().collect::<Vec<_>>().join(" ")
+    }
+
+    fn assert_caption_clear_of_buttons(form: &PaintedForm, what: &str) {
+        let caption = caption_of(form);
+        for (name, button) in [("Cancel", form.cancel), ("Save", form.save)] {
+            let gap = gap_between(caption.rect, button);
+            assert!(
+                gap >= theme::SPACE_INLINE,
+                "{what}: the caption ({:?} at {:?}) is {gap} px from {name} at {button:?}, 8 px is the least",
+                caption.text,
+                caption.rect
+            );
+        }
+        let rows = caption.text.lines().count() as f32;
+        assert!(
+            (caption.rect.height() - rows * theme::LINE_CAPTION).abs() < 0.5,
+            "{what}: a caption row is {} px high, the caption line height is {} px ({:?})",
+            caption.rect.height() / rows,
+            theme::LINE_CAPTION,
+            caption.text
+        );
+        for (name, button) in [("Cancel", form.cancel), ("Save", form.save)] {
+            assert!(button.height() >= theme::TARGET_MIN, "{what}: {name} is {} px high, the least for a target is {}", button.height(), theme::TARGET_MIN);
+        }
+        assert!(form.card.height() % theme::SPACE_FACT == 0.0, "{what}: the card is {} px high, a multiple of 4 is the rhythm", form.card.height());
+        assert!(form.card.contains_rect(caption.rect), "{what}: the caption {:?} stays inside the form card {:?}", caption.rect, form.card);
+        assert!(form.card.contains_rect(form.cancel) && form.card.contains_rect(form.save), "{what}: both buttons stay inside the form card {:?}", form.card);
+    }
+
+    #[test]
+    fn the_other_cli_caption_keeps_8px_from_the_buttons_and_is_not_cut() {
+        for (surface, panel_w) in [(FormSurface::PlusMenu, 208.0), (FormSurface::PlusMenu, 260.0), (FormSurface::Picker, 260.0), (FormSurface::Picker, 440.0)] {
+            let what = format!("{surface:?} in a {panel_w} px panel");
+            let form = paint_other_form(surface, panel_w, None);
+            assert_caption_clear_of_buttons(&form, &what);
+            assert_eq!(one_line(&caption_of(&form).text), CUSTOM_CLI_WARNING, "{what}: the caption is shown whole, not cut with an ellipsis");
+        }
+    }
+
+    #[test]
+    fn a_long_other_cli_error_keeps_8px_from_the_buttons_and_stays_in_the_card() {
+        let error = "Enter a command to run, for example aider or ollama run llama3, then save it.";
+        for (surface, panel_w) in [(FormSurface::PlusMenu, 208.0), (FormSurface::Picker, 260.0), (FormSurface::Picker, 440.0)] {
+            let what = format!("{surface:?} in a {panel_w} px panel, error shown");
+            let form = paint_other_form(surface, panel_w, Some(error));
+            assert_caption_clear_of_buttons(&form, &what);
+        }
     }
 }
