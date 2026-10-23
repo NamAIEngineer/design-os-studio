@@ -216,6 +216,8 @@ pub(super) fn title(ui: &mut Ui, pane: &mut Pane, text: &str, action: Option<Ico
     let mut clicked = false;
     if let Some(ic) = action {
         let b = pane.rect(theme::SECTION_TRAILING_X, 8.0, theme::PANEL_ACTION_BUTTON, theme::PANEL_ACTION_BUTTON);
+        #[cfg(test)]
+        widgets::record(ui, &format!("title-action:{text}"), b);
         clicked = widgets::icon_button(ui, b, ("title-action", text), ic, false, "").clicked();
     }
     pane.y += theme::SECTION_TITLE_HEIGHT;
@@ -452,7 +454,9 @@ fn page_section(app: &mut App, ui: &mut Ui, pane: &mut Pane) {
 }
 
 fn styles_section(app: &mut App, ui: &mut Ui, pane: &mut Pane) {
-    title(ui, pane, "Styles", Some(Icon::Plus), false);
+    // No "+" here: a style is created from the layer it describes, through the style button of that
+    // layer's Typography, Effects or Layout guide section.
+    title(ui, pane, "Styles", None, false);
     let before = pane.y;
     styles_list(app, ui, pane, &[]);
     if pane.y > before {
@@ -594,7 +598,7 @@ fn styles_list(app: &mut App, ui: &mut Ui, pane: &mut Pane, target: &[NodeId]) {
                 }
             }
             if resp.clicked() && !edit_clicked && !target.is_empty() {
-                app.apply_style(target, &e.key);
+                app.apply_picked_style(target, &e.key);
             }
             pane.y += theme::STYLE_ROW_H;
         }
@@ -644,7 +648,7 @@ fn library_styles_list(app: &mut App, ui: &mut Ui, pane: &mut Pane, target: &[No
                 }
                 if resp.clicked() && !target.is_empty() {
                     if let Some(key) = app.use_library_style(&s.library_id, &s.key) {
-                        app.apply_style(target, &key);
+                        app.apply_picked_style(target, &key);
                     }
                 }
                 pane.y += theme::STYLE_ROW_H;
