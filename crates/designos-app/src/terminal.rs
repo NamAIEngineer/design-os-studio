@@ -392,6 +392,9 @@ pub struct SessionEnv {
     pub claude_mcp_config: Option<String>,
     /// Value of `DESIGNOS_CLAUDE_SETTINGS`, which an Ask-mode Claude launch passes as `--settings` (`None` in Skip mode).
     pub claude_settings: Option<String>,
+    /// Value of `GEMINI_CLI_SYSTEM_DEFAULTS_PATH` for a Gemini tab: the private status-hooks file written for it. `None` when
+    /// there is none, and then the variable is left as Studio's own environment holds it.
+    pub gemini_system_defaults: Option<String>,
     /// Value of `DESIGNOS_CLAUDE_PLUGIN`, which an Ask-mode Claude launch passes as `--plugin-dir` (`None` in Skip mode).
     pub claude_plugin: Option<String>,
     #[cfg(test)]
@@ -424,6 +427,7 @@ impl SessionEnv {
             claude_mcp_config: None,
             claude_settings: None,
             claude_plugin: None,
+            gemini_system_defaults: None,
             #[cfg(test)]
             path_override: None,
         }
@@ -533,6 +537,11 @@ pub struct TerminalTab {
     /// When set, the PTY reader also reports an approval prompt in the output as `WaitingForInput` for a tab whose
     /// status otherwise comes from hook events: Antigravity in `Ask` mode has no permission hook (`#656`).
     pub pty_waiting_heuristic: Arc<std::sync::atomic::AtomicBool>,
+    /// What a Gemini CLI tab's confirmation dialog on screen says about its wait (`gemini_dialog`).
+    pub gemini: crate::gemini_dialog::GeminiTabState,
+    /// Bumped each time the screen changes: after the reader thread has fed a chunk to `parser`, and on a resize. A reader of the
+    /// screen that saw the same number last time has nothing new to read (`gemini_dialog`).
+    pub screen_rev: Arc<std::sync::atomic::AtomicU64>,
     /// Timestamp when the child process was first observed dead while waiting for `reader_eof`.
     pub exited_at: Option<std::time::Instant>,
     /// Per-tab ledger of agent canvas turns (`#677`).
@@ -589,7 +598,7 @@ impl TerminalTab {
             return true;
         }
         self.permission_mode == crate::agent_permissions::AgentPermissionMode::Ask
-            && matches!(self.preset, AgentCliPreset::Codex | AgentCliPreset::Grok | AgentCliPreset::Antigravity)
+            && matches!(self.preset, AgentCliPreset::Codex | AgentCliPreset::Grok | AgentCliPreset::Antigravity | AgentCliPreset::Gemini)
             && self.agent_status.lock().ok().is_some_and(|g| matches!(*g, AgentTabStatus::WaitingForInput(_)))
     }
 
@@ -708,6 +717,7 @@ impl TerminalTab {
         let agent_status = Arc::new(Mutex::new(AgentTabStatus::Idle));
         let last_output_at = Arc::new(Mutex::new(None));
         let reader_eof = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let screen_rev = Arc::new(std::sync::atomic::AtomicU64::new(0));
         let pty_waiting_heuristic = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let stop_in_flight = Arc::new(std::sync::atomic::AtomicBool::new(false));
 
@@ -717,6 +727,7 @@ impl TerminalTab {
         let status_bg = Arc::clone(&agent_status);
         let output_at_bg = Arc::clone(&last_output_at);
         let eof_bg = Arc::clone(&reader_eof);
+        let screen_rev_bg = Arc::clone(&screen_rev);
         let waiting_heuristic_bg = Arc::clone(&pty_waiting_heuristic);
         let slave_bg = Arc::downgrade(&slave);
         let stop_bg = Arc::clone(&stop_in_flight);
@@ -767,6 +778,8 @@ impl TerminalTab {
                                     p.process(clean_chunk.as_bytes());
                                 }
                             }
+                            // After the screen has the chunk: a reader that sees the new number reads a screen that has it.
+                            screen_rev_bg.fetch_add(1, std::sync::atomic::Ordering::Release);
                             if let Ok(mut log) = log_bg.lock() {
                                 log.push_str(&clean_chunk);
                                 if log.len() > MAX_RAW_LOG_BYTES {
@@ -826,6 +839,8 @@ impl TerminalTab {
             last_usage_status: None,
             reader_eof,
             pty_waiting_heuristic,
+            gemini: Default::default(),
+            screen_rev,
             exited_at: None,
             turn_ledger: crate::agent_turn_ledger::AgentTurnLedger::default(),
             unread: false,
@@ -971,6 +986,7 @@ impl TerminalTab {
         if let Ok(mut p) = self.parser.lock() {
             p.set_size(rows, cols);
         }
+        self.screen_rev.fetch_add(1, std::sync::atomic::Ordering::Release);
     }
 
     /// Writes raw bytes directly to the PTY master stdin, returning any I/O error.
@@ -2139,6 +2155,7 @@ impl TerminalState {
             claude_mcp_config: crate::agent_permissions::claude_mcp_config_value(&self.session_dir, self.permission_mode),
             claude_settings: crate::agent_permissions::claude_settings_value(&self.session_dir, self.permission_mode),
             claude_plugin: crate::agent_permissions::claude_plugin_value(&self.session_dir, self.permission_mode),
+            gemini_system_defaults: None,
         }
     }
 
@@ -2975,6 +2992,8 @@ impl TerminalState {
         }
         let mut env = self.session_env();
         env.tab_session_uuid = session_uuid.clone();
+        // A Gemini tab in Ask mode reads its status hooks from a private file, written before the tab starts.
+        env.gemini_system_defaults = crate::gemini_status_hooks::prepare_for_tab(&self.session_dir, id, mode, preset).map(|path| path.display().to_string());
         let cmd_override = command.map(|c| {
             let cmd = build_agent_shell_cmd(&default_shell_program(), c);
             #[cfg(test)]
@@ -3001,10 +3020,13 @@ impl TerminalState {
                 tab.is_resumed = is_resumed;
                 tab.spawned_command = command.map(str::to_string);
                 tab.permission_mode = self.permission_mode;
+                // Antigravity has no permission hook. A Gemini tab with no hooks file is not on this list: its waits start from the
+                // dialog on its screen (`gemini_dialog`), never from words in its output.
                 tab.pty_waiting_heuristic.store(
                     self.permission_mode == crate::agent_permissions::AgentPermissionMode::Ask && preset == AgentCliPreset::Antigravity,
                     std::sync::atomic::Ordering::Release,
                 );
+                tab.gemini.hooks = env.gemini_system_defaults.is_some();
                 if let Some(title) = custom_title {
                     tab.title = title;
                 }
@@ -3059,6 +3081,8 @@ impl TerminalState {
                 Ok(self.active_tab)
             }
             Err(e) => {
+                // The tab never started, so nothing will read the hooks file written for it.
+                crate::gemini_status_hooks::remove_tab_file(&self.session_dir, id);
                 self.status_msg = Some(format!("PTY error: {e}"));
                 Err(e)
             }
@@ -3184,6 +3208,9 @@ impl TerminalState {
             let mut removed = self.tabs.remove(idx);
             let _ = removed.child.kill();
             Self::withdraw_tab_approvals(&mut removed);
+            if removed.spawn_preset == AgentCliPreset::Gemini {
+                crate::gemini_status_hooks::remove_tab_file(&self.session_dir, removed.id);
+            }
             if let Some(entry) = self.session_registry.find_entry_mut(removed.id as u64, removed.session_uuid.as_deref()) {
                 if entry.status == crate::agent_sessions::SessionEntryStatus::Active {
                     entry.status = crate::agent_sessions::SessionEntryStatus::Exited;
@@ -3265,9 +3292,12 @@ impl TerminalState {
             actions.push(TerminalAction::ApplyLiveLog(lines));
         }
 
-        // Channel 3: Append-only agent-events.jsonl written by Claude, Grok, and Antigravity hooks (`#683`).
+        // Channel 3: Append-only agent-events.jsonl written by Claude, Grok, Antigravity and Gemini hooks (`#683`).
         // Each routed status change also drives that tab's turn ledger (`#677`) for CLIs without turn marks.
-        let has_eligible_tabs = self.tabs.iter().any(|t| matches!(t.spawn_preset, AgentCliPreset::Claude | AgentCliPreset::Grok | AgentCliPreset::Antigravity));
+        let has_eligible_tabs = self
+            .tabs
+            .iter()
+            .any(|t| matches!(t.spawn_preset, AgentCliPreset::Claude | AgentCliPreset::Grok | AgentCliPreset::Antigravity | AgentCliPreset::Gemini));
         let records = self.event_stream.poll(has_eligible_tabs);
         // Tabs whose status left `WaitingForInput` for `Working`/`Done` in this poll: an approval answered in the
         // CLI itself (not the in-panel card) withdraws that tab's stale approval requests below (`#656`).
@@ -3279,6 +3309,7 @@ impl TerminalState {
                 .enumerate()
                 .map(|(idx, t)| crate::agent_turn_status::TabAttributionInfo {
                     idx,
+                    tab_id: t.id,
                     preset: t.spawn_preset,
                     is_alive: t.is_alive(),
                     session_uuid: t.session_uuid.clone(),
@@ -3361,6 +3392,9 @@ impl TerminalState {
                 }
             }
         }
+
+        // A Gemini tab's wait follows the confirmation dialog on its screen, after the hook records above have had their say.
+        self.sync_gemini_dialogs();
 
         // Channel 4: each tab's folder in the Studio-private approval channel, written by Claude's PermissionRequest hook (#656).
         // No folder an agent can write is polled: a request file there is the agent's own doing, not the hook's.
@@ -3566,6 +3600,7 @@ impl TerminalState {
                 if let Ok(mut parser) = tab.parser.lock() {
                     parser.process("\r\n[design:os] Agent exited — this tab no longer accepts input. Open a new tab to continue.\r\n".as_bytes());
                 }
+                tab.screen_rev.fetch_add(1, std::sync::atomic::Ordering::Release);
                 Self::withdraw_tab_approvals(tab);
                 if let Ok(mut st) = tab.agent_status.lock() {
                     if matches!(*st, AgentTabStatus::WaitingForInput(_)) {
@@ -4760,8 +4795,13 @@ pub(crate) fn write_session_agent_files_for_job(job: &crate::agent_session_files
 /// Shell command that appends one wrapped hook record to `<session_dir>/agent-events.jsonl` (`#683` §3.1)
 /// and updates `agent-status.json` for legacy status readers.
 fn status_hook_command(status_path: &Path, event: &str, state: &str) -> String {
+    status_hook_command_for_tab(status_path, event, state, None)
+}
+
+/// [`status_hook_command`] whose record also names tab `tab` (Gemini CLI's hooks; `None` gives the plain command).
+pub(crate) fn status_hook_command_for_tab(status_path: &Path, event: &str, state: &str, tab: Option<usize>) -> String {
     let events_path = status_path.parent().map(|p| p.join("agent-events.jsonl")).unwrap_or_else(|| status_path.with_file_name("agent-events.jsonl"));
-    let append_cmd = crate::agent_turn_status::event_append_command(&events_path, event);
+    let append_cmd = crate::agent_turn_status::event_append_command_for_tab(&events_path, event, tab);
     format!(
         "{append_cmd}; printf '{{\"state\":\"{state}\",\"run_id\":\"%s\"}}\\n' \"${{DESIGNOS_AGENT_RUN_ID:-}}\" > {}",
         crate::agent_turn_status::sh_single_quote(&status_path.display().to_string())
@@ -4968,6 +5008,10 @@ pub fn configure_pty_env_with_session(cmd: &mut CommandBuilder, preset: AgentCli
         cmd.env("DESIGNOS_DOC_NAME", &sess.doc_name);
         if preset == AgentCliPreset::Gemini {
             cmd.env("GEMINI_CLI_TRUSTED_FOLDERS_PATH", sess.session_dir.join(".gemini").join("trustedFolders.json").as_os_str());
+            // The variable is Gemini's own, so a value the user or an admin set stays when Studio has no file to name.
+            if let Some(defaults) = sess.gemini_system_defaults.as_deref() {
+                cmd.env(crate::gemini_status_hooks::SYSTEM_DEFAULTS_ENV, defaults);
+            }
         }
         if let Some(tab_uuid) = sess.tab_session_uuid.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
             cmd.env("DESIGNOS_TAB_SESSION_UUID", tab_uuid);
@@ -4994,6 +5038,15 @@ pub fn configure_pty_env_with_session(cmd: &mut CommandBuilder, preset: AgentCli
     #[cfg(test)]
     if let Some(overrides) = session.and_then(|s| s.path_override.as_ref()) {
         cmd.env("PATH", overrides);
+        return;
+    }
+    // A test's agent tab finds no real agent CLI: it gets the stubs the test put in `path_prepend`, then the test process's own `PATH`
+    // without any folder that holds an agent CLI (the user's `~/.local/bin`, Homebrew's, and so on). The runner's own tools, a stub's
+    // `python3` and `sh`, stay where the runner has them.
+    #[cfg(test)]
+    if !matches!(preset, AgentCliPreset::Shell | AgentCliPreset::DesignOsHelp) {
+        let prepend = session.map(|s| s.path_prepend.as_slice()).unwrap_or_default();
+        cmd.env("PATH", crate::test_agent_path::test_agent_path(prepend, std::env::var_os("PATH")));
         return;
     }
     if std::env::var_os("PATH").is_some_and(|p| p.is_empty()) {
@@ -5872,6 +5925,10 @@ fn render_vt100_viewport(state: &mut TerminalState, ui: &mut Ui, viewport_rect: 
         {
             let bracketed_paste = tab.parser.lock().ok().map(|pg| pg.screen().bracketed_paste()).unwrap_or(false);
             let mut raw_bytes: Vec<u8> = Vec::new();
+            // Set when a key that can answer Gemini CLI's confirmation dialog is among them: Enter, Esc, Ctrl+C or an option number
+            // (`ToolConfirmationMessage.tsx:185-196`, `useSelectionList.ts:411-461`, `AppContainer.tsx:1695-1701` in 0.35.3). It never
+            // ends a wait; the dialog on screen does (`gemini_dialog`).
+            let mut answers_gemini_dialog = false;
             let mut copy_selection = false;
             let mut select_all = false;
             let mut clear_scrollback = false;
@@ -5892,6 +5949,7 @@ fn render_vt100_viewport(state: &mut TerminalState, ui: &mut Ui, viewport_rect: 
                             if !i.modifiers.command && !i.modifiers.ctrl && !i.modifiers.alt && text != "\n" && text != "\r" {
                                 tab.input_line_buffer.push_str(text);
                                 raw_bytes.extend_from_slice(text.as_bytes());
+                                answers_gemini_dialog |= matches!(text.as_bytes(), [b'1'..=b'5']);
                             }
                         }
                         Event::Key { key, pressed: true, modifiers, .. } => {
@@ -5934,6 +5992,7 @@ fn render_vt100_viewport(state: &mut TerminalState, ui: &mut Ui, viewport_rect: 
                                         } else {
                                             tab.input_line_buffer.clear();
                                             raw_bytes.push(0x03);
+                                            answers_gemini_dialog = true;
                                         }
                                     }
                                     Key::D => raw_bytes.push(0x04),
@@ -5962,6 +6021,7 @@ fn render_vt100_viewport(state: &mut TerminalState, ui: &mut Ui, viewport_rect: 
                                         tab.input_line_buffer.clear();
                                         tab.clear_session_failure();
                                         raw_bytes.push(b'\r');
+                                        answers_gemini_dialog = true;
                                     }
                                     Key::Backspace => {
                                         let _ = tab.input_line_buffer.pop();
@@ -5973,6 +6033,7 @@ fn render_vt100_viewport(state: &mut TerminalState, ui: &mut Ui, viewport_rect: 
                                             close_search = true;
                                         } else {
                                             raw_bytes.push(0x1b);
+                                            answers_gemini_dialog = true;
                                         }
                                     }
                                     Key::ArrowUp => raw_bytes.extend_from_slice(b"\x1b[A"),
@@ -6014,6 +6075,9 @@ fn render_vt100_viewport(state: &mut TerminalState, ui: &mut Ui, viewport_rect: 
                     pg.set_scrollback(0);
                 }
                 tab.write_bytes(&raw_bytes);
+                if answers_gemini_dialog {
+                    tab.note_gemini_key();
+                }
             }
         }
 
@@ -6346,6 +6410,36 @@ mod ask_hooks_tests;
 
 #[cfg(all(test, unix))]
 mod ask_launch_sources_tests;
+
+#[cfg(all(test, unix))]
+mod gemini_status_tests;
+
+#[cfg(all(test, unix))]
+mod gemini_test_support;
+
+#[cfg(all(test, unix))]
+mod gemini_launch_tests;
+
+#[cfg(all(test, unix))]
+mod gemini_wait_tests;
+
+#[cfg(all(test, unix))]
+mod gemini_dialog_tests;
+
+#[cfg(all(test, unix))]
+mod gemini_composer_tests;
+
+#[cfg(all(test, unix))]
+mod delayed_enter_tests;
+
+#[cfg(all(test, unix))]
+mod gemini_narrow_tests;
+
+#[cfg(all(test, unix))]
+mod gemini_range_tests;
+
+#[cfg(all(test, unix))]
+mod real_cli_launch_tests;
 
 #[cfg(test)]
 mod tests {
@@ -8878,6 +8972,31 @@ mod tests {
         assert_eq!(home_before, home_after, "$HOME/.gemini/settings.json must never be modified by Studio");
     }
 
+    /// `gemini mcp list` in `session_dir`, as the live check runs it, against a scratch home so that it never writes to the
+    /// user's `~/.gemini` (Gemini's project registry and login live there). The placeholder key only satisfies the auth check
+    /// that comes before the listing: nothing logs in, and no model is called.
+    fn gemini_mcp_list_command(session_dir: &Path, trusted_path: &Path) -> std::process::Command {
+        let mut list_cmd = std::process::Command::new("gemini");
+        list_cmd.args(["mcp", "list"]).current_dir(session_dir).env("GEMINI_CLI_TRUSTED_FOLDERS_PATH", trusted_path);
+        crate::scratch_cli_home::isolate_cli_homes(&mut list_cmd);
+        list_cmd.env("GEMINI_API_KEY", "placeholder-not-a-key");
+        list_cmd
+    }
+
+    #[test]
+    fn the_live_check_of_gemini_uses_a_scratch_home() {
+        let session = std::env::temp_dir().join("designos-live-check-session");
+        let cmd = gemini_mcp_list_command(&session, &session.join(".gemini").join("trustedFolders.json"));
+        let env = |name: &str| cmd.get_envs().find(|(key, _)| *key == name).and_then(|(_, value)| value).map(PathBuf::from);
+        let home = env("GEMINI_CLI_HOME").expect("Gemini's home folder is moved off the user's");
+        assert_eq!(env("HOME").as_deref(), Some(home.as_path()), "anything that asks the OS for the home gets the scratch one too");
+        assert!(home.starts_with(std::env::temp_dir()), "{}", home.display());
+        assert!(std::env::var_os("HOME").is_none_or(|real| !home.starts_with(real)), "the scratch home sits inside the real one");
+        assert!(home.join(".gemini").join("settings.json").is_file(), "the scratch home carries the auth type `gemini mcp list` checks");
+        assert!(env("GEMINI_API_KEY").is_some(), "a placeholder key satisfies that check; no login happens");
+        assert!(cmd.get_args().eq(["mcp", "list"]) && cmd.get_current_dir() == Some(session.as_path()));
+    }
+
     #[test]
     fn gemini_live_check() {
         let mut st = isolated_683_state(780);
@@ -8904,9 +9023,7 @@ mod tests {
         assert!(argv.windows(2).any(|w| w == ["--", "--workspace"]), "must separate --workspace with --: {argv:?}");
 
         if runtime_binary_available("gemini") {
-            let mut list_cmd = std::process::Command::new("gemini");
-            list_cmd.args(["mcp", "list"]).current_dir(&st.session_dir).env("GEMINI_CLI_TRUSTED_FOLDERS_PATH", &trusted_path);
-            if let Ok(out) = list_cmd.output() {
+            if let Ok(out) = gemini_mcp_list_command(&st.session_dir, &trusted_path).output() {
                 let combined = format!("{}\n{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
                 assert!(combined.contains("designos:"), "gemini mcp list must discover the session-scoped designos server: {combined}");
             }
@@ -9067,18 +9184,20 @@ mod tests {
     #[test]
     fn receipt_shows_exact_duration_and_counts() {
         let mut tracker = crate::agent_turn_status::TabTurnTracker::default();
-        let submit = crate::agent_turn_status::AgentEventRecord { t: 100.0, e: "UserPromptSubmit".to_string(), p: serde_json::json!({"session_id": "s1"}) };
+        let submit =
+            crate::agent_turn_status::AgentEventRecord { t: 100.0, e: "UserPromptSubmit".to_string(), tab: None, p: serde_json::json!({"session_id": "s1"}) };
         let _ = tracker.on_event(&submit);
         for i in 0..12 {
             let pre = crate::agent_turn_status::AgentEventRecord {
                 t: 101.0 + f64::from(i),
                 e: "PreToolUse".to_string(),
+                tab: None,
                 p: serde_json::json!({"session_id": "s1", "tool_name": "designos_update_node"}),
             };
             let _ = tracker.on_event(&pre);
         }
         tracker.record_touched_layers([1, 2, 3, 4, 5, 6, 7]);
-        let stop = crate::agent_turn_status::AgentEventRecord { t: 180.0, e: "Stop".to_string(), p: serde_json::json!({"session_id": "s1"}) };
+        let stop = crate::agent_turn_status::AgentEventRecord { t: 180.0, e: "Stop".to_string(), tab: None, p: serde_json::json!({"session_id": "s1"}) };
         let eff = tracker.on_event(&stop);
         let receipt = eff.receipt.expect("receipt emitted on Stop");
         assert_eq!(receipt.format_line(), "Worked for 1m 20s · 12 tool calls · 7 layers changed");
@@ -9095,10 +9214,15 @@ mod tests {
     #[test]
     fn no_count_is_invented_without_data() {
         let mut tracker = crate::agent_turn_status::TabTurnTracker::default();
-        let _ = tracker.on_event(&crate::agent_turn_status::AgentEventRecord { t: 10.0, e: "UserPromptSubmit".to_string(), p: serde_json::json!({}) });
         let _ =
-            tracker.on_event(&crate::agent_turn_status::AgentEventRecord { t: 11.0, e: "PreToolUse".to_string(), p: serde_json::json!({"tool_name": "Read"}) });
-        let eff = tracker.on_event(&crate::agent_turn_status::AgentEventRecord { t: 15.0, e: "Stop".to_string(), p: serde_json::json!({}) });
+            tracker.on_event(&crate::agent_turn_status::AgentEventRecord { t: 10.0, e: "UserPromptSubmit".to_string(), tab: None, p: serde_json::json!({}) });
+        let _ = tracker.on_event(&crate::agent_turn_status::AgentEventRecord {
+            t: 11.0,
+            e: "PreToolUse".to_string(),
+            tab: None,
+            p: serde_json::json!({"tool_name": "Read"}),
+        });
+        let eff = tracker.on_event(&crate::agent_turn_status::AgentEventRecord { t: 15.0, e: "Stop".to_string(), tab: None, p: serde_json::json!({}) });
         let receipt = eff.receipt.expect("receipt emitted");
         assert_eq!(receipt.layers_changed, None);
         let line = receipt.format_line();
@@ -11115,6 +11239,14 @@ mod tests {
             assert!(texts_nosel.iter().any(|t| t.text == expected.label), "NoSelection prompt label {:?} must be painted: {:?}", expected.label, texts_nosel);
         }
         kill_tabs(&mut st);
+    }
+
+    /// Runs last among the tests `real_cli_launch_tests` starts in a child process (the name sorts after theirs), so that a CLI
+    /// the earlier tests started in the background has run before the child exits. Skipped in a normal run.
+    #[test]
+    #[ignore = "only the real-CLI launch check runs this, last, in a child process"]
+    fn zz_let_background_launches_finish() {
+        std::thread::sleep(std::time::Duration::from_millis(1500));
     }
 
     #[test]

@@ -46,6 +46,9 @@ mod fig_export;
 mod find;
 mod font_refit;
 mod fonts;
+mod gemini_dialog;
+mod gemini_screen;
+mod gemini_status_hooks;
 mod history;
 mod home;
 mod icons;
@@ -77,6 +80,8 @@ mod present;
 mod proto;
 mod protovars;
 mod richtext;
+#[cfg(test)]
+mod scratch_cli_home;
 mod shell;
 mod showcase;
 mod skills;
@@ -86,6 +91,8 @@ mod system_paste;
 mod tabs;
 mod terminal;
 mod terminal_undo_chord;
+#[cfg(test)]
+mod test_agent_path;
 #[cfg(test)]
 mod test_alloc_count;
 #[cfg(test)]
