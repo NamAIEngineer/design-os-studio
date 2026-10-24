@@ -254,7 +254,7 @@ impl AgentCliPreset {
                 "claude --dangerously-skip-permissions --mcp-config \"$DESIGNOS_MCP_CONFIG\" --settings \"$DESIGNOS_SESSION_DIR/hooks.json\" --append-system-prompt \"You are inside DESIGN:OS Studio bound exclusively to file '$DESIGNOS_DOC_NAME' (session $DESIGNOS_SESSION_DIR). Use the pre-fetched bootstrap context (or call designos_get_app_state) for the current selected page, frames, tokens, and components, and deliver all designs onto that file and page via designos-mcp tools (designos_apply_spec, designos_create_node, designos_update_node) or by writing NodeSpec JSON to $DESIGNOS_LIVE_SPEC.\""
             }
             (AgentCliPreset::Claude, PermissionMode::Ask) => {
-                "claude --mcp-config \"$DESIGNOS_MCP_CONFIG\" --settings \"$DESIGNOS_CLAUDE_SETTINGS\" --append-system-prompt \"You are inside DESIGN:OS Studio bound exclusively to file '$DESIGNOS_DOC_NAME' (session $DESIGNOS_SESSION_DIR). Use the pre-fetched bootstrap context (or call designos_get_app_state) for the current selected page, frames, tokens, and components, and deliver all designs onto that file and page via designos-mcp tools (designos_apply_spec, designos_create_node, designos_update_node) or by writing NodeSpec JSON to $DESIGNOS_LIVE_SPEC.\""
+                "claude --mcp-config \"$DESIGNOS_CLAUDE_MCP_CONFIG\" --settings \"$DESIGNOS_CLAUDE_SETTINGS\" --setting-sources user --plugin-dir \"$DESIGNOS_CLAUDE_PLUGIN\" --append-system-prompt \"You are inside DESIGN:OS Studio bound exclusively to file '$DESIGNOS_DOC_NAME' (session $DESIGNOS_SESSION_DIR). Use the pre-fetched bootstrap context (or call designos_get_app_state) for the current selected page, frames, tokens, and components, and deliver all designs onto that file and page via designos-mcp tools (designos_apply_spec, designos_create_node, designos_update_node) or by writing NodeSpec JSON to $DESIGNOS_LIVE_SPEC.\""
             }
             (AgentCliPreset::Codex, PermissionMode::Skip) => concat!("codex --dangerously-bypass-approvals-and-sandbox", codex_mcp_overrides!()),
             (AgentCliPreset::Codex, PermissionMode::Ask) => concat!("codex", codex_mcp_overrides!()),
@@ -388,8 +388,12 @@ pub struct SessionEnv {
     pub doc_name: String,
     pub path_prepend: Vec<PathBuf>,
     pub tab_session_uuid: Option<String>,
+    /// Value of `DESIGNOS_CLAUDE_MCP_CONFIG`, which an Ask-mode Claude launch passes as `--mcp-config` (`None` in Skip mode).
+    pub claude_mcp_config: Option<String>,
     /// Value of `DESIGNOS_CLAUDE_SETTINGS`, which an Ask-mode Claude launch passes as `--settings` (`None` in Skip mode).
     pub claude_settings: Option<String>,
+    /// Value of `DESIGNOS_CLAUDE_PLUGIN`, which an Ask-mode Claude launch passes as `--plugin-dir` (`None` in Skip mode).
+    pub claude_plugin: Option<String>,
     #[cfg(test)]
     pub path_override: Option<std::ffi::OsString>,
 }
@@ -417,7 +421,9 @@ impl SessionEnv {
             doc_name: "Untitled".to_string(),
             path_prepend: Vec::new(),
             tab_session_uuid: None,
+            claude_mcp_config: None,
             claude_settings: None,
+            claude_plugin: None,
             #[cfg(test)]
             path_override: None,
         }
@@ -2130,7 +2136,9 @@ impl TerminalState {
             #[cfg(test)]
             path_override: self.path_override.clone(),
             tab_session_uuid: None,
+            claude_mcp_config: crate::agent_permissions::claude_mcp_config_value(&self.session_dir, self.permission_mode),
             claude_settings: crate::agent_permissions::claude_settings_value(&self.session_dir, self.permission_mode),
+            claude_plugin: crate::agent_permissions::claude_plugin_value(&self.session_dir, self.permission_mode),
         }
     }
 
@@ -4569,6 +4577,25 @@ fn invalid_data(e: serde_json::Error) -> std::io::Error {
     std::io::Error::new(std::io::ErrorKind::InvalidData, e)
 }
 
+/// Writes the MCP config an Ask-mode Claude starts its servers from into the private channel folder `private_dir`: the
+/// session's `mcp_config` with the `designos` server's `DESIGNOS_MCP_CONFIG` pointing at this copy (so the server reads
+/// its enabled tools from it, not from the session folder), owner-only, rewritten at every sync. A failure is reported
+/// and leaves no copy or the previous one: Claude then starts no server, or the one Studio wrote last, and never one
+/// from a file in the session folder.
+fn write_private_claude_mcp_config(private_dir: &Path, mcp_config: &serde_json::Value) {
+    let path = private_dir.join(crate::agent_approval_channel::MCP_CONFIG_FILE_NAME);
+    let mut private_config = mcp_config.clone();
+    if let Some(slot) = private_config.pointer_mut("/mcpServers/designos/env/DESIGNOS_MCP_CONFIG") {
+        *slot = serde_json::Value::String(path.display().to_string());
+    }
+    let written = serde_json::to_vec_pretty(&private_config)
+        .map_err(invalid_data)
+        .and_then(|bytes| crate::agent_approval_channel::write_owner_only_file(&path, &bytes, false));
+    if let Err(e) = written {
+        eprintln!("design:os studio: could not write Claude's MCP config to {}: {e}", path.display());
+    }
+}
+
 /// Writes `mcp-config.json`, `hooks.json`, `SKILL.md`, `AGENTS.md`, and runtime-specific plugin/hook
 /// files for `job` into `job.session_dir` (`#690` §6).
 pub(crate) fn write_session_agent_files_for_job(job: &crate::agent_session_files::SnapshotJob) -> std::io::Result<()> {
@@ -4576,12 +4603,32 @@ pub(crate) fn write_session_agent_files_for_job(job: &crate::agent_session_files
     let workspace_dir = session_workspace_dir(job.file_path.as_deref());
     let mcp_config_path = job.session_dir.join("mcp-config.json");
 
+    // Ask mode: Claude's MCP config, hooks and skill go to a folder only Studio writes (made first, as the MCP config below
+    // is copied into it). Claude starts the servers of its `--mcp-config` file as commands, and reads the hooks of its
+    // `--settings` file as commands too, so neither may be a file the agent can write. When the folder is not there (no
+    // private data folder, or it cannot be made private) nothing is installed: Claude starts with no MCP server and the
+    // inline settings `{}`.
+    let private_dir = if job.ask_mode {
+        match crate::agent_approval_channel::prepare_channel_dir(&job.session_dir) {
+            Ok(dir) => Some(dir),
+            Err(e) => {
+                eprintln!("design:os studio: in-panel approvals are off for this session, Claude will ask in its terminal: {e}");
+                None
+            }
+        }
+    } else {
+        None
+    };
+
     // The default (every tool) is never written down: an absent `designos` key means "all", so a tool a later
     // build adds is on for sessions that survive an update. A user-edited `enabled_tools` list is kept across
     // each page or selection sync, together with the `known_tools` snapshot that lets new tools be switched on.
     let existing_config = std::fs::read_to_string(&mcp_config_path).ok();
     let custom_tools = designos_mcp::rules::reconcile_designos_block(existing_config.as_deref());
 
+    // The server's environment holds ids and paths, and no document or page name: every CLI loads this config by itself,
+    // and `designos-mcp` reads neither name (the tab's shell still has `DESIGNOS_DOC_NAME` and `DESIGNOS_TARGET_PAGE_NAME`).
+    // `DESIGNOS_FILE` is the document's path on disk, which `designos-mcp` needs.
     let mut mcp_config = serde_json::json!({
         "mcpServers": {
             "designos": {
@@ -4599,8 +4646,6 @@ pub(crate) fn write_session_agent_files_for_job(job: &crate::agent_session_files
                     "DESIGNOS_LIVE_SPEC": job.live_spec_path.display().to_string(),
                     "DESIGNOS_CONTEXT_JSON": job.context_json_path.display().to_string(),
                     "DESIGNOS_TARGET_PAGE_ID": job.current_page_id.to_string(),
-                    "DESIGNOS_TARGET_PAGE_NAME": job.current_page_name,
-                    "DESIGNOS_DOC_NAME": job.doc_name,
                     "DESIGNOS_FILE": job.file_path.as_ref().map(|p| p.display().to_string()).unwrap_or_default()
                 }
             }
@@ -4614,6 +4659,9 @@ pub(crate) fn write_session_agent_files_for_job(job: &crate::agent_session_files
     write_agy_session_plugin(&job.session_dir, &bytes)?;
     write_gemini_session_config(&job.session_dir, &mcp_config);
     write_grok_session_config(&job.session_dir, &mcp_config)?;
+    if let Some(dir) = &private_dir {
+        write_private_claude_mcp_config(dir, &mcp_config);
+    }
 
     let page_context = page_context_json(&job.session_id, &job.doc_name, job.file_path.as_deref(), job.current_page_id, &job.current_page_name);
     // Claude's reply to a prompt hook: the page as `additionalContext`, nothing that could block the prompt.
@@ -4634,17 +4682,6 @@ pub(crate) fn write_session_agent_files_for_job(job: &crate::agent_session_files
     // Claude reads that file (not one in the session folder, which the agent can write), so the agent cannot swap the
     // approval handler for its own. When the folder is not there (no private data folder, or it cannot be made private)
     // nothing is installed: Claude starts with the inline settings `{}` and asks in its own terminal prompt.
-    let private_dir = if job.ask_mode {
-        match crate::agent_approval_channel::prepare_channel_dir(&job.session_dir) {
-            Ok(dir) => Some(dir),
-            Err(e) => {
-                eprintln!("design:os studio: in-panel approvals are off for this session, Claude will ask in its terminal: {e}");
-                None
-            }
-        }
-    } else {
-        None
-    };
     let approve_script_path = private_dir.as_deref().and_then(|dir| match crate::agent_permissions::install_hook_script(dir, &job.session_dir) {
         Ok(path) => Some(path),
         Err(e) => {
@@ -4682,9 +4719,8 @@ pub(crate) fn write_session_agent_files_for_job(job: &crate::agent_session_files
     // The session `SKILL.md` carries the rules pack for the tools this session enables.
     let rules_body = session_rules_pack(custom_tools.as_ref().map(|custom| &custom.enabled));
     let selection_spec_path = job.session_dir.join("selection.spec.json");
+    // The skill is loaded by the CLIs by themselves and holds no document or page name (see `format_session_skill_md`).
     let skill_md = designos_mcp::rules::format_session_skill_md(
-        &job.doc_name,
-        &job.current_page_name,
         &job.session_id,
         job.current_page_id,
         &job.live_canvas_path,
@@ -4697,6 +4733,15 @@ pub(crate) fn write_session_agent_files_for_job(job: &crate::agent_session_files
     );
     atomic_write_session_file(&job.session_dir.join("SKILL.md"), skill_md.as_bytes())?;
     atomic_write_session_file(&job.session_dir.join(".claude/skills/designos-studio/SKILL.md"), skill_md.as_bytes())?;
+    // An Ask-mode Claude loads no project skills (`--setting-sources user`), so the same skill is also written, as a plugin,
+    // to the private folder its `--plugin-dir` names. Skip-mode tabs keep reading the copy above.
+    if job.ask_mode {
+        if let Some(plugin_dir) = private_dir.as_deref().map(|dir| dir.join(crate::agent_approval_channel::CLAUDE_PLUGIN_DIR_NAME)) {
+            if let Err(e) = crate::agent_permissions::write_claude_plugin(&plugin_dir, skill_md.as_bytes()) {
+                eprintln!("design:os studio: could not write Studio's skill for Claude to {}: {e}", plugin_dir.display());
+            }
+        }
+    }
     atomic_write_session_file(&job.session_dir.join(".agents/skills/designos-studio/SKILL.md"), skill_md.as_bytes())?;
     // Codex, Grok, Antigravity, Gemini CLI, and OpenCode read `AGENTS.md` / `GEMINI.md` from their cwd (the session dir).
     atomic_write_session_file(&job.session_dir.join("AGENTS.md"), skill_md.as_bytes())?;
@@ -4882,11 +4927,27 @@ pub fn configure_pty_env_with_session(cmd: &mut CommandBuilder, preset: AgentCli
         // `~/.grok/trusted_folders.toml`.
         cmd.env("GROK_FOLDER_TRUST", "0");
     }
-    // Only an Ask-mode tab carries the private hooks file Studio names; a value Studio's own environment held (or
-    // an earlier tab left) must never reach any other tab, and Skip mode names no such file.
-    match session.and_then(|sess| sess.claude_settings.as_deref()) {
-        Some(settings) => cmd.env(crate::agent_permissions::CLAUDE_SETTINGS_ENV, settings),
-        None => cmd.env_remove(crate::agent_permissions::CLAUDE_SETTINGS_ENV),
+    // The Ask launch names these three variables, and Claude reads an empty `--settings` as no settings and an empty
+    // `--plugin-dir` as its own working folder. So an Ask tab always gets non-empty values (a private file or plugin, or
+    // values that name nothing). A tab without a session takes the Ask command as its safety net, so it gets the values
+    // that name nothing. A Skip tab names none of the variables, and a value Studio's own environment held must not reach it.
+    let (mcp_config, settings, plugin) = match session {
+        Some(sess) => (sess.claude_mcp_config.as_deref(), sess.claude_settings.as_deref(), sess.claude_plugin.as_deref()),
+        None => (
+            Some(crate::agent_permissions::NO_CLAUDE_MCP_CONFIG),
+            Some(crate::agent_permissions::NO_CLAUDE_SETTINGS),
+            Some(crate::agent_permissions::NO_CLAUDE_PLUGIN_DIR),
+        ),
+    };
+    for (name, value) in [
+        (crate::agent_permissions::CLAUDE_MCP_CONFIG_ENV, mcp_config),
+        (crate::agent_permissions::CLAUDE_SETTINGS_ENV, settings),
+        (crate::agent_permissions::CLAUDE_PLUGIN_ENV, plugin),
+    ] {
+        match value {
+            Some(value) => cmd.env(name, value),
+            None => cmd.env_remove(name),
+        }
     }
 
     if let Some(sess) = session {
@@ -6279,6 +6340,9 @@ mod ask_mode_tests;
 #[cfg(all(test, unix))]
 mod ask_hooks_tests;
 
+#[cfg(all(test, unix))]
+mod ask_launch_sources_tests;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -7660,7 +7724,9 @@ mod tests {
         st.flush_live_sync();
         for rel in ["SKILL.md", ".claude/skills/designos-studio/SKILL.md", ".agents/skills/designos-studio/SKILL.md", "AGENTS.md"] {
             let text = std::fs::read_to_string(st.session_dir.join(rel)).unwrap_or_else(|e| panic!("{rel}: {e}"));
-            assert!(text.contains("designos-studio") && text.contains("Skill Layout File"), "{rel}: {text}");
+            // Each CLI loads this file by itself, so it names the open file through `$DESIGNOS_DOC_NAME` and not by its name.
+            assert!(text.contains("designos-studio") && text.contains("`$DESIGNOS_DOC_NAME`"), "{rel}: {text}");
+            assert!(!text.contains("Skill Layout File"), "{rel} carries the document name: {text}");
             assert!(text.ends_with(designos_mcp::rules::GENERATED_RULES_MD.trim_start()), "{rel} must include the generated rules pack");
         }
     }

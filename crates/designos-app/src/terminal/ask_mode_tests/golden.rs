@@ -23,13 +23,20 @@ fn golden_launches(cli: &str, mode: PermissionMode) -> [String; 4] {
     match cli {
         "claude" => {
             let flag = if skip { " --dangerously-skip-permissions" } else { "" };
-            // Skip keeps the tail as pinned above. In Ask mode only the `--settings` value differs: the hooks file is the
-            // private one Studio names in `DESIGNOS_CLAUDE_SETTINGS`, never `hooks.json` in the session folder.
+            // Skip keeps the tail as pinned above. In Ask mode its `--mcp-config` and `--settings` arguments become four: the MCP
+            // config and the hooks file are the private ones Studio names in `DESIGNOS_CLAUDE_MCP_CONFIG` and
+            // `DESIGNOS_CLAUDE_SETTINGS`, never `mcp-config.json` or `hooks.json` in the session folder; Claude may load only
+            // the user's own setting sources (so nothing from `<session>/.claude/settings*.json` or `.mcp.json`); and Studio's
+            // skill comes from the private plugin in `DESIGNOS_CLAUDE_PLUGIN`.
             let tail = if skip {
                 CLAUDE_TAIL.to_string()
             } else {
-                assert_eq!(CLAUDE_TAIL.matches("--settings \"$DESIGNOS_SESSION_DIR/hooks.json\"").count(), 1, "the tail names the hooks file once");
-                CLAUDE_TAIL.replace("--settings \"$DESIGNOS_SESSION_DIR/hooks.json\"", "--settings \"$DESIGNOS_CLAUDE_SETTINGS\"")
+                let skip_args = "--mcp-config \"$DESIGNOS_MCP_CONFIG\" --settings \"$DESIGNOS_SESSION_DIR/hooks.json\"";
+                assert_eq!(CLAUDE_TAIL.matches(skip_args).count(), 1, "the tail names the MCP config and the hooks file once");
+                CLAUDE_TAIL.replace(
+                    skip_args,
+                    "--mcp-config \"$DESIGNOS_CLAUDE_MCP_CONFIG\" --settings \"$DESIGNOS_CLAUDE_SETTINGS\" --setting-sources user --plugin-dir \"$DESIGNOS_CLAUDE_PLUGIN\"",
+                )
             };
             [
                 format!("claude{flag}{tail}"),
@@ -148,7 +155,6 @@ fn golden_server_entry() -> Value {
             "DESIGNOS_AGENT_RUNTIME": "claude",
             "DESIGNOS_AGENT_RUN_ID": "<SESSION_ID>-1-1",
             "DESIGNOS_CONTEXT_JSON": "<SESSION>/context.json",
-            "DESIGNOS_DOC_NAME": "Untitled",
             "DESIGNOS_FILE": "",
             "DESIGNOS_IN_PROGRESS_STALE_MINUTES": "<MINUTES>",
             "DESIGNOS_LIVE_CANVAS": "<SESSION>/canvas.designos",
@@ -157,8 +163,7 @@ fn golden_server_entry() -> Value {
             "DESIGNOS_LIVE_SPEC": "<SESSION>/live-spec.json",
             "DESIGNOS_MCP_CONFIG": "<SESSION>/mcp-config.json",
             "DESIGNOS_SESSION_DIR": "<SESSION>",
-            "DESIGNOS_TARGET_PAGE_ID": "1",
-            "DESIGNOS_TARGET_PAGE_NAME": "Page 1"
+            "DESIGNOS_TARGET_PAGE_ID": "1"
         }
     })
 }
@@ -224,6 +229,19 @@ fn claude_launch_and_config_match_the_golden() {
         let st = session_in(mode);
         let ask = mode == PermissionMode::Ask;
         assert_eq!(normalized_json(&st, "mcp-config.json"), golden_servers(), "Claude {mode:?}: mcp-config.json");
+        if ask {
+            // What Claude starts its servers from is the private copy: the session's file, but for the one setting that
+            // points the `designos` server at this copy instead of the session folder's.
+            let private_path = crate::agent_approval_channel::mcp_config_path(&st.session_dir).expect("a private channel folder");
+            assert!(!private_path.starts_with(&st.session_dir), "Claude's MCP config must not sit in the session folder: {}", private_path.display());
+            let mut private = read_json_at(&private_path);
+            let pointer = "/mcpServers/designos/env/DESIGNOS_MCP_CONFIG";
+            assert_eq!(private.pointer(pointer).and_then(Value::as_str), Some(private_path.display().to_string().as_str()), "the copy reads its own settings");
+            let session_copy = read_json(&st, "mcp-config.json");
+            *private.pointer_mut(pointer).expect("the copy names its settings file") =
+                session_copy.pointer(pointer).cloned().expect("the session copy names its settings file");
+            assert_eq!(private, session_copy, "Claude Ask: the private MCP config is the session's, bar its own path");
+        }
 
         let hooks = read_json(&st, "hooks.json");
         let mut expected = expected_shape("/hooks", CLAUDE_EVENTS, CLAUDE_LEAVES);
@@ -313,7 +331,7 @@ fn grok_launch_and_config_match_the_golden() {
             .collect::<Vec<_>>()
             .join("\n");
         let toml = toml.replace("DESIGNOS_IN_PROGRESS_STALE_MINUTES = \"15\"", "DESIGNOS_IN_PROGRESS_STALE_MINUTES = \"<MINUTES>\"");
-        let golden = "[mcp_servers.designos]\ncommand = \"<MCP_BIN>\"\nargs = [\"--workspace\", \"<WORKSPACE>\"]\nenabled = true\n\n[mcp_servers.designos.env]\nDESIGNOS_AGENT_RUNTIME = \"claude\"\nDESIGNOS_AGENT_RUN_ID = \"<SESSION_ID>-1-1\"\nDESIGNOS_CONTEXT_JSON = \"<SESSION>/context.json\"\nDESIGNOS_DOC_NAME = \"Untitled\"\nDESIGNOS_FILE = \"\"\nDESIGNOS_IN_PROGRESS_STALE_MINUTES = \"<MINUTES>\"\nDESIGNOS_LIVE_CANVAS = \"<SESSION>/canvas.designos\"\nDESIGNOS_LIVE_DOC_PATCH = \"<SESSION>/doc-patch.jsonl\"\nDESIGNOS_LIVE_DOC_SYNC = \"<SESSION>/doc-sync.designos\"\nDESIGNOS_LIVE_SPEC = \"<SESSION>/live-spec.json\"\nDESIGNOS_MCP_CONFIG = \"<SESSION>/mcp-config.json\"\nDESIGNOS_SESSION_DIR = \"<SESSION>\"\nDESIGNOS_TARGET_PAGE_ID = \"1\"\nDESIGNOS_TARGET_PAGE_NAME = \"Page 1\"";
+        let golden = "[mcp_servers.designos]\ncommand = \"<MCP_BIN>\"\nargs = [\"--workspace\", \"<WORKSPACE>\"]\nenabled = true\n\n[mcp_servers.designos.env]\nDESIGNOS_AGENT_RUNTIME = \"claude\"\nDESIGNOS_AGENT_RUN_ID = \"<SESSION_ID>-1-1\"\nDESIGNOS_CONTEXT_JSON = \"<SESSION>/context.json\"\nDESIGNOS_FILE = \"\"\nDESIGNOS_IN_PROGRESS_STALE_MINUTES = \"<MINUTES>\"\nDESIGNOS_LIVE_CANVAS = \"<SESSION>/canvas.designos\"\nDESIGNOS_LIVE_DOC_PATCH = \"<SESSION>/doc-patch.jsonl\"\nDESIGNOS_LIVE_DOC_SYNC = \"<SESSION>/doc-sync.designos\"\nDESIGNOS_LIVE_SPEC = \"<SESSION>/live-spec.json\"\nDESIGNOS_MCP_CONFIG = \"<SESSION>/mcp-config.json\"\nDESIGNOS_SESSION_DIR = \"<SESSION>\"\nDESIGNOS_TARGET_PAGE_ID = \"1\"";
         assert_eq!(toml.trim_end(), golden, "Grok {mode:?}: .grok/config.toml");
         let expected = expected_shape("/hooks", CLAUDE_EVENTS, CLAUDE_LEAVES);
         assert_eq!(shape_of(&read_json(&st, ".grok/hooks/designos-status.json")), expected, "Grok {mode:?}: the keys of the status hooks changed");
