@@ -787,13 +787,18 @@
   },
   {
     "name": "designos_export_fig_file",
-    "description": "Export the current session document to a Figma binary .fig container (with fig-kiwi header and deflate chunks) inside the workspace.",
+    "description": "Export the current session document to a Figma binary .fig container inside the workspace. The destination must be a regular .fig path; existing files, directories and symbolic links are refused unless overwrite=true for a regular file.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
         "output_path": {
           "description": "Destination .fig path inside the workspace.",
           "type": "string"
+        },
+        "overwrite": {
+          "default": false,
+          "description": "Replace an existing regular .fig file atomically; symbolic links and non-regular targets are always refused.",
+          "type": "boolean"
         }
       },
       "required": [

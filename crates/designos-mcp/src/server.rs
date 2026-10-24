@@ -1,5 +1,6 @@
 //! Workspace-scoped file session exposed over the official MCP SDK.
 use crate::engine::{parse, Engine};
+use crate::fig_export::{resolve_workspace_path, write_export};
 use crate::tools::errors::{tool_output_schema, ErrorCode, ToolError};
 use crate::tools::ledger::{
     corrected_example_with_new_key, extract_and_strip_idempotency_key, extract_live_and_gone, is_idempotent_write_tool, now_ms, payload_hash,
@@ -657,33 +658,6 @@ impl Session {
         Ok(parent.join(requested.file_name().ok_or_else(|| ToolError::new(ErrorCode::InvalidArguments, "/path", "Render path needs a filename"))?))
     }
 
-    fn fig_output_path(&self, path: &str) -> Result<PathBuf, ToolError> {
-        let requested = self.root.join(path);
-        if requested.extension().and_then(|x| x.to_str()) != Some("fig") {
-            return Err(ToolError::new(ErrorCode::InvalidArguments, "/output_path", "Export path must end in .fig")
-                .with_received(json!(path))
-                .with_expected("*.fig"));
-        }
-        let parent = requested
-            .parent()
-            .ok_or_else(|| ToolError::new(ErrorCode::InvalidArguments, "/output_path", "Export path needs a parent directory"))?
-            .canonicalize()
-            .map_err(|e| {
-                if path.contains("..") || Path::new(path).is_absolute() {
-                    ToolError::new(ErrorCode::PathOutsideWorkspace, "/output_path", format!("Path must stay inside the configured workspace: {e}"))
-                        .with_received(json!(path))
-                } else {
-                    ToolError::new(ErrorCode::InvalidArguments, "/output_path", format!("Export directory must already exist: {e}")).with_received(json!(path))
-                }
-            })?;
-        if !parent.starts_with(&self.root) {
-            return Err(
-                ToolError::new(ErrorCode::PathOutsideWorkspace, "/output_path", "Path must stay inside the configured workspace").with_received(json!(path))
-            );
-        }
-        Ok(parent.join(requested.file_name().ok_or_else(|| ToolError::new(ErrorCode::InvalidArguments, "/output_path", "Export path needs a filename"))?))
-    }
-
     pub fn call(&mut self, name: &str, args: Value) -> Result<Value, ToolError> {
         let t0 = std::time::Instant::now();
         let args_copy = args.clone();
@@ -1016,19 +990,11 @@ impl Session {
             }
             "designos_export_fig_file" | "export_fig_file" => {
                 let a: crate::engine::ExportFigArgs = parse(args)?;
-                let path = self.fig_output_path(&a.output_path)?;
+                let path = resolve_workspace_path(&self.root, &a.output_path, a.overwrite)?;
                 self.engine.settle_layout();
                 let (bytes, omitted) = designos_fig::export_fig_with_report(&self.engine.doc)
                     .map_err(|e| ToolError::new(ErrorCode::InternalError, "", format!("Failed to export .fig: {e}")))?;
-                let mut file = fs::OpenOptions::new()
-                    .write(true)
-                    .create(true)
-                    .truncate(true)
-                    .open(&path)
-                    .map_err(|e| ToolError::new(ErrorCode::InternalError, "/output_path", format!("Cannot write .fig file: {e}")))?;
-                file.write_all(&bytes)
-                    .and_then(|_| file.sync_all())
-                    .map_err(|e| ToolError::new(ErrorCode::InternalError, "/output_path", format!("Cannot write .fig file: {e}")))?;
+                write_export(&path, &a.output_path, &bytes, a.overwrite)?;
                 *files_created += 1;
                 // A `.fig` has no place for comments: the result says how many threads this file left out.
                 Ok(json!({
@@ -3335,6 +3301,92 @@ mod tests {
         }
         assert_eq!(doc.nodes.len(), 200_000);
         validate_document(&doc).expect("200,000-node document must be accepted under the 1,200,000 layer limit");
+    }
+
+    fn fig_export_workspace(tag: &str) -> PathBuf {
+        let nonce = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+        let path = std::env::temp_dir().join(format!("designos-mcp-fig-{tag}-{}-{nonce}", std::process::id()));
+        fs::create_dir_all(&path).unwrap();
+        path
+    }
+
+    #[test]
+    fn export_fig_refuses_to_replace_an_existing_file_without_opt_in() {
+        let root = fig_export_workspace("existing");
+        let target = root.join("out.fig");
+        fs::write(&target, b"keep this file").unwrap();
+        let mut session = Session::new(&root).unwrap();
+
+        let err = session.call("designos_export_fig_file", json!({"output_path": "out.fig"})).unwrap_err();
+        assert_eq!(err.code, ErrorCode::FileExists, "{err}");
+        assert_eq!(fs::read(&target).unwrap(), b"keep this file");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn export_fig_accepts_an_uppercase_extension_for_a_new_file() {
+        let root = fig_export_workspace("extension-case");
+        let target = root.join("OUT.FIG");
+        let mut session = Session::new(&root).unwrap();
+
+        let result = session.call("designos_export_fig_file", json!({"output_path": "OUT.FIG"})).unwrap();
+        assert_eq!(result["saved"], true);
+        assert!(fs::metadata(&target).unwrap().len() > 0);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn export_fig_refuses_a_final_symlink_without_writing_through_it() {
+        use std::os::unix::fs::symlink;
+
+        let root = fig_export_workspace("symlink");
+        let outside = root.parent().unwrap().join(format!("designos-mcp-fig-victim-{}", std::process::id()));
+        let link = root.join("link.fig");
+        fs::write(&outside, b"keep outside").unwrap();
+        symlink(&outside, &link).unwrap();
+        let mut session = Session::new(&root).unwrap();
+
+        for overwrite in [false, true] {
+            let err = session.call("designos_export_fig_file", json!({"output_path": "link.fig", "overwrite": overwrite})).unwrap_err();
+            assert!(err.to_string().contains("symbolic link"), "{err}");
+            assert_eq!(fs::read(&outside).unwrap(), b"keep outside");
+            assert_eq!(fs::read_link(&link).unwrap(), outside);
+        }
+        let _ = fs::remove_file(outside);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn export_fig_refuses_a_dangling_final_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let root = fig_export_workspace("dangling");
+        let missing = root.parent().unwrap().join(format!("designos-mcp-fig-missing-{}", std::process::id()));
+        let link = root.join("dangling.fig");
+        symlink(&missing, &link).unwrap();
+        let mut session = Session::new(&root).unwrap();
+
+        for overwrite in [false, true] {
+            let err = session.call("designos_export_fig_file", json!({"output_path": "dangling.fig", "overwrite": overwrite})).unwrap_err();
+            assert!(err.to_string().contains("symbolic link"), "{err}");
+            assert!(!missing.exists());
+        }
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn export_fig_allows_explicit_overwrite_of_a_regular_file() {
+        let root = fig_export_workspace("overwrite");
+        let target = root.join("out.fig");
+        fs::write(&target, b"replace this file").unwrap();
+        let mut session = Session::new(&root).unwrap();
+
+        let result = session.call("designos_export_fig_file", json!({"output_path": "out.fig", "overwrite": true})).unwrap();
+        assert_eq!(result["saved"], true);
+        assert_ne!(fs::read(&target).unwrap(), b"replace this file");
+        let _ = fs::remove_dir_all(root);
     }
 }
 

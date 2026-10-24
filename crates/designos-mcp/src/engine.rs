@@ -896,14 +896,9 @@ impl Engine {
             "designos_export_fig_file" | "export_fig_file" => {
                 let a: ExportFigArgs = parse(args)?;
                 let path = std::path::Path::new(&a.output_path);
-                if path.extension().and_then(|x| x.to_str()) != Some("fig") {
-                    return Err(ToolError::new(ErrorCode::UnsupportedExtension, "/output_path", "output_path must end in .fig")
-                        .with_valid_options(vec![".fig"])
-                        .with_corrected_example(json!({ "output_path": "export.fig" })));
-                }
                 let (bytes, omitted) = designos_fig::export_fig_with_report(&self.doc)
                     .map_err(|e| ToolError::new(ErrorCode::IoError, "/output_path", format!("Failed to export .fig: {e}")))?;
-                std::fs::write(path, &bytes).map_err(|e| ToolError::new(ErrorCode::IoError, "/output_path", format!("Cannot write .fig file: {e}")))?;
+                crate::fig_export::write_export(path, &a.output_path, &bytes, a.overwrite)?;
                 // A `.fig` has no place for comments: the result says how many threads this file left out.
                 Ok(json!({
                     "output_path": a.output_path,
@@ -1508,6 +1503,8 @@ struct SetInProgressArgs {
 pub(crate) struct ExportFigArgs {
     #[serde(alias = "path")]
     pub output_path: String,
+    #[serde(default)]
+    pub overwrite: bool,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -1847,8 +1844,8 @@ pub fn tools() -> Vec<Value> {
     );
     add(
         "export_fig_file",
-        "Export the current session document to a Figma binary .fig container (with fig-kiwi header and deflate chunks) inside the workspace.",
-        json!({"output_path":{"type":"string","description":"Destination .fig path inside the workspace."}}),
+        "Export the current session document to a Figma binary .fig container inside the workspace. The destination must be a regular .fig path; existing files, directories and symbolic links are refused unless overwrite=true for a regular file.",
+        json!({"output_path":{"type":"string","description":"Destination .fig path inside the workspace."},"overwrite":{"type":"boolean","default":false,"description":"Replace an existing regular .fig file atomically; symbolic links and non-regular targets are always refused."}}),
         vec!["output_path"],
         json!({
             "output_path": {"type": "string"},
@@ -2488,7 +2485,7 @@ mod tests {
             let out = dir.join("out.fig");
             let args = match tool {
                 "designos_generate_code" => json!({"node_id":frame.0,"language":"css"}),
-                "designos_export_fig_file" => json!({"output_path":out.to_str().unwrap()}),
+                "designos_export_fig_file" => json!({"output_path":out.to_str().unwrap(), "overwrite": true}),
                 "designos_lint" => json!({"node_ids":[frame.0],"limit":10}),
                 _ => json!({"node_id":frame.0}),
             };
