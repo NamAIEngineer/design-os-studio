@@ -402,7 +402,7 @@ impl SessionEnv {
     #[allow(dead_code)]
     pub fn for_session_id(session_id: &str) -> Self {
         let clean = if session_id.trim().is_empty() { "tab-1" } else { session_id.trim() };
-        let session_dir = std::env::temp_dir().join("designos-sessions").join(clean);
+        let session_dir = crate::agent_session_files::ephemeral_session_dir(clean);
         Self {
             session_id: clean.to_string(),
             run_id: format!("{clean}-1-1"),
@@ -1219,7 +1219,7 @@ pub struct TerminalState {
     pub path_override: Option<std::ffi::OsString>,
     /// How this terminal's session directory is keyed (`LibraryFile` vs `Fallback`).
     pub key: crate::agent_sessions::SessionKey,
-    /// Active Studio library root (`#652` / `#653`), retained even when the session falls back to `/tmp/designos-sessions/`.
+    /// Active Studio library root (`#652` / `#653`), retained even when the session falls back to the ephemeral folder under `<data dir>/designos/sessions/`.
     pub library_root: Option<PathBuf>,
     /// Persistent `sessions.json` registry for this session folder (`#653`).
     pub session_registry: crate::agent_sessions::SessionRegistry,
@@ -1329,7 +1329,7 @@ impl Drop for TerminalState {
 }
 
 /// Agent session id of document tab `tab_id` in the Studio window `instance_id`
-/// (`/tmp/designos-sessions/<instance_id>-tab-<tab_id>`). A tab's session id is formed only here,
+/// (`<data dir>/designos/sessions/<instance_id>-tab-<tab_id>`). A tab's session id is formed only here,
 /// so the id a terminal is created with and the id the tab bar binds it to have one shape.
 pub fn tab_session_id(instance_id: &str, tab_id: u64) -> String {
     format!("{instance_id}-tab-{tab_id}")
@@ -1437,12 +1437,12 @@ thread_local! {
 
 impl TerminalState {
     /// Creates an isolated `TerminalState` bound to document tab `tab_id` of this process
-    /// (`/tmp/designos-sessions/p<pid>-tab-{tab_id}`). A window's terminal is bound to its own
+    /// (`<data dir>/designos/sessions/p<pid>-tab-{tab_id}`). A window's terminal is bound to its own
     /// instance (`TabsState::session_id_for_tab`) before any shell starts in it.
     pub fn for_tab(tab_id: u64) -> Self {
         let session_id = tab_session_id(&format!("p{}", std::process::id()), tab_id);
         let active_run_id = format!("{session_id}-1-1");
-        let session_dir = std::env::temp_dir().join("designos-sessions").join(&session_id);
+        let session_dir = crate::agent_session_files::ephemeral_session_dir(&session_id);
         let live_spec_path = session_dir.join("live-spec.json");
         let live_doc_sync_path = session_dir.join("doc-sync.designos");
         let live_canvas_path = session_dir.join("canvas.designos");
@@ -1879,7 +1879,7 @@ impl TerminalState {
         self.last_agent_status_done = false;
     }
 
-    /// Re-binds this terminal state to `session_id` under `/tmp/designos-sessions/<session_id>`.
+    /// Re-binds this terminal state to `session_id` under `<data dir>/designos/sessions/<session_id>`.
     /// When already bound to a library file and holding its `session.lock`, updates `self.session_id`
     /// while preserving `<lib_root>/agent-sessions/<file_id>` as `self.session_dir`.
     pub fn bind_session(&mut self, session_id: &str) {
@@ -1891,7 +1891,7 @@ impl TerminalState {
             self.session_id = clean.to_string();
             self.active_run_id = format!("{clean}-1-{}", self.next_run_seq.max(1));
             if self.lock_owner.is_none() && self.tabs.is_empty() {
-                let fallback_dir = std::env::temp_dir().join("designos-sessions").join(clean);
+                let fallback_dir = crate::agent_session_files::ephemeral_session_dir(clean);
                 if self.session_dir != fallback_dir {
                     self.update_session_dir_paths(fallback_dir);
                 }
@@ -1901,14 +1901,14 @@ impl TerminalState {
         if self.session_id == clean {
             return;
         }
-        let session_dir = std::env::temp_dir().join("designos-sessions").join(clean);
+        let session_dir = crate::agent_session_files::ephemeral_session_dir(clean);
         self.session_id = clean.to_string();
         self.key = crate::agent_sessions::SessionKey::Fallback(clean.to_string());
         self.update_session_dir_paths(session_dir);
     }
 
     /// Binds this terminal state to `<lib_root>/agent-sessions/<file_id>/` (`#653`), acquiring
-    /// `session.lock` for `window_id` or falling back to `/tmp/designos-sessions/<window_id>` if
+    /// `session.lock` for `window_id` or falling back to `<data dir>/designos/sessions/<window_id>` if
     /// another live Studio window already holds the lock.
     pub fn bind_library_file(&mut self, lib_root: &Path, file_id: &str, window_id: &str) {
         self.bind_library_file_with_liveness(lib_root, file_id, window_id, crate::agent_sessions::is_pid_alive);
@@ -2098,7 +2098,7 @@ impl TerminalState {
         }
     }
 
-    /// Detaches from any library file and binds to an ephemeral fallback `/tmp/designos-sessions/<session_id>`.
+    /// Detaches from any library file and binds to an ephemeral fallback `<data dir>/designos/sessions/<session_id>`.
     pub fn unbind_library_file(&mut self, session_id: &str) {
         let clean = if session_id.trim().is_empty() { self.session_id.clone() } else { session_id.trim().to_string() };
         let target_key = crate::agent_sessions::SessionKey::Fallback(clean.clone());
@@ -2688,7 +2688,7 @@ impl TerminalState {
     }
 
     /// Cancels/waits for any in-flight snapshot write and removes `self.session_dir` if it is an
-    /// ephemeral `/tmp/designos-sessions/<session_id>/` directory (never touching library
+    /// ephemeral `<data dir>/designos/sessions/<session_id>/` directory (never touching library
     /// `<lib_root>/agent-sessions/<file_id>/` folders or a scratch directory that still holds the
     /// only copy of a library file's session).
     fn cleanup_ephemeral_session_dir(&mut self) {
@@ -2869,9 +2869,14 @@ impl TerminalState {
     /// Spawns a custom CLI command tab (`"Other CLI…"` / `custom_clis`) in this file's session folder
     /// with the `DESIGNOS_*` environment, without registering a resumable session (`#652` §3 rule 7).
     pub fn spawn_custom_cli_tab(&mut self, label: &str, command: &str, file_path: Option<&Path>) -> Result<usize, String> {
+        let clean_title = if label.trim().is_empty() { command.trim() } else { label.trim() };
+        if let Err(e) = crate::agent_session_files::ensure_session_dir(&self.session_dir) {
+            let message = crate::agent_session_files::start_failure_message(clean_title, &e);
+            self.status_msg = Some(message.clone());
+            return Err(message);
+        }
         let id = self.next_tab_id.max(1);
         self.next_tab_id = id + 1;
-        let _ = std::fs::create_dir_all(&self.session_dir);
         self.provision_session_agent_files(file_path);
         let env = self.session_env();
         let mut cmd = build_agent_shell_cmd(&default_shell_program(), command);
@@ -2879,7 +2884,6 @@ impl TerminalState {
         isolate_zsh_from_home(&mut cmd);
         cmd.cwd(&self.session_dir);
 
-        let clean_title = if label.trim().is_empty() { command.trim() } else { label.trim() };
         match TerminalTab::spawn_with_session_cmd(id, AgentCliPreset::Claude, 28, 100, file_path, Some(&env), Some(cmd)) {
             Ok(mut tab) => {
                 tab.preset = AgentCliPreset::Shell;
@@ -2952,13 +2956,18 @@ impl TerminalState {
         register_new_entry: bool,
         mode: crate::agent_permissions::AgentPermissionMode,
     ) -> Result<usize, String> {
+        // The agent's working folder must be one Studio made: a link or foreign folder there stops the tab, with the reason.
+        if let Err(e) = crate::agent_session_files::ensure_session_dir(&self.session_dir) {
+            let message = crate::agent_session_files::start_failure_message(preset.tab_title(), &e);
+            self.status_msg = Some(message.clone());
+            return Err(message);
+        }
         self.permission_mode = mode;
         let id = self.next_tab_id.max(1);
         self.next_tab_id = id + 1;
         let run_seq = self.next_run_seq.max(1);
         self.next_run_seq = run_seq + 1;
         self.active_run_id = format!("{}-{}-{}", self.session_id, id, run_seq);
-        let _ = crate::agent_session_files::ensure_session_dir(&self.session_dir);
         if !matches!(preset, AgentCliPreset::Shell | AgentCliPreset::DesignOsHelp) {
             self.reset_agent_run(file_path);
         } else {
@@ -4753,7 +4762,10 @@ pub(crate) fn write_session_agent_files_for_job(job: &crate::agent_session_files
 fn status_hook_command(status_path: &Path, event: &str, state: &str) -> String {
     let events_path = status_path.parent().map(|p| p.join("agent-events.jsonl")).unwrap_or_else(|| status_path.with_file_name("agent-events.jsonl"));
     let append_cmd = crate::agent_turn_status::event_append_command(&events_path, event);
-    format!("{append_cmd}; printf '{{\"state\":\"{state}\",\"run_id\":\"%s\"}}\\n' \"${{DESIGNOS_AGENT_RUN_ID:-}}\" > '{}'", status_path.display())
+    format!(
+        "{append_cmd}; printf '{{\"state\":\"{state}\",\"run_id\":\"%s\"}}\\n' \"${{DESIGNOS_AGENT_RUN_ID:-}}\" > {}",
+        crate::agent_turn_status::sh_single_quote(&status_path.display().to_string())
+    )
 }
 
 fn command_handler_group(command: String, capture_command: Option<&str>) -> serde_json::Value {
@@ -4793,21 +4805,12 @@ fn session_hooks_settings_with_approval(
     let prompt = match context_replies {
         Some((page_reply, boot_reply, marker)) => {
             let compact_reply = boot_reply.with_file_name("bootstrap-compact-reply.json");
+            let quoted = |path: &Path| crate::agent_turn_status::sh_single_quote(&path.display().to_string());
+            let (marker, boot, compact, page) = (quoted(marker), quoted(boot_reply), quoted(&compact_reply), quoted(page_reply));
             format!(
-                "{}; {}; if [ ! -e '{}' ]; then i=0; while [ ! -f '{}' ] && [ $i -lt 5 ]; do sleep 0.1; i=$((i+1)); done; fi; if [ ! -e '{}' ] && [ -f '{}' ]; then : > '{}'; cat '{}'; elif [ ! -e '{}' ] && [ -f '{}' ]; then : > '{}'; cat '{}'; else cat '{}'; fi",
+                "{}; {}; if [ ! -e {marker} ]; then i=0; while [ ! -f {boot} ] && [ $i -lt 5 ]; do sleep 0.1; i=$((i+1)); done; fi; if [ ! -e {marker} ] && [ -f {boot} ]; then : > {marker}; cat {boot}; elif [ ! -e {marker} ] && [ -f {compact} ]; then : > {marker}; cat {compact}; else cat {page}; fi",
                 status_hook_command(status_path, "UserPromptSubmit", "working"),
                 start_mark,
-                marker.display(),
-                boot_reply.display(),
-                marker.display(),
-                boot_reply.display(),
-                marker.display(),
-                boot_reply.display(),
-                marker.display(),
-                compact_reply.display(),
-                marker.display(),
-                compact_reply.display(),
-                page_reply.display()
             )
         }
         None => format!("{}; {}", status_hook_command(status_path, "UserPromptSubmit", "working"), start_mark),
@@ -4971,7 +4974,7 @@ pub fn configure_pty_env_with_session(cmd: &mut CommandBuilder, preset: AgentCli
         }
     } else {
         cmd.env("DESIGNOS_AGENT_RUN_ID", format!("p{}-tab-1-1-1", std::process::id()));
-        let fallback_dir = std::env::temp_dir().join("designos-sessions").join(tab_session_id(&format!("p{}", std::process::id()), 1));
+        let fallback_dir = crate::agent_session_files::ephemeral_session_dir(&tab_session_id(&format!("p{}", std::process::id()), 1));
         cmd.env("DESIGNOS_LIVE_SPEC", fallback_dir.join("live-spec.json").as_os_str());
         cmd.env("DESIGNOS_SELECTION_JSON", fallback_dir.join("selection.spec.json").as_os_str());
     }
@@ -5065,7 +5068,8 @@ pub fn export_selection_and_comments_to_pty(
         );
     }
     let json = serde_json::to_string_pretty(&json_value).map_err(|e| e.to_string())?;
-    atomic_write_session_file(&state.selection_spec_path, json.as_bytes()).map_err(|e| format!("write {}: {e}", state.selection_spec_path.display()))?;
+    atomic_write_session_file(&state.selection_spec_path, json.as_bytes())
+        .map_err(|e| format!("write {}: {}", state.selection_spec_path.display(), crate::agent_session_files::with_next_step(&e)))?;
 
     let cmd_snippet =
         format!("Read the design:os selection at {} (node spec plus open pin-comments under \"designos_context\").", state.selection_spec_path.display());
@@ -8951,7 +8955,7 @@ mod tests {
 
     /// A terminal state on a cleared session folder, which is removed again when the test ends (see [`ScopedTerminalState`]).
     fn isolated_683_state(tab_id: u64) -> ScopedTerminalState {
-        let dir = std::env::temp_dir().join("designos-sessions").join(tab_session_id(&format!("p{}", std::process::id()), tab_id));
+        let dir = crate::agent_session_files::ephemeral_session_dir(&tab_session_id(&format!("p{}", std::process::id()), tab_id));
         let _ = std::fs::remove_dir_all(&dir);
         let _ = std::fs::create_dir_all(&dir);
         ScopedTerminalState::new(TerminalState::for_tab(tab_id))
