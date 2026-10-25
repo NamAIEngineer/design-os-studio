@@ -245,22 +245,35 @@ def extract_design_token_colors(tokens_data: Dict[str, Any]) -> Dict[str, str]:
     return out
 
 
-def check_rust_token_parity(record_gaps: bool = False) -> Tuple[bool, str, Dict[str, Any]]:
-    if not THEME_RS.exists():
+def check_rust_token_parity(
+    record_gaps: bool = False,
+    *,
+    theme_source: Optional[str] = None,
+    token_data: Optional[Dict[str, Any]] = None,
+) -> Tuple[bool, str, Dict[str, Any]]:
+    if theme_source is None and not THEME_RS.exists():
         msg = f"Missing Rust theme file: {THEME_RS}"
         if record_gaps:
             record_gap_event(msg)
         return False, msg, {}
-    if not TOKENS_JSON.exists():
+    if token_data is None and not TOKENS_JSON.exists():
         msg = f"Missing design tokens file: {TOKENS_JSON}"
         if record_gaps:
             record_gap_event(msg, target="design/design.tokens.json")
         return False, msg, {}
 
-    theme_src = THEME_RS.read_text(encoding="utf-8", errors="replace")
+    theme_src = (
+        theme_source
+        if theme_source is not None
+        else THEME_RS.read_text(encoding="utf-8", errors="replace")
+    )
     rust_consts = parse_rust_theme_constants(theme_src)
-    tokens_data = json.loads(TOKENS_JSON.read_text(encoding="utf-8"))
-    ds_colors = extract_design_token_colors(tokens_data)
+    resolved_token_data = (
+        token_data
+        if token_data is not None
+        else json.loads(TOKENS_JSON.read_text(encoding="utf-8"))
+    )
+    ds_colors = extract_design_token_colors(resolved_token_data)
 
     missing_consts: List[str] = []
     purple_violations: List[str] = []
@@ -295,7 +308,7 @@ def check_rust_token_parity(record_gaps: bool = False) -> Tuple[bool, str, Dict[
         if ds_hex in BANNED_PURPLES:
             purple_violations.append(f"colors.{ds_key}={ds_hex}")
 
-    non_colour = check_non_colour_parity(theme_src, tokens_data)
+    non_colour = check_non_colour_parity(theme_src, resolved_token_data)
     non_colour_issues = (
         non_colour["drifts"] + non_colour["stale_exemptions"] + non_colour["problems"]
     )

@@ -33,9 +33,13 @@ class ThemeTokenParityTests(unittest.TestCase):
         theme = (REPO / "crates/designos-app/src/theme.rs").read_text(encoding="utf-8")
         tokens = json.loads((REPO / "design/design.tokens.json").read_text(encoding="utf-8"))
         drifted = theme.replace("pub const TEXT: Color32 = rgb(0xF5F5F7);", "pub const TEXT: Color32 = rgb(0xF4F4F5);")
-        rust = parse_rust_theme_constants(drifted)
-        colors = extract_design_token_colors(tokens)
-        self.assertNotEqual(rust["TEXT"], colors["bg-foreground"])
+        ok, summary, details = check_rust_token_parity(
+            theme_source=drifted,
+            token_data=tokens,
+        )
+        self.assertFalse(ok, (summary, details))
+        self.assertIn("TEXT", summary)
+        self.assertTrue(any("TEXT" in drift for drift in details["token_drifts"]))
 
     def test_repository_parity_gate_passes(self):
         ok, summary, details = check_rust_token_parity()
