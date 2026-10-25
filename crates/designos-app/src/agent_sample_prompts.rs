@@ -380,6 +380,8 @@ pub fn show_empty_state(state: &mut TerminalState, ui: &mut Ui, area: Rect, file
     let prompt_ctx = state.prompt_context;
     let start_error = state.sample_prompt_error.clone();
     let picker_rows = if state.tabs.is_empty() { Some(crate::agent_picker::rows_for_state(state)) } else { None };
+    let picker_row_count = picker_rows.as_ref().map_or(0, Vec::len);
+    let other_form_was_open = state.picker.other_form_open;
     let picker_h = picker_rows.as_ref().map_or(0.0, |rows| crate::agent_picker::picker_outer_height(rows.len(), state.picker.other_form_open));
     let origin = Pos2::new(area.left(), area.top() - state.left_scroll.max(0.0));
     let mut outcome = EmptyStateOutcome { prompt_clicked: None, content_height: 0.0 };
@@ -392,7 +394,14 @@ pub fn show_empty_state(state: &mut TerminalState, ui: &mut Ui, area: Rect, file
         outcome = paint_empty_state(ui, prompts_rect, prompt_ctx, cli_installed, picker_h <= 0.0, start_error.as_deref());
     });
 
-    let max_scroll = (picker_h + outcome.content_height - area.height()).max(0.0);
+    // Opening Other CLI adds a form below the rows. Recompute the content height after
+    // the click is applied, then reveal the new bottom in the next frame instead of
+    // leaving the form below the clipped picker until the user wheels manually.
+    let rendered_picker_h = if picker_row_count == 0 { 0.0 } else { crate::agent_picker::picker_outer_height(picker_row_count, state.picker.other_form_open) };
+    let max_scroll = (rendered_picker_h + outcome.content_height - area.height()).max(0.0);
+    if !other_form_was_open && state.picker.other_form_open {
+        state.left_scroll = max_scroll;
+    }
     if ui.rect_contains_pointer(area) {
         let wheel = ui.input(|i| i.smooth_scroll_delta.y);
         if wheel != 0.0 {

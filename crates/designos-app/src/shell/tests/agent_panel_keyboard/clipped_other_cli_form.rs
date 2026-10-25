@@ -70,6 +70,10 @@ fn assert_tab_never_reaches(s: &mut Sim, height: f32, ids: &[Id]) {
 fn tab_does_not_walk_into_a_form_that_is_out_of_view() {
     let height = FORM_OUT_OF_VIEW;
     let mut s = window_with_the_form_open(height);
+    // Opening the form reveals it automatically. Move the panel back to its top to
+    // retain the guard for a form that later scrolls out of view.
+    s.shell.app.terminal.left_scroll = 0.0;
+    frames_at(&mut s, height, 2);
     let (form, composer) = (s.rect_of("agents-other-cli-form"), s.rect_of("agents-composer-input"));
     assert!(form.top() > composer.top(), "precondition: the form lies below the end of the list, under the composer: form {form:?}, composer {composer:?}");
     assert_tab_never_reaches(&mut s, height, &form_ids());
@@ -80,9 +84,23 @@ fn tab_does_not_walk_into_a_form_that_is_out_of_view() {
 }
 
 #[test]
+fn opening_other_cli_scrolls_the_form_into_view() {
+    let height = FORM_OUT_OF_VIEW;
+    let s = window_with_the_form_open(height);
+    let form = s.rect_of("agents-other-cli-form");
+    let composer = s.rect_of("agents-composer-input");
+
+    assert!(s.app().terminal.left_scroll > 0.0, "opening the form must scroll the picker in a short window");
+    assert!(form.top() < composer.top(), "the opened form must be visible above the composer: form {form:?}, composer {composer:?}");
+    finish(s);
+}
+
+#[test]
 fn tab_does_not_walk_into_the_field_of_a_form_that_is_out_of_view() {
     let height = COMMAND_FIELD_OUT_OF_VIEW;
     let mut s = window_with_the_form_open(height);
+    s.shell.app.terminal.left_scroll = 0.0;
+    frames_at(&mut s, height, 2);
     let (label, command, composer) = (s.rect_of(LABEL_FIELD), s.rect_of("agents-other-cli-command-input"), s.rect_of("agents-composer-input"));
     assert!(label.top() < composer.top() && command.top() > composer.top(), "precondition: only the label is in view: {label:?}, {command:?}, {composer:?}");
     assert_tab_never_reaches(&mut s, height, &form_ids()[1..]);
