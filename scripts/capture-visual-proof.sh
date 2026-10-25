@@ -24,6 +24,9 @@ export PATH="$HOME/.cargo/bin:$PATH"
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
 
+: "${CARGO_TARGET_DIR:=/Users/nam/Library/Caches/design-os-studio/target}"
+export CARGO_TARGET_DIR
+
 DOC="${DESIGNOS_PROOF_DOC:-}"
 if [[ -z "$DOC" ]]; then
   echo "error: DESIGNOS_PROOF_DOC is not set." >&2
@@ -37,7 +40,7 @@ fi
 DOC="$(cd "$(dirname "$DOC")" && pwd)/$(basename "$DOC")"
 
 OUT="${DESIGNOS_PROOF_OUT:-docs/images}"
-BIN="${CARGO_TARGET_DIR:-$REPO_ROOT/target}/release/designos-studio"
+BIN="$CARGO_TARGET_DIR/release/designos-studio"
 if [[ ! -x "$BIN" ]]; then
   echo "==> Building release binary ($BIN)..."
   cargo build --release -p designos-app

@@ -23,8 +23,9 @@ set -euo pipefail
 target=${1:?usage: package.sh <target-triple> <version> [bin-dir]}
 version=${2:?usage: package.sh <target-triple> <version> [bin-dir]}
 version=${version#v}
-bin_dir=${3:-target/$target/release}
-[ -d "$bin_dir" ] || bin_dir=target/release
+target_dir=${CARGO_TARGET_DIR:-/Users/nam/Library/Caches/design-os-studio/target}
+bin_dir=${3:-$target_dir/$target/release}
+[ -d "$bin_dir" ] || bin_dir=$target_dir/release
 
 root=$(cd "$(dirname "$0")/.." && pwd)
 cd "$root"

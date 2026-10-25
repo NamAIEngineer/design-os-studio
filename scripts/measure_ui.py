@@ -19,8 +19,9 @@ import sys
 from PIL import Image
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-EXE = os.path.join(ROOT, "target", "debug", "designos.exe" if os.name == "nt" else "designos")
-DIFF = os.path.join(ROOT, "target", "debug", "designos-diff.exe" if os.name == "nt" else "designos-diff")
+TARGET_DIR = os.environ.get("CARGO_TARGET_DIR", "/Users/nam/Library/Caches/design-os-studio/target")
+EXE = os.path.join(TARGET_DIR, "debug", "designos.exe" if os.name == "nt" else "designos")
+DIFF = os.path.join(TARGET_DIR, "debug", "designos-diff.exe" if os.name == "nt" else "designos-diff")
 
 # name -> (reference file, our CLI args, crop rect x,y,w,h)
 CASES = {

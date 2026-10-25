@@ -24,7 +24,8 @@ from pathlib import Path
 from PIL import Image, ImageDraw, ImageFont
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-BIN = REPO_ROOT / "target" / "release" / "designos-studio"
+TARGET_DIR = Path(os.environ.get("CARGO_TARGET_DIR", "/Users/nam/Library/Caches/design-os-studio/target"))
+BIN = TARGET_DIR / "release" / "designos-studio"
 MARKETING_DIR = REPO_ROOT / "Design" / "marketing"
 SHOTS_DIR = MARKETING_DIR / "screenshots"
 VIDEOS_DIR = MARKETING_DIR / "videos"

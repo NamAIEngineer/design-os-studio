@@ -8,13 +8,15 @@ Captures all 48 REAL sequential Retina 2x (2880x1800) screenshots directly from
 from __future__ import annotations
 
 import concurrent.futures
+import os
 import subprocess
 import sys
 import time
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-BIN = REPO_ROOT / "target" / "release" / "designos-studio"
+TARGET_DIR = Path(os.environ.get("CARGO_TARGET_DIR", "/Users/nam/Library/Caches/design-os-studio/target"))
+BIN = TARGET_DIR / "release" / "designos-studio"
 OUT_DIR = REPO_ROOT / "Design" / "marketing" / "screenshots" / "micro"
 
 SUITES = [

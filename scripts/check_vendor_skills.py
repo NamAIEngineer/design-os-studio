@@ -159,7 +159,7 @@ def load_vendor_register(repo_root: Path) -> Tuple[Dict[str, dict], Optional[str
 def load_lint_rule_ids(repo_root: Path) -> Set[str]:
     """Lint rule IDs: the output of a built `designos-mcp --list-lint-rules` when there is one, else the registry ids pinned in `CANONICAL_LINT_RULE_IDS`."""
     ids = set(CANONICAL_LINT_RULE_IDS)
-    target_dir = Path(os.environ.get("CARGO_TARGET_DIR", str(repo_root / "target")))
+    target_dir = Path(os.environ.get("CARGO_TARGET_DIR", "/Users/nam/Library/Caches/design-os-studio/target"))
     for profile in ("debug", "release"):
         bin_path = target_dir / profile / "designos-mcp"
         if bin_path.is_file() and os.access(bin_path, os.X_OK):
