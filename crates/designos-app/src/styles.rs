@@ -135,7 +135,7 @@ impl App {
     }
 
     /// Runs the outcome of a style operation as one undo step; false (with a toast) when refused.
-    fn run_style_op(&mut self, op: Result<Command, StyleOpError>) -> bool {
+    pub(crate) fn run_style_op(&mut self, op: Result<Command, StyleOpError>) -> bool {
         self.run_style_op_then(op, |_, _| {})
     }
 

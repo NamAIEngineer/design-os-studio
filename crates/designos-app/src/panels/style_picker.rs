@@ -17,6 +17,39 @@ use egui::{Align2, Id, Pos2, Sense, TextEdit, Ui};
 
 const MENU_W: f32 = 184.0;
 
+const UNDO_SHORTCUT: &str = if cfg!(target_os = "macos") { "Cmd+Z" } else { "Ctrl+Z" };
+const STYLE_DELETED_TOAST: &str = if cfg!(target_os = "macos") { "Style deleted · Cmd+Z to undo" } else { "Style deleted · Ctrl+Z to undo" };
+
+fn style_deleted_toast(fallback_layers: usize) -> String {
+    match fallback_layers {
+        0 => STYLE_DELETED_TOAST.to_string(),
+        1 => format!("Style deleted · 1 layer matches it in this mode only · {UNDO_SHORTCUT} to undo"),
+        n => format!("Style deleted · {n} layers match it in this mode only · {UNDO_SHORTCUT} to undo"),
+    }
+}
+
+fn delete_linked_style(app: &mut App, sel: &[NodeId], prop: StyleProperty) {
+    let Some(key) = linked_style(app, sel, prop) else { return };
+    app.scrub_end();
+    if app.props.style_edit.as_ref().is_some_and(|s| s.key == key) {
+        app.props.style_edit = None;
+    }
+    if app.props.style_rename == Some(prop) {
+        app.props.style_rename = None;
+    }
+    let (op, fallback_layers) = match delete_style_with_fallbacks(&app.doc, &key) {
+        Ok((cmd, fallbacks)) => {
+            let mut ids: Vec<NodeId> = fallbacks.into_iter().map(|(id, _)| id).collect();
+            ids.dedup();
+            (Ok(cmd), ids.len())
+        }
+        Err(e) => (Err(e), 0),
+    };
+    if app.run_style_op(op) {
+        app.show_toast(style_deleted_toast(fallback_layers), false);
+    }
+}
+
 fn kind_of(prop: StyleProperty) -> StyleKind {
     if prop == StyleProperty::Effect {
         StyleKind::Effect
@@ -45,6 +78,7 @@ enum Pick {
     Create,
     Rename,
     Detach,
+    Delete,
     Edit,
 }
 
@@ -67,13 +101,17 @@ fn menu_model(app: &App, sel: &[NodeId], prop: StyleProperty) -> (Vec<MenuItem>,
         last.separator_after = true;
     }
     let linked = current.is_some();
-    // A library style is edited and renamed in its library file.
+    // A library style is edited, renamed and deleted in its library file.
     let read_only = current.as_deref().is_some_and(|k| style_edit::is_read_only(app, k));
+    let ro_tip = if read_only { style_edit::LIBRARY_STYLE_TIP } else { "" };
+    let delete_ro = read_only || current.as_deref().is_some_and(|k| used_on_library_page(&app.doc, k));
+    let delete_tip = if delete_ro { style_edit::LIBRARY_STYLE_TIP } else { "" };
     items.push(MenuItem::new(create).disabled(linked || !has_values(app, sel, prop)));
-    items.push(MenuItem::new(if read_only { style_edit::LIBRARY_STYLE_TIP } else { "Rename style" }).disabled(!linked || read_only));
+    items.push(MenuItem::new("Rename style").disabled(!linked || read_only).tooltip(ro_tip));
     items.push(MenuItem::new("Detach style").disabled(!linked));
-    items.push(MenuItem::new(if read_only { style_edit::LIBRARY_STYLE_TIP } else { "Edit style" }).disabled(!linked || read_only));
-    picks.extend([Some(Pick::Create), Some(Pick::Rename), Some(Pick::Detach), Some(Pick::Edit)]);
+    items.push(MenuItem::new("Delete style").disabled(!linked || delete_ro).tooltip(delete_tip));
+    items.push(MenuItem::new("Edit style").disabled(!linked || read_only).tooltip(ro_tip));
+    picks.extend([Some(Pick::Create), Some(Pick::Rename), Some(Pick::Detach), Some(Pick::Delete), Some(Pick::Edit)]);
     (items, picks)
 }
 
@@ -88,6 +126,13 @@ pub(crate) fn edit_style_row(app: &App, sel: &[NodeId], prop: StyleProperty) -> 
 pub(crate) fn rename_style_row(app: &App, sel: &[NodeId], prop: StyleProperty) -> MenuItem {
     let (items, picks) = menu_model(app, sel, prop);
     items.into_iter().zip(picks).find_map(|(item, pick)| matches!(pick, Some(Pick::Rename)).then_some(item)).expect("the menu always has a Rename style row")
+}
+
+/// The "Delete style" row of the menu, so tests can read its label, tooltip and state.
+#[cfg(test)]
+pub(crate) fn delete_style_row(app: &App, sel: &[NodeId], prop: StyleProperty) -> MenuItem {
+    let (items, picks) = menu_model(app, sel, prop);
+    items.into_iter().zip(picks).find_map(|(item, pick)| matches!(pick, Some(Pick::Delete)).then_some(item)).expect("the menu always has a Delete style row")
 }
 
 /// The "Style" button left of the "+" of a section header whose title row was just laid out, and
@@ -122,6 +167,9 @@ pub(super) fn header_button(app: &mut App, ui: &mut Ui, pane: &Pane, sel: &[Node
                 }
                 Some(Pick::Detach) => {
                     app.detach_style_of(sel, prop);
+                }
+                Some(Pick::Delete) => {
+                    delete_linked_style(app, sel, prop);
                 }
                 Some(Pick::Edit) => {
                     if let Some(style) = linked_style(app, sel, prop) {
