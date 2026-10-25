@@ -20,6 +20,8 @@ jobs:
   version-check:
     name: Tag matches Cargo version
     runs-on: ubuntu-latest
+    env:
+      CARGO_TARGET_DIR: ${{ runner.temp }}/design-os-studio-target
     steps:
       - uses: actions/checkout@v4
 
@@ -37,6 +39,8 @@ jobs:
     name: Build ${{ matrix.target }}
     needs: version-check
     runs-on: ${{ matrix.os }}
+    env:
+      CARGO_TARGET_DIR: ${{ runner.temp }}/design-os-studio-target
     strategy:
       fail-fast: false
       matrix:
@@ -103,6 +107,8 @@ jobs:
     name: Build macOS universal app
     needs: version-check
     runs-on: macos-14
+    env:
+      CARGO_TARGET_DIR: ${{ runner.temp }}/design-os-studio-target
     steps:
       - uses: actions/checkout@v4
 
