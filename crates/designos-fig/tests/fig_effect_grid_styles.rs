@@ -156,6 +156,7 @@ fn style_values_and_metadata_are_imported() {
             description: "Shadow/Card description".into(),
             property: StyleProperty::Effect,
             bindings: Default::default(),
+            ..Default::default()
         }
     );
     assert_eq!(d.style_meta["2:101"].property, StyleProperty::Grid);
@@ -190,7 +191,14 @@ fn export_then_import_keeps_effect_and_grid_styles_and_their_links() {
     d1.styles.insert("Shadow/Unused".into(), Style::Effect(vec![Effect::LayerBlur { radius: 6.0, visible: true }]));
     d1.style_meta.insert(
         "Shadow/Unused".into(),
-        StyleMeta { name: "Shadow/Unused".into(), key: None, description: String::new(), property: StyleProperty::Effect, bindings: Default::default() },
+        StyleMeta {
+            name: "Shadow/Unused".into(),
+            key: None,
+            description: String::new(),
+            property: StyleProperty::Effect,
+            bindings: Default::default(),
+            ..Default::default()
+        },
     );
     let d2 = import_fig(&export_fig(&d1).unwrap()).unwrap();
 
@@ -388,6 +396,7 @@ fn fig_style_colorvar_round_trips() {
             description: String::new(),
             property: StyleProperty::Fill,
             bindings: [("fills/0".to_string(), var_id.clone())].into_iter().collect(),
+            ..Default::default()
         },
     );
 
@@ -424,6 +433,7 @@ fn text_style_paragraph_indent_and_weight_round_trip() {
             ]
             .into_iter()
             .collect(),
+            ..Default::default()
         },
     );
 
@@ -463,6 +473,7 @@ fn fill_style_gradient_stop_binding_round_trips() {
             description: String::new(),
             property: StyleProperty::Fill,
             bindings: [("fills/0/stops/0".to_string(), stop_var.clone())].into_iter().collect(),
+            ..Default::default()
         },
     );
     let fid = d.alloc_id();
@@ -524,6 +535,7 @@ fn effect_style_shadow_vars_round_trip() {
             ]
             .into_iter()
             .collect(),
+            ..Default::default()
         },
     );
     let fid = d.alloc_id();
@@ -790,4 +802,127 @@ fn own_font_style_binding_and_style_font_weight_binding_preserve_resolved_node_a
         after.variables = Default::default();
         assert_eq!(after, before, "resolve_node in mode {mode} must match before and after delete_style");
     }
+}
+
+#[test]
+fn style_sort_position_and_folder_order_round_trip() {
+    let nodes = vec![
+        node((0, 0), (0, 0), "!", "DOCUMENT", "Document", vec![]),
+        node((0, 1), (0, 0), "a", "CANVAS", "Page", vec![("backgroundColor", color(1.0, 1.0, 1.0, 1.0))]),
+        node((0, 2), (0, 0), "b", "CANVAS", "Internal Only Canvas", vec![("internalOnly", V::Bool(true))]),
+        style_node(
+            201,
+            "Shadows/shadow-lg",
+            "EFFECT",
+            "key-lg",
+            vec![("effects", V::Array(vec![shadow(16.0)])), ("sortPosition", V::String("!~~p~oLx".into()))],
+        ),
+        style_node(202, "Shadows/shadow-xs", "EFFECT", "key-xs", vec![("effects", V::Array(vec![shadow(2.0)])), ("sortPosition", V::String("!~~p~oL".into()))]),
+        style_node(
+            203,
+            "Focus rings/focus-ring",
+            "EFFECT",
+            "key-ring",
+            vec![("effects", V::Array(vec![shadow(4.0)])), ("sortPosition", V::String("\"'#".into()))],
+        ),
+        style_node(
+            204,
+            "Shadows/shadow-sm",
+            "EFFECT",
+            "key-sm",
+            vec![("effects", V::Array(vec![shadow(6.0)])), ("sortPosition", V::String("!~~p~oLf".into()))],
+        ),
+    ];
+    let message = msg(vec![("nodeChanges", V::Array(nodes))]);
+    let schema = figma_like_schema();
+    let root = schema.find("Message").unwrap();
+    let body = schema.encode_message(root, &message).unwrap();
+    let fig_bytes = container::write_container(&schema.encode(), &body, Compression::Zstd, 101);
+
+    let d1 = import_fig(&fig_bytes).unwrap();
+    assert_eq!(d1.style_meta["2:202"].sort_position.as_deref(), Some("!~~p~oL"));
+    assert_eq!(d1.style_meta["2:204"].sort_position.as_deref(), Some("!~~p~oLf"));
+    assert_eq!(d1.style_meta["2:201"].sort_position.as_deref(), Some("!~~p~oLx"));
+    assert_eq!(d1.style_meta["2:203"].sort_position.as_deref(), Some("\"'#"));
+
+    let order1: Vec<(String, Option<String>)> = ordered_style_keys(&d1, Some(StyleProperty::Effect))
+        .into_iter()
+        .map(|k| (d1.style_name(&k).to_string(), d1.style_meta[&k].sort_position.clone()))
+        .collect();
+    assert_eq!(
+        order1,
+        vec![
+            ("Shadows/shadow-xs".into(), Some("!~~p~oL".into())),
+            ("Shadows/shadow-sm".into(), Some("!~~p~oLf".into())),
+            ("Shadows/shadow-lg".into(), Some("!~~p~oLx".into())),
+            ("Focus rings/focus-ring".into(), Some("\"'#".into())),
+        ]
+    );
+
+    let exported = export_fig(&d1).unwrap();
+    let d2 = import_fig(&exported).unwrap();
+    let order2: Vec<(String, Option<String>)> = ordered_style_keys(&d2, Some(StyleProperty::Effect))
+        .into_iter()
+        .map(|k| (d2.style_name(&k).to_string(), d2.style_meta[&k].sort_position.clone()))
+        .collect();
+    assert_eq!(order2, order1, "import -> export -> import must keep exact order and sortPosition values");
+}
+
+#[test]
+fn unpositioned_ten_fill_styles_keep_order_through_fig_round_trip() {
+    let mut d = Document::new("TenStyles");
+    d.add_page("Page 1");
+    let expected_names: Vec<String> = (1..=10).map(|i| format!("Fill/S{i:02}")).collect();
+    for i in 1..=10 {
+        let key = format!("S{i:02}");
+        let name = format!("Fill/S{i:02}");
+        d.styles.insert(key.clone(), Style::Fill(vec![Paint::solid(Color::rgb(i as u8 * 10, 20, 30))]));
+        d.style_meta.insert(key, StyleMeta { name, property: StyleProperty::Fill, sort_position: None, ..Default::default() });
+    }
+    assert!(d.style_meta.values().all(|m| m.sort_position.is_none()));
+
+    let exported = export_fig(&d).unwrap();
+    assert!(d.style_meta.values().all(|m| m.sort_position.is_none()), "export must not mutate in-memory doc sort_position");
+
+    let reimported = import_fig(&exported).unwrap();
+    let names_after: Vec<String> =
+        ordered_style_keys(&reimported, Some(StyleProperty::Fill)).into_iter().map(|k| reimported.style_name(&k).to_string()).collect();
+    assert_eq!(names_after, expected_names, "ten unpositioned fill styles S01..S10 must keep their order through .fig export and import");
+}
+
+#[test]
+fn mixed_positioned_and_unpositioned_styles_keep_order_through_fig_round_trip() {
+    let mut d = Document::new("MixedStyles");
+    d.add_page("Page 1");
+    for (key, name, pos, r) in [
+        ("p_mid", "Shadows/sm", Some("!~~p~oLf"), 20),
+        ("p_last", "Focus rings/ring", Some("\"'#"), 30),
+        ("p_first", "Shadows/xs", Some("!~~p~oL"), 10),
+        ("1_unpos_first", "Custom/First", None, 40),
+        ("2:2", "Custom/Second", None, 50),
+    ] {
+        d.styles.insert(key.into(), Style::Fill(vec![Paint::solid(Color::rgb(r, 0, 0))]));
+        d.style_meta
+            .insert(key.into(), StyleMeta { name: name.into(), property: StyleProperty::Fill, sort_position: pos.map(str::to_string), ..Default::default() });
+    }
+
+    let exported = export_fig(&d).unwrap();
+    assert_eq!(d.style_meta["1_unpos_first"].sort_position, None);
+    assert_eq!(d.style_meta["2:2"].sort_position, None);
+
+    let reimported = import_fig(&exported).unwrap();
+    let after: Vec<(String, Option<String>)> = ordered_style_keys(&reimported, Some(StyleProperty::Fill))
+        .into_iter()
+        .map(|k| (reimported.style_name(&k).to_string(), reimported.style_meta[&k].sort_position.clone()))
+        .collect();
+    let names_after: Vec<&str> = after.iter().map(|(n, _)| n.as_str()).collect();
+    assert_eq!(
+        names_after,
+        vec!["Shadows/xs", "Shadows/sm", "Focus rings/ring", "Custom/First", "Custom/Second"],
+        "positioned styles must come first in sortPosition order, followed by unpositioned styles in stored order"
+    );
+    assert_eq!(after[0].1.as_deref(), Some("!~~p~oL"));
+    assert_eq!(after[1].1.as_deref(), Some("!~~p~oLf"));
+    assert_eq!(after[2].1.as_deref(), Some("\"'#"));
+    assert!(after[3].1.is_some() && after[4].1.is_some(), "unpositioned styles receive generated sortPosition on round trip");
 }
