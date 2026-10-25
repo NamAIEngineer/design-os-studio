@@ -959,6 +959,7 @@ impl TerminalTab {
         let _ = self.master.resize(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 });
         if let Ok(mut p) = self.parser.lock() {
             p.set_size(rows, cols);
+            clamp_terminal_scrollback(&mut p);
         }
     }
 
@@ -5605,6 +5606,26 @@ fn extract_selected_terminal_text(screen: &vt100::Screen, sel: ((u16, u16), (u16
     strip_selection_gutter(&lines.join("\n"))
 }
 
+fn apply_terminal_wheel_scroll(parser: &mut vt100::Parser, delta_y: f32) {
+    let step = ((delta_y.abs() / ROW_H).ceil() as usize).max(1);
+    let max_sb = terminal_scrollback_limit(parser);
+    let cur_sb = parser.screen().scrollback().min(max_sb);
+    let next_sb = if delta_y > 0.0 { cur_sb.saturating_add(step).min(max_sb) } else { cur_sb.saturating_sub(step) };
+    parser.set_scrollback(next_sb);
+}
+
+fn terminal_scrollback_limit(parser: &vt100::Parser) -> usize {
+    usize::from(parser.screen().size().0)
+}
+
+fn clamp_terminal_scrollback(parser: &mut vt100::Parser) {
+    let max_sb = terminal_scrollback_limit(parser);
+    let current = parser.screen().scrollback();
+    if current > max_sb {
+        parser.set_scrollback(max_sb);
+    }
+}
+
 fn render_vt100_viewport(state: &mut TerminalState, ui: &mut Ui, viewport_rect: Rect, file_path: Option<&Path>, surface_id: &'static str) {
     if let Some(failure) = state.active_tab().and_then(|t| t.start_failure.clone()) {
         if let Some(fix) = agent_start_failure::paint(ui, viewport_rect, &failure, surface_id) {
@@ -5732,10 +5753,7 @@ fn render_vt100_viewport(state: &mut TerminalState, ui: &mut Ui, viewport_rect: 
                     let seq = format!("\x1b[<{button};{};{}M", c0 + 1, r0 + 1);
                     tab.write_bytes(seq.as_bytes());
                 } else if let Ok(mut pg) = tab.parser.lock() {
-                    let step = ((delta_y.abs() / ROW_H).ceil() as usize).max(1);
-                    let cur_sb = pg.screen().scrollback();
-                    let next_sb = if delta_y > 0.0 { cur_sb.saturating_add(step) } else { cur_sb.saturating_sub(step) };
-                    pg.set_scrollback(next_sb);
+                    apply_terminal_wheel_scroll(&mut pg, delta_y);
                 }
             }
         }
@@ -6240,6 +6258,36 @@ mod tests {
         }
         let _ = tab.child.kill();
         assert!(found, "VT100 screen should capture 'DESIGNOS_PTY_OK' from PTY stdout");
+    }
+
+    #[test]
+    fn wheel_scroll_clamps_to_visible_rows_before_reading_vt100_cells() {
+        let mut parser = vt100::Parser::new(4, 20, 5_000);
+        for line in 0..20 {
+            parser.process(format!("line-{line}\r\n").as_bytes());
+        }
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            apply_terminal_wheel_scroll(&mut parser, 10_000.0);
+            let _ = parser.screen().cell(0, 0);
+        }));
+
+        assert!(result.is_ok(), "wheel scroll must not make vt100 visible_rows underflow");
+        assert_eq!(parser.screen().scrollback(), 4);
+    }
+
+    #[test]
+    fn resize_clamps_an_existing_scrollback_offset_before_rendering() {
+        let mut parser = vt100::Parser::new(12, 20, 5_000);
+        for line in 0..40 {
+            parser.process(format!("line-{line}\r\n").as_bytes());
+        }
+        parser.set_scrollback(12);
+        parser.set_size(4, 20);
+        clamp_terminal_scrollback(&mut parser);
+
+        assert_eq!(parser.screen().scrollback(), 4);
+        let _ = parser.screen().cell(0, 0);
     }
 
     #[test]
