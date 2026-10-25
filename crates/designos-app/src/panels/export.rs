@@ -449,7 +449,7 @@ impl Sink {
                 let path = dir.join(&job.file);
                 std::fs::write(&path, bytes).map(|()| path.clone()).map_err(|e| (path, e))
             }
-            Sink::Dir { dir, keep_existing: true } => crate::io::write_new_in(dir, &job.file, bytes).map_err(|e| (dir.join(&job.file), e)),
+            Sink::Dir { dir, keep_existing: true } => crate::io::write_new_in(dir, &job.file, bytes).map_err(|e| (e.path, e.error)),
         }
     }
 }

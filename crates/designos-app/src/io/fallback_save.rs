@@ -4,6 +4,25 @@
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
+/// A failed fallback write together with the exact candidate path that was opened or tried.
+#[derive(Debug)]
+pub struct WriteNewInError {
+    pub path: PathBuf,
+    pub error: std::io::Error,
+}
+
+impl std::fmt::Display for WriteNewInError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}: {}", self.path.display(), self.error)
+    }
+}
+
+impl std::error::Error for WriteNewInError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.error)
+    }
+}
+
 /// The user's home folder.
 pub fn user_home() -> Option<PathBuf> {
     ["HOME", "USERPROFILE"].iter().find_map(|name| std::env::var_os(name).filter(|v| !v.is_empty())).map(PathBuf::from)
@@ -35,7 +54,7 @@ fn cut_stem(stem: &str) -> String {
 
 /// Writes `bytes` to `dir/file_name`, or to the first free `name 2.ext`, `name 3.ext`, ... Never replaces a file.
 /// The name is cleaned first, so a layer called `../x` stays inside `dir`.
-pub fn write_new_in(dir: &Path, file_name: &str, bytes: &[u8]) -> std::io::Result<PathBuf> {
+pub fn write_new_in(dir: &Path, file_name: &str, bytes: &[u8]) -> Result<PathBuf, WriteNewInError> {
     let clean = designos_export::sanitize_file_name(file_name);
     let (stem, ext) = match clean.rsplit_once('.') {
         Some((stem, ext)) if !stem.is_empty() && ext.len() <= MAX_EXTENSION_BYTES => (stem, Some(ext)),
@@ -54,21 +73,16 @@ pub fn write_new_in(dir: &Path, file_name: &str, bytes: &[u8]) -> std::io::Resul
             Ok(mut file) => {
                 if let Err(e) = file.write_all(bytes) {
                     std::fs::remove_file(&path).ok();
-                    return Err(with_path(path, e));
+                    return Err(WriteNewInError { path, error: e });
                 }
                 return Ok(path);
             }
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
-            Err(e) => return Err(with_path(path, e)),
+            Err(e) => return Err(WriteNewInError { path, error: e }),
         }
     }
     let path = dir.join(if ext.is_some() { format!("{stem}.{}", ext.unwrap_or_default()) } else { stem });
-    Err(with_path(path, std::io::Error::new(std::io::ErrorKind::AlreadyExists, "too many candidate names")))
-}
-
-fn with_path(path: PathBuf, error: std::io::Error) -> std::io::Error {
-    let kind = error.kind();
-    std::io::Error::new(kind, format!("{}: {error}", path.display()))
+    Err(WriteNewInError { path, error: std::io::Error::new(std::io::ErrorKind::AlreadyExists, "too many candidate names") })
 }
 
 #[cfg(test)]
