@@ -32,3 +32,42 @@ pub(super) fn run(path: &Path, step: Step) {
         hook(step);
     }
 }
+
+type MoveHook = Box<dyn FnOnce() + Send>;
+
+static BEFORE_MOVE: Mutex<Vec<(PathBuf, MoveHook)>> = Mutex::new(Vec::new());
+
+/// Runs `hook` once, just before the entry at `path` is moved aside, so a test can take the entry away at that exact point.
+pub(in crate::agent_session_files) fn set_before_move_hook(path: &Path, hook: MoveHook) {
+    BEFORE_MOVE.lock().unwrap_or_else(|e| e.into_inner()).push((path.to_path_buf(), hook));
+}
+
+pub(super) fn run_before_move(path: &Path) {
+    let hook = {
+        let mut hooks = BEFORE_MOVE.lock().unwrap_or_else(|e| e.into_inner());
+        hooks.iter().position(|(p, _)| p == path).map(|i| hooks.remove(i).1)
+    };
+    if let Some(hook) = hook {
+        hook();
+    }
+}
+
+type RenameHook = Box<dyn FnOnce(&Path) + Send>;
+
+static BEFORE_RENAME: Mutex<Vec<(PathBuf, RenameHook)>> = Mutex::new(Vec::new());
+
+/// Runs `hook` once with the path the entry at `path` is about to be renamed to, between the choice of that name and the rename, so a
+/// test can put something at that name at that exact point.
+pub(in crate::agent_session_files) fn set_before_rename_hook(path: &Path, hook: RenameHook) {
+    BEFORE_RENAME.lock().unwrap_or_else(|e| e.into_inner()).push((path.to_path_buf(), hook));
+}
+
+pub(super) fn run_before_rename(path: &Path, to: &Path) {
+    let hook = {
+        let mut hooks = BEFORE_RENAME.lock().unwrap_or_else(|e| e.into_inner());
+        hooks.iter().position(|(p, _)| p == path).map(|i| hooks.remove(i).1)
+    };
+    if let Some(hook) = hook {
+        hook(to);
+    }
+}

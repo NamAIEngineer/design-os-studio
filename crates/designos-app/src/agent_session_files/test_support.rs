@@ -35,6 +35,55 @@ pub(super) fn running_as_root() -> bool {
     unsafe { libc::geteuid() == 0 }
 }
 
+/// A tab state in `mode` with a session folder Studio made and no agent CLI that can start from its PATH.
+pub(crate) fn tab_state_in(mode: crate::terminal::PermissionMode) -> crate::test_timing::ScopedTerminalState {
+    let mut st = crate::test_timing::ScopedTerminalState::new(crate::terminal::TerminalState::for_tab(unique_tab_id()));
+    st.permission_mode = mode;
+    st.path_override = Some(std::ffi::OsString::new());
+    ensure_session_dir(&st.session_dir).expect("the session folder");
+    st
+}
+
+/// Writes `text` at `<session>/<rel>`, making the folders above it, the way an agent in its own folder would.
+pub(crate) fn plant(session: &Path, rel: &str, text: &str) {
+    let path = session.join(rel);
+    std::fs::create_dir_all(path.parent().expect("a parent")).expect("the agent's folders");
+    std::fs::write(&path, text).expect("the agent's file");
+}
+
+/// The names in the folder `dir`, sorted; empty when it is not there.
+pub(crate) fn names_in(dir: &Path) -> Vec<String> {
+    let mut names: Vec<String> = std::fs::read_dir(dir).into_iter().flatten().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
+    names.sort();
+    names
+}
+
+/// The folders an Ask-mode start made below `<session>/.designos-set-aside`, one for each start that moved something aside.
+pub(crate) fn stamp_folders(session: &Path) -> Vec<PathBuf> {
+    names_in(&session.join(".designos-set-aside")).into_iter().map(|name| session.join(".designos-set-aside").join(name)).collect()
+}
+
+/// `rel` below the one folder a single start moved its entries into.
+pub(crate) fn aside_path(session: &Path, rel: &str) -> PathBuf {
+    let folders = stamp_folders(session);
+    assert_eq!(folders.len(), 1, "one start, one folder: {folders:?}");
+    folders[0].join(rel)
+}
+
+/// Whether `name` is the name of a set-aside folder: `<UTC date>-<UTC time>-<six hex digits>`, like `20261025-023045-a1b2c3`.
+pub(crate) fn is_stamp(name: &str) -> bool {
+    let parts: Vec<&str> = name.split('-').collect();
+    matches!(parts.as_slice(), [date, time, id]
+        if date.len() == 8 && date.bytes().all(|b| b.is_ascii_digit())
+        && time.len() == 6 && time.bytes().all(|b| b.is_ascii_digit())
+        && id.len() == 6 && id.bytes().all(|b| b.is_ascii_hexdigit()))
+}
+
+/// Whether anything, a link included, is at `path`.
+pub(crate) fn is_there(path: &Path) -> bool {
+    std::fs::symlink_metadata(path).is_ok()
+}
+
 /// Makes a FIFO at `path`, which a plain `open` for reading blocks on until something opens it for writing.
 pub(crate) fn make_fifo(path: &Path) {
     let c = std::ffi::CString::new(std::os::unix::ffi::OsStrExt::as_bytes(path.as_os_str())).expect("a path without NUL");
