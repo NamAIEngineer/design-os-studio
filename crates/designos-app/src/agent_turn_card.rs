@@ -9,6 +9,7 @@ use egui::{Align2, Id, Pos2, Rect, Sense, Stroke, StrokeKind, Ui, Vec2};
 use std::time::Instant;
 
 pub const MAX_PREVIEW_LAYERS: usize = 5;
+const MAX_VISIBLE_ROWS: usize = 8;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TurnCardAction {
@@ -81,10 +82,10 @@ pub fn desired_card_height(app: &mut App, tab_idx: usize) -> f32 {
 
 fn compute_turn_card_height(turn: &TurnRecord) -> f32 {
     let pad = theme::INSET_FRAME;
-    match turn.state {
+    let height = match turn.state {
         TurnState::Reverted => pad * 2.0 + theme::CONTROL_DENSE,
         TurnState::Active | TurnState::Completed => {
-            let visible_rows = if turn.expanded { turn.touched_layers.len() } else { turn.touched_layers.len().min(MAX_PREVIEW_LAYERS) };
+            let visible_rows = if turn.expanded { turn.touched_layers.len().min(MAX_VISIBLE_ROWS) } else { turn.touched_layers.len().min(MAX_PREVIEW_LAYERS) };
             let has_show_all = !turn.expanded && turn.touched_layers.len() > MAX_PREVIEW_LAYERS;
             let total_rows = visible_rows + usize::from(has_show_all);
             let rows_h = if total_rows > 0 { total_rows as f32 * theme::CONTROL_DENSE + (total_rows.saturating_sub(1)) as f32 * theme::SPACE_ROW } else { 0.0 };
@@ -98,7 +99,8 @@ fn compute_turn_card_height(turn: &TurnRecord) -> f32 {
                 + theme::CONTROL_STANDARD
         }
         TurnState::Kept => 0.0,
-    }
+    };
+    height
 }
 
 /// Renders the per-turn review card inside `outer_rect` at the bottom of the agent panel.
@@ -240,10 +242,31 @@ fn draw_active_turn_card(ui: &mut Ui, p: &egui::Painter, app: &App, inner: Rect,
     p.text(Pos2::new(inner.left(), y + theme::LINE_CAPTION * 0.5), Align2::LEFT_CENTER, sub_elided, theme::font_caption(), theme::TEXT_SECONDARY);
     y += theme::LINE_CAPTION + theme::SPACE_INLINE;
 
-    // 3. Collapsible list of changed layers (first 5 visible, then "Show all"), each row `CONTROL_DENSE` high.
-    let limit = if turn.expanded { turn.touched_layers.len() } else { turn.touched_layers.len().min(MAX_PREVIEW_LAYERS) };
-    for (idx, layer) in turn.touched_layers.iter().take(limit).enumerate() {
+    // 3. Collapsible list. Expanded cards use a bounded viewport so the footer remains visible;
+    // wheel input advances the visible slice without changing the turn's review state.
+    let max_rows = MAX_VISIBLE_ROWS;
+    let requested = if turn.expanded { turn.touched_layers.len() } else { turn.touched_layers.len().min(MAX_PREVIEW_LAYERS) };
+    let max_start = requested.saturating_sub(max_rows);
+    let scroll_id = Id::new(("agent-turn-scroll", turn.id));
+    let mut start = ui.ctx().data(|d| d.get_temp::<usize>(scroll_id).unwrap_or(0)).min(max_start);
+    let visible_rows = requested.min(max_rows);
+    let rows_h = if visible_rows > 0 { visible_rows as f32 * theme::CONTROL_DENSE + (visible_rows - 1) as f32 * theme::SPACE_ROW } else { 0.0 };
+    let list_rect = Rect::from_min_size(Pos2::new(inner.left(), y), Vec2::new(inner.width(), rows_h));
+    if turn.expanded && ui.rect_contains_pointer(list_rect) {
+        let dy = ui.input(|i| i.smooth_scroll_delta.y);
+        if dy.abs() > 0.5 {
+            start = if dy < 0.0 { (start + 1).min(max_start) } else { start.saturating_sub(1) };
+            ui.ctx().data_mut(|d| d.insert_temp(scroll_id, start));
+        }
+    }
+    let visible_end = (start + max_rows).min(requested);
+    let limit = visible_end.saturating_sub(start);
+    let previous_clip = ui.clip_rect();
+    ui.set_clip_rect(previous_clip.intersect(list_rect));
+    for (offset, layer) in turn.touched_layers.iter().skip(start).take(limit).enumerate() {
+        let idx = start + offset;
         let row_rect = Rect::from_min_size(Pos2::new(inner.left(), y), Vec2::new(inner.width(), theme::CONTROL_DENSE));
+        let row_rect = row_rect.translate(Vec2::new(0.0, offset as f32 * (theme::CONTROL_DENSE + theme::SPACE_ROW)));
         let is_removed = layer.kind == TouchKind::Removed;
         let resp = ui.interact(row_rect, Id::new(("agent-turn-layer", turn.id, layer.id.0)), Sense::click());
         let is_selected = !is_removed && app.is_selected(layer.id);
@@ -277,10 +300,11 @@ fn draw_active_turn_card(ui: &mut Ui, p: &egui::Painter, app: &App, inner: Rect,
         if !is_removed && resp.clicked() {
             *action = Some(TurnCardAction::SelectLayer(layer.id));
         }
-        y += theme::CONTROL_DENSE + theme::SPACE_ROW;
     }
+    ui.set_clip_rect(previous_clip);
+    y += rows_h;
 
-    let remaining = turn.touched_layers.len().saturating_sub(limit);
+    let remaining = if turn.expanded { 0 } else { requested.saturating_sub(visible_end) };
     if remaining > 0 {
         let more_rect = Rect::from_min_size(Pos2::new(inner.left(), y), Vec2::new(inner.width(), theme::CONTROL_DENSE));
         let more_resp = ui.interact(more_rect, Id::new(("agent-turn-show-all", turn.id)), Sense::click());
@@ -376,5 +400,31 @@ pub fn execute_revert(app: &mut App, tab_idx: usize, turn_id: u64) {
         Err(e) => {
             app.show_toast(format!("Turn not reverted: {e}"), true);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::agent_turn_ledger::TurnRecord;
+    use std::time::Instant;
+
+    #[test]
+    fn expanded_card_height_is_bounded_for_large_turn() {
+        let now = Instant::now();
+        let mut turn = TurnRecord {
+            id: 1, cli: None, start_patch_bytes: 0, end_patch_bytes: None,
+            steps: Vec::new(), touched_layers: Vec::new(), inserted_count: 0,
+            updated_count: 0, moved_count: 0, removed_count: 0, approximate: false,
+            state: TurnState::Completed, expanded: true, last_revert_report: None,
+            reverted_at: None, created_at: now, last_patch_at: now, ended_at: Some(now), approx_bytes: 0,
+        };
+        turn.touched_layers.resize_with(82, || crate::agent_turn_ledger::TouchedLayerSummary {
+            id: NodeId(1), name: "layer".into(), kind: TouchKind::Updated,
+        });
+        let height = compute_turn_card_height(&turn);
+        let eight_rows = 8.0 * theme::CONTROL_DENSE + 7.0 * theme::SPACE_ROW;
+        assert!(height < 500.0);
+        assert!(height >= eight_rows);
     }
 }
