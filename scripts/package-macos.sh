@@ -20,11 +20,11 @@ version=${version#v}
 root=$(cd "$(dirname "$0")/.." && pwd)
 cd "$root"
 
-default_target_dir=$root/../.design-os-studio-target
-if [ "$(uname -s)" = "Darwin" ]; then
-  default_target_dir="$HOME/Library/Caches/design-os-studio/target"
+if [ -n "${CARGO_TARGET_DIR:-}" ]; then
+  target_dir="$CARGO_TARGET_DIR"
+else
+  target_dir="$(python3 "$root/scripts/cargo_target.py" "$root")"
 fi
-target_dir=${CARGO_TARGET_DIR:-$default_target_dir}
 arm_dir=${2:-$target_dir/aarch64-apple-darwin/release}
 x64_dir=${3:-$target_dir/x86_64-apple-darwin/release}
 host_dir=$target_dir/release

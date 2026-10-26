@@ -13,11 +13,9 @@ set -euo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
 cd "$root"
 
-default_target_dir="$root/../.design-os-studio-target"
-if [ "$(uname -s)" = "Darwin" ]; then
-  default_target_dir="${HOME}/Library/Caches/design-os-studio/target"
+if [ -z "${CARGO_TARGET_DIR:-}" ]; then
+  CARGO_TARGET_DIR="$(python3 "$root/scripts/cargo_target.py" "$root")"
 fi
-: "${CARGO_TARGET_DIR:=$default_target_dir}"
 export CARGO_TARGET_DIR
 target_dir="$CARGO_TARGET_DIR"
 

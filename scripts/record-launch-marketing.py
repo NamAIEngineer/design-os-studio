@@ -24,8 +24,10 @@ from pathlib import Path
 from PIL import Image, ImageDraw, ImageFont
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-DEFAULT_TARGET_DIR = Path.home() / "Library" / "Caches" / "design-os-studio" / "target" if sys.platform == "darwin" else REPO_ROOT.parent / ".design-os-studio-target"
-TARGET_DIR = Path(os.environ.get("CARGO_TARGET_DIR", str(DEFAULT_TARGET_DIR)))
+sys.path.insert(0, str(REPO_ROOT / "scripts"))
+from cargo_target import resolve as resolve_cargo_target
+
+TARGET_DIR = resolve_cargo_target(REPO_ROOT)
 BIN = TARGET_DIR / "release" / "designos-studio"
 MARKETING_DIR = REPO_ROOT / "Design" / "marketing"
 SHOTS_DIR = MARKETING_DIR / "screenshots"

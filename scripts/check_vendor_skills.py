@@ -12,9 +12,9 @@ from __future__ import annotations
 import argparse
 import hashlib
 import os
-import sys
 import re
 import subprocess
+import sys
 import tomllib
 import urllib.request
 from pathlib import Path, PurePosixPath
@@ -159,8 +159,10 @@ def load_vendor_register(repo_root: Path) -> Tuple[Dict[str, dict], Optional[str
 def load_lint_rule_ids(repo_root: Path) -> Set[str]:
     """Lint rule IDs: the output of a built `designos-mcp --list-lint-rules` when there is one, else the registry ids pinned in `CANONICAL_LINT_RULE_IDS`."""
     ids = set(CANONICAL_LINT_RULE_IDS)
-    default_target_dir = Path.home() / "Library" / "Caches" / "design-os-studio" / "target" if sys.platform == "darwin" else repo_root.parent / ".design-os-studio-target"
-    target_dir = Path(os.environ.get("CARGO_TARGET_DIR", str(default_target_dir)))
+    sys.path.insert(0, str(repo_root / "scripts"))
+    from cargo_target import resolve as resolve_cargo_target
+
+    target_dir = resolve_cargo_target(repo_root)
     for profile in ("debug", "release"):
         bin_path = target_dir / profile / "designos-mcp"
         if bin_path.is_file() and os.access(bin_path, os.X_OK):
