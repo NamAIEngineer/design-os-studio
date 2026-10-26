@@ -19,6 +19,11 @@ pub enum TurnCardAction {
     Expand(u64),
 }
 
+struct TurnCardRenderScope<'a> {
+    app: &'a App,
+    tab_id: usize,
+}
+
 pub fn touch_kind_label(kind: TouchKind) -> &'static str {
     match kind {
         TouchKind::Inserted => "added",
@@ -153,7 +158,9 @@ pub fn show(ui: &mut Ui, app: &mut App, tab_idx: usize) {
             draw_reverted_caption(&p, Pos2::new(row_rect.left(), row_rect.center().y), text_max_w, &report);
         }
         TurnState::Active | TurnState::Completed => {
-            draw_active_turn_card(ui, &p, app, tab_idx, inner, &turn_snapshot, fallback_cli, &mut action);
+            let tab_id = app.terminal.tabs.get(tab_idx).map(|tab| tab.id).unwrap_or(usize::MAX);
+            let scope = TurnCardRenderScope { app, tab_id };
+            draw_active_turn_card(ui, &p, &scope, inner, &turn_snapshot, fallback_cli, &mut action);
         }
         TurnState::Kept => {}
     }
@@ -215,8 +222,7 @@ fn draw_reverted_caption(p: &egui::Painter, pos: Pos2, max_w: f32, report: &Reve
 fn draw_active_turn_card(
     ui: &mut Ui,
     p: &egui::Painter,
-    app: &App,
-    tab_idx: usize,
+    scope: &TurnCardRenderScope<'_>,
     inner: Rect,
     turn: &TurnRecord,
     fallback_cli: &str,
@@ -258,8 +264,7 @@ fn draw_active_turn_card(
     let max_start = if turn.expanded { total_layers.saturating_sub(max_rows) } else { 0 };
     // Turn IDs restart at one for each per-tab ledger. Include the tab identity so a scroll
     // offset from one agent tab cannot leak into another tab's turn with the same ID.
-    let tab_id = app.terminal.tabs.get(tab_idx).map(|tab| tab.id).unwrap_or(usize::MAX);
-    let scroll_id = turn_scroll_id(tab_id, turn.id);
+    let scroll_id = turn_scroll_id(scope.tab_id, turn.id);
     let mut start = ui.ctx().data(|d| d.get_temp::<usize>(scroll_id).unwrap_or(0)).min(max_start);
     let rows_h = if visible_rows > 0 { visible_rows as f32 * theme::CONTROL_DENSE + (visible_rows - 1) as f32 * theme::SPACE_ROW } else { 0.0 };
     let list_rect = Rect::from_min_size(Pos2::new(inner.left(), y), Vec2::new(inner.width(), rows_h));
@@ -281,7 +286,7 @@ fn draw_active_turn_card(
         let row_rect = row_rect.translate(Vec2::new(0.0, offset as f32 * (theme::CONTROL_DENSE + theme::SPACE_ROW)));
         let is_removed = layer.kind == TouchKind::Removed;
         let resp = ui.interact(row_rect, Id::new(("agent-turn-layer", turn.id, layer.id.0)), Sense::click());
-        let is_selected = !is_removed && app.is_selected(layer.id);
+        let is_selected = !is_removed && scope.app.is_selected(layer.id);
         if is_selected {
             row_p.rect_filled(row_rect, theme::cr(theme::RADIUS_CONTROL), theme::BG_SELECTED);
         } else if resp.hovered() && !is_removed {
