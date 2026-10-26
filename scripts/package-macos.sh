@@ -16,13 +16,18 @@ set -euo pipefail
 
 version=${1:?usage: package-macos.sh <version> [arm64-bin-dir] [x86_64-bin-dir]}
 version=${version#v}
-target_dir=${CARGO_TARGET_DIR:-/Users/nam/Library/Caches/design-os-studio/target}
-arm_dir=${2:-$target_dir/aarch64-apple-darwin/release}
-x64_dir=${3:-$target_dir/x86_64-apple-darwin/release}
-host_dir=$target_dir/release
 
 root=$(cd "$(dirname "$0")/.." && pwd)
 cd "$root"
+
+default_target_dir=$root/../.design-os-studio-target
+if [ "$(uname -s)" = "Darwin" ]; then
+  default_target_dir="$HOME/Library/Caches/design-os-studio/target"
+fi
+target_dir=${CARGO_TARGET_DIR:-$default_target_dir}
+arm_dir=${2:-$target_dir/aarch64-apple-darwin/release}
+x64_dir=${3:-$target_dir/x86_64-apple-darwin/release}
+host_dir=$target_dir/release
 dist=$root/dist
 work=$dist/macos-work
 rm -rf "$work"

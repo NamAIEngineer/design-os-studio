@@ -9,13 +9,14 @@ from __future__ import annotations
 
 import concurrent.futures
 import os
-import subprocess
 import sys
+import subprocess
 import time
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-TARGET_DIR = Path(os.environ.get("CARGO_TARGET_DIR", "/Users/nam/Library/Caches/design-os-studio/target"))
+DEFAULT_TARGET_DIR = Path.home() / "Library" / "Caches" / "design-os-studio" / "target" if sys.platform == "darwin" else REPO_ROOT.parent / ".design-os-studio-target"
+TARGET_DIR = Path(os.environ.get("CARGO_TARGET_DIR", str(DEFAULT_TARGET_DIR)))
 BIN = TARGET_DIR / "release" / "designos-studio"
 OUT_DIR = REPO_ROOT / "Design" / "marketing" / "screenshots" / "micro"
 

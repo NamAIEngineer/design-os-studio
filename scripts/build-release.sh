@@ -13,7 +13,11 @@ set -euo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
 cd "$root"
 
-: "${CARGO_TARGET_DIR:=/Users/nam/Library/Caches/design-os-studio/target}"
+default_target_dir="$root/../.design-os-studio-target"
+if [ "$(uname -s)" = "Darwin" ]; then
+  default_target_dir="${HOME}/Library/Caches/design-os-studio/target"
+fi
+: "${CARGO_TARGET_DIR:=$default_target_dir}"
 export CARGO_TARGET_DIR
 target_dir="$CARGO_TARGET_DIR"
 

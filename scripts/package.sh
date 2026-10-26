@@ -23,12 +23,17 @@ set -euo pipefail
 target=${1:?usage: package.sh <target-triple> <version> [bin-dir]}
 version=${2:?usage: package.sh <target-triple> <version> [bin-dir]}
 version=${version#v}
-target_dir=${CARGO_TARGET_DIR:-/Users/nam/Library/Caches/design-os-studio/target}
-bin_dir=${3:-$target_dir/$target/release}
-[ -d "$bin_dir" ] || bin_dir=$target_dir/release
 
 root=$(cd "$(dirname "$0")/.." && pwd)
 cd "$root"
+
+default_target_dir=$root/../.design-os-studio-target
+if [ "$(uname -s)" = "Darwin" ]; then
+  default_target_dir="$HOME/Library/Caches/design-os-studio/target"
+fi
+target_dir=${CARGO_TARGET_DIR:-$default_target_dir}
+bin_dir=${3:-$target_dir/$target/release}
+[ -d "$bin_dir" ] || bin_dir=$target_dir/release
 
 case "$target" in
   *windows*) exe=.exe; fmt=zip ;;

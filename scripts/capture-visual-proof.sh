@@ -24,7 +24,11 @@ export PATH="$HOME/.cargo/bin:$PATH"
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
 
-: "${CARGO_TARGET_DIR:=/Users/nam/Library/Caches/design-os-studio/target}"
+default_target_dir="$REPO_ROOT/../.design-os-studio-target"
+if [[ "$(uname -s)" == Darwin ]]; then
+  default_target_dir="$HOME/Library/Caches/design-os-studio/target"
+fi
+: "${CARGO_TARGET_DIR:=$default_target_dir}"
 export CARGO_TARGET_DIR
 
 DOC="${DESIGNOS_PROOF_DOC:-}"
