@@ -212,7 +212,16 @@ fn draw_reverted_caption(p: &egui::Painter, pos: Pos2, max_w: f32, report: &Reve
     }
 }
 
-fn draw_active_turn_card(ui: &mut Ui, p: &egui::Painter, app: &App, tab_idx: usize, inner: Rect, turn: &TurnRecord, fallback_cli: &str, action: &mut Option<TurnCardAction>) {
+fn draw_active_turn_card(
+    ui: &mut Ui,
+    p: &egui::Painter,
+    app: &App,
+    tab_idx: usize,
+    inner: Rect,
+    turn: &TurnRecord,
+    fallback_cli: &str,
+    action: &mut Option<TurnCardAction>,
+) {
     let mut y = inner.top();
 
     // 1. Headline: "<CLI> changed layers" in body-medium + separate count pill (`BG_TERTIARY`, `font_mono`).
