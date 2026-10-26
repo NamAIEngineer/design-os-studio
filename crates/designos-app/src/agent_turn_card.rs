@@ -154,7 +154,7 @@ pub fn show(ui: &mut Ui, app: &mut App, tab_idx: usize) {
             draw_reverted_caption(&p, Pos2::new(row_rect.left(), row_rect.center().y), text_max_w, &report);
         }
         TurnState::Active | TurnState::Completed => {
-            draw_active_turn_card(ui, &p, app, inner, &turn_snapshot, fallback_cli, &mut action);
+            draw_active_turn_card(ui, &p, app, tab_idx, inner, &turn_snapshot, fallback_cli, &mut action);
         }
         TurnState::Kept => {}
     }
@@ -213,7 +213,16 @@ fn draw_reverted_caption(p: &egui::Painter, pos: Pos2, max_w: f32, report: &Reve
     }
 }
 
-fn draw_active_turn_card(ui: &mut Ui, p: &egui::Painter, app: &App, inner: Rect, turn: &TurnRecord, fallback_cli: &str, action: &mut Option<TurnCardAction>) {
+fn draw_active_turn_card(
+    ui: &mut Ui,
+    p: &egui::Painter,
+    app: &App,
+    tab_idx: usize,
+    inner: Rect,
+    turn: &TurnRecord,
+    fallback_cli: &str,
+    action: &mut Option<TurnCardAction>,
+) {
     let mut y = inner.top();
 
     // 1. Headline: "<CLI> changed layers" in body-medium + separate count pill (`BG_TERTIARY`, `font_mono`).
@@ -248,7 +257,10 @@ fn draw_active_turn_card(ui: &mut Ui, p: &egui::Painter, app: &App, inner: Rect,
     let total_layers = turn.touched_layers.len();
     let visible_rows = if turn.expanded { total_layers.min(max_rows) } else { total_layers.min(MAX_PREVIEW_LAYERS) };
     let max_start = if turn.expanded { total_layers.saturating_sub(max_rows) } else { 0 };
-    let scroll_id = Id::new(("agent-turn-scroll", turn.id));
+    // Turn IDs restart at one for each per-tab ledger. Include the tab identity so a scroll
+    // offset from one agent tab cannot leak into another tab's turn with the same ID.
+    let tab_id = app.terminal.tabs.get(tab_idx).map(|tab| tab.id).unwrap_or(usize::MAX);
+    let scroll_id = turn_scroll_id(tab_id, turn.id);
     let mut start = ui.ctx().data(|d| d.get_temp::<usize>(scroll_id).unwrap_or(0)).min(max_start);
     let rows_h = if visible_rows > 0 { visible_rows as f32 * theme::CONTROL_DENSE + (visible_rows - 1) as f32 * theme::SPACE_ROW } else { 0.0 };
     let list_rect = Rect::from_min_size(Pos2::new(inner.left(), y), Vec2::new(inner.width(), rows_h));
@@ -355,6 +367,10 @@ fn draw_active_turn_card(ui: &mut Ui, p: &egui::Painter, app: &App, inner: Rect,
     }
 }
 
+fn turn_scroll_id(tab_id: usize, turn_id: u64) -> Id {
+    Id::new(("agent-turn-scroll", tab_id, turn_id))
+}
+
 pub fn apply_card_action(app: &mut App, tab_idx: usize, action: TurnCardAction) {
     match action {
         TurnCardAction::Keep(turn_id) => {
@@ -446,5 +462,11 @@ mod tests {
         let eight_rows = 8.0 * theme::CONTROL_DENSE + 7.0 * theme::SPACE_ROW;
         assert!(height < 500.0);
         assert!(height >= eight_rows);
+    }
+
+    #[test]
+    fn expanded_scroll_state_is_scoped_per_tab() {
+        assert_ne!(turn_scroll_id(0, 1), turn_scroll_id(1, 1));
+        assert_eq!(turn_scroll_id(0, 1), turn_scroll_id(0, 1));
     }
 }
