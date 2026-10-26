@@ -18,8 +18,6 @@ jobs:
   gate-fmt:
     name: PR Gate (rustfmt)
     runs-on: ubuntu-latest
-    env:
-      CARGO_TARGET_DIR: ${{ runner.temp }}/design-os-studio-target
     steps:
       - uses: actions/checkout@v4
       - name: Install Linux system libraries
@@ -37,8 +35,6 @@ jobs:
   gate-clippy:
     name: PR Gate (clippy)
     runs-on: ubuntu-latest
-    env:
-      CARGO_TARGET_DIR: ${{ runner.temp }}/design-os-studio-target
     steps:
       - uses: actions/checkout@v4
       - name: Install Linux system libraries
@@ -56,8 +52,6 @@ jobs:
   gate-lib-tests:
     name: PR Gate (lib tests)
     runs-on: ubuntu-latest
-    env:
-      CARGO_TARGET_DIR: ${{ runner.temp }}/design-os-studio-target
     steps:
       - uses: actions/checkout@v4
       - name: Install Linux system libraries
