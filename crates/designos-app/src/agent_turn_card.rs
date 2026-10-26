@@ -435,7 +435,13 @@ mod tests {
             ended_at: Some(now),
             approx_bytes: 0,
         };
-        turn.touched_layers.resize_with(82, || crate::agent_turn_ledger::TouchedLayerSummary { id: NodeId(1), name: "layer".into(), kind: TouchKind::Updated });
+        turn.touched_layers.resize_with(82, || crate::agent_turn_ledger::TouchedLayerSummary {
+            id: NodeId(1),
+            name: "layer".into(),
+            kind: TouchKind::Updated,
+            post_fingerprint: None,
+            post_children: Vec::new(),
+        });
         let height = compute_turn_card_height(&turn);
         let eight_rows = 8.0 * theme::CONTROL_DENSE + 7.0 * theme::SPACE_ROW;
         assert!(height < 500.0);
