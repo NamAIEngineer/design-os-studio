@@ -82,7 +82,7 @@ pub fn desired_card_height(app: &mut App, tab_idx: usize) -> f32 {
 
 fn compute_turn_card_height(turn: &TurnRecord) -> f32 {
     let pad = theme::INSET_FRAME;
-    let height = match turn.state {
+    match turn.state {
         TurnState::Reverted => pad * 2.0 + theme::CONTROL_DENSE,
         TurnState::Active | TurnState::Completed => {
             let visible_rows = if turn.expanded { turn.touched_layers.len().min(MAX_VISIBLE_ROWS) } else { turn.touched_layers.len().min(MAX_PREVIEW_LAYERS) };
@@ -99,8 +99,7 @@ fn compute_turn_card_height(turn: &TurnRecord) -> f32 {
                 + theme::CONTROL_STANDARD
         }
         TurnState::Kept => 0.0,
-    };
-    height
+    }
 }
 
 /// Renders the per-turn review card inside `outer_rect` at the bottom of the agent panel.
@@ -154,7 +153,7 @@ pub fn show(ui: &mut Ui, app: &mut App, tab_idx: usize) {
             draw_reverted_caption(&p, Pos2::new(row_rect.left(), row_rect.center().y), text_max_w, &report);
         }
         TurnState::Active | TurnState::Completed => {
-            draw_active_turn_card(ui, &p, app, tab_idx, inner, &turn_snapshot, fallback_cli, &mut action);
+            draw_active_turn_card(ui, &p, app, inner, &turn_snapshot, fallback_cli, &mut action);
         }
         TurnState::Kept => {}
     }
@@ -213,16 +212,7 @@ fn draw_reverted_caption(p: &egui::Painter, pos: Pos2, max_w: f32, report: &Reve
     }
 }
 
-fn draw_active_turn_card(
-    ui: &mut Ui,
-    p: &egui::Painter,
-    app: &App,
-    tab_idx: usize,
-    inner: Rect,
-    turn: &TurnRecord,
-    fallback_cli: &str,
-    action: &mut Option<TurnCardAction>,
-) {
+fn draw_active_turn_card(ui: &mut Ui, p: &egui::Painter, app: &App, inner: Rect, turn: &TurnRecord, fallback_cli: &str, action: &mut Option<TurnCardAction>) {
     let mut y = inner.top();
 
     // 1. Headline: "<CLI> changed layers" in body-medium + separate count pill (`BG_TERTIARY`, `font_mono`).
@@ -259,7 +249,7 @@ fn draw_active_turn_card(
     let max_start = if turn.expanded { total_layers.saturating_sub(max_rows) } else { 0 };
     // Turn IDs restart at one for each per-tab ledger. Include the tab identity so a scroll
     // offset from one agent tab cannot leak into another tab's turn with the same ID.
-    let tab_id = app.terminal.tabs.get(tab_idx).map(|tab| tab.id).unwrap_or(usize::MAX);
+    let tab_id = app.terminal.tabs.get(app.terminal.active_tab).map(|tab| tab.id).unwrap_or(usize::MAX);
     let scroll_id = turn_scroll_id(tab_id, turn.id);
     let mut start = ui.ctx().data(|d| d.get_temp::<usize>(scroll_id).unwrap_or(0)).min(max_start);
     let rows_h = if visible_rows > 0 { visible_rows as f32 * theme::CONTROL_DENSE + (visible_rows - 1) as f32 * theme::SPACE_ROW } else { 0.0 };
