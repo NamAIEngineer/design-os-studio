@@ -2427,7 +2427,7 @@ impl<'a> Ctx<'a> {
                 })
             })
             .flatten();
-        let stroke_geo = (!skip_geo)
+        let mut stroke_geo = (!skip_geo)
             .then(|| {
                 d.stroke_geometry.as_ref().map(|arr| {
                     arr.iter()
@@ -2448,6 +2448,16 @@ impl<'a> Ctx<'a> {
                 })
             })
             .flatten();
+        let derived_source_size =
+            d.size.and_then(|_| self.doc.get(id).and_then(|n| n.component.source).and_then(|source| self.doc.get(source)).map(|n| n.size));
+        if let (Some(target), Some(source)) = (d.size, derived_source_size) {
+            if let Some(g) = fill_geo.as_mut() {
+                scale_derived_geometry(g, source, target);
+            }
+            if let Some(g) = stroke_geo.as_mut() {
+                scale_derived_geometry(g, source, target);
+            }
+        }
         let Some(n) = self.doc.get_mut(id) else { return };
         let is_vec_or_bool = matches!(n.kind, NodeKind::Vector { .. } | NodeKind::BooleanOp(_));
         if let Some(sz) = d.size {
@@ -2602,6 +2612,9 @@ impl<'a> Ctx<'a> {
         if !derived_only && set.get("layoutMode").is_none() && !self.no_auto_layout.contains(&id) {
             self.inherit_auto_layout_for_partial_override(id, set);
         }
+        let derived_target = derived_only.then(|| set.get("size").and_then(vec2)).flatten();
+        let derived_source_size =
+            derived_target.and_then(|_| self.doc.get(id).and_then(|n| n.component.source).and_then(|source| self.doc.get(source)).map(|n| n.size));
         let Some(n) = self.doc.get_mut(id) else { return Ok(swapped) };
         let keep = |k: &str| !derived_only || matches!(k, "size" | "relativeTransform" | "fillGeometry" | "strokeGeometry");
         let has = |k: &str| keep(k) && set.get(k).is_some();
@@ -2636,7 +2649,10 @@ impl<'a> Ctx<'a> {
             }
         }
         if has("fillGeometry") && !skip_geo {
-            let g = parse_geometry_cached(farr(set, "fillGeometry"), &mut self.path_cache, &mut self.blob_cache, self.blobs);
+            let mut g = parse_geometry_cached(farr(set, "fillGeometry"), &mut self.path_cache, &mut self.blob_cache, self.blobs);
+            if let (Some(target), Some(source)) = (derived_target, derived_source_size) {
+                scale_derived_geometry(&mut g, source, target);
+            }
             if let NodeKind::Vector { paths, network } = &mut n.kind {
                 if self.large_file {
                     *paths = g;
@@ -2653,8 +2669,11 @@ impl<'a> Ctx<'a> {
             }
         }
         if has("strokeGeometry") && !skip_geo {
-            n.stroke_geometry =
-                Some(parse_geometry_cached(farr(set, "strokeGeometry"), &mut self.path_cache, &mut self.blob_cache, self.blobs)).filter(|g| !g.is_empty());
+            let mut g = parse_geometry_cached(farr(set, "strokeGeometry"), &mut self.path_cache, &mut self.blob_cache, self.blobs);
+            if let (Some(target), Some(source)) = (derived_target, derived_source_size) {
+                scale_derived_geometry(&mut g, source, target);
+            }
+            n.stroke_geometry = Some(g).filter(|g| !g.is_empty());
         }
         if derived_only {
             return Ok(swapped);
@@ -3504,6 +3523,36 @@ fn parse_geometry_cached(items: &[Value], cache: &mut HashMap<String, Path>, blo
         }
     }
     out
+}
+
+fn scale_derived_geometry(paths: &mut [Path], source: Vec2, target: Vec2) {
+    let kx = if source.x.abs() > 1e-6 { target.x / source.x } else { 1.0 };
+    let ky = if source.y.abs() > 1e-6 { target.y / source.y } else { 1.0 };
+    for path in paths {
+        for cmd in &mut path.cmds {
+            match cmd {
+                PathCmd::MoveTo(p) | PathCmd::LineTo(p) => {
+                    p.x *= kx;
+                    p.y *= ky;
+                }
+                PathCmd::QuadTo(c, p) => {
+                    c.x *= kx;
+                    c.y *= ky;
+                    p.x *= kx;
+                    p.y *= ky;
+                }
+                PathCmd::CubicTo(c1, c2, p) => {
+                    c1.x *= kx;
+                    c1.y *= ky;
+                    c2.x *= kx;
+                    c2.y *= ky;
+                    p.x *= kx;
+                    p.y *= ky;
+                }
+                PathCmd::Close => {}
+            }
+        }
+    }
 }
 
 /// Parses `.fig` v106 CSS-grid track strings (e.g. `"1fr 2fr 120px auto"`,

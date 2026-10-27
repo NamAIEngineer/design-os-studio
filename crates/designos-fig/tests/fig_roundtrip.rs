@@ -2622,6 +2622,52 @@ fn derived_entry_overrides_the_pass() {
 }
 
 #[test]
+fn derived_geometry_scales_with_resized_instance_child() {
+    let g = |s: u64, l: u64| -> Value { json!({"sessionID": s, "localID": l}) };
+    let source_path = Path {
+        cmds: vec![PathCmd::MoveTo(Vec2::new(0.0, 0.0)), PathCmd::LineTo(Vec2::new(10.0, 0.0)), PathCmd::LineTo(Vec2::new(10.0, 5.0)), PathCmd::Close],
+        fill_rule: FillRule::NonZero,
+    };
+    let source_blob = path_to_commands_blob(&source_path);
+    let changes = json!([
+        {"guid": g(0, 0), "type": "DOCUMENT", "name": "DerivedGeometry"},
+        {"guid": g(0, 1), "parentIndex": {"guid": g(0, 0), "position": "!"}, "type": "CANVAS", "name": "Page"},
+        {"guid": g(1, 2), "parentIndex": {"guid": g(0, 1), "position": "!"}, "type": "SYMBOL", "name": "Icon", "size": {"x": 10.0, "y": 10.0}},
+        {"guid": g(1, 3), "parentIndex": {"guid": g(1, 2), "position": "!"}, "type": "VECTOR", "name": "Arrow", "size": {"x": 10.0, "y": 5.0},
+         "fillGeometry": [{"commandsBlob": 0, "windingRule": "NONZERO"}]},
+        {"guid": g(1, 10), "parentIndex": {"guid": g(0, 1), "position": "\""}, "type": "INSTANCE", "name": "IconSmall", "size": {"x": 5.0, "y": 2.5},
+         "symbolData": {"symbolID": g(1, 2), "symbolOverrides": []},
+         "derivedSymbolData": [{"guidPath": {"guids": [g(1, 3)]}, "size": {"x": 5.0, "y": 2.5},
+             "fillGeometry": [{"commandsBlob": 0, "windingRule": "NONZERO"}],
+             "strokeGeometry": [{"commandsBlob": 0, "windingRule": "NONZERO"}]}]}
+    ]);
+    let msg = json!({"blobs": [{"bytes": source_blob}], "nodeChanges": changes});
+    let doc = import_fig_node_changes(&msg, "DerivedGeometry").expect("import");
+    let inst = doc.nodes.values().find(|n| matches!(n.kind, NodeKind::Instance { .. })).expect("instance");
+    let arrow = doc.get(inst.children[0]).expect("vector child");
+    let NodeKind::Vector { paths, .. } = &arrow.kind else { panic!("expected vector") };
+    let max_x = paths[0]
+        .cmds
+        .iter()
+        .filter_map(|c| match c {
+            PathCmd::MoveTo(p) | PathCmd::LineTo(p) => Some(p.x),
+            _ => None,
+        })
+        .fold(0.0_f32, f32::max);
+    assert!((max_x - 5.0).abs() < 1e-4, "derived geometry must scale with child size; got max_x={max_x}");
+    let stroke = arrow.stroke_geometry.as_ref().expect("derived stroke geometry");
+    let stroke_max_x = stroke[0]
+        .cmds
+        .iter()
+        .filter_map(|c| match c {
+            PathCmd::MoveTo(p) | PathCmd::LineTo(p) => Some(p.x),
+            _ => None,
+        })
+        .fold(0.0_f32, f32::max);
+    assert!((stroke_max_x - 5.0).abs() < 1e-4, "derived stroke geometry must scale with child size; got max_x={stroke_max_x}");
+}
+
+#[test]
 fn editor_and_importer_call_the_shared_pass() {
     let g = |s: u64, l: u64| -> Value { json!({"sessionID": s, "localID": l}) };
     let changes = json!([
