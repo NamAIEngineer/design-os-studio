@@ -6,6 +6,7 @@
 
 use designos_doc::lint::token_match::same_text_style;
 use designos_doc::*;
+use std::collections::BTreeMap;
 
 /// Key of the `style_refs` entry that links a text layer to its text style.
 const TEXT_REF: &str = "text";
@@ -33,9 +34,35 @@ fn text_layers<'a>(doc: &'a Document, nodes: &[NodeId]) -> Result<Vec<(&'a Node,
 /// [`has_single_text_style`]) and all are alike, colour aside. `None` when there is no text layer or
 /// they differ, so no single style describes them.
 pub fn shared_text_style(doc: &Document, nodes: &[NodeId]) -> Option<TextStyle> {
+    shared_text_style_data(doc, nodes).map(|(style, _)| style)
+}
+
+const TEXT_STYLE_BINDING_KEYS: [&str; 8] =
+    ["fontFamily", "fontStyle", "fontSize", "fontWeight", "lineHeight", "letterSpacing", "paragraphSpacing", "paragraphIndent"];
+
+fn typography_bindings(doc: &Document, node: &Node) -> BTreeMap<String, String> {
+    TEXT_STYLE_BINDING_KEYS.iter().filter_map(|key| doc.effective_binding(node.id, key).map(|value| ((*key).to_string(), value.to_string()))).collect()
+}
+
+/// Returns the values seen on the canvas plus bindings that can be owned by the created style.
+/// A single style can carry one binding map, so differing maps do not describe one style.
+fn shared_text_style_data(doc: &Document, nodes: &[NodeId]) -> Option<(TextStyle, BTreeMap<String, String>)> {
     let layers = text_layers(doc, nodes).ok()?;
-    let (_, first) = *layers.first()?;
-    layers.iter().all(|(_, t)| has_single_text_style(t) && same_text_style(&t.style, &first.style)).then(|| first.style.clone())
+    let (first, _) = *layers.first()?;
+    let first_resolved = resolve_node(doc, first).into_owned();
+    let NodeKind::Text(first_text) = first_resolved.kind else { return None };
+    let first_bindings = typography_bindings(doc, first);
+    for (node, _) in &layers {
+        let resolved = resolve_node(doc, node).into_owned();
+        let NodeKind::Text(text) = resolved.kind else { return None };
+        if !has_single_text_style(&text) || !same_text_style(&text.style, &first_text.style) {
+            return None;
+        }
+        if typography_bindings(doc, node) != first_bindings {
+            return None;
+        }
+    }
+    Some((first_text.style, first_bindings))
 }
 
 /// First `Text style N` that is neither the key nor the display name of a style of `doc`, so a style
@@ -56,18 +83,18 @@ pub fn create_text_style_from_nodes(doc: &Document, nodes: &[NodeId]) -> Result<
     let Some((first, _)) = layers.first() else {
         return Err(StyleOpError::WrongNodeKind(nodes.first().copied().unwrap_or_default()));
     };
-    let style = shared_text_style(doc, nodes).ok_or(StyleOpError::NothingToStyle(first.id))?;
+    let (style, bindings) = shared_text_style_data(doc, nodes).ok_or(StyleOpError::NothingToStyle(first.id))?;
     let name = next_free_name(doc);
     let mut styles = doc.styles.clone();
     let mut style_meta = doc.style_meta.clone();
     styles.insert(name.clone(), Style::Text(style));
-    style_meta.insert(
-        name.clone(),
-        StyleMeta { name: name.clone(), key: None, description: String::new(), property: StyleProperty::Text, bindings: Default::default() },
-    );
+    style_meta.insert(name.clone(), StyleMeta { name: name.clone(), key: None, description: String::new(), property: StyleProperty::Text, bindings });
     let mut cmds = vec![Command::SetStyles { styles, style_meta }];
     for (n, _) in layers {
         let mut linked = n.clone();
+        // Direct typography bindings would override the new style, so move the shared map to the
+        // style and leave the linked layers with only the style-owned binding.
+        detach_text_style_bindings(&mut linked);
         linked.style_refs.insert(TEXT_REF.into(), name.clone());
         cmds.push(Command::Update { node: Box::new(linked) });
     }

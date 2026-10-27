@@ -72,6 +72,7 @@ impl App {
     /// Applies the shared style `key` to `sel`: records the reference in
     /// `style_refs` and copies the style's values onto the nodes.
     pub fn apply_style(&mut self, sel: &[NodeId], key: &str) {
+        self.end_text_edit_of(sel);
         let mut tx = crate::edit::Tx::new();
         self.apply_style_in(&mut tx, sel, key);
         self.run_tx(tx);
@@ -105,6 +106,9 @@ impl App {
                 n.style_refs.insert("fill".into(), key.into());
             }
             Style::Text(ts) => {
+                if matches!(&n.kind, NodeKind::Text(_)) {
+                    detach_text_style_bindings(n);
+                }
                 if let NodeKind::Text(t) = &mut n.kind {
                     // A text style carries no colour: keep the node's own.
                     t.style = TextStyle { fills: t.style.fills.clone(), ..ts.clone() };
@@ -288,6 +292,8 @@ impl App {
                 st.pending = None;
             }
         }
+        let linked = linked_style_nodes(&self.doc, key);
+        self.end_text_edit_of(&linked);
         let mut tx = crate::edit::Tx::new();
         match self.bind_style_variable_in(&mut tx, key, property, var) {
             Ok(()) => self.run_tx(tx),
@@ -460,6 +466,9 @@ pub use text_style_ops::{create_text_style_from_nodes, detach_text_style, shared
 
 #[cfg(test)]
 mod fill_binding_tests;
+
+#[cfg(test)]
+mod variable_binding_tests;
 
 #[cfg(test)]
 mod instance_refit_tests;

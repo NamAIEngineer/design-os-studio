@@ -113,6 +113,9 @@ impl App {
                 if !hardcoded::style_is_current(&self.doc, id, style) {
                     return false;
                 }
+                // Commit an active text session before applying the style. The caller-owned
+                // transaction must not be interleaved with its live text edit.
+                self.end_text_edit_of(&[id]);
                 self.apply_style_in(tx, &[id], style);
                 true
             }
