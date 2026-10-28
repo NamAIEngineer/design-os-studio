@@ -88,24 +88,55 @@ jobs:
           $installRoot = Join-Path $qa 'installed'
           $shotCanvas = Join-Path $qa 'canvas.png'
           $shotAgents = Join-Path $qa 'agents.png'
+          $legacyLog = Join-Path $qa 'install-powershell-5.1.log'
+          $legacyExitPath = Join-Path $qa 'install-powershell-5.1.exit'
+          $modernLog = Join-Path $qa 'install-pwsh.log'
+          $modernExitPath = Join-Path $qa 'install-pwsh.exit'
+          $uninstallLog = Join-Path $qa 'uninstall-pwsh.log'
+          $uninstallExitPath = Join-Path $qa 'uninstall-pwsh.exit'
           Expand-Archive -LiteralPath $archive -DestinationPath $unpack -Force
           $stage = Join-Path $unpack 'designos-0.6.1-x86_64-pc-windows-msvc'
-          if (-not (Test-Path (Join-Path $stage 'install.ps1'))) { throw 'package missing install.ps1' }
-          powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $stage 'install.ps1') -InstallRoot $installRoot -NoDesktopShortcut
-          $installedCli = Join-Path $installRoot 'bin/designos.exe'
-          $installedStudio = Join-Path $installRoot 'bin/designos-studio.exe'
-          if (-not (Test-Path $installedCli) -or -not (Test-Path $installedStudio)) { throw 'installer did not install CLI and Studio' }
-          & $installedCli --version
-          if ($LASTEXITCODE -ne 0) { throw 'installed CLI failed --version' }
-          $doc = Join-Path $qa 'smoke.designos'
-          & $installedStudio $doc --screenshot $shotCanvas --size 800x600 --no-toast
-          $canvasExit = $LASTEXITCODE
-          if ($canvasExit -ne 0 -or -not (Test-Path $shotCanvas)) { throw "Studio canvas screenshot failed (exit $canvasExit)" }
-          & $installedStudio $doc --panel agents --screenshot $shotAgents --size 1280x800 --no-toast
-          $agentsExit = $LASTEXITCODE
-          if ($agentsExit -ne 0 -or -not (Test-Path $shotAgents)) { throw "Agents panel screenshot failed (exit $agentsExit)" }
-          powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $stage 'uninstall.ps1') -InstallRoot $installRoot
-          if (Test-Path $installRoot) { throw 'uninstaller left the install root behind' }
+          $installer = Join-Path $stage 'install.ps1'
+          $uninstaller = Join-Path $stage 'uninstall.ps1'
+          if (-not (Test-Path $installer)) { throw 'package missing install.ps1' }
+          if (-not (Test-Path $uninstaller)) { throw 'package missing uninstall.ps1' }
+          $legacyExit = 0
+          & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $installer -InstallRoot $installRoot -NoDesktopShortcut *> $legacyLog
+          $legacyExit = $LASTEXITCODE
+          Set-Content -Path $legacyExitPath -Value $legacyExit
+          if ($legacyExit -eq 0) { throw 'PowerShell 5.1 installer unexpectedly succeeded; expected the known UTF-8 parser failure to remain visible' }
+          if (-not (Select-String -Path $legacyLog -Pattern 'ParserError|Unexpected token|ampersand' -Quiet)) {
+            throw 'PowerShell 5.1 installer failed for an undocumented reason; inspect install-powershell-5.1.log'
+          }
+          $pwsh = (Get-Command pwsh.exe -ErrorAction Stop).Source
+          $cleanupNeeded = $true
+          try {
+            & $pwsh -NoProfile -ExecutionPolicy Bypass -File $installer -InstallRoot $installRoot -NoDesktopShortcut *> $modernLog
+            $modernExit = $LASTEXITCODE
+            Set-Content -Path $modernExitPath -Value $modernExit
+            if ($modernExit -ne 0) { throw "pwsh installer failed (exit $modernExit)" }
+            $installedCli = Join-Path $installRoot 'bin/designos.exe'
+            $installedStudio = Join-Path $installRoot 'bin/designos-studio.exe'
+            if (-not (Test-Path $installedCli) -or -not (Test-Path $installedStudio)) { throw 'installer did not install CLI and Studio' }
+            & $installedCli --version
+            if ($LASTEXITCODE -ne 0) { throw 'installed CLI failed --version' }
+            $doc = Join-Path $qa 'smoke.designos'
+            & $installedStudio $doc --screenshot $shotCanvas --size 800x600 --no-toast
+            $canvasExit = $LASTEXITCODE
+            if ($canvasExit -ne 0 -or -not (Test-Path $shotCanvas) -or (Get-Item $shotCanvas).Length -eq 0) { throw "Studio canvas screenshot failed (exit $canvasExit)" }
+            & $installedStudio $doc --panel agents --screenshot $shotAgents --size 1280x800 --no-toast
+            $agentsExit = $LASTEXITCODE
+            if ($agentsExit -ne 0 -or -not (Test-Path $shotAgents) -or (Get-Item $shotAgents).Length -eq 0) { throw "Agents panel screenshot failed (exit $agentsExit)" }
+          }
+          finally {
+            if ($cleanupNeeded) {
+              & $pwsh -NoProfile -ExecutionPolicy Bypass -File $uninstaller -InstallRoot $installRoot *> $uninstallLog
+              $uninstallExit = $LASTEXITCODE
+              Set-Content -Path $uninstallExitPath -Value $uninstallExit
+              if ($uninstallExit -ne 0) { throw "pwsh uninstaller failed (exit $uninstallExit)" }
+              if (Test-Path $installRoot) { throw 'uninstaller left the install root behind' }
+            }
+          }
 
       - name: Upload Windows QA report and screenshots
         if: always()
