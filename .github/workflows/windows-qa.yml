@@ -1,0 +1,116 @@
+name: Windows QA
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - 'qa/windows-smoke-*'
+
+permissions:
+  contents: read
+
+env:
+  RUST_VERSION: '1.93.1'
+  CARGO_TERM_COLOR: always
+
+jobs:
+  windows-qa:
+    name: Windows package/install/GUI QA
+    runs-on: windows-latest
+    timeout-minutes: 120
+    steps:
+      - name: Checkout target
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+
+      - name: Cache Cargo registry and target
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build release binaries
+        shell: pwsh
+        run: |
+          cargo build --release --locked -p designos-app -p designos-mcp -p designos-diff
+          $expected = @(
+            'target/release/designos-studio.exe',
+            'target/release/designos.exe',
+            'target/release/designos-mcp.exe',
+            'target/release/designos-diff.exe'
+          )
+          foreach ($path in $expected) {
+            if (-not (Test-Path $path)) { throw "Missing release binary: $path" }
+          }
+
+      - name: CLI, document, import/export smoke
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $qa = Join-Path $env:RUNNER_TEMP 'designos-windows-qa'
+          New-Item -ItemType Directory -Force -Path $qa | Out-Null
+          $cli = (Resolve-Path 'target/release/designos.exe').Path
+          $spec = Join-Path $qa 'smoke.spec.json'
+          $doc = Join-Path $qa 'smoke.designos'
+          $exportSpec = Join-Path $qa 'roundtrip.spec.json'
+          $exportFig = Join-Path $qa 'roundtrip.fig'
+          $inspect = Join-Path $qa 'inspect.json'
+          @'
+          {"kind":"frame","name":"Windows QA Frame","width":320,"height":180,"children":[{"kind":"text","name":"Windows QA Text","text":"Windows QA"}]}
+          '@ | Set-Content -Encoding utf8 $spec
+          & $cli --version | Tee-Object -FilePath (Join-Path $qa 'version.txt')
+          if ($LASTEXITCODE -ne 0) { throw 'designos --version failed' }
+          & $cli --help | Out-File -Encoding utf8 (Join-Path $qa 'help.txt')
+          if ($LASTEXITCODE -ne 0) { throw 'designos --help failed' }
+          & $cli --out $doc --apply-spec $spec | Tee-Object -FilePath (Join-Path $qa 'apply-spec.json')
+          if ($LASTEXITCODE -ne 0 -or -not (Test-Path $doc)) { throw 'apply-spec did not create a document' }
+          & $cli $doc --inspect-json | Tee-Object -FilePath $inspect
+          if ($LASTEXITCODE -ne 0) { throw 'inspect-json failed after reopen' }
+          & $cli $doc --export-spec $exportSpec
+          if ($LASTEXITCODE -ne 0 -or -not (Test-Path $exportSpec)) { throw 'export-spec failed' }
+          & $cli $doc --export-fig $exportFig
+          if ($LASTEXITCODE -ne 0 -or -not (Test-Path $exportFig)) { throw 'export-fig failed' }
+
+      - name: Package Windows archive
+        shell: bash
+        run: |
+          bash scripts/package.sh x86_64-pc-windows-msvc 0.6.1 target/release
+          test -s dist/designos-0.6.1-x86_64-pc-windows-msvc.zip
+
+      - name: Install, launch, screenshot, and uninstall
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $qa = Join-Path $env:RUNNER_TEMP 'designos-windows-qa'
+          $archive = (Resolve-Path 'dist/designos-0.6.1-x86_64-pc-windows-msvc.zip').Path
+          $unpack = Join-Path $qa 'package'
+          $installRoot = Join-Path $qa 'installed'
+          $shotCanvas = Join-Path $qa 'canvas.png'
+          $shotAgents = Join-Path $qa 'agents.png'
+          Expand-Archive -LiteralPath $archive -DestinationPath $unpack -Force
+          $stage = Join-Path $unpack 'designos-0.6.1-x86_64-pc-windows-msvc'
+          if (-not (Test-Path (Join-Path $stage 'install.ps1'))) { throw 'package missing install.ps1' }
+          powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $stage 'install.ps1') -InstallRoot $installRoot -NoDesktopShortcut
+          $installedCli = Join-Path $installRoot 'bin/designos.exe'
+          $installedStudio = Join-Path $installRoot 'bin/designos-studio.exe'
+          if (-not (Test-Path $installedCli) -or -not (Test-Path $installedStudio)) { throw 'installer did not install CLI and Studio' }
+          & $installedCli --version
+          if ($LASTEXITCODE -ne 0) { throw 'installed CLI failed --version' }
+          $doc = Join-Path $qa 'smoke.designos'
+          & $installedStudio $doc --screenshot $shotCanvas --size 800x600 --no-toast
+          $canvasExit = $LASTEXITCODE
+          if ($canvasExit -ne 0 -or -not (Test-Path $shotCanvas)) { throw "Studio canvas screenshot failed (exit $canvasExit)" }
+          & $installedStudio $doc --panel agents --screenshot $shotAgents --size 1280x800 --no-toast
+          $agentsExit = $LASTEXITCODE
+          if ($agentsExit -ne 0 -or -not (Test-Path $shotAgents)) { throw "Agents panel screenshot failed (exit $agentsExit)" }
+          powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $stage 'uninstall.ps1') -InstallRoot $installRoot
+          if (Test-Path $installRoot) { throw 'uninstaller left the install root behind' }
+
+      - name: Upload Windows QA report and screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: designos-windows-qa-${{ github.sha }}
+          path: ${{ runner.temp }}/designos-windows-qa
+          if-no-files-found: warn
