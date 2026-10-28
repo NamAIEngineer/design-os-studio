@@ -2506,8 +2506,22 @@ fn convert_override(o: &Value, lk: &Lk) -> Map<String, Value> {
             }
             text_overrides(&mut m, td, base_sz, lk);
         }
+        if let Some((key, val)) = text_style_override_link(obj, lk) {
+            m.insert(key.into(), val);
+        }
     }
     m
+}
+
+/// `styleIdForText` naming a style relinks it; a null or unresolved `styleIdForText` clears the link (Figma's detach); every other override keeps the inherited link.
+fn text_style_override_link(obj: &Map<String, Value>, lk: &Lk) -> Option<(&'static str, Value)> {
+    let r = obj.get("styleIdForText")?;
+    if let Some(id) = lk.style_id(r).filter(|id| lk.style_node(r).is_some() || id.starts_with("key:")) {
+        let mut styles = Map::new();
+        styles.insert("text".into(), Value::String(id));
+        return Some(("styles", Value::Object(styles)));
+    }
+    Some(("_clearTextStyle", Value::Bool(true)))
 }
 
 fn convert_derived_override(o: &Value, lk: &Lk) -> Map<String, Value> {
