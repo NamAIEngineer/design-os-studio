@@ -16,23 +16,36 @@ use std::path::Path;
 pub enum CardAction {
     Approve(String),
     Deny(String),
-    OpenTab,
+    ShowPrompt,
+    OpenTab(usize),
+    /// A click on a Codex card (`#930`): answered through that tab's app-server link, never through its PTY.
+    CodexApprove {
+        tab_id: usize,
+        key: String,
+    },
+    CodexDeny {
+        tab_id: usize,
+        key: String,
+    },
 }
 
 /// Height occupied by the approval card (including its top and bottom `SPACE_ROW` viewport margins).
-pub fn approval_card_outer_height(preset: AgentCliPreset) -> f32 {
+pub fn approval_card_outer_height(preset: AgentCliPreset, has_caption: bool) -> f32 {
     let is_claude = preset == AgentCliPreset::Claude;
     let summary_and_gap = if is_claude { theme::SPACE_ROW + theme::CONTROL_STANDARD } else { 0.0 };
     let card_h = theme::INSET_FRAME + theme::CONTROL_DENSE + summary_and_gap + theme::SPACE_ROW + theme::CONTROL_STANDARD + theme::INSET_FRAME;
-    card_h + theme::SPACE_ROW + theme::SPACE_ROW
+    let caption_h = if has_caption { theme::LINE_CAPTION + theme::SPACE_ROW } else { 0.0 };
+    card_h + theme::SPACE_ROW + theme::SPACE_ROW + caption_h
 }
 
 /// Paints the in-panel approval card pinned to the top of `viewport_rect` (inset by `SPACE_ROW`).
 ///
-/// - For `Claude`, shows the tool name, monospace input summary, queue count (`"1 of N"`), and
+/// - For `Claude` on the active tab, shows the tool name, monospace input summary, queue count (`"1 of N"`), and
 ///   secondary **Deny** + primary **Approve** buttons.
-/// - For `Codex`, `Grok`, and `Antigravity` (`agy`), shows `"<CLI> needs approval in its terminal"`
-///   and a single **Open tab** button (never **Approve** or **Deny**).
+/// - For `Codex`, `Grok`, `Gemini`, and `Antigravity` (`agy`), shows `"<CLI> needs approval in its terminal"`
+///   and a single **Show prompt** button when already in that tab's terminal, or **Open tab** when the approval
+///   is on another tab or view (never **Approve** or **Deny**).
+#[cfg(test)]
 pub fn paint_approval_card(
     ui: &mut Ui,
     viewport_rect: Rect,
@@ -40,11 +53,27 @@ pub fn paint_approval_card(
     requests: &[ApprovalRequest],
     surface_id: &'static str,
 ) -> Option<CardAction> {
-    let is_claude = preset == AgentCliPreset::Claude;
+    paint_approval_card_for_tab(ui, viewport_rect, preset, requests, 0, preset == AgentCliPreset::Claude, requests.len(), None, surface_id)
+}
+
+/// Paints the in-panel approval card for `tab_id` (`#656`, `#1195`).
+#[allow(clippy::too_many_arguments)]
+pub fn paint_approval_card_for_tab(
+    ui: &mut Ui,
+    viewport_rect: Rect,
+    preset: AgentCliPreset,
+    requests: &[ApprovalRequest],
+    tab_id: usize,
+    in_active_terminal: bool,
+    total_pending: usize,
+    caption: Option<&str>,
+    surface_id: &'static str,
+) -> Option<CardAction> {
     let first_req = requests.first();
-    if (is_claude || matches!(preset, AgentCliPreset::Shell | AgentCliPreset::DesignOsHelp)) && first_req.is_none() {
+    if (preset == AgentCliPreset::Claude || matches!(preset, AgentCliPreset::Shell | AgentCliPreset::DesignOsHelp)) && first_req.is_none() {
         return None;
     }
+    let is_claude = preset == AgentCliPreset::Claude && in_active_terminal;
     let summary_and_gap = if is_claude { theme::SPACE_ROW + theme::CONTROL_STANDARD } else { 0.0 };
     let card_h = theme::INSET_FRAME + theme::CONTROL_DENSE + summary_and_gap + theme::SPACE_ROW + theme::CONTROL_STANDARD + theme::INSET_FRAME;
     let card_rect = Rect::from_min_size(
@@ -71,8 +100,9 @@ pub fn paint_approval_card(
 
     // Optional right-aligned "1 of N" queue indicator
     let count_font = theme::font_caption();
-    let count_reserve = if is_claude && requests.len() > 1 {
-        let count_text = format!("1 of {}", requests.len());
+    let queue_len = total_pending.max(requests.len());
+    let count_reserve = if queue_len > 1 {
+        let count_text = format!("1 of {queue_len}");
         let cw = widgets::text_width(&p, &count_text, &count_font) + theme::SPACE_INLINE;
         p.text(Pos2::new(header_r.right(), header_r.center().y), Align2::RIGHT_CENTER, count_text, count_font, theme::TEXT_SECONDARY);
         cw
@@ -92,6 +122,13 @@ pub fn paint_approval_card(
     let title_max_w = (header_r.right() - count_reserve - title_x).max(theme::CONTROL_DENSE);
     let title_elided = widgets::elide(&p, &raw_title, &title_font, title_max_w);
     p.text(Pos2::new(title_x, header_r.center().y), Align2::LEFT_CENTER, title_elided, title_font, theme::TEXT);
+
+    if let Some(caption) = caption {
+        // Why this tab asks in its terminal (`#930` F1): under the card, where it does not move the buttons.
+        let font = theme::font_caption();
+        let text = widgets::elide(&p, caption, &font, card_rect.width() - theme::INSET_FRAME - theme::INSET_FRAME);
+        p.text(Pos2::new(card_rect.left() + theme::INSET_FRAME, card_rect.bottom() + theme::SPACE_ROW), Align2::LEFT_TOP, text, font, theme::TEXT_SECONDARY);
+    }
 
     let mut y = header_r.bottom() + theme::SPACE_ROW;
 
@@ -123,18 +160,39 @@ pub fn paint_approval_card(
         } else if deny_resp.clicked() {
             out = Some(CardAction::Deny(req_id));
         }
+    } else if in_active_terminal {
+        let (_show_r, show_resp) = paint_card_button(
+            ui,
+            &p,
+            (surface_id, "agent-approval-show-prompt"),
+            "agent-approval-show-prompt",
+            action_r.right(),
+            action_r.top(),
+            "Show prompt",
+            false,
+        );
+        widgets::labelled(ui, show_resp.id, egui::accesskit::Role::Button, &format!("Show the {} prompt", preset.short_agent_name()));
+        if show_resp.clicked() {
+            out = Some(CardAction::ShowPrompt);
+        }
     } else {
         let (_open_r, open_resp) =
             paint_card_button(ui, &p, (surface_id, "agent-approval-open-tab"), "agent-approval-open-tab", action_r.right(), action_r.top(), "Open tab", false);
+        widgets::labelled(ui, open_resp.id, egui::accesskit::Role::Button, &format!("Open the {} tab waiting for approval", preset.short_agent_name()));
         if open_resp.clicked() {
-            out = Some(CardAction::OpenTab);
+            out = Some(CardAction::OpenTab(tab_id));
         }
     }
     out
 }
 
+/// Width of a card button with `label`.
+pub(crate) fn card_button_width(p: &Painter, label: &str) -> f32 {
+    (widgets::text_width(p, label, &theme::font_body_medium()) + theme::INSET_BUTTON + theme::INSET_BUTTON).max(theme::CONTROL_ROW)
+}
+
 #[allow(clippy::too_many_arguments)]
-fn paint_card_button(
+pub(crate) fn paint_card_button(
     ui: &mut Ui,
     p: &Painter,
     id: impl std::hash::Hash + Copy + std::fmt::Debug,
@@ -145,7 +203,7 @@ fn paint_card_button(
     primary: bool,
 ) -> (Rect, egui::Response) {
     let font = theme::font_body_medium();
-    let w = (widgets::text_width(p, label, &font) + theme::INSET_BUTTON + theme::INSET_BUTTON).max(theme::CONTROL_ROW);
+    let w = card_button_width(p, label);
     let rect = Rect::from_min_size(Pos2::new(right_x - w, top_y), Vec2::new(w, theme::CONTROL_STANDARD));
     let resp = ui.interact(rect, Id::new(id), Sense::click());
     let fill = match (primary, resp.hovered()) {
@@ -155,7 +213,9 @@ fn paint_card_button(
         (false, false) => theme::BG_SECONDARY,
     };
     p.rect_filled(rect, theme::cr(theme::RADIUS_CONTROL), fill);
-    if !primary {
+    if resp.has_focus() {
+        p.rect_stroke(rect, theme::cr(theme::RADIUS_CONTROL), Stroke::new(theme::BORDER_WIDTH, theme::BORDER_SELECTED), StrokeKind::Inside);
+    } else if !primary {
         p.rect_stroke(rect, theme::cr(theme::RADIUS_CONTROL), Stroke::new(theme::BORDER_WIDTH, theme::BORDER), StrokeKind::Inside);
     }
     p.text(rect.center(), Align2::CENTER_CENTER, label, font, theme::TEXT);

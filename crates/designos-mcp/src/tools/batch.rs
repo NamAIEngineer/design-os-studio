@@ -13,7 +13,7 @@ use crate::tools::{build_created_node, build_updated_node, validate_create_field
 use designos_doc::live_patch::{live_ops_for_command, LiveOp, SiblingHint};
 use designos_doc::{
     apply_style_values, resolve_easeui_color, style_property, Color, Command, Document, Effect, LayoutGrid, NodeId, NodeKind, NodeSpec, Paint, Rect,
-    SpecDataSnapshot, Style, StyleMeta, StyleProperty, TextStyle, Variable, VariableCollection, VariableKind, VariableMode, VariableValue,
+    SpecDataSnapshot, Style, StyleMeta, StyleProperty, TextAutoResize, TextStyle, Variable, VariableCollection, VariableKind, VariableMode, VariableValue,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
@@ -203,10 +203,6 @@ pub enum NodeRef {
     Ref(String),
 }
 
-fn default_size() -> f32 {
-    100.0
-}
-
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ApplySpecOp {
@@ -236,10 +232,10 @@ struct InsertOp {
     x: f32,
     #[serde(default)]
     y: f32,
-    #[serde(default = "default_size")]
-    width: f32,
-    #[serde(default = "default_size")]
-    height: f32,
+    #[serde(default)]
+    width: Option<f32>,
+    #[serde(default)]
+    height: Option<f32>,
     #[serde(default)]
     fill: Option<String>,
     #[serde(default)]
@@ -622,6 +618,10 @@ fn parse_and_validate_ops(raw_ops: Vec<Value>) -> Result<Vec<ParsedOp>, ToolErro
                     let cause = crate::tools::errors::from_serde_error_with_args(&e, &op_path, true, Some(&raw_op));
                     ToolError::batch_op_failed(idx, "apply_spec", cause)
                 })?;
+                if let Some(spec_msg) = crate::tools::errors::describe_spec_args_error(&raw_op) {
+                    let cause = ToolError::new(ErrorCode::InvalidArguments, &op_path, format!("Invalid arguments: {spec_msg}"));
+                    return Err(ToolError::batch_op_failed(idx, "apply_spec", cause));
+                }
                 if let Some(p) = &a.parent {
                     if !matches!(p, NodeRef::Id(0)) {
                         validate_ref_pre_run(p, &declared_as, has_prev, idx, "apply_spec", "parent")?;
@@ -638,7 +638,7 @@ fn parse_and_validate_ops(raw_ops: Vec<Value>) -> Result<Vec<ParsedOp>, ToolErro
                 if let Some(p) = &a.parent {
                     validate_ref_pre_run(p, &declared_as, has_prev, idx, "insert", "parent")?;
                 }
-                validate_create_fields(&a.kind, a.name.as_deref(), a.text.as_deref(), a.x, a.y, a.width, a.height)
+                validate_create_fields(&a.kind, a.name.as_deref(), a.text.as_deref(), a.x, a.y, a.width.unwrap_or(100.0), a.height.unwrap_or(100.0))
                     .map_err(|e| wrap_op_err(idx, "insert", &op_path, e))?;
                 validate_fill_color(a.fill.as_deref()).map_err(|e| wrap_op_err(idx, "insert", &op_path, e))?;
                 has_prev = true;
@@ -712,6 +712,10 @@ fn parse_and_validate_ops(raw_ops: Vec<Value>) -> Result<Vec<ParsedOp>, ToolErro
                     let cause = crate::tools::errors::from_serde_error_with_args(&e, &op_path, true, Some(&raw_op));
                     ToolError::batch_op_failed(idx, "set_slot", cause)
                 })?;
+                if let Some(spec_msg) = crate::tools::errors::describe_spec_args_error(&raw_op) {
+                    let cause = ToolError::new(ErrorCode::InvalidArguments, &op_path, format!("Invalid arguments: {spec_msg}"));
+                    return Err(ToolError::batch_op_failed(idx, "set_slot", cause));
+                }
                 validate_ref_pre_run(&a.node, &declared_as, has_prev, idx, "set_slot", "node")?;
                 has_prev = true;
                 ParsedOp::SetSlot(a)
@@ -1338,6 +1342,19 @@ fn apply_set_style_op(
         }
         updated.style_refs.insert(ref_slot.into(), resolved_key.clone());
         apply_style_values(&mut updated, st, &resolved_key);
+        if prop == StyleProperty::Text {
+            if let NodeKind::Text(tp) = &updated.kind {
+                match tp.auto_resize {
+                    TextAutoResize::WidthAndHeight => {
+                        updated.size = designos_doc::text_measure::intrinsic_text_size(tp, None);
+                    }
+                    TextAutoResize::Height => {
+                        updated.size.y = designos_doc::text_measure::intrinsic_text_size(tp, Some(updated.size.x.max(20.0))).y;
+                    }
+                    TextAutoResize::None | TextAutoResize::Truncate => {}
+                }
+            }
+        }
         if &updated != cur {
             cmds.push(Command::Update { node: Box::new(updated) });
         }
@@ -1454,6 +1471,8 @@ pub fn apply(engine: &mut Engine, args: Value) -> Result<Value, ToolError> {
     let mut changed = ChangedCounts::default();
     let mut touched_records: Vec<TouchedRootRecord> = Vec::with_capacity(ops.len());
     let mut deleted_ids: Vec<NodeId> = Vec::new();
+    let mut measured_with_fallback: Vec<u64> = Vec::new();
+    let mut batch_warnings: Vec<designos_doc::SpecWarning> = Vec::new();
 
     let default_page = engine.resolve_default_page().ok();
 
@@ -1482,6 +1501,16 @@ pub fn apply(engine: &mut Engine, args: Value) -> Result<Value, ToolError> {
                     let cause = crate::tools::errors::from_spec_error(designos_doc::SpecError::from(se), &format!("{op_path}/spec"));
                     ToolError::batch_op_failed(op_idx, op_name, cause)
                 })?;
+                for fid in &report.measured_with_fallback {
+                    if !measured_with_fallback.contains(fid) {
+                        measured_with_fallback.push(*fid);
+                    }
+                }
+                for w in &report.warnings {
+                    if w.code != "TEXT_MEASURED_WITH_FALLBACK_FONT" || !batch_warnings.iter().any(|bw| bw.code == "TEXT_MEASURED_WITH_FALLBACK_FONT") {
+                        batch_warnings.push(w.clone());
+                    }
+                }
                 let root_id = report.root_node_id;
                 // A spec flag without a run id gets the writer's, as the single apply_spec does; Stop clears by run id only.
                 for id in report.in_progress.keys() {
@@ -1579,6 +1608,14 @@ pub fn apply(engine: &mut Engine, args: Value) -> Result<Value, ToolError> {
                 let (id, target_idx, mut node) =
                     build_created_node(&mut trial, parent, a.index, &a.kind, a.name.clone(), a.text.clone(), a.x, a.y, a.width, a.height)
                         .map_err(|e| wrap_op_err(op_idx, op_name, &op_path, e))?;
+                if let NodeKind::Text(tp) = &node.kind {
+                    if (a.width.is_none() || a.height.is_none())
+                        && designos_doc::text_measure::uses_fallback_font(tp)
+                        && !measured_with_fallback.contains(&id.0)
+                    {
+                        measured_with_fallback.push(id.0);
+                    }
+                }
                 write_fill(&mut trial, &mut node, parent, FillTarget::NewLayer, a.fill.as_deref(), a.fills.clone(), &mut Vec::new())
                     .map_err(|e| wrap_op_err(op_idx, op_name, &op_path, e))?;
 
@@ -1813,6 +1850,11 @@ pub fn apply(engine: &mut Engine, args: Value) -> Result<Value, ToolError> {
                     let cause = crate::tools::errors::from_spec_error(se, &format!("{op_path}/value"));
                     ToolError::batch_op_failed(op_idx, op_name, cause)
                 })?;
+                for fid in &built_id.measured_with_fallback {
+                    if !measured_with_fallback.contains(fid) {
+                        measured_with_fallback.push(*fid);
+                    }
+                }
                 if let Some(alias) = &a.alias {
                     alias_roots.insert(alias.clone(), id);
                 }
@@ -1957,6 +1999,21 @@ pub fn apply(engine: &mut Engine, args: Value) -> Result<Value, ToolError> {
         "touched_bounds": bounds_json(touched_bounds_rect),
         "undo_label": undo_label,
     });
+    if !measured_with_fallback.is_empty() {
+        reply["measured_with_fallback"] = json!(measured_with_fallback);
+        if !batch_warnings.iter().any(|w| w.code == "TEXT_MEASURED_WITH_FALLBACK_FONT") {
+            batch_warnings.push(designos_doc::SpecWarning {
+                code: "TEXT_MEASURED_WITH_FALLBACK_FONT".to_string(),
+                path: "ops".to_string(),
+                token: None,
+                replacement: None,
+                message: Some("One or more text nodes were measured with a fallback font because the requested font_family is not loaded.".to_string()),
+            });
+        }
+    }
+    if !batch_warnings.is_empty() {
+        reply["warnings"] = json!(batch_warnings);
+    }
 
     if batch_args.diff_image {
         crate::tools::screenshot::attach_diff_to_reply(&engine.doc, &trial, &check_ids, &mut reply);
@@ -2963,7 +3020,11 @@ mod tests {
         // nodes has ~5x uninlined allocator/drop overhead, so we enforce the strict §11 budgets
         // in release builds and a generous ceiling in debug builds while printing exact timings.
         let scale = if cfg!(debug_assertions) { 10.0 } else { 1.0 };
-        let cases = [(100_000usize, 400.0 * scale), (112_474usize, 450.0 * scale), (1_200_000usize, 5_000.0 * scale)];
+        // The 1.2M case holds the document, the dry-run trial clone and the commit clone at once: about 6 GiB peak
+        // RSS in a debug build, which kills a 16 GiB CI runner next to other tests (#1205). Debug builds run a
+        // 250,000-node largest case instead (well under 2 GiB); release builds keep the full 1.2M budget.
+        let largest = if cfg!(debug_assertions) { 250_000usize } else { 1_200_000usize };
+        let cases = [(100_000usize, 400.0 * scale), (112_474usize, 450.0 * scale), (largest, 5_000.0 * scale)];
 
         for (target_nodes, budget_ms) in cases {
             let (doc, page, target_board) = build_synthetic_document(target_nodes);

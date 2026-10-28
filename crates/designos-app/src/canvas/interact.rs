@@ -402,7 +402,7 @@ pub fn process(app: &mut App, ui: &mut Ui, rect: ERect, resp: &Response) {
     } else if resp.double_clicked() && hovered {
         on_double_click(app, rect, &inp);
     }
-    update_hover_and_cursor(app, rect, &inp, hovered);
+    update_hover_and_cursor(app, &ctx, rect, &inp, hovered);
 }
 
 // ------------------------------------------------------------------ press
@@ -429,8 +429,8 @@ fn handle_hit(app: &App, rect: ERect, pos: Pos2) -> Option<HandleHit> {
 
 /// Checks if the click hits an on-canvas `Ready for dev` / `Completed` status pill badge (`S3-12`),
 /// cycling `n.dev.status` (`ReadyForDev` -> `Completed` -> `ReadyForDev`) with a toast.
-pub fn try_click_dev_status_badge(app: &mut App, rect: ERect, pos: Pos2) -> bool {
-    for (id, label_r) in super::draw::label_rects(app, rect) {
+pub fn try_click_dev_status_badge(app: &mut App, ctx: &egui::Context, rect: ERect, pos: Pos2) -> bool {
+    for (id, label_r) in super::draw::label_rects(app, ctx, rect) {
         let Some(n) = app.doc.get(id) else { continue };
         let Some((badge_r, status)) = super::draw::dev_status_badge_rect(id, n, label_r) else { continue };
         if badge_r.contains(pos) {
@@ -701,7 +701,7 @@ fn on_press(app: &mut App, ctx: &egui::Context, rect: ERect, inp: &Inp) {
     let mid = inp.mid_pressed && !inp.pressed;
     if !mid
         && !inp.space
-        && (try_click_dev_status_badge(app, rect, pos) || arm_grid_track_pill(app, ctx, rect, pos) || try_click_canvas_action_pill(app, rect, pos))
+        && (try_click_dev_status_badge(app, ctx, rect, pos) || arm_grid_track_pill(app, ctx, rect, pos) || try_click_canvas_action_pill(app, rect, pos))
     {
         return;
     }
@@ -730,7 +730,7 @@ fn on_press(app: &mut App, ctx: &egui::Context, rect: ERect, inp: &Inp) {
     }
     let target = if let Some(h) = over_handle {
         PressTarget::Handle(h)
-    } else if let Some(id) = label_hit(app, rect, pos).or_else(|| hit_under(app, page, deep)) {
+    } else if let Some(id) = label_hit(app, ctx, rect, pos).or_else(|| hit_under(app, page, deep)) {
         if app.is_selected(id) {
             PressTarget::SelectedNode(id)
         } else {
@@ -915,8 +915,8 @@ pub fn update_shape_control(app: &mut App, s: &mut ShapeControlDragState, cur: D
     app.changed();
 }
 
-fn label_hit(app: &App, rect: ERect, pos: Pos2) -> Option<NodeId> {
-    super::draw::label_rects(app, rect).into_iter().find(|(_, r)| r.contains(pos)).map(|(id, _)| id)
+fn label_hit(app: &App, ctx: &egui::Context, rect: ERect, pos: Pos2) -> Option<NodeId> {
+    super::draw::label_entries(app, ctx, rect).into_iter().find(|e| e.pieces.iter().any(|p| p.contains(pos))).map(|e| e.id)
 }
 
 fn start_resize(app: &mut App, handle: Handle, page: DV) {
@@ -1286,7 +1286,7 @@ fn start_move(app: &mut App, clicked: NodeId, start: DV, alt: bool) -> Option<Mo
     let idx = active_index(app);
     let orig_bbox = union_all(ids.iter().map(|i| super::fast_world_aabb(&app.doc, idx, *i)))?;
     let targets = snap_targets(app, &ids);
-    Some(MoveState { tx, ids, start, orig_bbox, targets, moved: false, reorder: None, dup_blocked, main_copies })
+    Some(MoveState { tx, ids, start, last: start, orig_bbox, targets, moved: false, reorder: None, dup_blocked, main_copies })
 }
 
 fn parent_has_auto_layout(doc: &Document, id: NodeId) -> bool {
@@ -1298,6 +1298,7 @@ fn parent_has_auto_layout(doc: &Document, id: NodeId) -> bool {
 }
 
 fn update_move(app: &mut App, m: &mut MoveState, cur: DV, inp: &Inp) {
+    m.last = cur;
     m.tx.ed.revert(&mut app.doc);
     let mut d = sub(cur, m.start);
     let mut lock_x = false;
@@ -1724,7 +1725,7 @@ pub fn commit_auto_layout_inline_value(app: &mut App, id: NodeId, kind: handles:
 /// edits it made. Returns false when a slot limit refuses the drop (the caller undoes the drag).
 fn release_move(app: &mut App, m: &mut MoveState, cur: Option<DV>, space: bool) -> bool {
     // Holding Space on release suppresses reparenting into a different container (MI-12).
-    if m.moved && !m.ids.is_empty() && !space && !reparent_after_move(app, m, cur) {
+    if m.moved && !m.ids.is_empty() && !space && !reparent_after_move(app, m, cur.or(Some(m.last))) {
         return false;
     }
     settle_main_copies(app, m);
@@ -2205,7 +2206,7 @@ fn place_image(app: &mut App, page: DV) {
 pub(crate) fn place_image_with(app: &mut App, page: DV, dialogs: &dyn crate::io::FileDialogs) {
     let exts: Vec<&str> = IMAGE_EXTENSIONS.iter().chain(crate::video::VIDEO_EXTENSIONS.iter()).copied().collect();
     let outcome = dialogs.pick(&crate::io::FileRequest::open().filter("Images and video", &exts));
-    let Some(path) = app.picked_path(outcome) else { return };
+    let Some(path) = app.picked_path(outcome, false) else { return };
     let Ok(bytes) = std::fs::read(&path) else {
         app.show_toast("Cannot read file", true);
         return;
@@ -2362,7 +2363,7 @@ fn text_press(app: &mut App, page: DV) {
 }
 
 // ------------------------------------------------------------------ hover / cursor
-fn update_hover_and_cursor(app: &mut App, rect: ERect, inp: &Inp, hovered: bool) {
+fn update_hover_and_cursor(app: &mut App, ctx: &egui::Context, rect: ERect, inp: &Inp, hovered: bool) {
     let mut cursor = egui::CursorIcon::Default;
     let idle = matches!(app.canvas.inter, Interaction::None);
     app.canvas.cursor = None;
@@ -2447,7 +2448,7 @@ fn update_hover_and_cursor(app: &mut App, rect: ERect, inp: &Inp, hovered: bool)
                             }
                             let query_key = (pos, app.canvas.tiles.rev(), inp.mods.command, app.view.zoom);
                             if app.canvas.dirty || app.canvas.last_hover_query != Some(query_key) {
-                                app.hover = label_hit(app, rect, pos).or_else(|| page.and_then(|p| hit_under(app, p, inp.mods.command)));
+                                app.hover = label_hit(app, ctx, rect, pos).or_else(|| page.and_then(|p| hit_under(app, p, inp.mods.command)));
                                 app.canvas.last_hover_query = Some(query_key);
                             }
                         }
@@ -2577,6 +2578,38 @@ mod tests {
 
     fn is_instance_of(app: &App, id: NodeId, main: NodeId) -> bool {
         app.doc.get(id).is_some_and(|n| matches!(n.kind, NodeKind::Instance { component: Some(c), .. } if c == main))
+    }
+
+    #[test]
+    fn interrupted_move_reparents_at_the_last_pointer_position() {
+        let (d, page, frames) = page_of_frames(2);
+        let child = d.get(frames[0]).unwrap().children[0];
+        let mut app = App::new(d);
+        app.page = page;
+        let mut m = start_move(&mut app, child, v2(20.0, 20.0), false).expect("move starts");
+        let inp = Inp {
+            pos: None,
+            press_pos: None,
+            release_pos: None,
+            prior_release_pos: None,
+            release_mods: None,
+            prior_release_mods: None,
+            pressed: false,
+            down: true,
+            released: false,
+            mid_pressed: false,
+            mid_down: false,
+            mods: Modifiers::NONE,
+            space: false,
+            z_down: false,
+        };
+        update_move(&mut app, &mut m, v2(305.0, 5.0), &inp);
+
+        // A leave/save dialog can interrupt the release frame, so commit_open_gesture must finish
+        // the move at its last observed pointer position.
+        app.canvas.inter = Interaction::Move(m);
+        commit_open_gesture(&mut app);
+        assert_eq!(app.doc.get(child).and_then(|n| n.parent), Some(frames[1]));
     }
 
     #[test]

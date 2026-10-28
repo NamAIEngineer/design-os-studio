@@ -85,6 +85,30 @@ jobs:
           python3 -B scripts/check_vendor_skills.py map-coverage
           python3 -B -m unittest scripts/test_check_vendor_skills.py
 
+      - name: Configure Linux swap and debuginfo
+        if: runner.os == 'Linux'
+        run: |
+          if sudo modprobe zram 2>/dev/null && command -v zramctl >/dev/null 2>&1; then
+            zdev=$(sudo zramctl --find --size 24G --algorithm zstd 2>/dev/null || sudo zramctl --find --size 24G 2>/dev/null || true)
+            if [ -n "$zdev" ]; then
+              sudo mkswap "$zdev" && sudo swapon -p 100 "$zdev" || true
+            fi
+          fi
+          if [ -d /sys/module/zswap/parameters ]; then
+            echo zstd | sudo tee /sys/module/zswap/parameters/compressor >/dev/null 2>&1 || true
+            echo 50 | sudo tee /sys/module/zswap/parameters/max_pool_percent >/dev/null 2>&1 || true
+            echo Y | sudo tee /sys/module/zswap/parameters/enabled >/dev/null 2>&1 || true
+          fi
+          sudo fallocate -l 24G /swapfile_ci
+          sudo chmod 600 /swapfile_ci
+          sudo mkswap /swapfile_ci
+          sudo swapon -p 10 /swapfile_ci
+          swapon --show
+          free -m
+          df -h /
+          echo "CARGO_PROFILE_DEV_DEBUG=0" >> "$GITHUB_ENV"
+          echo "CARGO_PROFILE_TEST_DEBUG=0" >> "$GITHUB_ENV"
+
       - name: Build workspace (designos-studio, designos, designos-mcp, designos-diff)
         run: cargo build --workspace --all-targets --locked
 
@@ -106,8 +130,50 @@ jobs:
           fi
           echo "NODE_PATH=$harness_dir/node_modules" >> "$GITHUB_ENV"
 
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@v2.87.31
+        with:
+          tool: nextest@0.9.149
+
+      # Evidence only (#1205): samples RAM and the top RSS processes every 5 s so a future runner kill can be
+      # traced to the test that caused it. It never fails the job.
+      - name: Start memory sampler
+        if: runner.os == 'Linux'
+        continue-on-error: true
+        run: |
+          (
+            while true; do
+              {
+                date -u +%FT%TZ
+                free -m
+                ps -eo rss,comm --sort=-rss | head -n 6
+              } >> "$RUNNER_TEMP/mem.log" 2>&1 || true
+              sleep 5
+            done
+          ) >/dev/null 2>&1 &
+          echo "memory sampler started"
+
       - name: Test workspace
-        run: cargo test --workspace --locked
+        if: runner.os != 'Linux'
+        run: cargo nextest run --workspace --locked --profile ci
+
+      # The 16 GB Linux runner is killed (SIGKILL, "runner has received a shutdown signal") when
+      # nextest runs one test process per core, so Linux runs two at a time on top of the swap above.
+      - name: Test workspace (Linux)
+        if: runner.os == 'Linux'
+        run: cargo nextest run --workspace --locked --profile ci --test-threads 2
+
+      - name: Upload memory log
+        if: always() && runner.os == 'Linux'
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: mem-log-${{ matrix.os }}
+          path: ${{ runner.temp }}/mem.log
+          if-no-files-found: ignore
+
+      - name: Test workspace doctests
+        run: cargo test --workspace --doc --locked
 
       # The large-fixture lint wall-time budget is bounded in release builds only (debug builds skip it).
       - name: Lint budget on a release build (large fixture)
