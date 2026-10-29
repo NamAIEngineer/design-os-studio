@@ -539,6 +539,31 @@ mod tests {
     }
 
     #[test]
+    fn non_normal_shadow_blend_is_marked_as_approximate() {
+        let (mut d, id) = doc_with(|d, page| {
+            let i = d.alloc_id();
+            let mut n = Node::rectangle(i, Rect::new(0.0, 0.0, 40.0, 40.0));
+            n.effects = vec![Effect::DropShadow {
+                color: Color::BLACK,
+                offset: Vec2::new(0.0, 2.0),
+                radius: 4.0,
+                spread: 0.0,
+                visible: true,
+                show_behind: false,
+                blend: BlendMode::Multiply,
+            }];
+            d.insert(page, n).unwrap();
+        });
+        let css = css_for(&d, id);
+        assert!(css.contains("DESIGNOS limitation: non-normal shadow blend is not representable in CSS"), "{css}");
+
+        if let Effect::DropShadow { blend, .. } = &mut d.get_mut(id).unwrap().effects[0] {
+            *blend = BlendMode::Normal;
+        }
+        assert!(!css_for(&d, id).contains("DESIGNOS limitation:"));
+    }
+
+    #[test]
     fn golden_auto_layout_and_children() {
         let (d, id) = doc_with(|d, page| {
             let f = d.alloc_id();

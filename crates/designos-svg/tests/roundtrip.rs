@@ -233,6 +233,32 @@ fn shadow_blend_mode_is_emitted_and_reimported() {
     let effects = back.nodes.values().find(|n| n.effects.len() == 2).map(|n| &n.effects).unwrap_or_else(|| panic!("no imported shadow effects\n{svg}"));
     assert!(matches!(effects[0], Effect::DropShadow { blend: BlendMode::Multiply, .. }));
     assert!(matches!(effects[1], Effect::InnerShadow { blend: BlendMode::Screen, .. }));
+
+    // Normal remains the compatibility default: drop shadows omit the optional
+    // blend primitive, while inner shadows explicitly emit `normal`.
+    let mut normal = Document::new("normal-blend");
+    let normal_page = normal.add_page("p");
+    let normal_id = normal.alloc_id();
+    let mut normal_node = Node::rectangle(normal_id, Rect::new(0.0, 0.0, 40.0, 40.0));
+    normal_node.effects = vec![
+        Effect::DropShadow {
+            color: Color::BLACK,
+            offset: Vec2::new(0.0, 2.0),
+            radius: 4.0,
+            spread: 0.0,
+            visible: true,
+            show_behind: false,
+            blend: BlendMode::Normal,
+        },
+        Effect::InnerShadow { color: Color::BLACK, offset: Vec2::new(0.0, 2.0), radius: 4.0, spread: 0.0, visible: true, blend: BlendMode::Normal },
+    ];
+    let normal_root = normal.insert(normal_page, normal_node).unwrap();
+    let (normal_svg, normal_back, _) = roundtrip(&normal, normal_root);
+    assert!(normal_svg.contains("feBlend mode=\"normal\""));
+    let normal_effects = normal_back.nodes.values().find(|n| n.effects.len() == 2).map(|n| &n.effects).unwrap();
+    assert!(normal_effects
+        .iter()
+        .all(|effect| matches!(effect, Effect::DropShadow { blend: BlendMode::Normal, .. } | Effect::InnerShadow { blend: BlendMode::Normal, .. })));
 }
 
 #[test]
