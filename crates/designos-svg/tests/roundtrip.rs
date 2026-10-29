@@ -209,6 +209,33 @@ fn kinds_and_geometry_survive_the_roundtrip() {
 }
 
 #[test]
+fn shadow_blend_mode_is_emitted_and_reimported() {
+    let mut d = Document::new("blend");
+    let page = d.add_page("p");
+    let id = d.alloc_id();
+    let mut n = Node::rectangle(id, Rect::new(0.0, 0.0, 40.0, 40.0));
+    n.effects = vec![
+        Effect::DropShadow {
+            color: Color::BLACK,
+            offset: Vec2::new(0.0, 2.0),
+            radius: 4.0,
+            spread: 0.0,
+            visible: true,
+            show_behind: false,
+            blend: BlendMode::Multiply,
+        },
+        Effect::InnerShadow { color: Color::BLACK, offset: Vec2::new(0.0, 2.0), radius: 4.0, spread: 0.0, visible: true, blend: BlendMode::Screen },
+    ];
+    let root = d.insert(page, n).unwrap();
+    let (svg, back, _back_root) = roundtrip(&d, root);
+    assert!(svg.contains("feBlend mode=\"multiply\""));
+    assert!(svg.contains("feBlend mode=\"screen\""));
+    let effects = back.nodes.values().find(|n| n.effects.len() == 2).map(|n| &n.effects).unwrap_or_else(|| panic!("no imported shadow effects\n{svg}"));
+    assert!(matches!(effects[0], Effect::DropShadow { blend: BlendMode::Multiply, .. }));
+    assert!(matches!(effects[1], Effect::InnerShadow { blend: BlendMode::Screen, .. }));
+}
+
+#[test]
 fn reimported_document_renders_like_the_original_and_like_resvg() {
     let (d, root) = sample();
     let (svg, back, back_root) = roundtrip(&d, root);

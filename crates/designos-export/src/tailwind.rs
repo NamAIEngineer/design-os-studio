@@ -487,6 +487,9 @@ fn classes(doc: &Document, n: &Node, parent: Parent<'_>) -> Vec<String> {
     if let Some(s) = shadow_value(n) {
         c.push(s);
     }
+    if n.effects.iter().any(|e| matches!(e, Effect::DropShadow { visible: true, blend, .. } | Effect::InnerShadow { visible: true, blend, .. } if !matches!(blend, BlendMode::Normal | BlendMode::PassThrough))) {
+        c.push("designos-shadow-blend-unsupported".into());
+    }
     for e in &n.effects {
         match e {
             Effect::LayerBlur { radius, visible: true } if *radius > 0.0 => c.push(format!("blur-[{}px]", num(radius / 2.0))),
