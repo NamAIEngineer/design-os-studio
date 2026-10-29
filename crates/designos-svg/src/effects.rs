@@ -73,11 +73,8 @@ fn one_filter(prims: &[usvg::filter::Primitive]) -> Vec<Effect> {
                 let Some(index) = name.strip_prefix("innerShadow").or_else(|| name.strip_prefix("shadow")).and_then(|n| n.parse::<usize>().ok()) else {
                     continue;
                 };
-                if let Some(effect) = out.get_mut(index) {
-                    match effect {
-                        Effect::DropShadow { blend, .. } | Effect::InnerShadow { blend, .. } => *blend = blend_mode(b.mode()),
-                        _ => {}
-                    }
+                if let Some(Effect::DropShadow { blend, .. } | Effect::InnerShadow { blend, .. }) = out.get_mut(index) {
+                    *blend = blend_mode(b.mode());
                 }
             }
             Kind::DropShadow(s) => {
