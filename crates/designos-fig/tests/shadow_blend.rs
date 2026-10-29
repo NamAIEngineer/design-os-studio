@@ -4,7 +4,7 @@ use designos_doc::*;
 use designos_fig::container::{self, Compression};
 use designos_fig::kiwi::KiwiValue as V;
 use designos_fig::testkit::{color, en, figma_like_schema, fl, msg, node, vec2};
-use designos_fig::{export_fig, export_pen_json, export_rest_json, import_fig, import_pen_json, import_rest_json};
+use designos_fig::{export_fig, export_pen_json, export_rest_json, import_fig, import_rest_json};
 
 fn find<'a>(doc: &'a Document, name: &str) -> &'a Node {
     doc.nodes.values().find(|n| n.name == name).unwrap_or_else(|| panic!("no node named {name}"))
