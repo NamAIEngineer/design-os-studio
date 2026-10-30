@@ -171,6 +171,15 @@ jobs:
           cat dist/SHA256SUMS
           cat dist/release-manifest.json
 
+      - name: Decide whether this stable release is GitHub Latest
+        id: latest
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          make_latest="$(scripts/resolve-release-latest.sh)"
+          echo "make_latest=$make_latest" >> "$GITHUB_OUTPUT"
+          echo "make_latest=$make_latest"
+
       - uses: softprops/action-gh-release@v2
         with:
           generate_release_notes: true
@@ -191,6 +200,7 @@ jobs:
 
             Full instructions: [docs/install.md](https://github.com/jangtrinh/design-os-studio/blob/main/docs/install.md). Verify downloads against `SHA256SUMS` or `release-manifest.json`.
           prerelease: ${{ contains(github.ref_name, '-') }}
+          make_latest: ${{ steps.latest.outputs.make_latest }}
           files: |
             dist/*.dmg
             dist/*-setup.exe

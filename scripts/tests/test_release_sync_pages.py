@@ -153,13 +153,13 @@ class MissingAssetTests(SyncCase):
 
 
 class GuardTests(SyncCase):
-    def test_refuses_downgrade(self):
-        # The json matches the requested tag, so only the downgrade check can reject it.
+    def test_skips_downgrade_with_notice(self):
+        # The json matches the requested tag; the page guard must skip without mutating files.
         self.assertEqual(self.sync_to("0.4.0").returncode, 0)
         before = self.snapshot()
         out = self.sync_to("0.3.0")
-        self.assertEqual(out.returncode, 1)
-        self.assertIn("pages already point at v0.4.0, newer than v0.3.0; refusing to downgrade", out.stderr)
+        self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertIn("::notice::v0.3.0 is older than the version already shown on the pages (v0.4.0); skipping page sync", out.stdout)
         self.assertEqual(before | {"release-0.3.0.json": ""}, self.snapshot() | {"release-0.3.0.json": ""})
 
     def test_version_compare_is_numeric_not_lexicographic(self):
@@ -175,8 +175,8 @@ class GuardTests(SyncCase):
         self.assertEqual(self.sync_to("0.9.0").returncode, 0)
         self.assertEqual(self.sync_to("0.10.0").returncode, 0)
         out = self.sync_to("0.9.0")
-        self.assertEqual(out.returncode, 1)
-        self.assertIn("pages already point at v0.10.0, newer than v0.9.0; refusing to downgrade", out.stderr)
+        self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertIn("::notice::v0.9.0 is older than the version already shown on the pages (v0.10.0); skipping page sync", out.stdout)
 
     def test_refuses_prerelease_and_bad_version(self):
         self.assertEqual(self.sync("release-0.4.0-prerelease.json").returncode, 1)

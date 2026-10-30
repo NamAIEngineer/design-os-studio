@@ -259,7 +259,17 @@ def run(args: argparse.Namespace) -> int:
     old = previous_versions(texts, args.repo)
     newest_seen = max(old | {version}, key=semver)
     if newest_seen != version:
-        raise SyncError(f"pages already point at v{newest_seen}, newer than v{version}; refusing to downgrade")
+        message = (
+            f"v{version} is older than the version already shown on the pages "
+            f"(v{newest_seen}); skipping page sync"
+        )
+        print(f"::notice::{message}")
+        if args.report:
+            Path(args.report).write_text(
+                f"## Release sync for v{version}\n\n"
+                f"Skipped: {message}.\n"
+            )
+        return 0
 
     warnings: list[str] = []
     changed: list[str] = []
