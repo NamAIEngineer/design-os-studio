@@ -355,6 +355,16 @@
       ],
       "count": 1
     },
+    "left-panel-resize-band": {
+      "region": "left_panel",
+      "rect": [
+        438.0,
+        32.0,
+        15.0,
+        1056.0
+      ],
+      "count": 1
+    },
     "left-panel-resize-handle": {
       "region": "left_panel",
       "rect": [
@@ -1485,6 +1495,16 @@
       ],
       "count": 1
     },
+    "tab-close-hit-1": {
+      "region": "tab_bar",
+      "rect": [
+        307.0,
+        4.0,
+        24.0,
+        24.0
+      ],
+      "count": 1
+    },
     "tab-unsaved-dot-1": {
       "region": "unknown",
       "rect": [
@@ -1571,6 +1591,56 @@
         808.0,
         1036.0,
         16.0,
+        32.0
+      ],
+      "count": 1
+    },
+    "tool-chevron-hit-0": {
+      "region": "canvas",
+      "rect": [
+        584.0,
+        1036.0,
+        24.0,
+        32.0
+      ],
+      "count": 1
+    },
+    "tool-chevron-hit-1": {
+      "region": "canvas",
+      "rect": [
+        640.0,
+        1036.0,
+        24.0,
+        32.0
+      ],
+      "count": 1
+    },
+    "tool-chevron-hit-2": {
+      "region": "canvas",
+      "rect": [
+        696.0,
+        1036.0,
+        24.0,
+        32.0
+      ],
+      "count": 1
+    },
+    "tool-chevron-hit-3": {
+      "region": "canvas",
+      "rect": [
+        752.0,
+        1036.0,
+        24.0,
+        32.0
+      ],
+      "count": 1
+    },
+    "tool-chevron-hit-4": {
+      "region": "canvas",
+      "rect": [
+        808.0,
+        1036.0,
+        24.0,
         32.0
       ],
       "count": 1
@@ -2410,7 +2480,7 @@
       "rect": [
         92.0,
         3.0,
-        216.0,
+        213.0,
         26.0
       ],
       "sense": [
