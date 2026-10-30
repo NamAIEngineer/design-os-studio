@@ -83,16 +83,37 @@ fn tab_does_not_walk_into_a_form_that_is_out_of_view() {
     finish(s);
 }
 
-#[test]
-fn opening_other_cli_scrolls_the_form_into_view() {
-    let height = FORM_OUT_OF_VIEW;
+/// Window heights at which the form was found scrolled past (520 px: none of it in view; 600 px: only Cancel and Save).
+const SHORT_WINDOWS: [f32; 2] = [520.0, 600.0];
+
+/// The area the empty state scrolls in: from the panel's top to 8 px above the composer (`terminal::show_left_with_doc`).
+/// The picker card sits `INSET_POPOVER` below the area's top, shifted up by the scroll.
+fn empty_state_viewport(s: &Sim) -> Rect {
+    let card = s.rect_of("agents-new-session-picker");
+    let composer = s.rect_of("agents-composer-input");
+    let top = card.top() + s.app().terminal.left_scroll - crate::theme::INSET_POPOVER;
+    Rect::from_min_max(Pos2::new(card.left(), top), Pos2::new(card.right(), composer.top() - 8.0))
+}
+
+fn assert_form_fully_in_view(height: f32) {
     let s = window_with_the_form_open(height);
     let form = s.rect_of("agents-other-cli-form");
-    let composer = s.rect_of("agents-composer-input");
-
-    assert!(s.app().terminal.left_scroll > 0.0, "opening the form must scroll the picker in a short window");
-    assert!(form.top() < composer.top(), "the opened form must be visible above the composer: form {form:?}, composer {composer:?}");
+    let viewport = empty_state_viewport(&s);
+    assert!(
+        form.top() >= viewport.top() && form.bottom() <= viewport.bottom(),
+        "at {height} px the whole opened form must lie inside the visible area: form {form:?}, viewport {viewport:?}"
+    );
     finish(s);
+}
+
+#[test]
+fn opening_other_cli_brings_the_whole_form_into_view_at_520_px() {
+    assert_form_fully_in_view(SHORT_WINDOWS[0]);
+}
+
+#[test]
+fn opening_other_cli_brings_the_whole_form_into_view_at_600_px() {
+    assert_form_fully_in_view(SHORT_WINDOWS[1]);
 }
 
 #[test]

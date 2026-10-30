@@ -369,6 +369,14 @@ pub fn paint_empty_state(
 /// Id of the composer `TextEdit` (`agent_composer::show_composer`).
 const COMPOSER_INPUT_ID: &str = "agents-ask-for-changes-input";
 
+/// The scroll offset that shows the content span `top..bottom` in a viewport `view_h` tall, with the least movement past
+/// the span: a span that fits ends at the viewport's bottom edge, one that does not starts at its top edge. The result
+/// stays within `0..=max_scroll`.
+fn scroll_to_reveal(top: f32, bottom: f32, view_h: f32, max_scroll: f32) -> f32 {
+    let target = if bottom - top <= view_h { bottom - view_h } else { top };
+    target.clamp(0.0, max_scroll.max(0.0))
+}
+
 /// Draws the Agents empty state in `area` and handles a sample-prompt click (`#688` §3 rules 3 and 6, §8 rule 7).
 ///
 /// With no tab open the `#652` new-session picker sits on top and the prompts below it; the stack scrolls with the
@@ -395,8 +403,8 @@ pub fn show_empty_state(state: &mut TerminalState, ui: &mut Ui, area: Rect, file
     });
 
     // Opening Other CLI adds a form below the rows. Recompute the content height after
-    // the click is applied, then reveal the new bottom in the next frame instead of
-    // leaving the form below the clipped picker until the user wheels manually.
+    // the click is applied, then scroll so the whole form is in view (not the bottom of the
+    // stack, which is the prompts below it) instead of leaving it clipped until the user wheels.
     let rendered_picker_h = if picker_row_count == 0 {
         0.0
     } else {
@@ -404,7 +412,8 @@ pub fn show_empty_state(state: &mut TerminalState, ui: &mut Ui, area: Rect, file
     };
     let max_scroll = (rendered_picker_h + outcome.content_height - area.height()).max(0.0);
     if !other_form_was_open && state.picker.other_form_open {
-        state.left_scroll = max_scroll;
+        let (form_top, form_bottom) = crate::agent_picker::other_form_span(&crate::agent_picker::rows_for_state(state));
+        state.left_scroll = scroll_to_reveal(form_top, form_bottom, area.height(), max_scroll);
     }
     if ui.rect_contains_pointer(area) {
         let wheel = ui.input(|i| i.smooth_scroll_delta.y);
@@ -555,5 +564,13 @@ text = "   "
             attach_hint_line(AttachHintCapabilities { selection_chip: true, at_mentions: true }).as_deref(),
             Some("Click the selection chip to send your selection. Type @ to mention layers.")
         );
+    }
+
+    #[test]
+    fn a_form_that_fits_ends_at_the_bottom_edge_and_one_that_does_not_starts_at_the_top_edge() {
+        assert_eq!(scroll_to_reveal(300.0, 440.0, 360.0, 500.0), 80.0, "a fitting span ends at the viewport's bottom");
+        assert_eq!(scroll_to_reveal(300.0, 440.0, 100.0, 500.0), 300.0, "a span taller than the viewport starts at its top");
+        assert_eq!(scroll_to_reveal(20.0, 100.0, 360.0, 500.0), 0.0, "a span already in view does not scroll");
+        assert_eq!(scroll_to_reveal(300.0, 440.0, 360.0, 50.0), 50.0, "never past the end of the content");
     }
 }
