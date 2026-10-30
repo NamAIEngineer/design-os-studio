@@ -404,7 +404,14 @@ mod tests {
         theme::install_fonts(&ctx);
         theme::apply(&ctx);
         let out = ctx.run_ui(egui::RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(900.0, 400.0))), ..Default::default() }, |ui| {
-            let _ = paint_approval_card(ui, Rect::from_min_size(Pos2::ZERO, Vec2::new(900.0, 400.0)), AgentCliPreset::Codex, &[], "test-approval", AgentPermissionMode::Ask);
+            let _ = paint_approval_card(
+                ui,
+                Rect::from_min_size(Pos2::ZERO, Vec2::new(900.0, 400.0)),
+                AgentCliPreset::Codex,
+                &[],
+                "test-approval",
+                AgentPermissionMode::Ask,
+            );
         });
         let texts = crate::lint::scan_shapes(&out.shapes).0;
         assert!(texts.iter().any(|t| t.text.contains("Use ↑/↓ and Enter in terminal to choose")), "native CLI card hint missing: {texts:?}");
