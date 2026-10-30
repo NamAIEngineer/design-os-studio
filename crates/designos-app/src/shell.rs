@@ -1659,7 +1659,8 @@ impl Shell {
         if self.app.ui.permissions_modal_open {
             let mut mode = self.app.terminal.permission_mode;
             let mut open = self.app.ui.permissions_modal_open;
-            let picked = crate::agent_approval_card::paint_permissions_modal(ctx, &mut open, &mut mode, None);
+            let lib_root = self.app.lib.as_ref().map(|l| l.root().to_path_buf());
+            let picked = crate::agent_approval_card::paint_permissions_modal(ctx, &mut open, &mut mode, lib_root.as_deref());
             self.app.ui.permissions_modal_open = open;
             if let Some(new_mode) = picked {
                 self.app.set_agent_permission_mode(new_mode);
@@ -1961,7 +1962,8 @@ impl Shell {
         if self.app.ui.permissions_modal_open {
             let mut mode = self.app.terminal.permission_mode;
             let mut open = self.app.ui.permissions_modal_open;
-            let picked = crate::agent_approval_card::paint_permissions_modal(&ctx, &mut open, &mut mode, None);
+            let lib_root = self.app.lib.as_ref().map(|l| l.root().to_path_buf());
+            let picked = crate::agent_approval_card::paint_permissions_modal(&ctx, &mut open, &mut mode, lib_root.as_deref());
             self.app.ui.permissions_modal_open = open;
             if let Some(new_mode) = picked {
                 self.app.set_agent_permission_mode(new_mode);
