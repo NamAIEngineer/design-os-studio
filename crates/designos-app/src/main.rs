@@ -280,8 +280,11 @@ fn screenshot_viewport(w: u32, h: u32) -> egui::ViewportBuilder {
         .with_inner_size([w as f32, h as f32])
         .with_min_inner_size([200.0, 200.0])
         .with_resizable(true)
+        // Keep the native surface visible to wgpu so screenshot events are delivered, but keep
+        // the capture window outside the user's desktop. Repeated CLI captures must not flash a
+        // topmost editor window over the user's work.
+        .with_position(egui::pos2(-10_000.0, -10_000.0))
         .with_active(false)
-        .with_window_level(egui::WindowLevel::AlwaysOnTop)
 }
 
 /// The exit status of a finished `--screenshot` run: 2 when `--select` matched nothing (no PNG is written), which
@@ -697,9 +700,9 @@ fn inspect_json(doc: &designos_doc::Document, selected: Option<designos_doc::Nod
 #[cfg(test)]
 mod icon_tests {
     #[test]
-    fn screenshot_viewport_stays_visible_above_other_windows_without_focus() {
+    fn screenshot_viewport_stays_renderable_offscreen_without_focus() {
         let viewport = super::screenshot_viewport(1600, 1088);
-        assert_eq!(viewport.window_level, Some(egui::WindowLevel::AlwaysOnTop));
+        assert_eq!(viewport.position, Some(egui::pos2(-10_000.0, -10_000.0)));
         assert_eq!(viewport.active, Some(false));
         assert_eq!(viewport.resizable, Some(true));
     }

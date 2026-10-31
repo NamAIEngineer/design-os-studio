@@ -1,11 +1,13 @@
 #!/usr/bin/env bash
 # Repeat screenshot captures and preserve actionable stderr for every failure.
 # Usage: scripts/screenshot_repeat.sh [runs]
+# The default is one capture so invoking this helper never opens a stream of
+# short-lived GUI windows by accident. Pass an explicit count for stress runs.
 set -euo pipefail
 
 root=$(cd "$(dirname "$0")/.." && pwd)
 cd "$root"
-runs=${1:-250}
+runs=${1:-1}
 if [[ -n "${DESIGNOS_BIN:-}" ]]; then
   bin=$DESIGNOS_BIN
 else
