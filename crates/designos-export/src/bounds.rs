@@ -149,7 +149,12 @@ fn is_anisotropic(t: &Affine) -> bool {
 
 fn needs_device_space_shadow_bounds(t: &Affine) -> bool {
     let scale = (t.a.abs().max(t.b.abs()).max(t.c.abs()).max(t.d.abs())).max(1.0);
-    is_anisotropic(t) || t.b.abs() > 1e-4 * scale || t.c.abs() > 1e-4 * scale
+    let off_axis = t.b.abs() > 1e-4 * scale || t.c.abs() > 1e-4 * scale;
+    // A reflection or 180° rotation can be axis-aligned without being
+    // positive-diagonal.  Shadow offsets are applied in device space by the
+    // renderer, so local per-side growth reverses the offset under a sign flip.
+    let axis_sign_flip = !off_axis && (t.a < 0.0 || t.d < 0.0);
+    is_anisotropic(t) || off_axis || axis_sign_flip
 }
 
 fn anisotropic_effect_bounds(n: &Node, scale: f32, world: Affine, local_base: Rect) -> Rect {
@@ -547,6 +552,47 @@ mod tests {
             .max()
             .unwrap_or(0);
         assert_eq!(edge_alpha, 0, "rotated group shadow clipped at an image edge: bounds={b:?} size={w}x{h}");
+    }
+
+    #[test]
+    fn axis_aligned_sign_flip_shadow_offset_keeps_device_space_bounds() {
+        for (label, transform) in [
+            ("180-degree rotation", Affine::translate(40.0, 40.0) * Affine::rotate(std::f32::consts::PI)),
+            ("horizontal reflection", Affine::translate(40.0, 40.0) * Affine::scale(-1.0, 1.0)),
+        ] {
+            let mut d = Document::new("t");
+            let page = d.add_page("p");
+            let gid = d.alloc_id();
+            let mut group = Node::rectangle(gid, Rect::new(0.0, 0.0, 1.0, 1.0));
+            group.kind = NodeKind::Group;
+            group.fills.clear();
+            let group = d.insert(page, group).unwrap();
+
+            let cid = d.alloc_id();
+            let mut child = Node::rectangle(cid, Rect::new(0.0, 0.0, 20.0, 20.0));
+            child.transform = transform;
+            child.effects.push(Effect::DropShadow {
+                color: Color::BLACK,
+                offset: Vec2::new(10.0, 0.0),
+                radius: 8.0,
+                spread: 2.0,
+                visible: true,
+                show_behind: true,
+                blend: Default::default(),
+            });
+            d.insert(group, child).unwrap();
+
+            let b = render_bounds(&d, group);
+            let pm = crate::raster::render_export(&d, group, 1.0).expect("sign-flipped shadow export");
+            let w = pm.width() as usize;
+            let h = pm.height() as usize;
+            let edge_alpha = (0..w)
+                .flat_map(|x| [pm.data()[x * 4 + 3], pm.data()[((h - 1) * w + x) * 4 + 3]])
+                .chain((0..h).flat_map(|y| [pm.data()[(y * w) * 4 + 3], pm.data()[(y * w + w - 1) * 4 + 3]]))
+                .max()
+                .unwrap_or(0);
+            assert_eq!(edge_alpha, 0, "{label} shadow clipped at an image edge: bounds={b:?} size={w}x{h}");
+        }
     }
 
     #[test]
