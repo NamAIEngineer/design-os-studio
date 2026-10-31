@@ -43,6 +43,8 @@ pub struct AgentPickerState {
     pub menu_scroll: f32,
     /// Set when the `Other CLI…` form opens: the next menu pass scrolls the form into view (`#1010`).
     pub reveal_other_form: bool,
+    /// The agent menu's height on its last pass: a change while the `Other CLI…` form is open (a window resize) reveals the form again.
+    pub menu_view_h: f32,
 }
 
 impl AgentPickerState {
@@ -466,7 +468,9 @@ pub fn render_runtime_dropdown_menu(state: &mut TerminalState, ui: &mut Ui, pane
     let menu_x = raw_x.clamp(x_lo, x_hi);
     let menu_r = Rect::from_min_size(Pos2::new(menu_x, menu_top), Vec2::new(menu_w, view_h));
     let max_scroll = (content_h - view_h).max(0.0);
-    if state.picker.reveal_other_form && state.picker.other_form_open {
+    let resized = (state.picker.menu_view_h - view_h).abs() > 0.5;
+    state.picker.menu_view_h = view_h;
+    if (state.picker.reveal_other_form || resized) && state.picker.other_form_open {
         // The form sits under the Other CLI row, which Shell may follow; a menu capped by the room above the pill would leave it clipped until the wheel moves.
         let rows_above =
             main_idx.len() + 1 + folded_idx.iter().position(|&idx| matches!(rows[idx].kind, PickerRowKind::OtherCli)).map_or(folded_idx.len(), |at| at + 1);

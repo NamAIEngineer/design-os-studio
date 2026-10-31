@@ -77,6 +77,44 @@ fn opening_other_cli_brings_the_whole_form_into_view() {
     assert!(revealed >= 1, "some window height clips the form until the menu is revealed: {revealed}");
 }
 
+/// The window chrome above the Sim's canvas: a live window is this much taller than the Sim window that gives its menu the same room
+/// (QA r3 measured a live 520 px window clipping the form exactly where the Sim does at 460 px).
+const LIVE_CHROME: f32 = 60.0;
+
+fn assert_form_inside_menu(s: &Sim, what: &str) {
+    let (menu, form) = (s.rect_of("agents-agent-menu"), s.rect_of("agents-other-cli-form"));
+    assert!(form.top() >= menu.top() - 1.0 && form.bottom() <= menu.bottom() + 3.0, "{what}: form {form:?}, menu {menu:?}");
+}
+
+#[test]
+fn opening_other_cli_in_a_520_px_live_window_shows_the_whole_form() {
+    let height = 520.0 - LIVE_CHROME;
+    let scrolled_out = window_with_the_form_scrolled_out(height);
+    let (menu, form) = (scrolled_out.rect_of("agents-agent-menu"), scrolled_out.rect_of("agents-other-cli-form"));
+    assert!(form.bottom() > menu.bottom() + 3.0, "a live 520 px window must clip the form until it is revealed: form {form:?}, menu {menu:?}");
+    finish(scrolled_out);
+    let s = window_with_the_form_open(height);
+    assert_form_inside_menu(&s, "at a live 520 px window (Sim 460 px) opening the form reveals it");
+    finish(s);
+}
+
+#[test]
+fn resizing_the_window_with_the_form_open_reveals_it_again() {
+    // Opened in a tall window the form fits with no scroll; every shrink after that has to bring it back into view.
+    let mut s = window_with_the_form_open(700.0);
+    assert_form_inside_menu(&s, "open at 700 px");
+    for height in [460.0, 360.0, 300.0, 360.0, 460.0] {
+        frames_at(&mut s, height, 3);
+        assert_form_inside_menu(&s, &format!("after resizing to {height} px"));
+    }
+    // A wheel turn away from the form is the person's choice and stays put while the window keeps its size.
+    s.shell.app.terminal.picker.menu_scroll = 0.0;
+    frames_at(&mut s, 460.0, 3);
+    let (menu, form) = (s.rect_of("agents-agent-menu"), s.rect_of("agents-other-cli-form"));
+    assert!(form.bottom() > menu.bottom() + 3.0, "a manual scroll away is not undone without a resize: form {form:?}, menu {menu:?}");
+    finish(s);
+}
+
 /// Presses Tab 80 times: the caret never lands in a field of `ids`.
 fn assert_tab_never_reaches(s: &mut Sim, height: f32, ids: &[Id]) {
     for presses in 1..=80 {
