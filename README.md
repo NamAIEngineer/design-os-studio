@@ -82,7 +82,7 @@ Install the agent skill plugin in Claude Code, copy the skill into Codex, downlo
 /plugin install design-os-studio@design-os-studio
 
 # Option B: Clone and launch the native Rust/wgpu Studio (or package a .dmg / .zip / .deb)
-git clone https://github.com/jangtrinh/design-os-studio
+git clone https://github.com/NamAIEngineer/design-os-studio
 cd design-os-studio
 cargo run --release -p designos-app --bin designos-studio
 ./scripts/build-release.sh <version> --local-host
@@ -319,7 +319,7 @@ Run these two commands inside Claude Code:
 Install to your personal Codex skills directory:
 
 ```bash
-git clone https://github.com/jangtrinh/design-os-studio /tmp/design-os-studio
+git clone https://github.com/NamAIEngineer/design-os-studio /tmp/design-os-studio
 mkdir -p ~/.codex/skills/design-os-studio ~/.codex/prompts
 cp -R /tmp/design-os-studio/skills/design-os-studio/* ~/.codex/skills/design-os-studio/
 cp /tmp/design-os-studio/prompts/doctor.md ~/.codex/prompts/design-os-studio-doctor.md
@@ -329,7 +329,7 @@ rm -rf /tmp/design-os-studio
 ### Gemini CLI & Google Antigravity
 
 ```bash
-git clone https://github.com/jangtrinh/design-os-studio /tmp/design-os-studio
+git clone https://github.com/NamAIEngineer/design-os-studio /tmp/design-os-studio
 mkdir -p ~/.gemini/skills/design-os-studio
 cp -R /tmp/design-os-studio/skills/design-os-studio/* ~/.gemini/skills/design-os-studio/
 rm -rf /tmp/design-os-studio
@@ -338,7 +338,7 @@ rm -rf /tmp/design-os-studio
 ### OpenCode, Cursor, Windsurf & Other Agent Harnesses (Skill + `designos-mcp`)
 
 ```bash
-git clone https://github.com/jangtrinh/design-os-studio /tmp/design-os-studio
+git clone https://github.com/NamAIEngineer/design-os-studio /tmp/design-os-studio
 mkdir -p ~/.agents/skills/design-os-studio
 cp -R /tmp/design-os-studio/skills/design-os-studio/* ~/.agents/skills/design-os-studio/
 rm -rf /tmp/design-os-studio
