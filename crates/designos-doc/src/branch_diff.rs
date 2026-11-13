@@ -600,6 +600,12 @@ impl<'a> serde::ser::SerializeStructVariant for HashSerializer<'a> {
     }
 }
 
+/// A 64-bit hash of everything about `node` except its place in the tree (`parent` and `children`). Two nodes with
+/// different content hash differently up to hash collisions; callers use it to tell whether a node was edited.
+pub fn node_content_hash(node: &Node) -> u64 {
+    hash_node_props(node)
+}
+
 /// Computes a 64-bit streaming hash of a node's property groups (excluding `parent` and `children`,
 /// which belong to the `Position` / move pass).
 fn hash_node_props(node: &Node) -> u64 {
@@ -619,6 +625,9 @@ fn hash_node_props(node: &Node) -> u64 {
     }
     node.corner_smoothing.to_bits().hash(&mut h);
     node.is_mask.hash(&mut h);
+    if node.mask_type != crate::MaskType::Alpha {
+        node.mask_type.hash(&mut h);
+    }
     node.lock_aspect.hash(&mut h);
     let _ = node.kind.serialize(HashSerializer(&mut h));
     if !node.fills.is_empty() {
@@ -638,6 +647,7 @@ fn hash_node_props(node: &Node) -> u64 {
     if !node.style_refs.is_empty() {
         4u8.hash(&mut h);
         let _ = node.style_refs.serialize(HashSerializer(&mut h));
+        node.text_style_overrides.hash(&mut h);
     }
     if node.fill_geometry.is_some() || node.stroke_geometry.is_some() {
         5u8.hash(&mut h);
@@ -678,6 +688,10 @@ fn hash_node_props(node: &Node) -> u64 {
         let _ = node.plugin_data.serialize(HashSerializer(&mut h));
         node.detached_symbol_id.hash(&mut h);
         let _ = node.fig_metadata.serialize(HashSerializer(&mut h));
+    }
+    if let Some(motion) = &node.motion {
+        12u8.hash(&mut h);
+        let _ = motion.serialize(HashSerializer(&mut h));
     }
     h.finish()
 }
@@ -826,6 +840,9 @@ fn eq_kind_group(a: &NodeKind, b: &NodeKind) -> bool {
         (NodeKind::ShapeWithText(sa), NodeKind::ShapeWithText(sb)) => sa.shape == sb.shape,
         (NodeKind::Stamp { kind: ka }, NodeKind::Stamp { kind: kb }) => ka == kb,
         (NodeKind::Unknown { type_name: ta }, NodeKind::Unknown { type_name: tb }) => ta == tb,
+        // the cell text is covered by the text groups through `any_text`
+        (NodeKind::Table(ta), NodeKind::Table(tb)) => ta == tb,
+        (NodeKind::TableCell(ca), NodeKind::TableCell(cb)) => ca.row == cb.row && ca.col == cb.col,
         _ => false,
     }
 }
@@ -837,6 +854,7 @@ fn eq_other_group(a: &Node, b: &Node) -> bool {
         && a.hyperlink == b.hyperlink
         && a.detached_symbol_id == b.detached_symbol_id
         && a.fig_metadata == b.fig_metadata
+        && a.motion == b.motion
 }
 
 /// Returns whether a specific property [`Group`] is equal on nodes `a` and `b`.
@@ -855,8 +873,8 @@ pub fn node_group_eq(a: &Node, b: &Node, group: Group) -> bool {
         Group::CornerRadii => a.corner_radii == b.corner_radii && approx_eq_f32(a.corner_smoothing, b.corner_smoothing),
         Group::Constraints => a.constraints == b.constraints,
         Group::LayoutChild => a.layout_child == b.layout_child,
-        Group::Mask => a.is_mask == b.is_mask,
-        Group::StyleRefs => a.style_refs == b.style_refs,
+        Group::Mask => a.is_mask == b.is_mask && a.mask_type == b.mask_type,
+        Group::StyleRefs => a.style_refs == b.style_refs && a.text_style_overrides == b.text_style_overrides,
         Group::Variables => a.variables == b.variables,
         Group::Component => eq_component_group(a, b),
         Group::Prototype => a.prototype == b.prototype,

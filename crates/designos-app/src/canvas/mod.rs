@@ -17,6 +17,7 @@ pub mod polyfill;
 pub mod proto;
 pub mod reorder;
 pub mod rulers;
+pub mod selection_overlap;
 pub mod snap;
 pub mod textsession;
 pub mod tiles;
@@ -41,6 +42,8 @@ pub struct MoveState {
     pub tx: Tx,
     pub ids: Vec<NodeId>,
     pub start: DV,
+    /// Last page-space pointer position observed while dragging. Used when a modal dialog interrupts release.
+    pub last: DV,
     pub orig_bbox: Rect,
     pub targets: Vec<Rect>,
     pub moved: bool,
@@ -146,6 +149,7 @@ pub enum Interaction {
         start: DV,
         cur: DV,
         base: Vec<NodeId>,
+        matching: Option<Vec<(NodeId, Rect)>>,
     },
     ZoomMarquee {
         start: DV,
@@ -170,6 +174,8 @@ pub enum Interaction {
     Guide(rulers::GuideDrag),
     /// Dragging a connector out of a board node (or from empty canvas).
     Connect(crate::board::connect::ConnectDrag),
+    /// Dragging a table grip, a track line or across cells (nothing is written until the release).
+    Table(crate::board::table::grips::TableDrag),
 }
 
 pub use textsession::TextSession;
@@ -198,10 +204,14 @@ pub struct CanvasState {
     /// On-canvas inline input pill for Auto-Layout padding/gap single-click (`S1-08`).
     pub al_inline: Option<AutoLayoutInlineEdit>,
     pub pointer_page: Option<DV>,
+    /// `--pointer x,y` of a screenshot: where the pointer is taken to be when no real one is over the canvas.
+    pub shot_pointer: Option<egui::Pos2>,
+    /// The last press landed outside the canvas, so the keys are not the canvas's until it is pressed again.
+    pub keys_left_canvas: bool,
     pub cursor: Option<egui::CursorIcon>,
     pub last_render_ms: f32,
-    /// Cached `(pointer_screen_pos, tile_rev, deep_mod, zoom)` for hover hit-test deduplication.
-    pub last_hover_query: Option<(egui::Pos2, u64, bool, f32)>,
+    /// Cached `(pointer_screen_pos, tile_rev, deep_mod, shift_mod, zoom, selection_hash)` for hover hit-test deduplication.
+    pub last_hover_query: Option<(egui::Pos2, u64, bool, bool, f32, u64)>,
 }
 
 /// Fast axis-aligned bounding box of `(0, 0, size.x, size.y)` transformed by `t` with zero heap allocations.
@@ -370,6 +380,14 @@ pub fn show(app: &mut App, ui: &mut Ui, rect: ERect) {
         app.first_fit_done = true;
         match app.startup_zoom.take() {
             Some(z) => app.zoom_on_content(z),
+            None if app.startup_fit_selection => {
+                app.startup_fit_selection = false;
+                if app.selection.is_empty() {
+                    app.fit_all();
+                } else {
+                    app.fit_selection();
+                }
+            }
             None if app.is_deck() => {
                 if let Some(id) = app.active_slide() {
                     app.select_slide(id);
@@ -380,7 +398,7 @@ pub fn show(app: &mut App, ui: &mut Ui, rect: ERect) {
             None => app.fit_all(),
         }
     }
-    if app.is_board() {
+    if app.wb_dotted_background() {
         // the dotted board under the (transparent) page tiles
         crate::board::canvas::background(app, ui, rect);
     }

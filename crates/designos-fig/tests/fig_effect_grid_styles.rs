@@ -5,6 +5,7 @@ use designos_fig::container::{self, Compression};
 use designos_fig::kiwi::KiwiValue as V;
 use designos_fig::testkit::{color, en, figma_like_schema, fl, guid, msg, node, solid, vec2};
 use designos_fig::{export_fig, import_fig};
+use serde_json::{json, Value};
 
 fn find<'a>(doc: &'a Document, name: &str) -> &'a Node {
     doc.nodes.values().find(|n| n.name == name).unwrap_or_else(|| panic!("no node named {name}"))
@@ -156,6 +157,7 @@ fn style_values_and_metadata_are_imported() {
             description: "Shadow/Card description".into(),
             property: StyleProperty::Effect,
             bindings: Default::default(),
+            ..Default::default()
         }
     );
     assert_eq!(d.style_meta["2:101"].property, StyleProperty::Grid);
@@ -169,7 +171,7 @@ fn a_soft_deleted_style_is_ignored() {
     assert_eq!(deleted.effects.len(), 1);
     assert!(matches!(deleted.effects[0], Effect::LayerBlur { radius, .. } if radius == 3.0), "keeps its own effects, not the deleted style's");
     assert!(!d.style_meta.contains_key("2:102"), "no metadata for a deleted style");
-    assert!(!deleted.style_refs.contains_key("effect"), "the consumer is left unlinked");
+    assert_eq!(deleted.style_refs.get("effect").map(String::as_str), Some("2:102"), "the consumer keeps style_refs so .fig export round-trips");
 }
 
 #[test]
@@ -190,7 +192,14 @@ fn export_then_import_keeps_effect_and_grid_styles_and_their_links() {
     d1.styles.insert("Shadow/Unused".into(), Style::Effect(vec![Effect::LayerBlur { radius: 6.0, visible: true }]));
     d1.style_meta.insert(
         "Shadow/Unused".into(),
-        StyleMeta { name: "Shadow/Unused".into(), key: None, description: String::new(), property: StyleProperty::Effect, bindings: Default::default() },
+        StyleMeta {
+            name: "Shadow/Unused".into(),
+            key: None,
+            description: String::new(),
+            property: StyleProperty::Effect,
+            bindings: Default::default(),
+            ..Default::default()
+        },
     );
     let d2 = import_fig(&export_fig(&d1).unwrap()).unwrap();
 
@@ -284,6 +293,7 @@ fn noise_texture_and_glass_effects_round_trip_through_fig_import_export_reimport
     let expected_mono = Effect::Noise(NoiseEffect {
         mode: NoiseMode::Mono { color: Color { r: 0.25, g: 0.5, b: 0.75, a: 1.0 } },
         size: 3.5,
+        size_y: None,
         density: 0.65,
         opacity: 0.4,
         blend: BlendMode::Overlay,
@@ -293,17 +303,35 @@ fn noise_texture_and_glass_effects_round_trip_through_fig_import_export_reimport
     let expected_duo = Effect::Noise(NoiseEffect {
         mode: NoiseMode::Duo { color: Color { r: 1.0, g: 0.0, b: 0.0, a: 1.0 }, secondary: Color { r: 0.0, g: 0.0, b: 1.0, a: 0.5 } },
         size: 2.0,
+        size_y: None,
         density: 0.35,
         opacity: 0.8,
         blend: BlendMode::Multiply,
         seed: 9,
         visible: false,
     });
-    let expected_multi =
-        Effect::Noise(NoiseEffect { mode: NoiseMode::Multi, size: 1.5, density: 0.9, opacity: 0.5, blend: BlendMode::Screen, seed: 77, visible: true });
-    let expected_texture = Effect::Texture(TextureEffect { size: 4.0, radius: 6.5, clip_to_shape: false, seed: 13, visible: false });
-    let expected_glass =
-        Effect::Glass(GlassEffect { light_angle: 135.0, light_intensity: 0.75, refraction: 0.6, depth: 18.0, dispersion: 0.3, frost: 8.0, visible: true });
+    let expected_multi = Effect::Noise(NoiseEffect {
+        mode: NoiseMode::Multi,
+        size: 1.5,
+        size_y: None,
+        density: 0.9,
+        opacity: 0.5,
+        blend: BlendMode::Screen,
+        seed: 77,
+        visible: true,
+    });
+    let expected_texture = Effect::Texture(TextureEffect { size: 4.0, size_y: None, radius: 6.5, clip_to_shape: false, seed: 13, visible: false });
+    let expected_glass = Effect::Glass(GlassEffect {
+        light_angle: 135.0,
+        light_intensity: 0.75,
+        refraction: 0.6,
+        depth: 18.0,
+        dispersion: 0.3,
+        frost: 8.0,
+        splay: 0.0,
+        bevel: 0.0,
+        visible: true,
+    });
 
     // 1. First import from .fig
     let d1 = import_fig(&fig_bytes).unwrap();
@@ -388,6 +416,7 @@ fn fig_style_colorvar_round_trips() {
             description: String::new(),
             property: StyleProperty::Fill,
             bindings: [("fills/0".to_string(), var_id.clone())].into_iter().collect(),
+            ..Default::default()
         },
     );
 
@@ -424,6 +453,7 @@ fn text_style_paragraph_indent_and_weight_round_trip() {
             ]
             .into_iter()
             .collect(),
+            ..Default::default()
         },
     );
 
@@ -463,6 +493,7 @@ fn fill_style_gradient_stop_binding_round_trips() {
             description: String::new(),
             property: StyleProperty::Fill,
             bindings: [("fills/0/stops/0".to_string(), stop_var.clone())].into_iter().collect(),
+            ..Default::default()
         },
     );
     let fid = d.alloc_id();
@@ -506,7 +537,15 @@ fn effect_style_shadow_vars_round_trip() {
     insert_var(&mut d, &x_var, "sh-x", VariableKind::Number, VariableValue::Number(2.0), VariableValue::Number(8.0));
     insert_var(&mut d, &y_var, "sh-y", VariableKind::Number, VariableValue::Number(3.0), VariableValue::Number(12.0));
 
-    let fx = Effect::DropShadow { color: light_c, offset: Vec2::new(2.0, 3.0), radius: 4.0, spread: 1.0, visible: true, show_behind: false };
+    let fx = Effect::DropShadow {
+        color: light_c,
+        offset: Vec2::new(2.0, 3.0),
+        radius: 4.0,
+        spread: 1.0,
+        visible: true,
+        show_behind: false,
+        blend: Default::default(),
+    };
     d.styles.insert("2:503".into(), Style::Effect(vec![fx.clone()]));
     d.style_meta.insert(
         "2:503".into(),
@@ -524,6 +563,7 @@ fn effect_style_shadow_vars_round_trip() {
             ]
             .into_iter()
             .collect(),
+            ..Default::default()
         },
     );
     let fid = d.alloc_id();
@@ -554,4 +594,651 @@ fn effect_style_shadow_vars_round_trip() {
     assert_eq!(radius, 16.0);
     assert_eq!(spread, 6.0);
     assert_eq!(offset, Vec2::new(8.0, 12.0));
+}
+
+fn exported_style_node_names(bytes: &[u8]) -> Vec<String> {
+    let arch = container::open(bytes).expect("open exported .fig archive");
+    let (schema_bytes, data_bytes) = container::read_archive_chunks(&arch).expect("decode exported .fig chunks");
+    let s = designos_fig::kiwi::Schema::decode(&schema_bytes).expect("decode exported .fig schema");
+    let r = s.find("Message").expect("find Message in schema");
+    let msg_val = s.decode_message(r, &data_bytes).expect("decode exported .fig message");
+    msg_val
+        .get("nodeChanges")
+        .and_then(|v| v.as_array())
+        .into_iter()
+        .flatten()
+        .filter(|nc| nc.get("styleType").is_some())
+        .filter_map(|nc| match nc.get("name") {
+            Some(V::String(s)) => Some(s.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn deleted_style_leaves_no_orphan_style_node_or_dangling_ref_on_fig_round_trip() {
+    let mut d = import_fig(&fixture_bytes()).unwrap();
+    assert!(
+        exported_style_node_names(&export_fig(&d).unwrap()).iter().any(|n| n == "Shadow/Card"),
+        "precondition: exported .fig before delete_style carries the Shadow/Card style node"
+    );
+    let mut h = History::default();
+    let cmd = delete_style(&d, "2:100").expect("delete_style succeeds on local effect style");
+    h.exec(&mut d, cmd).unwrap();
+
+    let bytes = export_fig(&d).expect("export_fig succeeds after deleting style");
+    let style_names = exported_style_node_names(&bytes);
+    assert!(!style_names.iter().any(|n| n == "Shadow/Card" || n == "2:100"), "exported .fig still has a style node for deleted Shadow/Card: {style_names:?}");
+    let d2 = import_fig(&bytes).expect("import_fig succeeds on exported bytes");
+
+    assert!(!d2.styles.contains_key("2:100"), "deleted style key must not reappear in styles");
+    assert!(!d2.style_meta.contains_key("2:100"), "deleted style key must not reappear in style_meta");
+    assert!(d2.style_meta.values().all(|m| m.name != "Shadow/Card"), "no orphan style_meta entry named Shadow/Card");
+    assert!(d2.nodes.values().all(|n| n.name != "Shadow/Card"), "no orphan style node named Shadow/Card");
+    for n in d2.nodes.values() {
+        for (slot, target) in &n.style_refs {
+            assert_ne!(target, "2:100", "node {} still points at deleted style 2:100 via {slot}", n.name);
+            assert!(d2.styles.contains_key(target), "node {} has dangling style_ref {slot} -> {target}", n.name);
+        }
+    }
+    for name in ["Modern", "Legacy"] {
+        let n = find(&d2, name);
+        assert!(!n.style_refs.contains_key("effect"), "{name} has no effect style ref");
+        assert_eq!(drop_shadow_radius(&n.effects[0]), 8.0, "{name} keeps its resolved effect values");
+        assert_eq!(n.style_refs.get("grid").map(String::as_str), Some("2:101"), "{name} keeps its other style refs");
+    }
+}
+
+/// A .fig whose internal canvas holds a remote component that uses the same style as a local layer.
+fn remote_component_fixture() -> Vec<u8> {
+    let nodes = vec![
+        node((0, 0), (0, 0), "!", "DOCUMENT", "Document", vec![]),
+        node((0, 1), (0, 0), "a", "CANVAS", "Page", vec![("backgroundColor", color(1.0, 1.0, 1.0, 1.0))]),
+        node((0, 2), (0, 0), "b", "CANVAS", "Internal Only Canvas", vec![("internalOnly", V::Bool(true))]),
+        style_node(100, "Shadow/Card", "EFFECT", "key-fx", vec![("effects", V::Array(vec![shadow(8.0)]))]),
+        node((2, 300), (0, 2), "c", "SYMBOL", "Remote Card", vec![("size", vec2(100.0, 100.0)), ("key", V::String("comp-key".into()))]),
+        node(
+            (2, 301),
+            (2, 300),
+            "a",
+            "FRAME",
+            "Remote Card Body",
+            vec![("size", vec2(50.0, 50.0)), ("styleIdForEffect", sref(100)), ("effects", V::Array(vec![shadow(8.0)]))],
+        ),
+        frame(1, "Local", vec![("styleIdForEffect", sref(100)), ("effects", V::Array(vec![shadow(8.0)]))]),
+    ];
+    let message = msg(vec![("nodeChanges", V::Array(nodes))]);
+    let schema = figma_like_schema();
+    let root = schema.find("Message").unwrap();
+    let body = schema.encode_message(root, &message).unwrap();
+    container::write_container(&schema.encode(), &body, Compression::Zstd, 101)
+}
+
+#[test]
+fn a_style_used_by_a_remote_component_on_the_library_page_cannot_be_deleted() {
+    let d = import_fig(&remote_component_fixture()).unwrap();
+    let body = d.nodes.values().find(|n| n.name == "Remote Card Body").map(|n| n.id).expect("remote body imported");
+    assert!(is_library_node(&d, body), "Remote Card Body sits on the hidden library page");
+
+    let err = delete_style(&d, "2:100").unwrap_err();
+    assert!(matches!(&err, StyleOpError::LibraryStyle(k) if k == "2:100"), "expected LibraryStyle error, got {err:?}");
+    assert!(d.styles.contains_key("2:100"));
+    for n in d.nodes.values() {
+        for target in n.style_refs.values() {
+            assert!(d.styles.contains_key(target), "no dangling style ref on {}", n.name);
+        }
+    }
+}
+
+#[test]
+fn deleting_colour_and_text_styles_on_mixed_run_text_preserves_rendered_pixels() {
+    let mut d = Document::new("t");
+    let page = d.add_page("p");
+    let black = vec![Paint::solid(Color::BLACK)];
+    let red = vec![Paint::solid(Color::rgb(255, 0, 0))];
+    let base_fill = TextStyle { font_size: 20.0, fills: black.clone(), ..Default::default() };
+    let hi_fill = TextStyle { fills: red, ..base_fill.clone() };
+    let t_fill_id = d.alloc_id();
+    let mut t_fill = Node::text(t_fill_id, Rect::new(0.0, 0.0, 220.0, 40.0), "Hello world", base_fill.clone());
+    if let NodeKind::Text(tp) = &mut t_fill.kind {
+        tp.runs = vec![TextRun { start: 0, end: 5, style: base_fill }, TextRun { start: 5, end: 11, style: hi_fill }];
+    }
+    let t_fill = d.insert(page, t_fill).unwrap();
+    d.get_mut(t_fill).unwrap().style_refs.insert("fill".into(), "Ink".into());
+    d.styles.insert("Ink".into(), Style::Fill(black));
+    d.style_meta.insert("Ink".into(), StyleMeta { name: "Ink".into(), property: StyleProperty::Fill, ..Default::default() });
+
+    let base_text = TextStyle { font_size: 20.0, font_weight: 400, ..Default::default() };
+    let bold_text = TextStyle { font_weight: 700, ..base_text.clone() };
+    let t_text_id = d.alloc_id();
+    let mut t_text = Node::text(t_text_id, Rect::new(0.0, 50.0, 220.0, 40.0), "Hello world", base_text.clone());
+    if let NodeKind::Text(tp) = &mut t_text.kind {
+        tp.runs = vec![TextRun { start: 0, end: 5, style: base_text.clone() }, TextRun { start: 5, end: 11, style: bold_text }];
+    }
+    let t_text = d.insert(page, t_text).unwrap();
+    d.get_mut(t_text).unwrap().style_refs.insert("text".into(), "Body".into());
+    d.styles.insert("Body".into(), Style::Text(base_text));
+    d.style_meta.insert("Body".into(), StyleMeta { name: "Body".into(), property: StyleProperty::Text, ..Default::default() });
+
+    let fill_px_before = designos_render::render_node(&d, t_fill, 1.0).expect("render t_fill before").data().to_vec();
+    let text_px_before = designos_render::render_node(&d, t_text, 1.0).expect("render t_text before").data().to_vec();
+
+    let mut h = History::default();
+    let c1 = delete_style(&d, "Ink").unwrap();
+    h.exec(&mut d, c1).unwrap();
+    let c2 = delete_style(&d, "Body").unwrap();
+    h.exec(&mut d, c2).unwrap();
+
+    let fill_px_after = designos_render::render_node(&d, t_fill, 1.0).expect("render t_fill after").data().to_vec();
+    let text_px_after = designos_render::render_node(&d, t_text, 1.0).expect("render t_text after").data().to_vec();
+    let fill_diff = fill_px_after.iter().zip(&fill_px_before).filter(|(a, b)| a != b).count();
+    let text_diff = text_px_after.iter().zip(&text_px_before).filter(|(a, b)| a != b).count();
+    assert_eq!(fill_diff, 0, "rendered pixels of mixed-colour text must not change after deleting its fill style ({fill_diff} bytes differed)");
+    assert_eq!(text_diff, 0, "rendered pixels of mixed-weight text must not change after deleting its text style ({text_diff} bytes differed)");
+}
+
+#[test]
+fn own_font_style_binding_and_style_font_weight_binding_preserve_resolved_node_across_modes() {
+    use designos_doc::{resolve_node, Variable, VariableCollection, VariableKind, VariableMode, VariableValue};
+
+    let mut d = Document::new("t");
+    let p = d.add_page("p");
+    d.variable_collections.insert(
+        "c".into(),
+        VariableCollection {
+            id: "c".into(),
+            name: "C".into(),
+            modes: vec![VariableMode { id: "m1".into(), name: "M1".into() }, VariableMode { id: "m2".into(), name: "M2".into() }],
+            default_mode: "m1".into(),
+            variables: vec!["v_style".into(), "v_weight".into()],
+            key: None,
+            source_library_key: None,
+            extensions: Default::default(),
+        },
+    );
+    d.variables.insert(
+        "v_style".into(),
+        Variable {
+            id: "v_style".into(),
+            name: "fontStyle".into(),
+            collection: "c".into(),
+            kind: VariableKind::String,
+            values: [("m1".to_string(), VariableValue::String("Bold Italic".into())), ("m2".to_string(), VariableValue::String("SemiBold Italic".into()))]
+                .into_iter()
+                .collect(),
+            description: String::new(),
+            scopes: vec![],
+            hidden_from_publishing: false,
+            key: None,
+            code_syntax: Default::default(),
+            extensions: Default::default(),
+            mode_extensions: Default::default(),
+        },
+    );
+    d.variables.insert(
+        "v_weight".into(),
+        Variable {
+            id: "v_weight".into(),
+            name: "fontWeight".into(),
+            collection: "c".into(),
+            kind: VariableKind::Number,
+            values: [("m1".to_string(), VariableValue::Number(300.0)), ("m2".to_string(), VariableValue::Number(400.0))].into_iter().collect(),
+            description: String::new(),
+            scopes: vec![],
+            hidden_from_publishing: false,
+            key: None,
+            code_syntax: Default::default(),
+            extensions: Default::default(),
+            mode_extensions: Default::default(),
+        },
+    );
+
+    let tid = d.alloc_id();
+    let mut t = Node::text(tid, Rect::new(0.0, 0.0, 120.0, 30.0), "Sample", TextStyle::default());
+    t.style_refs.insert("text".into(), "Heading".into());
+    t.variables.bindings.insert("fontStyle".into(), "v_style".into());
+    let tid = d.insert(p, t).unwrap();
+
+    d.styles.insert("Heading".into(), Style::Text(TextStyle::default()));
+    d.style_meta.insert(
+        "Heading".into(),
+        StyleMeta {
+            name: "Heading".into(),
+            property: StyleProperty::Text,
+            bindings: [("fontWeight".to_string(), "v_weight".to_string())].into_iter().collect(),
+            ..Default::default()
+        },
+    );
+
+    let mut before_by_mode = Vec::new();
+    for mode in ["m1", "m2"] {
+        d.get_mut(tid).unwrap().variables.modes.insert("c".into(), mode.into());
+        let mut r = resolve_node(&d, d.get(tid).unwrap()).into_owned();
+        r.style_refs.clear();
+        r.variables = Default::default();
+        before_by_mode.push((mode, r));
+    }
+    d.get_mut(tid).unwrap().variables.modes.remove("c");
+
+    let mut h = History::default();
+    let cmd = delete_style(&d, "Heading").unwrap();
+    h.exec(&mut d, cmd).unwrap();
+
+    for (mode, before) in before_by_mode {
+        d.get_mut(tid).unwrap().variables.modes.insert("c".into(), mode.into());
+        let mut after = resolve_node(&d, d.get(tid).unwrap()).into_owned();
+        after.variables = Default::default();
+        assert_eq!(after, before, "resolve_node in mode {mode} must match before and after delete_style");
+    }
+}
+
+#[test]
+fn style_sort_position_and_folder_order_round_trip() {
+    let nodes = vec![
+        node((0, 0), (0, 0), "!", "DOCUMENT", "Document", vec![]),
+        node((0, 1), (0, 0), "a", "CANVAS", "Page", vec![("backgroundColor", color(1.0, 1.0, 1.0, 1.0))]),
+        node((0, 2), (0, 0), "b", "CANVAS", "Internal Only Canvas", vec![("internalOnly", V::Bool(true))]),
+        style_node(
+            201,
+            "Shadows/shadow-lg",
+            "EFFECT",
+            "key-lg",
+            vec![("effects", V::Array(vec![shadow(16.0)])), ("sortPosition", V::String("!~~p~oLx".into()))],
+        ),
+        style_node(202, "Shadows/shadow-xs", "EFFECT", "key-xs", vec![("effects", V::Array(vec![shadow(2.0)])), ("sortPosition", V::String("!~~p~oL".into()))]),
+        style_node(
+            203,
+            "Focus rings/focus-ring",
+            "EFFECT",
+            "key-ring",
+            vec![("effects", V::Array(vec![shadow(4.0)])), ("sortPosition", V::String("\"'#".into()))],
+        ),
+        style_node(
+            204,
+            "Shadows/shadow-sm",
+            "EFFECT",
+            "key-sm",
+            vec![("effects", V::Array(vec![shadow(6.0)])), ("sortPosition", V::String("!~~p~oLf".into()))],
+        ),
+    ];
+    let message = msg(vec![("nodeChanges", V::Array(nodes))]);
+    let schema = figma_like_schema();
+    let root = schema.find("Message").unwrap();
+    let body = schema.encode_message(root, &message).unwrap();
+    let fig_bytes = container::write_container(&schema.encode(), &body, Compression::Zstd, 101);
+
+    let d1 = import_fig(&fig_bytes).unwrap();
+    assert_eq!(d1.style_meta["2:202"].sort_position.as_deref(), Some("!~~p~oL"));
+    assert_eq!(d1.style_meta["2:204"].sort_position.as_deref(), Some("!~~p~oLf"));
+    assert_eq!(d1.style_meta["2:201"].sort_position.as_deref(), Some("!~~p~oLx"));
+    assert_eq!(d1.style_meta["2:203"].sort_position.as_deref(), Some("\"'#"));
+
+    let order1: Vec<(String, Option<String>)> = ordered_style_keys(&d1, Some(StyleProperty::Effect))
+        .into_iter()
+        .map(|k| (d1.style_name(&k).to_string(), d1.style_meta[&k].sort_position.clone()))
+        .collect();
+    assert_eq!(
+        order1,
+        vec![
+            ("Shadows/shadow-xs".into(), Some("!~~p~oL".into())),
+            ("Shadows/shadow-sm".into(), Some("!~~p~oLf".into())),
+            ("Shadows/shadow-lg".into(), Some("!~~p~oLx".into())),
+            ("Focus rings/focus-ring".into(), Some("\"'#".into())),
+        ]
+    );
+
+    let exported = export_fig(&d1).unwrap();
+    let d2 = import_fig(&exported).unwrap();
+    let order2: Vec<(String, Option<String>)> = ordered_style_keys(&d2, Some(StyleProperty::Effect))
+        .into_iter()
+        .map(|k| (d2.style_name(&k).to_string(), d2.style_meta[&k].sort_position.clone()))
+        .collect();
+    assert_eq!(order2, order1, "import -> export -> import must keep exact order and sortPosition values");
+}
+
+#[test]
+fn unpositioned_ten_fill_styles_keep_order_through_fig_round_trip() {
+    let mut d = Document::new("TenStyles");
+    d.add_page("Page 1");
+    let expected_names: Vec<String> = (1..=10).map(|i| format!("Fill/S{i:02}")).collect();
+    for i in 1..=10 {
+        let key = format!("S{i:02}");
+        let name = format!("Fill/S{i:02}");
+        d.styles.insert(key.clone(), Style::Fill(vec![Paint::solid(Color::rgb(i as u8 * 10, 20, 30))]));
+        d.style_meta.insert(key, StyleMeta { name, property: StyleProperty::Fill, sort_position: None, ..Default::default() });
+    }
+    assert!(d.style_meta.values().all(|m| m.sort_position.is_none()));
+
+    let exported = export_fig(&d).unwrap();
+    assert!(d.style_meta.values().all(|m| m.sort_position.is_none()), "export must not mutate in-memory doc sort_position");
+
+    let reimported = import_fig(&exported).unwrap();
+    let names_after: Vec<String> =
+        ordered_style_keys(&reimported, Some(StyleProperty::Fill)).into_iter().map(|k| reimported.style_name(&k).to_string()).collect();
+    assert_eq!(names_after, expected_names, "ten unpositioned fill styles S01..S10 must keep their order through .fig export and import");
+}
+
+#[test]
+fn mixed_positioned_and_unpositioned_styles_keep_order_through_fig_round_trip() {
+    let mut d = Document::new("MixedStyles");
+    d.add_page("Page 1");
+    for (key, name, pos, r) in [
+        ("p_mid", "Shadows/sm", Some("!~~p~oLf"), 20),
+        ("p_last", "Focus rings/ring", Some("\"'#"), 30),
+        ("p_first", "Shadows/xs", Some("!~~p~oL"), 10),
+        ("1_unpos_first", "Custom/First", None, 40),
+        ("2:2", "Custom/Second", None, 50),
+    ] {
+        d.styles.insert(key.into(), Style::Fill(vec![Paint::solid(Color::rgb(r, 0, 0))]));
+        d.style_meta
+            .insert(key.into(), StyleMeta { name: name.into(), property: StyleProperty::Fill, sort_position: pos.map(str::to_string), ..Default::default() });
+    }
+
+    let exported = export_fig(&d).unwrap();
+    assert_eq!(d.style_meta["1_unpos_first"].sort_position, None);
+    assert_eq!(d.style_meta["2:2"].sort_position, None);
+
+    let reimported = import_fig(&exported).unwrap();
+    let after: Vec<(String, Option<String>)> = ordered_style_keys(&reimported, Some(StyleProperty::Fill))
+        .into_iter()
+        .map(|k| (reimported.style_name(&k).to_string(), reimported.style_meta[&k].sort_position.clone()))
+        .collect();
+    let names_after: Vec<&str> = after.iter().map(|(n, _)| n.as_str()).collect();
+    assert_eq!(
+        names_after,
+        vec!["Shadows/xs", "Shadows/sm", "Focus rings/ring", "Custom/First", "Custom/Second"],
+        "positioned styles must come first in sortPosition order, followed by unpositioned styles in stored order"
+    );
+    assert_eq!(after[0].1.as_deref(), Some("!~~p~oL"));
+    assert_eq!(after[1].1.as_deref(), Some("!~~p~oLf"));
+    assert_eq!(after[2].1.as_deref(), Some("\"'#"));
+    assert!(after[3].1.is_some() && after[4].1.is_some(), "unpositioned styles receive generated sortPosition on round trip");
+}
+
+#[test]
+fn style_description_fig_round_trip_keeps_empty_and_non_empty_descriptions() {
+    let mut d_no_desc = Document::new("NoDescriptions");
+    d_no_desc.add_page("Page 1");
+    for (key, name, prop, style) in [
+        ("fill_1", "Brand/Primary", StyleProperty::Fill, Style::Fill(vec![Paint::solid(Color::rgb(10, 20, 30))])),
+        (
+            "effect_1",
+            "Shadows/sm",
+            StyleProperty::Effect,
+            Style::Effect(vec![Effect::DropShadow {
+                color: Color::rgba(0, 0, 0, 64),
+                offset: Vec2::new(0.0, 2.0),
+                radius: 4.0,
+                spread: 0.0,
+                visible: true,
+                show_behind: false,
+                blend: Default::default(),
+            }]),
+        ),
+    ] {
+        d_no_desc.styles.insert(key.into(), style);
+        d_no_desc.style_meta.insert(key.into(), StyleMeta { name: name.into(), property: prop, ..Default::default() });
+    }
+    let bytes_no_desc = export_fig(&d_no_desc).unwrap();
+    let imported_no_desc = import_fig(&bytes_no_desc).unwrap();
+    assert_eq!(imported_no_desc.style_meta.len(), 2);
+    assert!(
+        imported_no_desc.style_meta.values().all(|m| m.description.is_empty()),
+        "a file whose styles have no description must round-trip with every description still empty: {:?}",
+        imported_no_desc.style_meta
+    );
+
+    let mut d_with_desc = d_no_desc.clone();
+    let mut h = History::default();
+    let cmd = set_style_description(&d_with_desc, "fill_1", "Primary brand surface   ").unwrap();
+    h.exec(&mut d_with_desc, cmd).unwrap();
+    let bytes_with_desc = export_fig(&d_with_desc).unwrap();
+    let imported_with_desc = import_fig(&bytes_with_desc).unwrap();
+    let (_, fill_meta) = imported_with_desc.style_meta.iter().find(|(_, m)| m.name == "Brand/Primary").expect("Brand/Primary imported");
+    let (_, fx_meta) = imported_with_desc.style_meta.iter().find(|(_, m)| m.name == "Shadows/sm").expect("Shadows/sm imported");
+    assert_eq!(fill_meta.description, "Primary brand surface");
+    assert_eq!(fx_meta.description, "");
+}
+
+#[test]
+fn us01_ac02_and_ac03_deleted_removed_and_orphan_styles_keep_layer_values_and_round_trip_style_refs() {
+    let own_fx = msg(vec![
+        ("type", en("DROP_SHADOW")),
+        ("color", color(0.0, 0.0, 0.0, 0.05)),
+        ("offset", vec2(0.0, 1.0)),
+        ("radius", fl(2.0)),
+        ("spread", fl(0.0)),
+        ("visible", V::Bool(true)),
+    ]);
+    let mut removed_style =
+        style_node(100350, "Shadow/Removed", "EFFECT", "key-removed", vec![("effects", V::Array(vec![blur(77.0)])), ("phase", en("REMOVED"))]);
+    if let V::Message(ref mut fields) = removed_style {
+        for (k, v) in fields.iter_mut() {
+            if k.as_ref() == "guid" {
+                *v = guid(1186, 100350);
+            }
+        }
+    }
+    let nodes = vec![
+        node((0, 0), (0, 0), "!", "DOCUMENT", "Document", vec![]),
+        node((0, 1), (0, 0), "a", "CANVAS", "Page", vec![("backgroundColor", color(1.0, 1.0, 1.0, 1.0))]),
+        node((0, 2), (0, 0), "b", "CANVAS", "Internal Only Canvas", vec![("internalOnly", V::Bool(true))]),
+        style_node(100, "Shadow/Card", "EFFECT", "key-fx", vec![("effects", V::Array(vec![shadow(8.0)]))]),
+        style_node(
+            102,
+            "Shadow/SoftDeletedStyle",
+            "EFFECT",
+            "key-sd-style",
+            vec![("effects", V::Array(vec![blur(99.0)])), ("isSoftDeletedStyle", V::Bool(true))],
+        ),
+        style_node(104, "Shadow/SoftDeletedNode", "EFFECT", "key-sd-node", vec![("effects", V::Array(vec![blur(88.0)])), ("isSoftDeleted", V::Bool(true))]),
+        removed_style,
+        style_node(106, "Library/Elevation", "EFFECT", "key-lib-emb", vec![("effects", V::Array(vec![shadow(12.0)]))]),
+        frame(10, "SoftDeletedStyleLayer", vec![("styleIdForEffect", sref(102)), ("effects", V::Array(vec![own_fx.clone()]))]),
+        frame(11, "SoftDeletedNodeLayer", vec![("styleIdForEffect", sref(104)), ("effects", V::Array(vec![own_fx.clone()]))]),
+        frame(12, "RemovedPhaseLayer", vec![("styleIdForEffect", msg(vec![("guid", guid(1186, 100350))])), ("effects", V::Array(vec![own_fx.clone()]))]),
+        frame(13, "MissingNodeLayer", vec![("styleIdForEffect", sref(999)), ("effects", V::Array(vec![own_fx.clone()]))]),
+        frame(
+            14,
+            "MissingLibraryLayer",
+            vec![
+                ("styleIdForEffect", msg(vec![("assetRef", msg(vec![("key", V::String("ext-missing".into())), ("version", V::String("1".into()))]))])),
+                ("effects", V::Array(vec![own_fx])),
+            ],
+        ),
+        frame(
+            15,
+            "EmbeddedLibraryLayer",
+            vec![
+                ("styleIdForEffect", msg(vec![("assetRef", msg(vec![("key", V::String("key-lib-emb".into())), ("version", V::String("1".into()))]))])),
+                ("effects", V::Array(vec![shadow(1.0)])),
+            ],
+        ),
+    ];
+    let message = msg(vec![("nodeChanges", V::Array(nodes))]);
+    let schema = figma_like_schema();
+    let root = schema.find("Message").unwrap();
+    let body = schema.encode_message(root, &message).unwrap();
+    let bytes = container::write_container(&schema.encode(), &body, Compression::Zstd, 101);
+
+    let d1 = import_fig(&bytes).unwrap();
+    let d2 = import_fig(&export_fig(&d1).unwrap()).unwrap();
+
+    for (label, d) in [("imported", &d1), ("re-imported", &d2)] {
+        for orphan_id in ["2:102", "2:104", "1186:100350", "2:999", "key:ext-missing"] {
+            assert!(!d.style_meta.contains_key(orphan_id), "{label}: orphan {orphan_id} must not be in style_meta");
+        }
+        for (layer_name, expected_ref) in [
+            ("SoftDeletedStyleLayer", "2:102"),
+            ("SoftDeletedNodeLayer", "2:104"),
+            ("RemovedPhaseLayer", "1186:100350"),
+            ("MissingNodeLayer", "2:999"),
+            ("MissingLibraryLayer", "key:ext-missing"),
+        ] {
+            let n = find(d, layer_name);
+            assert_eq!(n.style_refs.get("effect").map(String::as_str), Some(expected_ref), "{label}: {layer_name} keeps style_refs");
+            assert_eq!(n.effects.len(), 1, "{label}: {layer_name} keeps its own effect");
+            match &n.effects[0] {
+                Effect::DropShadow { color, offset, radius, .. } => {
+                    assert_eq!((offset.x, offset.y, *radius), (0.0, 1.0, 2.0), "{label}: {layer_name} effect geometry unchanged");
+                    assert!((color.a - 0.05).abs() < 1e-3, "{label}: {layer_name} effect alpha unchanged ({})", color.a);
+                }
+                other => panic!("{label}: expected DropShadow on {layer_name}, got {other:?}"),
+            }
+        }
+        let emb = find(d, "EmbeddedLibraryLayer");
+        let emb_ref = emb.style_refs.get("effect").expect("embedded library style ref preserved");
+        assert_eq!(d.style_name(emb_ref), "Library/Elevation", "{label}: embedded library style keeps its embedded name");
+        assert_eq!(drop_shadow_radius(&emb.effects[0]), 12.0, "{label}: embedded library style supplies its values");
+    }
+}
+
+#[test]
+fn us01_ac04_empty_and_whitespace_style_names_use_typed_unnamed_fallbacks() {
+    let nodes = vec![
+        node((0, 0), (0, 0), "!", "DOCUMENT", "Document", vec![]),
+        node((0, 1), (0, 0), "a", "CANVAS", "Page", vec![("backgroundColor", color(1.0, 1.0, 1.0, 1.0))]),
+        node((0, 2), (0, 0), "b", "CANVAS", "Internal Only Canvas", vec![("internalOnly", V::Bool(true))]),
+        style_node(201, "", "FILL", "k-fill", vec![("fillPaints", V::Array(vec![solid(1.0, 0.0, 0.0)]))]),
+        style_node(202, "   ", "STROKE", "k-stroke", vec![("fillPaints", V::Array(vec![solid(0.0, 1.0, 0.0)]))]),
+        style_node(203, "", "TEXT", "k-text", vec![("fontSize", fl(16.0))]),
+        style_node(204, " \t ", "EFFECT", "k-fx", vec![("effects", V::Array(vec![shadow(4.0)]))]),
+        style_node(205, "", "GRID", "k-grid", vec![("layoutGrids", V::Array(vec![columns(12)]))]),
+    ];
+    let message = msg(vec![("nodeChanges", V::Array(nodes))]);
+    let schema = figma_like_schema();
+    let root = schema.find("Message").unwrap();
+    let body = schema.encode_message(root, &message).unwrap();
+    let bytes = container::write_container(&schema.encode(), &body, Compression::Zstd, 101);
+
+    let d = import_fig(&bytes).unwrap();
+    assert_eq!(d.style_name("2:201"), "Unnamed fill style");
+    assert_eq!(d.style_name("2:202"), "Unnamed fill style");
+    assert_eq!(d.style_name("2:203"), "Unnamed text style");
+    assert_eq!(d.style_name("2:204"), "Unnamed effect style");
+    assert_eq!(d.style_name("2:205"), "Unnamed grid style");
+}
+
+// ---- glass splay and bevel, noise and texture X/Y size. Effects are compared as the JSON they save
+// as, so the expectation is the saved shape itself.
+
+fn fig_of(nodes: Vec<V>) -> Vec<u8> {
+    let message = msg(vec![("nodeChanges", V::Array(nodes))]);
+    let schema = figma_like_schema();
+    let root = schema.find("Message").unwrap();
+    let body = schema.encode_message(root, &message).unwrap();
+    container::write_container(&schema.encode(), &body, Compression::Zstd, 38)
+}
+
+fn fx_json(effects: &[Effect]) -> Vec<Value> {
+    effects.iter().map(|e| serde_json::to_value(e).unwrap()).collect()
+}
+
+/// `effects` on a frame named `Direct` and on a frame linked to an effect style that holds the same list.
+fn fig_with_effects(effects: Vec<V>) -> Vec<u8> {
+    fig_of(vec![
+        node((0, 0), (0, 0), "!", "DOCUMENT", "Document", vec![]),
+        node((0, 1), (0, 0), "a", "CANVAS", "Page", vec![("backgroundColor", color(1.0, 1.0, 1.0, 1.0))]),
+        node((0, 2), (0, 0), "b", "CANVAS", "Internal Only Canvas", vec![("internalOnly", V::Bool(true))]),
+        style_node(200, "FX/Pair", "EFFECT", "key-fx-pair", vec![("effects", V::Array(effects.clone()))]),
+        frame(10, "Direct", vec![("effects", V::Array(effects))]),
+        frame(11, "Styled", vec![("styleIdForEffect", sref(200)), ("effects", V::Array(vec![shadow(1.0)]))]),
+    ])
+}
+
+/// Asserts the two frames and the style hold `expected` after import, after export and re-import, and
+/// after a second round.
+fn assert_effects_survive_every_round(effects: Vec<V>, expected: Vec<Value>) {
+    let mut doc = import_fig(&fig_with_effects(effects)).unwrap();
+    for round in 0..3 {
+        assert_eq!(fx_json(&find(&doc, "Direct").effects), expected, "frame effects, round {round}");
+        let styled = find(&doc, "Styled");
+        assert_eq!(fx_json(&styled.effects), expected, "styled frame effects, round {round}");
+        let key = &styled.style_refs["effect"];
+        let Style::Effect(fx) = &doc.styles[key] else { panic!("not an effect style") };
+        assert_eq!(fx_json(fx), expected, "effect style, round {round}");
+        doc = import_fig(&export_fig(&doc).unwrap()).unwrap();
+    }
+}
+
+#[test]
+fn fig_round_trip_keeps_glass_splay_and_bevel() {
+    let glass = msg(vec![
+        ("type", en("GLASS")),
+        ("specularAngle", fl(135.0)),
+        ("specularIntensity", fl(0.75)),
+        ("refractionIntensity", fl(0.5)),
+        ("refractionRadius", fl(20.0)),
+        ("chromaticAberration", fl(0.5)),
+        ("reflectionDistance", fl(0.25)),
+        ("bevelSize", fl(4.0)),
+        ("radius", fl(4.0)),
+        ("visible", V::Bool(true)),
+    ]);
+    let expected = json!({"Glass": {
+        "light_angle": 135.0, "light_intensity": 0.75, "refraction": 0.5, "depth": 20.0, "dispersion": 0.5,
+        "frost": 4.0, "splay": 0.25, "bevel": 4.0, "visible": true
+    }});
+    assert_effects_survive_every_round(vec![glass], vec![expected]);
+}
+
+#[test]
+fn fig_round_trip_keeps_noise_x_and_y_size() {
+    let noise = |ty: &str, extra: Vec<(&'static str, V)>| {
+        let mut f = vec![
+            ("type", en("NOISE")),
+            ("noiseType", en(ty)),
+            ("noiseSize", vec2(3.0, 7.0)),
+            ("density", fl(0.5)),
+            ("opacity", fl(0.5)),
+            ("blendMode", en("NORMAL")),
+            ("seed", V::Uint(42)),
+            ("visible", V::Bool(true)),
+        ];
+        f.extend(extra);
+        msg(f)
+    };
+    let mono = noise("MONOTONE", vec![("color", color(0.25, 0.5, 0.75, 1.0))]);
+    let duo = noise("DUOTONE", vec![("color", color(1.0, 0.0, 0.0, 1.0)), ("secondaryColor", color(0.0, 0.0, 1.0, 0.5))]);
+    let multi = noise("MULTITONE", vec![]);
+    let saved = |mode: Value| json!({"Noise": {"mode": mode, "size": 3.0, "size_y": 7.0, "density": 0.5, "opacity": 0.5, "blend": "Normal", "seed": 42, "visible": true}});
+    let expected = vec![
+        saved(json!({"Mono": {"color": {"r": 0.25, "g": 0.5, "b": 0.75, "a": 1.0}}})),
+        saved(json!({"Duo": {"color": {"r": 1.0, "g": 0.0, "b": 0.0, "a": 1.0}, "secondary": {"r": 0.0, "g": 0.0, "b": 1.0, "a": 0.5}}})),
+        saved(json!("Multi")),
+    ];
+    assert_effects_survive_every_round(vec![mono, duo, multi], expected);
+}
+
+#[test]
+fn fig_round_trip_keeps_texture_x_and_y_size_clip_and_seed() {
+    let grain = msg(vec![
+        ("type", en("GRAIN")),
+        ("noiseSize", vec2(3.0, 7.0)),
+        ("radius", fl(6.5)),
+        ("clipToShape", V::Bool(false)),
+        ("seed", V::Uint(13)),
+        ("visible", V::Bool(true)),
+    ]);
+    let expected = json!({"Texture": {"size": 3.0, "size_y": 7.0, "radius": 6.5, "clip_to_shape": false, "seed": 13, "visible": true}});
+    assert_effects_survive_every_round(vec![grain], vec![expected]);
+}
+
+#[test]
+fn equal_x_and_y_sizes_stay_one_size() {
+    let sized = |x: f32, y: f32| {
+        msg(vec![
+            ("type", en("GRAIN")),
+            ("noiseSize", vec2(x, y)),
+            ("radius", fl(2.0)),
+            ("clipToShape", V::Bool(true)),
+            ("seed", V::Uint(1)),
+            ("visible", V::Bool(true)),
+        ])
+    };
+    let doc = import_fig(&fig_with_effects(vec![sized(4.0, 4.0)])).unwrap();
+    let saved = fx_json(&find(&doc, "Direct").effects);
+    assert_eq!(saved, vec![json!({"Texture": {"size": 4.0, "radius": 2.0, "clip_to_shape": true, "seed": 1, "visible": true}})]);
+    let again = import_fig(&export_fig(&doc).unwrap()).unwrap();
+    assert_eq!(fx_json(&find(&again, "Direct").effects), saved);
 }

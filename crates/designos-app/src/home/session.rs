@@ -12,6 +12,24 @@ use std::path::PathBuf;
 pub const AUTOSAVE_IDLE: f64 = 1.5;
 /// Seconds of calm after which a revision change is compared with the saved document.
 const PROBE_DELAY: f64 = 0.3;
+const MAX_THUMBNAIL_NODES: usize = 25_000;
+
+fn should_refresh_thumbnail(doc: &Document) -> bool {
+    doc.nodes.len() <= MAX_THUMBNAIL_NODES
+}
+
+/// Bundled offline starter document (`crates/designos-app/assets/starter/designos-studio-starter.designos`).
+pub const STARTER_BYTES: &[u8] = include_bytes!("../../assets/starter/designos-studio-starter.designos");
+
+/// Decodes [`STARTER_BYTES`] into a [`Document`].
+pub fn load_starter_document() -> std::result::Result<Document, String> {
+    #[cfg(test)]
+    let bytes: &[u8] = super::TEST_STARTER_BYTES_OVERRIDE.with(std::cell::Cell::get).unwrap_or(STARTER_BYTES);
+    #[cfg(not(test))]
+    let bytes: &[u8] = STARTER_BYTES;
+    let text = std::str::from_utf8(bytes).map_err(|e| e.to_string())?;
+    Document::from_json(text).map_err(|e| e.to_string())
+}
 
 /// The library file currently open in the editor.
 #[derive(Clone, Debug, PartialEq)]
@@ -46,6 +64,37 @@ pub(crate) fn library_file_disk_path(lib: &Library, project_id: &str, file_id: &
     lib.path("projects").join(project_id).join("files").join(format!("{file_id}.designos"))
 }
 
+/// What the library file `lf` holds now: the document as a tab shows it, its hash, and when the file last changed.
+fn saved_library_document(lib: &Library, lf: &LibFile) -> Result<(Document, u64, Option<std::time::SystemTime>), String> {
+    let path = library_file_disk_path(lib, &lf.project_id, &lf.id);
+    let (mut doc, _warning) = crate::io::load_path_with_warning(&path)?;
+    doc.name = lf.name.clone();
+    let mtime = std::fs::metadata(&path).ok().and_then(|m| m.modified().ok());
+    let hash = doc_hash(&doc);
+    Ok((doc, hash, mtime))
+}
+
+/// Walks `doc` back through `hist` to the point of its last save. True when it is there: the history is clean and
+/// the document hashes as the file did when it was last written or read (`saved_hash`), and the steps that were
+/// undone cannot be redone. When it cannot get there, the steps that were undone are redone, so nothing is lost by trying.
+fn rewind_to_saved_state(doc: &mut Document, hist: &mut designos_doc::History, saved_hash: u64) -> bool {
+    let mut undone = 0;
+    while !hist.is_clean() {
+        if !matches!(hist.undo(doc), Ok(true)) {
+            break;
+        }
+        undone += 1;
+    }
+    if hist.is_clean() && doc_hash(doc) == saved_hash {
+        hist.restore_redo(Vec::new());
+        return true;
+    }
+    for _ in 0..undone {
+        let _ = hist.redo(doc);
+    }
+    false
+}
+
 /// What a tab remembers of its file while another tab is shown: the hash it last wrote or read, and when the
 /// file last changed. Both belong to one document, so they travel with its tab, and a tab switch is never
 /// mistaken for a write by another program (which would reload the file over unsaved edits) or for an edit.
@@ -53,9 +102,24 @@ pub(crate) fn library_file_disk_path(lib: &Library, project_id: &str, file_id: &
 pub struct DiskState {
     pub saved_hash: u64,
     pub disk_mtime: Option<std::time::SystemTime>,
+    /// When the last attempt to write this document failed. This travels with a parked tab so a failed library
+    /// save still counts as unsaved after switching away and back.
+    pub save_failed_at: Option<f64>,
     /// The write the user was asked about and answered "Keep mine": it is not asked about again, also after a
     /// trip to another tab.
     pub conflict_mtime: Option<std::time::SystemTime>,
+    /// The user answered "Don't save" to the question about this library file's failed write. Nothing writes the
+    /// file from this document while the flag is set: not the autosave, not the way out of the app, not an image
+    /// job that lands on the tab. It ends with the tab or the app, and when the questions are cancelled.
+    pub edits_refused: bool,
+}
+
+impl DiskState {
+    /// Whether a write of this library file must wait: its edits were refused, or the question about its failed write
+    /// is open (`asking`) and not answered yet.
+    pub fn write_held(&self, asking: bool) -> bool {
+        self.edits_refused || (asking && self.save_failed_at.is_some())
+    }
 }
 
 #[derive(Default)]
@@ -87,13 +151,26 @@ pub struct Autosave {
     /// outside the library has edits no save has written). The same write is not asked about twice; kept
     /// per tab in [`DiskState`].
     pub conflict_mtime: Option<std::time::SystemTime>,
+    /// "Don't save" was the answer to the question about this file's failed write; see [`DiskState::edits_refused`].
+    pub edits_refused: bool,
     /// Background thread watching `watched_disk_path()` off the UI thread.
     watcher: Option<DiskWatcher>,
 }
 
 impl Autosave {
     pub fn disk_state(&self) -> DiskState {
-        DiskState { saved_hash: self.saved_hash, disk_mtime: self.disk_mtime, conflict_mtime: self.conflict_mtime }
+        DiskState {
+            saved_hash: self.saved_hash,
+            disk_mtime: self.disk_mtime,
+            save_failed_at: self.save_failed_at,
+            conflict_mtime: self.conflict_mtime,
+            edits_refused: self.edits_refused,
+        }
+    }
+
+    /// [`DiskState::write_held`] for the shown document.
+    pub fn write_held(&self, asking: bool) -> bool {
+        self.disk_state().write_held(asking)
     }
 
     /// Takes over the file state a parked tab kept, for the document at `path` that is about to be shown.
@@ -102,11 +179,12 @@ impl Autosave {
     pub fn adopt_disk_state(&mut self, state: DiskState, path: Option<PathBuf>) {
         self.saved_hash = state.saved_hash;
         self.disk_mtime = state.disk_mtime;
+        self.save_failed_at = state.save_failed_at;
         self.disk_path = path;
         self.changed_at = None;
         self.confirmed = false;
-        self.save_failed_at = None;
         self.conflict_mtime = state.conflict_mtime;
+        self.edits_refused = state.edits_refused;
     }
 
     /// An edit is waiting for the idle delay before it is saved.
@@ -467,6 +545,7 @@ pub(crate) fn doc_hash(doc: &Document) -> u64 {
     )
         .serialize(HashSerializer(&mut h));
     let _ = doc.check_designs.serialize(HashSerializer(&mut h));
+    doc.color_profile.hash(&mut h);
     doc.images.len().hash(&mut h);
     for (k, v) in &doc.images {
         (k, v.len(), &v[..v.len().min(64)]).hash(&mut h);
@@ -514,6 +593,12 @@ pub(crate) fn node_fingerprint(node: &designos_doc::Node) -> u64 {
         (&node.plugin_data, &node.detached_symbol_id, &node.fig_metadata),
     )
         .serialize(HashSerializer(&mut h));
+    if node.mask_type != designos_doc::MaskType::Alpha {
+        let _ = node.mask_type.serialize(HashSerializer(&mut h));
+    }
+    if let Some(motion) = &node.motion {
+        let _ = motion.serialize(HashSerializer(&mut h));
+    }
     h.finish()
 }
 
@@ -534,9 +619,10 @@ impl App {
             entry.terminal.permission_mode = mode;
         }
         let _ = crate::comments::settings::load_in_progress_stale_minutes(&root);
+        self.ui.pages_height = crate::comments::settings::load_pages_height(&root);
         match Library::open(&root) {
             Ok(lib) => {
-                match lib.seed_first_run(crate::demo::demo_document) {
+                match lib.seed_starter(load_starter_document) {
                     // The sample file gets its thumbnail right away so the home screen is not blank.
                     Ok(Some(entry)) => {
                         if let Ok(doc) = lib.load_file(&entry.id) {
@@ -544,12 +630,81 @@ impl App {
                         }
                     }
                     Ok(None) => {}
-                    Err(e) => self.show_toast(format!("Could not create the sample project: {e}"), true),
+                    Err(_) => self.show_toast("Could not create the starter sample", true),
                 }
                 self.lib = Some(lib);
             }
             Err(e) => self.show_toast(format!("Cannot open the library at {}: {e}", root.display()), true),
         }
+    }
+
+    /// Creates a numbered copy (`"DESIGN-OS Studio Starter (n)"`) of the starter sample in the
+    /// current project and opens it (`Help ▸ Open starter sample`, AC-10).
+    pub fn open_starter_sample(&mut self) {
+        let Some(lib) = self.lib.clone() else {
+            self.show_toast("The projects library is unavailable", true);
+            return;
+        };
+        let mut doc = match load_starter_document() {
+            Ok(doc) => doc,
+            Err(_) => {
+                self.show_toast("Could not create the starter sample", true);
+                return;
+            }
+        };
+        let project_id = if let Some(lf) = &self.lib_file {
+            if lib.project(&lf.project_id).is_ok() {
+                Some(lf.project_id.clone())
+            } else {
+                None
+            }
+        } else if let Some(h) = &self.home {
+            match &h.section {
+                Section::Project(pid, _) if lib.project(pid).is_ok() => Some(pid.clone()),
+                _ => None,
+            }
+        } else {
+            None
+        };
+        let project_id = match project_id {
+            Some(pid) => pid,
+            None => {
+                let projects = lib.list_projects();
+                if let Some(p) = projects.iter().find(|p| p.name == designos_library::SEED_PROJECT) {
+                    p.id.clone()
+                } else if let Some(p) = projects.first() {
+                    p.id.clone()
+                } else {
+                    match lib.create_project(designos_library::SEED_PROJECT) {
+                        Ok(p) => p.id,
+                        Err(_) => {
+                            self.show_toast("Could not create the starter sample", true);
+                            return;
+                        }
+                    }
+                }
+            }
+        };
+        let name = match lib.next_available_file_name(&project_id, designos_library::STARTER_FILE_NAME, true) {
+            Ok(n) => n,
+            Err(_) => {
+                self.show_toast("Could not create the starter sample", true);
+                return;
+            }
+        };
+        doc.name = name.clone();
+        let entry = match lib.create_file(&project_id, None, &name, &doc) {
+            Ok(e) => e,
+            Err(_) => {
+                self.show_toast("Could not create the starter sample", true);
+                return;
+            }
+        };
+        thumb::refresh(&lib, &entry.id, &doc);
+        if let Some(h) = &mut self.home {
+            h.dirty = true;
+        }
+        self.open_library_file(&entry.id);
     }
 
     /// Shows the home screen ("Back to files"), saving pending edits first.
@@ -619,7 +774,7 @@ impl App {
                 // The tab's own file state came back with it: the file is not read again unless it changed meanwhile.
                 self.history_open_file();
                 let _ = lib.mark_opened(id);
-                if needs_thumb && self.doc.nodes.len() <= 25_000 {
+                if needs_thumb && should_refresh_thumbnail(&self.doc) {
                     thumb::refresh_in_background(lib, entry.id, self.export_doc().into_owned());
                 }
                 return;
@@ -660,7 +815,7 @@ impl App {
             tabs.reconcile_frame(self);
             self.tabs = tabs;
         }
-        if needs_thumb && self.doc.nodes.len() <= 25_000 {
+        if needs_thumb && should_refresh_thumbnail(&self.doc) {
             thumb::refresh_in_background(lib, entry.id, self.export_doc().into_owned());
         }
     }
@@ -742,10 +897,12 @@ impl App {
         lf: &LibFile,
         doc: &mut Document,
         hist: &mut designos_doc::History,
-    ) -> Result<(Option<String>, bool), String> {
+    ) -> Result<(Option<String>, bool), LibrarySaveError> {
         let disk_path = library_file_disk_path(lib, &lf.project_id, &lf.id);
-        let wrote_backup = crate::io::write_pending_repair_backup(&disk_path)?;
-        let replaced = lib.save_file_counted(&lf.id, doc).map_err(|e| format!("Cannot save: {e}"))?;
+        // Pages a `.fig` import left unloaded come first, in place: the file must hold their content.
+        let left_empty = doc.load_pending_pages().map_err(|e| LibrarySaveError::other(format!("Cannot save: {e}")))?;
+        let wrote_backup = crate::io::write_pending_repair_backup(&disk_path).map_err(LibrarySaveError::other)?;
+        let replaced = lib.save_file_counted(&lf.id, doc).map_err(LibrarySaveError::from_library)?;
         if wrote_backup {
             crate::io::clear_pending_repair_backup(&disk_path);
         }
@@ -754,13 +911,25 @@ impl App {
             doc.neutralize_non_finite();
             hist.neutralize_non_finite();
         }
-        Ok((crate::io::non_finite_notice_once(&disk_path, replaced), neutralized))
+        let notices: Vec<String> =
+            [crate::io::non_finite_notice_once(&disk_path, replaced), (left_empty > 0).then(|| crate::io::clone_budget_notice(left_empty))]
+                .into_iter()
+                .flatten()
+                .collect();
+        Ok(((!notices.is_empty()).then(|| notices.join("; ")), neutralized))
     }
 
     /// Writes the open library file; also refreshes its thumbnail. There is no "Saved" toast, but a save
     /// that replaced non-finite numbers says so, because no later open of the file would.
     pub fn save_library_file(&mut self) -> Result<(), String> {
-        if let Some(notice) = self.save_library_file_noticing()? {
+        let notice = match self.save_library_file_noticing() {
+            Ok(notice) => notice,
+            Err(e) => {
+                self.autosave.save_failed_at = Some(self.now);
+                return Err(e.message);
+            }
+        };
+        if let Some(notice) = notice {
             self.show_toast(&notice, true);
             self.pending_flush_notice = Some((self.now, notice));
         }
@@ -769,12 +938,12 @@ impl App {
 
     /// [`Self::save_library_file`] without any toast: returns the once-per-file notice for the
     /// non-finite numbers this save replaced, for the caller to show.
-    fn save_library_file_noticing(&mut self) -> Result<Option<String>, String> {
+    fn save_library_file_noticing(&mut self) -> Result<Option<String>, LibrarySaveError> {
         crate::decks::ui::flush_notes(self);
-        let (Some(lib), Some(lf)) = (self.lib.clone(), self.lib_file.clone()) else { return Err("This file is not in the library".into()) };
+        let (Some(lib), Some(lf)) = (self.lib.clone(), self.lib_file.clone()) else { return Err(LibrarySaveError::other("This file is not in the library")) };
         if self.history.viewing.is_some() {
             // an old version is on screen: the file on disk must keep the live document
-            return Err("Go back to the current version before saving".into());
+            return Err(LibrarySaveError::other("Go back to the current version before saving"));
         }
         self.settle_pending_relayout();
         let (notice, neutralized) = Self::save_doc_to_library(&lib, &lf, &mut self.doc, &mut self.hist)?;
@@ -788,7 +957,7 @@ impl App {
         self.autosave.save_failed_at = None;
         self.autosave.disk_mtime = self.watched_disk_path().and_then(|p| std::fs::metadata(p).ok()).and_then(|m| m.modified().ok());
         self.autosave.note_known_mtime(self.autosave.disk_mtime);
-        if self.doc.nodes.len() <= 25_000 {
+        if should_refresh_thumbnail(&self.doc) {
             thumb::refresh_in_background(lib, lf.id, self.export_doc().into_owned());
         }
         Ok(notice)
@@ -796,6 +965,10 @@ impl App {
 
     /// Ctrl+S on a library file.
     pub fn save_library_file_with_toast(&mut self) {
+        let _ = self.save_library_file_reporting();
+    }
+
+    pub(crate) fn save_library_file_reporting(&mut self) -> Result<(), LibrarySaveError> {
         match self.save_library_file_noticing() {
             Ok(notice) => {
                 let project = self.lib_file.as_ref().map(|f| f.project.clone()).unwrap_or_default();
@@ -803,14 +976,24 @@ impl App {
                     Some(w) => self.show_toast(format!("Saved to {project} ({w})"), true),
                     None => self.show_toast(format!("Saved to {project}"), false),
                 }
+                Ok(())
             }
-            Err(e) => self.show_toast(e, true),
+            Err(e) => {
+                self.autosave.save_failed_at = Some(self.now);
+                self.show_toast(e.message.clone(), true);
+                Err(e)
+            }
         }
     }
 
     /// Saves pending edits right away (before leaving the editor or the app).
     pub fn flush_autosave(&mut self) {
         if self.history.viewing.is_some() {
+            return;
+        }
+        if self.lib_file.is_some() && self.autosave.write_held(self.leave.is_asking()) {
+            // The failed write is a question that is not answered yet, or was answered "Don't save": showing another
+            // tab for its own answer, or closing the window, must not write these edits.
             return;
         }
         self.settle_pending_relayout();
@@ -822,10 +1005,11 @@ impl App {
                 }
             } else {
                 // The edits netted out: the document is what the file holds.
+                self.autosave.save_failed_at = None;
                 self.mark_saved();
             }
         }
-        self.autosave.changed_at = None;
+        // A failed write remains pending so the document stays dirty and the next frame can retry it.
     }
 
     /// Called every frame: debounced autosave of the open library file.
@@ -961,7 +1145,7 @@ impl App {
 
     /// "Use file": the answer that drops the edits. Loads the file again (it may have changed once more) and
     /// shows it with a fresh history: undo steps of the document it replaces do not apply to it.
-    pub(super) fn use_disk_version(&mut self, ctx: &egui::Context) {
+    pub(crate) fn use_disk_version(&mut self, ctx: &egui::Context) {
         let (Some(asked), None) = (self.autosave.conflict_mtime.take(), self.lib_file.as_ref()) else { return };
         let Some(path) = self.file_path.clone() else { return };
         let mtime = std::fs::metadata(&path).ok().and_then(|m| m.modified().ok()).or(Some(asked));
@@ -970,8 +1154,8 @@ impl App {
                 self.autosave.disk_mtime = mtime;
                 self.autosave.note_known_mtime(mtime);
                 let new_hash = doc_hash(&new_doc);
-                self.install_disk_document(ctx, new_doc, new_hash, warning);
                 self.hist = designos_doc::History::default();
+                self.install_disk_document(ctx, new_doc, new_hash, warning);
                 self.mark_saved();
             }
             Err(e) => {
@@ -983,9 +1167,22 @@ impl App {
 
     /// Puts the document that was read from the file on screen, as the document the file holds.
     fn install_disk_document(&mut self, ctx: &egui::Context, new_doc: Document, new_hash: u64, warning: Option<String>) {
+        self.swap_in_disk_document(new_doc, new_hash);
+        match warning {
+            Some(w) => self.show_toast(format!("Synced external agent changes ({w})"), true),
+            None => self.show_toast("Synced external agent changes", false),
+        }
+        ctx.request_repaint();
+    }
+
+    /// [`Self::install_disk_document`] without the toast: the document read from the file replaces the one on screen,
+    /// and its hash is the saved one.
+    fn swap_in_disk_document(&mut self, new_doc: Document, new_hash: u64) {
         let old_page = self.page;
         let old_sel = self.selection.clone();
+        self.load_next_id = new_doc.peek_next_id();
         self.doc = new_doc;
+        self.tabs.retain_converted_images(self);
         self.agent_presence.reset();
         self.agent_changes_chip.clear();
         if !self.doc.pages.contains(&old_page) {
@@ -999,15 +1196,43 @@ impl App {
         self.autosave.saved_hash = new_hash;
         self.autosave.seen_rev = self.canvas.tiles.rev();
         self.autosave.changed_at = None;
-        match warning {
-            Some(w) => self.show_toast(format!("Synced external agent changes ({w})"), true),
-            None => self.show_toast("Synced external agent changes", false),
+    }
+
+    /// "Don't save" on the shown library file whose last write failed: the document goes back to what the file
+    /// holds, so that nothing that runs later (a tab switch, the way out of the app, a retry once the disk is back)
+    /// writes the edits that were refused. The file is read again; when it cannot be read, the undo history takes
+    /// the document back to the last save. Err when neither can: the edits are still there, and still unsaved.
+    pub(super) fn discard_failed_library_save(&mut self) -> Result<(), String> {
+        let (Some(lib), Some(lf)) = (self.lib.clone(), self.lib_file.clone()) else { return Err("This file is not in the library".to_string()) };
+        match saved_library_document(&lib, &lf) {
+            Ok((doc, hash, mtime)) => {
+                self.hist = designos_doc::History::default();
+                self.swap_in_disk_document(doc, hash);
+                self.autosave.disk_mtime = mtime;
+                self.autosave.note_known_mtime(mtime);
+            }
+            Err(read_error) => {
+                if !rewind_to_saved_state(&mut self.doc, &mut self.hist, self.autosave.saved_hash) {
+                    return Err(read_error);
+                }
+                self.changed();
+                self.sanitize();
+                self.autosave.seen_rev = self.canvas.tiles.rev();
+            }
         }
-        ctx.request_repaint();
+        self.mark_saved();
+        self.autosave.save_failed_at = None;
+        self.autosave.changed_at = None;
+        Ok(())
     }
 
     /// Debounced autosave: probes a changed revision once it settled, then saves after `AUTOSAVE_IDLE`.
     fn save_when_settled(&mut self, ctx: &egui::Context, busy: bool) {
+        if self.autosave.write_held(self.leave.is_asking()) {
+            // The failed write is the question on screen: only its answer writes the edits, or drops them. Once the
+            // answer is "Don't save", nothing writes them.
+            return;
+        }
         let Some(t) = self.autosave.changed_at else {
             if let Some(failed_at) = self.autosave.save_failed_at {
                 // The last save failed and the edits are still here. Retry on a frame that comes anyway: a timer
@@ -1025,6 +1250,7 @@ impl App {
             // Cheap-ish check once the revision settled: did the document really change?
             if doc_hash(&self.doc) == self.autosave.saved_hash {
                 self.autosave.changed_at = None;
+                self.autosave.save_failed_at = None;
                 // The edits netted out (a move and its undo by hand): the document is what the file holds.
                 self.mark_saved();
                 return;
@@ -1077,9 +1303,23 @@ impl App {
         crate::decks::ui::flush_notes(self);
         let Some(lib) = self.lib.clone() else { return };
         self.settle_pending_relayout();
-        let mut doc = self.doc.clone();
-        doc.name = name.trim().to_string();
-        match lib.create_file_counted(project, folder, name, &doc) {
+        // Pages a `.fig` open left unloaded are loaded on the open document, before it is copied: the copy shares the
+        // loader, so loading on the copy would leave this document's pages empty for the rest of the session.
+        let left_empty_notice = match self.load_pending_pages_for_write() {
+            Ok(notice) => notice,
+            Err(e) => {
+                self.show_toast(format!("Cannot save to the library: {e}"), true);
+                return;
+            }
+        };
+        // The file is written under the new name straight from the open document: a copy of a large document costs
+        // several GB. The name goes back if the write fails.
+        let previous_name = std::mem::replace(&mut self.doc.name, name.trim().to_string());
+        let created = lib.create_file_counted(project, folder, name, &self.doc);
+        if created.is_err() {
+            self.doc.name = previous_name;
+        }
+        match created {
             Ok((e, replaced)) => {
                 if replaced > 0 {
                     self.doc.neutralize_non_finite();
@@ -1099,15 +1339,48 @@ impl App {
                 let disk_path = self.watched_disk_path();
                 self.autosave.disk_mtime = disk_path.as_ref().and_then(|p| std::fs::metadata(p).ok()).and_then(|m| m.modified().ok());
                 self.history_open_file();
-                thumb::refresh_in_background(lib, e.id, self.export_doc().into_owned());
-                let notice = disk_path.as_deref().and_then(|p| crate::io::non_finite_notice_once(p, replaced));
-                match notice {
-                    Some(w) => self.show_toast(format!("Saved to {project_name} ({w})"), true),
-                    None => self.show_toast(format!("Saved to {project_name}"), false),
+                if should_refresh_thumbnail(&self.doc) {
+                    thumb::refresh_in_background(lib, e.id, self.export_doc().into_owned());
+                }
+                let non_finite = disk_path.as_deref().and_then(|p| crate::io::non_finite_notice_once(p, replaced));
+                let notices: Vec<String> = non_finite.into_iter().chain(left_empty_notice).collect();
+                if notices.is_empty() {
+                    self.show_toast(format!("Saved to {project_name}"), false);
+                } else {
+                    self.show_toast(format!("Saved to {project_name} ({})", notices.join("; ")), true);
                 }
             }
             Err(e) => self.show_toast(format!("Cannot save to the library: {e}"), true),
         }
+    }
+
+    /// [`Self::import_into_library`] for the controls (the Import button, a drop on Home). A `.fig` loads every page before
+    /// it is stored, which takes a while with the window held, so its status goes up first and the import runs on the next frame.
+    pub fn import_into_library_announced(&mut self, paths: Vec<PathBuf>, project: String, folder: Option<String>) {
+        let is_fig = |p: &PathBuf| p.extension().is_some_and(|e| e.eq_ignore_ascii_case("fig"));
+        if !paths.iter().any(is_fig) {
+            self.import_into_library(&paths, &project, folder.as_deref());
+            return;
+        }
+        let what = match paths.as_slice() {
+            [one] => one.file_name().and_then(|n| n.to_str()).unwrap_or("file").to_string(),
+            many => format!("{} files", many.len()),
+        };
+        self.run_after_status_paint(format!("Importing {what}\u{2026} loading all pages"), move |app| {
+            app.import_into_library(&paths, &project, folder.as_deref());
+        });
+    }
+
+    /// [`Self::save_to_library_as`] for the save dialog. A document with pages that are not loaded yet loads them first,
+    /// which takes a while with the window held, so its status goes up first and the save runs on the next frame.
+    pub fn save_to_library_as_announced(&mut self, project: String, folder: Option<String>, name: String) {
+        if !self.doc.has_pending_pages() {
+            self.save_to_library_as(&project, folder.as_deref(), &name);
+            return;
+        }
+        self.run_after_status_paint("Saving to library\u{2026} loading all pages", move |app| {
+            app.save_to_library_as(&project, folder.as_deref(), &name);
+        });
     }
 
     /// Imports files into a project; returns how many succeeded.
@@ -1119,12 +1392,14 @@ impl App {
         let mut notices: Vec<String> = Vec::new();
         for p in paths {
             let file_name = p.file_name().and_then(|n| n.to_str()).unwrap_or("file");
-            match lib.import_file_with_doc_counted(p, project, folder) {
-                Ok((e, doc, replaced)) => {
+            match lib.import_file_with_doc_repairs(p, project, folder) {
+                Ok((e, doc, replaced, left_empty, motion_dropped)) => {
                     ok += 1;
-                    if let Some(w) = crate::io::non_finite_notice_once(p, replaced) {
-                        notices.push(format!("{file_name}: {w}"));
-                    }
+                    let numbers = [crate::io::non_finite_notice_once(p, replaced), crate::io::motion_tracks_dropped_notice(motion_dropped)]
+                        .into_iter()
+                        .flatten()
+                        .reduce(|a, b| format!("{a}; {b}"));
+                    notices.extend(import_notice(file_name, numbers, left_empty));
                     thumb::refresh_in_background(lib.clone(), e.id, doc);
                 }
                 Err(e) => last_err = Some(format!("{file_name}: {e}")),
@@ -1156,6 +1431,20 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn thumbnail_refresh_guard_skips_documents_over_the_memory_budget() {
+        let mut small = Document::new("small");
+        for _ in 0..MAX_THUMBNAIL_NODES {
+            let id = small.alloc_id();
+            small.nodes.insert(id, designos_doc::Node::rectangle(id, designos_doc::Rect::new(0.0, 0.0, 1.0, 1.0)));
+        }
+        assert!(should_refresh_thumbnail(&small));
+
+        let id = small.alloc_id();
+        small.nodes.insert(id, designos_doc::Node::rectangle(id, designos_doc::Rect::new(0.0, 0.0, 1.0, 1.0)));
+        assert!(!should_refresh_thumbnail(&small));
+    }
 
     #[test]
     fn idle_editor_with_open_file_requests_no_periodic_repaint() {
@@ -1624,5 +1913,57 @@ mod tests {
         ed.app.toast = None;
         ed.app.open_library_file(&entry.id);
         assert!(ed.app.toast.as_ref().is_none_or(|t| !t.error), "the second open in the same run stays quiet");
+    }
+}
+
+/// Why a library save failed: the text for the person, and the operating-system error kind when a disk write failed, so a
+/// caller can tell "read-only" from "disk error" without reading the text.
+#[derive(Debug)]
+pub(crate) struct LibrarySaveError {
+    pub message: String,
+    /// `None` when no disk write was attempted or the failure was not an I/O error (a precondition, bad JSON).
+    pub io_kind: Option<std::io::ErrorKind>,
+}
+
+impl LibrarySaveError {
+    pub(crate) fn other(message: impl Into<String>) -> Self {
+        Self { message: message.into(), io_kind: None }
+    }
+
+    fn from_library(e: designos_library::LibraryError) -> Self {
+        let io_kind = match &e {
+            designos_library::LibraryError::Io(io) => Some(io.kind()),
+            _ => None,
+        };
+        Self { message: format!("Cannot save: {e}"), io_kind }
+    }
+}
+
+/// What an import says besides "Imported": the numbers it replaced, and the instances the file keeps empty for good
+/// because it has more nested component copies than can be expanded. `None` when there is nothing to say.
+pub(crate) fn import_notice(file_name: &str, non_finite: Option<String>, left_empty: usize) -> Option<String> {
+    let parts: Vec<String> = non_finite.into_iter().chain((left_empty > 0).then(|| crate::io::clone_budget_notice(left_empty))).collect();
+    (!parts.is_empty()).then(|| format!("{file_name}: {}", parts.join("; ")))
+}
+
+#[cfg(test)]
+mod import_notice_tests {
+    use super::import_notice;
+
+    #[test]
+    fn an_import_that_lost_nothing_says_nothing() {
+        assert_eq!(import_notice("kit.fig", None, 0), None);
+    }
+
+    #[test]
+    fn instances_left_empty_are_named_with_the_file() {
+        let notice = import_notice("kit.fig", None, 3).expect("the user is told");
+        assert!(notice.starts_with("kit.fig: ") && notice.contains(&crate::io::clone_budget_notice(3)), "{notice}");
+    }
+
+    #[test]
+    fn both_notices_share_one_entry_for_the_file() {
+        let notice = import_notice("kit.fig", Some("2 numbers replaced".into()), 3).unwrap();
+        assert_eq!(notice, format!("kit.fig: 2 numbers replaced; {}", crate::io::clone_budget_notice(3)));
     }
 }

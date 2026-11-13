@@ -240,21 +240,17 @@ impl<'a> Reader<'a> {
         Ok(s)
     }
     pub fn var_u64(&mut self) -> Result<u64> {
+        // Kiwi caps a 64-bit varint at 9 bytes: the first 8 carry 7 bits plus a continuation flag, the ninth
+        // carries a full 8 bits and never continues.
         let mut v: u64 = 0;
-        let mut shift = 0u32;
-        loop {
+        for i in 0..8 {
             let b = self.byte()?;
-            if shift < 64 {
-                v |= ((b & 0x7f) as u64) << shift;
-            }
+            v |= ((b & 0x7f) as u64) << (7 * i);
             if b & 0x80 == 0 {
                 return Ok(v);
             }
-            shift += 7;
-            if shift > 70 {
-                return Err(KiwiError::Bad("varint too long".into()));
-            }
         }
+        Ok(v | (self.byte()? as u64) << 56)
     }
     pub fn var_u32(&mut self) -> Result<u32> {
         Ok(self.var_u64()? as u32)
@@ -708,6 +704,15 @@ impl Schema {
         Some((f.name.clone(), kv))
     }
 
+    /// Reconstructs a typed `(field_name, KiwiValue)` pair for field `field_name` of
+    /// definition `def_idx` directly from a `serde_json::Value`.
+    pub fn def_field_from_json(&self, def_idx: usize, field_name: &str, v: &serde_json::Value) -> Option<(Arc<str>, KiwiValue)> {
+        let def = self.defs.get(def_idx)?;
+        let f = def.fields.iter().find(|f| &*f.name == field_name)?;
+        let kv = self.field_from_json(f, v, 0)?;
+        Some((f.name.clone(), kv))
+    }
+
     fn field_from_metadata(&self, f: &Field, raw_str: &str, depth: usize) -> Option<KiwiValue> {
         if depth > MAX_DEPTH {
             return None;
@@ -774,7 +779,7 @@ impl Schema {
                         }
                     }
                     let v: serde_json::Value = serde_json::from_str(trimmed).ok()?;
-                    return self.def_from_json(d, &v, depth + 1);
+                    return self.def_from_json(d, &v, depth + 1, false);
                 }
             }
         }
@@ -789,13 +794,24 @@ impl Schema {
         self.field_from_json(f, &v, depth + 1)
     }
 
-    /// Reconstructs a `KiwiValue` for field `f` from a `serde_json::Value`.
+    /// Reconstructs a `KiwiValue` for field `f` from a `serde_json::Value`. Lenient: an array element or a message field
+    /// that does not convert is left out and the rest is kept (a passthrough value stays usable with one bad part).
     pub fn field_from_json(&self, f: &Field, v: &serde_json::Value, depth: usize) -> Option<KiwiValue> {
+        self.field_from_json_mode(f, v, depth, false)
+    }
+
+    /// Like [`Self::field_from_json`], but every non-null part of `v` must convert: a value that does not fails the whole
+    /// conversion, so the caller never writes a shortened value. For data that is written back whole.
+    pub fn field_from_json_strict(&self, f: &Field, v: &serde_json::Value, depth: usize) -> Option<KiwiValue> {
+        self.field_from_json_mode(f, v, depth, true)
+    }
+
+    fn field_from_json_mode(&self, f: &Field, v: &serde_json::Value, depth: usize, strict: bool) -> Option<KiwiValue> {
         if depth > MAX_DEPTH {
             return None;
         }
         if !f.is_array {
-            return self.type_from_json(f.ty, v, depth + 1);
+            return self.type_from_json(f.ty, v, depth + 1, strict);
         }
         if f.ty == FieldType::Native(Native::Byte) {
             if let Some(s) = v.as_str() {
@@ -810,17 +826,65 @@ impl Schema {
         let arr = v.as_array()?;
         let mut out = Vec::with_capacity(arr.len());
         for item in arr {
-            if let Some(elem) = self.type_from_json(f.ty, item, depth + 1) {
-                out.push(elem);
+            match self.type_from_json(f.ty, item, depth + 1, strict) {
+                Some(elem) => out.push(elem),
+                None if strict => return None,
+                None => {}
             }
         }
-        if out.is_empty() && !arr.is_empty() {
+        if !strict && out.is_empty() && !arr.is_empty() {
             return None;
         }
         Some(KiwiValue::Array(out))
     }
 
-    fn type_from_json(&self, ty: FieldType, v: &serde_json::Value, depth: usize) -> Option<KiwiValue> {
+    /// The first key of `v` that is not a field of the definition `f` reads it against, as a path from the field's own
+    /// name (`customEffectId.futureFlag`, `componentPropAssignments[1].value.future`), or `None` when every key is named.
+    /// Messages, structs and arrays of them are walked at every depth. [`Self::field_from_json_strict`] builds only the
+    /// fields a definition names, so a key reported here would not survive an encode.
+    pub fn first_unknown_json_key(&self, f: &Field, v: &serde_json::Value) -> Option<String> {
+        if v.is_null() {
+            return None;
+        }
+        let FieldType::Def(idx) = f.ty else { return None };
+        if !f.is_array {
+            return self.unknown_key_in_def(idx, v, &f.name, 0);
+        }
+        v.as_array()?.iter().enumerate().find_map(|(i, item)| self.unknown_key_in_def(idx, item, &format!("{}[{i}]", f.name), 0))
+    }
+
+    fn unknown_key_in_def(&self, idx: usize, v: &serde_json::Value, path: &str, depth: usize) -> Option<String> {
+        if depth > MAX_DEPTH {
+            return None;
+        }
+        let def = self.defs.get(idx)?;
+        if def.kind == DefKind::Enum {
+            return None;
+        }
+        // A GUID or a widget pointer may also be written as a "session:local" string: no keys to read.
+        let obj = v.as_object()?;
+        for (key, value) in obj {
+            if value.is_null() {
+                continue;
+            }
+            let child = format!("{path}.{key}");
+            let Some(field) = def.fields.iter().find(|sf| &*sf.name == key.as_str()) else { return Some(child) };
+            let FieldType::Def(inner) = field.ty else { continue };
+            let found = if field.is_array {
+                value
+                    .as_array()
+                    .and_then(|items| items.iter().enumerate().find_map(|(i, item)| self.unknown_key_in_def(inner, item, &format!("{child}[{i}]"), depth + 1)))
+            } else {
+                self.unknown_key_in_def(inner, value, &child, depth + 1)
+            };
+            if found.is_some() {
+                return found;
+            }
+        }
+        None
+    }
+
+    fn type_from_json(&self, ty: FieldType, v: &serde_json::Value, depth: usize, strict: bool) -> Option<KiwiValue> {
         if depth > MAX_DEPTH {
             return None;
         }
@@ -838,11 +902,11 @@ impl Schema {
             FieldType::Native(Native::String) => v.as_str().map(|s| KiwiValue::String(s.to_string())),
             FieldType::Native(Native::Int64) => v.as_i64().or_else(|| v.as_str().and_then(|s| s.parse::<i64>().ok())).map(KiwiValue::Int64),
             FieldType::Native(Native::Uint64) => v.as_u64().or_else(|| v.as_str().and_then(|s| s.parse::<u64>().ok())).map(KiwiValue::Uint64),
-            FieldType::Def(idx) => self.def_from_json(idx, v, depth + 1),
+            FieldType::Def(idx) => self.def_from_json(idx, v, depth + 1, strict),
         }
     }
 
-    fn def_from_json(&self, idx: usize, v: &serde_json::Value, depth: usize) -> Option<KiwiValue> {
+    fn def_from_json(&self, idx: usize, v: &serde_json::Value, depth: usize, strict: bool) -> Option<KiwiValue> {
         if depth > MAX_DEPTH {
             return None;
         }
@@ -872,7 +936,7 @@ impl Schema {
                 let mut fs = Vec::with_capacity(def.fields.len());
                 for sf in &def.fields {
                     let kv = match obj.get(&*sf.name) {
-                        Some(fv) if !fv.is_null() => self.field_from_json(sf, fv, depth + 1)?,
+                        Some(fv) if !fv.is_null() => self.field_from_json_mode(sf, fv, depth + 1, strict)?,
                         _ => self.struct_field_default(&def.name, sf, depth + 1)?,
                     };
                     fs.push((sf.name.clone(), kv));
@@ -892,8 +956,10 @@ impl Schema {
                 for sf in &def.fields {
                     if let Some(fv) = obj.get(&*sf.name) {
                         if !fv.is_null() {
-                            if let Some(kv) = self.field_from_json(sf, fv, depth + 1) {
-                                fs.push((sf.name.clone(), kv));
+                            match self.field_from_json_mode(sf, fv, depth + 1, strict) {
+                                Some(kv) => fs.push((sf.name.clone(), kv)),
+                                None if strict => return None,
+                                None => {}
                             }
                         }
                     }
@@ -956,7 +1022,7 @@ fn guid_struct_kv(session: u32, local: u32) -> KiwiValue {
     KiwiValue::Struct(vec![("sessionID".into(), KiwiValue::Uint(session)), ("localID".into(), KiwiValue::Uint(local))])
 }
 
-fn decode_hex_bytes(s: &str) -> Option<Vec<u8>> {
+pub(crate) fn decode_hex_bytes(s: &str) -> Option<Vec<u8>> {
     if !s.len().is_multiple_of(2) || !s.bytes().all(|b| b.is_ascii_hexdigit()) {
         return None;
     }
@@ -975,7 +1041,8 @@ impl Writer {
         self.buf.push(b);
     }
     pub fn var_u64(&mut self, mut v: u64) {
-        loop {
+        // Mirror of `Reader::var_u64`: at most 9 bytes, the ninth a full 8 bits.
+        for _ in 0..8 {
             let b = (v & 0x7f) as u8;
             v >>= 7;
             if v == 0 {
@@ -984,6 +1051,7 @@ impl Writer {
             }
             self.buf.push(b | 0x80);
         }
+        self.buf.push(v as u8);
     }
     pub fn var_i64(&mut self, v: i64) {
         self.var_u64(((v << 1) ^ (v >> 63)) as u64);
@@ -1240,6 +1308,37 @@ mod tests {
         }
     }
 
+    /// Kiwi's 64-bit varint is at most 9 bytes: the ninth carries a full 8 bits and no continuation flag.
+    /// Figma's random `strokeSeed` values hit this whenever bit 63 is set.
+    #[test]
+    fn varint64_ninth_byte_is_full_width() {
+        // Real `strokeSeed` bytes from a Figma file, followed by the next field id (0x1c0 = c0 03).
+        let wire = [0x86, 0xc4, 0xa9, 0xed, 0xff, 0xae, 0xd2, 0xc4, 0xa3, 0xc0, 0x03];
+        let mut r = Reader::new(&wire);
+        let v = r.var_u64().unwrap();
+        assert_eq!(r.var_u32().unwrap(), 0x1c0);
+        assert!(r.at_end());
+
+        let mut w = Writer::default();
+        w.var_u64(v);
+        assert_eq!(w.buf, wire[..9]);
+
+        let mut w = Writer::default();
+        w.var_u64(u64::MAX);
+        assert_eq!(w.buf, [0xff; 9]);
+
+        let vals = [0u64, 127, 128, (1 << 56) - 1, 1 << 56, 1 << 63, u64::MAX - 1, u64::MAX];
+        let mut w = Writer::default();
+        for v in vals {
+            w.var_u64(v);
+        }
+        let mut r = Reader::new(&w.buf);
+        for v in vals {
+            assert_eq!(r.var_u64().unwrap(), v);
+        }
+        assert!(r.at_end());
+    }
+
     #[test]
     fn float_roundtrip() {
         let vals = [0.0f32, 1.0, -1.0, 0.1, 123456.78, -3.5e-5, f32::MAX, 1e-30];
@@ -1430,5 +1529,213 @@ mod tests {
         let (s_over, m_over, data_over) = padded_empty_struct_arrays(20, 4_000, 4_000);
         assert!(s_over.decode_message(m_over, &data_over).is_err());
         assert!(s_over.decode_message_for_import(m_over, &data_over).is_err());
+    }
+
+    #[test]
+    fn ac01_u64_max_and_bit63_roundtrip_in_9_bytes() {
+        for v in [u64::MAX, 0x8000_0000_0000_0001u64, 0xa3c4_d2ae_ffed_a986u64] {
+            let mut w = Writer::default();
+            w.var_u64(v);
+            assert_eq!(w.buf.len(), 9, "value {v:#x} must encode in 9 bytes");
+
+            let mut trailed = w.buf.clone();
+            trailed.push(0x2a);
+            let mut r = Reader::new(&trailed);
+            assert_eq!(r.var_u64().unwrap(), v);
+            assert_eq!(r.pos, 9, "reader must advance 9 bytes for {v:#x}");
+            assert_eq!(r.byte().unwrap(), 0x2a);
+        }
+    }
+
+    #[test]
+    fn ac02_var_u64_boundary_byte_lengths() {
+        let cases = [(0u64, 1usize), (127, 1), (128, 2), ((1u64 << 56) - 1, 8), (1u64 << 56, 9)];
+        for (v, expected_len) in cases {
+            let mut w = Writer::default();
+            w.var_u64(v);
+            assert_eq!(w.buf.len(), expected_len, "value {v:#x}");
+            let mut r = Reader::new(&w.buf);
+            assert_eq!(r.var_u64().unwrap(), v);
+            assert_eq!(r.pos, expected_len);
+            assert!(r.at_end());
+        }
+    }
+
+    #[test]
+    fn ac03_field_after_9_byte_varint_decodes_correctly() {
+        let mut b = SchemaBuilder::new();
+        let nc = b.define("NodeChange", DefKind::Message);
+        b.field(nc, "name", FieldType::Native(Native::String), false, 5);
+        b.field(nc, "strokeSeed", FieldType::Native(Native::Uint64), false, 482);
+        let lib_move = b.define("LibraryMoveInfo", DefKind::Message);
+        b.field(lib_move, "oldKey", FieldType::Native(Native::String), false, 1);
+        let root = b.define("Message", DefKind::Message);
+        b.field(root, "nodeChanges", FieldType::Def(nc), true, 1);
+        b.field(root, "libraryMoveInfo", FieldType::Def(lib_move), false, 2);
+        let s = b.build();
+
+        // Construct a wire message where strokeSeed (field 482 = 0xe2 0x03) is a 9-byte Kiwi varint
+        // with bit 63 set, followed immediately by name (field 5) and libraryMoveInfo (field 2).
+        let mut wire = vec![
+            1, // Message.nodeChanges
+            1, // array len = 1
+            0xe2, 0x03, // NodeChange.strokeSeed (id 482)
+            0x86, 0xc4, 0xa9, 0xed, 0xff, 0xae, 0xd2, 0xc4, 0xa3, // 9-byte varint with bit 63 set
+            5,    // NodeChange.name (id 5)
+        ];
+        wire.extend_from_slice(b"StrokeNode\0");
+        wire.push(0); // end NodeChange
+        wire.extend_from_slice(&[2, 1]); // Message.libraryMoveInfo, LibraryMoveInfo.oldKey
+        wire.extend_from_slice(b"k1\0");
+        wire.extend_from_slice(&[0, 0]); // end LibraryMoveInfo, end Message
+
+        let decoded = s.decode_message(root, &wire).expect("9-byte varint must not shift following fields");
+        let changes = decoded.get("nodeChanges").unwrap().as_array().unwrap();
+        assert_eq!(changes[0].get("name"), Some(&KiwiValue::String("StrokeNode".into())));
+        assert_eq!(decoded.get("libraryMoveInfo").and_then(|m| m.get("oldKey")), Some(&KiwiValue::String("k1".into())));
+    }
+
+    #[test]
+    fn ac04_fixture_with_bit63_stroke_seed_imports_and_roundtrips() {
+        const FIXTURE: &[u8] = include_bytes!("../tests/fixtures/stroke-seed-bit63.fig");
+        let doc = crate::import_fig(FIXTURE).expect("import stroke-seed-bit63.fig");
+        assert_eq!(doc.nodes.len(), 4);
+        let re_exported = crate::export_fig(&doc).expect("export_fig round-trip");
+        let roundtrip = crate::import_fig(&re_exported).expect("re-import exported .fig");
+        assert_eq!(roundtrip.nodes.len(), 4);
+    }
+
+    #[test]
+    fn ac05_truncated_9_byte_varint_returns_error_without_panic() {
+        let full = [0xffu8; 9];
+        for len in 0..9 {
+            let mut r = Reader::new(&full[..len]);
+            assert_eq!(r.var_u64(), Err(KiwiError::Eof(len)));
+        }
+
+        let mut b = SchemaBuilder::new();
+        let nc = b.define("NodeChange", DefKind::Message);
+        b.field(nc, "strokeSeed", FieldType::Native(Native::Uint64), false, 482);
+        let s = b.build();
+        let msg = KiwiValue::Message(vec![("strokeSeed".into(), KiwiValue::Uint64(u64::MAX))]);
+        let bytes = s.encode_message(nc, &msg).unwrap();
+        assert_eq!(bytes.len(), 2 + 9 + 1);
+        assert_eq!(s.decode_message(nc, &bytes).unwrap(), msg);
+        for len in 0..bytes.len() {
+            assert!(s.decode_message(nc, &bytes[..len]).is_err(), "truncated len {len} must fail");
+        }
+        // Truncated 8-byte varint followed by message terminator (eaten as 9th byte) and bogus field id 125.
+        let malformed = [0xe2, 0x03, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x00, 125, 0x00];
+        let err = s.decode_message(nc, &malformed).unwrap_err();
+        assert!(err.to_string().contains("malformed data: unknown field id 125"), "{err}");
+    }
+
+    #[test]
+    fn edge_case_2_pow_63_high_byte_is_data_not_continuation() {
+        let v = 1u64 << 63;
+        let mut w = Writer::default();
+        w.var_u64(v);
+        assert_eq!(w.buf, [0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80]);
+
+        let wire = [0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x05];
+        let mut r = Reader::new(&wire);
+        assert_eq!(r.var_u64().unwrap(), v);
+        assert_eq!(r.pos, 9);
+        assert_eq!(r.byte().unwrap(), 0x05);
+    }
+
+    #[test]
+    fn edge_case_zigzag_var_i64_min_and_max() {
+        let mut w_min = Writer::default();
+        w_min.var_i64(i64::MIN);
+        assert_eq!(w_min.buf, [0xff; 9]);
+        let mut r_min = Reader::new(&w_min.buf);
+        assert_eq!(r_min.var_i64().unwrap(), i64::MIN);
+        assert!(r_min.at_end());
+
+        let mut w_max = Writer::default();
+        w_max.var_i64(i64::MAX);
+        assert_eq!(w_max.buf, [0xfe, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff]);
+        let mut r_max = Reader::new(&w_max.buf);
+        assert_eq!(r_max.var_i64().unwrap(), i64::MAX);
+        assert!(r_max.at_end());
+    }
+
+    #[test]
+    fn edge_case_10_byte_varint_from_old_build_returns_error_without_panic() {
+        let mut b = SchemaBuilder::new();
+        let nc = b.define("NodeChange", DefKind::Message);
+        b.field(nc, "strokeSeed", FieldType::Native(Native::Uint64), false, 482);
+        let s = b.build();
+
+        // Old Studio builds encoded bit-63 u64 values as 10-byte LEB128 (9 continuation bytes + 0x01).
+        let old_10_byte_wire = [0xe2, 0x03, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x01, 0x00];
+        let err = s.decode_message(nc, &old_10_byte_wire).unwrap_err();
+        assert!(err.to_string().contains("malformed data: unknown field id 1 in NodeChange"), "{err}");
+    }
+
+    #[test]
+    fn field_from_json_reconstructs_code_component_id_and_prop_assignments() {
+        let s = crate::testkit::figma_like_schema();
+        let effect_idx = s.find("Effect").expect("Effect in schema");
+        let custom_eff_field = s.defs[effect_idx].fields.iter().find(|f| &*f.name == "customEffectId").expect("customEffectId field");
+        let props_field = s.defs[effect_idx].fields.iter().find(|f| &*f.name == "componentPropAssignments").expect("componentPropAssignments field");
+
+        let custom_eff_json = serde_json::json!({
+            "guid": {"sessionID": 10, "localID": 25},
+            "assetRef": {"key": "shader_key_abc", "version": "1"}
+        });
+        let custom_eff_kv = s.field_from_json(custom_eff_field, &custom_eff_json, 0).expect("CodeComponentId from json");
+        assert_eq!(to_json(&custom_eff_kv), custom_eff_json);
+
+        let props_json = serde_json::json!([
+            {
+                "defID": {"sessionID": 1, "localID": 2},
+                "value": {"floatValue": 0.75}
+            },
+            {
+                "defID": {"sessionID": 1, "localID": 3},
+                "value": {"boolValue": true}
+            }
+        ]);
+        let props_kv = s.field_from_json(props_field, &props_json, 0).expect("ComponentPropAssignment[] from json");
+        assert_eq!(to_json(&props_kv), props_json);
+
+        let bad_custom_eff = serde_json::json!({
+            "guid": {"sessionID": "not-a-uint", "localID": 25},
+            "assetRef": {"key": "shader_key_abc", "version": "1"}
+        });
+        assert!(s.field_from_json_strict(custom_eff_field, &bad_custom_eff, 0).is_none());
+        // the lenient conversion keeps what converts, as it does for a passthrough value
+        let kept = s.field_from_json(custom_eff_field, &bad_custom_eff, 0).expect("the asset reference converts");
+        assert_eq!(to_json(&kept), serde_json::json!({"assetRef": {"key": "shader_key_abc", "version": "1"}}));
+    }
+    #[test]
+    fn first_unknown_json_key_names_the_path_of_a_key_the_schema_does_not_name() {
+        use serde_json::json;
+        let s = crate::testkit::figma_like_schema();
+        let effect = s.find("Effect").expect("Effect in schema");
+        let field = |name: &str| s.defs[effect].fields.iter().find(|f| &*f.name == name).unwrap_or_else(|| panic!("{name} field"));
+        let unknown = |name: &str, v: serde_json::Value| s.first_unknown_json_key(field(name), &v);
+
+        let id = json!({"guid": {"sessionID": 1, "localID": 2}, "assetRef": {"key": "k", "version": "1"}});
+        assert_eq!(unknown("customEffectId", id.clone()), None, "every key is named");
+        // a message, a struct inside a message, and a struct on its own
+        assert_eq!(
+            unknown("customEffectId", json!({"guid": {"sessionID": 1, "localID": 2}, "futureFlag": true})).as_deref(),
+            Some("customEffectId.futureFlag")
+        );
+        assert_eq!(unknown("customEffectId", json!({"guid": {"sessionID": 1, "localID": 2, "epoch": 3}})).as_deref(), Some("customEffectId.guid.epoch"));
+        assert_eq!(unknown("offset", json!({"x": 1.0, "y": 2.0, "future": 1})).as_deref(), Some("offset.future"));
+        // an array of messages names the index; a message nested in a message is reached
+        let props = json!([
+            {"defID": {"sessionID": 1, "localID": 2}, "value": {"floatValue": 0.5}},
+            {"defID": {"sessionID": 1, "localID": 3}, "value": {"boolValue": true, "future": 1}}
+        ]);
+        assert_eq!(unknown("componentPropAssignments", props).as_deref(), Some("componentPropAssignments[1].value.future"));
+        // a null value carries nothing, a GUID string and a scalar have no keys to read
+        assert_eq!(unknown("customEffectId", json!({"guid": "1:2", "futureFlag": null})), None);
+        assert_eq!(unknown("radius", json!(4.0)), None);
+        assert_eq!(unknown("visible", serde_json::Value::Null), None);
     }
 }

@@ -24,11 +24,13 @@ impl Drop for TmpDir {
     }
 }
 
-/// An editor with the library's "Welcome" file open.
+/// An editor with a library demo fixture file open.
 fn file_sim() -> (Sim, TmpDir) {
     let dir = TmpDir::new();
     let mut s = Sim::with(Options { home: true, library: Some(dir.0.clone()), ..Default::default() });
-    let id = lib(&s).all_files().into_iter().find(|f| f.name == "Welcome").expect("seeded file").id;
+    let l = lib(&s);
+    let p = l.list_projects()[0].id.clone();
+    let id = l.create_file(&p, None, "Demo fixture", &crate::demo::demo_document()).expect("create demo fixture file").id;
     crate::home::apply(&mut s.shell.app, Act::Open(id));
     s.frame(vec![]);
     s.frame(vec![]);
@@ -261,4 +263,22 @@ fn labeled_live_patch_shows_step_label_in_history_panel() {
     s.cmd_key(Key::Z);
     assert_eq!(s.app().hist.peek_undo_label(), None);
     assert_eq!(s.app().hist.peek_redo_label(), Some("Agent: run-7"));
+}
+
+#[test]
+fn banner_paints_back_to_current_in_the_frame_restore_is_clicked() {
+    let (mut s, _d) = file_sim();
+    run(&mut s, Action::ToggleVersionHistory);
+    save_version(&mut s, "Before cleanup");
+    s.frame(vec![]);
+    let row = s.rect_of("history-version-1");
+    s.click(row.center());
+    assert!(s.app().history.viewing.is_some());
+    let restore = s.rect_of("history-restore");
+    s.mv(restore.center());
+    s.button(true);
+    s.button(false);
+    let back_painted = s.shapes.iter().any(|clipped| matches!(&clipped.shape, egui::epaint::Shape::Text(text) if text.galley.text() == "Back to current"));
+    assert!(back_painted, "the click frame still paints the second button");
+    assert!(s.app().history.viewing.is_none(), "the click restored the version");
 }

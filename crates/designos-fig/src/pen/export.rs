@@ -86,12 +86,18 @@ pub fn export_pen_node(doc: &Document, id: NodeId) -> Option<Value> {
     let n = doc.get(id)?;
 
     // Spec §9: Unknown node round-trips its original raw JSON payload verbatim (plus updated children).
-    if let NodeKind::Unknown { type_name } = &n.kind {
+    let unknown_type = match &n.kind {
+        NodeKind::Unknown { type_name } => Some(type_name.as_str()),
+        NodeKind::Table(_) => Some("TABLE"),
+        NodeKind::TableCell(_) => Some("TABLE_CELL"),
+        _ => None,
+    };
+    if let Some(type_name) = unknown_type {
         let mut obj =
             n.plugin_data.get("pen:raw").and_then(|s| serde_json::from_str::<Value>(s).ok()).and_then(|v| v.as_object().cloned()).unwrap_or_else(|| {
                 let mut m = Map::new();
                 m.insert("id".into(), Value::String(node_pen_id(n)));
-                m.insert("type".into(), Value::String(type_name.clone()));
+                m.insert("type".into(), Value::String(type_name.to_string()));
                 m.insert("name".into(), Value::String(n.name.clone()));
                 m
             });
@@ -150,7 +156,7 @@ pub fn export_pen_node(doc: &Document, id: NodeId) -> Option<Value> {
             NodeKind::Connector(_) => ("connection", false),
             NodeKind::BooleanOp(_) => ("boolean", false),
             NodeKind::Page { .. } | NodeKind::ShapeWithText(_) | NodeKind::Stamp { .. } => ("frame", false),
-            NodeKind::Unknown { .. } => unreachable!(),
+            NodeKind::Unknown { .. } | NodeKind::Table(_) | NodeKind::TableCell(_) => unreachable!(),
         }
     };
 
@@ -372,17 +378,7 @@ pub fn export_pen_node(doc: &Document, id: NodeId) -> Option<Value> {
         match &n.kind {
             NodeKind::Ellipse(arc) => {
                 if *arc != ArcData::default() {
-                    let start_deg = ((arc.start.to_degrees() * 1000.0).round()) / 1000.0;
-                    let sweep_deg = (((arc.end - arc.start).to_degrees() * 1000.0).round()) / 1000.0;
-                    if start_deg.abs() > 1e-3 {
-                        obj.insert("startAngle".into(), json!(start_deg));
-                    }
-                    if (sweep_deg - 360.0).abs() > 1e-3 {
-                        obj.insert("sweepAngle".into(), json!(sweep_deg));
-                    }
-                    if arc.inner_radius > 1e-4 {
-                        obj.insert("innerRadius".into(), json!(arc.inner_radius));
-                    }
+                    insert_arc_keys(arc, false, &mut obj);
                 }
             }
             NodeKind::Polygon { count } => {
@@ -628,24 +624,34 @@ fn align_to_pen_str(a: LayoutAlign) -> &'static str {
 
 fn export_effect(eff: &Effect) -> Option<Value> {
     match eff {
-        Effect::DropShadow { color, offset, radius, spread, visible, .. } => Some(json!({
-            "type": "shadow",
-            "shadowType": "outer",
-            "color": format_pen_color(*color),
-            "offset": { "x": offset.x, "y": offset.y },
-            "blur": radius,
-            "spread": spread,
-            "enabled": visible,
-        })),
-        Effect::InnerShadow { color, offset, radius, spread, visible } => Some(json!({
-            "type": "shadow",
-            "shadowType": "inner",
-            "color": format_pen_color(*color),
-            "offset": { "x": offset.x, "y": offset.y },
-            "blur": radius,
-            "spread": spread,
-            "enabled": visible,
-        })),
+        Effect::DropShadow { color, offset, radius, spread, visible, blend, .. } => {
+            let mut obj = Map::new();
+            obj.insert("type".into(), json!("shadow"));
+            obj.insert("shadowType".into(), json!("outer"));
+            obj.insert("color".into(), json!(format_pen_color(*color)));
+            obj.insert("offset".into(), json!({ "x": offset.x, "y": offset.y }));
+            obj.insert("blur".into(), json!(radius));
+            obj.insert("spread".into(), json!(spread));
+            obj.insert("enabled".into(), json!(visible));
+            if !blend.is_normal() {
+                obj.insert("blendMode".into(), json!(blend_mode_to_pen_str(*blend)));
+            }
+            Some(Value::Object(obj))
+        }
+        Effect::InnerShadow { color, offset, radius, spread, visible, blend } => {
+            let mut obj = Map::new();
+            obj.insert("type".into(), json!("shadow"));
+            obj.insert("shadowType".into(), json!("inner"));
+            obj.insert("color".into(), json!(format_pen_color(*color)));
+            obj.insert("offset".into(), json!({ "x": offset.x, "y": offset.y }));
+            obj.insert("blur".into(), json!(radius));
+            obj.insert("spread".into(), json!(spread));
+            obj.insert("enabled".into(), json!(visible));
+            if !blend.is_normal() {
+                obj.insert("blendMode".into(), json!(blend_mode_to_pen_str(*blend)));
+            }
+            Some(Value::Object(obj))
+        }
         Effect::LayerBlur { radius, visible } => Some(json!({
             "type": "blur",
             "radius": radius,
@@ -657,6 +663,23 @@ fn export_effect(eff: &Effect) -> Option<Value> {
             "enabled": visible,
         })),
         _ => None,
+    }
+}
+
+/// Writes an ellipse's arc as startAngle, sweepAngle (degrees) and innerRadius. A node leaves out the keys that
+/// hold the default (whole is false); an override writes all three, because the importer takes only the keys an entry
+/// carries and would leave the others at what the main shows.
+fn insert_arc_keys(arc: &ArcData, whole: bool, obj: &mut Map<String, Value>) {
+    let start_deg = ((arc.start.to_degrees() * 1000.0).round()) / 1000.0;
+    let sweep_deg = (((arc.end - arc.start).to_degrees() * 1000.0).round()) / 1000.0;
+    if whole || start_deg.abs() > 1e-3 {
+        obj.insert("startAngle".into(), json!(start_deg));
+    }
+    if whole || (sweep_deg - 360.0).abs() > 1e-3 {
+        obj.insert("sweepAngle".into(), json!(sweep_deg));
+    }
+    if whole || arc.inner_radius > 1e-4 {
+        obj.insert("innerRadius".into(), json!(arc.inner_radius));
     }
 }
 
@@ -725,6 +748,9 @@ fn collect_instance_descendant_overrides(doc: &Document, inst_node: &Node, out: 
                 if cn.component.overrides.contains(&OverrideField::Visible) {
                     ov.insert("enabled".into(), json!(cn.visible));
                 }
+                if let (true, NodeKind::Ellipse(arc)) = (cn.component.overrides.contains(&OverrideField::Arc), &cn.kind) {
+                    insert_arc_keys(arc, true, &mut ov);
+                }
                 if cn.component.overrides.contains(&OverrideField::CornerRadii) {
                     let r0 = cn.corner_radii[0];
                     if cn.corner_radii.iter().all(|&r| (r - r0).abs() < 1e-4) {
@@ -759,5 +785,111 @@ fn collect_instance_descendant_overrides(doc: &Document, inst_node: &Node, out: 
         if !has_slot_override {
             collect_instance_descendant_overrides(doc, cn, out);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::pen::{export_pen_json, import_pen_json};
+    use designos_doc::*;
+
+    fn doc_with_shadows(drop_blend: BlendMode, inner_blend: BlendMode) -> Document {
+        let mut doc = Document::new("Shadow Blend Pen Test");
+        let page = doc.add_page("Page 1");
+        let id = doc.alloc_id();
+        let mut rect = Node::rectangle(id, Rect::new(10.0, 20.0, 120.0, 80.0));
+        rect.name = "Card".into();
+        rect.effects = vec![
+            Effect::DropShadow {
+                color: Color::rgba(0, 0, 0, 128),
+                offset: Vec2::new(0.0, 4.0),
+                radius: 8.0,
+                spread: 2.0,
+                visible: true,
+                show_behind: false,
+                blend: drop_blend,
+            },
+            Effect::InnerShadow {
+                color: Color::rgba(255, 255, 255, 64),
+                offset: Vec2::new(1.0, 2.0),
+                radius: 4.0,
+                spread: 1.0,
+                visible: true,
+                blend: inner_blend,
+            },
+        ];
+        doc.insert(page, rect).unwrap();
+        doc
+    }
+
+    #[test]
+    fn shadow_blend_mode_survives_pen_roundtrip() {
+        let doc = doc_with_shadows(BlendMode::Multiply, BlendMode::Multiply);
+        let json = export_pen_json(&doc).expect("export .pen");
+        assert!(json.contains("\"blendMode\": \"multiply\""), "expected exported .pen JSON to contain blendMode multiply, got:\n{json}");
+
+        let reimported = import_pen_json(&json).expect("import .pen");
+        let page = reimported.pages[0];
+        let card_id = reimported.get(page).unwrap().children[0];
+        let card = reimported.get(card_id).unwrap();
+        assert_eq!(card.effects.len(), 2);
+        match &card.effects[0] {
+            Effect::DropShadow { blend, radius, spread, offset, .. } => {
+                assert_eq!(*blend, BlendMode::Multiply);
+                assert_eq!(*radius, 8.0);
+                assert_eq!(*spread, 2.0);
+                assert_eq!(*offset, Vec2::new(0.0, 4.0));
+            }
+            other => panic!("expected DropShadow, got {other:?}"),
+        }
+        match &card.effects[1] {
+            Effect::InnerShadow { blend, radius, spread, offset, .. } => {
+                assert_eq!(*blend, BlendMode::Multiply);
+                assert_eq!(*radius, 4.0);
+                assert_eq!(*spread, 1.0);
+                assert_eq!(*offset, Vec2::new(1.0, 2.0));
+            }
+            other => panic!("expected InnerShadow, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn normal_shadow_blend_omits_blend_mode_in_pen_export_and_defaults_on_import() {
+        let doc = doc_with_shadows(BlendMode::Normal, BlendMode::Normal);
+        let json = export_pen_json(&doc).expect("export .pen");
+        assert!(!json.contains("\"blendMode\""), "Normal-blend shadows must omit blendMode in .pen output:\n{json}");
+        let val: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let effects = val["children"][0]["effect"].as_array().expect("effect array");
+        assert_eq!(
+            effects[0],
+            serde_json::json!({
+                "type": "shadow",
+                "shadowType": "outer",
+                "color": "#00000080",
+                "offset": { "x": 0.0, "y": 4.0 },
+                "blur": 8.0,
+                "spread": 2.0,
+                "enabled": true
+            })
+        );
+        assert_eq!(
+            effects[1],
+            serde_json::json!({
+                "type": "shadow",
+                "shadowType": "inner",
+                "color": "#FFFFFF40",
+                "offset": { "x": 1.0, "y": 2.0 },
+                "blur": 4.0,
+                "spread": 1.0,
+                "enabled": true
+            })
+        );
+
+        let reimported = import_pen_json(&json).expect("import .pen");
+        let page = reimported.pages[0];
+        let card_id = reimported.get(page).unwrap().children[0];
+        let card = reimported.get(card_id).unwrap();
+        assert!(matches!(card.effects[0], Effect::DropShadow { blend: BlendMode::Normal, .. }));
+        assert!(matches!(card.effects[1], Effect::InnerShadow { blend: BlendMode::Normal, .. }));
     }
 }

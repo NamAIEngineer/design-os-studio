@@ -125,7 +125,15 @@ fn only(report: &Report, rule: Rule) -> Finding {
 }
 
 fn shadow(radius: f32) -> Effect {
-    Effect::DropShadow { color: Color::rgba(0, 0, 0, 64), offset: Vec2::new(0.0, 4.0), radius, spread: 0.0, visible: true, show_behind: false }
+    Effect::DropShadow {
+        color: Color::rgba(0, 0, 0, 64),
+        offset: Vec2::new(0.0, 4.0),
+        radius,
+        spread: 0.0,
+        visible: true,
+        show_behind: false,
+        blend: Default::default(),
+    }
 }
 
 // ---------------------------------------------------------------- hard-coded values
@@ -633,6 +641,7 @@ fn check_designs_counts_bound() {
             description: String::new(),
             property: designos_doc::StyleProperty::Fill,
             bindings: [("fills/0".to_string(), surface.clone())].into_iter().collect(),
+            ..Default::default()
         },
     );
     f.doc.styles.insert("Body".into(), Style::Text(TextStyle::default()));
@@ -644,6 +653,7 @@ fn check_designs_counts_bound() {
             description: String::new(),
             property: designos_doc::StyleProperty::Text,
             bindings: [("strokeWeight".to_string(), border_w.clone())].into_iter().collect(),
+            ..Default::default()
         },
     );
     let frame = f.frame(f.page, "Container", None);

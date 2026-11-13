@@ -18,9 +18,18 @@ fn leaf(item: MenuItem, act: Action) -> Entry {
     Entry { item, act: Some(act), kids: vec![] }
 }
 
+/// The Select layer submenu in the context menu lists layers in Layers-panel order with parents first; to be confirmed against Figma.
+fn select_layer_submenu_lists_parents_first() -> bool {
+    true
+}
+
 /// The "Select" submenu: structural selection and the "same ..." family.
-fn select_submenu(has: bool) -> Entry {
-    let same = |label: &str, c: MatchCriteria| (MenuItem::new(label).disabled(!has), Action::SelectSame(c));
+fn select_submenu(app: &App, sep_after: bool) -> Entry {
+    let has = !app.selection.is_empty();
+    let can_text = designos_doc::find::can_select_same_text(&app.doc, &app.selection) || app.canvas.text.is_some();
+    let can_inst = designos_doc::find::can_select_same_instance(&app.doc, &app.selection);
+    let can_var = designos_doc::find::can_select_same_variant(&app.doc, &app.selection);
+    let same = |label: &str, c: MatchCriteria, en: bool| (MenuItem::new(label).disabled(!en), Action::SelectSame(c));
     let mut kids = vec![
         (MenuItem::new("Select children").shortcut("Enter").disabled(!has), Action::SelectChildren),
         (MenuItem::new("Select parent").shortcut("Shift+Enter").disabled(!has), Action::SelectParent),
@@ -28,13 +37,45 @@ fn select_submenu(has: bool) -> Entry {
         (MenuItem::new("Select matching layers").shortcut("Ctrl+Alt+A").disabled(!has).sep(), Action::SelectMatching),
     ];
     kids.extend([
-        same("Select all with same fill", MatchCriteria::Fill),
-        same("Select all with same stroke", MatchCriteria::Stroke),
-        same("Select all with same effect", MatchCriteria::Effect),
-        same("Select all with same font", MatchCriteria::Font),
-        same("Select all with same instance", MatchCriteria::Instance),
+        same("Select all with same properties", MatchCriteria::Properties, has),
+        same("Select all with same fill", MatchCriteria::Fill, has),
+        same("Select all with same stroke", MatchCriteria::Stroke, has),
+        same("Select all with same effect", MatchCriteria::Effect, has),
+        same("Select all with same text properties", MatchCriteria::TextProperties, can_text),
+        same("Select all with same font", MatchCriteria::Font, can_text),
+        same("Select all with same instance", MatchCriteria::Instance, can_inst),
+        same("Select all with same variant", MatchCriteria::Variant, can_var),
     ]);
-    Entry { item: MenuItem::new("Select").disabled(!has).sep(), act: None, kids }
+    let mut item = MenuItem::new("Select").disabled(!has);
+    if sep_after {
+        item = item.sep();
+    }
+    Entry { item, act: None, kids }
+}
+
+/// The "Select layer" submenu shown when right-clicking over layers on the canvas.
+fn select_layer_submenu(app: &App) -> Option<Entry> {
+    let page_pt = app.ui.ctx_menu_page?;
+    let idx = crate::canvas::interact::active_index(app);
+    let ids = crate::canvas::hit::hit_all_under_including_locked(&app.doc, app.page, page_pt, select_layer_submenu_lists_parents_first(), idx);
+    if ids.is_empty() {
+        return None;
+    }
+    let kids: Vec<(MenuItem, Action)> = ids
+        .into_iter()
+        .filter_map(|id| {
+            let n = app.doc.get(id)?;
+            let mut item = MenuItem::new(&n.name).icon(super::layers::kind_icon(&n.kind));
+            if n.locked {
+                item = item.trailing_icon(crate::icons::Icon::Lock);
+            }
+            Some((item, Action::SelectLayer(id)))
+        })
+        .collect();
+    if kids.is_empty() {
+        return None;
+    }
+    Some(Entry { item: MenuItem::new("Select layer").sep(), act: None, kids })
 }
 
 /// The "Copy/Paste" submenu: property copy/paste and positional paste variants.
@@ -43,7 +84,7 @@ fn copy_paste_submenu(has: bool, has_clip: bool) -> Entry {
         (MenuItem::new("Copy properties").shortcut("Ctrl+Alt+C").disabled(!has), Action::CopyProperties),
         (MenuItem::new("Paste properties").shortcut("Ctrl+Alt+V").disabled(!has).sep(), Action::PasteProperties),
         (MenuItem::new("Paste over selection").shortcut("Ctrl+Shift+V").disabled(!has_clip), Action::PasteOverSelection),
-        (MenuItem::new("Paste to replace").shortcut("Ctrl+Alt+Shift+R").disabled(!has || !has_clip), Action::PasteToReplace),
+        (MenuItem::new("Paste to replace").shortcut("Ctrl+Shift+R").disabled(!has || !has_clip), Action::PasteToReplace),
     ];
     Entry { item: MenuItem::new("Copy/Paste").sep(), act: None, kids }
 }
@@ -63,6 +104,9 @@ fn ai_image_submenu(app: &App) -> Entry {
 
 /// Entries given the current selection.
 fn entries(app: &App) -> Vec<Entry> {
+    if crate::board::table::selected_block(app).is_some() {
+        return crate::board::table::menu::entries(app).into_iter().map(|(item, a)| leaf(item, Action::Table(a))).collect();
+    }
     let has = !app.selection.is_empty();
     let has_clip = app.clip.is_some();
     let insts = app.selected_instances();
@@ -78,7 +122,8 @@ fn entries(app: &App) -> Vec<Entry> {
                 .and_then(|pn| pn.kind.frame_props())
                 .and_then(|fp| fp.auto_layout.as_ref())
                 .is_some_and(|al| al.direction == designos_doc::LayoutDirection::Grid);
-            self_grid || parent_grid || n.name.to_ascii_lowercase().contains("table")
+            let real_table = matches!(n.kind, NodeKind::Table(_) | NodeKind::TableCell(_));
+            !real_table && (self_grid || parent_grid || n.name.to_ascii_lowercase().contains("table"))
         })
     });
     let can_create = app
@@ -88,22 +133,26 @@ fn entries(app: &App) -> Vec<Entry> {
     let can_mark = app.selection.iter().any(|id| crate::dev::markable(app, *id));
     let has_status = app.selection.iter().any(|id| app.doc.get(*id).is_some_and(|n| n.dev.status.is_some()));
     let has_image_fill = crate::image_jobs::selection_target_image_fill(app).is_some();
+    let select_layer = select_layer_submenu(app);
     let mut list = vec![
         leaf(MenuItem::new("Duplicate").shortcut("Ctrl+D").disabled(!has), Action::Duplicate),
         leaf(MenuItem::new("Group selection").shortcut("Ctrl+G").disabled(!has), Action::Group),
         leaf(MenuItem::new("Frame selection").shortcut("Ctrl+Alt+G").disabled(!has), Action::FrameSelection),
         leaf(MenuItem::new("Ungroup").shortcut("Ctrl+Shift+G").disabled(!any_container), Action::Ungroup),
         leaf(MenuItem::new("Add auto layout").shortcut("Shift+A").disabled(!has).sep(), Action::AutoLayout),
-        leaf(MenuItem::new("Create component").shortcut("Ctrl+Alt+K").disabled(!can_create), Action::CreateComponent),
+        leaf(MenuItem::new(app.create_component_label()).shortcut("Ctrl+Alt+K").disabled(!can_create), Action::CreateComponent),
         leaf(MenuItem::new("Combine as variants").shortcut("Ctrl+Shift+K").disabled(!has), Action::CombineVariants),
         leaf(MenuItem::new("Detach instance").shortcut("Ctrl+Alt+B").disabled(!has_inst), Action::Detach),
         leaf(MenuItem::new("Go to main component").disabled(!has_inst), Action::GoToMain),
         leaf(MenuItem::new("Reset all changes").disabled(!has_inst).sep(), Action::ResetInstance),
         leaf(MenuItem::new("Bring to front").shortcut("Ctrl+Shift+]").disabled(!has), Action::BringToFront),
         leaf(MenuItem::new("Send to back").shortcut("Ctrl+Shift+[").disabled(!has).sep(), Action::SendToBack),
-        select_submenu(has),
-        copy_paste_submenu(has, has_clip),
+        select_submenu(app, select_layer.is_none()),
     ];
+    if let Some(sub) = select_layer {
+        list.push(sub);
+    }
+    list.push(copy_paste_submenu(has, has_clip));
     if has_image_fill {
         list.push(ai_image_submenu(app));
     }
@@ -157,11 +206,15 @@ pub fn show(app: &mut App, ctx: &Context) {
     match popup_tree(ctx, Id::new("selection-menu"), at, 230.0, &list, None) {
         TreeResult::Picked(path) => {
             app.ui.ctx_menu = None;
+            app.ui.ctx_menu_page = None;
             if let Some(a) = resolve(&entries, &path) {
                 menus::run(app, ctx, a);
             }
         }
-        TreeResult::Closed => app.ui.ctx_menu = None,
+        TreeResult::Closed => {
+            app.ui.ctx_menu = None;
+            app.ui.ctx_menu_page = None;
+        }
         TreeResult::Open => {}
     }
 }
@@ -173,8 +226,8 @@ fn show_layer_picker(app: &mut App, ctx: &Context) {
         return;
     }
     let w = 220.0;
-    let row_h = 26.0;
-    let header_h = 26.0;
+    let row_h = crate::theme::MENU_ITEM_HEIGHT;
+    let header_h = crate::theme::MENU_ITEM_HEIGHT;
     let h = header_h + ids.len() as f32 * row_h + 6.0;
     let screen = ctx.content_rect();
     let x = at.x.clamp(screen.left() + 4.0, (screen.right() - w - 4.0).max(screen.left() + 4.0));
@@ -183,13 +236,16 @@ fn show_layer_picker(app: &mut App, ctx: &Context) {
 
     let mut picked: Option<designos_doc::NodeId> = None;
     let mut hovered_any = None;
+    // A row is picked by the release of a press this picker saw, not by egui's click (see `widgets::menu::release_pick`).
+    // A release on the row of a layer that is gone since the picker opened picks nothing and closes it.
+    let menu_id = Id::new("layer-picker-menu");
+    let release = crate::widgets::menu::release_pick(ctx, menu_id, egui::LayerId::new(egui::Order::Tooltip, menu_id), r, None, None);
+    let mut gone = false;
 
-    egui::Area::new(Id::new("layer-picker-menu")).order(egui::Order::Tooltip).fixed_pos(r.min).show(ctx, |ui| {
+    egui::Area::new(menu_id).order(egui::Order::Tooltip).fixed_pos(r.min).show(ctx, |ui| {
         let (_, _) = ui.allocate_exact_size(r.size(), egui::Sense::hover());
         let p = ui.painter();
-        crate::widgets::elevation_shadow(p, r, crate::theme::RADIUS_FRAME);
-        p.rect_filled(r, crate::theme::cr(crate::theme::RADIUS_FRAME), crate::theme::BG_MENU);
-        p.rect_stroke(r, crate::theme::cr(crate::theme::RADIUS_FRAME), egui::Stroke::new(1.0, crate::theme::BORDER_MENU), egui::StrokeKind::Inside);
+        crate::widgets::kit::menu_surface(p, r);
         p.text(
             egui::Pos2::new(r.left() + 12.0, r.top() + header_h * 0.5),
             egui::Align2::LEFT_CENTER,
@@ -200,33 +256,32 @@ fn show_layer_picker(app: &mut App, ctx: &Context) {
         p.hline(r.left() + 1.0..=r.right() - 1.0, r.top() + header_h, egui::Stroke::new(1.0, crate::theme::BORDER_MENU));
 
         for (idx, &id) in ids.iter().enumerate() {
-            let Some(node) = app.doc.get(id) else { continue };
-            let rr = egui::Rect::from_min_size(
-                egui::Pos2::new(r.left() + 4.0, r.top() + header_h + 3.0 + idx as f32 * row_h),
-                egui::Vec2::new(w - 8.0, row_h - 2.0),
-            );
+            let inset = crate::theme::INSET_FRAME;
+            let rr =
+                egui::Rect::from_min_size(egui::Pos2::new(r.left() + inset, r.top() + header_h + idx as f32 * row_h), egui::Vec2::new(w - inset * 2.0, row_h));
+            let Some(node) = app.doc.get(id) else {
+                gone |= release.is_some_and(|p| rr.contains(p));
+                continue;
+            };
             let resp = ui.interact(rr, Id::new(("layer-picker-row", id)), egui::Sense::click());
-            let hov = resp.hovered();
+            crate::widgets::record_with(ui, || format!("layer-row-{idx}"), rr);
+            let hov = resp.contains_pointer();
             let sel = app.is_selected(id);
             if hov {
                 hovered_any = Some(id);
-                p.rect_filled(rr, crate::theme::cr(4), crate::theme::BG_MENU_SELECTED);
-            } else if sel {
-                p.rect_filled(rr, crate::theme::cr(4), crate::theme::BG_SELECTED);
             }
+            // The same Menu/Item look as the menu rows; a selected layer keeps the selected fill.
+            let mut paint = crate::widgets::kit::menu_row_look(false, hov, false);
+            if sel {
+                paint.fill = crate::theme::BG_SELECTED;
+            }
+            crate::widgets::kit::paint_frame(p, rr, crate::theme::RADIUS_CONTROL, &paint);
             let icon = super::layers::kind_icon(&node.kind);
             let is_comp = matches!(node.kind, NodeKind::Component(_) | NodeKind::ComponentSet(_) | NodeKind::Instance { .. });
-            let icon_col = if hov {
-                egui::Color32::WHITE
-            } else if is_comp {
-                crate::theme::COMPONENT
-            } else {
-                crate::theme::TEXT_SECONDARY
-            };
+            let icon_col = if is_comp && !hov { crate::theme::COMPONENT } else { paint.icon };
             crate::icons::paint(p, icon, egui::Pos2::new(rr.left() + 12.0, rr.center().y), crate::theme::LAYER_ICON_SIZE, icon_col);
-            let text_col = if hov { egui::Color32::WHITE } else { crate::theme::TEXT };
-            p.text(egui::Pos2::new(rr.left() + 26.0, rr.center().y), egui::Align2::LEFT_CENTER, &node.name, crate::theme::font_body(), text_col);
-            if resp.clicked() {
+            p.text(egui::Pos2::new(rr.left() + 26.0, rr.center().y), egui::Align2::LEFT_CENTER, &node.name, crate::theme::font_menu(), paint.text);
+            if crate::widgets::menu::row_picked(&resp, rr, release) {
                 picked = Some(id);
             }
         }
@@ -238,7 +293,8 @@ fn show_layer_picker(app: &mut App, ctx: &Context) {
         app.hover_layer = None;
         app.ui.layer_picker = None;
     } else {
-        let close = ctx.input(|i| i.key_pressed(egui::Key::Escape) || (i.pointer.any_pressed() && i.pointer.interact_pos().is_some_and(|p| !r.contains(p))));
+        let close =
+            gone || ctx.input(|i| i.key_pressed(egui::Key::Escape) || (i.pointer.any_pressed() && i.pointer.interact_pos().is_some_and(|p| !r.contains(p))));
         if close {
             app.hover_layer = None;
             app.ui.layer_picker = None;
@@ -249,4 +305,9 @@ fn show_layer_picker(app: &mut App, ctx: &Context) {
 #[cfg(test)]
 pub fn labels(app: &App) -> Vec<String> {
     entries(app).into_iter().map(|e| e.item.label).collect()
+}
+
+#[cfg(test)]
+pub fn select_layer_labels(app: &App) -> Vec<String> {
+    select_layer_submenu(app).map(|e| e.kids.into_iter().map(|(it, _)| it.label).collect()).unwrap_or_default()
 }

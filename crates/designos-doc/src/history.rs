@@ -61,6 +61,10 @@ pub enum Command {
     },
     /// Replace Check designs settings (rule toggles, contrast level, ignored findings).
     SetCheckDesignsSettings(CheckDesignsSettings),
+    /// Replace the colour profile the document's colour values are written in.
+    SetColorProfile {
+        profile: ColorProfile,
+    },
     /// Replace all variables and collections (variable edits).
     SetVariables {
         variables: BTreeMap<String, Variable>,
@@ -82,10 +86,13 @@ impl Command {
         Ok(match self {
             Command::Insert { parent, index, nodes } => {
                 let root = nodes.first().map(|n| n.id).ok_or(DocError::NotFound(parent))?;
-                let p = doc.nodes.get_mut(&parent).ok_or(DocError::NotFound(parent))?;
+                let p = doc.nodes.get(&parent).ok_or(DocError::NotFound(parent))?;
                 if !p.kind.can_hold_children() {
                     return Err(DocError::NotAContainer(parent));
                 }
+                validate_insert_nodes(doc, &nodes)?;
+                let p = doc.nodes.get_mut(&parent).ok_or(DocError::NotFound(parent))?;
+                table::check_insert_payload(&p.kind, &nodes)?;
                 let index = index.min(p.children.len());
                 p.children.insert(index, root);
                 let many = nodes.len() > 64;
@@ -114,10 +121,16 @@ impl Command {
                 let n = doc.get(id).ok_or(DocError::NotFound(id))?;
                 let old_parent = n.parent.ok_or(DocError::NotFound(id))?;
                 let old_index = doc.get(old_parent).and_then(|p| p.children.iter().position(|c| *c == id)).unwrap_or(0);
+                if let Some(new_parent) = doc.get(parent) {
+                    table::check_child_kind(&new_parent.kind, &n.kind)?;
+                }
                 doc.reparent(id, parent, index)?;
                 Command::Reparent { id, parent: old_parent, index: old_index }
             }
             Command::Update { mut node } => {
+                if let Some(cur) = doc.get(node.id) {
+                    table::check_kind_change(&cur.kind, &node.kind)?;
+                }
                 let cur = doc.get_mut(node.id).ok_or(DocError::NotFound(node.id))?;
                 node.parent = cur.parent;
                 node.children = std::mem::take(&mut cur.children);
@@ -129,6 +142,7 @@ impl Command {
                 if !matches!(root.kind, NodeKind::Page { .. }) {
                     return Err(DocError::NotAContainer(root.id));
                 }
+                validate_insert_nodes(doc, &nodes)?;
                 let root = root.id;
                 for mut n in nodes {
                     if n.id == root {
@@ -181,6 +195,10 @@ impl Command {
                 Command::SetGuides { page, guides: old.unwrap_or_default() }
             }
             Command::SetPrototypeDevice { device } => Command::SetPrototypeDevice { device: std::mem::replace(&mut doc.prototype_device, device) },
+            Command::SetColorProfile { profile } => {
+                doc.mark_full_dirty();
+                Command::SetColorProfile { profile: std::mem::replace(&mut doc.color_profile, profile) }
+            }
             Command::SetCheckDesignsSettings(settings) => {
                 doc.bump_mutation_epoch();
                 Command::SetCheckDesignsSettings(std::mem::replace(&mut doc.check_designs, settings))
@@ -212,6 +230,37 @@ impl Command {
                 Command::Batch(inv)
             }
         })
+    }
+
+    /// Like [`Self::apply`], but a `Batch` that fails applies nothing: the commands it already applied
+    /// are undone, newest first (nested batches too). `History` runs every step this way, so a
+    /// refused step leaves no half-applied edit behind. Plain `apply` keeps its partial behaviour for
+    /// the callers (transactions, replay) that rely on it.
+    pub fn apply_atomic(self, doc: &mut Document) -> Result<Command, DocError> {
+        let Command::Batch(cmds) = self else { return self.apply(doc) };
+        let mut inv = Vec::with_capacity(cmds.len());
+        for c in cmds {
+            match c.apply_atomic(doc) {
+                Ok(i) => inv.push(i),
+                Err(e) => {
+                    // An inverse only fails when the document changed under it, which a single
+                    // `&mut Document` borrow rules out inside this call, so no test can provoke it.
+                    // It is still reported, never swallowed: the document would stay half changed.
+                    let mut rollback_failure = None;
+                    for i in inv.into_iter().rev() {
+                        if let Err(re) = i.apply(doc) {
+                            rollback_failure.get_or_insert(re);
+                        }
+                    }
+                    return Err(match rollback_failure {
+                        None => e,
+                        Some(re) => DocError::Table(format!("{e} Rolling back the earlier commands of the step also failed: {re}")),
+                    });
+                }
+            }
+        }
+        inv.reverse();
+        Ok(Command::Batch(inv))
     }
 
     /// Returns `true` when this command (or its inverse stored on the undo stack) directly targets `id`,
@@ -246,9 +295,50 @@ impl Command {
             | Command::SetPrototypeDevice { .. }
             | Command::SetVariables { .. }
             | Command::SetImages { .. }
+            | Command::SetColorProfile { .. }
             | Command::SetCheckDesignsSettings(_) => false,
         }
     }
+
+    fn visit_images<'a>(&'a self, f: &mut impl FnMut(&'a str, &'a [u8])) {
+        match self {
+            Command::SetImages { add, .. } => {
+                for (k, v) in add {
+                    f(k, v);
+                }
+            }
+            Command::Batch(cmds) => {
+                for c in cmds {
+                    c.visit_images(f);
+                }
+            }
+            Command::Insert { .. }
+            | Command::Remove { .. }
+            | Command::Update { .. }
+            | Command::Reparent { .. }
+            | Command::InsertPage { .. }
+            | Command::RemovePage { .. }
+            | Command::SetFlows { .. }
+            | Command::SetStyles { .. }
+            | Command::SetComments { .. }
+            | Command::SetLibraryState { .. }
+            | Command::SetGuides { .. }
+            | Command::SetPrototypeDevice { .. }
+            | Command::SetVariables { .. }
+            | Command::SetColorProfile { .. }
+            | Command::SetCheckDesignsSettings(_) => {}
+        }
+    }
+}
+
+fn validate_insert_nodes(doc: &Document, nodes: &[Node]) -> Result<(), DocError> {
+    let mut ids = std::collections::BTreeSet::new();
+    for node in nodes {
+        if doc.nodes.contains_key(&node.id) || !ids.insert(node.id) {
+            return Err(DocError::DuplicateNode(node.id));
+        }
+    }
+    Ok(())
 }
 
 fn is_auto_layout_reflow(doc: &Document, before: &Node, after: &Node) -> bool {
@@ -363,7 +453,7 @@ impl History {
     }
     /// Executes `cmd` and records an optional human-readable label on the resulting undo step.
     pub fn exec_labeled(&mut self, doc: &mut Document, cmd: Command, label: Option<String>) -> Result<(), DocError> {
-        let inv = cmd.apply(doc)?;
+        let inv = guarded(doc, cmd, false, apply_with_table_relayout).map_err(|refused| refused.0)?;
         self.push_step(inv, UndoStepMeta { origin: StepOrigin::Unspecified, label, ..Default::default() });
         Ok(())
     }
@@ -372,14 +462,14 @@ impl History {
     /// [`Self::fold_since`] can fold the contiguous agent tail on stop without folding
     /// intervening user edits.
     pub fn exec_agent(&mut self, doc: &mut Document, cmd: Command) -> Result<(), DocError> {
-        let inv = cmd.apply(doc)?;
+        let inv = guarded(doc, cmd, false, apply_with_table_relayout).map_err(|refused| refused.0)?;
         self.push_step(inv, UndoStepMeta { origin: StepOrigin::Agent, ..Default::default() });
         Ok(())
     }
 
     /// Executes an edit explicitly marked as a user edit.
     pub fn exec_user(&mut self, doc: &mut Document, cmd: Command) -> Result<(), DocError> {
-        let inv = cmd.apply(doc)?;
+        let inv = guarded(doc, cmd, false, apply_with_table_relayout).map_err(|refused| refused.0)?;
         self.push_step(inv, UndoStepMeta { origin: StepOrigin::User, ..Default::default() });
         Ok(())
     }
@@ -407,6 +497,13 @@ impl History {
     /// undoing past it does not. Costs nothing: no step is inspected and the document is not hashed.
     pub fn is_clean(&self) -> bool {
         !self.clean_lost && self.undo.len() == self.clean_depth
+    }
+
+    /// Calls `f` for every `(key, bytes)` image entry held inside the undo and redo stacks.
+    pub fn for_each_image<'a>(&'a self, mut f: impl FnMut(&'a str, &'a [u8])) {
+        for cmd in self.undo.iter().chain(self.redo.iter()) {
+            cmd.visit_images(&mut f);
+        }
     }
 
     /// Marks the most recently pushed undo step as an agent step. An agent step never counts as
@@ -554,10 +651,20 @@ impl History {
         self.sync_meta_lengths();
         let Some(c) = self.undo.pop() else { return Ok(false) };
         let meta = self.undo_meta.pop().unwrap_or_default();
-        let inv = apply_step(doc, c, meta.layout_recorded)?;
-        self.redo.push(inv);
-        self.redo_meta.push(meta);
-        Ok(true)
+        match guarded(doc, c, solves_layout(doc, meta.layout_recorded), |d, c| apply_step(d, c, meta.layout_recorded)) {
+            Ok(inv) => {
+                self.redo.push(inv);
+                self.redo_meta.push(meta);
+                Ok(true)
+            }
+            Err(refused) => {
+                let (e, restored) = *refused;
+                self.undo.extend(restored);
+                self.undo_meta.push(meta);
+                self.undo_meta.truncate(self.undo.len());
+                Err(e)
+            }
+        }
     }
     /// Re-applies the latest undone step, solving auto layout again only for a step whose layout
     /// was not recorded, like [`Self::undo`].
@@ -565,10 +672,20 @@ impl History {
         self.sync_meta_lengths();
         let Some(c) = self.redo.pop() else { return Ok(false) };
         let meta = self.redo_meta.pop().unwrap_or_default();
-        let inv = apply_step(doc, c, meta.layout_recorded)?;
-        self.undo.push(inv);
-        self.undo_meta.push(meta);
-        Ok(true)
+        match guarded(doc, c, solves_layout(doc, meta.layout_recorded), |d, c| apply_step(d, c, meta.layout_recorded)) {
+            Ok(inv) => {
+                self.undo.push(inv);
+                self.undo_meta.push(meta);
+                Ok(true)
+            }
+            Err(refused) => {
+                let (e, restored) = *refused;
+                self.redo.extend(restored);
+                self.redo_meta.push(meta);
+                self.redo_meta.truncate(self.redo.len());
+                Err(e)
+            }
+        }
     }
     /// The command [`Self::undo`] would apply next.
     pub fn peek_undo(&self) -> Option<&Command> {
@@ -663,6 +780,7 @@ impl Command {
             | Command::Reparent { .. }
             | Command::RemovePage { .. }
             | Command::SetImages { .. }
+            | Command::SetColorProfile { .. }
             | Command::SetCheckDesignsSettings(_) => 0,
         }
     }
@@ -709,7 +827,7 @@ fn layout_inputs_changed(old: &Node, new: &Node) -> bool {
         || !old.variables.bindings.iter().filter(|(k, _)| is_layout_binding_key(k)).eq(new.variables.bindings.iter().filter(|(k, _)| is_layout_binding_key(k)))
 }
 
-fn collect_relayout_seeds(doc: &Document, cmd: &Command, seeds: &mut Vec<NodeId>) {
+pub(crate) fn collect_relayout_seeds(doc: &Document, cmd: &Command, seeds: &mut Vec<NodeId>) {
     match cmd {
         Command::Update { node } => {
             let Some(cur) = doc.get(node.id) else { return };
@@ -753,12 +871,88 @@ fn collect_relayout_seeds(doc: &Document, cmd: &Command, seeds: &mut Vec<NodeId>
     }
 }
 
+/// Applies `c`, then re-solves every table whose cell text it changed and re-applies the values of component
+/// properties bound to variables that `c` moved (a mode switch, a variable edit, a binding edit), as part of the same
+/// undo step. The row heights follow the text whoever wrote it. Nothing changes without a layout measurer (the stored
+/// heights are kept) or when the rows already fit.
+fn apply_with_table_relayout(doc: &mut Document, c: Command) -> Result<Command, DocError> {
+    let mut edited = std::collections::BTreeSet::new();
+    table::text_edited_tables(doc, &c, &mut edited);
+    let prop_scope = prop_resync_scope(doc, &c);
+    let inv = c.apply_atomic(doc)?;
+    let mut steps = vec![inv];
+    if !prop_scope.is_empty() {
+        match apply_prop_resync_and_relayout(doc, &prop_scope) {
+            Ok(Some(resync_inv)) => steps.insert(0, resync_inv),
+            Ok(None) => {}
+            Err(e) => {
+                let _ = Command::Batch(steps).apply(doc);
+                return Err(e);
+            }
+        }
+    }
+    let fix: Vec<Command> = edited.iter().flat_map(|&t| table::relayout(doc, t)).collect();
+    if !fix.is_empty() {
+        match Command::Batch(fix).apply_atomic(doc) {
+            Ok(fix_inv) => steps.insert(0, fix_inv),
+            Err(e) => {
+                let _ = Command::Batch(steps).apply(doc);
+                return Err(e);
+            }
+        }
+    }
+    Ok(if steps.len() == 1 { steps.remove(0) } else { Command::Batch(steps) })
+}
+
 /// Applies one undo or redo step. A layout-recorded step is replayed as stored while no deferred
 /// layout is queued. With a queue present it re-solves like any other step, so a queued subtree is
 /// never drained against a state the step restored without that solve.
+/// Applies one undo step with `apply`, then checks every table the step touched (see
+/// [`table::check_table_positions`]). A table left broken rolls the step back with its own inverse.
+/// Either way a refusal returns the error with the command that re-does the step, so the caller can
+/// put the step back on its stack and leave the document and both stacks as they were (a command
+/// that fails changes nothing: `Command::apply_atomic` undoes what a batch already applied). The command is
+/// kept only when it involves a table, so an ordinary step costs no clone. The table ids are
+/// collected before `apply` runs, because a removed cell's parent is gone afterwards.
+///
+/// `solves_layout` is true when `apply` re-solves auto layout after the command (see [`apply_step`]).
+/// That pass writes outside the command's inverse, so a refused step solves the same containers
+/// again from the restored tree, which puts frames and siblings back where they were.
+fn guarded(
+    doc: &mut Document,
+    c: Command,
+    solves_layout: bool,
+    apply: impl FnOnce(&mut Document, Command) -> Result<Command, DocError>,
+) -> Result<Command, Box<(DocError, Option<Command>)>> {
+    let mut touched = std::collections::BTreeSet::new();
+    table::touched_tables(doc, &c, &mut touched);
+    let backup = table::involves_tables(doc, &c).then(|| c.clone());
+    let mut seeds = Vec::new();
+    if solves_layout && !touched.is_empty() {
+        collect_relayout_seeds(doc, &c, &mut seeds);
+    }
+    let inv = apply(doc, c).map_err(|e| Box::new((e, backup)))?;
+    match table::check_touched(doc, &touched) {
+        Ok(()) => Ok(inv),
+        Err(e) => match inv.apply(doc) {
+            Ok(restored) => {
+                doc.relayout_seeds_upward(&seeds);
+                Err(Box::new((e, Some(restored))))
+            }
+            Err(re) => Err(Box::new((DocError::Table(format!("{e} Rolling the step back also failed: {re}")), None))),
+        },
+    }
+}
+
+/// Whether [`apply_step`] re-solves auto layout: a recorded step replays as stored while no deferred layout is queued.
+fn solves_layout(doc: &Document, layout_recorded: bool) -> bool {
+    !(layout_recorded && doc.pending_relayout().is_empty())
+}
+
+/// Applies `c`; a step whose layout was recorded replays as stored, any other re-solves auto layout.
 fn apply_step(doc: &mut Document, c: Command, layout_recorded: bool) -> Result<Command, DocError> {
-    if layout_recorded && doc.pending_relayout().is_empty() {
-        c.apply(doc)
+    if !solves_layout(doc, layout_recorded) {
+        c.apply_atomic(doc)
     } else {
         apply_and_relayout(doc, c)
     }
@@ -774,7 +968,7 @@ fn apply_step(doc: &mut Document, c: Command, layout_recorded: bool) -> Result<C
 fn apply_and_relayout(doc: &mut Document, c: Command) -> Result<Command, DocError> {
     let mut seeds = Vec::new();
     collect_relayout_seeds(doc, &c, &mut seeds);
-    let inv = c.apply(doc)?;
+    let inv = c.apply_atomic(doc)?;
     doc.relayout_seeds_upward(&seeds);
     Ok(inv)
 }
@@ -1029,8 +1223,15 @@ mod tests {
         let mut h = History::default();
         let mut moved = d.get(leaf).unwrap().clone();
         moved.transform.tx = 3.0;
-        moved.effects =
-            vec![Effect::DropShadow { color: Color::BLACK, offset: Vec2::new(0.0, 1.0), radius: 2.0, spread: 0.0, visible: true, show_behind: false }];
+        moved.effects = vec![Effect::DropShadow {
+            color: Color::BLACK,
+            offset: Vec2::new(0.0, 1.0),
+            radius: 2.0,
+            spread: 0.0,
+            visible: true,
+            show_behind: false,
+            blend: Default::default(),
+        }];
         h.exec(&mut d, Command::Update { node: Box::new(moved) }).unwrap();
         crate::layout_apply::reset_solve_calls();
         h.undo(&mut d).unwrap();
@@ -1765,5 +1966,120 @@ mod style_tests {
         // The folded batch is final: a second fold over the same span finds nothing new.
         assert_eq!(h.fold_since_range(start_depth, "Agent turn (stopped)"), None);
         assert_eq!(h.undo_depth(), start_depth + 2);
+    }
+}
+
+#[cfg(test)]
+mod duplicate_node_id_tests {
+    use super::*;
+
+    #[test]
+    fn insert_with_existing_id_refuses_without_changing_history_or_document() {
+        let mut doc = Document::new("t");
+        let page = doc.add_page("P");
+        let id = NodeId(42);
+        let original = Node::rectangle(id, Rect::new(10.0, 20.0, 30.0, 40.0));
+        doc.insert(page, original.clone()).unwrap();
+        let before = doc.clone();
+        let mut history = History::default();
+
+        let duplicate = Node::rectangle(id, Rect::new(90.0, 90.0, 5.0, 5.0));
+        let result = history.exec(&mut doc, Command::Insert { parent: page, index: 0, nodes: vec![duplicate] });
+
+        assert!(result.is_err(), "duplicate node insertion must be refused");
+        assert_eq!(doc.nodes, before.nodes);
+        assert_eq!(doc.pages, before.pages);
+        assert!(history.undo.is_empty());
+    }
+
+    #[test]
+    fn insert_with_duplicate_ids_in_one_payload_refuses_before_mutating() {
+        let mut doc = Document::new("t");
+        let page = doc.add_page("P");
+        let id = NodeId(42);
+        let before = doc.clone();
+        let mut history = History::default();
+
+        let result = history.exec(
+            &mut doc,
+            Command::Insert { parent: page, index: 0, nodes: vec![Node::rectangle(id, Rect::default()), Node::rectangle(id, Rect::default())] },
+        );
+
+        assert!(matches!(result, Err(DocError::DuplicateNode(found)) if found == id));
+        assert_eq!(doc.nodes, before.nodes);
+        assert_eq!(doc.pages, before.pages);
+        assert!(history.undo.is_empty());
+    }
+
+    #[test]
+    fn failed_batch_rollback_does_not_remove_a_preexisting_node() {
+        let mut doc = Document::new("t");
+        let page = doc.add_page("P");
+        let existing = NodeId(42);
+        doc.insert(page, Node::rectangle(existing, Rect::default())).unwrap();
+        let fresh = NodeId(43);
+        let before = doc.clone();
+        let mut history = History::default();
+
+        let result = history.exec(
+            &mut doc,
+            Command::Batch(vec![
+                Command::Insert { parent: page, index: 1, nodes: vec![Node::rectangle(fresh, Rect::default())] },
+                Command::Insert { parent: page, index: 0, nodes: vec![Node::rectangle(existing, Rect::default())] },
+            ]),
+        );
+
+        assert!(matches!(result, Err(DocError::DuplicateNode(found)) if found == existing));
+        assert_eq!(doc.nodes, before.nodes);
+        assert_eq!(doc.pages, before.pages);
+        assert!(history.undo.is_empty());
+    }
+
+    #[test]
+    fn insert_page_with_existing_id_refuses_without_mutating_pages() {
+        let mut doc = Document::new("t");
+        let page = doc.add_page("P");
+        let before = doc.clone();
+        let mut history = History::default();
+        let mut duplicate_page = Node::new(page, NodeKind::Page { background: Color::rgb(1, 2, 3) });
+        duplicate_page.name = "duplicate".into();
+
+        let result = history.exec(&mut doc, Command::InsertPage { index: 0, nodes: vec![duplicate_page] });
+
+        assert!(matches!(result, Err(DocError::DuplicateNode(found)) if found == page));
+        assert_eq!(doc.nodes, before.nodes);
+        assert_eq!(doc.pages, before.pages);
+        assert!(history.undo.is_empty());
+    }
+
+    #[test]
+    fn direct_document_insert_with_existing_id_leaves_the_original_untouched() {
+        let mut doc = Document::new("t");
+        let page = doc.add_page("P");
+        let id = NodeId(42);
+        doc.insert(page, Node::rectangle(id, Rect::new(10.0, 20.0, 30.0, 40.0))).unwrap();
+        let before = doc.clone();
+
+        let result = doc.insert(page, Node::rectangle(id, Rect::new(90.0, 90.0, 5.0, 5.0)));
+
+        assert!(matches!(result, Err(DocError::DuplicateNode(found)) if found == id));
+        assert_eq!(doc.nodes, before.nodes);
+        assert_eq!(doc.pages, before.pages);
+    }
+
+    #[test]
+    fn a_fresh_insert_still_undoes_and_redoes_after_the_duplicate_guard() {
+        let mut doc = Document::new("t");
+        let page = doc.add_page("P");
+        let id = NodeId(77);
+        let mut history = History::default();
+
+        history.exec(&mut doc, Command::Insert { parent: page, index: 0, nodes: vec![Node::rectangle(id, Rect::default())] }).unwrap();
+        assert!(doc.nodes.contains_key(&id));
+        assert!(history.undo(&mut doc).unwrap());
+        assert!(!doc.nodes.contains_key(&id));
+        assert!(history.redo(&mut doc).unwrap());
+        assert!(doc.nodes.contains_key(&id));
+        assert_eq!(doc.nodes[&page].children.iter().filter(|c| **c == id).count(), 1);
     }
 }

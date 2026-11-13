@@ -1,7 +1,7 @@
 //! 1:1 Figma UI3 Multi-Tab Project Workspace (`US-10`) and Brand Wordmark Chrome (`DIR-12`).
 //!
 //! Manages multiple simultaneously open project tabs (`Design`, `Board`, `Deck`, `Spec`),
-//! per-tab isolated state (`Document`, `History`, `page`, `selection`, `View`, `file_path`,
+//! per-tab isolated state (`Document`, its load watermark, `History`, `page`, `selection`, `View`, `file_path`,
 //! `lib_file`, `dev_mode`, `pinned`, `dirty`), seamless switching between the `Home` screen
 //! and open project tabs without losing state, and the 32px top window tab bar.
 
@@ -12,10 +12,14 @@ use crate::theme;
 use crate::widgets;
 use crate::widgets::menu::{popup_menu, MenuItem, MenuResult};
 use designos_doc::{Document, DocumentKind, History, NodeId};
-use egui::{Align2, Color32, Pos2, Rect, Sense, Stroke, StrokeKind, Ui, Vec2};
+use egui::{Align2, Color32, Pos2, Rect, Sense, Stroke, Ui, Vec2};
 use std::path::{Path, PathBuf};
 
 mod agent_document;
+
+// Declared here, not in `main.rs`: the Project tab is a kind of tab, and this keeps the wiring in one owned file.
+#[path = "project_tab/mod.rs"]
+pub mod project_tab;
 
 /// Exact height of the 1:1 Figma UI3 Top Window Tab Bar (`32px`).
 pub const TOP_TAB_BAR_HEIGHT: f32 = 32.0;
@@ -23,12 +27,6 @@ pub const TOP_TAB_BAR_HEIGHT: f32 = 32.0;
 // Top Tab Strip palette tokens (unified with theme.rs Zinc dark palette)
 const TAB_BAR_BG: Color32 = theme::BG_PRIMARY;
 const TAB_BAR_BORDER: Color32 = theme::BORDER;
-const TAB_ACTIVE_BG: Color32 = theme::BG_SECONDARY;
-const TAB_ACTIVE_BORDER: Color32 = theme::BORDER_STRONG;
-const TAB_HOVER_BG: Color32 = theme::BG_HOVER;
-const BADGE_DESIGN_BLUE: Color32 = Color32::from_rgb(0x0D, 0x99, 0xFF);
-const BADGE_BOARD_PURPLE: Color32 = Color32::from_rgb(0xF5, 0x9E, 0x0B);
-const BADGE_DECK_ORANGE: Color32 = Color32::from_rgb(0xFF, 0x6A, 0x3D);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ProjectTabKind {
@@ -36,6 +34,8 @@ pub enum ProjectTabKind {
     Board,
     Deck,
     Spec,
+    /// A library project's docs (tree, reading page, contents); its state lives in `TabsState::project_states`.
+    Project,
 }
 
 impl ProjectTabKind {
@@ -47,20 +47,13 @@ impl ProjectTabKind {
         }
     }
 
-    pub fn badge_color(self) -> Color32 {
-        match self {
-            Self::Design => BADGE_DESIGN_BLUE,
-            Self::Board => BADGE_BOARD_PURPLE,
-            Self::Deck | Self::Spec => BADGE_DECK_ORANGE,
-        }
-    }
-
     pub fn icon(self) -> Icon {
         match self {
             Self::Design => Icon::Design,
             Self::Board => Icon::Sticky,
             Self::Deck => Icon::Page,
             Self::Spec => Icon::Specs,
+            Self::Project => Icon::BookOpen,
         }
     }
 }
@@ -70,6 +63,8 @@ pub struct ProjectTab {
     pub title: String,
     pub kind: ProjectTabKind,
     pub doc: Document,
+    /// [`Document::peek_next_id`] from when `doc` was opened, before its pages hydrated.
+    pub load_next_id: NodeId,
     pub hist: History,
     pub terminal: crate::terminal::TerminalState,
     pub image_jobs: crate::image_jobs::ImageJobsState,
@@ -102,6 +97,7 @@ impl ProjectTab {
             title,
             kind,
             doc: Document::default(),
+            load_next_id: app.load_next_id,
             hist: History::default(),
             terminal: crate::terminal::TerminalState::for_tab(id),
             image_jobs: crate::image_jobs::ImageJobsState::new_inheriting_config_from(&app.image_jobs),
@@ -148,6 +144,8 @@ pub struct TabsState {
     pub parked_in_home: bool,
     /// Tracks whether `entries[active_idx]`'s live `History` currently resides in `app.hist`.
     hist_in_app: bool,
+    /// The state of every open Project tab, by tab id. It stays with the tab while another tab shows.
+    pub project_states: std::collections::HashMap<u64, project_tab::ProjectTabState>,
 }
 
 impl Default for TabsState {
@@ -162,6 +160,7 @@ impl Default for TabsState {
             always_visible: false,
             parked_in_home: false,
             hist_in_app: true,
+            project_states: std::collections::HashMap::new(),
         }
     }
 }
@@ -225,8 +224,10 @@ impl TabsState {
             self.active_idx = self.entries.len() - 1;
         }
         let tab = &mut self.entries[self.active_idx];
-        tab.title = ProjectTab::derive_title(app);
-        if tab.kind != ProjectTabKind::Spec {
+        if tab.kind != ProjectTabKind::Project {
+            tab.title = ProjectTab::derive_title(app);
+        }
+        if !matches!(tab.kind, ProjectTabKind::Spec | ProjectTabKind::Project) {
             tab.kind = ProjectTabKind::from_doc(&app.doc);
         }
         tab.page = app.page;
@@ -237,6 +238,7 @@ impl TabsState {
         tab.dev_mode = app.ui.dev_mode;
         tab.dirty = app.autosave.dot.flag();
         tab.disk = app.autosave.disk_state();
+        tab.load_next_id = app.load_next_id;
     }
 
     /// Moves the live document out of `app` and detaches `app` from its library file in the same step.
@@ -252,9 +254,18 @@ impl TabsState {
     /// Takes the terminal out of the window for a parked tab. Its log watcher stops here and starts again when
     /// the tab shows (`LivePatchLog::stop_wake`).
     fn park_terminal(app: &mut App) -> crate::terminal::TerminalState {
+        crate::live_patch_apply::abandon_queued_close(app);
         let mut terminal = std::mem::take(&mut app.terminal);
         terminal.live_patch.stop_wake();
         terminal
+    }
+
+    fn exit_version_view(&mut self, app: &mut App) {
+        if app.history.viewing.is_some() {
+            std::mem::swap(&mut app.tabs.entries, &mut self.entries);
+            app.exit_version_view();
+            std::mem::swap(&mut app.tabs.entries, &mut self.entries);
+        }
     }
 
     /// Parks the active tab's state (moving `app.doc`, `app.hist`, `app.terminal`, and `app.image_jobs` into `entries[active_idx]`).
@@ -263,7 +274,7 @@ impl TabsState {
             app.commit_open_text_session();
             crate::decks::ui::flush_notes(app);
             app.stop_plugin();
-            app.exit_version_view();
+            self.exit_version_view(app);
             app.flush_autosave();
             let id = self.alloc_id();
             let sid = self.session_id_for_tab(id);
@@ -289,6 +300,7 @@ impl TabsState {
                     self.entries[self.active_idx].page = app.page;
                     self.entries[self.active_idx].selection = app.selection.clone();
                     self.entries[self.active_idx].view = app.view;
+                    self.entries[self.active_idx].load_next_id = app.load_next_id;
                     self.entries[self.active_idx].doc = Self::take_live_doc(app);
                 }
                 self.entries[self.active_idx].hist = std::mem::take(&mut app.hist);
@@ -303,11 +315,12 @@ impl TabsState {
             app.commit_open_text_session();
             crate::decks::ui::flush_notes(app);
             app.stop_plugin();
-            app.exit_version_view();
+            self.exit_version_view(app);
             app.flush_autosave();
             let active_id = self.entries[self.active_idx].id;
             let sid = self.session_id_for_tab(active_id);
             app.terminal.bind_session(&sid);
+            self.entries[self.active_idx].load_next_id = app.load_next_id;
             self.entries[self.active_idx].doc = Self::take_live_doc(app);
             self.entries[self.active_idx].hist = std::mem::take(&mut app.hist);
             self.entries[self.active_idx].terminal = Self::park_terminal(app);
@@ -326,21 +339,34 @@ impl TabsState {
         }
         crate::decks::ui::flush_notes(app);
         app.stop_plugin();
-        app.exit_version_view();
+        self.exit_version_view(app);
         app.flush_autosave();
 
-        let (mut doc, tab_page, tab_selection, tab_view, tab_file_path, tab_lib_file, tab_dev_mode, tab_kind, tab_dirty, tab_disk) = {
+        let (mut doc, tab_page, tab_selection, tab_view, tab_file_path, tab_lib_file, tab_dev_mode, tab_kind, tab_dirty, tab_disk, tab_load_next_id) = {
             let tab = &mut self.entries[idx];
-            let doc = if tab.doc.nodes.is_empty() && idx == self.active_idx && !app.doc.nodes.is_empty() {
-                std::mem::take(&mut app.doc)
+            let (doc, load_next_id) = if tab.doc.nodes.is_empty() && idx == self.active_idx && !app.doc.nodes.is_empty() {
+                (std::mem::take(&mut app.doc), app.load_next_id)
             } else {
-                std::mem::take(&mut tab.doc)
+                (std::mem::take(&mut tab.doc), tab.load_next_id)
             };
-            (doc, tab.page, tab.selection.clone(), tab.view, tab.file_path.clone(), tab.lib_file.clone(), tab.dev_mode, tab.kind, tab.dirty, tab.disk)
+            (
+                doc,
+                tab.page,
+                tab.selection.clone(),
+                tab.view,
+                tab.file_path.clone(),
+                tab.lib_file.clone(),
+                tab.dev_mode,
+                tab.kind,
+                tab.dirty,
+                tab.disk,
+                load_next_id,
+            )
         };
         crate::io::ensure_page(&mut doc);
         let page = if doc.pages.contains(&tab_page) { tab_page } else { doc.pages[0] };
         app.doc = doc;
+        app.load_next_id = tab_load_next_id;
         app.page = page;
         app.selection = tab_selection;
         app.view = tab_view;
@@ -368,6 +394,10 @@ impl TabsState {
             app.ui.rail = Some(RailItem::Specs);
             app.specs.open = true;
             app.specs.ensure_loaded();
+        } else if tab_kind == ProjectTabKind::Project {
+            // The doc tree is the File panel of this tab: the rail shows File as the selected tile.
+            app.ui.rail = Some(RailItem::File);
+            app.specs.open = false;
         } else if app.specs.open && app.ui.rail == Some(RailItem::Specs) {
             app.specs.open = false;
         }
@@ -407,6 +437,7 @@ impl TabsState {
             // The closing version needs the live document and its file, which parking detaches.
             app.commit_open_text_session();
             crate::decks::ui::flush_notes(app);
+            self.exit_version_view(app);
             app.save_close_version();
             self.park_active_from_app(app);
         }
@@ -542,9 +573,11 @@ impl TabsState {
         doc.kind = match kind {
             ProjectTabKind::Board => DocumentKind::Board,
             ProjectTabKind::Deck => DocumentKind::Deck,
-            ProjectTabKind::Design | ProjectTabKind::Spec => DocumentKind::Design,
+            ProjectTabKind::Design | ProjectTabKind::Spec | ProjectTabKind::Project => DocumentKind::Design,
         };
         crate::io::ensure_page(&mut doc);
+        // Before any page hydrates. `open_new_design_tab` and `open_new_board_tab` come through here.
+        let load_next_id = doc.peek_next_id();
         let page = doc.pages[0];
         let id = self.alloc_id();
         let sid = self.session_id_for_tab(id);
@@ -559,6 +592,7 @@ impl TabsState {
             title: title.to_string(),
             kind,
             doc,
+            load_next_id,
             hist: History::default(),
             terminal,
             image_jobs: crate::image_jobs::ImageJobsState::new_inheriting_config_from(&app.image_jobs),
@@ -615,6 +649,44 @@ impl TabsState {
         self.open_new_tab(app, "Untitled", doc, ProjectTabKind::Deck)
     }
 
+    /// Whether the tab on screen is a Project tab (not the Home screen, not a parked tab).
+    pub fn active_is_project(&self) -> bool {
+        !self.parked_in_home && self.entries.get(self.active_idx).is_some_and(|t| t.kind == ProjectTabKind::Project)
+    }
+
+    /// Focuses the Project tab of library project `project_id`, or opens one at the end of the strip.
+    /// `shot` is what a screenshot run asked the new tab to show.
+    pub fn open_project_tab(&mut self, app: &mut App, project_id: &str, shot: Option<project_tab::shot::ShotSpec>) -> Option<usize> {
+        let existing =
+            self.entries.iter().position(|t| t.kind == ProjectTabKind::Project && self.project_states.get(&t.id).is_some_and(|s| s.project_id == project_id));
+        if let Some(idx) = existing {
+            self.switch_to(idx, app);
+            return Some(idx);
+        }
+        let name = match app.lib.as_ref().map(|l| l.project(project_id)) {
+            Some(Ok(project)) => project.name,
+            Some(Err(e)) => {
+                app.show_toast(format!("Cannot open this project: {e}"), true);
+                return None;
+            }
+            None => {
+                app.show_toast("Studio has no library open", true);
+                return None;
+            }
+        };
+        let title = project_tab::tab_title(&name);
+        let mut doc = Document::new(&title);
+        doc.add_page("Page 1");
+        let idx = self.open_new_tab(app, &title, doc, ProjectTabKind::Project);
+        let id = self.entries[idx].id;
+        let state = match shot {
+            Some(spec) => project_tab::ProjectTabState::with_shot(project_id, &name, spec),
+            None => project_tab::ProjectTabState::new(project_id, &name),
+        };
+        self.project_states.insert(id, state);
+        Some(idx)
+    }
+
     /// Focuses an existing tab with `file_path == Some(path)`, or opens `path` in a new tab.
     #[allow(dead_code)]
     pub fn open_or_focus_path(&mut self, app: &mut App, path: &Path) -> Option<usize> {
@@ -655,7 +727,9 @@ impl TabsState {
         if app.home.is_none() {
             self.park_active_from_app(app);
         }
+        std::mem::swap(&mut app.tabs.entries, &mut self.entries);
         app.open_library_file(file_id);
+        std::mem::swap(&mut app.tabs.entries, &mut self.entries);
         if app.lib_file.as_ref().is_some_and(|lf| lf.id == file_id) {
             let id = self.alloc_id();
             let sid = self.session_id_for_tab(id);
@@ -708,20 +782,31 @@ impl TabsState {
         }
     }
 
+    /// Keeps only cached profile-converted images still held by a surviving document, snapshot, or undo/redo history.
+    pub(crate) fn retain_converted_images(&self, app: &App) {
+        let extra = (!std::ptr::eq(self, &app.tabs)).then_some(app.tabs.entries.as_slice()).unwrap_or(&[]);
+        let surviving = std::iter::once((&app.doc, Some(&app.hist)))
+            .chain(self.entries.iter().chain(extra.iter()).map(|t| (&t.doc, Some(&t.hist))))
+            .chain(app.history.parked_snapshots());
+        designos_render::retain_converted_images(surviving);
+    }
+
     /// Closes `entries[idx]` unless it is `pinned`. If `entries` becomes empty, opens `Home`;
     /// otherwise activates the nearest remaining tab.
     pub fn close_tab(&mut self, idx: usize, app: &mut App) -> bool {
         let closed_paths: Vec<_> = self.disk_path_of_tab(idx, app).into_iter().collect();
-        let closed = self.close_tab_entry(idx, app);
-        if closed {
-            self.release_closed_paths(app, &closed_paths);
-        }
-        closed
+        let Some(closed_doc) = self.close_tab_entry(idx, app) else {
+            return false;
+        };
+        drop(closed_doc);
+        self.release_closed_paths(app, &closed_paths);
+        self.retain_converted_images(app);
+        true
     }
 
-    fn close_tab_entry(&mut self, idx: usize, app: &mut App) -> bool {
+    fn close_tab_entry(&mut self, idx: usize, app: &mut App) -> Option<Document> {
         if idx >= self.entries.len() || self.entries[idx].pinned {
-            return false;
+            return None;
         }
         let was_home = app.home.is_some();
         if was_home && self.hist_in_app {
@@ -735,6 +820,7 @@ impl TabsState {
             app.agent_changes_chip.clear();
         }
         let mut removed = self.entries.remove(idx);
+        self.project_states.remove(&removed.id);
         removed.image_jobs.cancel_and_cleanup(Some(removed.terminal.session_dir.join("image-jobs")));
         removed.terminal.shutdown();
         if self.entries.is_empty() {
@@ -742,6 +828,7 @@ impl TabsState {
             self.hist_in_app = false;
             self.parked_in_home = true;
             if !was_home {
+                self.exit_version_view(app);
                 if app.lib.is_some() {
                     // Saves the file being left before detaching it so `go_home` does not re-park a closed tab.
                     crate::decks::ui::flush_notes(app);
@@ -754,10 +841,13 @@ impl TabsState {
                 } else {
                     app.home = Some(crate::home::Home::new());
                 }
+                removed.doc = Self::take_live_doc(app);
+                removed.hist = std::mem::take(&mut app.hist);
+                app.history.reset();
             }
             app.file_path = None;
             app.lib_file = None;
-            return true;
+            return Some(removed.doc);
         }
         if was_home {
             if idx < self.active_idx {
@@ -765,14 +855,21 @@ impl TabsState {
             } else if self.active_idx >= self.entries.len() {
                 self.active_idx = self.entries.len() - 1;
             }
-            return true;
+            return Some(removed.doc);
         }
         if idx != old_active {
             if idx < old_active {
                 self.active_idx = old_active - 1;
             }
-            return true;
+            return Some(removed.doc);
         }
+        crate::decks::ui::flush_notes(app);
+        app.stop_plugin();
+        self.exit_version_view(app);
+        app.flush_autosave();
+        removed.doc = Self::take_live_doc(app);
+        removed.hist = std::mem::take(&mut app.hist);
+        app.history.reset();
         let next_idx = idx.min(self.entries.len() - 1);
         self.active_idx = next_idx;
         self.parked_in_home = false;
@@ -785,7 +882,7 @@ impl TabsState {
         app.terminal.bind_session(&sid);
         app.terminal.sync_live_file_context(&app.doc, app.page, &app.selection, app.file_path.as_deref());
         self.hist_in_app = true;
-        true
+        Some(removed.doc)
     }
 
     /// Closes all unpinned tabs except `keep_idx` and activates `keep_idx`.
@@ -812,6 +909,7 @@ impl TabsState {
             }
         }
         self.entries.retain(|t| t.id == keep_id || t.pinned);
+        self.project_states.retain(|id, _| self.entries.iter().any(|t| t.id == *id));
         if let Some(new_idx) = self.entries.iter().position(|t| t.id == keep_id) {
             let tab_id = self.entries[new_idx].id;
             let sid = self.session_id_for_tab(tab_id);
@@ -826,6 +924,25 @@ impl TabsState {
             self.hist_in_app = true;
         }
         self.release_closed_paths(app, &closed_paths);
+        self.retain_converted_images(app);
+    }
+
+    /// Whether the document of tab `idx` still has pages that wait for their content. The open tab's document is on
+    /// screen, in `app`, unless the window is on Home.
+    pub(crate) fn tab_has_pending_pages(&self, idx: usize, app: &App) -> bool {
+        if idx == self.active_idx && app.home.is_none() {
+            return app.doc.has_pending_pages();
+        }
+        self.entries.get(idx).is_some_and(|tab| tab.doc.has_pending_pages())
+    }
+
+    /// Loads every pending page of tab `idx`, in place. Returns the notice when instances stay empty.
+    fn load_pending_pages_of(&mut self, idx: usize, app: &mut App) -> Result<Option<String>, String> {
+        if idx == self.active_idx && app.home.is_none() {
+            return app.load_pending_pages_for_write();
+        }
+        let left_empty = self.entries[idx].doc.load_pending_pages().map_err(|e| e.to_string())?;
+        Ok((left_empty > 0).then(|| crate::io::clone_budget_notice(left_empty)))
     }
 
     /// Clones `entries[idx]` as `"<title> (Copy)"` in a new tab right after `idx` and activates it.
@@ -833,10 +950,21 @@ impl TabsState {
         if idx >= self.entries.len() {
             return None;
         }
+        // The copy shares the page loader of a large `.fig`, so whichever side loads a page first leaves the
+        // other with empty instances. Load the source in place first: the copy then starts complete.
+        match self.load_pending_pages_of(idx, app) {
+            Ok(Some(notice)) => app.show_toast(notice, false),
+            Ok(None) => {}
+            Err(why) => {
+                app.show_toast(format!("Cannot copy tab: {why}"), true);
+                return None;
+            }
+        }
         if app.home.is_none() {
             self.park_active_from_app(app);
         }
         let src = &self.entries[idx];
+        let src_id = src.id;
         let copy_title = format!("{} (Copy)", src.title);
         let mut copy_doc = src.doc.clone();
         copy_doc.name = copy_title.clone();
@@ -847,6 +975,7 @@ impl TabsState {
         let copy_selection = src.selection.clone();
         let copy_view = src.view;
         let copy_dev_mode = src.dev_mode;
+        let copy_load_next_id = src.load_next_id;
 
         let new_id = self.alloc_id();
         let sid = self.session_id_for_tab(new_id);
@@ -857,6 +986,7 @@ impl TabsState {
             title: copy_title,
             kind: copy_kind,
             doc: copy_doc,
+            load_next_id: copy_load_next_id,
             hist: History::default(),
             terminal,
             image_jobs: crate::image_jobs::ImageJobsState::new_inheriting_config_from(&app.image_jobs),
@@ -872,6 +1002,12 @@ impl TabsState {
         };
         let insert_idx = (idx + 1).min(self.entries.len());
         self.entries.insert(insert_idx, new_tab);
+        if copy_kind == ProjectTabKind::Project {
+            if let Some(src_state) = self.project_states.get(&src_id) {
+                let copy_state = project_tab::ProjectTabState::new(&src_state.project_id, &src_state.project_name);
+                self.project_states.insert(new_id, copy_state);
+            }
+        }
         self.active_idx = insert_idx;
         self.parked_in_home = false;
         self.apply_to_app(insert_idx, app);
@@ -931,6 +1067,12 @@ pub(crate) fn tab_is_unsaved(app: &App, idx: usize) -> bool {
     app.tabs.entries.get(idx).is_some_and(|t| if is_active { app.has_unsaved_edits() } else { !t.hist.is_clean() || t.dirty })
 }
 
+fn mark_focus(ui: &Ui, p: &egui::Painter, id: egui::Id, rect: Rect, radius: f32) {
+    if crate::widgets::kit::keyboard_focus(ui, id) {
+        crate::widgets::kit::focus_ring(p, rect, radius);
+    }
+}
+
 /// Renders the 1:1 Figma UI3 Top Window Tab Bar (`32px` height) inside `ui`.
 #[allow(dead_code)]
 pub fn show_top_tab_bar(ui: &mut Ui, app: &mut App) {
@@ -938,6 +1080,18 @@ pub fn show_top_tab_bar(ui: &mut Ui, app: &mut App) {
         let rect = ui.max_rect();
         show_top_tab_bar_ui(ui, rect, app);
     });
+}
+
+/// Draws the Project tab on screen (rail included) into `full`. Returns false when the tab on screen is not one.
+pub fn show_active_project(app: &mut App, ui: &mut Ui, full: Rect) -> bool {
+    if !app.tabs.active_is_project() {
+        return false;
+    }
+    let Some(id) = app.tabs.entries.get(app.tabs.active_idx).map(|t| t.id) else { return false };
+    let Some(mut state) = app.tabs.project_states.remove(&id) else { return false };
+    project_tab::show(app, ui, full, &mut state);
+    app.tabs.project_states.insert(id, state);
+    true
 }
 
 /// Renders the 1:1 Figma UI3 Top Window Tab Bar (`32px` height) inside `bar_rect`.
@@ -969,15 +1123,18 @@ pub fn show_top_tab_bar_ui(ui: &mut Ui, bar_rect: Rect, app: &mut App) {
         if resp.hovered() {
             ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
         }
-        if is_home {
-            p.rect_filled(home_rect, theme::cr(6), TAB_ACTIVE_BG);
-            p.rect_stroke(home_rect, theme::cr(6), Stroke::new(1.0, TAB_ACTIVE_BORDER), StrokeKind::Inside);
+        let home_state = if is_home {
+            crate::widgets::kit::State::Selected
         } else if resp.hovered() {
-            p.rect_filled(home_rect, theme::cr(6), TAB_HOVER_BG);
-        }
-        let fg = if is_home || resp.hovered() { theme::TEXT } else { theme::TEXT_SECONDARY };
-        paint_home_glyph(&p, Pos2::new(home_rect.left() + 14.0, cy), fg);
-        p.text(Pos2::new(home_rect.left() + 26.0, cy), Align2::LEFT_CENTER, "Home", if is_home { theme::font_body_strong() } else { theme::font_body() }, fg);
+            crate::widgets::kit::State::Hover
+        } else {
+            crate::widgets::kit::State::Default
+        };
+        let home_look = crate::widgets::kit::tab_look(home_state);
+        crate::widgets::kit::paint_frame(&p, home_rect, theme::RADIUS_CONTROL, &home_look);
+        mark_focus(ui, &p, resp.id, home_rect, theme::RADIUS_CONTROL as f32);
+        paint_home_glyph(&p, Pos2::new(home_rect.left() + 14.0, cy), home_look.icon);
+        p.text(Pos2::new(home_rect.left() + 26.0, cy), Align2::LEFT_CENTER, "Home", theme::font_body_strong(), home_look.text);
         if resp.clicked() {
             actions.push(TabUiAction::ClickHome);
         }
@@ -985,7 +1142,7 @@ pub fn show_top_tab_bar_ui(ui: &mut Ui, bar_rect: Rect, app: &mut App) {
     }
 
     // Divider between Home button and open project tabs
-    p.vline(x, (bar_rect.top() + 8.0)..=(bar_rect.bottom() - 8.0), Stroke::new(1.0, TAB_ACTIVE_BORDER));
+    p.vline(x, (bar_rect.top() + 8.0)..=(bar_rect.bottom() - 8.0), Stroke::new(1.0, TAB_BAR_BORDER));
     x += 6.0;
 
     // 3. Open Project Tabs Strip
@@ -1013,78 +1170,96 @@ pub fn show_top_tab_bar_ui(ui: &mut Ui, bar_rect: Rect, app: &mut App) {
 
         let close_rect = Rect::from_center_size(Pos2::new(tab_rect.right() - 13.0, tab_rect.center().y), Vec2::splat(18.0));
         widgets::record(ui, &format!("tab-close-{tab_id}"), close_rect);
+        let close_hit = Rect::from_center_size(close_rect.center(), Vec2::splat(theme::TARGET_MIN));
+        if !tab.pinned {
+            widgets::record_with(ui, || format!("tab-close-hit-{tab_id}"), close_hit);
+        }
 
-        // Exclude close_rect from tab_hit_rect so clicking `×` never triggers tab switch instead of close
-        let tab_hit_right = if tab.pinned { tab_rect.right() } else { (close_rect.left() - 2.0).max(tab_rect.left() + 24.0) };
+        // The body stops before the 24px close hit so the close wins that press.
+        let tab_hit_right = if tab.pinned { tab_rect.right() } else { (close_hit.left() - theme::INSET_SEGMENT).max(tab_rect.left() + theme::TARGET_MIN) };
         let tab_hit_rect = Rect::from_min_max(tab_rect.min, Pos2::new(tab_hit_right, tab_rect.bottom()));
         let tab_resp = ui.interact(tab_hit_rect, ui.id().with(("project-tab", tab_id)), Sense::click());
-        let close_resp = if !tab.pinned { Some(ui.interact(close_rect, ui.id().with(("tab-close", tab_id)), Sense::click())) } else { None };
+        let close_resp = if !tab.pinned { Some(ui.interact(close_hit, ui.id().with(("tab-close", tab_id)), Sense::click())) } else { None };
 
         let hovered = tab_resp.hovered() || close_resp.as_ref().is_some_and(|r| r.hovered());
         if hovered {
             ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
         }
 
-        if is_active {
-            p.rect_filled(tab_rect, theme::cr_each(theme::RADIUS_CONTROL, theme::RADIUS_CONTROL, theme::RADIUS_SEGMENT, theme::RADIUS_SEGMENT), TAB_ACTIVE_BG);
-            p.rect_stroke(
-                tab_rect,
-                theme::cr_each(theme::RADIUS_CONTROL, theme::RADIUS_CONTROL, theme::RADIUS_SEGMENT, theme::RADIUS_SEGMENT),
-                Stroke::new(1.0, TAB_ACTIVE_BORDER),
-                StrokeKind::Inside,
-            );
+        let tab_state = if is_active {
+            crate::widgets::kit::State::Selected
         } else if hovered {
-            p.rect_filled(tab_rect, theme::cr(theme::RADIUS_CONTROL), TAB_HOVER_BG);
+            crate::widgets::kit::State::Hover
+        } else {
+            crate::widgets::kit::State::Default
+        };
+        let tab_look = crate::widgets::kit::tab_look(tab_state);
+        if is_active || hovered {
+            crate::widgets::kit::paint_frame(&p, tab_rect, theme::RADIUS_CONTROL, &tab_look);
         } else {
             // Subtle right separator between inactive tabs
             p.vline(tab_rect.right() + 1.0, (tab_rect.top() + 5.0)..=(tab_rect.bottom() - 5.0), Stroke::new(1.0, TAB_BAR_BORDER));
         }
+        mark_focus(ui, &p, tab_resp.id, tab_rect, theme::RADIUS_CONTROL as f32);
 
-        // Colored file-type icon badge (or Figma Dev Mode #1BC47D `</>` badge when dev_mode is active)
+        // File-type tile, or the ready mark when dev mode is on for this tab.
         let badge_rect = Rect::from_center_size(Pos2::new(tab_rect.left() + 13.0, tab_rect.center().y), Vec2::splat(14.0));
         let in_dev_mode = tab.dev_mode || (is_active && app.ui.dev_mode);
-        let (badge_col, badge_icon) = if in_dev_mode { (Color32::from_rgb(0x1B, 0xC4, 0x7D), Icon::Dev) } else { (tab.kind.badge_color(), tab.kind.icon()) };
         if in_dev_mode {
-            p.rect_filled(badge_rect, theme::cr(3), badge_col);
-            icons::paint(&p, badge_icon, badge_rect.center(), 10.0, Color32::from_rgb(0x0D, 0x1F, 0x16));
+            let dev = crate::widgets::kit::Look {
+                fill: theme::DEV_READY,
+                border: Color32::TRANSPARENT,
+                border_w: theme::BORDER_WIDTH,
+                text: Color32::TRANSPARENT,
+                icon: theme::TEXT_ON_BRAND,
+                mark: Color32::TRANSPARENT,
+            };
+            crate::widgets::kit::paint_frame(&p, badge_rect, theme::RADIUS_MARK, &dev);
+            icons::paint(&p, Icon::Dev, badge_rect.center(), 10.0, dev.icon);
         } else {
-            p.rect_filled(badge_rect, theme::cr(3), Color32::from_rgba_unmultiplied(badge_col.r(), badge_col.g(), badge_col.b(), 38));
-            icons::paint(&p, badge_icon, badge_rect.center(), 11.0, badge_col);
+            let kind = match tab.kind {
+                ProjectTabKind::Design => crate::widgets::kit::TileKind::Design,
+                ProjectTabKind::Board => crate::widgets::kit::TileKind::Board,
+                ProjectTabKind::Deck => crate::widgets::kit::TileKind::Deck,
+                ProjectTabKind::Spec | ProjectTabKind::Project => crate::widgets::kit::TileKind::Spec,
+            };
+            let tile = crate::widgets::kit::tile_look(kind);
+            crate::widgets::kit::paint_frame(&p, badge_rect, theme::RADIUS_MARK, &tile);
+            icons::paint(&p, tab.kind.icon(), badge_rect.center(), 11.0, tile.icon);
         }
 
         let mut text_left = badge_rect.right() + 6.0;
         if tab.pinned {
-            icons::paint(&p, Icon::Lock, Pos2::new(text_left + 5.0, tab_rect.center().y), 10.0, theme::TEXT_SECONDARY);
+            icons::paint(&p, Icon::Lock, Pos2::new(text_left + 5.0, tab_rect.center().y), 10.0, tab_look.icon);
             text_left += 13.0;
         }
 
         let right_reserve = if tab.pinned { 10.0 } else { 24.0 } + if is_dirty { 10.0 } else { 0.0 };
         let max_title_w = (tab_rect.right() - right_reserve - text_left).max(24.0);
-        let font = if is_active { theme::font_body_strong() } else { theme::font_body() };
-        let fg = if is_active || hovered { theme::TEXT } else { theme::TEXT_SECONDARY };
+        let font = theme::font_text(theme::FONT_SIZE_TEXT_XS, theme::TextWeight::Semibold);
         let display_title = truncate_tab_title(&p, &tab.title, &font, max_title_w);
-        p.text(Pos2::new(text_left, tab_rect.center().y), Align2::LEFT_CENTER, &display_title, font, fg);
+        p.text(Pos2::new(text_left, tab_rect.center().y), Align2::LEFT_CENTER, &display_title, font, tab_look.text);
 
-        // Unsaved/modified dot `•`
+        // Unsaved/modified dot.
         let dot_center = Pos2::new(if tab.pinned { tab_rect.right() - 10.0 } else { close_rect.left() - 6.0 }, tab_rect.center().y);
         widgets::record(ui, &format!("tab-unsaved-dot-{tab_id}"), if is_dirty { Rect::from_center_size(dot_center, Vec2::splat(6.0)) } else { Rect::NOTHING });
         if is_dirty {
-            p.circle_filled(dot_center, 3.0, BADGE_DESIGN_BLUE);
+            p.circle_filled(dot_center, 3.0, theme::ICON_BRAND_PRIMARY);
         }
 
-        // Close `×` button — always visible on unpinned tabs so user can close in 1 click
+        // Close stays on the 18px plate. The 24px hit is the interact target.
         if let Some(cr) = &close_resp {
-            if cr.hovered() {
-                p.rect_filled(close_rect, theme::cr(4), Color32::from_rgb(0xE1, 0x1D, 0x48));
-            }
-            let close_fg = if cr.hovered() {
-                Color32::WHITE
-            } else if is_active || hovered {
-                theme::TEXT
+            let plate = if is_active {
+                crate::widgets::kit::ClosePlate::Selected
+            } else if hovered {
+                crate::widgets::kit::ClosePlate::Hover
             } else {
-                theme::TEXT_SECONDARY
+                crate::widgets::kit::ClosePlate::Primary
             };
-            icons::paint(&p, Icon::Close, close_rect.center(), 10.0, close_fg);
+            let close_look = crate::widgets::kit::close_look_over(plate, crate::widgets::kit::state_of(cr, false, true));
+            crate::widgets::kit::paint_frame(&p, close_rect, theme::RADIUS_SEGMENT, &close_look);
+            mark_focus(ui, &p, cr.id, close_rect, theme::RADIUS_SEGMENT as f32);
+            icons::paint(&p, Icon::Close, close_rect.center(), 10.0, close_look.icon);
         }
 
         let close_clicked = close_resp.as_ref().is_some_and(|r| r.clicked());
@@ -1110,9 +1285,11 @@ pub fn show_top_tab_bar_ui(ui: &mut Ui, bar_rect: Rect, app: &mut App) {
         let plus_resp = ui.interact(plus_rect, ui.id().with("tab-bar-new"), Sense::click());
         if plus_resp.hovered() {
             ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
-            p.rect_filled(plus_rect, theme::cr(theme::RADIUS_CONTROL), TAB_HOVER_BG);
         }
-        icons::paint(&p, Icon::Plus, plus_rect.center(), 13.0, if plus_resp.hovered() { theme::TEXT } else { theme::TEXT_SECONDARY });
+        let plus_look = crate::widgets::kit::button_look(crate::widgets::kit::Hierarchy::Icon, crate::widgets::kit::state_of(&plus_resp, false, true));
+        crate::widgets::kit::paint_frame(&p, plus_rect, theme::RADIUS_CONTROL, &plus_look);
+        mark_focus(ui, &p, plus_resp.id, plus_rect, theme::RADIUS_CONTROL as f32);
+        icons::paint(&p, Icon::Plus, plus_rect.center(), 13.0, plus_look.icon);
         if plus_resp.clicked() {
             actions.push(TabUiAction::NewDesignTab);
         }
@@ -1124,21 +1301,20 @@ pub fn show_top_tab_bar_ui(ui: &mut Ui, bar_rect: Rect, app: &mut App) {
 
     // 4c. Right-aligned compact Update check button ("top-tab-update-btn"); hidden until the updater is real (see `updater::UPDATER_UI_ENABLED`)
     if crate::home::updater::UPDATER_UI_ENABLED {
-        let upd_rect = Rect::from_min_size(Pos2::new(bar_rect.right() - 68.0, bar_rect.top() + 4.0), Vec2::new(60.0, 24.0));
+        let upd_font = theme::font_text(theme::FONT_SIZE_TEXT_SM, theme::TextWeight::Semibold);
+        let upd_w = (14.0 + widgets::text_width(&p, "Update", &upd_font) + theme::INSET_CONTROL).ceil();
+        let upd_rect =
+            Rect::from_min_size(Pos2::new(bar_rect.right() - upd_w - theme::SPACE_INLINE, bar_rect.top() + 4.0), Vec2::new(upd_w, theme::TARGET_MIN));
         widgets::record(ui, "top-tab-update-btn", upd_rect);
         let upd_resp = ui.interact(upd_rect, ui.id().with("top-tab-update-btn"), Sense::click());
         if upd_resp.hovered() {
             ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
-            p.rect_filled(upd_rect, theme::cr(theme::RADIUS_CONTROL), TAB_HOVER_BG);
         }
-        p.circle_filled(Pos2::new(upd_rect.left() + 8.0, upd_rect.center().y), 2.5, Color32::from_rgb(0x1B, 0xC4, 0x7D));
-        p.text(
-            Pos2::new(upd_rect.left() + 14.0, upd_rect.center().y),
-            Align2::LEFT_CENTER,
-            "Update",
-            theme::font_caption(),
-            if upd_resp.hovered() { theme::TEXT } else { theme::TEXT_SECONDARY },
-        );
+        let upd_look = crate::widgets::kit::button_look(crate::widgets::kit::Hierarchy::Tertiary, crate::widgets::kit::state_of(&upd_resp, false, true));
+        crate::widgets::kit::paint_frame(&p, upd_rect, theme::RADIUS_CONTROL, &upd_look);
+        mark_focus(ui, &p, upd_resp.id, upd_rect, theme::RADIUS_CONTROL as f32);
+        p.circle_filled(Pos2::new(upd_rect.left() + 8.0, upd_rect.center().y), 2.5, theme::SUCCESS);
+        p.text(Pos2::new(upd_rect.left() + 14.0, upd_rect.center().y), Align2::LEFT_CENTER, "Update", upd_font, upd_look.text);
         if upd_resp.on_hover_text("Check for updates & verify binary SHA-256").clicked() {
             let msg = if let Some(home) = &mut app.home {
                 home.updater.check_for_updates();
@@ -1229,14 +1405,26 @@ pub fn show_top_tab_bar_ui(ui: &mut Ui, bar_rect: Rect, app: &mut App) {
         for act in actions {
             match act {
                 TabUiAction::ClickHome => tabs.enter_home(app),
-                TabUiAction::SwitchTab(idx) => tabs.switch_to(idx, app),
+                TabUiAction::SwitchTab(idx) => {
+                    if let Some(tab) = tabs.entries.get(idx) {
+                        // A failed library save is protected by the leave flow before the tab is parked.
+                        leaves.push(crate::home::Leave::SwitchTab(tab.id));
+                    }
+                }
                 TabUiAction::CloseTab(idx) => {
                     if let Some(t) = tabs.entries.get(idx) {
                         leaves.push(crate::home::Leave::CloseTab(t.id));
                     }
                 }
                 TabUiAction::DuplicateTab(idx) => {
-                    tabs.duplicate_tab(idx, app);
+                    if tabs.tab_has_pending_pages(idx, app) {
+                        // Loading the pages of a large `.fig` takes a while: say so before the window waits.
+                        app.run_after_status_paint("Copying tab\u{2026} loading all pages", move |app| {
+                            app.duplicate_tab(idx);
+                        });
+                    } else {
+                        tabs.duplicate_tab(idx, app);
+                    }
                 }
                 TabUiAction::TogglePin(idx) => {
                     tabs.toggle_pin(idx);
@@ -1337,15 +1525,23 @@ impl App {
     }
 
     pub fn next_tab(&mut self) {
-        let mut tabs = std::mem::take(&mut self.tabs);
-        tabs.next_tab(self);
-        self.tabs = tabs;
+        if self.tabs.entries.len() <= 1 {
+            return;
+        }
+        let next = (self.tabs.active_idx + 1) % self.tabs.entries.len();
+        if let Some(id) = self.tabs.entries.get(next).map(|tab| tab.id) {
+            self.request_leave(None, crate::home::Leave::SwitchTab(id));
+        }
     }
 
     pub fn prev_tab(&mut self) {
-        let mut tabs = std::mem::take(&mut self.tabs);
-        tabs.prev_tab(self);
-        self.tabs = tabs;
+        if self.tabs.entries.len() <= 1 {
+            return;
+        }
+        let prev = (self.tabs.active_idx + self.tabs.entries.len() - 1) % self.tabs.entries.len();
+        if let Some(id) = self.tabs.entries.get(prev).map(|tab| tab.id) {
+            self.request_leave(None, crate::home::Leave::SwitchTab(id));
+        }
     }
 }
 
@@ -1414,6 +1610,28 @@ mod tests {
         assert_eq!(app.selection, vec![r2]);
         assert!((app.view.zoom - 0.75).abs() < 1e-5);
         assert!(app.hist.can_undo(), "Tab 2 undo stack restored");
+    }
+
+    #[test]
+    fn switching_tabs_restores_each_documents_load_watermark() {
+        let mut app = make_app_with_doc("A");
+        let watermark_a = app.load_next_id;
+
+        let mut doc_b = Document::new("B");
+        doc_b.add_page("Page 1");
+        for _ in 0..4 {
+            let _ = doc_b.alloc_id();
+        }
+        let watermark_b = doc_b.peek_next_id();
+        assert_ne!(watermark_a, watermark_b, "the two documents allocate past different ids");
+
+        app.open_new_tab("B", doc_b, ProjectTabKind::Design);
+        assert_eq!(app.load_next_id, watermark_b, "tab B brings its own watermark");
+
+        app.switch_tab(0);
+        assert_eq!(app.load_next_id, watermark_a, "switching back to A restores A's watermark");
+        app.switch_tab(1);
+        assert_eq!(app.load_next_id, watermark_b, "switching back to B restores B's watermark");
     }
 
     #[test]
@@ -1502,10 +1720,9 @@ mod tests {
         let p2 = damaged2.add_page("P2");
         damaged2.nodes.get_mut(&p2).unwrap().children.push(designos_doc::NodeId(8888));
 
-        let mut path1 = std::env::temp_dir();
-        path1.push(format!("designos_tab_close_repaired_1_{}.designos", std::process::id()));
-        let mut path2 = std::env::temp_dir();
-        path2.push(format!("designos_tab_close_repaired_2_{}.designos", std::process::id()));
+        let temp_dir = tempfile::Builder::new().prefix("designos_tab_close_repaired-").tempdir().unwrap();
+        let path1 = temp_dir.path().join("one.designos");
+        let path2 = temp_dir.path().join("two.designos");
 
         std::fs::write(&path1, damaged1.to_json().unwrap()).unwrap();
         std::fs::write(&path2, damaged2.to_json().unwrap()).unwrap();
@@ -1543,15 +1760,12 @@ mod tests {
 
         app.new_document();
         assert!(!crate::io::has_repaired_original(&path2), "replacing active document without saving drops its repaired bytes");
-
-        std::fs::remove_file(&path1).ok();
-        std::fs::remove_file(&path2).ok();
     }
 
     /// A library with one design file whose page holds a rectangle; returns the library, the file id and the rectangle.
-    fn library_with_one_file(tag: &str) -> (designos_library::Library, std::path::PathBuf, String, NodeId) {
-        let dir = std::env::temp_dir().join(format!("designos_tab_close_lib_{tag}_{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
+    fn library_with_one_file(tag: &str) -> (tempfile::TempDir, designos_library::Library, std::path::PathBuf, String, NodeId) {
+        let temp = tempfile::Builder::new().prefix(&format!("designos_tab_close_lib_{tag}-")).tempdir().unwrap();
+        let dir = temp.path().to_path_buf();
         let lib = designos_library::Library::open(&dir).unwrap();
         let project = lib.create_project("Project").unwrap();
         let mut doc = Document::new("Doc");
@@ -1559,7 +1773,7 @@ mod tests {
         let rect_id = doc.alloc_id();
         let rect = doc.insert(page, Node::rectangle(rect_id, DRect::new(0.0, 0.0, 40.0, 40.0))).unwrap();
         let entry = lib.create_file(&project.id, None, "Doc", &doc).unwrap();
-        (lib, dir, entry.id, rect)
+        (temp, lib, dir, entry.id, rect)
     }
 
     /// Renames the rectangle and checks that the edit is not on disk yet (no autosave frame has run).
@@ -1575,7 +1789,7 @@ mod tests {
 
     #[test]
     fn closing_the_last_library_tab_saves_the_edit_and_a_closing_version() {
-        let (lib, dir, file_id, rect) = library_with_one_file("last");
+        let (_temp, lib, dir, file_id, rect) = library_with_one_file("last");
         let mut app = App::new(Document::new("Scratch"));
         app.lib = Some(lib.clone());
         app.open_library_file(&file_id);
@@ -1603,15 +1817,15 @@ mod tests {
     }
 
     /// Two library files, each with one rectangle; returns the library, its directory and both files (id, rectangle).
-    fn library_with_two_files(tag: &str) -> (designos_library::Library, std::path::PathBuf, (String, NodeId), (String, NodeId)) {
-        let (lib, dir, id_a, rect_a) = library_with_one_file(tag);
+    fn library_with_two_files(tag: &str) -> (tempfile::TempDir, designos_library::Library, std::path::PathBuf, (String, NodeId), (String, NodeId)) {
+        let (temp, lib, dir, id_a, rect_a) = library_with_one_file(tag);
         let project = lib.list_projects().remove(0);
         let mut doc = Document::new("Other");
         let page = doc.add_page("Page 1");
         let rect_id = doc.alloc_id();
         let rect_b = doc.insert(page, Node::rectangle(rect_id, DRect::new(0.0, 0.0, 40.0, 40.0))).unwrap();
         let entry = lib.create_file(&project.id, None, "Other", &doc).unwrap();
-        (lib, dir, (id_a, rect_a), (entry.id, rect_b))
+        (temp, lib, dir, (id_a, rect_a), (entry.id, rect_b))
     }
 
     /// One `reconcile_frame`, as the shell runs every frame.
@@ -1624,8 +1838,10 @@ mod tests {
     /// The production route to two open library tabs, file B active and unedited: Home, open A from Home,
     /// the tab-bar Home click, open B from Home. Opening goes through `App::open_library_file` (what the
     /// Home screen calls) and the tab entries are created by `reconcile_frame`, never by `open_or_focus_lib_file`.
-    fn two_library_tabs_opened_from_home(tag: &str) -> (App, designos_library::Library, std::path::PathBuf, (String, NodeId), (String, NodeId)) {
-        let (lib, dir, a, b) = library_with_two_files(tag);
+    fn two_library_tabs_opened_from_home(
+        tag: &str,
+    ) -> (tempfile::TempDir, App, designos_library::Library, std::path::PathBuf, (String, NodeId), (String, NodeId)) {
+        let (temp, lib, dir, a, b) = library_with_two_files(tag);
         let mut app = App::new(Document::new("Scratch"));
         app.lib = Some(lib.clone());
         app.go_home();
@@ -1641,7 +1857,7 @@ mod tests {
         assert_eq!(app.tabs.entries.len(), 2, "both files are open in tabs");
         assert_eq!(app.tabs.active_idx, 1);
         assert_eq!(app.lib_file.as_ref().map(|f| f.id.as_str()), Some(b.0.as_str()));
-        (app, lib, dir, a, b)
+        (temp, app, lib, dir, a, b)
     }
 
     /// The file keeps its content and none of its stored versions is empty.
@@ -1654,7 +1870,7 @@ mod tests {
 
     /// Edits the active tab (file B) without letting autosave run, leaves it with `leave`, and checks the disk.
     fn leaving_the_edited_tab_saves_it(name: &str, leave: fn(&mut TabsState, &mut App)) {
-        let (mut app, lib, dir, _a, b) = two_library_tabs_opened_from_home(&format!("park_{name}"));
+        let (_temp, mut app, lib, dir, _a, b) = two_library_tabs_opened_from_home(&format!("park_{name}"));
         edit_unsaved(&mut app, &lib, &b.0, b.1);
 
         let mut tabs = std::mem::take(&mut app.tabs);
@@ -1683,7 +1899,7 @@ mod tests {
 
     #[test]
     fn clicking_home_stores_the_closing_version_with_the_edit() {
-        let (mut app, lib, dir, _a, b) = two_library_tabs_opened_from_home("park_home_version");
+        let (_temp, mut app, lib, dir, _a, b) = two_library_tabs_opened_from_home("park_home_version");
         edit_unsaved(&mut app, &lib, &b.0, b.1);
 
         let mut tabs = std::mem::take(&mut app.tabs);
@@ -1699,7 +1915,7 @@ mod tests {
 
     #[test]
     fn switching_tabs_from_home_reached_by_back_to_files_does_not_empty_the_file() {
-        let (mut app, lib, dir, _a, b) = two_library_tabs_opened_from_home("park_back_to_files");
+        let (_temp, mut app, lib, dir, _a, b) = two_library_tabs_opened_from_home("park_back_to_files");
         edit_unsaved(&mut app, &lib, &b.0, b.1);
         app.go_home();
         assert!(disk_has_edit(&lib, &b.0), "Back to files saves the edit");
@@ -1715,7 +1931,7 @@ mod tests {
 
     #[test]
     fn clicking_home_on_a_library_tab_without_edits_does_not_empty_its_file() {
-        let (lib, dir, a, _b) = library_with_two_files("park_clean_home");
+        let (_temp, lib, dir, a, _b) = library_with_two_files("park_clean_home");
         let mut app = App::new(Document::new("Scratch"));
         app.lib = Some(lib.clone());
         app.go_home();
@@ -1734,7 +1950,7 @@ mod tests {
 
     #[test]
     fn closing_the_last_tab_of_a_repaired_library_file_saves_the_edit_and_keeps_the_backup() {
-        let (lib, dir, file_id, _rect) = library_with_one_file("repaired_last");
+        let (_temp, lib, dir, file_id, _rect) = library_with_one_file("repaired_last");
         let entry = lib.file(&file_id).unwrap();
         let disk_path = lib.path("projects").join(&entry.project).join("files").join(format!("{file_id}.designos"));
         let mut damaged = Document::new("Damaged");
@@ -1765,8 +1981,8 @@ mod tests {
     /// Two damaged library files open in two tabs: tab 0 (active) holds the second file, tab 1 the first.
     /// Built by pushing a tab entry instead of parking a document. Returns the app, the library root and
     /// the disk paths that key each file's cached pre-repair bytes.
-    fn app_with_two_repaired_library_tabs(tag: &str) -> (App, std::path::PathBuf, std::path::PathBuf, std::path::PathBuf) {
-        let (lib, dir, file_id, _rect) = library_with_one_file(tag);
+    fn app_with_two_repaired_library_tabs(tag: &str) -> (tempfile::TempDir, App, std::path::PathBuf, std::path::PathBuf, std::path::PathBuf) {
+        let (temp, lib, dir, file_id, _rect) = library_with_one_file(tag);
         let project = lib.file(&file_id).unwrap().project;
         let other_id = lib.create_file(&project, None, "Other", &Document::new("Other")).unwrap().id;
         let disk_path_of = |id: &str| lib.path("projects").join(&project).join("files").join(format!("{id}.designos"));
@@ -1791,12 +2007,12 @@ mod tests {
         app.tabs = tabs;
         assert_eq!(app.tabs.entries.len(), 2);
         assert!(crate::io::has_repaired_original(&path_a) && crate::io::has_repaired_original(&path_b));
-        (app, dir, path_a, path_b)
+        (temp, app, dir, path_a, path_b)
     }
 
     #[test]
     fn closing_a_repaired_library_tab_without_saving_drops_its_repaired_original_bytes() {
-        let (mut app, dir, path_a, path_b) = app_with_two_repaired_library_tabs("repaired_unsaved");
+        let (_temp, mut app, dir, path_a, path_b) = app_with_two_repaired_library_tabs("repaired_unsaved");
 
         // A background tab, then the active one, closed without an edit: nothing is saved, so nothing may linger.
         assert!(app.close_tab(1));
@@ -1809,7 +2025,7 @@ mod tests {
 
     #[test]
     fn closing_other_tabs_drops_the_repaired_original_bytes_of_closed_library_tabs() {
-        let (mut app, dir, path_a, path_b) = app_with_two_repaired_library_tabs("repaired_others");
+        let (_temp, mut app, dir, path_a, path_b) = app_with_two_repaired_library_tabs("repaired_others");
         // With Home on screen no document is parked, which keeps this to the eviction.
         app.home = Some(crate::home::Home::new());
 
@@ -1825,7 +2041,7 @@ mod tests {
 
     #[test]
     fn closing_the_active_library_tab_with_other_tabs_open_saves_its_edit() {
-        let (lib, dir, file_id, rect) = library_with_one_file("active");
+        let (_temp, lib, dir, file_id, rect) = library_with_one_file("active");
         let mut app = App::new(Document::new("Scratch"));
         app.lib = Some(lib.clone());
         let mut tabs = std::mem::take(&mut app.tabs);
@@ -1845,12 +2061,13 @@ mod tests {
 
     #[test]
     fn moving_a_repaired_file_into_the_library_drops_its_repaired_original_bytes() {
-        let (lib, dir, _file_id, _rect) = library_with_one_file("moved");
+        let (_temp, lib, dir, _file_id, _rect) = library_with_one_file("moved");
         let project = lib.list_projects()[0].id.clone();
         let mut damaged = Document::new("Damaged");
         let page = damaged.add_page("P");
         damaged.nodes.get_mut(&page).unwrap().children.push(designos_doc::NodeId(9999));
-        let path = std::env::temp_dir().join(format!("designos_tab_moved_repaired_{}.designos", std::process::id()));
+        let temp_file_dir = tempfile::Builder::new().prefix("designos_tab_moved_repaired-").tempdir().unwrap();
+        let path = temp_file_dir.path().join("source.designos");
         std::fs::write(&path, damaged.to_json().unwrap()).unwrap();
         let mut app = App::new(Document::new("Scratch"));
         app.lib = Some(lib);
@@ -1864,7 +2081,6 @@ mod tests {
 
         assert!(app.file_path.is_none() && app.lib_file.is_some());
         assert!(!crate::io::has_repaired_original(&path), "the document no longer lives at the old path, so its repaired bytes are dropped");
-        let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1931,7 +2147,7 @@ mod tests {
 
     #[test]
     fn replacing_a_repaired_library_file_in_place_drops_its_repaired_original_bytes() {
-        let (lib, dir, file_id, _rect) = library_with_one_file("replace_in_place");
+        let (_temp, lib, dir, file_id, _rect) = library_with_one_file("replace_in_place");
         let project = lib.file(&file_id).unwrap().project;
         let disk_path = lib.path("projects").join(&project).join("files").join(format!("{file_id}.designos"));
         let mut damaged = Document::new("Damaged");
@@ -1970,7 +2186,7 @@ mod tests {
 
     #[test]
     fn library_tab_and_external_tab_on_same_disk_path_share_still_open_check() {
-        let (lib, dir, file_id, _rect) = library_with_one_file("shared_repair_key");
+        let (_temp, lib, dir, file_id, _rect) = library_with_one_file("shared_repair_key");
         let project = lib.file(&file_id).unwrap().project;
         let disk_path = lib.path("projects").join(&project).join("files").join(format!("{file_id}.designos"));
         let mut damaged = Document::new("Damaged");
@@ -2028,5 +2244,167 @@ mod tests {
         assert_eq!(std::fs::read(&backup).unwrap(), damaged_bytes, "saving the remaining library tab writes the pre-repair .bak");
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn paint_tab_bar(app: &mut App) -> (egui::Context, Vec<egui::epaint::ClippedShape>) {
+        let ctx = egui::Context::default();
+        theme::install_fonts(&ctx);
+        let screen = Rect::from_min_size(Pos2::ZERO, Vec2::new(1440.0, 900.0));
+        let bar = Rect::from_min_size(Pos2::ZERO, Vec2::new(1440.0, TOP_TAB_BAR_HEIGHT));
+        let raw = egui::RawInput { screen_rect: Some(screen), ..Default::default() };
+        let shapes = ctx.run_ui(raw, |ui| show_top_tab_bar_ui(ui, bar, app)).shapes;
+        (ctx, shapes)
+    }
+
+    fn walk_rects(shapes: &[egui::epaint::ClippedShape]) -> Vec<egui::epaint::RectShape> {
+        fn walk(shape: &egui::Shape, out: &mut Vec<egui::epaint::RectShape>) {
+            match shape {
+                egui::Shape::Rect(r) => out.push(r.clone()),
+                egui::Shape::Vec(inner) => inner.iter().for_each(|s| walk(s, out)),
+                _ => {}
+            }
+        }
+        let mut out = Vec::new();
+        for cs in shapes {
+            walk(&cs.shape, &mut out);
+        }
+        out
+    }
+
+    /// Every colour the tab bar paints on a rectangle, a line or a dot, transparent ones left out.
+    fn painted_colours(shapes: &[egui::epaint::ClippedShape]) -> Vec<Color32> {
+        fn walk(shape: &egui::Shape, out: &mut Vec<Color32>) {
+            match shape {
+                egui::Shape::Rect(r) => {
+                    out.push(r.fill);
+                    if r.stroke.width > 0.0 {
+                        out.push(r.stroke.color);
+                    }
+                }
+                egui::Shape::LineSegment { stroke, .. } => out.push(stroke.color),
+                egui::Shape::Circle(c) => {
+                    out.push(c.fill);
+                    if c.stroke.width > 0.0 {
+                        out.push(c.stroke.color);
+                    }
+                }
+                egui::Shape::Vec(inner) => inner.iter().for_each(|s| walk(s, out)),
+                _ => {}
+            }
+        }
+        let mut out = Vec::new();
+        for cs in shapes {
+            walk(&cs.shape, &mut out);
+        }
+        out.retain(|c| c.a() > 0);
+        out
+    }
+
+    /// The fills and lines the tab bar is allowed to paint: its own bar and hairline, the tab and close plates of the
+    /// widget kit, the file-type tiles, the Dev ready mark and the unsaved dot.
+    const TAB_BAR_ROLES: [Color32; 12] = [
+        theme::BG_PRIMARY,
+        theme::BORDER,
+        theme::BG_SELECTED,
+        theme::BG_HOVER,
+        theme::BG_SECONDARY_HOVER,
+        theme::BG_PRESSED,
+        theme::TILE_DESIGN_BG,
+        theme::TILE_BOARD_BG,
+        theme::TILE_DECK_BG,
+        theme::TILE_SPEC_BG,
+        theme::DEV_READY,
+        theme::ICON_BRAND_PRIMARY,
+    ];
+
+    fn assert_only_roles(shapes: &[egui::epaint::ClippedShape], what: &str) -> Vec<Color32> {
+        let painted = painted_colours(shapes);
+        let strays: Vec<_> = painted.iter().filter(|c| !TAB_BAR_ROLES.contains(c)).collect();
+        assert!(strays.is_empty(), "{what}: the tab bar paints colours outside its roles: {strays:?}");
+        painted
+    }
+
+    /// Paints the bar once to find the tab's close hit, then again with the pointer resting on it.
+    fn paint_tab_bar_hovering_close(app: &mut App, tab: usize) -> Vec<egui::epaint::ClippedShape> {
+        let ctx = egui::Context::default();
+        theme::install_fonts(&ctx);
+        let screen = Rect::from_min_size(Pos2::ZERO, Vec2::new(1440.0, 900.0));
+        let bar = Rect::from_min_size(Pos2::ZERO, Vec2::new(1440.0, TOP_TAB_BAR_HEIGHT));
+        let id = app.tabs.entries[tab].id;
+        let run = |app: &mut App, events: Vec<egui::Event>| {
+            let raw = egui::RawInput { screen_rect: Some(screen), events, ..Default::default() };
+            ctx.run_ui(raw, |ui| show_top_tab_bar_ui(ui, bar, app)).shapes
+        };
+        run(app, vec![]);
+        let close = ctx.data(|d| d.get_temp::<Rect>(egui::Id::new(("test-rect", format!("tab-close-hit-{id}"))))).expect("close hit");
+        let at = close.center();
+        run(app, vec![egui::Event::PointerMoved(at)]);
+        run(app, vec![egui::Event::PointerMoved(at)])
+    }
+
+    #[test]
+    fn tab_bar_paints_only_theme_roles() {
+        let mut app = make_app_with_doc("Design");
+        app.home = None;
+        let (_ctx, shapes) = paint_tab_bar(&mut app);
+        let painted = assert_only_roles(&shapes, "at rest");
+        assert!(
+            walk_rects(&shapes).iter().any(|r| (r.rect.height() - 26.0).abs() < 0.5 && r.fill == theme::BG_SELECTED),
+            "the active file tab fills with the selected role"
+        );
+        assert!(painted.contains(&theme::BG_PRIMARY), "the bar fills with the page role");
+        assert!(!painted.contains(&theme::DEV_READY), "outside Dev mode no tab shows the ready mark");
+
+        let mut dev = make_app_with_doc("Design");
+        dev.home = None;
+        dev.ui.dev_mode = true;
+        let (_ctx, shapes) = paint_tab_bar(&mut dev);
+        let painted = assert_only_roles(&shapes, "in Dev mode");
+        assert!(painted.contains(&theme::DEV_READY), "the active tab shows the ready mark in Dev mode");
+
+        let mut hovered = make_app_with_doc("Design");
+        hovered.home = None;
+        let shapes = paint_tab_bar_hovering_close(&mut hovered, 0);
+        let painted = assert_only_roles(&shapes, "hovering the close of the active tab");
+        assert!(painted.contains(&theme::BG_PRESSED), "the close plate of the selected tab takes its hover fill");
+
+        let mut two = make_app_with_doc("Design");
+        two.home = None;
+        two.open_new_design_tab();
+        let shapes = paint_tab_bar_hovering_close(&mut two, 0);
+        let painted = assert_only_roles(&shapes, "hovering the close of a resting tab");
+        assert!(painted.contains(&theme::BG_HOVER), "the hovered tab takes the hover fill");
+        assert!(painted.contains(&theme::BG_SECONDARY_HOVER), "the close plate of a hovered tab takes its hover fill");
+    }
+
+    #[test]
+    fn tab_close_hit_box_meets_the_target_floor() {
+        let mut app = make_app_with_doc("Design");
+        app.home = None;
+        let id = app.tabs.entries[0].id;
+        let ctx = egui::Context::default();
+        theme::install_fonts(&ctx);
+        let screen = Rect::from_min_size(Pos2::ZERO, Vec2::new(1440.0, 900.0));
+        let bar = Rect::from_min_size(Pos2::ZERO, Vec2::new(1440.0, TOP_TAB_BAR_HEIGHT));
+        let raw = egui::RawInput { screen_rect: Some(screen), ..Default::default() };
+        let root = std::cell::Cell::new(egui::Id::NULL);
+        let _ = ctx.run_ui(raw, |ui| {
+            root.set(ui.id());
+            show_top_tab_bar_ui(ui, bar, &mut app)
+        });
+        let named = |name: String| ctx.data(|d| d.get_temp::<Rect>(egui::Id::new(("test-rect", name))));
+        let hit = named(format!("tab-close-hit-{id}")).expect("close hit");
+        let visual = named(format!("tab-close-{id}")).expect("close visual");
+        let tab = named("project-tab-0".to_string()).expect("tab");
+        // The body is a widget the bar does not record under a name (a new name would change the layout gate's
+        // unnamed widgets), so its rect comes from the response egui kept for it.
+        let body = ctx.read_response(root.get().with(("project-tab", id))).expect("the tab body widget").rect;
+        assert!(hit.width() + 0.5 >= theme::TARGET_MIN && hit.height() + 0.5 >= theme::TARGET_MIN);
+        assert!((visual.width() - 18.0).abs() < 0.5 && (visual.height() - 18.0).abs() < 0.5, "the painted close stays 18");
+        assert!((hit.center() - visual.center()).length() < 0.5, "hit and visual share a centre");
+        assert!(hit.left() > tab.left() && hit.right() <= tab.right() + 0.5, "the close hit stays inside the tab");
+        assert!(hit.left() < visual.left(), "the hit extends past the painted close, so the tab body stops before it");
+        assert!(body.right() < hit.left(), "the tab body hit ends at {} before the close hit starts at {}", body.right(), hit.left());
+        assert!(body.left() == tab.left() && body.height() == tab.height(), "the body keeps the tab's left edge and height");
     }
 }

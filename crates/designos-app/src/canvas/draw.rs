@@ -20,6 +20,11 @@ pub const FIGMA_PINK: Color32 = Color32::from_rgb(0xFF, 0x38, 0x8C);
 /// Figma UI3 export slice accent green (`#14AE5C`).
 pub const FIGMA_SLICE_GREEN: Color32 = Color32::from_rgb(0x14, 0xAE, 0x5C);
 
+/// Size badge for one selected node. Reads stored `n.size`.
+pub(crate) fn selection_size_badge(n: &Node) -> String {
+    format!("{} × {}", n.size.x.round() as i64, n.size.y.round() as i64)
+}
+
 /// Whether `n` is a Slice node (either imported `SLICE` or drawn with `Tool::Slice`).
 pub fn is_slice_node(n: &Node) -> bool {
     matches!(&n.kind, NodeKind::Unknown { type_name } if type_name.eq_ignore_ascii_case("SLICE"))
@@ -98,8 +103,20 @@ fn paint_instance_diamond(p: &Painter, center: Pos2, radius: f32, col: Color32) 
     p.add(egui::Shape::closed_line(pts, Stroke::new(1.3, col)));
 }
 
+const COMP_LABEL_GLYPH_W: f32 = 18.0;
+const LABEL_RIGHT_INSET: f32 = 4.5;
+
+#[derive(Clone, Debug)]
+pub struct LabelEntry {
+    pub id: NodeId,
+    pub rect: ERect,
+    pub pieces: Vec<ERect>,
+    pub show_glyph: bool,
+    pub text: String,
+}
+
 type LabelRectsKey = (u64, NodeId, u64, u32, u32, u32, u32, u32, u32, u32);
-type LabelRectsCacheEntry = (LabelRectsKey, Vec<(NodeId, ERect)>);
+type LabelRectsCacheEntry = (LabelRectsKey, Vec<LabelEntry>);
 type ChromeNodesKey = (u64, NodeId, u64);
 type ChromeNodesCacheEntry = (ChromeNodesKey, Vec<(NodeId, bool, bool, bool)>);
 thread_local! {
@@ -107,8 +124,62 @@ thread_local! {
     static CHROME_NODES_CACHE: std::cell::RefCell<Option<ChromeNodesCacheEntry>> = const { std::cell::RefCell::new(None) };
 }
 
-/// Screen rects of the name labels above top-level frames, components, instances, and sections.
-pub fn label_rects(app: &App, rect: ERect) -> Vec<(NodeId, ERect)> {
+fn has_covering_fill(n: &Node) -> bool {
+    n.visible
+        && n.opacity > 0.0
+        && matches!(n.kind, NodeKind::Frame(_) | NodeKind::Component(_) | NodeKind::ComponentSet(_) | NodeKind::Instance { .. })
+        && n.fills.iter().any(|f| f.visible && f.opacity > 0.0 && f.silhouette_alpha() > 0.0)
+}
+
+fn subtract_rect(pieces: &mut Vec<ERect>, cover: ERect) {
+    let prev = std::mem::take(pieces);
+    for p in prev {
+        let cut = p.intersect(cover);
+        if !cut.is_positive() {
+            pieces.push(p);
+            continue;
+        }
+        if cut.min.y > p.min.y {
+            pieces.push(ERect::from_min_max(Pos2::new(p.min.x, p.min.y), Pos2::new(p.max.x, cut.min.y)));
+        }
+        if cut.max.y < p.max.y {
+            pieces.push(ERect::from_min_max(Pos2::new(p.min.x, cut.max.y), Pos2::new(p.max.x, p.max.y)));
+        }
+        if cut.min.x > p.min.x {
+            pieces.push(ERect::from_min_max(Pos2::new(p.min.x, cut.min.y), Pos2::new(cut.min.x, cut.max.y)));
+        }
+        if cut.max.x < p.max.x {
+            pieces.push(ERect::from_min_max(Pos2::new(cut.max.x, cut.min.y), Pos2::new(p.max.x, cut.max.y)));
+        }
+    }
+}
+
+fn measure_label(ctx: &egui::Context, n: &Node, w_px: f32) -> (bool, String, f32) {
+    let w_px = w_px.max(0.0);
+    let max_w = (w_px - LABEL_RIGHT_INSET).max(0.0);
+    let font = theme::font_canvas_label();
+    let clean_name = n.name.trim_start_matches("❖ ").trim_start_matches("◇ ");
+    let is_comp_like = matches!(n.kind, NodeKind::Component(_) | NodeKind::ComponentSet(_) | NodeKind::Instance { .. });
+    ctx.fonts_mut(|f| {
+        let mut width_of = |cand: &str| f.layout_no_wrap(cand.to_string(), font.clone(), Color32::WHITE).size().x;
+        if is_comp_like {
+            let (_, ellipsis_w) = crate::widgets::elide_with(&mut width_of, "…", f32::INFINITY);
+            if COMP_LABEL_GLYPH_W + ellipsis_w <= max_w {
+                let (text, text_w) = crate::widgets::elide_with(&mut width_of, clean_name, max_w - COMP_LABEL_GLYPH_W);
+                (true, text, (COMP_LABEL_GLYPH_W + text_w).min(w_px))
+            } else {
+                (false, "…".to_string(), ellipsis_w.min(w_px))
+            }
+        } else {
+            let (text, text_w) = crate::widgets::elide_with(&mut width_of, clean_name, max_w);
+            (false, text, text_w.min(w_px))
+        }
+    })
+}
+
+/// Screen rects and visible (uncovered) pieces of the name labels above top-level frames,
+/// components, component sets, instances, and sections.
+pub fn label_entries(app: &App, ctx: &egui::Context, rect: ERect) -> Vec<LabelEntry> {
     let mut out = Vec::new();
     if app.view.zoom < theme::CANVAS_LABEL_MAX_ZOOM_HIDE {
         return out;
@@ -133,6 +204,9 @@ pub fn label_rects(app: &App, rect: ERect) -> Vec<(NodeId, ERect)> {
     }
     let Some(page) = app.doc.get(app.page) else { return out };
     let h = theme::FONT_SIZE_LABEL_CANVAS + 3.0;
+    let mut covers: Vec<(NodeId, ERect)> = Vec::new();
+    let mut raw: Vec<(NodeId, bool, ERect, bool, String)> = Vec::new();
+    let mut labels_bounds = ERect::NOTHING;
     for id in &page.children {
         let Some(n) = app.doc.get(*id) else { continue };
         if !n.visible
@@ -150,19 +224,39 @@ pub fn label_rects(app: &App, rect: ERect) -> Vec<(NodeId, ERect)> {
             super::affine_rect_aabb(&n.transform, n.size)
         };
         let tl = app.view.to_screen(rect.min, v2(bb.x, bb.y));
+        let w_px = bb.w * app.view.zoom;
+        let h_px = bb.h * app.view.zoom;
+        if has_covering_fill(n) {
+            covers.push((*id, ERect::from_min_size(tl, EV::new(w_px, h_px))));
+        }
         let label_y = tl.y - theme::CANVAS_LABEL_GAP - h;
-        if label_y > rect.max.y || label_y + h < rect.min.y || tl.x > rect.max.x {
+        if label_y > rect.max.y || label_y + h < rect.min.y || tl.x > rect.max.x || tl.x + w_px.max(0.0) < rect.min.x {
             continue;
         }
-        let w_px = bb.w * app.view.zoom;
-        let is_comp_like = matches!(n.kind, NodeKind::Component(_) | NodeKind::ComponentSet(_) | NodeKind::Instance { .. });
-        let icon_w = if is_comp_like { 18.0 } else { 0.0 };
-        let text_w = n.name.chars().count() as f32 * theme::FONT_SIZE_LABEL_CANVAS * 0.66 + icon_w + 16.0;
-        let w = text_w.min(w_px.max(24.0));
+        let (show_glyph, text, w) = measure_label(ctx, n, w_px);
         let r = ERect::from_min_size(Pos2::new(tl.x, label_y), EV::new(w, h));
         if r.intersects(rect) {
-            out.push((*id, r));
+            labels_bounds = labels_bounds.union(r);
+            let is_section = matches!(n.kind, NodeKind::Section);
+            raw.push((*id, is_section, r, show_glyph, text));
         }
+    }
+    covers.retain(|(_, cov_r)| cov_r.intersects(labels_bounds));
+    out.reserve(raw.len());
+    for (id, is_section, r, show_glyph, text) in raw {
+        let mut pieces = vec![r];
+        if !is_section {
+            for &(cov_id, cov_r) in &covers {
+                if cov_id == id || !r.intersects(cov_r) {
+                    continue;
+                }
+                subtract_rect(&mut pieces, cov_r);
+                if pieces.is_empty() {
+                    break;
+                }
+            }
+        }
+        out.push(LabelEntry { id, rect: r, pieces, show_glyph, text });
     }
     LABEL_RECTS_CACHE.with(|c| {
         *c.borrow_mut() = Some((key, out.clone()));
@@ -170,12 +264,33 @@ pub fn label_rects(app: &App, rect: ERect) -> Vec<(NodeId, ERect)> {
     out
 }
 
+/// Screen rects of the name labels above top-level frames, components, instances, and sections.
+pub fn label_rects(app: &App, ctx: &egui::Context, rect: ERect) -> Vec<(NodeId, ERect)> {
+    label_entries(app, ctx, rect).into_iter().map(|e| (e.id, e.rect)).collect()
+}
+
 fn outline(app: &App, p: &Painter, rect: ERect, id: NodeId, col: Color32, width: f32) {
     // a connector is outlined along its line, not around its box
     if let Some(route) = designos_doc::connector_route(&app.doc, id) {
         let pw = parent_world(&app.doc, id);
         let pts: Vec<Pos2> = route.polyline().into_iter().map(|q| app.view.to_screen(rect.min, pw.apply(q))).collect();
-        p.add(egui::Shape::line(pts, Stroke::new(width + 2.0, col.gamma_multiply(0.45))));
+        let stroke = Stroke::new(width + 2.0, col.gamma_multiply(0.45));
+        // the outline breaks at the label, which the renderer paints on a white box over the line
+        let label = app.doc.get(id).and_then(|n| designos_render::board::connector_label_box(&app.doc, n)).map(|b| {
+            let w = super::fast_world_transform(&app.doc, id);
+            let corners = [v2(b.x, b.y), v2(b.x + b.w, b.y), v2(b.x + b.w, b.y + b.h), v2(b.x, b.y + b.h)];
+            ERect::from_points(&corners.map(|c| app.view.to_screen(rect.min, w.apply(c))))
+        });
+        match label {
+            Some(lr) => {
+                for run in super::selection_overlap::polyline_outside_rect(&pts, lr) {
+                    p.add(egui::Shape::line(run, stroke));
+                }
+            }
+            None => {
+                p.add(egui::Shape::line(pts, stroke));
+            }
+        }
         return;
     }
     let corners = super::fast_world_corners(&app.doc, id).map(|c| app.view.to_screen(rect.min, c));
@@ -332,9 +447,14 @@ fn draw_component_slot_and_slice_chrome(app: &App, p: &Painter, rect: ERect) {
                 continue;
             }
         }
-        let corners =
+        let page_corners = if is_slot {
+            // A slot's dashed box stops where an ancestor clips its content; nothing painted means nothing outlined.
+            let Some(c) = slot_visible_corners(&app.doc, id, &world) else { continue };
+            c
+        } else {
             [world.apply(DV::ZERO), world.apply(DV::new(n.size.x, 0.0)), world.apply(DV::new(n.size.x, n.size.y)), world.apply(DV::new(0.0, n.size.y))]
-                .map(|c| app.view.to_screen(rect.min, c));
+        };
+        let corners = page_corners.map(|c| app.view.to_screen(rect.min, c));
         if is_comp_set && !app.is_selected(id) {
             dashed_quad(p, &corners, 6.0, 4.0, Stroke::new(1.25, FIGMA_COMPONENT_PURPLE.gamma_multiply(0.85)));
         }
@@ -381,17 +501,54 @@ fn draw_component_slot_and_slice_chrome(app: &App, p: &Painter, rect: ERect) {
     }
 }
 
-/// Screen rect of the centered `+` button inside an empty slot placeholder,
-/// or `None` when `id` should not display an empty-slot placeholder.
+/// A transform that keeps rectangles rectangular: no rotation or skew beyond float residue (a full turn leaves
+/// about 1e-7), and a flip (negative scale) still counts.
+fn keeps_rect_axes(t: &Affine) -> bool {
+    t.b.abs() < 1e-4 && t.c.abs() < 1e-4 && t.a.abs() > 1e-6 && t.d.abs() > 1e-6
+}
+
+/// Page-space corners of slot `id`'s box (`world` is its world transform) cut by every clip-content ancestor, or
+/// `None` when the clip hides it entirely. Axis-aligned chains are cut exactly; a rotated or skewed node or clip
+/// keeps the unclipped box, because a rotated clip has no single rectangle to cut against. The painter and the
+/// `+` overlay both read this, so a painted button is always a clickable one. Each clip ancestor costs one
+/// root walk (`fast_world_transform`); composing downward from one walk would need the ancestors' transforms
+/// stored, which means an allocation or a fixed stack cap, so it stays as is (measured +22 µs on the Studio UI page).
+fn slot_visible_corners(doc: &designos_doc::Document, id: NodeId, world: &Affine) -> Option<[DV; 4]> {
+    let n = doc.get(id)?;
+    let own = [world.apply(DV::ZERO), world.apply(DV::new(n.size.x, 0.0)), world.apply(DV::new(n.size.x, n.size.y)), world.apply(DV::new(0.0, n.size.y))];
+    if !keeps_rect_axes(world) {
+        return Some(own);
+    }
+    let b = super::affine_rect_aabb(world, n.size);
+    let (mut x0, mut y0, mut x1, mut y1) = (b.x, b.y, b.x + b.w, b.y + b.h);
+    let mut cur = n.parent;
+    while let Some(a) = cur {
+        let Some(an) = doc.get(a) else { break };
+        if an.kind.frame_props().is_some_and(|f| f.clips_content) {
+            let w = super::fast_world_transform(doc, a);
+            if !keeps_rect_axes(&w) {
+                return Some(own);
+            }
+            let r = super::affine_rect_aabb(&w, an.size);
+            x0 = x0.max(r.x);
+            y0 = y0.max(r.y);
+            x1 = x1.min(r.x + r.w);
+            y1 = y1.min(r.y + r.h);
+        }
+        cur = an.parent;
+    }
+    (x1 > x0 && y1 > y0).then(|| [DV::new(x0, y0), DV::new(x1, y0), DV::new(x1, y1), DV::new(x0, y1)])
+}
+
+/// Screen rect of the centered `+` button inside an empty slot placeholder, centred on the part of the slot a
+/// clip leaves visible, or `None` when `id` should not display an empty-slot placeholder or is fully clipped.
 pub fn empty_slot_plus_button_rect(app: &App, rect: ERect, id: NodeId) -> Option<ERect> {
     if !designos_doc::should_show_empty_slot_placeholder(&app.doc, id) {
         return None;
     }
-    let n = app.doc.get(id)?;
     let world = super::fast_world_transform(&app.doc, id);
-    let c0 = app.view.to_screen(rect.min, world.apply(DV::ZERO));
-    let c2 = app.view.to_screen(rect.min, world.apply(DV::new(n.size.x, n.size.y)));
-    let s_rect = ERect::from_two_pos(c0, c2);
+    let c = slot_visible_corners(&app.doc, id, &world)?;
+    let s_rect = ERect::from_two_pos(app.view.to_screen(rect.min, c[0]), app.view.to_screen(rect.min, c[2]));
     if s_rect.width() < 16.0 || s_rect.height() < 16.0 {
         return None;
     }
@@ -430,6 +587,24 @@ pub fn empty_slot_picker_overlay(app: &mut App, ui: &mut Ui, rect: ERect) {
         }
     }
     crate::panels::components::show_slot_picker_popup(app, ui.ctx());
+}
+
+/// The labels within this rect are painted; the ones further out are left to the next pan.
+fn label_paint_clip(rect: ERect) -> ERect {
+    rect.expand(40.0)
+}
+
+/// The nodes whose frame label the canvas paints in `rect` with a Dev status badge beside it, the same labels
+/// `overlays` paints. The Dev annotation pill is not painted for them: the badge already shows the status, and the
+/// pill would sit over the frame name. A hidden label (zoomed far out) paints no badge, so its node is not listed.
+pub fn status_badge_nodes(app: &App, ctx: &egui::Context, rect: ERect) -> std::collections::HashSet<NodeId> {
+    let clip = label_paint_clip(rect);
+    label_entries(app, ctx, rect)
+        .into_iter()
+        .filter(|entry| clip.intersects(entry.rect))
+        .filter(|entry| app.doc.get(entry.id).is_some_and(|n| dev_status_badge_rect(entry.id, n, entry.rect).is_some()))
+        .map(|entry| entry.id)
+        .collect()
 }
 
 /// Screen rect and status of the on-canvas Dev Status pill badge right after a top-level frame label (`S3-12`).
@@ -794,8 +969,9 @@ pub fn overlays(app: &App, ui: &Ui, rect: ERect) {
 
     // Frame / Component / Instance / Section labels + Dev status pills (`S3-12`).
     let lab_col = if light { theme::CANVAS_LABEL } else { theme::CANVAS_LABEL_DARK };
-    let label_clip = rect.expand(40.0);
-    for (id, r) in label_rects(app, rect) {
+    let label_clip = label_paint_clip(rect);
+    for entry in label_entries(app, ui.ctx(), rect) {
+        let (id, r) = (entry.id, entry.rect);
         if !label_clip.intersects(r) {
             continue;
         }
@@ -807,15 +983,27 @@ pub fn overlays(app: &App, ui: &Ui, rect: ERect) {
         let is_comp_like = is_comp || is_inst;
         // Main components, component sets, and instances carry #06B6D4 cyan label + diamond glyph.
         let col = if selected || hovered || is_comp_like { sel_color(app, id) } else { lab_col };
-        let dx = if is_comp_like { 18.0 } else { 0.0 };
-        if is_comp {
-            crate::icons::paint(&p, crate::icons::Icon::Component, Pos2::new(r.left() + theme::SPACE_INLINE - theme::BORDER_WIDTH, r.center().y), 14.0, col);
-        } else if is_inst {
-            paint_instance_diamond(&p, Pos2::new(r.left() + theme::SPACE_INLINE - theme::BORDER_WIDTH, r.center().y), 5.0, col);
+        let dx = if entry.show_glyph { COMP_LABEL_GLYPH_W } else { 0.0 };
+        for piece in &entry.pieces {
+            let piece_p = p.with_clip_rect(*piece);
+            if !piece_p.clip_rect().is_positive() {
+                continue;
+            }
+            if entry.show_glyph {
+                if is_comp {
+                    crate::icons::paint(
+                        &piece_p,
+                        crate::icons::Icon::Component,
+                        Pos2::new(r.left() + theme::SPACE_INLINE - theme::BORDER_WIDTH, r.center().y),
+                        14.0,
+                        col,
+                    );
+                } else if is_inst {
+                    paint_instance_diamond(&piece_p, Pos2::new(r.left() + theme::SPACE_INLINE - theme::BORDER_WIDTH, r.center().y), 5.0, col);
+                }
+            }
+            piece_p.text(Pos2::new(r.left() + dx, r.center().y), Align2::LEFT_CENTER, &entry.text, theme::font_canvas_label(), col);
         }
-        let clean_name = n.name.trim_start_matches("❖ ").trim_start_matches("◇ ");
-        let name = crate::widgets::elide(&p, clean_name, &theme::font_body(), (r.width() - dx + 8.0).max(8.0));
-        p.text(Pos2::new(r.left() + dx, r.center().y), Align2::LEFT_CENTER, name, theme::font_body(), col);
         if let Some((badge_r, status)) = dev_status_badge_rect(id, n, r) {
             let badge_col = match status {
                 designos_doc::DevStatus::ReadyForDev => theme::DEV_READY,
@@ -901,12 +1089,13 @@ pub fn overlays(app: &App, ui: &Ui, rect: ERect) {
     }
 
     // Hover outline.
-    for h in [app.hover, app.hover_layer].into_iter().flatten() {
+    for h in [app.hover.filter(|_| !app.ui.hide_hover_highlight), app.hover_layer].into_iter().flatten() {
         if !is_sel(h) && app.doc.get(h).is_some() {
             outline(app, &p, rect, h, sel_color(app, h), theme::CANVAS_HOVER_WIDTH);
         }
     }
 
+    crate::board::table::overlay::draw(app, &p);
     // Selection (the shape builder paints its own regions instead).
     if !app.selection.is_empty() && app.canvas.builder.is_none() {
         let multi = app.selection.len() > 1;
@@ -1001,7 +1190,7 @@ pub fn overlays(app: &App, ui: &Ui, rect: ERect) {
                 _ => {
                     if let [one] = app.selection.as_slice() {
                         app.doc.get(*one).map(|n| {
-                            let mut base = format!("{} × {}", n.size.x.round() as i64, n.size.y.round() as i64);
+                            let mut base = selection_size_badge(n);
                             if matches!(app.canvas.inter, Interaction::Resize(_)) {
                                 if n.layout_child.min_w.is_some_and(|m| (n.size.x - m).abs() < 0.5) {
                                     base.push_str(" · Min W");
@@ -1026,7 +1215,10 @@ pub fn overlays(app: &App, ui: &Ui, rect: ERect) {
             if let Some(label) = label.filter(|_| !only_connectors) {
                 let bottom = s.iter().map(|c| c.y).fold(f32::MIN, f32::max);
                 let cx = s.iter().map(|c| c.x).sum::<f32>() / 4.0;
-                badge(&p, Pos2::new(cx, bottom + theme::CANVAS_BADGE_OFFSET + 3.0), &label, col);
+                // drops below the bottom magnet dot when the selected layer shows its magnets
+                let below_magnet =
+                    app.wb_connectors_enabled() && matches!(app.selection.as_slice(), [one] if app.board.dots == Some(*one) || app.board.target == Some(*one));
+                badge(&p, Pos2::new(cx, super::selection_overlap::size_badge_top(bottom, below_magnet)), &label, col);
             }
             if let Some(tidy_r) = tidy_up_pill_rect(app, rect) {
                 p.rect_filled(tidy_r, theme::cr(3), FIGMA_PINK);
@@ -1165,7 +1357,7 @@ pub fn overlays(app: &App, ui: &Ui, rect: ERect) {
             .unwrap_or_else(|| rect.center());
         if let Some(pos) = ui.ctx().input(|i| i.pointer.hover_pos()).filter(|p| rect.contains(*p)).or(Some(fallback_pos)) {
             if let Some([r, g, b]) = crate::panels::properties::sample_canvas(app, pos) {
-                let sampled = Color32::from_rgb(r, g, b);
+                let sampled = crate::widgets::document_color32(Color32::from_rgb(r, g, b));
                 let loupe_c = pos + EV::new(28.0, -28.0);
                 let radius = 22.0;
                 p.circle_filled(loupe_c, radius + 2.5, Color32::from_black_alpha(0x66));
@@ -1267,6 +1459,166 @@ mod tests {
     use super::*;
     use designos_doc::Document;
 
+    /// Nested frames (parent-relative rect, clips_content) with a slot inside the innermost one. With
+    /// `outer_instance` the outermost frame is an Instance node, as when a panel instance expands its main
+    /// component. `slot_filled` gives the slot a child, so it draws the dashed box instead of the empty placeholder.
+    fn slot_scene(frames: &[(Rect, bool)], slot_rect: Rect, slot_filled: bool, outer_instance: bool) -> (App, NodeId) {
+        let mut doc = Document::new("slot-clip");
+        let page = doc.add_page("Page 1");
+        let mut parent = page;
+        for (i, (r, clips)) in frames.iter().enumerate() {
+            let id = doc.alloc_id();
+            parent = doc.insert(parent, Node::frame(id, *r)).unwrap();
+            let fp = designos_doc::FrameProps { clips_content: *clips, ..Default::default() };
+            doc.get_mut(parent).unwrap().kind =
+                if i == 0 && outer_instance { NodeKind::Instance { frame: fp, component: None, component_key: None } } else { NodeKind::Frame(fp) };
+        }
+        let slot_id = doc.alloc_id();
+        let slot = doc.insert(parent, Node::frame(slot_id, slot_rect)).unwrap();
+        doc.get_mut(slot).unwrap().component.is_slot = true;
+        if slot_filled {
+            let row_id = doc.alloc_id();
+            doc.insert(slot, Node::rectangle(row_id, Rect::new(0.0, 0.0, 10.0, 10.0))).unwrap();
+        }
+        let mut app = App::new(doc);
+        app.page = page;
+        app.canvas_rect = ERect::from_min_size(Pos2::ZERO, EV::new(1440.0, 900.0));
+        app.view.offset = DV::ZERO;
+        app.view.zoom = 1.0;
+        // no scene index yet: the chrome list comes from the tree walk
+        app.canvas.dirty = true;
+        (app, slot)
+    }
+
+    /// The Studio UI case: panel (instance) 0..700, list frame at y 100 showing 555 with clip content, and a
+    /// 576-high slot inside it (21 units more than the list shows).
+    fn list_panel_scene(clips: bool, outer_instance: bool) -> (App, NodeId) {
+        slot_scene(
+            &[(Rect::new(0.0, 0.0, 240.0, 700.0), false), (Rect::new(0.0, 100.0, 240.0, 555.0), clips)],
+            Rect::new(0.0, 0.0, 240.0, 576.0),
+            true,
+            outer_instance,
+        )
+    }
+
+    /// Union of everything the slot chrome paints, in screen space (zoom 1, no offset: page space).
+    fn slot_chrome_bounds(app: &App) -> Option<ERect> {
+        let ctx = egui::Context::default();
+        crate::theme::install_fonts(&ctx);
+        let _ = ctx.run_ui(egui::RawInput::default(), |_| {});
+        let raw = egui::RawInput { screen_rect: Some(app.canvas_rect), ..Default::default() };
+        let shapes = ctx.run_ui(raw, |ui| draw_component_slot_and_slice_chrome(app, ui.painter(), app.canvas_rect)).shapes;
+        shapes.iter().map(|c| c.shape.visual_bounding_rect()).filter(|r| r.is_finite()).reduce(|a, b| a.union(b))
+    }
+
+    #[test]
+    fn slot_dashed_box_stops_at_the_clipping_list_frame_inside_an_instance() {
+        let (app, _) = list_panel_scene(true, true);
+        let b = slot_chrome_bounds(&app).expect("the slot paints chrome");
+        assert!(b.max.y <= 655.0 + 1.0, "dashed box reaches {} but the list ends at 655", b.max.y);
+        assert!(b.min.y >= 100.0 - 1.0, "dashed box starts at {}", b.min.y);
+    }
+
+    #[test]
+    fn slot_dashed_box_keeps_its_full_box_without_clip_content() {
+        let (app, _) = list_panel_scene(false, false);
+        let b = slot_chrome_bounds(&app).expect("the slot paints chrome");
+        assert!(b.max.y >= 676.0 - 1.0, "unclipped slot keeps its 576 box, got {}", b.max.y);
+    }
+
+    #[test]
+    fn slot_dashed_box_follows_the_tightest_clip_through_a_frame_that_does_not_clip() {
+        // clip (page 0..250) / no clip (50..650) / clip (100..300) around a slot spanning 100..500
+        let (app, _) = slot_scene(
+            &[(Rect::new(0.0, 0.0, 300.0, 250.0), true), (Rect::new(0.0, 50.0, 300.0, 600.0), false), (Rect::new(0.0, 50.0, 300.0, 200.0), true)],
+            Rect::new(0.0, 0.0, 300.0, 400.0),
+            true,
+            false,
+        );
+        let b = slot_chrome_bounds(&app).expect("the slot paints chrome");
+        assert!((b.max.y - 250.0).abs() <= 1.0, "outer clip ends at 250, dashed box reaches {}", b.max.y);
+    }
+
+    #[test]
+    fn slot_dashed_box_is_cut_by_a_flipped_clip_frame() {
+        let (mut app, _) = list_panel_scene(true, false);
+        let list = app.doc.get(app.doc.get(app.page).unwrap().children[0]).unwrap().children[0];
+        // flipped vertically; the box still covers page y 100..655
+        app.doc.get_mut(list).unwrap().transform = Affine { a: 1.0, b: 0.0, c: 0.0, d: -1.0, tx: 0.0, ty: 655.0 };
+        let b = slot_chrome_bounds(&app).expect("the slot paints chrome");
+        assert!(b.min.y >= 100.0 - 1.0 && b.max.y <= 655.0 + 1.0, "dashed box {}..{} leaves the list 100..655", b.min.y, b.max.y);
+    }
+
+    #[test]
+    fn slot_dashed_box_is_cut_by_a_clip_frame_turned_a_full_turn() {
+        let (mut app, _) = list_panel_scene(true, false);
+        let list = app.doc.get(app.doc.get(app.page).unwrap().children[0]).unwrap().children[0];
+        let mut t = Affine::rotate(std::f32::consts::TAU);
+        assert!(t.b != 0.0, "a full turn leaves float residue in the matrix");
+        t.ty = 100.0;
+        app.doc.get_mut(list).unwrap().transform = t;
+        let b = slot_chrome_bounds(&app).expect("the slot paints chrome");
+        assert!(b.max.y <= 655.0 + 1.0, "dashed box reaches {} but the list ends at 655", b.max.y);
+    }
+
+    #[test]
+    fn slot_dashed_box_keeps_the_full_box_inside_a_really_rotated_clip_frame() {
+        let (mut app, _) = list_panel_scene(true, false);
+        let list = app.doc.get(app.doc.get(app.page).unwrap().children[0]).unwrap().children[0];
+        let mut t = Affine::rotate(0.1);
+        t.ty = 100.0;
+        app.doc.get_mut(list).unwrap().transform = t;
+        assert!(!keeps_rect_axes(&t));
+        assert!(slot_chrome_bounds(&app).is_some(), "a rotated clip keeps the slot's own box");
+    }
+
+    /// An empty slot spanning page y 150..450 inside a clip frame that shows page y 100..(100 + `clip_h`).
+    fn empty_slot_in_clip(clip_h: f32) -> (App, NodeId) {
+        slot_scene(&[(Rect::new(0.0, 0.0, 240.0, 700.0), false), (Rect::new(0.0, 100.0, 240.0, clip_h), true)], Rect::new(0.0, 50.0, 240.0, 300.0), false, true)
+    }
+
+    #[test]
+    fn empty_slot_plus_button_and_name_stay_inside_the_clip_frame() {
+        let (app, slot) = empty_slot_in_clip(140.0);
+        // the clip shows 100..240, so the slot is visible at 150..240
+        let plus = empty_slot_plus_button_rect(&app, app.canvas_rect, slot).expect("a partly visible empty slot keeps its +");
+        assert!(plus.min.y >= 150.0 && plus.max.y <= 240.0, "+ at {}..{} is outside the visible 150..240", plus.min.y, plus.max.y);
+        let b = slot_chrome_bounds(&app).expect("the placeholder is painted");
+        assert!(b.max.y <= 240.0 + 1.0, "placeholder, + or name reaches {} below the clip frame (240)", b.max.y);
+    }
+
+    #[test]
+    fn fully_clipped_empty_slot_paints_no_plus_and_cannot_be_clicked() {
+        let (mut app, slot) = empty_slot_in_clip(40.0);
+        // the clip shows 100..140 and the slot starts at 150: nothing of it is visible
+        assert!(empty_slot_plus_button_rect(&app, app.canvas_rect, slot).is_none());
+        assert!(slot_chrome_bounds(&app).is_none(), "a fully clipped slot paints nothing");
+        let click_at = Pos2::new(120.0, 300.0); // where the unclipped slot's + would sit
+        click_overlay_at(&mut app, click_at);
+        assert!(app.selection.is_empty(), "click selected {:?}", app.selection);
+        assert!(app.ui.slot_picker.is_none(), "click opened the slot picker");
+    }
+
+    #[test]
+    fn partly_visible_empty_slot_plus_is_clickable_where_it_is_painted() {
+        let (mut app, slot) = empty_slot_in_clip(140.0);
+        let plus = empty_slot_plus_button_rect(&app, app.canvas_rect, slot).unwrap();
+        click_overlay_at(&mut app, plus.center());
+        assert_eq!(app.selection, vec![slot]);
+        assert_eq!(app.ui.slot_picker.map(|(s, _)| s), Some(slot));
+    }
+
+    /// One frame with a primary press and release at `at`, through the `+` overlay.
+    fn click_overlay_at(app: &mut App, at: Pos2) {
+        let ctx = egui::Context::default();
+        crate::theme::install_fonts(&ctx);
+        let _ = ctx.run_ui(egui::RawInput::default(), |_| {});
+        let rect = app.canvas_rect;
+        let button = |pressed| egui::Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed, modifiers: Default::default() };
+        let raw = egui::RawInput { screen_rect: Some(rect), events: vec![egui::Event::PointerMoved(at), button(true), button(false)], ..Default::default() };
+        let _ = ctx.run_ui(raw, |ui| empty_slot_picker_overlay(app, ui, rect));
+    }
+
     #[test]
     fn large_page_label_rects_hit_marquee_and_snap_under_5ms() {
         let mut doc = Document::new("large-bench");
@@ -1303,11 +1655,15 @@ mod tests {
         let targets = super::super::interact::snap_targets(&app, &[leaf]);
         assert!(targets.len() <= 128);
 
+        let ctx = egui::Context::default();
+        crate::theme::install_fonts(&ctx);
+        let _ = ctx.run_ui(egui::RawInput::default(), |_| {});
+
         let budget = std::time::Duration::from_millis(5);
         let (elapsed, (labels, hit, marquee, snapped)) = crate::test_timing::fastest_within(budget, std::time::Duration::from_secs(2), || {
             // Every sample times the cache-miss path, as the single sample did before.
             LABEL_RECTS_CACHE.with(|c| *c.borrow_mut() = None);
-            let labels = label_rects(&app, screen_rect);
+            let labels = label_rects(&app, &ctx, screen_rect);
             let hit = super::super::hit::hit_test_with_index(&app.doc, app.page, v2(25.0, 25.0), 2.0, false, &[], Some(&idx));
             let marquee = super::super::hit::marquee_select_with_index(&app.doc, app.page, &Rect::new(0.0, 0.0, 120.0, 100.0), Some(&idx));
             let snapped = super::super::snap::snap_rect(&Rect::new(71.0, 10.0, 48.0, 36.0), &targets, 4.0);
@@ -1502,8 +1858,11 @@ mod tests {
 
         // 6. Canvas Overlay Chrome, Label Rects & Hover Hit-Test at zoom=1.0
         app.view.zoom = 1.0;
+        let ctx = egui::Context::default();
+        crate::theme::install_fonts(&ctx);
+        let _ = ctx.run_ui(egui::RawInput::default(), |_| {});
         let t_labels = std::time::Instant::now();
-        let _labels = super::label_rects(&app, app.canvas_rect);
+        let _labels = super::label_rects(&app, &ctx, app.canvas_rect);
         let labels_ms = t_labels.elapsed().as_secs_f64() * 1000.0;
 
         let t_chrome = std::time::Instant::now();
@@ -1566,7 +1925,7 @@ mod tests {
 
     /// The overlay of an empty grid with the given tracks (columns/rows as set on `al`).
     fn bare_overlay(al: &designos_doc::AutoLayout) -> super::super::grids::CssGridOverlay {
-        super::super::grids::compute_css_grid_overlay(al, DV::new(2000.0, 2000.0), &[])
+        super::super::grids::compute_css_grid_overlay(al, DV::new(2000.0, 2000.0), Default::default(), &[])
     }
 
     fn disjoint_per_axis(pills: &[(bool, usize, ERect, ERect)]) -> bool {
@@ -1655,7 +2014,10 @@ mod tests {
         );
 
         let viewport = ERect::from_min_size(Pos2::ZERO, EV::new(1280.0, 800.0));
-        let labels = label_rects(&app, viewport);
+        let ctx = egui::Context::default();
+        crate::theme::install_fonts(&ctx);
+        let _ = ctx.run_ui(egui::RawInput::default(), |_| {});
+        let labels = label_rects(&app, &ctx, viewport);
         let (_, label_r) = labels.into_iter().find(|(id, _)| *id == frame_id).expect("root frame must have a label rect");
         let node = app.doc.get(frame_id).unwrap();
         let (badge_r, ip) = in_progress_badge_rect(&app.doc, frame_id, node, label_r).expect("flagged frame must produce an in_progress badge rect");

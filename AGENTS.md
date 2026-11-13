@@ -2,7 +2,7 @@
 
 This repository is **DESIGN:OS Studio**, the native Rust + `wgpu` (Metal/Vulkan/GL) GPU-accelerated design canvas, `.fig` / `.designos` / `.designos` editor, and headless MCP server (`designos-mcp` / `designos-mcp`) for the **DESIGN:OS / EaseUI** ecosystem.
 
-All agents (Claude Code, Codex, Antigravity, Grok, Orca workers) operating in this repository are bound by the same architectural contracts as [`CLAUDE.md`](file:///Users/jangtrinh/Products/design-os-studio/CLAUDE.md), [`.project-agent.md`](file:///Users/jangtrinh/Products/design-os-studio/.project-agent.md), and [`CONTEXT.md`](file:///Users/jangtrinh/Products/design-os-studio/CONTEXT.md).
+All agents (Claude Code, Codex, Antigravity, Grok, Orca workers) operating in this repository are bound by the same architectural contracts as [`CLAUDE.md`](CLAUDE.md), [`.project-agent.md`](.project-agent.md), and [`CONTEXT.md`](CONTEXT.md).
 
 ---
 
@@ -16,6 +16,17 @@ All agents (Claude Code, Codex, Antigravity, Grok, Orca workers) operating in th
 2. **Project Knowledge Base (`.brv/`):**
    - Read `.brv/context-tree/session-handoffs/latest.md` before starting feature or bugfix work.
    - Read `.brv/context-tree/architecture/crate-map.md` and `.brv/context-tree/architecture/figma-vs-designos-engine.md` before modifying document serialization, `.fig` import, `SceneIndex`, or GPU compilation.
+
+---
+
+## Epic & Figma 126.11.7 REA Implementation Specs (Reference)
+
+All 24 Epics (`#14` through `#1788`), Proactive Epic `E21` Multiplayer ([`docs/specs/epics-figma-rea/e21-multiplayer-realtime-sync/`](docs/specs/epics-figma-rea/e21-multiplayer-realtime-sync/)), all 56 Open Parity/UX Bugs ([`docs/specs/epics-figma-rea/open-bugs-rea/`](docs/specs/epics-figma-rea/open-bugs-rea/)), and Figma Desktop `126.11.7` reverse-engineered clean-room implementation specs and REA dossiers live under [`docs/specs/epics-figma-rea/`](docs/specs/epics-figma-rea/).
+The specs are reference material to implement faster, not a contract. Before work on an Epic or one of its issues, read [`EPIC-FIGMA-SPECS-INDEX.md`](docs/specs/epics-figma-rea/EPIC-FIGMA-SPECS-INDEX.md) (for an open bug, also [`open-bugs-rea/README.md`](docs/specs/epics-figma-rea/open-bugs-rea/README.md)) and the matching spec, and take from it what helps: data models, Kiwi field tables, acceptance ideas, slice order.
+A reviewed spec carries its review status at its top and in the index (a spec without one has not been reviewed yet); read the linked [review](docs/specs/epics-figma-rea/reviews/README.md) first, it lists the known errors and the corrections.
+Check every symbol, path and line number against main before relying on it.
+When a spec disagrees with code on main, the CHANGELOG or an owner ruling, the spec loses.
+A statement about Figma's behaviour is a fact only with a checkable source (the Kiwi schema, a Figma-authored file, Figma's documentation or interface strings, a recorded observation); without one, treat it as a hypothesis and verify it before relying on it.
 
 ---
 
@@ -68,7 +79,7 @@ cargo test -p designos-mcp
 Since 2026-10-17 `main` is protected by a repository ruleset. Nobody bypasses it: not the owner, and not any agent runtime (Claude, Codex, Grok, Gemini).
 
 - Never push to `main`. Work on a branch or worktree, push it, and open a pull request.
-- To merge, a PR needs green `Test (macos-14)`, `Clippy` and `Rustfmt` on a branch that is up to date with `main`. Run `gh pr update-branch <n> --rebase`, then wait for CI. Ubuntu and Windows CI also run but do not block, because releases are verified on macOS.
+- To merge, a PR needs green `Test (macos-15)`, `Clippy` and `Rustfmt` on a branch that is up to date with `main`. Run `gh pr update-branch <n> --rebase`, then wait for CI. Ubuntu and Windows CI also run but do not block, because releases are verified on macOS.
 - Merge with squash only (`gh pr merge <n> --squash`). The head branch is deleted on merge, and `main` keeps a linear history.
 - Release tags `v*` cannot be moved or deleted once pushed. Tag the squash commit of the release PR (see `docs/releasing.md`).
 

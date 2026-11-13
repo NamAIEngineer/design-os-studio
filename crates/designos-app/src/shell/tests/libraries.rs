@@ -303,7 +303,14 @@ fn publish_red(root: &Path) -> (Sim, String) {
     a.shell.app.doc.styles.insert("Brand/Red".into(), Style::Fill(vec![Paint::solid(Color::rgb(255, 0, 0))]));
     a.shell.app.doc.style_meta.insert(
         "Brand/Red".into(),
-        StyleMeta { name: "Brand/Red".into(), key: None, description: String::new(), property: StyleProperty::Fill, bindings: Default::default() },
+        StyleMeta {
+            name: "Brand/Red".into(),
+            key: None,
+            description: String::new(),
+            property: StyleProperty::Fill,
+            bindings: Default::default(),
+            ..Default::default()
+        },
     );
     assert!(a.shell.app.publish_file());
     let lib_id = a.app().doc.library.published.clone().unwrap().library_id;
@@ -386,6 +393,7 @@ fn library_variables_bind_to_a_style_through_the_picker_in_one_undo_step() {
             description: String::new(),
             property: designos_doc::StyleProperty::Fill,
             bindings: Default::default(),
+            ..Default::default()
         },
     );
     b.shell.app.apply_style(&[id], "Card/Fill");
@@ -505,7 +513,9 @@ fn shared_libraries_follow_the_projects_library_root_and_open_its_files() {
     assert_eq!(s.shell.app.library().unwrap().root(), root.as_path());
 
     // Publish a projects-library file: the library remembers the file id.
-    let home_file = s.app().lib.as_ref().unwrap().all_files()[0].id.clone();
+    let lib_store = s.app().lib.as_ref().unwrap().clone();
+    let proj = lib_store.list_projects()[0].id.clone();
+    let home_file = lib_store.create_file(&proj, None, "Demo library", &crate::demo::demo_document()).unwrap().id;
     s.shell.app.open_library_file(&home_file);
     assert!(s.shell.app.publish_file());
     let lib_id = s.app().doc.library.published.clone().unwrap().library_id;
@@ -532,7 +542,9 @@ fn shared_libraries_follow_the_projects_library_root_and_open_its_files() {
 fn go_to_main_component_waits_for_the_save_changes_question_and_does_not_navigate_in_the_old_document() {
     let root = tmp("gotomainask");
     let mut s = Sim::with(Options { library: Some(root.clone()), ..Default::default() });
-    let home_file = s.app().lib.as_ref().unwrap().all_files()[0].id.clone();
+    let lib_store = s.app().lib.as_ref().unwrap().clone();
+    let proj = lib_store.list_projects()[0].id.clone();
+    let home_file = lib_store.create_file(&proj, None, "Demo library", &crate::demo::demo_document()).unwrap().id;
     s.shell.app.open_library_file(&home_file);
     assert!(s.shell.app.publish_file());
     let lib_id = s.app().doc.library.published.clone().unwrap().library_id;
@@ -682,7 +694,7 @@ fn publish_image_button_from_a(root: &Path) -> Sim {
     a.shell.app.doc.images.insert("pic".into(), tiny_png());
     a.shell.app.edit_nodes(&[bg], |n| {
         n.fills = vec![designos_doc::Paint {
-            kind: designos_doc::PaintKind::Image { image_ref: "pic".into(), scale_mode: designos_doc::ImageScaleMode::Fill },
+            kind: designos_doc::PaintKind::Image { image_ref: "pic".into(), scale_mode: designos_doc::ImageScaleMode::Fill, params: Default::default() },
             opacity: 1.0,
             visible: true,
             blend: designos_doc::BlendMode::Normal,
@@ -763,5 +775,99 @@ fn branch_merge_applies_and_undoes_in_one_step() {
     s.shell.app.undo();
     assert_eq!(s.shell.app.doc.nodes.len(), pre_merge_count);
 
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn selection_styles_section_shows_library_styles_when_file_has_no_local_styles() {
+    use designos_doc::{Node, Rect, Style, StyleMeta, StyleProperty, TextStyle};
+    let root = tmp("sel-lib-styles");
+    let (mut a, lib_id) = publish_red(&root);
+    a.shell.app.doc.styles.insert("Brand/Heading".into(), Style::Text(TextStyle { font_size: 28.0, ..TextStyle::default() }));
+    a.shell.app.doc.style_meta.insert(
+        "Brand/Heading".into(),
+        StyleMeta {
+            name: "Brand/Heading".into(),
+            key: None,
+            description: String::new(),
+            property: StyleProperty::Text,
+            bindings: Default::default(),
+            ..Default::default()
+        },
+    );
+    assert!(a.shell.app.publish_file());
+
+    let (mut b, rect_id) = consumer_with_rect(&root, &lib_id);
+    assert!(b.app().doc.styles.is_empty(), "consumer file has no local styles");
+    b.scroll_inspector_down();
+
+    let recorded = |s: &Sim, name: &str| s.ctx.data(|d| d.get_temp::<egui::Rect>(egui::Id::new(("test-rect", name.to_string()))));
+    assert!(recorded(&b, "libstyle:Brand/Heading").is_none(), "text library styles are not listed when only a rectangle is selected");
+    let red_row = b.rect_of("libstyle:Brand/Red");
+    b.click(red_row.center());
+    b.frame(vec![]);
+    assert_eq!(box_pixel(&b, rect_id), [255, 0, 0], "clicking the library style row in Styles applies it to the selection");
+    b.cmd_key(Key::Z);
+    assert!(b.app().doc.styles.is_empty(), "undo removes the imported library style");
+    assert_eq!(box_pixel(&b, rect_id), [255, 255, 255]);
+
+    // When an enabled library only has a text style, a rectangle selection has no applicable styles,
+    // while a text selection shows the Styles section and its library text style row.
+    let root_text_only = tmp("sel-lib-text-only");
+    let mut a_text = sim(&root_text_only);
+    a_text.shell.app.new_document();
+    a_text.shell.app.doc.styles.insert("Brand/Heading".into(), Style::Text(TextStyle { font_size: 28.0, ..TextStyle::default() }));
+    a_text.shell.app.doc.style_meta.insert(
+        "Brand/Heading".into(),
+        StyleMeta {
+            name: "Brand/Heading".into(),
+            key: None,
+            description: String::new(),
+            property: StyleProperty::Text,
+            bindings: Default::default(),
+            ..Default::default()
+        },
+    );
+    assert!(a_text.shell.app.publish_file());
+    let text_lib_id = a_text.app().doc.library.published.clone().unwrap().library_id;
+
+    let (mut b_text, rect_only_id) = consumer_with_rect(&root_text_only, &text_lib_id);
+    b_text.scroll_inspector_down();
+    assert!(recorded(&b_text, "libstyle:Brand/Heading").is_none(), "a rectangle selection does not show text-only library styles");
+
+    let page = b_text.app().page;
+    let txt_id = b_text.shell.app.doc.alloc_id();
+    let txt = Node::text(txt_id, Rect::new(0.0, 60.0, 120.0, 32.0), "Hello", TextStyle::default());
+    b_text.shell.app.doc.insert(page, txt).unwrap();
+    b_text.shell.app.selection = vec![txt_id];
+    b_text.shell.app.changed();
+    frames(&mut b_text, 2);
+    b_text.scroll_inspector_down();
+    assert_ne!(rect_only_id, txt_id);
+    let heading_row = b_text.rect_of("libstyle:Brand/Heading");
+    b_text.click(heading_row.center());
+    b_text.frame(vec![]);
+    assert_eq!(text_of(&b_text, txt_id).style.font_size, 28.0);
+
+    let _ = std::fs::remove_dir_all(root);
+    let _ = std::fs::remove_dir_all(root_text_only);
+}
+
+#[test]
+fn publishing_says_which_components_pick_a_mode_of_an_extended_collection() {
+    let root = tmp("extension-pick");
+    let mut s = sim(&root);
+    let mut store = designos_doc::VariableStore::from_doc(&s.app().doc);
+    let theme = store.collections.values().find(|c| c.name == "Theme").expect("Theme").id.clone();
+    let brand = store.extend_collection(&theme, "Brand").expect("extension");
+    let brand_mode = store.collections[&brand].modes[0].id.clone();
+    let doc = &mut s.shell.app.doc;
+    doc.variables = store.variables;
+    doc.variable_collections = store.collections;
+    let comp = doc.nodes.values().find(|n| matches!(n.kind, NodeKind::Component(_))).map(|n| (n.id, n.name.clone())).expect("the demo has a component");
+    doc.get_mut(comp.0).unwrap().variables.modes.insert(brand, brand_mode);
+    assert!(s.shell.app.publish_file(), "publishing still proceeds");
+    let toast = s.app().toast.as_ref().map(|t| t.text.clone()).unwrap_or_default();
+    assert!(toast.contains(&comp.1) && toast.contains("not published"), "the toast names the component: {toast}");
     let _ = std::fs::remove_dir_all(root);
 }

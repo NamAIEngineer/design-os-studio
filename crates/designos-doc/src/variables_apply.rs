@@ -17,9 +17,19 @@
 use crate::*;
 use std::borrow::Cow;
 
+fn unit_or_pct(x: f32) -> f32 {
+    if x > 1.0 {
+        (x / 100.0).clamp(0.0, 1.0)
+    } else {
+        x.clamp(0.0, 1.0)
+    }
+}
+
 /// Kind of variable a binding key accepts, or `None` for unknown keys.
 pub fn property_kind(key: &str) -> Option<VariableKind> {
     Some(match key {
+        k if is_easing_binding_key(k) => VariableKind::String,
+        k if is_duration_binding_key(k) => VariableKind::Number,
         k if paint_opacity_key(k).is_some() => VariableKind::Number,
         k if paint_stop_key(k).is_some() => VariableKind::Color,
         k if k.starts_with("fills/") || k.starts_with("strokes/") => {
@@ -29,14 +39,12 @@ pub fn property_kind(key: &str) -> Option<VariableKind> {
         }
         k if effect_field_key(k).is_some() => match effect_field_key(k)?.1 {
             "color" => VariableKind::Color,
-            "radius" | "spread" | "offsetX" | "offsetY" => VariableKind::Number,
-            _ => return None,
+            _ => VariableKind::Number,
         },
-        "width" | "height" | "topLeftRadius" | "topRightRadius" | "bottomLeftRadius" | "bottomRightRadius" | "itemSpacing" | "counterAxisSpacing"
-        | "paddingLeft" | "paddingRight" | "paddingTop" | "paddingBottom" | "opacity" | "fontSize" | "fontWeight" | "lineHeight" | "letterSpacing"
-        | "paragraphSpacing" | "paragraphIndent" | "strokeWeight" | "strokeTopWeight" | "strokeRightWeight" | "strokeBottomWeight" | "strokeLeftWeight" => {
-            VariableKind::Number
-        }
+        "width" | "height" | "minWidth" | "maxWidth" | "minHeight" | "maxHeight" | "topLeftRadius" | "topRightRadius" | "bottomLeftRadius"
+        | "bottomRightRadius" | "itemSpacing" | "counterAxisSpacing" | "paddingLeft" | "paddingRight" | "paddingTop" | "paddingBottom" | "opacity"
+        | "fontSize" | "fontWeight" | "lineHeight" | "letterSpacing" | "paragraphSpacing" | "paragraphIndent" | "strokeWeight" | "strokeTopWeight"
+        | "strokeRightWeight" | "strokeBottomWeight" | "strokeLeftWeight" => VariableKind::Number,
         "visible" => VariableKind::Boolean,
         "characters" | "fontFamily" | "fontStyle" => VariableKind::String,
         _ => return None,
@@ -51,6 +59,7 @@ pub fn scope_allows(scopes: &[String], key: &str, kind: &NodeKind) -> bool {
     }
     let has = |names: &[&str]| scopes.iter().any(|s| names.contains(&s.as_str()));
     match key {
+        k if is_easing_binding_key(k) || is_duration_binding_key(k) => true,
         k if paint_opacity_key(k).is_some() => has(&["COLOR_OPACITY"]),
         k if k.starts_with("fills/") => {
             let specific = match kind {
@@ -60,13 +69,12 @@ pub fn scope_allows(scopes: &[String], key: &str, kind: &NodeKind) -> bool {
             };
             has(&["ALL_FILLS", specific])
         }
-        k if k.starts_with("strokes/") => has(&["STROKE_COLOR"]),
+        k if k.starts_with("strokes/") => has(&["STROKE", "STROKE_COLOR"]),
         k if effect_field_key(k).is_some() => match effect_field_key(k).map(|(_, f)| f) {
             Some("color") => has(&["EFFECT_COLOR"]),
-            Some("radius" | "spread" | "offsetX" | "offsetY") => has(&["EFFECT_FLOAT"]),
-            _ => false,
+            _ => has(&["EFFECT_FLOAT"]),
         },
-        "width" | "height" => has(&["WIDTH_HEIGHT"]),
+        "width" | "height" | "minWidth" | "maxWidth" | "minHeight" | "maxHeight" => has(&["WIDTH_HEIGHT"]),
         "topLeftRadius" | "topRightRadius" | "bottomLeftRadius" | "bottomRightRadius" => has(&["CORNER_RADIUS"]),
         "itemSpacing" | "counterAxisSpacing" | "paddingLeft" | "paddingRight" | "paddingTop" | "paddingBottom" => has(&["GAP"]),
         "opacity" => has(&["OPACITY"]),
@@ -81,13 +89,15 @@ pub fn scope_allows(scopes: &[String], key: &str, kind: &NodeKind) -> bool {
         "fontStyle" => has(&["FONT_STYLE"]),
         "characters" => has(&["TEXT_CONTENT"]),
         "visible" => true,
+        // a component property takes a variable of its type whatever the variable's scopes
+        k if crate::prop_binding_name(k).is_some() => true,
         _ => false,
     }
 }
 
 /// Binding keys that make sense for a node (what the inspector can bind).
 pub fn bindable_keys(kind: &NodeKind) -> Vec<&'static str> {
-    let mut v = vec!["width", "height", "opacity", "visible", "fills/0", "strokes/0", "strokeWeight"];
+    let mut v = vec!["width", "height", "minWidth", "maxWidth", "minHeight", "maxHeight", "opacity", "visible", "fills/0", "strokes/0", "strokeWeight"];
     if !matches!(kind, NodeKind::Text(_)) {
         v.extend(["topLeftRadius", "topRightRadius", "bottomRightRadius", "bottomLeftRadius"]);
     }
@@ -95,9 +105,105 @@ pub fn bindable_keys(kind: &NodeKind) -> Vec<&'static str> {
         v.extend(["itemSpacing", "counterAxisSpacing", "paddingLeft", "paddingRight", "paddingTop", "paddingBottom"]);
     }
     if matches!(kind, NodeKind::Text(_)) {
-        v.extend(["characters", "fontSize", "fontWeight", "lineHeight", "letterSpacing"]);
+        v.extend(["characters", "fontFamily", "fontStyle", "fontSize", "fontWeight", "lineHeight", "letterSpacing", "paragraphSpacing", "paragraphIndent"]);
+    }
+    if !matches!(kind, NodeKind::Page { .. }) {
+        v.extend(["easingData", "timelineDuration"]);
     }
     v
+}
+
+/// Whether `key` can be bound on a node of `kind`.
+pub fn is_key_bindable_on_node(key: &str, kind: &NodeKind) -> bool {
+    bindable_keys(kind).contains(&key)
+        || paint_stop_key(key).is_some()
+        || effect_field_key(key).is_some()
+        || ((key.starts_with("effects/") || key.starts_with("fills/") || key.starts_with("strokes/")) && key.ends_with("/opacity"))
+        || (!matches!(kind, NodeKind::Page { .. }) && (is_easing_binding_key(key) || is_duration_binding_key(key)))
+}
+
+/// Whether `key` is an easing binding key (canonical `easingData` or an alias).
+pub fn is_easing_binding_key(key: &str) -> bool {
+    if matches!(key, "easingData" | "transition/easing" | "easing") {
+        return true;
+    }
+    if let Some(rest) = key.strip_prefix("reactions/") {
+        if let Some((idx_str, "easing")) = rest.split_once('/') {
+            return idx_str.parse::<usize>().is_ok();
+        }
+    }
+    if let Some(rest) = key.strip_prefix("tracks/") {
+        if let Some((idx_str, "easing")) = rest.split_once('/') {
+            return idx_str.parse::<usize>().is_ok();
+        }
+    }
+    false
+}
+
+/// Whether `key` is a duration binding key (canonical `timelineDuration` or an alias).
+pub fn is_duration_binding_key(key: &str) -> bool {
+    if matches!(key, "timelineDuration" | "transition/duration" | "duration") {
+        return true;
+    }
+    if let Some(rest) = key.strip_prefix("reactions/") {
+        if let Some((idx_str, "duration")) = rest.split_once('/') {
+            return idx_str.parse::<usize>().is_ok();
+        }
+    }
+    if let Some(rest) = key.strip_prefix("timelines/") {
+        if let Some((idx_str, "duration")) = rest.split_once('/') {
+            return idx_str.parse::<usize>().is_ok();
+        }
+    }
+    if let Some(rest) = key.strip_prefix("tracks/") {
+        if let Some((idx_str, "duration")) = rest.split_once('/') {
+            return idx_str.parse::<usize>().is_ok();
+        }
+    }
+    false
+}
+
+/// Retimes a track's keyframes from old span (`fallback_old_us` or max keyframe time) to `new_us`.
+pub fn retime_track_keyframes(track: &mut Track, new_us: u64, fallback_old_us: u64) {
+    if track.keyframes.is_empty() {
+        return;
+    }
+    let old_us = if fallback_old_us > 0 { fallback_old_us } else { track.keyframes.iter().map(|k| k.time_us).filter(|&t| t > 0).max().unwrap_or(0) as u64 };
+    if old_us == 0 {
+        return;
+    }
+    let ratio = new_us as f64 / old_us as f64;
+    for kf in &mut track.keyframes {
+        kf.time_us = (kf.time_us as f64 * ratio).round() as i64;
+    }
+    track.keyframes.sort_by_key(|k| k.time_us);
+}
+
+/// Why an easing variable binding cannot resolve to a known easing preset, or `None` when valid.
+pub fn easing_binding_problem(doc: &Document, node_id: NodeId, key: &str) -> Option<String> {
+    if !is_easing_binding_key(key) {
+        return None;
+    }
+    let node = doc.get(node_id)?;
+    let var_id = node.variables.bindings.get(key)?;
+    let var = match doc.variables.get(var_id) {
+        Some(v) => v,
+        None => return Some(format!("Variable \"{var_id}\" not found")),
+    };
+    if var.kind != VariableKind::String {
+        return Some(format!("Variable \"{}\" has kind {:?}, expected String", var.name, var.kind));
+    }
+    match doc.resolve_variable(node_id, var_id) {
+        Some(VariableValue::String(s)) => {
+            if parse_easing_preset(&s).is_none() {
+                Some(format!("Unknown easing preset \"{s}\""))
+            } else {
+                None
+            }
+        }
+        Some(_) => Some(format!("Variable \"{}\" resolved to non-string value", var.name)),
+        None => Some(format!("Variable \"{}\" cannot be resolved", var.name)),
+    }
 }
 
 /// Which list a composed-opacity binding key (`fills/N/opacity`, `strokes/N/opacity`,
@@ -134,7 +240,10 @@ fn paint_stop_key(key: &str) -> Option<(bool, usize, usize)> {
 fn effect_field_key(key: &str) -> Option<(usize, &str)> {
     let rest = key.strip_prefix("effects/")?;
     let (i, field) = rest.split_once('/')?;
-    if !matches!(field, "color" | "radius" | "spread" | "offsetX" | "offsetY") {
+    if !matches!(
+        field,
+        "color" | "radius" | "blur" | "frost" | "spread" | "offsetX" | "offsetY" | "lightAngle" | "lightIntensity" | "refraction" | "depth" | "dispersion"
+    ) {
         return None;
     }
     Some((i.parse().ok()?, field))
@@ -162,14 +271,21 @@ fn set_effect_field(fx: &mut Effect, field: &str, value: &VariableValue) {
                 *color = c;
             }
         }
-        "radius" => {
+        "radius" | "blur" => {
             let Some(x) = number_of(value) else { return };
             match fx {
                 Effect::DropShadow { radius, .. }
                 | Effect::InnerShadow { radius, .. }
                 | Effect::LayerBlur { radius, .. }
                 | Effect::BackgroundBlur { radius, .. } => *radius = x.max(0.0),
+                Effect::Glass(g) => g.frost = x.max(0.0),
                 _ => {}
+            }
+        }
+        "frost" => {
+            let Some(x) = number_of(value) else { return };
+            if let Effect::Glass(g) = fx {
+                g.frost = x.max(0.0);
             }
         }
         "spread" => {
@@ -190,14 +306,43 @@ fn set_effect_field(fx: &mut Effect, field: &str, value: &VariableValue) {
                 offset.y = x;
             }
         }
+        "lightAngle" => {
+            let Some(x) = number_of(value) else { return };
+            if let Effect::Glass(g) = fx {
+                g.light_angle = x;
+            }
+        }
+        "lightIntensity" => {
+            let Some(x) = number_of(value) else { return };
+            if let Effect::Glass(g) = fx {
+                g.light_intensity = unit_or_pct(x);
+            }
+        }
+        "refraction" => {
+            let Some(x) = number_of(value) else { return };
+            if let Effect::Glass(g) = fx {
+                g.refraction = unit_or_pct(x);
+            }
+        }
+        "depth" => {
+            let Some(x) = number_of(value) else { return };
+            if let Effect::Glass(g) = fx {
+                g.depth = x.max(0.0);
+            }
+        }
+        "dispersion" => {
+            let Some(x) = number_of(value) else { return };
+            if let Effect::Glass(g) = fx {
+                g.dispersion = unit_or_pct(x);
+            }
+        }
         _ => {}
     }
 }
 
-fn apply_font_style_str(s: &mut TextStyle, val: &str) {
+pub(crate) fn font_style_weight(val: &str) -> Option<u16> {
     let low = val.to_ascii_lowercase();
-    s.italic = low.contains("italic") || low.contains("oblique");
-    let weight = if low.contains("thin") || low.contains("hairline") {
+    if low.contains("thin") || low.contains("hairline") {
         Some(100)
     } else if low.contains("extralight") || low.contains("extra light") || low.contains("ultralight") {
         Some(200)
@@ -217,9 +362,14 @@ fn apply_font_style_str(s: &mut TextStyle, val: &str) {
         Some(400)
     } else {
         None
-    };
-    if let Some(w) = weight {
-        s.font_weight = w;
+    }
+}
+
+fn apply_font_style_str(s: &mut TextStyle, val: &str) {
+    let low = val.to_ascii_lowercase();
+    s.italic = low.contains("italic") || low.contains("oblique");
+    if let Some(w) = font_style_weight(val) {
+        s.set_font_weight(w);
     }
 }
 
@@ -276,6 +426,126 @@ fn paint_at<'a>(paints: &'a mut [Paint], key: &str, prefix: &str) -> Option<&'a 
 /// Writes `value` into the node property named by `key`; mismatched types and
 /// unknown keys are ignored.
 pub fn set_bound_property(n: &mut Node, key: &str, value: &VariableValue) {
+    if is_easing_binding_key(key) {
+        if let VariableValue::String(s) = value {
+            if let Some(easing) = parse_easing_preset(s) {
+                if let Some(rest) = key.strip_prefix("reactions/") {
+                    if let Some((idx_str, "easing")) = rest.split_once('/') {
+                        if let Ok(idx) = idx_str.parse::<usize>() {
+                            if let Some(r) = n.prototype.reactions.get_mut(idx) {
+                                if let Some(ref mut tr) = r.transition {
+                                    tr.easing = easing;
+                                }
+                            }
+                        }
+                    }
+                } else if key == "easingData" || key == "transition/easing" || key == "easing" {
+                    for r in &mut n.prototype.reactions {
+                        if let Some(ref mut tr) = r.transition {
+                            tr.easing = easing;
+                        }
+                    }
+                }
+
+                if let Some((interp, key_easing)) = parse_key_easing_preset(s) {
+                    if let Some(rest) = key.strip_prefix("tracks/") {
+                        if let Some((idx_str, "easing")) = rest.split_once('/') {
+                            if let Ok(idx) = idx_str.parse::<usize>() {
+                                if let Some(ref mut m) = n.motion {
+                                    if let Some(tr) = m.tracks.get_mut(idx) {
+                                        for kf in &mut tr.keyframes {
+                                            kf.interpolation = interp;
+                                            kf.easing = Some(key_easing);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    } else if key == "easingData" || key == "transition/easing" || key == "easing" {
+                        if let Some(ref mut m) = n.motion {
+                            for tr in &mut m.tracks {
+                                for kf in &mut tr.keyframes {
+                                    kf.interpolation = interp;
+                                    kf.easing = Some(key_easing);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        return;
+    }
+    if is_duration_binding_key(key) {
+        if let Some(x) = number_of(value) {
+            let dur_ms = x.max(0.0).round() as u32;
+            let dur_us = (x.max(0.0) * 1000.0).round() as u64;
+
+            if let Some(rest) = key.strip_prefix("reactions/") {
+                if let Some((idx_str, "duration")) = rest.split_once('/') {
+                    if let Ok(idx) = idx_str.parse::<usize>() {
+                        if let Some(r) = n.prototype.reactions.get_mut(idx) {
+                            if let Some(ref mut tr) = r.transition {
+                                tr.duration_ms = dur_ms;
+                            }
+                        }
+                    }
+                }
+            } else if key == "timelineDuration" || key == "transition/duration" || key == "duration" {
+                for r in &mut n.prototype.reactions {
+                    if let Some(ref mut tr) = r.transition {
+                        tr.duration_ms = dur_ms;
+                    }
+                }
+            }
+
+            if let Some(ref mut m) = n.motion {
+                if let Some(rest) = key.strip_prefix("timelines/") {
+                    if let Some((idx_str, "duration")) = rest.split_once('/') {
+                        if let Ok(idx) = idx_str.parse::<usize>() {
+                            if let Some(tl) = m.timelines.get_mut(idx) {
+                                let old_us = tl.duration_us;
+                                tl.duration_us = dur_us;
+                                let tid = tl.id.clone();
+                                for tr in &mut m.tracks {
+                                    if tr.timeline == tid {
+                                        retime_track_keyframes(tr, dur_us, old_us);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                } else if let Some(rest) = key.strip_prefix("tracks/") {
+                    if let Some((idx_str, "duration")) = rest.split_once('/') {
+                        if let Ok(idx) = idx_str.parse::<usize>() {
+                            if let Some(tr) = m.tracks.get_mut(idx) {
+                                let old_us = m.timelines.iter().find(|t| t.id == tr.timeline).map(|t| t.duration_us).unwrap_or(0);
+                                retime_track_keyframes(tr, dur_us, old_us);
+                            }
+                        }
+                    }
+                } else if key == "timelineDuration" || key == "transition/duration" || key == "duration" {
+                    if m.timelines.is_empty() {
+                        for tr in &mut m.tracks {
+                            retime_track_keyframes(tr, dur_us, 0);
+                        }
+                    } else {
+                        for tl in &mut m.timelines {
+                            let old_us = tl.duration_us;
+                            tl.duration_us = dur_us;
+                            let tid = tl.id.clone();
+                            for tr in &mut m.tracks {
+                                if tr.timeline == tid {
+                                    retime_track_keyframes(tr, dur_us, old_us);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        return;
+    }
     if let Some(target) = paint_opacity_key(key) {
         if let Some(x) = number_of(value) {
             compose_opacity(n, target, x);
@@ -353,8 +623,10 @@ pub fn set_bound_property(n: &mut Node, key: &str, value: &VariableValue) {
     }
     if key == "characters" {
         if let (VariableValue::String(s), NodeKind::Text(t)) = (value, &mut n.kind) {
-            t.content = s.clone();
-            t.runs.clear();
+            if t.content != *s {
+                t.content = s.clone();
+                t.runs.clear();
+            }
         }
         return;
     }
@@ -398,6 +670,10 @@ pub fn set_bound_property(n: &mut Node, key: &str, value: &VariableValue) {
                 n.stroke_geometry = None;
             }
         }
+        "minWidth" => n.layout_child.min_w = Some(x.max(0.0)),
+        "maxWidth" => n.layout_child.max_w = Some(x.max(0.0)),
+        "minHeight" => n.layout_child.min_h = Some(x.max(0.0)),
+        "maxHeight" => n.layout_child.max_h = Some(x.max(0.0)),
         "opacity" => n.opacity = (x / 100.0).clamp(0.0, 1.0),
         "topLeftRadius" | "topRightRadius" | "bottomRightRadius" | "bottomLeftRadius" => {
             let i = match key {
@@ -407,10 +683,7 @@ pub fn set_bound_property(n: &mut Node, key: &str, value: &VariableValue) {
                 _ => 3,
             };
             n.corner_radii[i] = x.max(0.0);
-            if is_rect_like {
-                n.fill_geometry = None;
-                n.stroke_geometry = None;
-            }
+            crate::drop_baked_outline_of_parametric_shape(n);
         }
         "strokeWeight" => {
             n.stroke.weight = x.max(0.0);
@@ -445,7 +718,7 @@ pub fn set_bound_property(n: &mut Node, key: &str, value: &VariableValue) {
             if let NodeKind::Text(t) = &mut n.kind {
                 let apply = |s: &mut TextStyle| match key {
                     "fontSize" => s.font_size = x.max(1.0),
-                    "fontWeight" => s.font_weight = x.round().clamp(1.0, 1000.0) as u16,
+                    "fontWeight" => s.set_font_weight(x.round().clamp(1.0, 1000.0) as u16),
                     "lineHeight" => s.line_height = LineHeight::Pixels(x.max(0.0)),
                     "paragraphSpacing" => s.paragraph_spacing = x.max(0.0),
                     _ => s.letter_spacing = x,
@@ -459,6 +732,11 @@ pub fn set_bound_property(n: &mut Node, key: &str, value: &VariableValue) {
         "paragraphIndent" => {
             if let NodeKind::Text(t) = &mut n.kind {
                 t.paragraph.indent = x.max(0.0);
+            }
+        }
+        "listSpacing" => {
+            if let NodeKind::Text(t) = &mut n.kind {
+                t.paragraph.list_spacing = x.max(0.0);
             }
         }
         _ => {}
@@ -496,7 +774,7 @@ pub fn set_bound_style_property(style: &mut Style, key: &str, value: &VariableVa
             }
             ("fontWeight", _) => {
                 if let Some(x) = number_of(value) {
-                    ts.font_weight = x.round().clamp(1.0, 1000.0) as u16;
+                    ts.set_font_weight(x.round().clamp(1.0, 1000.0) as u16);
                 }
             }
             ("lineHeight", _) => {
@@ -514,6 +792,19 @@ pub fn set_bound_style_property(style: &mut Style, key: &str, value: &VariableVa
                     ts.paragraph_spacing = x.max(0.0);
                 }
             }
+            ("paragraphIndent", _) => {
+                if let Some(x) = number_of(value) {
+                    ts.paragraph_indent = x.max(0.0);
+                }
+            }
+            ("listSpacing", _) => {
+                if let Some(x) = number_of(value) {
+                    ts.list_spacing = x.max(0.0);
+                }
+            }
+            ("leadingTrim", VariableValue::String(s)) => {
+                ts.leading_trim = if s == "CAP_HEIGHT" { LeadingTrim::CapHeight } else { LeadingTrim::None };
+            }
             _ => {}
         },
         Style::Effect(effects) => {
@@ -527,13 +818,19 @@ pub fn set_bound_style_property(style: &mut Style, key: &str, value: &VariableVa
                 }
             }
         }
-        Style::Grid(_) => {}
+        Style::Grid(_) | Style::Animation(_) => {}
     }
 }
 
 /// Whether `node` is linked to a style that holds at least one variable binding.
 pub fn node_has_style_bindings(doc: &Document, node: &Node) -> bool {
     !node.style_refs.is_empty() && node.style_refs.values().any(|k| doc.style_meta.get(k).is_some_and(|m| !m.bindings.is_empty()))
+}
+
+/// Removes direct typography bindings owned by a text style. Leaving a node binding in place
+/// would make it override the linked style when `resolve_node` applies bindings.
+pub fn detach_text_style_bindings(node: &mut Node) {
+    node.variables.bindings.retain(|key, _| !TEXT_STYLE_BINDING_KEYS.contains(&key.as_str()));
 }
 
 /// The node with its variable bindings (and linked style bindings) applied. Borrowed when it has none.
@@ -556,11 +853,23 @@ pub fn resolve_node<'a>(doc: &Document, node: &'a Node) -> Cow<'a, Node> {
                 continue;
             }
             if let Some(v) = doc.resolve_variable(node.id, var) {
-                set_bound_property(out.get_or_insert_with(|| node.clone()), &node_key, &v);
+                let target = out.get_or_insert_with(|| node.clone());
+                // Render path: a layer without overrides takes the plain write and skips the helper's node clones.
+                if slot == "text" && !raw_text_style_overrides(target).is_empty() {
+                    with_kept_text_style_overrides(target, doc.styles.get(sk), |n| {
+                        set_bound_property(n, &node_key, &v);
+                    });
+                } else {
+                    set_bound_property(target, &node_key, &v);
+                }
             }
         }
     }
     for (key, var) in &node.variables.bindings {
+        // A component property binding is applied to the instance's stored values (see `bind_prop_variable`).
+        if prop_binding_name(key).is_some() {
+            continue;
+        }
         if let Some(v) = doc.resolve_variable(node.id, var) {
             set_bound_property(out.get_or_insert_with(|| node.clone()), key, &v);
         }
@@ -664,6 +973,44 @@ mod tests {
     }
 
     #[test]
+    fn individual_corner_radius_binding_drops_baked_outline_for_parametric_shapes() {
+        let mut d = Document::new("radius-binding");
+        let page = d.add_page("P");
+        d.variable_collections.insert(
+            "c".into(),
+            VariableCollection {
+                id: "c".into(),
+                name: "C".into(),
+                modes: vec![VariableMode { id: "light".into(), name: "Light".into() }],
+                default_mode: "light".into(),
+                variables: vec!["radius".into()],
+                key: None,
+                source_library_key: None,
+                extensions: Default::default(),
+            },
+        );
+        d.variables.insert("radius".into(), var("radius", VariableKind::Number, VariableValue::Number(12.0), VariableValue::Number(12.0)));
+
+        let keys = ["topLeftRadius", "topRightRadius", "bottomRightRadius", "bottomLeftRadius"];
+        for kind in [NodeKind::Ellipse(ArcData::default()), NodeKind::Polygon { count: 5 }, NodeKind::Star { count: 5, inner_ratio: 0.5 }] {
+            for (i, key) in keys.into_iter().enumerate() {
+                let id = d.alloc_id();
+                let mut node = Node::new(id, kind.clone());
+                node.size = Vec2::new(100.0, 100.0);
+                node.fill_geometry = Some(vec![Path::default()]);
+                node.stroke_geometry = Some(vec![Path::default()]);
+                node.variables.bindings.insert(key.into(), "radius".into());
+                let id = d.insert(page, node).unwrap();
+
+                let resolved = resolved_node(&d, id).unwrap();
+                assert_eq!(resolved.corner_radii[i], 12.0, "{key} binding did not update the radius");
+                assert!(resolved.fill_geometry.is_none(), "{key} binding left a stale fill outline for {:?}", resolved.kind);
+                assert!(resolved.stroke_geometry.is_none(), "{key} binding left a stale stroke outline for {:?}", resolved.kind);
+            }
+        }
+    }
+
+    #[test]
     fn substitutes_values_in_default_mode() {
         let (d, _, frame, text) = setup();
         let f = resolved_node(&d, frame).unwrap();
@@ -684,6 +1031,19 @@ mod tests {
         assert!(t.visible);
         // raw node is untouched
         assert_eq!(d.get(frame).unwrap().size.x, 100.0);
+    }
+
+    #[test]
+    fn font_weight_binding_keeps_wght_axis_in_sync() {
+        let mut n = Node::text(NodeId(1), Rect::new(0.0, 0.0, 20.0, 20.0), "text", TextStyle::default());
+        let NodeKind::Text(t) = &mut n.kind else { panic!() };
+        t.style.set_axis("wght", 400.0);
+
+        set_bound_property(&mut n, "fontWeight", &VariableValue::Number(700.0));
+
+        let NodeKind::Text(t) = n.kind else { panic!() };
+        assert_eq!(t.style.font_weight, 700);
+        assert_eq!(t.style.get_axis("wght"), Some(700.0));
     }
 
     #[test]
@@ -738,6 +1098,7 @@ mod tests {
             spread: 0.0,
             visible: true,
             show_behind: false,
+            blend: Default::default(),
         }];
         for (k, v) in [("fills/0", "brand"), ("fills/0/opacity", "fade"), ("strokes/0/opacity", "fade"), ("effects/0/opacity", "fade")] {
             n.variables.bindings.insert(k.into(), v.into());
@@ -838,6 +1199,15 @@ mod tests {
         assert!(!scope_allows(&["FRAME_FILL".into()], "fills/0", &text));
         assert!(scope_allows(&["TEXT_FILL".into()], "fills/0", &text));
         assert!(scope_allows(&["ALL_FILLS".into()], "fills/0", &text));
+        assert!(scope_allows(&["STROKE".into()], "strokes/0", &frame), "Figma editor scope STROKE must allow stroke colours");
+        assert!(scope_allows(&["STROKE_COLOR".into()], "strokes/0", &frame), "REST scope STROKE_COLOR must allow stroke colours");
+        for spelling in ["STROKE", "STROKE_COLOR"] {
+            let scopes = [spelling.to_string()];
+            assert!(!scope_allows(&scopes, "fills/0", &frame), "{spelling} is a stroke colour scope, not a frame fill scope");
+            assert!(!scope_allows(&scopes, "fills/0", &text), "{spelling} is a stroke colour scope, not a text fill scope");
+            assert!(!scope_allows(&scopes, "strokeWeight", &frame), "{spelling} is a stroke colour scope, not a stroke weight scope");
+            assert!(!scope_allows(&scopes, "strokes/0/opacity", &frame), "{spelling} does not cover paint opacity");
+        }
     }
 
     #[test]
@@ -902,7 +1272,14 @@ mod tests {
         d.styles.insert("Card".into(), Style::Fill(vec![Paint::solid(light_c)]));
         d.style_meta.insert(
             "Card".into(),
-            StyleMeta { name: "Card".into(), key: None, description: String::new(), property: StyleProperty::Fill, bindings: BTreeMap::new() },
+            StyleMeta {
+                name: "Card".into(),
+                key: None,
+                description: String::new(),
+                property: StyleProperty::Fill,
+                bindings: BTreeMap::new(),
+                ..Default::default()
+            },
         );
         let cmd = crate::styles_ops::bind_style_property(&d, "Card", "fills/0", "surface").unwrap();
         cmd.apply(&mut d).unwrap();
@@ -935,6 +1312,7 @@ mod tests {
                 description: String::new(),
                 property: StyleProperty::Fill,
                 bindings: [("fills/0".to_string(), "surface".to_string())].into_iter().collect(),
+                ..Default::default()
             },
         );
 
@@ -956,7 +1334,14 @@ mod tests {
         d.styles.insert("Card".into(), Style::Fill(vec![Paint::solid(Color::WHITE)]));
         d.style_meta.insert(
             "Card".into(),
-            StyleMeta { name: "Card".into(), key: Some("k-card".into()), description: String::new(), property: StyleProperty::Fill, bindings: BTreeMap::new() },
+            StyleMeta {
+                name: "Card".into(),
+                key: Some("k-card".into()),
+                description: String::new(),
+                property: StyleProperty::Fill,
+                bindings: BTreeMap::new(),
+                ..Default::default()
+            },
         );
         let json = serde_json::to_string_pretty(&d).unwrap();
         assert!(!json.contains("\"bindings\""), "empty bindings map must be omitted from JSON: {json}");
@@ -971,7 +1356,14 @@ mod tests {
         d.styles.insert("Body".into(), Style::Text(TextStyle { font_size: 16.0, ..TextStyle::default() }));
         d.style_meta.insert(
             "Body".into(),
-            StyleMeta { name: "Body".into(), key: None, description: String::new(), property: StyleProperty::Text, bindings: BTreeMap::new() },
+            StyleMeta {
+                name: "Body".into(),
+                key: None,
+                description: String::new(),
+                property: StyleProperty::Text,
+                bindings: BTreeMap::new(),
+                ..Default::default()
+            },
         );
         let cmd = crate::styles_ops::bind_style_property(&d, "Body", "fontSize", "size-body").unwrap();
         cmd.apply(&mut d).unwrap();
@@ -983,5 +1375,303 @@ mod tests {
         let resolved = resolve_node(&d, d.get(text).unwrap());
         let NodeKind::Text(tp) = &resolved.kind else { panic!("expected text") };
         assert_eq!(tp.style.font_size, 24.0);
+    }
+
+    #[test]
+    fn characters_binding_preserves_runs_when_resolved_string_is_unchanged() {
+        let mut n = Node::text(NodeId(1), Rect::new(0.0, 0.0, 40.0, 20.0), "Delete", TextStyle { font_weight: 400, ..TextStyle::default() });
+        if let NodeKind::Text(t) = &mut n.kind {
+            let mut bold = t.style.clone();
+            bold.set_font_weight(700);
+            t.runs = vec![TextRun { start: 0, end: 6, style: bold }];
+        }
+
+        set_bound_property(&mut n, "characters", &VariableValue::String("Delete".into()));
+        let NodeKind::Text(t) = &n.kind else { panic!("expected text") };
+        assert_eq!(t.runs.len(), 1, "re-applying identical characters must not wipe text runs");
+        assert_eq!(t.runs[0].style.font_weight, 700);
+
+        set_bound_property(&mut n, "characters", &VariableValue::String("Confirm".into()));
+        let NodeKind::Text(t) = &n.kind else { panic!("expected text") };
+        assert_eq!(t.content, "Confirm");
+        assert!(t.runs.is_empty(), "changing characters content must clear stale byte runs");
+    }
+
+    #[test]
+    fn glass_property_kind_and_scopes() {
+        assert_eq!(property_kind("effects/0/color"), Some(VariableKind::Color));
+        assert_eq!(property_kind("effects/0/radius"), Some(VariableKind::Number));
+        assert_eq!(property_kind("effects/0/blur"), Some(VariableKind::Number));
+        assert_eq!(property_kind("effects/0/frost"), Some(VariableKind::Number));
+        assert_eq!(property_kind("effects/0/spread"), Some(VariableKind::Number));
+        assert_eq!(property_kind("effects/0/offsetX"), Some(VariableKind::Number));
+        assert_eq!(property_kind("effects/0/offsetY"), Some(VariableKind::Number));
+        assert_eq!(property_kind("effects/0/lightAngle"), Some(VariableKind::Number));
+        assert_eq!(property_kind("effects/0/lightIntensity"), Some(VariableKind::Number));
+        assert_eq!(property_kind("effects/0/refraction"), Some(VariableKind::Number));
+        assert_eq!(property_kind("effects/0/depth"), Some(VariableKind::Number));
+        assert_eq!(property_kind("effects/0/dispersion"), Some(VariableKind::Number));
+
+        let rect_kind = NodeKind::Rectangle;
+        let s = |scopes: &[&str]| scopes.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+
+        assert!(scope_allows(&s(&["EFFECT_FLOAT"]), "effects/0/lightAngle", &rect_kind));
+        assert!(scope_allows(&s(&["EFFECT_FLOAT"]), "effects/0/refraction", &rect_kind));
+        assert!(scope_allows(&s(&["EFFECT_FLOAT"]), "effects/0/frost", &rect_kind));
+        assert!(!scope_allows(&s(&["WIDTH_HEIGHT"]), "effects/0/lightAngle", &rect_kind));
+
+        assert!(scope_allows(&s(&["EFFECT_COLOR"]), "effects/0/color", &rect_kind));
+        assert!(!scope_allows(&s(&["STROKE_COLOR"]), "effects/0/color", &rect_kind));
+
+        assert!(is_key_bindable_on_node("effects/0/lightAngle", &rect_kind));
+        assert!(is_key_bindable_on_node("effects/0/frost", &rect_kind));
+        assert!(is_key_bindable_on_node("effects/0/opacity", &rect_kind));
+        assert!(!is_key_bindable_on_node("unknown_key_xyz", &rect_kind));
+    }
+
+    #[test]
+    fn resolve_node_applies_glass_bindings_per_mode() {
+        let (mut d, _, frame, _) = setup();
+        let cid = d.alloc_id();
+        let mut node = Node::rectangle(cid, Rect::new(0.0, 0.0, 100.0, 100.0));
+        node.effects = vec![Effect::Glass(GlassEffect {
+            frost: 10.0,
+            light_angle: 45.0,
+            light_intensity: 0.5,
+            refraction: 0.2,
+            depth: 2.0,
+            dispersion: 0.1,
+            splay: 0.0,
+            bevel: 0.0,
+            visible: true,
+        })];
+
+        d.variables.insert("frost-var".into(), var("frost-var", VariableKind::Number, VariableValue::Number(10.0), VariableValue::Number(25.0)));
+        d.variables.insert("angle-var".into(), var("angle-var", VariableKind::Number, VariableValue::Number(45.0), VariableValue::Number(90.0)));
+        d.variables.insert("depth-var".into(), var("depth-var", VariableKind::Number, VariableValue::Number(2.0), VariableValue::Number(8.0)));
+
+        node.variables.bindings.insert("effects/0/frost".into(), "frost-var".into());
+        node.variables.bindings.insert("effects/0/lightAngle".into(), "angle-var".into());
+        node.variables.bindings.insert("effects/0/depth".into(), "depth-var".into());
+
+        let node_id = d.insert(frame, node).unwrap();
+
+        // Light mode
+        let resolved_light = resolve_node(&d, d.get(node_id).unwrap());
+        let Effect::Glass(ref g_light) = resolved_light.effects[0] else { panic!("expected Glass") };
+        assert_eq!(g_light.frost, 10.0);
+        assert_eq!(g_light.light_angle, 45.0);
+        assert_eq!(g_light.depth, 2.0);
+
+        // Switch to Dark mode
+        d.get_mut(frame).unwrap().variables.modes.insert("c".into(), "dark".into());
+        let resolved_dark = resolve_node(&d, d.get(node_id).unwrap());
+        let Effect::Glass(ref g_dark) = resolved_dark.effects[0] else { panic!("expected Glass") };
+        assert_eq!(g_dark.frost, 25.0);
+        assert_eq!(g_dark.light_angle, 90.0);
+        assert_eq!(g_dark.depth, 8.0);
+    }
+
+    #[test]
+    fn bind_size_limits_and_typography_keys_metadata_and_resolution() {
+        assert_eq!(property_kind("minWidth"), Some(VariableKind::Number));
+        assert_eq!(property_kind("maxWidth"), Some(VariableKind::Number));
+        assert_eq!(property_kind("minHeight"), Some(VariableKind::Number));
+        assert_eq!(property_kind("maxHeight"), Some(VariableKind::Number));
+        assert_eq!(property_kind("fontFamily"), Some(VariableKind::String));
+        assert_eq!(property_kind("fontStyle"), Some(VariableKind::String));
+        assert_eq!(property_kind("paragraphSpacing"), Some(VariableKind::Number));
+        assert_eq!(property_kind("paragraphIndent"), Some(VariableKind::Number));
+
+        let frame_kind = NodeKind::Frame(FrameProps::default());
+        let text_kind = NodeKind::Text(TextProps::default());
+
+        assert!(scope_allows(&["WIDTH_HEIGHT".into()], "minWidth", &frame_kind));
+        assert!(scope_allows(&["WIDTH_HEIGHT".into()], "maxWidth", &frame_kind));
+        assert!(scope_allows(&["WIDTH_HEIGHT".into()], "minHeight", &frame_kind));
+        assert!(scope_allows(&["WIDTH_HEIGHT".into()], "maxHeight", &frame_kind));
+        assert!(!scope_allows(&["GAP".into()], "minWidth", &frame_kind));
+
+        assert!(scope_allows(&["FONT_FAMILY".into()], "fontFamily", &text_kind));
+        assert!(scope_allows(&["FONT_STYLE".into()], "fontStyle", &text_kind));
+        assert!(scope_allows(&["PARAGRAPH_SPACING".into()], "paragraphSpacing", &text_kind));
+        assert!(scope_allows(&["PARAGRAPH_INDENT".into()], "paragraphIndent", &text_kind));
+
+        let frame_keys = bindable_keys(&frame_kind);
+        for k in ["minWidth", "maxWidth", "minHeight", "maxHeight"] {
+            assert!(frame_keys.contains(&k), "frame_keys missing {k}");
+            assert!(is_key_bindable_on_node(k, &frame_kind), "is_key_bindable_on_node failed for {k} on frame");
+        }
+
+        let text_keys = bindable_keys(&text_kind);
+        for k in ["minWidth", "maxWidth", "minHeight", "maxHeight", "fontFamily", "fontStyle", "paragraphSpacing", "paragraphIndent"] {
+            assert!(text_keys.contains(&k), "text_keys missing {k}");
+            assert!(is_key_bindable_on_node(k, &text_kind), "is_key_bindable_on_node failed for {k} on text");
+        }
+
+        let mut d = Document::new("t");
+        let page = d.add_page("P");
+        d.variable_collections.insert(
+            "col".into(),
+            VariableCollection {
+                id: "col".into(),
+                name: "Col".into(),
+                modes: vec![VariableMode { id: "mode_a".into(), name: "Mode A".into() }, VariableMode { id: "mode_b".into(), name: "Mode B".into() }],
+                default_mode: "mode_a".into(),
+                variables: vec![],
+                key: None,
+                source_library_key: None,
+                extensions: Default::default(),
+            },
+        );
+
+        let n = |x: f32| VariableValue::Number(x);
+        let s = |x: &str| VariableValue::String(x.into());
+
+        let make_num_var = |id: &str, a: f32, b: f32| Variable {
+            id: id.into(),
+            name: id.into(),
+            collection: "col".into(),
+            kind: VariableKind::Number,
+            values: [("mode_a".to_string(), n(a)), ("mode_b".to_string(), n(b))].into_iter().collect(),
+            description: String::new(),
+            scopes: vec![],
+            hidden_from_publishing: false,
+            key: None,
+            code_syntax: Default::default(),
+            extensions: Default::default(),
+            mode_extensions: Default::default(),
+        };
+        let make_str_var = |id: &str, a: &str, b: &str| Variable {
+            id: id.into(),
+            name: id.into(),
+            collection: "col".into(),
+            kind: VariableKind::String,
+            values: [("mode_a".to_string(), s(a)), ("mode_b".to_string(), s(b))].into_iter().collect(),
+            description: String::new(),
+            scopes: vec![],
+            hidden_from_publishing: false,
+            key: None,
+            code_syntax: Default::default(),
+            extensions: Default::default(),
+            mode_extensions: Default::default(),
+        };
+
+        d.variables.insert("var_min_w".into(), make_num_var("var_min_w", 50.0, 70.0));
+        d.variables.insert("var_max_w".into(), make_num_var("var_max_w", 150.0, 250.0));
+        d.variables.insert("var_min_h".into(), make_num_var("var_min_h", 30.0, 40.0));
+        d.variables.insert("var_max_h".into(), make_num_var("var_max_h", 120.0, 220.0));
+
+        d.variables.insert("var_ff".into(), make_str_var("var_ff", "Inter", "Roboto Mono"));
+        d.variables.insert("var_fs".into(), make_str_var("var_fs", "Regular", "Bold Italic"));
+        d.variables.insert("var_ps".into(), make_num_var("var_ps", 8.0, 16.0));
+        d.variables.insert("var_pi".into(), make_num_var("var_pi", 12.0, 24.0));
+
+        let fid = d.alloc_id();
+        let mut f = Node::frame(fid, Rect::new(0.0, 0.0, 100.0, 100.0));
+        f.variables.bindings.insert("minWidth".into(), "var_min_w".into());
+        f.variables.bindings.insert("maxWidth".into(), "var_max_w".into());
+        f.variables.bindings.insert("minHeight".into(), "var_min_h".into());
+        f.variables.bindings.insert("maxHeight".into(), "var_max_h".into());
+        let frame_id = d.insert(page, f).unwrap();
+
+        let tid = d.alloc_id();
+        let mut t = Node::text(tid, Rect::new(0.0, 0.0, 100.0, 30.0), "Hello", TextStyle::default());
+        t.variables.bindings.insert("fontFamily".into(), "var_ff".into());
+        t.variables.bindings.insert("fontStyle".into(), "var_fs".into());
+        t.variables.bindings.insert("paragraphSpacing".into(), "var_ps".into());
+        t.variables.bindings.insert("paragraphIndent".into(), "var_pi".into());
+        let text_id = d.insert(frame_id, t).unwrap();
+
+        // Default mode: mode_a
+        let resolved_f = resolve_node(&d, d.get(frame_id).unwrap());
+        assert_eq!(resolved_f.layout_child.min_w, Some(50.0));
+        assert_eq!(resolved_f.layout_child.max_w, Some(150.0));
+        assert_eq!(resolved_f.layout_child.min_h, Some(30.0));
+        assert_eq!(resolved_f.layout_child.max_h, Some(120.0));
+
+        let resolved_t = resolve_node(&d, d.get(text_id).unwrap());
+        let NodeKind::Text(tp_a) = &resolved_t.kind else { panic!("expected text") };
+        assert_eq!(tp_a.style.font_family, "Inter");
+        assert_eq!(tp_a.style.font_weight, 400);
+        assert!(!tp_a.style.italic);
+        assert_eq!(tp_a.style.paragraph_spacing, 8.0);
+        assert_eq!(tp_a.paragraph.indent, 12.0);
+
+        // Switch to mode_b
+        d.get_mut(frame_id).unwrap().variables.modes.insert("col".into(), "mode_b".into());
+        let resolved_f_b = resolve_node(&d, d.get(frame_id).unwrap());
+        assert_eq!(resolved_f_b.layout_child.min_w, Some(70.0));
+        assert_eq!(resolved_f_b.layout_child.max_w, Some(250.0));
+        assert_eq!(resolved_f_b.layout_child.min_h, Some(40.0));
+        assert_eq!(resolved_f_b.layout_child.max_h, Some(220.0));
+
+        let resolved_t_b = resolve_node(&d, d.get(text_id).unwrap());
+        let NodeKind::Text(tp_b) = &resolved_t_b.kind else { panic!("expected text") };
+        assert_eq!(tp_b.style.font_family, "Roboto Mono");
+        assert_eq!(tp_b.style.font_weight, 700);
+        assert!(tp_b.style.italic);
+        assert_eq!(tp_b.style.paragraph_spacing, 16.0);
+        assert_eq!(tp_b.paragraph.indent, 24.0);
+    }
+
+    #[test]
+    fn easing_and_duration_binding_keys_and_properties() {
+        assert!(is_easing_binding_key("easingData"));
+        assert!(is_easing_binding_key("transition/easing"));
+        assert!(is_easing_binding_key("easing"));
+        assert!(is_easing_binding_key("reactions/0/easing"));
+        assert!(is_easing_binding_key("tracks/2/easing"));
+        assert!(!is_easing_binding_key("other"));
+
+        assert!(is_duration_binding_key("timelineDuration"));
+        assert!(is_duration_binding_key("transition/duration"));
+        assert!(is_duration_binding_key("duration"));
+        assert!(is_duration_binding_key("reactions/0/duration"));
+        assert!(is_duration_binding_key("timelines/0/duration"));
+        assert!(is_duration_binding_key("tracks/1/duration"));
+        assert!(!is_duration_binding_key("other"));
+
+        assert_eq!(property_kind("easingData"), Some(VariableKind::String));
+        assert_eq!(property_kind("timelineDuration"), Some(VariableKind::Number));
+
+        let frame_kind = NodeKind::Frame(FrameProps::default());
+        assert!(is_key_bindable_on_node("easingData", &frame_kind));
+        assert!(is_key_bindable_on_node("timelineDuration", &frame_kind));
+        assert!(scope_allows(&[], "easingData", &frame_kind));
+        assert!(scope_allows(&[], "timelineDuration", &frame_kind));
+    }
+
+    #[test]
+    fn retime_track_keyframes_scales_proportionally() {
+        let mut track = Track::new("tr", "tl", TrackProperty::Opacity);
+        track.keyframes.push(Keyframe::new(0, KeyValue::Float(0.0)));
+        track.keyframes.push(Keyframe::new(250_000, KeyValue::Float(0.5)));
+        track.keyframes.push(Keyframe::new(1_000_000, KeyValue::Float(1.0)));
+
+        retime_track_keyframes(&mut track, 2_000_000, 1_000_000);
+        assert_eq!(track.keyframes[0].time_us, 0);
+        assert_eq!(track.keyframes[1].time_us, 500_000);
+        assert_eq!(track.keyframes[2].time_us, 2_000_000);
+    }
+
+    #[test]
+    fn easing_binding_problem_reports_unknown_preset_or_missing() {
+        let (mut d, _p, fid, _) = setup();
+        d.variables.insert(
+            "bad-ease".into(),
+            var("bad-ease", VariableKind::String, VariableValue::String("not-a-curve".into()), VariableValue::String("not-a-curve".into())),
+        );
+        d.variables.insert(
+            "good-ease".into(),
+            var("good-ease", VariableKind::String, VariableValue::String("ease-in-out".into()), VariableValue::String("linear".into())),
+        );
+        d.get_mut(fid).unwrap().variables.bindings.insert("easingData".into(), "bad-ease".into());
+        let prob = easing_binding_problem(&d, fid, "easingData");
+        assert!(prob.is_some());
+        assert!(prob.unwrap().contains("Unknown easing preset"));
+
+        d.get_mut(fid).unwrap().variables.bindings.insert("easingData".into(), "good-ease".into());
+        assert_eq!(easing_binding_problem(&d, fid, "easingData"), None);
     }
 }

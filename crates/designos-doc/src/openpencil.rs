@@ -27,6 +27,8 @@ pub fn xpath_type_name(kind: &NodeKind) -> &'static str {
         NodeKind::Connector(_) => "CONNECTOR",
         NodeKind::ShapeWithText(_) => "SHAPE_WITH_TEXT",
         NodeKind::Stamp { .. } => "STAMP",
+        NodeKind::Table(_) => "TABLE",
+        NodeKind::TableCell(_) => "TABLE_CELL",
         NodeKind::Unknown { .. } => "UNKNOWN",
     }
 }
@@ -73,6 +75,8 @@ const NODE_TYPE_TESTS: &[&str] = &[
     "CONNECTOR",
     "SHAPE_WITH_TEXT",
     "STAMP",
+    "TABLE",
+    "TABLE_CELL",
     "UNKNOWN",
     "RECT",
     "BOOLEAN_OP",
@@ -116,6 +120,8 @@ const NODE_KIND_DEFAULT_NAMES: &[&str] = &[
     "Connector",
     "Shape",
     "Stamp",
+    "Table",
+    "Cell",
     "Layer",
 ];
 
@@ -709,6 +715,7 @@ pub fn describe_node(doc: &Document, id: NodeId, depth: usize) -> Result<Value, 
             PaintKind::AngularGradient { .. } => "angular-gradient".into(),
             PaintKind::DiamondGradient { .. } => "diamond-gradient".into(),
             PaintKind::Image { image_ref, .. } => format!("image:{image_ref}"),
+            PaintKind::Shader(_) => "shader".into(),
         })
         .collect();
 

@@ -21,10 +21,30 @@ pub mod branch_diff;
 mod branch_diff_tests;
 pub mod branch_merge;
 pub mod changelog_features;
+mod color_profile;
+mod color_space;
 mod comments;
 #[cfg(test)]
+mod component_arc_override_tests;
+#[cfg(test)]
 mod component_cycle_tests;
+#[cfg(test)]
+mod component_nested_variant_binding_tests;
+mod component_prop_variables;
+#[cfg(test)]
+mod component_prop_variables_tests;
+#[cfg(test)]
+mod component_variant_picks_round_tests;
+#[cfg(test)]
+mod component_variant_picks_tests;
+#[cfg(test)]
+mod component_variant_resync_layout_tests;
 mod components;
+mod connector_home;
+mod connector_index;
+mod connector_route_cache;
+mod copy_layer_links;
+mod cycle_refusal;
 mod dev;
 pub mod diff;
 pub mod find;
@@ -35,10 +55,16 @@ mod geom;
 mod history;
 mod layout_apply;
 pub mod layout_constraints;
+mod layout_rotated;
+pub use layout_rotated::{slot_drifted, slot_write, SlotWrite};
+#[cfg(test)]
+mod layout_rotated_tests;
 pub mod layout_solver;
 mod layout_solver_grid;
 mod layout_solver_grid_placement;
 mod layout_solver_types;
+#[cfg(test)]
+mod layout_wrapped_text_tests;
 mod library;
 mod library_ops;
 pub mod lint;
@@ -46,15 +72,26 @@ pub mod live_patch;
 mod load_repair;
 #[cfg(test)]
 mod load_repair_tests;
+mod motion;
+mod motion_copy;
+mod motion_eval;
+#[cfg(test)]
+mod motion_eval_tests;
+mod motion_ops;
+#[cfg(test)]
+mod motion_tests;
+mod motion_value;
 mod node;
 pub mod openpencil;
 mod paint;
+mod pending_pages;
 mod prototype;
 pub mod query;
 mod renumber_ids;
 #[cfg(test)]
 mod renumber_ids_tests;
 mod settings;
+mod silhouette;
 #[cfg(test)]
 mod slot_model_tests;
 pub mod spec;
@@ -66,12 +103,20 @@ mod spec_bind_rollback_label_tests;
 mod spec_data;
 pub use spec_data::SpecDataSnapshot;
 pub mod spec_instance;
+#[cfg(test)]
+mod spec_relayout_scope_tests;
 mod styles_ops;
+pub mod table;
+pub mod table_ops;
 mod text_fills;
+pub mod text_measure;
+pub mod text_style_ops;
+mod text_style_overrides;
 mod textmodel;
 mod variables;
 mod variables_apply;
 mod variables_edit;
+mod variables_extend;
 pub mod vector;
 mod vector_fit;
 mod writer_command;
@@ -82,8 +127,18 @@ pub use branch_merge::{
     merge, merge_branch, validate_merged_references, ConflictSide, DanglingReference, MergeError, MergePlan, MergeReport, Resolution, Side, UnresolvedItem,
 };
 pub use changelog_features::*;
+pub use color_profile::{ColorProfile, SrgbPixelConverter};
+pub use color_space::*;
 pub use comments::*;
+pub use component_prop_variables::*;
 pub use components::*;
+pub use connector_home::*;
+pub use connector_index::*;
+pub use connector_route_cache::{cached_connector_route, connector_route_bounds, ROUTE_CACHE_CAP};
+#[cfg(any(test, feature = "fixtures"))]
+pub use connector_route_cache::{clear_route_cache, perf_whiteboard_2000, route_cache_len, route_cache_stats, PerfWhiteboardScene};
+pub use copy_layer_links::{authored_layer, relink_copy_layers};
+pub use cycle_refusal::*;
 pub use dev::*;
 pub use diff::*;
 pub use geom::*;
@@ -93,32 +148,49 @@ pub use layout_constraints::*;
 pub use library::*;
 pub use library_ops::*;
 pub use load_repair::*;
+pub use motion::*;
+pub use motion_copy::{reid_copied_motion, reid_copied_motion_mapped, reid_copied_motion_with};
+pub use motion_eval::*;
+pub use motion_ops::*;
 pub use node::*;
 pub use openpencil::*;
 pub use paint::*;
+pub use pending_pages::PendingPagesError;
 pub use prototype::*;
 pub use settings::*;
+pub use silhouette::{silhouette_source, FilllessKnockout, SilhouetteMode, SilhouetteSource, FILLLESS_KNOCKOUT};
 pub use spec::*;
 pub use spec_bind::*;
 pub use spec_instance::*;
 pub use styles_ops::*;
+pub use table::{
+    apply_table_relayout, build_table, check_table_positions, default_cell_text, TableCellProps, TableMerge, TableProps, TableTrack, TrackId,
+    TABLE_CELL_PADDING, TABLE_DEFAULT_COLUMN_WIDTH, TABLE_DEFAULT_ROW_HEIGHT, TABLE_MIN_TRACK,
+};
+pub use table_ops::{TableOpError, TableStyle, TABLE_MAX_TRACKS};
 pub use text_fills::set_text_fills_everywhere;
+pub use text_style_ops::*;
+pub use text_style_overrides::*;
 pub use textmodel::*;
 pub use variables::*;
 pub use variables_apply::*;
 pub use variables_edit::*;
+pub use variables_extend::*;
 pub use vector::{HandleMirror, VectorNetwork};
 pub use vector_fit::{fit_polyline, Anchor};
 pub use writer_command::*;
 
 /// Shared spec test fixtures (`tokens_doc`, `button_library`, `card_with_slots`).
 pub mod fixtures {
+    #[cfg(any(test, feature = "fixtures"))]
+    pub use crate::connector_route_cache::{perf_whiteboard_2000, PerfWhiteboardScene};
     pub use crate::spec_bind::fixtures::*;
     pub use crate::spec_instance::fixtures::*;
 }
 
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 /// Stable node identifier. Imported Figma ids ("12:34") are kept in
 /// [`Node::source_id`]; `NodeId` is our own dense key.
@@ -129,18 +201,40 @@ pub struct NodeId(pub u64);
 pub enum DocError {
     #[error("node {0:?} not found")]
     NotFound(NodeId),
+    #[error("node {0:?} already exists")]
+    DuplicateNode(NodeId),
     #[error("cannot move node {0:?} into its own subtree")]
     Cycle(NodeId),
     #[error("node {0:?} cannot have children")]
     NotAContainer(NodeId),
+    /// A table edit that would leave a table without one cell per live row and column position.
+    /// The message names the next action.
+    #[error("{0}")]
+    Table(String),
 }
 
 const DIRTY_RING_CAP: usize = 512;
 const REMOVED_RING_CAP: usize = 64;
 
 static NEXT_DOC_RUNTIME_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+static NEXT_DOC_DERIVED_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
-#[derive(Clone, Debug)]
+#[derive(Debug)]
+struct DerivedId(u64);
+
+impl Default for DerivedId {
+    fn default() -> Self {
+        Self(NEXT_DOC_DERIVED_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed))
+    }
+}
+
+impl Clone for DerivedId {
+    fn clone(&self) -> Self {
+        Self::default()
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 struct DirtyLog {
     runtime_id: u64,
     epoch: u64,
@@ -172,15 +266,19 @@ impl Default for DirtyLog {
 }
 
 /// A whole file: pages at the root, each page a tree of nodes.
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[derive(Debug, Default, Serialize, Deserialize)]
 pub struct Document {
     pub name: String,
     /// Design file or board (whiteboard) file; decides the toolbar and panels.
     #[serde(default)]
     pub kind: DocumentKind,
+    /// Colour space the stored colour values are written in. Renderers convert Display P3 to sRGB.
+    #[serde(default, skip_serializing_if = "ColorProfile::is_srgb")]
+    pub color_profile: ColorProfile,
     pub nodes: BTreeMap<NodeId, Node>,
     /// Page node ids in display order. Each page is a node with [`NodeKind::Page`].
     pub pages: Vec<NodeId>,
+    #[serde(deserialize_with = "read_styles_noting_paragraph_fields")]
     pub styles: BTreeMap<String, Style>,
     /// Display metadata for entries of `styles`, same keys.
     #[serde(default)]
@@ -238,6 +336,13 @@ pub struct Document {
     /// Optional on-demand hydrator that expands deferred component instances on inactive pages when switched to or exported.
     #[serde(skip)]
     pub page_hydrator: Option<std::sync::Arc<std::sync::Mutex<dyn PageHydrator>>>,
+    /// The pages of this document that the loader has not filled into it. The loader is shared with every
+    /// clone, so only the document itself knows which of its own pages are still empty.
+    #[serde(skip)]
+    deferred: pending_pages::DeferredPages,
+    /// Fresh per-instance and per-clone identifier used to key derived caches.
+    #[serde(skip)]
+    derived_id: DerivedId,
 }
 
 /// Default staleness threshold for [`InProgress`] flags in minutes (`agent.in_progress_stale_minutes`, E15-7 §3.3).
@@ -496,6 +601,57 @@ pub trait PageHydrator: Send + Sync + std::fmt::Debug {
     fn take_last_error(&mut self) -> Option<String> {
         None
     }
+    /// What the file stated for `instance` (its override entries) while the instance's page has not been loaded:
+    /// the loader's own record, as text only the loader's format reader can interpret. `None` once the page is loaded,
+    /// or when the file stated nothing for it. Read-only: nothing is taken, loaded or marked.
+    fn pending_instance_overrides(&self, _instance: NodeId) -> Option<String> {
+        None
+    }
+    /// The derived data (the sizes, transforms and outlines the producing app computed for the nodes inside the
+    /// instance) the file stated for `instance` while its page has not been loaded, with the same rules as
+    /// [`Self::pending_instance_overrides`].
+    fn pending_instance_derived(&self, _instance: NodeId) -> Option<PendingDerived> {
+        None
+    }
+    /// A digest, taken when the file was opened, of each field the file's record overrides on `instance` itself, with
+    /// the same rules as [`Self::pending_instance_overrides`]. The loader flags those fields on the instance, so a
+    /// writer that finds a digest moved knows the user edited that field. The document does not interpret the digests.
+    fn pending_instance_self_digests(&self, _instance: NodeId) -> Option<BTreeMap<OverrideField, u64>> {
+        None
+    }
+}
+
+/// One outline of a [`PendingDerivedEntry`]: the path commands as a `.fig` stores them.
+#[derive(Clone, Debug)]
+pub struct PendingOutline {
+    /// Which outline of the file this is: two outlines with the same id have the same bytes, so a writer can store them
+    /// once.
+    pub id: u64,
+    pub even_odd: bool,
+    pub bytes: std::sync::Arc<[u8]>,
+}
+
+/// What the file computed for one node inside an instance, as the page loader holds it.
+#[derive(Clone, Debug, Default)]
+pub struct PendingDerivedEntry {
+    /// Ids (`session:local`) of the nodes from the instance's main component down to the node.
+    pub path: Vec<String>,
+    pub size: Option<[f32; 2]>,
+    /// The node's transform as `[a, b, c, d, tx, ty]`.
+    pub transform: Option<[f32; 6]>,
+    pub fill: Vec<PendingOutline>,
+    pub stroke: Vec<PendingOutline>,
+}
+
+/// The derived data of an instance on a page that is not loaded, and what it was computed from.
+#[derive(Clone, Debug)]
+pub struct PendingDerived {
+    /// A fingerprint of the main component the data was computed for, and of the mains inside it, as they were when the
+    /// file was opened. The loader and the format writer share its definition; the document does not interpret it.
+    pub fingerprint: u64,
+    pub entries: Vec<PendingDerivedEntry>,
+    /// The mains the file's record swaps nested instances to, which the fingerprint also covers.
+    pub swap_mains: Vec<NodeId>,
 }
 
 mod serde_images {
@@ -599,6 +755,12 @@ mod serde_images {
     }
 }
 
+impl Clone for Document {
+    fn clone(&self) -> Self {
+        self.clone_with_images(self.images.clone())
+    }
+}
+
 impl Document {
     pub fn new(name: impl Into<String>) -> Self {
         Self { name: name.into(), ..Default::default() }
@@ -607,9 +769,16 @@ impl Document {
     /// Clones the document structure, styles, variables, comments, and library state without
     /// copying embedded `images` byte buffers (used by background bootstrap indexing).
     pub fn clone_without_images(&self) -> Self {
+        self.clone_with_images(BTreeMap::new())
+    }
+
+    fn clone_with_images(&self, images: BTreeMap<String, Vec<u8>>) -> Self {
+        // The copy shares the page loader: note which pages are still empty before either side loads one.
+        self.remember_deferred_pages();
         Self {
             name: self.name.clone(),
             kind: self.kind,
+            color_profile: self.color_profile,
             nodes: self.nodes.clone(),
             pages: self.pages.clone(),
             styles: self.styles.clone(),
@@ -623,7 +792,7 @@ impl Document {
             library: self.library.clone(),
             library_page: self.library_page,
             check_designs: self.check_designs.clone(),
-            images: BTreeMap::new(),
+            images,
             in_progress: self.in_progress.clone(),
             next_id: self.next_id,
             gap_cursor: self.gap_cursor,
@@ -631,6 +800,8 @@ impl Document {
             pending_relayout: self.pending_relayout.clone(),
             layout_epoch: self.layout_epoch,
             page_hydrator: self.page_hydrator.clone(),
+            deferred: self.deferred.clone(),
+            derived_id: DerivedId::default(),
         }
     }
 
@@ -638,11 +809,15 @@ impl Document {
     /// Returns `true` if any deferred instances were expanded.
     pub fn ensure_page_hydrated(&mut self, page: NodeId) -> bool {
         let Some(h) = self.page_hydrator.clone() else { return false };
+        let loader_at = Arc::as_ptr(&h) as *const () as usize;
         let Ok(mut guard) = h.lock() else { return false };
         if guard.is_hydrated(page) {
             return false;
         }
+        // Take the list of empty pages before this load changes what the loader says.
+        drop(self.unloaded_pages(loader_at, &*guard));
         let changed = guard.hydrate_page(self, page);
+        self.forget_loaded_pages(loader_at, &*guard, [page]);
         if changed {
             self.mark_tree_full_dirty();
         }
@@ -650,17 +825,53 @@ impl Document {
     }
 
     /// Expands all remaining deferred pages (e.g., before full-document export).
+    ///
+    /// The loader is dropped once every page is filled into this document. Pages that a copy of this
+    /// document loaded stay empty here, so the loader stays attached and the document keeps refusing
+    /// native writes ([`Document::pending_pages_error`]).
     pub fn hydrate_all_pages(&mut self) -> bool {
         let Some(h) = self.page_hydrator.clone() else { return false };
+        let loader_at = Arc::as_ptr(&h) as *const () as usize;
         let Ok(mut guard) = h.lock() else { return false };
+        let waiting: Vec<NodeId> = self.unloaded_pages(loader_at, &*guard).into_iter().filter(|page| !guard.is_hydrated(*page)).collect();
         let changed = guard.hydrate_all(self);
-        if guard.unexpanded_instances() == 0 && guard.last_error().is_none() {
+        self.forget_loaded_pages(loader_at, &*guard, waiting);
+        if guard.unexpanded_instances() == 0 && guard.last_error().is_none() && self.unloaded_pages(loader_at, &*guard).is_empty() {
             self.page_hydrator = None;
         }
         if changed {
             self.mark_tree_full_dirty();
         }
         changed
+    }
+
+    /// The override entries the file stated for `instance` while its page has not been loaded (see
+    /// [`PageHydrator::pending_instance_overrides`]). Read-only: a writer reads it to carry the entries over without
+    /// loading the page, and the document's page loader is left exactly as it was.
+    ///
+    /// All three `pending_instance_*` accessors read the page loader, which clones of the document share (it is behind
+    /// an `Arc`). A clone exported after the live document opened a page finds no record for that page's instances that
+    /// are still childless in the clone, and exports them without overrides or derived data.
+    pub fn pending_instance_overrides(&self, instance: NodeId) -> Option<String> {
+        let h = self.page_hydrator.as_ref()?;
+        let guard = h.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        guard.pending_instance_overrides(instance)
+    }
+
+    /// The derived data the file stated for `instance` while its page has not been loaded (see
+    /// [`PageHydrator::pending_instance_derived`]). Read-only, like [`Self::pending_instance_overrides`].
+    pub fn pending_instance_derived(&self, instance: NodeId) -> Option<PendingDerived> {
+        let h = self.page_hydrator.as_ref()?;
+        let guard = h.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        guard.pending_instance_derived(instance)
+    }
+
+    /// The digests of the fields the file's record overrides on `instance` itself, taken when the file was opened (see
+    /// [`PageHydrator::pending_instance_self_digests`]). Read-only, like [`Self::pending_instance_overrides`].
+    pub fn pending_instance_self_digests(&self, instance: NodeId) -> Option<BTreeMap<OverrideField, u64>> {
+        let h = self.page_hydrator.as_ref()?;
+        let guard = h.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        guard.pending_instance_self_digests(instance)
     }
 
     /// Number of instances skipped by deferred page hydration due to hitting the clone budget.
@@ -738,9 +949,48 @@ impl Document {
         self.next_id = self.next_id.max(id.0);
     }
 
-    /// Display name of a shared style: its metadata name, else the key.
+    /// Display name of a shared style: its metadata name (or a typed `"Unnamed ... style"`
+    /// fallback when empty or whitespace-only), else the key.
     pub fn style_name<'a>(&'a self, key: &'a str) -> &'a str {
-        self.style_meta.get(key).map(|m| m.name.as_str()).filter(|n| !n.is_empty()).unwrap_or(key)
+        if let Some(m) = self.style_meta.get(key) {
+            if !m.name.trim().is_empty() {
+                m.name.as_str()
+            } else {
+                Self::unnamed_style_label(m.property)
+            }
+        } else if key.trim().is_empty() && self.styles.contains_key(key) {
+            Self::unnamed_style_label(style_property(self, key))
+        } else {
+            key
+        }
+    }
+
+    /// Fallback display label for a table style whose name is empty or whitespace-only.
+    pub const fn unnamed_style_label(prop: StyleProperty) -> &'static str {
+        match prop {
+            StyleProperty::Fill | StyleProperty::Stroke => "Unnamed fill style",
+            StyleProperty::Text => "Unnamed text style",
+            StyleProperty::Effect => "Unnamed effect style",
+            StyleProperty::Grid => "Unnamed grid style",
+            StyleProperty::Animation => "Unnamed animation style",
+        }
+    }
+
+    /// Whether `key` is a table style whose stored name is empty or whitespace-only.
+    pub fn is_unnamed_style(&self, key: &str) -> bool {
+        self.style_meta.get(key).is_some_and(|m| m.name.trim().is_empty())
+            || (!self.style_meta.contains_key(key) && self.styles.contains_key(key) && key.trim().is_empty())
+    }
+
+    /// Whether `key` is an orphan style reference (seeded only from a layer's `style_refs`
+    /// after a soft-deleted, `REMOVED`, or missing style node, with no entry in `style_meta`).
+    pub fn is_orphan_style(&self, key: &str) -> bool {
+        is_orphan_style_in(&self.styles, &self.style_meta, key)
+    }
+
+    /// Whether `key` is a live style in the file's own style table (not an orphan reference).
+    pub fn is_table_style(&self, key: &str) -> bool {
+        self.styles.contains_key(key) && !is_orphan_style_in(&self.styles, &self.style_meta, key)
     }
 
     /// Record a per-(rule, node) lint suppression in the unified `check_designs.ignored` store.
@@ -855,8 +1105,15 @@ impl Document {
         self.dirty.runtime_id
     }
 
+    #[inline]
+    pub fn derived_id(&self) -> u64 {
+        self.derived_id.0
+    }
+
     /// Gives this document an id of its own, for a clone that is opened as a file of its own (a duplicated tab):
-    /// a clone otherwise has the id of the document it came from.
+    /// a clone otherwise has the id of the document it came from. A clone installed as the live document must
+    /// renew its id too: a cache keyed on the id and `mutation_epoch` cannot tell apart two clones that took
+    /// the same number of edits.
     pub fn renew_runtime_id(&mut self) {
         self.dirty.runtime_id = NEXT_DOC_RUNTIME_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
@@ -986,11 +1243,15 @@ impl Document {
 
     /// Inserts `node` as the last (topmost) child of `parent`.
     pub fn insert(&mut self, parent: NodeId, mut node: Node) -> Result<NodeId, DocError> {
-        let p = self.nodes.get_mut(&parent).ok_or(DocError::NotFound(parent))?;
-        if !p.kind.can_hold_children() {
+        let can_hold = self.nodes.get(&parent).ok_or(DocError::NotFound(parent))?.kind.can_hold_children();
+        if !can_hold {
             return Err(DocError::NotAContainer(parent));
         }
         let id = node.id;
+        if self.nodes.contains_key(&id) {
+            return Err(DocError::DuplicateNode(id));
+        }
+        let p = self.nodes.get_mut(&parent).ok_or(DocError::NotFound(parent))?;
         p.children.push(id);
         node.parent = Some(parent);
         self.next_id = self.next_id.max(id.0);
@@ -1182,7 +1443,13 @@ impl Document {
     }
 
     /// Prunes any [`InProgress`] entries whose target node no longer exists or that are stale at [`now_ms`].
+    ///
+    /// With no entries there is nothing to prune, so the clock and the staleness setting are not read: every
+    /// committed edit calls this, and reading `DESIGNOS_IN_PROGRESS_STALE_MINUTES` allocates on Windows.
     pub fn prune_in_progress(&mut self) -> Vec<NodeId> {
+        if self.in_progress.is_empty() {
+            return Vec::new();
+        }
         self.clear_stale_in_progress(now_ms(), default_in_progress_stale_ms())
     }
 
@@ -1322,6 +1589,9 @@ impl Document {
     /// Compact JSON of the document. A number that is not finite (NaN, infinity) is written as its
     /// neutral value instead (see [`finite_json`]), so the text always parses back; a file used to
     /// fail to open with `invalid type: null, expected f32` after one such number was saved.
+    ///
+    /// Fails for a document that still has pages whose content is not loaded ([`Document::has_pending_pages`]):
+    /// load them first with [`Document::load_pending_pages`].
     pub fn to_json(&self) -> serde_json::Result<String> {
         let (json, replaced) = self.to_json_counted()?;
         if replaced > 0 {
@@ -1333,6 +1603,29 @@ impl Document {
 
     /// Like [`Document::to_json`], also returning how many non-finite numbers were replaced.
     pub fn to_json_counted(&self) -> serde_json::Result<(String, usize)> {
+        let mut out = Vec::with_capacity(128);
+        let replaced = self.to_writer_counted(&mut out)?;
+        // SAFETY: `serde_json::Serializer` writes only valid UTF-8 (see `finite_json::to_string_finite`).
+        Ok((unsafe { String::from_utf8_unchecked(out) }, replaced))
+    }
+
+    /// [`Document::to_json`] straight into `writer`: the same bytes, without the whole text in memory.
+    /// Wrap a file in a `BufWriter`.
+    pub fn to_writer<W: std::io::Write>(&self, writer: W) -> serde_json::Result<usize> {
+        let replaced = self.to_writer_counted(writer)?;
+        if replaced > 0 {
+            static WARNED: std::sync::Once = std::sync::Once::new();
+            WARNED.call_once(|| eprintln!("designos-doc: wrote {replaced} non-finite numbers as their neutral value (reported once per run)"));
+        }
+        Ok(replaced)
+    }
+
+    /// [`Document::to_json_counted`] straight into `writer`; returns how many non-finite numbers were
+    /// replaced. A document that still has unloaded pages is refused before the first byte is written.
+    pub fn to_writer_counted<W: std::io::Write>(&self, writer: W) -> serde_json::Result<usize> {
+        // A document whose pages are not all loaded would be written with empty instances, and the file could
+        // never be repaired: refuse it, naming the cause. Callers that own the document load the pages first.
+        self.refuse_pending_pages()?;
         let now = now_ms();
         // Flags of deleted layers and stale flags never reach the file: serialize through a view that filters them.
         if self.in_progress.iter().any(|(id, ip)| !self.nodes.contains_key(id) || ip.is_stale(now, IN_PROGRESS_DEFAULT_STALE_MS)) {
@@ -1340,6 +1633,8 @@ impl Document {
             struct DocumentSerializeView<'a> {
                 name: &'a String,
                 kind: &'a DocumentKind,
+                #[serde(skip_serializing_if = "ColorProfile::is_srgb")]
+                color_profile: &'a ColorProfile,
                 nodes: &'a BTreeMap<NodeId, Node>,
                 pages: &'a Vec<NodeId>,
                 styles: &'a BTreeMap<String, Style>,
@@ -1369,6 +1664,7 @@ impl Document {
             let view = DocumentSerializeView {
                 name: &self.name,
                 kind: &self.kind,
+                color_profile: &self.color_profile,
                 nodes: &self.nodes,
                 pages: &self.pages,
                 styles: &self.styles,
@@ -1386,7 +1682,7 @@ impl Document {
                 in_progress: filtered_in_progress,
                 next_id: self.next_id,
             };
-            return finite_json::to_string_finite(&view);
+            return finite_json::to_writer_finite(writer, &view);
         }
         // Ignore keys of deleted layers are written as they are and dropped when the file is read
         // back (`from_json_with_report`): pruning here would clone the whole document, images
@@ -1395,9 +1691,9 @@ impl Document {
         if self.in_progress.iter().any(|(id, ip)| !self.nodes.contains_key(id) || ip.is_stale(now, IN_PROGRESS_DEFAULT_STALE_MS)) {
             let mut clean = self.clone();
             clean.in_progress.retain(|id, ip| clean.nodes.contains_key(id) && !ip.is_stale(now, IN_PROGRESS_DEFAULT_STALE_MS));
-            return finite_json::to_string_finite(&clean);
+            return finite_json::to_writer_finite(writer, &clean);
         }
-        finite_json::to_string_finite(self)
+        finite_json::to_writer_finite(writer, self)
     }
 
     /// How many non-finite numbers [`Document::to_json_counted`] would replace, counted without
@@ -1460,7 +1756,33 @@ impl Document {
     pub fn from_json_with_report(s: &str) -> serde_json::Result<(Self, RepairReport)> {
         // A `null` in a number slot is how older versions saved a NaN or infinity; it is read as the
         // neutral value and counted (see [`finite_json`]).
-        let (mut doc, non_finite_numbers): (Self, usize) = finite_json::from_str_repairing(s)?;
+        let (doc, non_finite_numbers): (Self, usize) = finite_json::from_str_repairing(s)?;
+        Ok(Self::finish_load(doc, non_finite_numbers))
+    }
+
+    /// [`Document::from_json`] for a file: parsed as a stream, so a stored document of several GB never sits in
+    /// memory as one text next to the document. The result is the one [`Document::from_json`] gives for the same
+    /// bytes. A file that needs the repair of a damaged number is read a second time (hence `Seek`).
+    pub fn from_reader<R: std::io::Read + std::io::Seek>(reader: R) -> serde_json::Result<Self> {
+        let (doc, repaired) = Self::from_reader_with_report(reader)?;
+        if !repaired.is_clean() {
+            eprintln!("designos-doc: repaired a damaged document on load: {repaired:?}");
+        }
+        Ok(doc)
+    }
+
+    /// [`Document::from_reader`], silent: returns what the load-time repair changed.
+    pub fn from_reader_with_report<R: std::io::Read + std::io::Seek>(reader: R) -> serde_json::Result<(Self, RepairReport)> {
+        let (doc, non_finite_numbers): (Self, usize) = finite_json::from_reader_repairing(reader)?;
+        Ok(Self::finish_load(doc, non_finite_numbers))
+    }
+
+    fn finish_load(mut doc: Self, non_finite_numbers: usize) -> (Self, RepairReport) {
+        for (key, bits) in take_styles_paragraph_fields() {
+            if let Some(meta) = text_style_meta_mut(&doc.styles, &mut doc.style_meta, &key) {
+                meta.text_paragraph_fields = Some(meta.text_paragraph_fields.unwrap_or(0) | bits);
+            }
+        }
         let mut report = doc.validate_and_repair();
         let now = now_ms();
         doc.in_progress.retain(|id, _| doc.nodes.contains_key(id));
@@ -1471,8 +1793,14 @@ impl Document {
         }
         report.non_finite_numbers = non_finite_numbers;
         doc.check_designs.ignored.retain(|k| doc.nodes.contains_key(&k.node));
+        // A file an earlier release saved after reading a Studio-written `.fig` can link nested copy layers past a level.
+        // The pass reads a document whose links are right once and writes nothing, so it runs on every load; a file it
+        // repaired and that was saved reads clean the next time. It runs before the migrations below so that their
+        // full-dirty mark is the last thing the load does, as for any file.
+        report.copy_links_relinked = relink_copy_layers(&mut doc);
         doc.migrate_text();
-        Ok((doc, report))
+        doc.normalize_extensions();
+        (doc, report)
     }
 
     /// Converts literal list prefixes of every text node to real lists (see [`migrate_literal_lists`])
@@ -1520,6 +1848,7 @@ pub enum StyleProperty {
     Text,
     Effect,
     Grid,
+    Animation,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -1534,6 +1863,35 @@ pub struct StyleMeta {
     /// Property key -> variable id bound on this style.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub bindings: BTreeMap<String, String>,
+    /// Figma `sortPosition` fractional-indexing key ordering styles within a property.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sort_position: Option<String>,
+    /// Presence bits for paragraph fields in text styles loaded from legacy JSON (1=indent, 2=list spacing, 4=leading trim).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text_paragraph_fields: Option<u8>,
+}
+
+/// Returns paragraph-field ownership after replacing a text style.
+///
+/// `Some(0)` means an old style did not store any of the fields introduced after
+/// the original text-style format. A newly-created style owns all three. For
+/// an old style, changing one of the fields promotes only that field, so an
+/// unrelated style edit keeps legacy consumer values intact.
+pub fn text_style_paragraph_fields_after_update(previous: Option<&Style>, next: &Style, existing: Option<u8>) -> Option<u8> {
+    let Style::Text(next) = next else { return existing };
+    let Some(previous) = previous else { return existing };
+    let Style::Text(previous) = previous else { return existing };
+    let Some(mut bits) = existing else { return Some(0b111) };
+    if previous.paragraph_indent != next.paragraph_indent {
+        bits |= 0b001;
+    }
+    if previous.list_spacing != next.list_spacing {
+        bits |= 0b010;
+    }
+    if previous.leading_trim != next.leading_trim {
+        bits |= 0b100;
+    }
+    Some(bits)
 }
 
 /// Shared (library) style referenced by nodes via `style_refs`.
@@ -1543,6 +1901,182 @@ pub enum Style {
     Text(TextStyle),
     Effect(Vec<Effect>),
     Grid(Vec<LayoutGrid>),
+    Animation(Vec<Timeline>),
+}
+
+std::thread_local! {
+    static STYLES_PARAGRAPH_FIELDS: std::cell::RefCell<BTreeMap<String, u8>> = const { std::cell::RefCell::new(BTreeMap::new()) };
+}
+
+/// Hands over the paragraph fields (1 = indent, 2 = list spacing, 4 = leading trim) that each text style
+/// of the `styles` object read last on this thread had in its JSON. A document read before text styles
+/// stored these fields has none of them, and the decoded values alone cannot tell an omitted field from an
+/// explicit default.
+fn take_styles_paragraph_fields() -> BTreeMap<String, u8> {
+    STYLES_PARAGRAPH_FIELDS.with(|fields| std::mem::take(&mut *fields.borrow_mut()))
+}
+
+/// Reads the `styles` object as `BTreeMap<String, Style>` would, noting for each text style which paragraph
+/// fields its JSON holds, so the load needs no second pass over the document text.
+fn read_styles_noting_paragraph_fields<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<BTreeMap<String, Style>, D::Error> {
+    let (styles, fields) = deserializer.deserialize_map(NotingStyles)?;
+    STYLES_PARAGRAPH_FIELDS.with(|slot| *slot.borrow_mut() = fields);
+    Ok(styles)
+}
+
+struct NotingStyles;
+
+impl<'de> serde::de::Visitor<'de> for NotingStyles {
+    type Value = (BTreeMap<String, Style>, BTreeMap<String, u8>);
+
+    fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        f.write_str("a map of styles")
+    }
+
+    fn visit_map<A: serde::de::MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
+        let (mut styles, mut fields) = (BTreeMap::new(), BTreeMap::new());
+        while let Some(key) = map.next_key::<String>()? {
+            let NotedStyle(style, bits) = map.next_value()?;
+            if let Some(bits) = bits {
+                fields.insert(key.clone(), bits);
+            }
+            styles.insert(key, style);
+        }
+        Ok((styles, fields))
+    }
+}
+
+/// A [`Style`] and, for a text style, the paragraph fields its JSON holds.
+struct NotedStyle(Style, Option<u8>);
+
+impl<'de> Deserialize<'de> for NotedStyle {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        deserializer.deserialize_enum("Style", &["Fill", "Text", "Effect", "Grid", "Animation"], NotedStyleVisitor)
+    }
+}
+
+#[derive(Deserialize)]
+enum StyleKind {
+    Fill,
+    Text,
+    Effect,
+    Grid,
+    Animation,
+}
+
+struct NotedStyleVisitor;
+
+impl<'de> serde::de::Visitor<'de> for NotedStyleVisitor {
+    type Value = NotedStyle;
+
+    fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        f.write_str("a style")
+    }
+
+    fn visit_enum<A: serde::de::EnumAccess<'de>>(self, data: A) -> Result<NotedStyle, A::Error> {
+        use serde::de::VariantAccess;
+        let (kind, variant) = data.variant::<StyleKind>()?;
+        Ok(match kind {
+            StyleKind::Fill => NotedStyle(Style::Fill(variant.newtype_variant()?), None),
+            StyleKind::Effect => NotedStyle(Style::Effect(variant.newtype_variant()?), None),
+            StyleKind::Grid => NotedStyle(Style::Grid(variant.newtype_variant()?), None),
+            StyleKind::Animation => NotedStyle(Style::Animation(variant.newtype_variant()?), None),
+            StyleKind::Text => {
+                let (style, bits) = variant.newtype_variant_seed(NotingTextStyle)?;
+                NotedStyle(Style::Text(style), Some(bits))
+            }
+        })
+    }
+}
+
+struct NotingTextStyle;
+
+impl<'de> serde::de::DeserializeSeed<'de> for NotingTextStyle {
+    type Value = (TextStyle, u8);
+
+    fn deserialize<D: serde::Deserializer<'de>>(self, deserializer: D) -> Result<Self::Value, D::Error> {
+        deserializer.deserialize_struct("TextStyle", &[], self)
+    }
+}
+
+impl<'de> serde::de::Visitor<'de> for NotingTextStyle {
+    type Value = (TextStyle, u8);
+
+    fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        f.write_str("a text style")
+    }
+
+    fn visit_map<A: serde::de::MapAccess<'de>>(self, map: A) -> Result<Self::Value, A::Error> {
+        let mut keys = NotingKeys { inner: map, bits: 0 };
+        let style = TextStyle::deserialize(serde::de::value::MapAccessDeserializer::new(&mut keys))?;
+        Ok((style, keys.bits))
+    }
+}
+
+/// A map access that passes everything through and records which paragraph fields appeared as keys.
+struct NotingKeys<A> {
+    inner: A,
+    bits: u8,
+}
+
+impl<'de, A: serde::de::MapAccess<'de>> serde::de::MapAccess<'de> for NotingKeys<A> {
+    type Error = A::Error;
+
+    fn next_key_seed<K: serde::de::DeserializeSeed<'de>>(&mut self, seed: K) -> Result<Option<K::Value>, A::Error> {
+        let Some(key) = self.inner.next_key::<String>()? else { return Ok(None) };
+        self.bits |= match key.as_str() {
+            "paragraph_indent" => 0b001,
+            "list_spacing" => 0b010,
+            "leading_trim" => 0b100,
+            _ => 0,
+        };
+        seed.deserialize(serde::de::IntoDeserializer::<A::Error>::into_deserializer(key)).map(Some)
+    }
+
+    fn next_value_seed<V: serde::de::DeserializeSeed<'de>>(&mut self, seed: V) -> Result<V::Value, A::Error> {
+        self.inner.next_value_seed(seed)
+    }
+
+    fn size_hint(&self) -> Option<usize> {
+        self.inner.size_hint()
+    }
+}
+
+/// Paragraph fields a text style owns before an edit: those recorded in its metadata (`None` = all), or
+/// none when it has no metadata, because such a style predates field ownership.
+pub fn recorded_text_paragraph_fields(meta: Option<&StyleMeta>) -> Option<u8> {
+    meta.map_or(Some(0), |m| m.text_paragraph_fields)
+}
+
+/// The metadata of text style `key`. A table text style stored without any gets its own key as name
+/// and the text property; an orphan reference or a style of another kind gets none.
+pub(crate) fn text_style_meta_mut<'a>(
+    styles: &BTreeMap<String, Style>,
+    style_meta: &'a mut BTreeMap<String, StyleMeta>,
+    key: &str,
+) -> Option<&'a mut StyleMeta> {
+    if !style_meta.contains_key(key) {
+        if !matches!(styles.get(key), Some(Style::Text(_))) || is_orphan_style_in(styles, style_meta, key) {
+            return None;
+        }
+        style_meta.insert(key.to_string(), StyleMeta { name: key.to_string(), property: StyleProperty::Text, ..Default::default() });
+    }
+    style_meta.get_mut(key)
+}
+
+/// Decides whether `key` is an orphan style reference from the style tables alone,
+/// without touching `Document::nodes`.
+fn is_orphan_style_in(styles: &BTreeMap<String, Style>, style_meta: &BTreeMap<String, StyleMeta>, key: &str) -> bool {
+    if style_meta.contains_key(key) {
+        return false;
+    }
+    if !styles.contains_key(key) {
+        return true;
+    }
+    let is_guid = key
+        .split_once(':')
+        .is_some_and(|(a, b)| !a.is_empty() && !b.is_empty() && a.bytes().all(|c| c.is_ascii_digit()) && b.bytes().all(|c| c.is_ascii_digit()));
+    is_guid || key.starts_with("key:") || key.starts_with("S:")
 }
 
 #[cfg(test)]
@@ -1957,5 +2491,65 @@ mod tests {
 
         set_thread_mock_now_ms(None);
         assert_ne!(now_ms(), SENTINEL_MS + 1_000, "clearing must restore this thread's own clock");
+    }
+
+    #[test]
+    fn us01_ac02_round2_is_table_style_and_is_orphan_style_do_not_walk_200k_nodes() {
+        let mut doc = Document::new("t");
+        let page = doc.add_page("p");
+        let fx = Style::Effect(vec![Effect::LayerBlur { radius: 4.0, visible: true }]);
+
+        let mut children = Vec::with_capacity(199_999);
+        for i in 2..=200_000u64 {
+            let id = NodeId(i);
+            let mut n = Node::rectangle(id, Rect::new(0.0, 0.0, 10.0, 10.0));
+            n.parent = Some(page);
+            if i > 199_981 {
+                let idx = i - 199_982;
+                n.style_refs.insert("effect".into(), format!("S:orphan-{idx:02}"));
+            }
+            doc.nodes.insert(id, n);
+            children.push(id);
+        }
+        doc.reserve_ids(NodeId(200_000));
+        doc.nodes.get_mut(&page).unwrap().children = children;
+        assert_eq!(doc.nodes.len(), 200_000);
+
+        let mut keys = Vec::with_capacity(50);
+        for i in 0..25 {
+            let k = if i < 15 { format!("S:live-{i:02}") } else { format!("2:{}", 100 + i) };
+            doc.styles.insert(k.clone(), fx.clone());
+            doc.style_meta.insert(k.clone(), StyleMeta { name: format!("Elevation/{i:02}"), property: StyleProperty::Effect, ..Default::default() });
+            keys.push((k, true));
+        }
+        for i in 0..20 {
+            let k = format!("S:orphan-{i:02}");
+            doc.styles.insert(k.clone(), fx.clone());
+            keys.push((k, false));
+        }
+        for i in 0..5 {
+            let k = format!("1186:{}", 100_350 + i);
+            doc.styles.insert(k.clone(), fx.clone());
+            keys.push((k, false));
+        }
+        assert_eq!(doc.styles.len(), 50);
+
+        let budget = if cfg!(debug_assertions) { std::time::Duration::from_millis(50) } else { std::time::Duration::from_millis(5) };
+        let t0 = std::time::Instant::now();
+        for (k, expected_table) in &keys {
+            assert_eq!(doc.is_table_style(k), *expected_table, "is_table_style({k:?}) mismatch");
+            assert_eq!(doc.is_orphan_style(k), !*expected_table, "is_orphan_style({k:?}) mismatch");
+        }
+        let elapsed = t0.elapsed();
+        assert!(elapsed < budget, "is_table_style across 50 keys on 200,000 nodes took {elapsed:?} (budget {budget:?})");
+
+        // Prove by construction (Rust borrow checker): holding `&mut doc.nodes` while checking
+        // every key through `is_orphan_style_in(&doc.styles, &doc.style_meta, k)` compiles only
+        // because `doc.nodes` is never borrowed or touched.
+        let nodes_exclusive = &mut doc.nodes;
+        for (k, expected_table) in &keys {
+            assert_eq!(!is_orphan_style_in(&doc.styles, &doc.style_meta, k), *expected_table);
+        }
+        assert_eq!(nodes_exclusive.len(), 200_000);
     }
 }

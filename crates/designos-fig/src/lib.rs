@@ -12,12 +12,19 @@
 
 mod board;
 mod clipboard;
+mod component_fingerprint;
 pub mod container;
+mod design_system_scan;
+mod design_system_scan_sensing;
 mod dev;
+mod effect_units;
 mod export;
 mod fig;
 mod fig_export;
+mod instance_self_digest;
 pub mod kiwi;
+pub mod motion;
+mod own_entry_keys;
 pub mod pen;
 mod proto;
 #[cfg(feature = "net")]
@@ -33,9 +40,10 @@ mod vecnet;
 pub mod web_capture;
 
 pub use clipboard::{import_figma_clipboard, looks_like_figma_clipboard, parse_figma_clipboard_html, FigClipboard};
+pub use design_system_scan::{scan_design_system, DesignSystemScan, ScanError};
 pub use designos_doc::Document;
 pub use export::export_rest_json;
-pub use fig::{commands_blob_to_path, decode_fig_to_json, import_fig, import_fig_with_budget, import_fig_with_report};
+pub use fig::{commands_blob_to_path, decode_fig_to_json, import_fig, import_fig_node_changes_with_report, import_fig_with_budget, import_fig_with_report};
 #[doc(hidden)]
 pub use fig::{extract_fig_derived_symbol_data, import_fig_node_changes, FigDerivedSymbolEntry, FigInstanceDerivedData};
 pub use fig_export::{export_fig, export_fig_with_report, path_to_commands_blob};
@@ -50,9 +58,11 @@ pub use rest_import::{
 };
 pub use variables::{export_variables_json, export_variables_meta, import_variables_json, import_variables_value};
 pub use variables_dtcg::{
-    apply_staged_variables, collect_omitted_extensions, detect_variables_format, detect_variables_format_value, export_variables, import_variables,
-    import_variables_bytes, mode_name_from_filename, stage_variables, stage_variables_bytes, validate_dtcg_json, validate_dtcg_value, DtcgValidationError,
-    ExportBundle, ImportReport, ImportVariablesOptions, SkippedVariable, StagedVariablesImport, VariablesFormat,
+    apply_staged_variables, collect_omitted_extensions, detect_variables_format, detect_variables_format_value, export_dtcg_mode,
+    export_dtcg_with_color_format, export_variables, export_variables_with_color_format, import_variables, import_variables_bytes, mode_name_from_filename,
+    stage_variables, stage_variables_bytes, validate_dtcg_json, validate_dtcg_value, ColorFormat, DtcgModeOptions, DtcgValidationError, ExportBundle,
+    ImportReport, ImportVariablesOptions, ModeExportCollection, ModeExportReport, SkippedModeCollection, SkippedVariable, StagedVariablesImport,
+    VariablesFormat,
 };
 pub use web_capture::{import_web_capture_into_page, import_web_capture_json, import_web_capture_json_with_report, looks_like_web_capture_json};
 
@@ -64,4 +74,6 @@ pub enum FigError {
     Format(String),
     #[error("unsupported: {0}")]
     Unsupported(String),
+    #[error("{0}")]
+    Export(String),
 }

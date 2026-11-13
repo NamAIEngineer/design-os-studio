@@ -7,18 +7,19 @@ use crate::theme;
 use crate::widgets::field;
 use crate::widgets::menu::{dropdown, popup_menu, MenuItem, MenuResult};
 use crate::widgets::{self, elide};
-use designos_doc::{Document, ExportConstraint, ExportFileFormat, ExportPreset, NodeId, Rect as DRect};
+use designos_doc::{Affine, Document, ExportConstraint, ExportFileFormat, ExportPreset, NodeId, NodeKind, Rect as DRect};
 use designos_export::{ExportFormat, ExportScale, ExportSetting};
 use egui::{Align2, Id, Pos2, Rect, Sense, TextureHandle, TextureOptions, Ui, Vec2};
-use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 const ROW_GAP: f32 = 8.0;
 const PREVIEW_H: f32 = 120.0;
 // scale | suffix | format | remove, filling the 184px content width.
 const COL_GAP: f32 = 4.0;
 const SCALE_W: f32 = 56.0;
+/// The chevron slot at the right end of the scale field: the presets menu opens from it, the text takes the rest.
+const SCALE_CHEVRON_W: f32 = 16.0;
 const SUFFIX_W: f32 = 36.0;
 const FORMAT_W: f32 = 56.0;
 const THUMB_CHECK_SECONDS: f64 = 0.3;
@@ -39,6 +40,9 @@ struct Thumb {
     node: NodeId,
     fingerprint: u64,
     checked: f64,
+    /// Drawn with no lazy re-layout queued. A preview drawn mid-queue is drawn again once the
+    /// queue drains, even if the fingerprint missed what the re-layout moved.
+    settled: bool,
 }
 
 /// The inspector's scale parsing ("2x", "512w", "512h") as the stored constraint.
@@ -84,13 +88,13 @@ pub fn setting_of(p: &ExportPreset) -> ExportSetting {
 
 /// Output file name: layer name + the preset's suffix (or the `@2x` style default).
 pub fn preset_file_name(p: &ExportPreset, layer: &str) -> String {
+    let clean = crate::io::sanitize_export_name(layer);
     let s = setting_of(p);
-    let name = s.file_name(layer);
     if p.suffix.is_empty() {
-        return name;
+        return s.file_name(&clean);
     }
     let ext = s.format.extension();
-    format!("{}{}.{ext}", designos_export::sanitize_file_name(layer), p.suffix)
+    format!("{clean}{}.{ext}", p.suffix)
 }
 
 /// Rows every selected node has (in the first node's order). With one node: all its rows.
@@ -126,6 +130,10 @@ impl App {
     }
 }
 
+/// What the preview of `root` depends on: its subtree and the document's images. The root's
+/// position is left out because the export draws the root at its origin (neither its bounds nor its
+/// pixels read its translation), so dragging the layer leaves its preview as it is. A connector
+/// keeps it: its route is drawn relative to its own position.
 fn fingerprint(doc: &Document, root: NodeId) -> u64 {
     let mut h = std::collections::hash_map::DefaultHasher::new();
     let mut stack = vec![root];
@@ -136,7 +144,15 @@ fn fingerprint(doc: &Document, root: NodeId) -> u64 {
         }
         let Some(n) = doc.get(id) else { continue };
         visited += 1;
-        format!("{n:?}").hash(&mut h);
+        // Export resolves variable bindings (including modes inherited from ancestors), so the
+        // cache key must describe the resolved node rather than only its stored fields.
+        let mut resolved = designos_doc::resolve_node(doc, n).into_owned();
+        if id == root && !matches!(resolved.kind, NodeKind::Connector(_)) {
+            // The export renderer draws the root at its origin; translation alone does not alter
+            // its pixels and should not force a thumbnail redraw.
+            resolved.transform = Affine { tx: 0.0, ty: 0.0, ..resolved.transform };
+        }
+        format!("{resolved:?}").hash(&mut h);
         for &c in n.children.iter().rev().take(16) {
             stack.push(c);
         }
@@ -148,37 +164,62 @@ fn fingerprint(doc: &Document, root: NodeId) -> u64 {
     h.finish()
 }
 
+/// Pixels per unit for a preview of a layer whose export bounds are `b`: 2x the preview box, so it
+/// stays sharp on hi-dpi screens.
+fn preview_scale(b: DRect) -> f32 {
+    (theme::SECTION_CONTENT_W * 2.0 / b.w).min(PREVIEW_H * 2.0 / b.h).clamp(0.01, 2.0)
+}
+
+/// The export of `node`, sized for the preview box.
+///
+/// It renders from the live document, as the canvas does: the bounds and the renderer resolve bound
+/// variables layer by layer, so nothing is copied. A copy (what `App::export_doc` makes once any
+/// variable is bound) carries every layer and embedded image and stalls the UI thread for seconds on
+/// large files. Where the renderer still reads a stored value instead of the resolved one (boolean
+/// operands, background blur, connector ends), the preview matches the canvas, not the written file.
+fn preview_image(doc: &Document, node: NodeId) -> Option<egui::ColorImage> {
+    let b: DRect = designos_export::render_bounds(doc, node);
+    if b.w <= 0.0 || b.h <= 0.0 {
+        return None;
+    }
+    let pm = designos_export::render_export(doc, node, preview_scale(b))?;
+    Some(egui::ColorImage::from_rgba_premultiplied([pm.width() as usize, pm.height() as usize], pm.data()))
+}
+
 fn thumbnail(app: &App, ui: &Ui, node: NodeId) -> Option<Thumb> {
+    thumbnail_with(app, ui, node, app.doc.pending_relayout().is_empty())
+}
+
+/// [`thumbnail`] with `settled` = no lazy re-layout is queued.
+fn thumbnail_with(app: &App, ui: &Ui, node: NodeId, settled: bool) -> Option<Thumb> {
     // On massive 20k+ node documents, skip synchronous software CPU rasterization of multi-child containers on selection.
     if app.doc.nodes.len() > 20_000 && app.doc.get(node).is_some_and(|n| n.children.len() > 16) {
         return None;
     }
     let key = Id::new("export-thumb");
     let ctx = ui.ctx();
-    let cached = ctx.data(|d| d.get_temp::<Thumb>(key));
-    if let Some(t) = &cached {
-        if t.node == node && app.now - t.checked < THUMB_CHECK_SECONDS {
-            return cached;
+    // While the queue drains, come back after the check interval even if nothing else repaints.
+    let recheck = |t: &Thumb| {
+        if !t.settled {
+            ctx.request_repaint_after(std::time::Duration::from_secs_f64(THUMB_CHECK_SECONDS));
         }
+    };
+    let cached = ctx.data(|d| d.get_temp::<Thumb>(key));
+    if let Some(t) = cached.as_ref().filter(|t| t.node == node && app.now - t.checked < THUMB_CHECK_SECONDS) {
+        recheck(t);
+        return cached;
     }
     let fp = fingerprint(&app.doc, node);
-    if let Some(mut t) = cached {
-        if t.node == node && t.fingerprint == fp {
-            t.checked = app.now;
-            ctx.data_mut(|d| d.insert_temp(key, t.clone()));
-            return Some(t);
-        }
+    if let Some(t) = cached.as_ref().filter(|t| t.node == node && t.fingerprint == fp && (t.settled || !settled)) {
+        let t = Thumb { checked: app.now, ..t.clone() };
+        recheck(&t);
+        ctx.data_mut(|d| d.insert_temp(key, t.clone()));
+        return Some(t);
     }
-    let b: DRect = designos_export::render_bounds(&app.export_doc(), node);
-    if b.w <= 0.0 || b.h <= 0.0 {
-        return None;
-    }
-    // Render at 2x the preview box so it stays sharp on hi-dpi screens.
-    let scale = (theme::SECTION_CONTENT_W * 2.0 / b.w).min(PREVIEW_H * 2.0 / b.h).clamp(0.01, 2.0);
-    let pm = designos_export::render_export(&app.export_doc(), node, scale)?;
-    let img = egui::ColorImage::from_rgba_premultiplied([pm.width() as usize, pm.height() as usize], pm.data());
+    let img = preview_image(&app.doc, node)?;
     let tex = ctx.load_texture("export-preview", img, TextureOptions::LINEAR);
-    let t = Thumb { tex, node, fingerprint: fp, checked: app.now };
+    let t = Thumb { tex, node, fingerprint: fp, checked: app.now, settled };
+    recheck(&t);
     ctx.data_mut(|d| d.insert_temp(key, t.clone()));
     Some(t)
 }
@@ -206,6 +247,8 @@ pub fn section(app: &mut App, ui: &mut Ui, x0: f32, top: f32, sel: &[NodeId]) ->
     // Created before the button so the button sits on top of it.
     let title_resp = ui.interact(title, ui.id().with("export-title"), Sense::click());
     let plus = at(theme::SECTION_TRAILING_X, 8.0, theme::PANEL_ACTION_BUTTON, theme::PANEL_ACTION_BUTTON);
+    widgets::record(ui, "title-action:Export", plus);
+    widgets::record(ui, "export-add", plus);
     if widgets::icon_button(ui, plus, "export-add", Icon::Plus, false, "Add export setting").clicked() {
         edit = Some(RowEdit::Add(rows.last().cloned().unwrap_or_default()));
     }
@@ -222,8 +265,8 @@ pub fn section(app: &mut App, ui: &mut Ui, x0: f32, top: f32, sel: &[NodeId]) ->
             at(theme::SECTION_CONTENT_X + theme::SECTION_CONTENT_W - theme::PANEL_ACTION_BUTTON, y, theme::PANEL_ACTION_BUTTON, theme::PANEL_ACTION_BUTTON);
 
         // Scale: editable text ("2x", "512w") with a presets menu behind the chevron.
-        let text_r = Rect::from_min_max(scale_r.min, Pos2::new(scale_r.right() - 20.0, scale_r.bottom()));
-        let chev_r = Rect::from_min_max(Pos2::new(scale_r.right() - 20.0, scale_r.top()), scale_r.max);
+        let text_r = Rect::from_min_max(scale_r.min, Pos2::new(scale_r.right() - SCALE_CHEVRON_W, scale_r.bottom()));
+        let chev_r = Rect::from_min_max(Pos2::new(scale_r.right() - SCALE_CHEVRON_W, scale_r.top()), scale_r.max);
         let fid = ui.id().with(("export-scale", first, i));
         field::field_bg(ui, scale_r, fid);
         if let Some(s) = field::edit_text(ui, text_r, fid, &scale_of(row.constraint).to_string(), theme::font_body(), theme::TEXT, 4.0) {
@@ -232,7 +275,11 @@ pub fn section(app: &mut App, ui: &mut Ui, x0: f32, top: f32, sel: &[NodeId]) ->
                 changed = true;
             }
         }
-        let chev = ui.interact(chev_r, ui.id().with(("export-scale-chev", first, i)), Sense::click());
+        // The chevron is drawn in its 16px slot, but its pointer target is the 24px floor, right-aligned in the field.
+        // It is registered after the text field, so over the 8px they share it takes the press.
+        let chev_hit = Rect::from_min_max(Pos2::new(scale_r.right() - theme::TARGET_MIN, scale_r.top()), scale_r.max);
+        widgets::record(ui, "export-scale-chev", chev_hit);
+        let chev = ui.interact(chev_hit, ui.id().with(("export-scale-chev", first, i)), Sense::click());
         icons::paint(ui.painter(), Icon::ChevronDown, chev_r.center(), 12.0, if chev.hovered() { theme::ICON } else { theme::ICON_SECONDARY });
         let menu_id = ui.id().with(("export-scale-menu", first, i));
         let open = ui.data(|d| d.get_temp::<bool>(menu_id)).unwrap_or(false);
@@ -312,6 +359,7 @@ pub fn section(app: &mut App, ui: &mut Ui, x0: f32, top: f32, sel: &[NodeId]) ->
 
     // Export button.
     let btn = at(theme::SECTION_CONTENT_X, y, theme::SECTION_CONTENT_W, theme::FIELD_HEIGHT);
+    widgets::record(ui, "export-btn", btn);
     let resp = ui.interact(btn, ui.id().with("export-btn"), Sense::click());
     ui.painter().rect_filled(btn, theme::cr(theme::RADIUS_CONTROL), if resp.hovered() { theme::BG_TERTIARY } else { theme::BG_SECONDARY });
     icons::paint(ui.painter(), Icon::Export, Pos2::new(btn.left() + 16.0, btn.center().y), 14.0, theme::ICON_SECONDARY);
@@ -371,7 +419,7 @@ pub fn copy_as(app: &mut App, node: NodeId, kind: CopyKind) {
                 Ok("Copied as SVG")
             }
             CopyKind::Css => {
-                cb.set_text(designos_export::css_for(&app.export_doc(), node)).map_err(|e| e.to_string())?;
+                cb.set_text(designos_export::css_for_with(&app.export_doc(), node, app.dev.color_format)).map_err(|e| e.to_string())?;
                 Ok("Copied as CSS")
             }
         }
@@ -395,16 +443,6 @@ pub struct ExportJob {
 /// page per layer, in selection order, named after the layer (one) or the document (several).
 pub fn plan_export(doc: &Document, ids: &[NodeId]) -> Vec<ExportJob> {
     let mut jobs: Vec<ExportJob> = Vec::new();
-    let mut seen: HashMap<String, u32> = HashMap::new();
-    let mut unique = |file: String, ext: &str| -> String {
-        let count = seen.entry(file.clone()).or_insert(0);
-        *count += 1;
-        if *count == 1 {
-            return file;
-        }
-        let stem = file.rsplit_once('.').map_or(file.as_str(), |(a, _)| a);
-        format!("{stem} {count}.{ext}")
-    };
     let mut pdf: Option<(ExportPreset, Vec<NodeId>)> = None;
     for id in ids {
         let Some(n) = doc.get(*id) else { continue };
@@ -412,20 +450,29 @@ pub fn plan_export(doc: &Document, ids: &[NodeId]) -> Vec<ExportJob> {
         for p in &n.export_settings {
             let s = setting_of(p);
             if s.format != ExportFormat::Pdf {
-                let file = unique(preset_file_name(p, &n.name), s.format.extension());
+                let file = preset_file_name(p, &n.name);
                 jobs.push(ExportJob { file, nodes: vec![*id], setting: s });
             } else if !in_pdf {
                 in_pdf = true;
-                pdf.get_or_insert_with(|| (p.clone(), Vec::new())).1.push(*id);
+                let out = &mut pdf.get_or_insert_with(|| (p.clone(), Vec::new())).1;
+                if matches!(n.kind, designos_doc::NodeKind::Page { .. }) {
+                    for &child in &n.children {
+                        if doc.get(child).is_some_and(|c| c.visible && matches!(c.kind, designos_doc::NodeKind::Frame(_))) && !out.contains(&child) {
+                            out.push(child);
+                        }
+                    }
+                } else {
+                    out.push(*id);
+                }
             }
         }
     }
     if let Some((preset, nodes)) = pdf {
         let file = match nodes.as_slice() {
             [one] => preset_file_name(&preset, doc.get(*one).map_or("export", |n| n.name.as_str())),
-            _ => format!("{}.pdf", designos_export::sanitize_file_name(&doc.name)),
+            _ => format!("{}.pdf", crate::io::sanitize_export_name(&doc.name)),
         };
-        jobs.push(ExportJob { file: unique(file, "pdf"), nodes, setting: setting_of(&preset) });
+        jobs.push(ExportJob { file, nodes, setting: setting_of(&preset) });
     }
     jobs
 }
@@ -434,21 +481,22 @@ pub fn plan_export(doc: &Document, ids: &[NodeId]) -> Vec<ExportJob> {
 enum Sink {
     /// The one file the save dialog chose.
     File(PathBuf),
-    /// A folder: the chosen one (files are replaced) or the fallback one (nothing is replaced).
-    Dir { dir: PathBuf, keep_existing: bool },
+    /// A folder: the chosen one or the fallback one. Existing files are never replaced.
+    Dir(PathBuf),
 }
 
 impl Sink {
-    fn write(&self, job: &ExportJob, bytes: &[u8]) -> std::io::Result<PathBuf> {
+    fn write(&self, job: &ExportJob, bytes: &[u8]) -> Result<PathBuf, (PathBuf, std::io::Error)> {
         match self {
-            Sink::File(path) => std::fs::write(path, bytes).map(|()| path.clone()),
-            Sink::Dir { dir, keep_existing: false } => {
-                let path = dir.join(&job.file);
-                std::fs::write(&path, bytes).map(|()| path)
-            }
-            Sink::Dir { dir, keep_existing: true } => crate::io::write_new_in(dir, &job.file, bytes),
+            Sink::File(path) => crate::io::write_new_dashed_path(path, bytes).map_err(|e| (e.path, e.error)),
+            Sink::Dir(dir) => crate::io::write_new_dashed_in(dir, &job.file, bytes).map_err(|e| (e.path, e.error)),
         }
     }
+}
+
+/// A finished export: the full path, and Show in folder for that file or, for several files, the folder.
+fn show_export_toast(app: &mut App, text: String, reveal: PathBuf, error: bool) {
+    app.show_toast_with_reveal_status(text, error, reveal);
 }
 
 /// Writes every selected layer with its own export rows. One file asks for a
@@ -473,9 +521,9 @@ pub fn run_export_with(app: &mut App, ids: &[NodeId], dialogs: &dyn crate::io::F
     let (sink, without_dialog) = match outcome {
         DialogOutcome::Cancelled => return,
         DialogOutcome::Picked(path) if single => (Sink::File(path), false),
-        DialogOutcome::Picked(dir) => (Sink::Dir { dir, keep_existing: false }, false),
+        DialogOutcome::Picked(dir) => (Sink::Dir(dir), false),
         DialogOutcome::Unavailable => match dialogs.fallback_dir() {
-            Some(dir) => (Sink::Dir { dir, keep_existing: true }, true),
+            Some(dir) => (Sink::Dir(dir), true),
             None => {
                 app.show_toast(crate::io::NO_FALLBACK_FOLDER, true);
                 return;
@@ -502,22 +550,32 @@ pub fn run_export_with(app: &mut App, ids: &[NodeId], dialogs: &dyn crate::io::F
         };
         match sink.write(job, &bytes) {
             Ok(path) => written.push(path),
-            Err(e) => {
+            Err((path, e)) => {
                 drop(doc);
-                app.show_toast(format!("{lead}Export failed: {e}"), true);
+                app.show_export_write_error(without_dialog, &path, &e);
                 return;
             }
         }
     }
     drop(doc);
     let skipped = if failed.is_empty() { String::new() } else { format!(" ({} skipped: {})", failed.len(), failed.join("; ")) };
-    let warn = without_dialog || !failed.is_empty();
-    match (written.as_slice(), &sink) {
-        ([], _) => app.show_toast(format!("Nothing exported{skipped}"), true),
-        ([one], _) if without_dialog => app.show_toast(format!("{lead}Saved to {}{skipped}", one.display()), warn),
-        ([one], _) => app.show_toast(format!("Exported {}{skipped}", one.display()), warn),
-        (many, Sink::Dir { dir, .. }) if without_dialog => app.show_toast(format!("{lead}Saved {} files to {}{skipped}", many.len(), dir.display()), warn),
-        (many, _) => app.show_toast(format!("Exported {} files{skipped}", many.len()), warn),
+    let partial = !failed.is_empty();
+    match written.as_slice() {
+        [] => app.show_toast(format!("Nothing exported{skipped}"), true),
+        [one] if without_dialog => show_export_toast(app, format!("{lead}Saved to {}{skipped}", one.display()), one.clone(), partial),
+        [one] => show_export_toast(app, format!("Exported {}{skipped}", one.display()), one.clone(), partial),
+        many => {
+            let dir = match &sink {
+                Sink::Dir(dir) => dir.clone(),
+                Sink::File(path) => path.parent().map(Path::to_path_buf).unwrap_or_else(|| PathBuf::from(".")),
+            };
+            let text = if without_dialog {
+                format!("{lead}Saved {} files to {}{skipped}", many.len(), dir.display())
+            } else {
+                format!("Exported {} files to {}{skipped}", many.len(), dir.display())
+            };
+            show_export_toast(app, text, dir, partial);
+        }
     }
 }
 
@@ -588,9 +646,46 @@ mod tests {
             }
             for l in ["512w", "1.5x", "2x"] {
                 let w = widgets::text_width(ui.painter(), l, &theme::font_body());
-                assert!(w <= SCALE_W - 20.0 - 8.0, "{l} is {w}px wide");
+                assert!(w <= SCALE_W - SCALE_CHEVRON_W - 8.0, "{l} is {w}px wide");
             }
         });
+    }
+
+    /// An app with one rectangle that already has one export row, and the context to draw it in.
+    fn app_with_one_export_row() -> (App, Vec<NodeId>, egui::Context) {
+        let mut d = Document::new("t");
+        let page = d.add_page("p");
+        let id = d.alloc_id();
+        d.insert(page, Node::rectangle(id, R::new(0.0, 0.0, 40.0, 30.0))).unwrap();
+        d.get_mut(id).unwrap().export_settings = vec![ExportPreset::default()];
+        let mut app = App::new(d);
+        app.selection = vec![id];
+        let ctx = egui::Context::default();
+        theme::install_fonts(&ctx);
+        (app, vec![id], ctx)
+    }
+
+    #[test]
+    fn the_scale_chevron_has_a_full_size_pointer_target_that_wins_the_overlap_with_the_text() {
+        let (mut app, sel, ctx) = app_with_one_export_row();
+        frame(&ctx, 0.0, vec![], |ui| {
+            section(&mut app, ui, 0.0, 0.0, &sel);
+        });
+        let hit: Rect = ctx.data(|d| d.get_temp(Id::new(("test-rect", "export-scale-chev".to_string())))).expect("the chevron's hit rect is recorded");
+        assert!(hit.width() >= theme::TARGET_MIN, "the chevron's pointer target is {} px wide, the floor is {}", hit.width(), theme::TARGET_MIN);
+        // The field ends where the hit rect ends; a press 20 px in from that edge is over the text as well as the chevron.
+        let p = Pos2::new(hit.right() - 20.0, hit.center().y);
+        let ev = |pressed| egui::Event::PointerButton { pos: p, button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::NONE };
+        let mut last = Vec::new();
+        for (t, events) in [(0.1, vec![egui::Event::PointerMoved(p)]), (0.2, vec![ev(true)]), (0.3, vec![ev(false)]), (0.4, vec![]), (0.5, vec![])] {
+            let raw =
+                egui::RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(400.0, 800.0))), time: Some(t), events, ..Default::default() };
+            let out = ctx.run_ui(raw, |ui| {
+                section(&mut app, ui, 0.0, 0.0, &sel);
+            });
+            last = crate::lint::scan_shapes(&out.shapes).0.into_iter().map(|t| t.text).collect();
+        }
+        assert!(last.iter().any(|t| t == "4x"), "the click opened the scale presets menu: {last:?}");
     }
 
     #[test]
@@ -690,7 +785,7 @@ mod tests {
         let saved = dir.join("Alpha.png");
         assert!(saved.is_file(), "{:?}", files_in(&dir));
         assert!(std::fs::read(&saved).unwrap().starts_with(b"\x89PNG"));
-        assert_eq!(toast_of(&app), Some((format!("No save dialog. Saved to {}", saved.display()), true)));
+        assert_eq!(toast_of(&app), Some((format!("No save dialog. Saved to {}", saved.display()), false)));
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -702,9 +797,14 @@ mod tests {
         let (mut app, a, _) = named_rects_with_png_rows();
         run_export_with(&mut app, &[a], &ScriptedDialogs::answering(DialogOutcome::Unavailable).with_fallback(dir.clone()));
         assert_eq!(std::fs::read(dir.join("Alpha.png")).unwrap(), b"keep me");
-        let saved = dir.join("Alpha 2.png");
+        let saved = dir.join("Alpha-1.png");
         assert!(saved.is_file(), "{:?}", files_in(&dir));
         assert_eq!(toast_of(&app).unwrap().0, format!("No save dialog. Saved to {}", saved.display()));
+        app.toast = None;
+        run_export_with(&mut app, &[a], &ScriptedDialogs::answering(DialogOutcome::Unavailable).with_fallback(dir.clone()));
+        let saved_two = dir.join("Alpha-2.png");
+        assert!(saved_two.is_file(), "{:?}", files_in(&dir));
+        assert_eq!(toast_of(&app).unwrap().0, format!("No save dialog. Saved to {}", saved_two.display()));
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -715,9 +815,9 @@ mod tests {
         std::fs::write(dir.join("Beta.png"), b"keep me").unwrap();
         let (mut app, a, b) = named_rects_with_png_rows();
         run_export_with(&mut app, &[a, b], &ScriptedDialogs::answering(DialogOutcome::Unavailable).with_fallback(dir.clone()));
-        assert_eq!(files_in(&dir), ["Alpha.png", "Beta 2.png", "Beta.png"], "the existing Beta.png is kept");
+        assert_eq!(files_in(&dir), ["Alpha.png", "Beta-1.png", "Beta.png"], "the existing Beta.png is kept");
         assert_eq!(std::fs::read(dir.join("Beta.png")).unwrap(), b"keep me");
-        assert_eq!(toast_of(&app), Some((format!("No save dialog. Saved 2 files to {}", dir.display()), true)));
+        assert_eq!(toast_of(&app), Some((format!("No save dialog. Saved 2 files to {}", dir.display()), false)));
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -736,6 +836,46 @@ mod tests {
         assert_eq!(names.len(), 3, "one file, then two more: {names:?}");
         assert!(names.iter().all(|n| n.len() <= 255 && n.ends_with(".png")), "{names:?}");
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn export_error_toast_uses_the_sanitized_layer_path() {
+        use crate::io::{DialogOutcome, ScriptedDialogs};
+        let dir = scratch_dir("error_sanitized").join("missing");
+        let (mut app, a, _) = named_rects_with_png_rows();
+        app.doc.get_mut(a).unwrap().name = "../Notes".into();
+        run_export_with(&mut app, &[a], &ScriptedDialogs::answering(DialogOutcome::Unavailable).with_fallback(dir.clone()));
+        let toast = toast_of(&app).expect("failed export explains the attempted path").0;
+        assert!(toast.contains(&dir.join("-Notes.png").display().to_string()), "{toast}");
+        assert!(!toast.contains("../Notes"), "{toast}");
+
+        app.selection = vec![a];
+        app.export_selection_with(&ScriptedDialogs::answering(DialogOutcome::Unavailable).with_fallback(dir.clone()));
+        let selection_toast = toast_of(&app).expect("failed selection export explains the attempted path").0;
+        assert!(selection_toast.contains(&dir.join("_Notes.png").display().to_string()), "{selection_toast}");
+        assert!(!selection_toast.contains("../Notes"), "{selection_toast}");
+        std::fs::remove_dir_all(dir.parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn export_error_toast_uses_the_cut_layer_path() {
+        use crate::io::{DialogOutcome, ScriptedDialogs};
+        let dir = scratch_dir("error_long").join("missing");
+        let (mut app, a, _) = named_rects_with_png_rows();
+        let name = "a".repeat(300);
+        app.doc.get_mut(a).unwrap().name = name.clone();
+        run_export_with(&mut app, &[a], &ScriptedDialogs::answering(DialogOutcome::Unavailable).with_fallback(dir.clone()));
+        let toast = toast_of(&app).expect("failed export explains the attempted path").0;
+        let expected = dir.join(format!("{}.png", "a".repeat(100))).display().to_string();
+        assert!(toast.contains(&expected), "{toast}");
+        assert!(!toast.contains(&name), "{toast}");
+
+        app.selection = vec![a];
+        app.export_selection_with(&ScriptedDialogs::answering(DialogOutcome::Unavailable).with_fallback(dir.clone()));
+        let selection_toast = toast_of(&app).expect("failed selection export explains the attempted path").0;
+        assert!(selection_toast.contains(&expected), "{selection_toast}");
+        assert!(!selection_toast.contains(&name), "{selection_toast}");
+        std::fs::remove_dir_all(dir.parent().unwrap()).ok();
     }
 
     #[test]
@@ -776,6 +916,139 @@ mod tests {
         assert_eq!(files_in(&dir), ["chosen.png"], "nothing lands in the fallback folder");
         std::fs::remove_dir_all(&dir).ok();
         std::fs::remove_dir_all(&folder).ok();
+    }
+
+    /// Puts `dir` back to a writable mode and deletes it, including when an assertion panics first.
+    struct Restore(std::path::PathBuf);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let _ = std::fs::set_permissions(&self.0, std::fs::Permissions::from_mode(0o755));
+            }
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[cfg(unix)]
+    fn read_only(dir: &std::path::Path) {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o555)).unwrap();
+    }
+
+    fn assert_failed_write(app: &App, tried: &std::path::Path) {
+        let toast = app.toast.as_ref().expect("a failed write must say so");
+        assert!(toast.error, "{}", toast.text);
+        assert!(toast.reveal.is_none(), "a file that was not written has no Show in folder action: {}", toast.text);
+        assert!(toast.text.contains("Export failed"), "{}", toast.text);
+        assert!(toast.text.contains(&tried.display().to_string()), "toast names the path it tried: {}", toast.text);
+        assert!(
+            toast.text.contains("Permission denied") || toast.text.contains("Operation not permitted") || toast.text.contains("os error"),
+            "toast names the reason: {}",
+            toast.text
+        );
+    }
+
+    #[test]
+    fn export_toast_panel_one_file_without_a_dialog_offers_reveal_and_keeps_a_slash_name_inside() {
+        use crate::io::{DialogOutcome, ScriptedDialogs};
+        let dir = scratch_dir("slash_reveal");
+        let (mut app, a, _) = named_rects_with_png_rows();
+        app.doc.get_mut(a).unwrap().name = "Card/A:B".into();
+        run_export_with(&mut app, &[a], &ScriptedDialogs::answering(DialogOutcome::Unavailable).with_fallback(dir.clone()));
+        let names = files_in(&dir);
+        assert_eq!(names, ["Card-A-B.png"], "unsafe / and : characters become - inside the fallback folder");
+        let saved = dir.join(&names[0]);
+        assert_eq!(saved.parent(), Some(dir.as_path()));
+        crate::fig_export::tests::assert_offers_reveal(&app, &saved);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn export_toast_panel_dialog_picked_file_and_folder_never_overwrite_and_use_dash_suffix() {
+        use crate::io::{DialogOutcome, ScriptedDialogs};
+        let dir = scratch_dir("picked_no_overwrite");
+        let target = dir.join("Card.png");
+        std::fs::write(&target, b"keep original").unwrap();
+        let (mut app, a, b) = named_rects_with_png_rows();
+        app.doc.get_mut(a).unwrap().name = "Card".into();
+        app.doc.get_mut(b).unwrap().name = "Card".into();
+        let c = app.doc.alloc_id();
+        let page = app.page;
+        app.doc.insert(page, Node::rectangle(c, R::new(100.0, 0.0, 40.0, 30.0))).unwrap();
+        app.doc.get_mut(c).unwrap().name = "Hero/Sub:1".into();
+        app.edit_export_rows(&[c], &RowEdit::Add(ExportPreset::default()));
+
+        run_export_with(&mut app, &[a], &ScriptedDialogs::answering(DialogOutcome::Picked(target.clone())));
+        assert_eq!(std::fs::read(&target).unwrap(), b"keep original", "existing Card.png must never be overwritten");
+        let first_suffix = dir.join("Card-1.png");
+        assert!(first_suffix.is_file(), "{:?}", files_in(&dir));
+        assert_eq!(toast_of(&app), Some((format!("Exported {}", first_suffix.display()), false)));
+        crate::fig_export::tests::assert_offers_reveal(&app, &first_suffix);
+        // A toast with Show in folder is never replaced, so the next export's toast waits; this test reads each in turn.
+        app.toast = None;
+
+        run_export_with(&mut app, &[a], &ScriptedDialogs::answering(DialogOutcome::Picked(target.clone())));
+        let second_suffix = dir.join("Card-2.png");
+        assert!(second_suffix.is_file(), "{:?}", files_in(&dir));
+        assert_eq!(toast_of(&app), Some((format!("Exported {}", second_suffix.display()), false)));
+        crate::fig_export::tests::assert_offers_reveal(&app, &second_suffix);
+        app.toast = None;
+
+        let folder = scratch_dir("picked_folder_no_overwrite");
+        std::fs::write(folder.join("Card.png"), b"keep folder card").unwrap();
+        run_export_with(&mut app, &[a, b, c], &ScriptedDialogs::answering(DialogOutcome::Picked(folder.clone())));
+        assert_eq!(std::fs::read(folder.join("Card.png")).unwrap(), b"keep folder card");
+        assert_eq!(files_in(&folder), ["Card-1.png", "Card-2.png", "Card.png", "Hero-Sub-1.png"]);
+        assert_eq!(toast_of(&app), Some((format!("Exported 3 files to {}", folder.display()), false)));
+        crate::fig_export::tests::assert_offers_reveal(&app, &folder);
+
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&folder).ok();
+    }
+
+    #[test]
+    fn export_toast_panel_many_files_offer_one_folder_reveal() {
+        use crate::io::{DialogOutcome, ScriptedDialogs};
+        let dir = scratch_dir("many_reveal");
+        let (mut app, a, b) = named_rects_with_png_rows();
+        run_export_with(&mut app, &[a, b], &ScriptedDialogs::answering(DialogOutcome::Unavailable).with_fallback(dir.clone()));
+        crate::fig_export::tests::assert_offers_reveal(&app, &dir);
+        assert_eq!(app.toast.as_ref().unwrap().text.matches(dir.display().to_string().as_str()).count(), 1, "one summary, the folder once");
+        app.toast = None;
+        let picked = scratch_dir("many_reveal_picked");
+        run_export_with(&mut app, &[a, b], &ScriptedDialogs::answering(DialogOutcome::Picked(picked.clone())));
+        crate::fig_export::tests::assert_offers_reveal(&app, &picked);
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&picked).ok();
+    }
+
+    #[test]
+    fn export_toast_panel_dialog_file_offers_reveal() {
+        use crate::io::{DialogOutcome, ScriptedDialogs};
+        let dir = scratch_dir("picked_reveal");
+        let (mut app, a, _) = named_rects_with_png_rows();
+        let target = dir.join("chosen.png");
+        run_export_with(&mut app, &[a], &ScriptedDialogs::answering(DialogOutcome::Picked(target.clone())));
+        crate::fig_export::tests::assert_offers_reveal(&app, &target);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn export_toast_panel_read_only_folder_names_the_path_and_the_reason() {
+        use crate::io::{DialogOutcome, ScriptedDialogs};
+        let dir = scratch_dir("read_only");
+        let _restore = Restore(dir.clone());
+        let (mut app, a, b) = named_rects_with_png_rows();
+        read_only(&dir);
+        run_export_with(&mut app, &[a], &ScriptedDialogs::answering(DialogOutcome::Unavailable).with_fallback(dir.clone()));
+        assert_failed_write(&app, &dir.join("Alpha.png"));
+        assert!(files_in(&dir).is_empty(), "nothing was written");
+        let target = dir.join("chosen.png");
+        run_export_with(&mut app, &[b], &ScriptedDialogs::answering(DialogOutcome::Picked(target.clone())));
+        assert_failed_write(&app, &target);
     }
 
     fn two_frames_with_pdf_rows() -> (App, NodeId, NodeId) {
@@ -852,5 +1125,232 @@ mod tests {
         assert_eq!(a, fingerprint(&d, id));
         d.get_mut(id).unwrap().opacity = 0.5;
         assert_ne!(a, fingerprint(&d, id));
+    }
+
+    /// A frame `F` with one export row and a drop shadow (so its export takes the scratch-copy
+    /// path), inside a section that switches the `tokens` collection to its second mode. `F`'s fill
+    /// is bound to Color/Brand (green in the first mode, orange in the second); it holds a red child
+    /// and a child whose fill is bound too. Returns the app with `F` selected, `F` and the red child.
+    fn bound_frame_with_export_row() -> (App, NodeId, NodeId) {
+        use designos_doc::{Color, Effect, Paint, Variable, VariableCollection, VariableKind, VariableMode, VariableValue, Vec2};
+        let mut d = Document::new("t");
+        let page = d.add_page("p");
+        d.variable_collections.insert(
+            "tokens".into(),
+            VariableCollection {
+                id: "tokens".into(),
+                name: "tokens".into(),
+                modes: vec![VariableMode { id: "light".into(), name: "Light".into() }, VariableMode { id: "dark".into(), name: "Dark".into() }],
+                default_mode: "light".into(),
+                variables: vec!["brand".into()],
+                key: None,
+                source_library_key: None,
+                extensions: Default::default(),
+            },
+        );
+        d.variables.insert(
+            "brand".into(),
+            Variable {
+                id: "brand".into(),
+                name: "Color/Brand".into(),
+                collection: "tokens".into(),
+                kind: VariableKind::Color,
+                values: [
+                    ("light".to_string(), VariableValue::Color(Color::rgb(20, 160, 60))),
+                    ("dark".to_string(), VariableValue::Color(Color::rgb(240, 120, 0))),
+                ]
+                .into_iter()
+                .collect(),
+                description: String::new(),
+                scopes: vec![],
+                hidden_from_publishing: false,
+                key: None,
+                code_syntax: Default::default(),
+                extensions: Default::default(),
+                mode_extensions: Default::default(),
+            },
+        );
+        let s = d.alloc_id();
+        let mut section = Node::frame(s, R::new(0.0, 0.0, 400.0, 300.0));
+        section.variables.modes.insert("tokens".into(), "dark".into());
+        let s = d.insert(page, section).unwrap();
+        let f = d.alloc_id();
+        let mut frame = Node::frame(f, R::new(40.0, 40.0, 100.0, 80.0));
+        frame.fills = vec![Paint::solid(Color::rgb(0, 0, 255))];
+        frame.variables.bindings.insert("fills/0".into(), "brand".into());
+        frame.effects.push(Effect::DropShadow {
+            color: Color::rgba(0, 0, 0, 120),
+            offset: Vec2::new(0.0, 4.0),
+            radius: 8.0,
+            spread: 0.0,
+            visible: true,
+            show_behind: false,
+            blend: Default::default(),
+        });
+        frame.export_settings.push(ExportPreset::default());
+        let f = d.insert(s, frame).unwrap();
+        let c = d.alloc_id();
+        let mut child = Node::rectangle(c, R::new(10.0, 10.0, 30.0, 20.0));
+        child.fills = vec![Paint::solid(Color::rgb(220, 20, 20))];
+        let c = d.insert(f, child).unwrap();
+        let b = d.alloc_id();
+        let mut bound = Node::rectangle(b, R::new(50.0, 40.0, 30.0, 20.0));
+        bound.fills = vec![Paint::solid(Color::rgb(0, 0, 255))];
+        bound.variables.bindings.insert("fills/0".into(), "brand".into());
+        d.insert(f, bound).unwrap();
+        let mut app = App::new(d);
+        app.selection = vec![f];
+        (app, f, c)
+    }
+
+    fn preview_texture(ctx: &egui::Context) -> Option<egui::TextureId> {
+        ctx.data(|d| d.get_temp::<Thumb>(Id::new("export-thumb"))).map(|t| t.tex.id())
+    }
+
+    /// Draws the Export section for `sel` at time `t` and returns the texture of the preview that
+    /// `thumbnail` hands back for the first selected layer.
+    fn draw_and_take_preview(app: &mut App, ctx: &egui::Context, sel: &[NodeId], t: f64) -> Option<egui::TextureId> {
+        app.now = t;
+        let mut got = None;
+        frame(ctx, t, vec![], |ui| {
+            section(app, ui, 0.0, 0.0, sel);
+            got = thumbnail(app, ui, sel[0]).map(|th| th.tex.id());
+        });
+        got
+    }
+
+    #[test]
+    fn moving_a_layer_with_an_export_row_keeps_its_preview() {
+        let (mut app, f, _) = bound_frame_with_export_row();
+        let sel = vec![f];
+        let ctx = egui::Context::default();
+        theme::install_fonts(&ctx);
+        let first = draw_and_take_preview(&mut app, &ctx, &sel, 0.0).expect("the preview is drawn");
+        // A drag moves the layer every frame; its preview does not change, so it is not drawn again.
+        for (i, (x, y)) in [(30.0, 12.0), (60.5, 40.25), (95.0, 70.0)].into_iter().enumerate() {
+            let n = app.doc.get_mut(f).unwrap();
+            n.transform.tx = x;
+            n.transform.ty = y;
+            let got = draw_and_take_preview(&mut app, &ctx, &sel, 0.5 * (i + 1) as f64);
+            assert_eq!(got, Some(first), "moving the layer re-rendered or lost its preview (step {i})");
+            assert_eq!(preview_texture(&ctx), Some(first), "the cached preview changed (step {i})");
+        }
+    }
+
+    #[test]
+    fn a_preview_drawn_while_a_relayout_is_queued_is_drawn_again_once_it_drains() {
+        let (mut app, f, _) = bound_frame_with_export_row();
+        let ctx = egui::Context::default();
+        theme::install_fonts(&ctx);
+        // (preview texture, repaint delay the frame asked for)
+        let take = |app: &mut App, t: f64, settled: bool| {
+            app.now = t;
+            let mut got = None;
+            let raw = egui::RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(400.0, 800.0))), time: Some(t), ..Default::default() };
+            let out = ctx.run_ui(raw, |ui| got = thumbnail_with(app, ui, f, settled).map(|th| th.tex.id()));
+            (got, out.viewport_output.get(&egui::ViewportId::ROOT).map(|v| v.repaint_delay))
+        };
+        let (mid, delay) = take(&mut app, 0.0, false);
+        let mid = mid.expect("drawn while the queue drains");
+        assert!(delay.is_some_and(|d| d.as_secs_f64() <= THUMB_CHECK_SECONDS), "comes back to check: {delay:?}");
+        assert_eq!(take(&mut app, 0.5, false).0, Some(mid), "nothing changed and the queue still drains: no redraw");
+        let (done, _) = take(&mut app, 1.0, true);
+        let done = done.expect("drawn after the drain");
+        assert_ne!(done, mid, "drawn again once the queue drained");
+        let (again, delay) = take(&mut app, 1.5, true);
+        assert_eq!(again, Some(done), "settled: no more redraws");
+        assert!(delay.is_none_or(|d| d.as_secs_f64() > 1.0), "settled: no repaint asked for: {delay:?}");
+    }
+
+    #[test]
+    fn changing_a_child_redraws_the_preview() {
+        let (mut app, f, c) = bound_frame_with_export_row();
+        let sel = vec![f];
+        let ctx = egui::Context::default();
+        theme::install_fonts(&ctx);
+        let first = draw_and_take_preview(&mut app, &ctx, &sel, 0.0).expect("the preview is drawn");
+        app.doc.get_mut(c).unwrap().fills = vec![designos_doc::Paint::solid(designos_doc::Color::rgb(250, 200, 0))];
+        let second = draw_and_take_preview(&mut app, &ctx, &sel, 0.5).expect("the preview is still drawn");
+        assert_ne!(second, first, "a changed child must redraw the preview");
+    }
+
+    #[test]
+    fn changing_a_bound_variable_redraws_the_preview() {
+        let (mut app, f, _) = bound_frame_with_export_row();
+        let before = fingerprint(&app.doc, f);
+        app.doc.variables.get_mut("brand").unwrap().values.insert("dark".into(), designos_doc::VariableValue::Color(designos_doc::Color::rgb(20, 80, 240)));
+        assert_ne!(fingerprint(&app.doc, f), before, "a changed bound variable must invalidate the preview");
+    }
+
+    #[test]
+    fn changing_an_ancestor_variable_mode_redraws_the_preview() {
+        let (mut app, f, _) = bound_frame_with_export_row();
+        let before = fingerprint(&app.doc, f);
+        let ancestor = app.doc.get(f).unwrap().parent.unwrap();
+        app.doc.get_mut(ancestor).unwrap().variables.modes.insert("tokens".into(), "light".into());
+        assert_ne!(fingerprint(&app.doc, f), before, "an ancestor mode change must invalidate the preview");
+    }
+
+    fn export_image(doc: &Document, node: NodeId, scale: f32) -> egui::ColorImage {
+        let pm = designos_export::render_export(doc, node, scale).expect("the layer exports");
+        egui::ColorImage::from_rgba_premultiplied([pm.width() as usize, pm.height() as usize], pm.data())
+    }
+
+    #[test]
+    fn preview_matches_the_export_of_the_document_with_variables_applied() {
+        let (mut app, f, _) = bound_frame_with_export_row();
+        for with_shadow in [true, false] {
+            if !with_shadow {
+                app.doc.get_mut(f).unwrap().effects.clear();
+            }
+            let full = designos_doc::apply_bound_variables(&app.doc);
+            let b = designos_export::render_bounds(&full, f);
+            let scale = preview_scale(b);
+            let got = preview_image(&app.doc, f).expect("the preview renders");
+            assert_eq!(got, export_image(&full, f, scale), "the preview is the export, pixel for pixel (shadow: {with_shadow})");
+            // Colour/Brand resolves in the section's second mode (orange), on the frame and on its bound child.
+            for (x, y) in [(5.0, 5.0), (65.0, 50.0)] {
+                let px = got.pixels[((y - b.y) * scale) as usize * got.size[0] + ((x - b.x) * scale) as usize];
+                assert_eq!((px.r(), px.g(), px.b()), (240, 120, 0), "at ({x}, {y}), shadow: {with_shadow}: {px:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn export_pixels_do_not_depend_on_the_layers_position() {
+        // The preview fingerprint leaves the root's translation out; this is why that is exact.
+        let (mut app, f, _) = bound_frame_with_export_row();
+        for with_shadow in [true, false] {
+            if !with_shadow {
+                app.doc.get_mut(f).unwrap().effects.clear();
+            }
+            let before = export_image(&app.doc, f, 1.5);
+            let n = app.doc.get_mut(f).unwrap();
+            n.transform.tx += 317.25;
+            n.transform.ty -= 48.5;
+            assert_eq!(export_image(&app.doc, f, 1.5), before, "moved (shadow: {with_shadow})");
+        }
+    }
+
+    #[test]
+    fn the_preview_fingerprint_ignores_only_the_position_of_a_layer_that_is_not_a_connector() {
+        let (mut app, f, _) = bound_frame_with_export_row();
+        let fp = fingerprint(&app.doc, f);
+        let n = app.doc.get_mut(f).unwrap();
+        n.transform.tx += 25.0;
+        n.transform.ty += 7.5;
+        assert_eq!(fingerprint(&app.doc, f), fp, "moved");
+        let n = app.doc.get_mut(f).unwrap();
+        n.transform = Affine { tx: n.transform.tx, ty: n.transform.ty, ..Affine::rotate(0.4) };
+        assert_ne!(fingerprint(&app.doc, f), fp, "rotated");
+
+        // A connector's route is drawn relative to its own position, so moving it is a change.
+        let mut d = Document::new("t");
+        let page = d.add_page("p");
+        let id = d.alloc_id();
+        let c = d.insert(page, Node::connector(id, designos_doc::ConnectorProps::default())).unwrap();
+        let fp = fingerprint(&d, c);
+        d.get_mut(c).unwrap().transform.tx += 40.0;
+        assert_ne!(fingerprint(&d, c), fp, "moved connector");
     }
 }

@@ -8,8 +8,8 @@ mod file_dialog;
 #[cfg(test)]
 mod file_dialog_flow_tests;
 
-pub use fallback_save::write_new_in;
-#[cfg(test)]
+pub(crate) use fallback_save::user_home;
+pub use fallback_save::{sanitize_export_name, write_new_dashed_in, write_new_dashed_path, write_new_in};
 pub use file_dialog::ScriptedDialogs;
 pub use file_dialog::{DialogOutcome, FileDialogs, FileRequest, SystemDialogs, NO_FALLBACK_FOLDER};
 
@@ -46,6 +46,15 @@ pub fn non_finite_notice(count: usize) -> Option<String> {
         0 => None,
         1 => Some("1 number in this file was not valid and was replaced by 0 or 1".to_string()),
         n => Some(format!("{n} numbers in this file were not valid and were replaced by 0 or 1")),
+    }
+}
+
+/// The notice for animation tracks that a file stored with no property and that were dropped on open.
+pub fn motion_tracks_dropped_notice(count: usize) -> Option<String> {
+    match count {
+        0 => None,
+        1 => Some("Dropped 1 animation track with no property".to_string()),
+        n => Some(format!("Dropped {n} animation tracks with no property")),
     }
 }
 
@@ -104,12 +113,8 @@ fn parse_native_with_warning(path: &Path, text: &str, record_once: bool) -> serd
         }
     };
     let nf_notice = if record_once { non_finite_notice_once(path, report.non_finite_numbers) } else { non_finite_notice(report.non_finite_numbers) };
-    let warning = match (structural_warning, nf_notice) {
-        (Some(s), Some(n)) => Some(format!("{s}; {n}")),
-        (Some(s), None) => Some(s),
-        (None, Some(n)) => Some(n),
-        (None, None) => None,
-    };
+    let warning =
+        [structural_warning, nf_notice, motion_tracks_dropped_notice(report.motion_tracks_dropped)].into_iter().flatten().reduce(|a, b| format!("{a}; {b}"));
     Ok((doc, warning))
 }
 
@@ -122,7 +127,7 @@ fn import_pen_with_options(raw: &str, opts: &designos_fig::PenImportOptions) -> 
 /// Loads a document from disk, dispatching on the file extension. Import warnings go to stderr;
 /// use [`load_path_with_warning`] where the user should see them.
 pub fn load_path(path: &Path) -> Result<Document, String> {
-    let (doc, warning) = load_path_importing_pen_with_mode(path, import_pen_with_options, false)?;
+    let (doc, warning) = load_path_importing_pen_with_mode(path, import_pen_with_options, false, designos_fig::MAX_IMPORT_CLONES)?;
     if let Some(w) = warning {
         eprintln!("designos: {}: {w}", path.display());
     }
@@ -145,23 +150,74 @@ pub fn is_web_capture_path(path: &Path) -> bool {
 /// Like [`load_path`], but also returns the non-fatal import or repair warning, if any: a `.pen`
 /// file whose `ref` expansion hit the clone budget or a native `.designos` file whose node graph
 /// needed structural repair on load still opens, and reports what changed.
+#[cfg(test)]
+fn load_counts() -> &'static Mutex<HashMap<PathBuf, usize>> {
+    static COUNTS: OnceLock<Mutex<HashMap<PathBuf, usize>>> = OnceLock::new();
+    COUNTS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+#[cfg(test)]
+pub fn load_call_count(path: &Path) -> usize {
+    load_counts().lock().ok().and_then(|m| m.get(path).copied()).unwrap_or(0)
+}
+
+/// Test seam: `f` runs once on the document the next [`load_path_with_clone_budget`] on this thread returns, so a test
+/// can give a file the page hydrator that no importer attaches to page 0.
+#[cfg(test)]
+pub fn after_next_load(f: impl FnOnce(&mut Document) + 'static) {
+    AFTER_NEXT_LOAD.with(|slot| *slot.borrow_mut() = Some(Box::new(f)));
+}
+
+#[cfg(test)]
+type AfterLoad = Box<dyn FnOnce(&mut Document)>;
+
+#[cfg(test)]
+thread_local! {
+    static AFTER_NEXT_LOAD: std::cell::RefCell<Option<AfterLoad>> = const { std::cell::RefCell::new(None) };
+}
+
 pub fn load_path_with_warning(path: &Path) -> Result<(Document, Option<String>), String> {
-    load_path_importing_pen_with(path, import_pen_with_options)
+    load_path_with_clone_budget(path, designos_fig::MAX_IMPORT_CLONES)
+}
+
+pub fn load_path_with_clone_budget(path: &Path, clone_budget: usize) -> Result<(Document, Option<String>), String> {
+    #[cfg(test)]
+    if let Ok(mut m) = load_counts().lock() {
+        *m.entry(path.to_path_buf()).or_insert(0) += 1;
+    }
+    after_load_seam(load_path_importing_pen_with_mode(path, import_pen_with_options, true, clone_budget))
+}
+
+#[cfg(test)]
+fn after_load_seam(loaded: Result<(Document, Option<String>), String>) -> Result<(Document, Option<String>), String> {
+    loaded.map(|(mut doc, warning)| {
+        if let Some(f) = AFTER_NEXT_LOAD.with(|slot| slot.borrow_mut().take()) {
+            f(&mut doc);
+        }
+        (doc, warning)
+    })
+}
+
+#[cfg(not(test))]
+fn after_load_seam(loaded: Result<(Document, Option<String>), String>) -> Result<(Document, Option<String>), String> {
+    loaded
 }
 
 /// [`load_path_with_warning`] with the `.pen` importer injected, so a test can produce a warning
 /// without a document that really exhausts the import's clone budget.
+#[cfg(test)]
 fn load_path_importing_pen_with(
     path: &Path,
     import_pen: impl Fn(&str, &designos_fig::PenImportOptions) -> Result<(Document, Option<String>), String>,
 ) -> Result<(Document, Option<String>), String> {
-    load_path_importing_pen_with_mode(path, import_pen, true)
+    load_path_importing_pen_with_mode(path, import_pen, true, designos_fig::MAX_IMPORT_CLONES)
 }
 
 fn load_path_importing_pen_with_mode(
     path: &Path,
     import_pen: impl Fn(&str, &designos_fig::PenImportOptions) -> Result<(Document, Option<String>), String>,
     record_once: bool,
+    clone_budget: usize,
 ) -> Result<(Document, Option<String>), String> {
     let mut warning = None;
     let pen_opts = designos_fig::PenImportOptions { base_dir: path.parent().map(Path::to_path_buf) };
@@ -169,9 +225,12 @@ fn load_path_importing_pen_with_mode(
     let mut doc = match ext.as_str() {
         "fig" => {
             let bytes = std::fs::read(path).map_err(|e| format!("Cannot read {}: {e}", path.display()))?;
-            let (d, report) = designos_fig::import_fig_with_report(&bytes).map_err(|e| format!("Cannot import .fig: {e}"))?;
+            let (d, report) = designos_fig::import_fig_with_budget(&bytes, clone_budget).map_err(|e| format!("Cannot import .fig: {e}"))?;
             if report.instances_left_unexpanded > 0 {
                 warning = Some(clone_budget_notice(report.instances_left_unexpanded));
+            }
+            if report.missing_variable_bindings > 0 {
+                append_import_warning(&mut warning, missing_variable_bindings_notice(report.missing_variable_bindings));
             }
             d
         }
@@ -195,7 +254,7 @@ fn load_path_importing_pen_with_mode(
             if is_web_capture_path(path) || designos_fig::looks_like_web_capture_json(&text) {
                 designos_fig::import_web_capture_json(&text).map_err(|e| format!("Cannot import web capture: {e}"))?
             } else {
-                match designos_fig::import_rest_json_with_report(&text) {
+                match designos_fig::import_rest_json_with_budget(&text, clone_budget) {
                     Ok((mut d, report)) => {
                         // A number that overflowed `f32` on import is infinity here. Neutralize only the
                         // affected entries in place without re-parsing the whole document or running
@@ -206,10 +265,10 @@ fn load_path_importing_pen_with_mode(
                         }
                         if report.instances_left_unexpanded > 0 {
                             let budget_msg = clone_budget_notice(report.instances_left_unexpanded);
-                            warning = Some(match warning {
-                                Some(prev) => format!("{prev} {budget_msg}"),
-                                None => budget_msg,
-                            });
+                            append_import_warning(&mut warning, budget_msg);
+                        }
+                        if report.missing_variable_bindings > 0 {
+                            append_import_warning(&mut warning, missing_variable_bindings_notice(report.missing_variable_bindings));
                         }
                         d
                     }
@@ -259,6 +318,23 @@ fn load_path_importing_pen_with_mode(
 /// because expanding them would exceed [`designos_fig::MAX_IMPORT_CLONES`].
 pub fn clone_budget_notice(unexpanded: usize) -> String {
     format!("This file has more nested component copies than Studio can expand (limit 8,000,000). {unexpanded} instances are shown empty.")
+}
+
+/// Formats the warning shown when `missing` variables that layers or styles are bound to are not in the opened
+/// file. The links stay attached, so importing the variables later resolves them.
+pub fn missing_variable_bindings_notice(missing: usize) -> String {
+    if missing == 1 {
+        "1 variable used in this file is missing; its link is kept and resolves when the variable is imported.".to_string()
+    } else {
+        format!("{missing} variables used in this file are missing; their links are kept and resolve when the variables are imported.")
+    }
+}
+
+fn append_import_warning(warning: &mut Option<String>, message: String) {
+    *warning = Some(match warning.take() {
+        Some(previous) => format!("{previous} {message}"),
+        None => message,
+    });
 }
 
 /// Toast text after a successful open; carries the import warning so it reaches the user.
@@ -332,6 +408,12 @@ pub fn writes_native_format(path: &Path) -> bool {
     path.extension().and_then(|e| e.to_str()).is_some_and(|e| e.eq_ignore_ascii_case(NATIVE_EXT))
 }
 
+/// Whether [`save_path_counted`] writes `path` with the native serializer: every extension but `.fig` and `.pen`.
+/// That serializer refuses a document whose pages are not all loaded, so such a save loads them first.
+pub fn uses_native_serializer(path: &Path) -> bool {
+    save_format(path) == SaveFormat::Native
+}
+
 /// What a save or export of a document that has comments tells the user when the file cannot keep them.
 pub const COMMENTS_ONLY_IN_NATIVE_NOTICE: &str = "Comments left out: only .designos files keep them";
 
@@ -368,7 +450,7 @@ pub fn comment_threads_left_out(doc: &Document, path: &Path) -> usize {
 /// Writes the native format (or `.fig` binary / `.pen` JSON when the extension matches); returns the final path.
 /// This is the headless save (the Agent CLI), so what the file leaves out goes to stderr.
 pub fn save_path(doc: &Document, path: &Path) -> Result<PathBuf, String> {
-    let (p, replaced) = save_path_counted(doc, path)?;
+    let (p, replaced) = save_path_counted(doc, path).map_err(|e| e.to_string())?;
     if replaced > 0 {
         eprintln!("designos: {}: wrote {replaced} non-finite numbers as their neutral value", p.display());
     }
@@ -380,27 +462,46 @@ pub fn save_path(doc: &Document, path: &Path) -> Result<PathBuf, String> {
 
 /// [`save_path`], also returning how many non-finite numbers the native format wrote as their neutral
 /// value, counted by the one serialization the save performs (`.fig` and `.pen` exports replace none).
-pub fn save_path_counted(doc: &Document, path: &Path) -> Result<(PathBuf, usize), String> {
+pub fn save_path_counted(doc: &Document, path: &Path) -> Result<(PathBuf, usize), std::io::Error> {
     let mut p = path.to_path_buf();
     if p.extension().is_none() {
         p.set_extension(NATIVE_EXT);
     }
     let mut replaced = 0;
-    let payload = match save_format(&p) {
+    // The native format is streamed into the file: a multi-GB document never exists as one text in memory.
+    let exported = match save_format(&p) {
         SaveFormat::Fig => {
-            let (bytes, _omitted) = designos_fig::export_fig_with_report(doc).map_err(|e| format!("Cannot export .fig: {e}"))?;
-            bytes
+            let (bytes, _omitted) = designos_fig::export_fig_with_report(doc).map_err(|e| std::io::Error::other(format!("Cannot export .fig: {e}")))?;
+            Some(bytes)
         }
-        SaveFormat::Pen => designos_fig::export_pen_json(doc).map_err(|e| format!("Cannot export .pen: {e}"))?.into_bytes(),
+        SaveFormat::Pen => Some(designos_fig::export_pen_json(doc).map_err(|e| std::io::Error::other(format!("Cannot export .pen: {e}")))?.into_bytes()),
         SaveFormat::Native => {
-            let (json, n) = doc.to_json_counted().map_err(|e| format!("Cannot serialize: {e}"))?;
-            replaced = n;
-            json.into_bytes()
+            // Refused before the repair backup or the file is touched.
+            if let Some(why) = doc.pending_pages_error() {
+                return Err(std::io::Error::other(format!("Cannot serialize: {why}")));
+            }
+            None
         }
     };
 
-    let wrote_backup = write_pending_repair_backup(&p)?;
-    designos_library::write_atomic(&p, &payload).map_err(|e| format!("Cannot write {}: {e}", p.display()))?;
+    let wrote_backup = write_pending_repair_backup(&p).map_err(std::io::Error::other)?;
+    let written = match &exported {
+        Some(bytes) => designos_library::write_atomic(&p, bytes),
+        None => designos_library::write_atomic_with(&p, |out| {
+            replaced = doc.to_writer_counted(out).map_err(|e| {
+                if e.is_io() {
+                    std::io::Error::from(e)
+                } else {
+                    std::io::Error::other(format!("Cannot serialize: {e}"))
+                }
+            })?;
+            Ok(())
+        }),
+    };
+    written.map_err(|e| match e {
+        designos_library::LibraryError::Io(io) => std::io::Error::new(io.kind(), format!("Cannot write {}: {io}", p.display())),
+        other => std::io::Error::other(format!("Cannot write {}: {other}", p.display())),
+    })?;
     if wrote_backup {
         clear_pending_repair_backup(&p);
     }
@@ -437,7 +538,7 @@ pub fn export_request(default_name: &str) -> FileRequest {
 /// The app saves through [`save_path_counted`] so it can repair the open document; tests use this wrapper.
 #[cfg(test)]
 pub fn save_path_with_notice(doc: &Document, path: &Path) -> Result<(PathBuf, Option<String>), String> {
-    let (p, replaced) = save_path_counted(doc, path)?;
+    let (p, replaced) = save_path_counted(doc, path).map_err(|e| e.to_string())?;
     let notice = non_finite_notice_once(&p, replaced);
     Ok((p, notice))
 }
@@ -716,6 +817,78 @@ mod tests {
         assert!(!bak.exists(), "clean file must not write a .bak file on save");
 
         std::fs::remove_file(&p).ok();
+    }
+
+    #[test]
+    fn dropped_animation_tracks_are_named_in_the_notice_on_open_and_import() {
+        use designos_doc::{NodeMotion, Timeline, Track, TrackProperty};
+        assert_eq!(motion_tracks_dropped_notice(0), None);
+        assert_eq!(motion_tracks_dropped_notice(1).as_deref(), Some("Dropped 1 animation track with no property"));
+        assert_eq!(motion_tracks_dropped_notice(2).as_deref(), Some("Dropped 2 animation tracks with no property"));
+
+        let mut d = Document::new("Animated");
+        let page = d.add_page("Page 1");
+        let id = d.alloc_id();
+        let mut frame = Node::frame(id, Rect::new(0.0, 0.0, 10.0, 10.0));
+        frame.motion = Some(Box::new(NodeMotion {
+            timelines: vec![Timeline::new("tl", 1)],
+            tracks: vec![Track::new("a", "tl", TrackProperty::Opacity), Track::new("b", "tl", TrackProperty::Rotation)],
+            ..Default::default()
+        }));
+        d.insert(page, frame).unwrap();
+        // a file made elsewhere: both tracks have an empty property name
+        let text = d.to_json().unwrap().replace("\"OPACITY\"", "\"\"").replace("\"MOTION_ROTATION\"", "\"\"");
+        let file = tmp("empty_track_property.designos");
+        std::fs::write(&file, text).unwrap();
+
+        let (doc, warning) = load_path_with_warning(&file).unwrap();
+        assert_eq!(warning.as_deref(), Some("Dropped 2 animation tracks with no property"));
+        assert!(doc.get(id).unwrap().motion.is_none() || doc.get(id).unwrap().motion.as_deref().unwrap().tracks.is_empty());
+        assert!(!backup_path(&file).exists(), "nothing structural was repaired, so no backup");
+
+        let mut app = crate::app::App::new(Document::new("Init"));
+        app.open_path(file.clone());
+        let toast = app.toast.as_ref().expect("open shows the notice");
+        assert!(toast.text.contains("Dropped 2 animation tracks with no property"), "{}", toast.text);
+        std::fs::remove_file(&file).ok();
+    }
+
+    #[test]
+    fn importing_into_the_library_names_the_animation_tracks_that_were_dropped() {
+        use designos_doc::{NodeMotion, Timeline, Track, TrackProperty};
+        let mut d = Document::new("Animated import");
+        let page = d.add_page("Page 1");
+        let id = d.alloc_id();
+        let mut frame = Node::frame(id, Rect::new(0.0, 0.0, 10.0, 10.0));
+        frame.motion = Some(Box::new(NodeMotion {
+            timelines: vec![Timeline::new("tl", 1)],
+            tracks: vec![Track::new("a", "tl", TrackProperty::Opacity), Track::new("b", "tl", TrackProperty::Rotation)],
+            ..Default::default()
+        }));
+        d.insert(page, frame).unwrap();
+        let text = d.to_json().unwrap().replace("\"OPACITY\"", "\"\"").replace("\"MOTION_ROTATION\"", "\"\"");
+        let src = tmp("empty_track_property_import.designos");
+        std::fs::write(&src, text).unwrap();
+
+        let lib_dir = tmp("motion_drop_lib");
+        let _ = std::fs::remove_dir_all(&lib_dir);
+        let mut app = crate::app::App::new(Document::new("Init"));
+        app.attach_library(lib_dir);
+        let lib = app.lib.clone().expect("library attached");
+        let proj = lib.list_projects().into_iter().next().unwrap_or_else(|| lib.create_project("P").unwrap());
+
+        // the store hands the count back next to the document
+        let (_, doc, _, _, dropped) = lib.import_file_with_doc_repairs(&src, &proj.id, None).unwrap();
+        assert_eq!(dropped, 2);
+        assert!(doc.get(id).is_none() || doc.nodes.values().all(|n| n.motion.as_deref().is_none_or(|m| m.tracks.is_empty())));
+
+        // and the import toast names it, in warning styling
+        app.toast = None;
+        assert_eq!(app.import_into_library(std::slice::from_ref(&src), &proj.id, None), 1);
+        let toast = app.toast.as_ref().expect("import shows a toast");
+        assert!(toast.error, "a drop is shown with warning styling");
+        assert!(toast.text.contains("Dropped 2 animation tracks with no property"), "{}", toast.text);
+        std::fs::remove_file(&src).ok();
     }
 
     #[test]
@@ -1197,10 +1370,9 @@ mod tests {
         assert_eq!(al.item_spacing, 16.0);
     }
 
-    #[test]
-    fn opening_file_that_hits_clone_budget_surfaces_unexpanded_instances_toast() {
-        let mut children = Vec::with_capacity(207);
-        let c0_rects: Vec<String> = (0..99)
+    fn budget_kit_fixture() -> (String, usize) {
+        let mut children = Vec::with_capacity(18);
+        let c0_rects: Vec<String> = (0..9)
             .map(|i| {
                 format!(r#"{{"id": "2:{i}", "name": "R{i}", "type": "RECTANGLE", "size": {{"x": 4, "y": 4}}, "relativeTransform": [[1, 0, 0], [0, 1, 0]]}}"#)
             })
@@ -1220,7 +1392,7 @@ mod tests {
             r#"{{"id": "1:1", "name": "C1", "type": "COMPONENT", "size": {{"x": 10, "y": 10}}, "relativeTransform": [[1, 0, 0], [0, 1, 0]], "children": [{}]}}"#,
             c1_insts.join(",")
         ));
-        let c2_insts: Vec<String> = (0..40)
+        let c2_insts: Vec<String> = (0..4)
             .map(|i| {
                 format!(
                     r#"{{"id": "4:{i}", "name": "I2_{i}", "type": "INSTANCE", "componentId": "1:1", "size": {{"x": 10, "y": 10}}, "relativeTransform": [[1, 0, 0], [0, 1, 0]], "children": []}}"#
@@ -1231,7 +1403,7 @@ mod tests {
             r#"{{"id": "1:2", "name": "C2", "type": "COMPONENT", "size": {{"x": 10, "y": 10}}, "relativeTransform": [[1, 0, 0], [0, 1, 0]], "children": [{}]}}"#,
             c2_insts.join(",")
         ));
-        for k in 0..204 {
+        for k in 0..15 {
             children.push(format!(
                 r#"{{"id": "5:{k}", "name": "U{k}", "type": "INSTANCE", "componentId": "1:2", "size": {{"x": 10, "y": 10}}, "relativeTransform": [[1, 0, 0], [0, 1, 0]], "children": []}}"#
             ));
@@ -1240,10 +1412,92 @@ mod tests {
             r#"{{"name": "BudgetKit", "version": "1", "schemaVersion": 0, "document": {{"id": "0:0", "name": "Document", "type": "DOCUMENT", "children": [{{"id": "0:1", "name": "Page 1", "type": "CANVAS", "children": [{}]}}]}}}}"#,
             children.join(",")
         );
+        // C1 expands 90 clones, C2 expands 400 clones, and each U{k} expands 404 clones.
+        // Budget 4,530 = 90 + 400 + 10 * 404 expands U0..U9 and leaves U10..U14 (5 instances) unexpanded.
+        (json, 4_530)
+    }
+
+    #[test]
+    fn clone_budget_notice_keeps_user_facing_8m_limit() {
+        assert_eq!(designos_fig::MAX_IMPORT_CLONES, 8_000_000);
+        assert_eq!(clone_budget_notice(5), "This file has more nested component copies than Studio can expand (limit 8,000,000). 5 instances are shown empty.");
+    }
+
+    #[test]
+    fn missing_variables_notice_counts_the_variables_in_plain_words() {
+        assert_eq!(
+            missing_variable_bindings_notice(1),
+            "1 variable used in this file is missing; its link is kept and resolves when the variable is imported."
+        );
+        assert_eq!(
+            missing_variable_bindings_notice(3),
+            "3 variables used in this file are missing; their links are kept and resolve when the variables are imported."
+        );
+    }
+
+    #[test]
+    fn opening_rest_file_with_a_gradient_stop_bound_to_a_missing_variable_shows_the_notice() {
+        let p = tmp("missing_variable_gradient.json");
+        std::fs::write(
+            &p,
+            r#"{"name":"MissingVariable","document":{"type":"DOCUMENT","children":[{"type":"CANVAS","name":"P","children":[
+                {"id":"1:1","type":"RECTANGLE","name":"Gradient","absoluteBoundingBox":{"x":0,"y":0,"width":40,"height":40},
+                 "fills":[{"type":"GRADIENT_LINEAR","gradientHandlePositions":[{"x":0,"y":0.5},{"x":1,"y":0.5},{"x":0,"y":1}],
+                 "gradientStops":[{"position":0,"color":{"r":1,"g":0,"b":0,"a":1},"boundVariables":{"color":{"type":"VARIABLE_ALIAS","id":"VariableID:9:9"}}}]}]}
+            ]}]}}"#,
+        )
+        .unwrap();
+        let (doc, warning) = load_path_with_warning(&p).unwrap();
+        std::fs::remove_file(&p).ok();
+        assert!(!doc.pages.is_empty());
+        assert_eq!(warning.as_deref(), Some(missing_variable_bindings_notice(1).as_str()));
+    }
+
+    #[test]
+    fn opening_rest_file_with_a_solid_fill_bound_to_a_missing_variable_shows_the_notice_in_the_toast() {
+        let p = tmp("missing_variable_solid.json");
+        std::fs::write(
+            &p,
+            r#"{"name":"MissingVariable","document":{"type":"DOCUMENT","children":[{"type":"CANVAS","name":"P","children":[
+                {"id":"1:1","type":"RECTANGLE","name":"Solid","absoluteBoundingBox":{"x":0,"y":0,"width":40,"height":40},
+                 "fills":[{"type":"SOLID","color":{"r":1,"g":0,"b":0,"a":1},"boundVariables":{"color":{"type":"VARIABLE_ALIAS","id":"VariableID:9:9"}}}]},
+                {"id":"1:2","type":"RECTANGLE","name":"Other","absoluteBoundingBox":{"x":50,"y":0,"width":40,"height":40},
+                 "fills":[{"type":"SOLID","color":{"r":1,"g":0,"b":0,"a":1},"boundVariables":{"color":{"type":"VARIABLE_ALIAS","id":"VariableID:9:9"}}}]}
+            ]}]}}"#,
+        )
+        .unwrap();
+        let (doc, warning) = load_path_with_warning(&p).unwrap();
+        std::fs::remove_file(&p).ok();
+        assert_eq!(warning.as_deref(), Some("1 variable used in this file is missing; its link is kept and resolves when the variable is imported."));
+        let toast = opened_toast_text(&doc.name, warning.as_deref());
+        assert!(toast.contains("1 variable used in this file is missing"), "{toast}");
+    }
+
+    #[test]
+    fn opening_fig_file_with_bindings_to_missing_variables_shows_the_notice() {
+        let mut d = Document::new("FigMissing");
+        let page = d.add_page("Page 1");
+        for (i, var) in ["VariableID:9:9", "VariableID:9:10"].into_iter().enumerate() {
+            let id = d.alloc_id();
+            let rect = d.insert(page, Node::rectangle(id, Rect::new(10.0 * i as f32, 0.0, 40.0, 40.0))).unwrap();
+            d.get_mut(rect).unwrap().variables.bindings.insert("fills/0".into(), var.into());
+        }
+        let p = save_path(&d, &tmp("missing_variables.fig")).unwrap();
+        let (back, warning) = load_path_with_warning(&p).unwrap();
+        std::fs::remove_file(&p).ok();
+        assert!(!back.pages.is_empty());
+        assert_eq!(warning.as_deref(), Some("2 variables used in this file are missing; their links are kept and resolve when the variables are imported."));
+    }
+
+    #[test]
+    fn opening_file_that_hits_clone_budget_surfaces_unexpanded_instances_toast() {
+        let (json, budget) = budget_kit_fixture();
+        assert!(json.len() <= 8 * 1024, "BudgetKit fixture must stay <= 8 KiB for CI (got {} bytes)", json.len());
+        assert!(budget <= 10_000, "BudgetKit test clone budget must stay <= 10,000 for CI (got {budget})");
         let p = tmp("budget_kit_warning.json");
         std::fs::write(&p, json).unwrap();
         let mut app = crate::app::App::new(Document::new("Init"));
-        app.open_path(p.clone());
+        app.open_path_with_clone_budget(p.clone(), budget);
         std::fs::remove_file(&p).ok();
 
         let toast = app.toast.as_ref().expect("open_path must show a toast");
@@ -1251,5 +1505,163 @@ mod tests {
             toast.text,
             "Opened BudgetKit with a warning: This file has more nested component copies than Studio can expand (limit 8,000,000). 5 instances are shown empty."
         );
+        assert!(app.doc.nodes.len() <= 10_000, "BudgetKit test must not allocate millions of nodes in CI (got {})", app.doc.nodes.len());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn acl_granting_write_on_0444_file_allows_save_and_survives() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = std::env::temp_dir().join(format!("designos_io_acl_0444_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("acl_writable.designos");
+
+        let mut doc = Document::new("Initial");
+        doc.add_page("Page 1");
+        save_path(&doc, &file).unwrap();
+
+        let user_out = std::process::Command::new("/usr/bin/id").arg("-un").output().unwrap();
+        assert!(user_out.status.success());
+        let user = String::from_utf8(user_out.stdout).unwrap().trim().to_string();
+        let acl_rule = format!("user:{user} allow write");
+
+        let status = std::process::Command::new("/bin/chmod").args(["+a", &acl_rule, file.to_str().unwrap()]).status().unwrap();
+        assert!(status.success(), "chmod +a failed");
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o444)).unwrap();
+
+        doc.name = "Saved Once".to_string();
+        let res1 = save_path(&doc, &file);
+        doc.name = "Saved Twice".to_string();
+        let res2 = save_path(&doc, &file);
+
+        let ls_out = std::process::Command::new("/bin/ls").args(["-le", file.to_str().unwrap()]).output().unwrap();
+        let ls_text = String::from_utf8_lossy(&ls_out.stdout).into_owned();
+        let mode = std::fs::metadata(&file).unwrap().permissions().mode() & 0o777;
+        let reopened = load_path(&file).map(|d| d.name);
+
+        let _ = std::process::Command::new("/bin/chmod").args(["-N", file.to_str().unwrap()]).status();
+        let _ = std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o644));
+        let _ = std::fs::remove_dir_all(&dir);
+
+        res1.expect("first save on 0444 file with write-granting ACL must succeed");
+        res2.expect("second save on 0444 file with write-granting ACL must also succeed");
+        assert_eq!(reopened.unwrap(), "Saved Twice");
+        assert_eq!(mode, 0o444, "0444 mode must survive atomic save");
+        assert!(ls_text.contains(&acl_rule), "ACL must survive atomic save, got ls -le:\n{ls_text}");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn extended_attribute_survives_atomic_save() {
+        let dir = std::env::temp_dir().join(format!("designos_io_xattr_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("xattr_doc.designos");
+
+        let mut doc = Document::new("BeforeXattr");
+        doc.add_page("Page 1");
+        save_path(&doc, &file).unwrap();
+
+        let status =
+            std::process::Command::new("/usr/bin/xattr").args(["-w", "com.designos.custom-test", "keep-this-xattr", file.to_str().unwrap()]).status().unwrap();
+        assert!(status.success(), "xattr -w failed");
+
+        doc.name = "AfterXattr".to_string();
+        save_path(&doc, &file).unwrap();
+
+        let out = std::process::Command::new("/usr/bin/xattr").args(["-p", "com.designos.custom-test", file.to_str().unwrap()]).output().unwrap();
+        let reopened = load_path(&file).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert_eq!(reopened.name, "AfterXattr");
+        assert!(out.status.success(), "xattr must still exist after atomic save: {}", String::from_utf8_lossy(&out.stderr));
+        assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "keep-this-xattr");
+    }
+
+    #[test]
+    fn user_file_named_target_dot_tmp_survives_save() {
+        let dir = std::env::temp_dir().join(format!("designos_io_user_tmp_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("project.designos");
+        let user_tmp = dir.join("project.designos.tmp");
+
+        let mut doc = Document::new("V1");
+        doc.add_page("Page 1");
+        save_path(&doc, &file).unwrap();
+        std::fs::write(&user_tmp, b"user-scratch-notes").unwrap();
+
+        doc.name = "V2".to_string();
+        save_path(&doc, &file).unwrap();
+
+        let user_tmp_bytes = std::fs::read(&user_tmp);
+        let reopened = load_path(&file).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert_eq!(reopened.name, "V2");
+        assert_eq!(user_tmp_bytes.expect("user <name>.tmp must not be deleted"), b"user-scratch-notes");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn truly_unwritable_0444_file_is_refused() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = std::env::temp_dir().join(format!("designos_io_unwritable_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("locked.designos");
+
+        let mut doc = Document::new("LockedV1");
+        doc.add_page("Page 1");
+        save_path(&doc, &file).unwrap();
+        let original = std::fs::read(&file).unwrap();
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o444)).unwrap();
+
+        doc.name = "LockedV2".to_string();
+        let err = save_path(&doc, &file).expect_err("truly unwritable 0444 file must be refused");
+        let after = std::fs::read(&file).unwrap();
+        let mode = std::fs::metadata(&file).unwrap().permissions().mode() & 0o777;
+
+        let _ = std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o644));
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert!(err.contains("is read-only or not writable:"), "unexpected error message: {err}");
+        assert_eq!(after, original, "unwritable file content must stay untouched");
+        assert_eq!(mode, 0o444, "unwritable file mode must stay 0444");
+    }
+
+    /// A write that hits the file-size limit half way through a document larger than the 1 MiB write buffer keeps
+    /// the disk error kind. The limit is set only in a child process, so the shared test binary is untouched.
+    #[cfg(unix)]
+    #[test]
+    fn a_large_save_that_hits_the_size_limit_keeps_the_disk_error_kind() {
+        let dir = std::env::var("DESIGNOS_FSIZE_CHILD");
+        let mut big = Document::new("Big");
+        big.add_page("Page");
+        big.images.insert("blob".into(), (0..3_000_000u32).map(|i| (i % 251) as u8).collect());
+        let Ok(dir) = dir else {
+            let exe = std::env::current_exe().unwrap();
+            let scratch = tmp("fsize_child");
+            std::fs::create_dir_all(&scratch).unwrap();
+            let out = std::process::Command::new("sh")
+                .arg("-c")
+                .arg("trap '' XFSZ; ulimit -f 2500; exec \"$0\" --exact io::tests::a_large_save_that_hits_the_size_limit_keeps_the_disk_error_kind --test-threads=1")
+                .arg(&exe)
+                .env("DESIGNOS_FSIZE_CHILD", &scratch)
+                .output()
+                .unwrap();
+            let _ = std::fs::remove_dir_all(&scratch);
+            let text = String::from_utf8_lossy(&out.stdout).into_owned() + &String::from_utf8_lossy(&out.stderr);
+            assert!(out.status.success() && text.contains("1 passed"), "child run failed: {text}");
+            return;
+        };
+        let target = PathBuf::from(dir).join("doc.designos");
+        let err = save_path_counted(&big, &target).expect_err("the limit must stop the write");
+        assert_eq!(err.kind(), std::io::ErrorKind::FileTooLarge, "{err}");
+        assert!(!err.to_string().contains("Cannot serialize"), "a disk error is not a serializer error: {err}");
+        assert!(!target.exists(), "no partial file");
     }
 }

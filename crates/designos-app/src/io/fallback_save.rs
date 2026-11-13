@@ -4,19 +4,37 @@
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
+/// A failed fallback write together with the exact candidate path that was opened or tried.
+#[derive(Debug)]
+pub struct WriteNewInError {
+    pub path: PathBuf,
+    pub error: std::io::Error,
+}
+
+impl std::fmt::Display for WriteNewInError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}: {}", self.path.display(), self.error)
+    }
+}
+
+impl std::error::Error for WriteNewInError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.error)
+    }
+}
+
 /// The user's home folder.
 pub fn user_home() -> Option<PathBuf> {
     ["HOME", "USERPROFILE"].iter().find_map(|name| std::env::var_os(name).filter(|v| !v.is_empty())).map(PathBuf::from)
 }
 
-/// `Downloads` inside `home`, or `home` itself when there is no such folder.
+/// `Downloads` inside `home`, creating it when missing so exports never fall back to `~`.
 pub fn fallback_dir_in(home: &Path) -> PathBuf {
     let downloads = home.join("Downloads");
-    if downloads.is_dir() {
-        downloads
-    } else {
-        home.to_path_buf()
+    if !downloads.exists() {
+        let _ = std::fs::create_dir(&downloads);
     }
+    downloads
 }
 
 const MAX_STEM_CHARS: usize = 100;
@@ -34,36 +52,65 @@ fn cut_stem(stem: &str) -> String {
     cut
 }
 
-/// Writes `bytes` to `dir/file_name`, or to the first free `name 2.ext`, `name 3.ext`, ... Never replaces a file.
-/// The name is cleaned first, so a layer called `../x` stays inside `dir`.
-pub fn write_new_in(dir: &Path, file_name: &str, bytes: &[u8]) -> std::io::Result<PathBuf> {
-    let clean = designos_export::sanitize_file_name(file_name);
+/// Cleans a layer or document name for an exported file: unsafe characters such as `/` and `:` become `-`.
+pub fn sanitize_export_name(name: &str) -> String {
+    let dashed: String =
+        name.chars().map(|c| if matches!(c, '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|') || c.is_control() { '-' } else { c }).collect();
+    designos_export::sanitize_file_name(&dashed)
+}
+
+fn write_unique_in(dir: &Path, clean: &str, bytes: &[u8], dashed: bool) -> Result<PathBuf, WriteNewInError> {
     let (stem, ext) = match clean.rsplit_once('.') {
         Some((stem, ext)) if !stem.is_empty() && ext.len() <= MAX_EXTENSION_BYTES => (stem, Some(ext)),
-        _ => (clean.as_str(), None),
+        _ => (clean, None),
     };
     let stem = cut_stem(stem);
-    for n in 1..=10_000u32 {
-        let name = match (n, ext) {
-            (1, Some(ext)) => format!("{stem}.{ext}"),
-            (1, None) => stem.clone(),
-            (_, Some(ext)) => format!("{stem} {n}.{ext}"),
-            (_, None) => format!("{stem} {n}"),
+    for step in 0..=10_000u32 {
+        let name = match (step, dashed, ext) {
+            (0, _, Some(ext)) => format!("{stem}.{ext}"),
+            (0, _, None) => stem.clone(),
+            (n, true, Some(ext)) => format!("{stem}-{n}.{ext}"),
+            (n, true, None) => format!("{stem}-{n}"),
+            (n, false, Some(ext)) => format!("{stem} {}.{ext}", n + 1),
+            (n, false, None) => format!("{stem} {}", n + 1),
         };
         let path = dir.join(name);
         match std::fs::OpenOptions::new().write(true).create_new(true).open(&path) {
             Ok(mut file) => {
                 if let Err(e) = file.write_all(bytes) {
                     std::fs::remove_file(&path).ok();
-                    return Err(e);
+                    return Err(WriteNewInError { path, error: e });
                 }
                 return Ok(path);
             }
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
-            Err(e) => return Err(e),
+            Err(e) => return Err(WriteNewInError { path, error: e }),
         }
     }
-    Err(std::io::Error::new(std::io::ErrorKind::AlreadyExists, format!("too many files named {stem}")))
+    let path = dir.join(if ext.is_some() { format!("{stem}.{}", ext.unwrap_or_default()) } else { stem });
+    Err(WriteNewInError { path, error: std::io::Error::new(std::io::ErrorKind::AlreadyExists, "too many candidate names") })
+}
+
+/// Writes `bytes` to `dir/file_name`, or to the first free `name 2.ext`, `name 3.ext`, ... Never replaces a file.
+/// The name is cleaned first, so a layer called `../x` stays inside `dir`.
+pub fn write_new_in(dir: &Path, file_name: &str, bytes: &[u8]) -> Result<PathBuf, WriteNewInError> {
+    let clean = designos_export::sanitize_file_name(file_name);
+    write_unique_in(dir, &clean, bytes, false)
+}
+
+/// Writes `bytes` to `dir/file_name`, or to the first free `name-1.ext`, `name-2.ext`, ... Never replaces a file.
+/// Unsafe characters such as `/` and `:` in `file_name` become `-`.
+pub fn write_new_dashed_in(dir: &Path, file_name: &str, bytes: &[u8]) -> Result<PathBuf, WriteNewInError> {
+    let clean = sanitize_export_name(file_name);
+    write_unique_in(dir, &clean, bytes, true)
+}
+
+/// Writes `bytes` to `path`, or to the first free `name-1.ext`, `name-2.ext`, ... in `path`'s folder.
+/// Never replaces an existing file.
+pub fn write_new_dashed_path(path: &Path, bytes: &[u8]) -> Result<PathBuf, WriteNewInError> {
+    let dir = path.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or_else(|| Path::new("."));
+    let file_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("export");
+    write_new_dashed_in(dir, file_name, bytes)
 }
 
 #[cfg(test)]
@@ -86,11 +133,15 @@ mod tests {
     }
 
     #[test]
-    fn the_fallback_is_home_when_downloads_is_missing_or_a_file() {
+    fn the_fallback_is_always_downloads_and_never_home() {
         let home = scratch("home_without_downloads");
-        assert_eq!(fallback_dir_in(&home), home);
+        assert_eq!(fallback_dir_in(&home), home.join("Downloads"));
+        assert!(home.join("Downloads").is_dir(), "missing Downloads folder is created");
+        std::fs::remove_dir_all(home.join("Downloads")).unwrap();
         std::fs::write(home.join("Downloads"), b"not a folder").unwrap();
-        assert_eq!(fallback_dir_in(&home), home);
+        assert_eq!(fallback_dir_in(&home), home.join("Downloads"));
+        assert!(write_new_in(&fallback_dir_in(&home), "a.png", b"x").is_err(), "blocked Downloads errors instead of writing to ~");
+        assert!(!home.join("a.png").exists());
         std::fs::remove_dir_all(&home).ok();
     }
 
@@ -174,6 +225,25 @@ mod tests {
     fn a_missing_folder_is_an_error_not_a_panic() {
         let dir = scratch("missing").join("nope");
         assert!(write_new_in(&dir, "a.png", b"x").is_err());
+        std::fs::remove_dir_all(dir.parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn an_error_names_the_cleaned_path_that_was_tried() {
+        let dir = scratch("error_path").join("missing");
+        let err = write_new_in(&dir, "../Notes.png", b"x").unwrap_err().to_string();
+        assert!(err.contains("missing/_Notes.png"), "{err}");
+        assert!(!err.contains("../Notes.png"), "{err}");
+        std::fs::remove_dir_all(dir.parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn a_long_name_error_uses_the_cut_stem() {
+        let dir = scratch("long_error_path").join("missing");
+        let name = format!("{}.png", "a".repeat(300));
+        let err = write_new_in(&dir, &name, b"x").unwrap_err().to_string();
+        assert!(err.contains(&format!("missing/{}.png", "a".repeat(100))), "{err}");
+        assert!(!err.contains(&name), "{err}");
         std::fs::remove_dir_all(dir.parent().unwrap()).ok();
     }
 }

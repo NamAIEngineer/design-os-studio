@@ -5,8 +5,8 @@ use crate::import::{element_selector_label, FontSubstitution, ImportReport};
 use crate::paint_map::{has_own_box_paint, map_effects_and_blend, map_rotation_rad, node_transform_at, parse_css_color, parse_css_px};
 use crate::schema::Element;
 use designos_doc::{
-    Color, LineHeight, Node, NodeId, NodeKind, Paint, ParagraphProps, Rect, TextAlignH, TextAlignV, TextAutoResize, TextCase, TextDecoration, TextRun,
-    TextStyle,
+    Color, LeadingTrim, LineHeight, Node, NodeId, NodeKind, Paint, ParagraphProps, Rect, TextAlignH, TextAlignV, TextAutoResize, TextCase, TextDecoration,
+    TextRun, TextStyle,
 };
 use std::collections::BTreeMap;
 
@@ -234,6 +234,9 @@ pub fn map_text_style(styles: &BTreeMap<String, String>, report: &mut ImportRepo
         line_height,
         letter_spacing,
         paragraph_spacing: 0.0,
+        paragraph_indent: 0.0,
+        list_spacing: 0.0,
+        leading_trim: LeadingTrim::None,
         align_h,
         align_v: TextAlignV::Top,
         case,
@@ -323,7 +326,7 @@ fn append_inline_child(
 fn apply_semantic_tag_style(tag: &str, style: &mut TextStyle) {
     let lower = tag.to_ascii_lowercase();
     if matches!(lower.as_str(), "strong" | "b") && style.font_weight < 600 {
-        style.font_weight = 700;
+        style.set_font_weight(700);
     }
     if matches!(lower.as_str(), "em" | "i") {
         style.italic = true;

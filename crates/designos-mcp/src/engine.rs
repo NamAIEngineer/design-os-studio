@@ -1,5 +1,5 @@
 //! Typed, local document operations shared by the MCP transport and future bridges.
-use crate::tools::errors::{tool_output_schema, ErrorCode, ToolError};
+use crate::tools::errors::{tool_output_schema, ErrorCode, ErrorKind, ToolError};
 use designos_doc::live_patch::{live_ops_for_command, live_ops_for_independent, LiveOp};
 use designos_doc::{Annotation, Command, Comment, CommentAnchor, CommentThread, DevStatus, Document, History, Node, NodeId, NodeKind, NodeSpec, Vec2};
 use serde::{de::DeserializeOwned, Deserialize};
@@ -80,6 +80,8 @@ pub struct Engine {
     /// Edits executed since the last [`Engine::take_live_ops`], recorded while an open editor
     /// mirrors this session (`None` = not recording).
     pub live_ops: Option<Vec<LiveOp>>,
+    /// Connector reroute warnings produced by the last mutating tool call.
+    pub reroute_warnings: Vec<designos_doc::SpecWarning>,
     /// Undo-group label attached to the next [`designos_doc::live_patch::LivePatch`] line when set.
     pub live_patch_label: Option<String>,
     /// Optional RD-3 frame ownership lock: when `Some`, writes outside these root frames are refused.
@@ -118,8 +120,24 @@ pub struct Engine {
     pub ledger_entries: usize,
 }
 
+/// Layers mirrored inside a component instance cannot be deleted one by one: the
+/// editor refuses it, and a recursive remove would leave the instance with stale
+/// geometry. Direct children of an instance slot and instance roots stay deletable.
+pub(crate) fn is_protected_instance_child(doc: &Document, node: &Node, former_parent: NodeId) -> bool {
+    designos_doc::is_linked(node) && !designos_doc::is_top_instance(node) && !designos_doc::is_instance_slot(doc, former_parent)
+}
+
+pub(crate) const INSTANCE_CHILD_DELETE_MESSAGE: &str = "layers inside an instance cannot be deleted; hide the layer or edit an instance slot instead";
+
+impl Engine {
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
 impl Default for Engine {
     fn default() -> Self {
+        designos_doc::text_measure::set_layout_measurer(Some(std::sync::Arc::new(designos_render::RenderTextMeasure)));
         let mut doc = Document::new("Untitled");
         let page = doc.add_page("Page 1");
         Self {
@@ -129,6 +147,7 @@ impl Default for Engine {
             default_run_id: None,
             default_agent: None,
             live_ops: None,
+            reroute_warnings: Vec::new(),
             live_patch_label: None,
             owned_frames: None,
             lint_call_max_nodes: 100_000,
@@ -195,6 +214,8 @@ pub const DISPATCHED: &[&str] = &[
     "designos_redo",
     "designos_apply_batch",
     "designos_configure_session",
+    "designos_docs_list",
+    "designos_docs_read",
 ];
 
 /// Non-prefixed compatibility aliases accepted by [`Engine::call`].
@@ -214,11 +235,81 @@ fn non_empty_trimmed(s: Option<&str>) -> Option<String> {
     s.map(str::trim).filter(|s| !s.is_empty()).map(str::to_string)
 }
 
+fn strip_connectors_from_spec(spec: &mut NodeSpec) -> usize {
+    let mut skipped = 0usize;
+    let before = spec.children.len();
+    spec.children.retain(|c| !c.kind.eq_ignore_ascii_case("connector"));
+    skipped += before - spec.children.len();
+    for child in &mut spec.children {
+        skipped += strip_connectors_from_spec(child);
+    }
+    for slot_fill in spec.slots.values_mut() {
+        if let designos_doc::SlotFillSpec::Fill(list) = slot_fill {
+            let slot_before = list.len();
+            list.retain(|c| !c.kind.eq_ignore_ascii_case("connector"));
+            skipped += slot_before - list.len();
+            for child in list {
+                skipped += strip_connectors_from_spec(child);
+            }
+        }
+    }
+    skipped
+}
+
+fn enrich_metadata_xml_connectors(doc: &Document, xml: &str) -> String {
+    if !xml.contains("<connector ") {
+        return xml.to_string();
+    }
+    let mut out = String::with_capacity(xml.len() + 64);
+    for (idx, line) in xml.lines().enumerate() {
+        if idx > 0 {
+            out.push('\n');
+        }
+        let trimmed = line.trim_start();
+        if let Some(rest) = trimmed.strip_prefix("<connector id=\"") {
+            if let Some((id_str, _)) = rest.split_once('"') {
+                if let Ok(raw_id) = id_str.parse::<u64>() {
+                    if let Some(NodeKind::Connector(cp)) = doc.get(NodeId(raw_id)).map(|n| &n.kind) {
+                        let from_attr = match cp.start.node {
+                            Some(fid) => format!("from=\"{}\"", fid.0),
+                            None => format!("from_point=\"{},{}\"", designos_export::fmt_f32_2(cp.start.point.x), designos_export::fmt_f32_2(cp.start.point.y)),
+                        };
+                        let to_attr = match cp.end.node {
+                            Some(tid) => format!("to=\"{}\"", tid.0),
+                            None => format!("to_point=\"{},{}\"", designos_export::fmt_f32_2(cp.end.point.x), designos_export::fmt_f32_2(cp.end.point.y)),
+                        };
+                        let from_mag = format!("{:?}", cp.start.magnet).to_ascii_lowercase();
+                        let to_mag = format!("{:?}", cp.end.magnet).to_ascii_lowercase();
+                        let extra = format!(" {from_attr} from_magnet=\"{from_mag}\" {to_attr} to_magnet=\"{to_mag}\"");
+                        if let Some(prefix) = line.strip_suffix("/>") {
+                            out.push_str(prefix);
+                            out.push_str(&extra);
+                            out.push_str("/>");
+                            continue;
+                        } else if let Some(prefix) = line.strip_suffix('>') {
+                            out.push_str(prefix);
+                            out.push_str(&extra);
+                            out.push('>');
+                            continue;
+                        }
+                    }
+                }
+            }
+        }
+        out.push_str(line);
+    }
+    if xml.ends_with('\n') {
+        out.push('\n');
+    }
+    out
+}
+
 fn read_session_json_field(env_file_var: &str, session_rel: &str, pointer: &str) -> Option<String> {
     let path = std::env::var_os(env_file_var).map(std::path::PathBuf::from).filter(|p| !p.as_os_str().is_empty()).or_else(|| {
         std::env::var_os("DESIGNOS_SESSION_DIR").map(std::path::PathBuf::from).filter(|p| !p.as_os_str().is_empty()).map(|d| d.join(session_rel))
     })?;
-    let raw = std::fs::read_to_string(path).ok()?;
+    // The session reads these files itself through `session_file_io` and tells the agent when one is refused (a link, a FIFO), so here a refusal is only `None`.
+    let raw = crate::session_file_io::read_to_string(&path).ok()?;
     let val: Value = serde_json::from_str(&raw).ok()?;
     non_empty_trimmed(val.pointer(pointer).and_then(Value::as_str))
 }
@@ -334,6 +425,23 @@ impl Engine {
             .ok_or_else(|| ToolError::new(ErrorCode::PageNotFound, "/page_id", "Document has no pages"))
     }
 
+    /// Expands the deferred component instances on the page that owns a targeted read.
+    /// The desktop app performs this step when a page becomes active; MCP has no page-switch
+    /// event, so every targeted read must make the same transition before inspecting the tree.
+    pub(crate) fn ensure_page_hydrated_for_node(&mut self, node: NodeId) -> Result<(), ToolError> {
+        let Some(page) = self.doc.page_of(node) else { return Ok(()) };
+        self.doc.ensure_page_hydrated(page);
+        if let Some(err) = self.doc.take_hydration_error() {
+            return Err(ToolError::new(ErrorCode::InternalError, "", format!("Cannot hydrate page {}: {err}", page.0)).with_safe_to_retry(false));
+        }
+        Ok(())
+    }
+
+    pub(crate) fn ensure_active_page_hydrated(&mut self) -> Result<(), ToolError> {
+        let Ok(page) = self.resolve_default_page() else { return Ok(()) };
+        self.ensure_page_hydrated_for_node(page)
+    }
+
     pub(crate) fn collect_library_snapshots(&self, _spec: &NodeSpec) -> Vec<designos_doc::LibrarySnapshot> {
         crate::tools::library_source::load_enabled_snapshots(&self.doc)
     }
@@ -360,8 +468,18 @@ impl Engine {
         // or serialize a document with deferred layout still in it.
         self.settle_layout();
         match name {
-            "designos_get_app_state" => crate::tools::bootstrap::call_get_app_state(self, args).map_err(ToolError::from),
+            "designos_get_app_state" => {
+                // The outline walks the frames this call reports on, so the pages that own them are filled in first.
+                self.ensure_active_page_hydrated()?;
+                if let Some(ids) = args.get("target_node_ids").and_then(Value::as_array) {
+                    for id in ids.iter().filter_map(Value::as_u64).filter(|id| *id > 0) {
+                        self.ensure_page_hydrated_for_node(NodeId(id))?;
+                    }
+                }
+                crate::tools::bootstrap::call_get_app_state(self, args).map_err(ToolError::from)
+            }
             "designos_get_document" => {
+                self.ensure_active_page_hydrated()?;
                 let _: Empty = parse(args)?;
                 let in_progress_nodes: Vec<Value> = self
                     .doc
@@ -391,22 +509,29 @@ impl Engine {
                         Some((id.0.to_string(), serde_json::to_value(ip).ok()?))
                     })
                     .collect();
+                let listed_styles: Vec<_> = self
+                    .doc
+                    .styles
+                    .iter()
+                    .filter(|(k, _)| self.doc.is_table_style(k))
+                    .map(|(key, values)| {
+                        let meta = self.doc.style_meta.get(key);
+                        let empty = std::collections::BTreeMap::new();
+                        json!({"key":key,"name":self.doc.style_name(key),"property":designos_doc::style_property(&self.doc,key),
+                        "description":meta.map(|m|m.description.as_str()).unwrap_or(""),"library_key":meta.and_then(|m|m.key.as_deref()),
+                        "bindings":meta.map(|m|&m.bindings).unwrap_or(&empty),"values":values})
+                    })
+                    .collect();
                 Ok(json!({"name":self.doc.name,"kind":self.doc.kind,
                     "active_page_id":self.resolve_default_page().ok().map(|p| p.0),
                     "pages":self.doc.pages.iter().filter_map(|id|self.doc.get(*id)).map(|n| summary(&self.doc, n)).collect::<Vec<_>>(),
-                    "node_count":self.doc.nodes.len(),"variable_count":self.doc.variables.len(),
+                    "node_count":self.doc.nodes.len(),"variable_count":self.doc.live_variables().count(),
                     "comment_count":self.doc.comments.len(),
-                    "style_count":self.doc.styles.len(),
+                    "style_count":listed_styles.len(),
                     "in_progress_count":in_progress_nodes.len(),
                     "in_progress_nodes":in_progress_nodes,
                     "in_progress":in_progress_map,
-                    "styles":self.doc.styles.iter().map(|(key,values)|{
-                        let meta=self.doc.style_meta.get(key);
-                        let empty = std::collections::BTreeMap::new();
-                        json!({"key":key,"name":self.doc.style_name(key),"property":designos_doc::style_property(&self.doc,key),
-                            "description":meta.map(|m|m.description.as_str()).unwrap_or(""),"library_key":meta.and_then(|m|m.key.as_deref()),
-                            "bindings":meta.map(|m|&m.bindings).unwrap_or(&empty),"values":values})
-                    }).collect::<Vec<_>>(),
+                    "styles":listed_styles,
                     "can_undo":self.history.can_undo(),"can_redo":self.history.can_redo()}))
             }
             "designos_get_libraries" => {
@@ -427,6 +552,9 @@ impl Engine {
                 }
                 if let Some(id) = a.parent_id {
                     self.node_at(id, "/parent_id")?;
+                    self.ensure_page_hydrated_for_node(NodeId(id))?;
+                } else {
+                    self.ensure_active_page_hydrated()?;
                 }
                 if let Some(q) = &a.query {
                     bounded_text("query", q, 1024)?;
@@ -445,8 +573,9 @@ impl Engine {
             }
             "designos_get_node" => {
                 let a: NodeArgs = parse(args)?;
+                self.ensure_page_hydrated_for_node(NodeId(a.node_id))?;
                 let n = self.node(a.node_id)?;
-                let mut node_val = serde_json::to_value(n).map_err(|e| e.to_string())?;
+                let mut node_val = self.node_reply_json(n.id);
                 let ip = self.doc.get_in_progress(n.id).cloned();
                 if let (Some(obj), Some(ip_ref)) = (node_val.as_object_mut(), &ip) {
                     obj.insert("in_progress".into(), serde_json::to_value(ip_ref).map_err(|e| e.to_string())?);
@@ -457,25 +586,46 @@ impl Engine {
                 }
                 Ok(out)
             }
-            "designos_get_screenshot" | "get_screenshot" => crate::tools::screenshot::execute_get_screenshot(&self.doc, args).map_err(ToolError::from),
+            "designos_get_screenshot" | "get_screenshot" => {
+                let a: crate::tools::screenshot::ScreenshotArgs = parse(args.clone())?;
+                let target = a.resolve_target().map_err(|e| ToolError::from(e.to_err_string()))?;
+                match target {
+                    crate::tools::screenshot::ScreenshotTarget::Node(id) => self.ensure_page_hydrated_for_node(id)?,
+                    crate::tools::screenshot::ScreenshotTarget::Nodes(ids) => {
+                        for id in ids {
+                            self.ensure_page_hydrated_for_node(id)?;
+                        }
+                    }
+                    crate::tools::screenshot::ScreenshotTarget::Region(region) => self.ensure_page_hydrated_for_node(NodeId(region.page_id))?,
+                }
+                crate::tools::screenshot::execute_get_screenshot(&self.doc, args).map_err(ToolError::from)
+            }
             "designos_get_design_context" | "get_design_context" => {
+                let a: crate::tools::design_context::DesignContextArgs = parse(args.clone())?;
+                self.ensure_page_hydrated_for_node(NodeId(a.node_id))?;
                 crate::tools::design_context::execute_get_design_context(&self.doc, args).map_err(ToolError::from)
             }
             "designos_get_variables" => {
                 let a: VariablesArgs = parse(args)?;
                 let effective = if let Some(id) = a.node_id {
+                    self.ensure_page_hydrated_for_node(NodeId(id))?;
                     let n = self.node(id)?;
                     Some(
                         n.variables
                             .bindings
                             .iter()
                             .map(|(property, variable)| {
-                                json!({
+                                let mut binding = json!({
                                     "property":property,"variable_id":variable,
                                     "mode_id":self.doc.variables.get(variable).and_then(|v|self.doc.variable_mode(n.id,&v.collection)),
                                     "value":self.doc.resolve_variable(n.id,variable),
                                     "code_syntax":self.doc.variables.get(variable).map(|v|&v.code_syntax)
-                                })
+                                });
+                                // The binding still resolves; the variable is not in `variables` below because it is deleted.
+                                if self.doc.variables.get(variable).is_some_and(|v| v.is_soft_deleted()) {
+                                    binding["deleted_but_referenced"] = json!(true);
+                                }
+                                binding
                             })
                             .collect::<Vec<_>>(),
                     )
@@ -483,14 +633,37 @@ impl Engine {
                     None
                 };
                 // `code_syntax` is skipped in the native format when empty; tools get a stable shape.
-                let mut variables = json!(self.doc.variables);
+                // Only live variables and collections are listed: a soft-deleted one stays in the document so bindings
+                // resolve, but it is not something to pick or bind.
+                let live_variables: std::collections::BTreeMap<_, _> = self.doc.variables.iter().filter(|(_, v)| !v.is_soft_deleted()).collect();
+                let live_collections: std::collections::BTreeMap<_, _> = self.doc.variable_collections.iter().filter(|(_, c)| !c.is_soft_deleted()).collect();
+                let mut variables = json!(live_variables);
                 for v in variables.as_object_mut().into_iter().flat_map(|m| m.values_mut()).filter_map(|v| v.as_object_mut()) {
                     v.entry("code_syntax").or_insert_with(|| json!({}));
                 }
-                Ok(json!({"variables":variables,"collections":self.doc.variable_collections,"effective_bindings":effective}))
+                let mut collections = json!(live_collections);
+                for (id, c) in &live_collections {
+                    let Some(entry) = collections.get_mut(id.as_str()).and_then(|v| v.as_object_mut()) else { continue };
+                    // the storage keys are internal: `extendable` and `extension` below say the same, once
+                    if let Some(raw) = entry.get_mut("extensions").and_then(|x| x.as_object_mut()) {
+                        raw.remove(designos_doc::EXTENSION_KEY);
+                        raw.remove(designos_doc::EXTENDABLE_KEY);
+                        if raw.is_empty() {
+                            entry.remove("extensions");
+                        }
+                    }
+                    if c.is_extendable() {
+                        entry.insert("extendable".into(), json!(true));
+                    }
+                    if let Some(ext) = c.extension() {
+                        entry.insert("extension".into(), extension_report(&self.doc, c, &ext));
+                    }
+                }
+                Ok(json!({"variables":variables,"collections":collections,"effective_bindings":effective}))
             }
             "designos_generate_code" => {
                 let a: CodeArgs = parse(args)?;
+                self.ensure_page_hydrated_for_node(NodeId(a.node_id))?;
                 let id = self.node(a.node_id)?.id;
                 let doc = designos_doc::apply_bound_variables(&self.doc);
                 let code = if a.language == "svg" {
@@ -517,6 +690,13 @@ impl Engine {
                 let a: DeleteArgs = parse(args)?;
                 crate::tools::ledger::validate_idempotency_key_opt(&a.idempotency_key)?;
                 let n = self.node(a.node_id)?;
+                if matches!(n.kind, NodeKind::TableCell(_)) {
+                    return Err(ToolError::new(
+                        ErrorCode::InvalidArguments,
+                        "/node_id",
+                        "Delete rows or columns with the batch `table` op (`delete_rows` / `delete_cols`).",
+                    ));
+                }
                 let Some(former_parent) = n.parent else {
                     let non_page_id = self.doc.nodes.values().find(|c| c.parent.is_some()).map(|c| c.id.0).unwrap_or(2);
                     return Err(ToolError::new(ErrorCode::PageRootProtected, "/node_id", "page roots cannot be deleted by this tool")
@@ -524,11 +704,14 @@ impl Engine {
                 };
                 let id = n.id;
                 self.check_owned_frames(id, "/node_id")?;
+                if is_protected_instance_child(&self.doc, n, former_parent) {
+                    return Err(ToolError::new(ErrorCode::InstanceChild, "/node_id", INSTANCE_CHILD_DELETE_MESSAGE));
+                }
                 let before_doc = a.diff_image.then(|| self.doc.clone());
                 let baseline =
                     crate::tools::issues::PreCallBaseline::capture(&self.doc, &[former_parent], &self.session_options.issues, a.lint, self.lint_env());
                 self.exec(Command::Remove { id })?;
-                self.relayout(former_parent);
+                self.relayout_containers(&[former_parent]);
                 let mut out = json!({"node_id":id,"deleted":true});
                 if let Some(before) = &before_doc {
                     crate::tools::screenshot::attach_diff_to_reply(before, &self.doc, &[id], &mut out);
@@ -608,7 +791,7 @@ impl Engine {
                         author_id: None,
                         author_color: None,
                         text: a.text.trim().into(),
-                        created: "2026-10-14T23:30:00Z".into(),
+                        created: crate::time::now_rfc3339(),
                         edited: None,
                     }],
                     resolved: false,
@@ -651,7 +834,7 @@ impl Engine {
                     author_id: None,
                     author_color: None,
                     text: a.text.trim().into(),
-                    created: "2026-10-14T23:30:00Z".into(),
+                    created: crate::time::now_rfc3339(),
                     edited: None,
                 });
                 if let Some(resolved) = a.resolved {
@@ -704,8 +887,9 @@ impl Engine {
                 let baseline =
                     crate::tools::issues::PreCallBaseline::capture_container(&self.doc, parent, &self.session_options.issues, a.lint, self.lint_env());
                 let snapshots = self.collect_library_snapshots(&a.spec);
-                let (cmd, report) = designos_doc::apply_spec_command(&mut self.doc, parent, &a.spec, &snapshots)
-                    .map_err(|e| crate::tools::errors::from_spec_error(e, "/spec"))?;
+                let (cmd, report) =
+                    designos_doc::apply_spec_command_with(&mut self.doc, parent, &a.spec, &snapshots, Some(&designos_render::RenderTextMeasure))
+                        .map_err(|e| crate::tools::errors::from_spec_error(e, "/spec"))?;
                 self.exec(cmd)?;
                 for (id, ip) in &report.in_progress {
                     if self.doc.in_progress.get(id) != Some(ip) {
@@ -723,12 +907,12 @@ impl Engine {
                         self.record(vec![LiveOp::SetInProgress { node: *id, state: Some(ip) }]);
                     }
                 }
-                self.relayout(parent);
+                self.relayout(report.root_node_id);
                 let root_id = report.root_node_id;
                 let mut resp = json!({
                     "root_node_id": root_id,
                     "parent_id": parent.0,
-                    "node": self.doc.get(root_id),
+                    "node": self.node_reply_json(root_id),
                     "changed": true,
                     "name_to_id": report.name_to_id,
                     "instances": report.instances,
@@ -739,6 +923,9 @@ impl Engine {
                 });
                 if !report.stale_library_assets.is_empty() {
                     resp["stale_library_assets"] = json!(report.stale_library_assets);
+                }
+                if !report.measured_with_fallback.is_empty() {
+                    resp["measured_with_fallback"] = json!(report.measured_with_fallback);
                 }
                 if let Some(before) = &before_doc {
                     crate::tools::screenshot::attach_diff_to_reply(before, &self.doc, &[root_id], &mut resp);
@@ -757,8 +944,23 @@ impl Engine {
             }
             "designos_export_spec" => {
                 let a: NodeArgs = parse(args)?;
-                let spec = self.doc.export_spec(NodeId(a.node_id)).map_err(|e| ToolError::new(ErrorCode::NodeNotFound, "/node_id", e))?;
-                Ok(json!({"node_id": a.node_id, "spec": spec}))
+                // A connector asked for by id is skipped like one met inside a subtree: no spec, one warning.
+                let (spec, skipped) = if matches!(self.doc.get(NodeId(a.node_id)).map(|n| &n.kind), Some(NodeKind::Connector(_))) {
+                    (None, 1)
+                } else {
+                    let mut spec = self.doc.export_spec(NodeId(a.node_id)).map_err(|e| ToolError::new(ErrorCode::NodeNotFound, "/node_id", e))?;
+                    let skipped = strip_connectors_from_spec(&mut spec);
+                    (Some(spec), skipped)
+                };
+                let mut out = json!({"node_id": a.node_id, "spec": spec});
+                if skipped > 0 {
+                    out["warnings"] = json!([{
+                        "code": "CONNECTORS_SKIPPED",
+                        "skipped": skipped,
+                        "message": format!("Skipped {skipped} connector node(s); connectors are not exported in declarative specs.")
+                    }]);
+                }
+                Ok(out)
             }
             "designos_set_dev_status" => {
                 let a: SetDevStatusArgs = parse(args)?;
@@ -896,14 +1098,18 @@ impl Engine {
             "designos_export_fig_file" | "export_fig_file" => {
                 let a: ExportFigArgs = parse(args)?;
                 let path = std::path::Path::new(&a.output_path);
-                if path.extension().and_then(|x| x.to_str()) != Some("fig") {
-                    return Err(ToolError::new(ErrorCode::UnsupportedExtension, "/output_path", "output_path must end in .fig")
-                        .with_valid_options(vec![".fig"])
-                        .with_corrected_example(json!({ "output_path": "export.fig" })));
-                }
+                let target_meta = std::fs::symlink_metadata(path).ok().map(|m| {
+                    #[cfg(unix)]
+                    let second_name = std::os::unix::fs::MetadataExt::nlink(&m) > 1;
+                    #[cfg(not(unix))]
+                    let second_name = false;
+                    (m.file_type().is_symlink(), m.is_dir(), m.file_type().is_file(), m.permissions().readonly(), second_name)
+                });
+                validate_existing_output_target(target_meta, &a.output_path, "/output_path", EXPORT_FIG_EXTENSION, a.overwrite, true)?;
+                self.settle_layout();
                 let (bytes, omitted) = designos_fig::export_fig_with_report(&self.doc)
-                    .map_err(|e| ToolError::new(ErrorCode::IoError, "/output_path", format!("Failed to export .fig: {e}")))?;
-                std::fs::write(path, &bytes).map_err(|e| ToolError::new(ErrorCode::IoError, "/output_path", format!("Cannot write .fig file: {e}")))?;
+                    .map_err(|e| ToolError::new(ErrorCode::InternalError, "/output_path", format!("Failed to export .fig: {e}")))?;
+                write_checked_output_bytes(path, &a.output_path, "/output_path", &bytes, a.overwrite, true)?;
                 // A `.fig` has no place for comments: the result says how many threads this file left out.
                 Ok(json!({
                     "output_path": a.output_path,
@@ -915,10 +1121,30 @@ impl Engine {
                 }))
             }
             "designos_query_xpath" | "query_nodes" => {
+                let a: crate::tools::query::QueryXpathToolArgs = parse(args.clone())?;
+                if let Some(id) = a.node_id.or_else(|| a.node_ids.as_ref().and_then(|ids| ids.first().copied())) {
+                    self.ensure_page_hydrated_for_node(NodeId(id))?;
+                } else if let Some(page) = a.page_id {
+                    self.ensure_page_hydrated_for_node(NodeId(page))?;
+                } else {
+                    self.ensure_active_page_hydrated()?;
+                }
                 self.settle_layout();
                 crate::tools::query::execute_query_xpath(&self.doc, self.resolve_default_page().ok(), self.lint_env(), args)
             }
-            "designos_get_metadata" | "get_metadata" => crate::tools::metadata::call_get_metadata(self, args).map_err(ToolError::from),
+            "designos_get_metadata" | "get_metadata" => {
+                let a: crate::tools::metadata::MetadataArgs = parse(args.clone())?;
+                let root = a.node_id.or(a.page_id).map(NodeId).or_else(|| self.resolve_default_page().ok());
+                if let Some(root) = root {
+                    self.ensure_page_hydrated_for_node(root)?;
+                }
+                let mut res = crate::tools::metadata::call_get_metadata(self, args).map_err(ToolError::from)?;
+                if let Some(xml) = res.get("xml").and_then(Value::as_str) {
+                    let enriched = enrich_metadata_xml_connectors(&self.doc, xml);
+                    res["xml"] = Value::String(enriched);
+                }
+                Ok(res)
+            }
             "designos_lint" | "check_design" | "designos_lint_fix" => {
                 let a: LintArgs = parse(args)?;
                 if (a.page_id.is_some() && (a.node_ids.is_some() || a.node_id.is_some())) || (a.node_id.is_some() && a.node_ids.is_some()) {
@@ -929,11 +1155,13 @@ impl Engine {
                     return Err("limit must be between 1 and 500 (safe_to_retry: true)".into());
                 }
                 let roots: Vec<NodeId> = if let Some(pid) = a.page_id {
+                    self.ensure_page_hydrated_for_node(NodeId(pid))?;
                     if pid == 0 || self.doc.get(NodeId(pid)).is_none() {
                         return Err(format!("NODE_NOT_FOUND: page {pid} not found (safe_to_retry: true)").into());
                     }
                     vec![NodeId(pid)]
                 } else if let Some(nid) = a.node_id {
+                    self.ensure_page_hydrated_for_node(NodeId(nid))?;
                     if nid == 0 || self.doc.get(NodeId(nid)).is_none() {
                         return Err(format!("NODE_NOT_FOUND: node {nid} not found (safe_to_retry: true)").into());
                     }
@@ -944,6 +1172,7 @@ impl Engine {
                     }
                     let mut out = Vec::with_capacity(ids.len());
                     for &nid in ids {
+                        self.ensure_page_hydrated_for_node(NodeId(nid))?;
                         if nid == 0 || self.doc.get(NodeId(nid)).is_none() {
                             return Err(format!("NODE_NOT_FOUND: node {nid} not found (safe_to_retry: true)").into());
                         }
@@ -951,6 +1180,7 @@ impl Engine {
                     }
                     out
                 } else {
+                    self.ensure_active_page_hydrated()?;
                     match self.resolve_default_page() {
                         Ok(p) => vec![p],
                         Err(_) => self.doc.pages.clone(),
@@ -973,16 +1203,18 @@ impl Engine {
                     let (cmds, fix_payload) = designos_doc::lint::lint_fix_commands(&self.doc, &roots, &cfg);
                     let fixed_count = fix_payload.get("fixed_count").and_then(Value::as_u64).unwrap_or(0);
                     let changes = fix_payload.get("changes").cloned().unwrap_or_else(|| json!([]));
+                    let warnings = fix_payload.get("warnings").cloned().unwrap_or_else(|| json!([]));
                     if !cmds.is_empty() {
+                        let seeds = crate::tools::relayout_scope::seeds_after_commands(&self.doc, &cmds);
                         self.exec(Command::Batch(cmds))?;
-                        for &r in &roots {
-                            if let Some(p) = self.doc.page_of(r) {
-                                self.relayout(p);
-                            }
-                        }
+                        self.relayout_seeds(&seeds.leaves, &seeds.containers);
                         self.settle_layout();
                     }
-                    return Ok(json!({ "changed": fixed_count > 0, "fixed_count": fixed_count, "changes": changes }));
+                    let mut reply = json!({ "changed": fixed_count > 0, "fixed_count": fixed_count, "changes": changes });
+                    if warnings.as_array().is_some_and(|w| !w.is_empty()) {
+                        reply["warnings"] = warnings;
+                    }
+                    return Ok(reply);
                 }
 
                 let (stack_cursor, offset_cursor) = if let Some(cur) = a.cursor.as_deref() {
@@ -1069,8 +1301,22 @@ impl Engine {
                 });
                 Ok(value)
             }
-            "designos_apply_batch" => crate::tools::batch::apply(self, args),
+            "designos_apply_batch" => {
+                let depth_before = self.history.undo_depth();
+                let epoch_before = self.doc.mutation_epoch();
+                self.reroute_warnings.clear();
+                let mut res = crate::tools::batch::apply(self, args)?;
+                if self.history.undo_depth() > depth_before {
+                    if let Some(inv) = self.history.peek_undo().cloned() {
+                        self.reroute_after_batch_layout(&inv, epoch_before)?;
+                    }
+                }
+                attach_warnings(&mut res, &self.reroute_warnings);
+                Ok(res)
+            }
             "designos_configure_session" => self.session_options.apply_patch(args).map_err(ToolError::from),
+            "designos_docs_list" => crate::tools::docs::docs_list(&crate::tools::library_source::resolve_library_root(), self.file_path.as_deref(), args),
+            "designos_docs_read" => crate::tools::docs::docs_read(&crate::tools::library_source::resolve_library_root(), self.file_path.as_deref(), args),
             "designos_import_web_capture" | "import_web_capture" => {
                 let a: ImportWebCaptureArgs = parse(args)?;
                 let page = a
@@ -1103,14 +1349,15 @@ impl Engine {
                 let (cmd, report) =
                     designos_webcapture::import_capture_json(&self.doc, page, &raw_json, &opts).map_err(|e| format!("Failed to import web capture: {e}"))?;
                 self.exec(cmd)?;
-                self.relayout(page);
+                self.doc.relayout_subtree(report.root_node_id);
+                self.relayout(report.root_node_id);
                 Ok(json!({
                     "root_node_id": report.root_node_id.0,
                     "page_id": page.0,
                     "root_name": report.root_name,
                     "summary_toast": report.summary_toast(),
                     "report": report,
-                    "node": self.doc.get(report.root_node_id),
+                    "node": self.node_reply_json(report.root_node_id),
                     "changed": true
                 }))
             }
@@ -1148,18 +1395,132 @@ impl Engine {
         }
     }
 
-    /// Re-solves auto layout under `root` and finishes what the pass had to defer. The editor
-    /// drains deferred layout a step per frame; this engine has no window, and its document is
-    /// read, saved and exported as is.
+    /// Re-solves auto layout for `root`, its parent, and their auto-layout ancestors, then finishes
+    /// what the pass had to defer. The editor drains deferred layout a step per frame; this engine
+    /// has no window, and its document is read, saved and exported as is.
     pub(crate) fn relayout(&mut self, root: NodeId) {
-        self.doc.relayout_subtree(root);
-        self.doc.flush_pending_relayout();
+        self.relayout_seeds(&[root], &[]);
+    }
+
+    /// Like [`Self::relayout`] for containers that lost or gained a layer: each runs on its own
+    /// and the frames above it run only while a container's size changes.
+    pub(crate) fn relayout_containers(&mut self, containers: &[NodeId]) {
+        self.relayout_seeds(&[], containers);
+    }
+
+    /// One solve over `leaves` (with their parents) and `containers`, then the connector re-route
+    /// for what it wrote.
+    pub(crate) fn relayout_seeds(&mut self, leaves: &[NodeId], containers: &[NodeId]) {
+        let ep = self.doc.mutation_epoch();
+        crate::tools::batch::relayout_seeds(&mut self.doc, leaves, containers);
+        if self.doc.mutation_epoch() != ep && designos_doc::with_index(&self.doc, |idx| !idx.is_empty()) {
+            let mut dirty = Vec::new();
+            let mut removed = Vec::new();
+            let touched = if self.doc.dirty_changes_since(ep, &mut dirty, &mut removed) { dirty } else { [leaves, containers].concat() };
+            if !touched.is_empty() && !designos_doc::plan_reroute(&self.doc, &touched, None).updates.is_empty() {
+                let _ = self.reroute_in_last_step(&touched);
+                // Re-routing resizes connectors, and one that is a flow child of a frame this edit solves
+                // is measured by the solver (a flow child elsewhere keeps its routed box).
+                // The second solve runs the seeds of the first: the layers the first solve wrote are not
+                // seeds, or the frame an edit left would solve its parent again.
+                crate::tools::batch::relayout_seeds(&mut self.doc, leaves, containers);
+            }
+        }
+    }
+
+    /// Re-routes the connectors a committed `designos_apply_batch` left behind, in the batch's own
+    /// undo step. The batch has already been solved by the time it commits, so connectors are
+    /// planned against where layout left the nodes: the batch's own targets, and every node the
+    /// solve wrote (the siblings of a resized or deleted child move without being a target).
+    /// Passing those nodes also keeps a reflow from being taken for a rigid move of a subtree.
+    /// When the change log cannot name them, that is everything under the auto-layout containers
+    /// the batch reached: the ones holding its targets now, and the ones its inserts, removals and
+    /// moves left (a moved child's old parent reflows although the child is no longer in it).
+    ///
+    /// A fold is followed by one more solve, because re-routing resizes connectors and one that is
+    /// itself a flow child of an auto-layout frame the batch solves is measured by the solver, which
+    /// also moves its siblings and rewrites its transform (a flow child of a frame the batch does not
+    /// solve keeps its routed box). Routing has the last word: the nodes that solve wrote
+    /// are planned once more and folded, and there is no loop. A further solve would put the
+    /// connector back in its flow slot, so a plan would never come back empty; the cap is one
+    /// extra plan and one extra fold per batch.
+    fn reroute_after_batch_layout(&mut self, inverse: &Command, epoch_before: u64) -> Result<(), ToolError> {
+        if designos_doc::with_index(&self.doc, |idx| idx.is_empty()) {
+            return Ok(());
+        }
+        let mut targets = Vec::new();
+        collect_cmd_touched_nodes(inverse, &mut targets);
+        let mut containers = Vec::new();
+        collect_cmd_container_parents(inverse, &mut containers);
+        let mut anchors = targets.clone();
+        for id in &containers {
+            if !anchors.contains(id) {
+                anchors.push(*id);
+            }
+        }
+        for id in &targets {
+            if let Some(parent) = self.doc.get(*id).and_then(|n| n.parent) {
+                if !anchors.contains(&parent) {
+                    anchors.push(parent);
+                }
+            }
+        }
+        let leaf_targets = targets.clone();
+        let mut touched = targets;
+        let mut seen: std::collections::HashSet<NodeId> = touched.iter().copied().collect();
+        touched.extend(self.layout_written_since(epoch_before, &anchors).into_iter().filter(|id| seen.insert(*id)));
+        if self.reroute_in_last_step(&touched)? {
+            let epoch = self.doc.mutation_epoch();
+            // The targets run with their parents and the containers that lost or gained a layer run on
+            // their own, so a frame a delete or move left does not solve the frame above it.
+            crate::tools::batch::relayout_seeds(&mut self.doc, &leaf_targets, &containers);
+            self.settle_layout();
+            let written = self.layout_written_since(epoch, &anchors);
+            if !written.is_empty() {
+                self.reroute_in_last_step(&written)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// The nodes layout wrote since `epoch`: what the change log lists, or, when it cannot say, every
+    /// node under the outermost auto-layout frame holding any of `anchors`.
+    fn layout_written_since(&self, epoch: u64, anchors: &[NodeId]) -> Vec<NodeId> {
+        if self.doc.mutation_epoch() == epoch {
+            return Vec::new();
+        }
+        let (mut written, mut removed) = (Vec::new(), Vec::new());
+        if self.doc.dirty_changes_since(epoch, &mut written, &mut removed) {
+            return written;
+        }
+        let roots: std::collections::BTreeSet<NodeId> = anchors.iter().filter_map(|id| auto_layout_root(&self.doc, *id)).collect();
+        let mut scope = Vec::new();
+        for root in roots {
+            self.doc.walk(root, |n, _| scope.push(n.id));
+        }
+        scope
     }
 
     /// Finishes any auto-layout the document still has deferred. Callers that serialize or
     /// export the document directly call this first.
     pub fn settle_layout(&mut self) {
         self.doc.flush_pending_relayout();
+    }
+
+    /// The node as a reply carries it (`null` when it is gone).
+    fn node_reply_json(&self, id: NodeId) -> Value {
+        let Some(n) = self.doc.get(id) else { return Value::Null };
+        let mut v = serde_json::to_value(n).unwrap_or(Value::Null);
+        // The stored bit set is not meant for readers: report the overridden properties by name,
+        // including the ones a character range carries.
+        if let Some(obj) = v.as_object_mut() {
+            let names = designos_doc::text_style_overrides(&self.doc, n).labels();
+            obj.remove("text_style_overrides");
+            if !names.is_empty() {
+                obj.insert("text_style_overrides".into(), json!(names));
+            }
+        }
+        v
     }
 
     pub(crate) fn node(&self, id: u64) -> Result<&Node, ToolError> {
@@ -1179,11 +1540,136 @@ impl Engine {
 
     pub fn exec(&mut self, command: Command) -> Result<(), ToolError> {
         let w = designos_doc::writer_command(&self.doc, command);
+        let mut touched = Vec::new();
+        for p in &w.parts {
+            collect_cmd_touched_nodes(p, &mut touched);
+        }
         let ops = self.live_ops_for_parts(&w.parts)?;
         self.history.exec(&mut self.doc, w.cmd).map_err(|e| ToolError::new(ErrorCode::InternalError, "", e.to_string()))?;
         self.revision = self.revision.wrapping_add(1);
         self.record(ops);
+        self.reroute_in_last_step(&touched)?;
         Ok(())
+    }
+
+    /// Folds the re-route of the connectors `touched` nodes leave stale into the last undo step.
+    /// Returns whether it wrote anything.
+    pub(crate) fn reroute_in_last_step(&mut self, touched: &[NodeId]) -> Result<bool, ToolError> {
+        if touched.is_empty() || designos_doc::with_index(&self.doc, |idx| idx.is_empty()) {
+            return Ok(false);
+        }
+        let plan = designos_doc::plan_reroute(&self.doc, touched, None);
+        if plan.updates.is_empty() && plan.rehomes.is_empty() && plan.detached.is_empty() {
+            return Ok(false);
+        }
+        let mut structural_connectors = std::collections::HashSet::new();
+        // Build the same endpoint detach/rehome transaction as Studio.  Commands are
+        // planned against a scratch document so every geometry update sees the preceding
+        // structural change, while the real document is changed only by the folded history step.
+        let mut scratch = self.doc.clone();
+        let mut reroute_parts = Vec::with_capacity(plan.updates.len() + plan.rehomes.len() * 2 + plan.detached.len());
+        for (cid, end) in plan.detached {
+            let Some(cur) = scratch.get(cid) else { continue };
+            let mut updated = cur.clone();
+            if let NodeKind::Connector(c) = &mut updated.kind {
+                match end {
+                    designos_doc::End::Start => c.start.node = None,
+                    designos_doc::End::End => c.end.node = None,
+                }
+            }
+            let update = Command::Update { node: Box::new(updated) };
+            update.clone().apply(&mut scratch).map_err(|e| ToolError::new(ErrorCode::InternalError, "", e.to_string()))?;
+            let Some(g) = designos_doc::connector_geometry(&scratch, cid) else { continue };
+            let mut updated = scratch.get(cid).cloned().unwrap();
+            g.apply(&mut updated);
+            let update = Command::Update { node: Box::new(updated) };
+            update.clone().apply(&mut scratch).map_err(|e| ToolError::new(ErrorCode::InternalError, "", e.to_string()))?;
+            reroute_parts.push(update);
+            structural_connectors.insert(cid);
+            self.reroute_warnings.push(designos_doc::SpecWarning {
+                code: "CONNECTOR_ENDPOINT_DETACHED".to_string(),
+                path: format!(
+                    "/connectors/{}/{}",
+                    cid.0,
+                    match end {
+                        designos_doc::End::Start => "start",
+                        designos_doc::End::End => "end",
+                    }
+                ),
+                token: None,
+                replacement: None,
+                message: Some("The connector endpoint was detached because its layer moved to another page.".to_string()),
+            });
+        }
+        for (cid, new_home) in plan.rehomes {
+            if !connector_ends_moved_with(&self.doc, cid, touched) {
+                continue;
+            }
+            let Some(cur) = scratch.get(cid) else { continue };
+            let Some(old_parent) = cur.parent else { continue };
+            if old_parent == new_home {
+                continue;
+            }
+            let old_world = scratch.world_transform(old_parent);
+            let new_inv = scratch.world_transform(new_home).invert().unwrap_or(designos_doc::Affine::IDENTITY);
+            let reparent = Command::Reparent { id: cid, parent: new_home, index: usize::MAX };
+            reparent.clone().apply(&mut scratch).map_err(|e| ToolError::new(ErrorCode::InternalError, "", e.to_string()))?;
+            reroute_parts.push(reparent);
+            structural_connectors.insert(cid);
+            let Some(cur) = scratch.get(cid) else { continue };
+            let mut updated = cur.clone();
+            updated.layout_child.absolute = true;
+            let xform = new_inv * old_world;
+            if let NodeKind::Connector(c) = &mut updated.kind {
+                for end in [&mut c.start, &mut c.end] {
+                    if end.node.is_none() {
+                        end.point = xform.apply(end.point);
+                    }
+                }
+            }
+            let point_update = Command::Update { node: Box::new(updated) };
+            point_update.clone().apply(&mut scratch).map_err(|e| ToolError::new(ErrorCode::InternalError, "", e.to_string()))?;
+            let Some(g) = designos_doc::connector_geometry(&scratch, cid) else { continue };
+            let mut updated = scratch.get(cid).cloned().unwrap();
+            g.apply(&mut updated);
+            let update = Command::Update { node: Box::new(updated) };
+            update.clone().apply(&mut scratch).map_err(|e| ToolError::new(ErrorCode::InternalError, "", e.to_string()))?;
+            reroute_parts.push(update);
+        }
+        for (cid, g) in plan.updates {
+            if structural_connectors.contains(&cid) {
+                continue;
+            }
+            if let Some(cur) = scratch.get(cid) {
+                let mut updated = cur.clone();
+                g.apply(&mut updated);
+                let update = Command::Update { node: Box::new(updated) };
+                update.clone().apply(&mut scratch).map_err(|e| ToolError::new(ErrorCode::InternalError, "", e.to_string()))?;
+                reroute_parts.push(update);
+            }
+        }
+        if reroute_parts.is_empty() {
+            return Ok(false);
+        }
+        let ops = self.live_ops_for_parts(&reroute_parts)?;
+        let depth = self.history.undo_depth();
+        if let Some(inv_prev) = self.history.peek_undo().cloned() {
+            let label = self.history.peek_undo_label().map(str::to_owned);
+            let fwd_prev = inv_prev.apply(&mut self.doc).map_err(|e| ToolError::new(ErrorCode::InternalError, "", e.to_string()))?;
+            self.history.drop_undo_steps_after(depth - 1);
+            let mut cmds = match fwd_prev {
+                Command::Batch(v) => v,
+                other => vec![other],
+            };
+            cmds.extend(reroute_parts);
+            let combined = if cmds.len() == 1 { cmds.pop().unwrap() } else { Command::Batch(cmds) };
+            self.history.exec_labeled(&mut self.doc, combined, label).map_err(|e| ToolError::new(ErrorCode::InternalError, "", e.to_string()))?;
+        } else {
+            let cmd = if reroute_parts.len() == 1 { reroute_parts.pop().unwrap() } else { Command::Batch(reroute_parts) };
+            self.history.exec(&mut self.doc, cmd).map_err(|e| ToolError::new(ErrorCode::InternalError, "", e.to_string()))?;
+        }
+        self.record(ops);
+        Ok(true)
     }
 
     /// The ops `command` will perform, when recording; refuses edits the editor cannot replay.
@@ -1205,7 +1691,13 @@ impl Engine {
         if self.live_ops.is_none() {
             return Ok(Vec::new());
         }
-        live_ops_for_independent(&self.doc, parts).map_err(|e| ToolError::new(ErrorCode::InternalError, "", e))
+        if designos_doc::live_patch::is_independent_batch(&self.doc, parts) {
+            return live_ops_for_independent(&self.doc, parts).map_err(|e| ToolError::new(ErrorCode::InternalError, "", e));
+        }
+        // A rehome is followed by a dependent geometry update for the same connector.  Record
+        // those parts as one sequential batch so the second LiveOp is derived from the document
+        // after the Reparent, matching the command history and editor replay order.
+        live_ops_for_command(&self.doc, &Command::Batch(parts.to_vec())).map_err(|e| ToolError::new(ErrorCode::InternalError, "", e))
     }
 
     pub(crate) fn record(&mut self, ops: Vec<LiveOp>) {
@@ -1234,12 +1726,26 @@ impl Engine {
         let baseline = crate::tools::issues::PreCallBaseline::capture_container(&self.doc, parent_id, &self.session_options.issues, a.lint, self.lint_env());
         let (id, index, mut node) = crate::tools::build_created_node(&mut self.doc, parent_id, None, &a.kind, a.name, a.text, a.x, a.y, a.width, a.height)?;
         let mut warnings = Vec::new();
+        let mut measured_with_fallback = Vec::new();
+        if let NodeKind::Text(tp) = &node.kind {
+            if (a.width.is_none() || a.height.is_none()) && crate::tools::text_fell_back(tp) {
+                measured_with_fallback.push(id.0);
+                warnings.push(designos_doc::SpecWarning {
+                    code: "TEXT_MEASURED_WITH_FALLBACK_FONT".to_string(),
+                    path: "text".to_string(),
+                    token: None,
+                    replacement: None,
+                    message: Some("One or more text nodes were measured with a fallback font because the requested font_family is not loaded.".to_string()),
+                });
+            }
+        }
         crate::tools::fill_write::write_fill(&mut self.doc, &mut node, parent_id, FillTarget::NewLayer, a.fill.as_deref(), a.fills, &mut warnings)?;
         self.exec(Command::Insert { parent: parent_id, index, nodes: vec![node] })?;
-        if let Some(page_id) = self.doc.page_of(id) {
-            self.relayout(page_id);
+        self.relayout(id);
+        let mut out = json!({"node":self.node_reply_json(id),"parent_id":parent_id.0,"changed":true});
+        if !measured_with_fallback.is_empty() {
+            out["measured_with_fallback"] = json!(measured_with_fallback);
         }
-        let mut out = json!({"node":self.doc.get(id),"parent_id":parent_id.0,"changed":true});
         attach_warnings(&mut out, &warnings);
         crate::tools::issues::attach_issues_block(&self.doc, &[id], &self.session_options.issues, a.lint, &baseline, self.lint_env(), &[], &mut out);
         if let Some(before) = &before_doc {
@@ -1265,18 +1771,107 @@ impl Engine {
                 opacity: a.opacity,
                 fill: a.fill,
                 fills: a.fills,
+                bindings: a.bindings,
             },
         )?;
         let id = node.id;
+        let prop_map = a.prop_vars.as_ref().filter(|m| !m.is_empty());
+        let saved_data = prop_map.is_some().then(|| designos_doc::SpecDataSnapshot::of(&self.doc));
+        let restore_data = |doc: &mut Document, saved: Option<designos_doc::SpecDataSnapshot>| {
+            if let Some(data) = saved {
+                data.restore(doc);
+            }
+        };
+        let take_data_cmds = |doc: &mut Document, saved: Option<designos_doc::SpecDataSnapshot>| -> Vec<Command> {
+            match saved {
+                Some(before) => {
+                    let after = designos_doc::SpecDataSnapshot::of(doc);
+                    let cmds = before.commands_to(&after);
+                    before.restore(doc);
+                    cmds
+                }
+                None => Vec::new(),
+            }
+        };
+        let resolved_props: Option<Vec<(String, Option<String>)>> = match prop_map {
+            Some(map) => match self.resolve_prop_vars(id, map) {
+                Ok(r) => Some(r),
+                Err(e) => {
+                    restore_data(&mut self.doc, saved_data);
+                    return Err(e);
+                }
+            },
+            None => None,
+        };
+        let planned_bind = match (&resolved_props, changed) {
+            (None, _) => None,
+            (Some(resolved), false) => match self.plan_prop_vars_cmd(id, resolved) {
+                Ok(bind_cmd) => {
+                    let mut cmds = take_data_cmds(&mut self.doc, saved_data);
+                    match bind_cmd {
+                        Command::Batch(v) => cmds.extend(v),
+                        other => cmds.push(other),
+                    }
+                    Some(if cmds.len() == 1 { cmds.remove(0) } else { Command::Batch(cmds) })
+                }
+                Err(e) => {
+                    restore_data(&mut self.doc, saved_data);
+                    return Err(e);
+                }
+            },
+            (Some(resolved), true) => {
+                let field_cmd = designos_doc::writer_command(&self.doc, Command::Update { node: Box::new(node.clone()) }).cmd;
+                let field_inv = match field_cmd.clone().apply(&mut self.doc) {
+                    Ok(inv) => inv,
+                    Err(e) => {
+                        restore_data(&mut self.doc, saved_data);
+                        return Err(ToolError::new(ErrorCode::InternalError, "", e.to_string()));
+                    }
+                };
+                let bind_res = self.plan_prop_vars_cmd(id, resolved);
+                let _ = field_inv.apply(&mut self.doc);
+                let bind_cmd = match bind_res {
+                    Ok(cmd) => cmd,
+                    Err(e) => {
+                        restore_data(&mut self.doc, saved_data);
+                        return Err(e);
+                    }
+                };
+                let mut cmds = take_data_cmds(&mut self.doc, saved_data);
+                match field_cmd {
+                    Command::Batch(v) => cmds.extend(v),
+                    other => cmds.push(other),
+                }
+                match bind_cmd {
+                    Command::Batch(v) => cmds.extend(v),
+                    other => cmds.push(other),
+                }
+                Some(if cmds.len() == 1 { cmds.remove(0) } else { Command::Batch(cmds) })
+            }
+        };
         let before_doc = a.diff_image.then(|| self.doc.clone());
         let baseline = crate::tools::issues::PreCallBaseline::capture(&self.doc, &[id], &self.session_options.issues, a.lint, self.lint_env());
-        if changed {
-            self.exec(Command::Update { node: Box::new(node) })?;
-            if let Some(page_id) = self.doc.page_of(id) {
-                self.relayout(page_id);
+        let bound = match (changed, resolved_props, planned_bind) {
+            (false, None, _) => None,
+            (true, None, _) => {
+                let affects_layout = self.doc.get(id).is_some_and(|old| crate::tools::relayout_scope::update_affects_layout(&self.doc, old, &node));
+                self.exec(Command::Update { node: Box::new(node) })?;
+                if affects_layout {
+                    self.relayout(id);
+                }
+                None
             }
+            (_, Some(resolved), Some(cmd)) => {
+                self.exec(cmd)?;
+                self.relayout(id);
+                Some(self.prop_vars_issues(id, &resolved))
+            }
+            (_, Some(_), None) => unreachable!(),
+        };
+        let mut out = json!({"node":self.node_reply_json(NodeId(a.node_id)),"changed":changed || bound.is_some()});
+        if let Some(issues) = bound.filter(|i| !i.is_empty()) {
+            out["property_binding_issues"] = Value::Array(issues);
         }
-        let mut out = json!({"node":self.doc.get(NodeId(a.node_id)),"changed":changed});
         attach_warnings(&mut out, &warnings);
         crate::tools::issues::attach_issues_block(&self.doc, &[id], &self.session_options.issues, a.lint, &baseline, self.lint_env(), &[], &mut out);
         if let Some(before) = &before_doc {
@@ -1284,6 +1879,142 @@ impl Engine {
         }
         Ok(out)
     }
+
+    fn resolve_prop_vars(&mut self, id: NodeId, map: &std::collections::BTreeMap<String, Option<String>>) -> Result<Vec<(String, Option<String>)>, ToolError> {
+        let comp = self
+            .doc
+            .get(id)
+            .and_then(designos_doc::instance_component)
+            .ok_or_else(|| ToolError::new(ErrorCode::OverrideFieldNotApplicable, "/prop_vars", format!("node {} is not an instance", id.0)))?;
+        let defs = designos_doc::prop_defs(&self.doc, comp);
+        let libraries = crate::tools::library_source::load_enabled_snapshots(&self.doc);
+        let mut index = designos_doc::SpecBindIndex::build(&self.doc);
+        let mut resolved: Vec<(String, Option<String>)> = Vec::with_capacity(map.len());
+        for (name, reference) in map {
+            let path = format!("/prop_vars/{name}");
+            let def = defs
+                .iter()
+                .find(|d| d.name == *name)
+                .ok_or_else(|| ToolError::new(ErrorCode::UnknownComponentProperty, &path, format!("the component has no property \"{name}\"")))?;
+            let var = match reference {
+                None => None,
+                Some(r) => {
+                    let kind = designos_doc::bindable_prop_kind(&def.kind).ok_or_else(|| {
+                        ToolError::new(
+                            ErrorCode::PropertyTypeMismatch,
+                            &path,
+                            format!("property \"{name}\" takes no variable: only boolean, text and variant properties do"),
+                        )
+                    })?;
+                    let var_id = designos_doc::resolve_variable_ref_of_kind(&mut self.doc, &mut index, &libraries, r, name, &path, Some(kind))
+                        .map_err(|e| crate::tools::errors::from_spec_error(designos_doc::SpecError::from(e), &path))?;
+                    Some(var_id)
+                }
+            };
+            resolved.push((def.name.clone(), var));
+        }
+        Ok(resolved)
+    }
+
+    fn plan_prop_vars_cmd(&mut self, id: NodeId, resolved: &[(String, Option<String>)]) -> Result<Command, ToolError> {
+        use designos_doc::PropBindError;
+        let edits: Vec<(&str, Option<&str>)> = resolved.iter().map(|(n, v)| (n.as_str(), v.as_deref())).collect();
+        let bound = designos_doc::bind_prop_variables_explained(&mut self.doc, id, &edits);
+        if let Ok((_, Some(message))) = &bound {
+            return Err(ToolError::new(ErrorCode::InstanceCycle, "/prop_vars", message.clone()));
+        }
+        bound.map(|(cmd, _)| cmd).map_err(|e| match e {
+            PropBindError::NoSuchVariable(_) => ToolError::new(ErrorCode::UnknownVariable, "/prop_vars", e.to_string()),
+            PropBindError::KindMismatch { .. } | PropBindError::NotBindable(_) => ToolError::new(ErrorCode::VariableTypeMismatch, "/prop_vars", e.to_string()),
+            PropBindError::NoSuchProperty(_) => ToolError::new(ErrorCode::UnknownComponentProperty, "/prop_vars", e.to_string()),
+            PropBindError::NotAnInstance(_) => ToolError::new(ErrorCode::OverrideFieldNotApplicable, "/prop_vars", e.to_string()),
+        })
+    }
+
+    fn prop_vars_issues(&self, id: NodeId, resolved: &[(String, Option<String>)]) -> Vec<Value> {
+        resolved
+            .iter()
+            .filter(|(_, v)| v.is_some())
+            .filter_map(|(name, _)| designos_doc::prop_binding_problem(&self.doc, id, name).map(|p| json!({"property": name, "problem": p.to_string()})))
+            .collect()
+    }
+}
+
+fn collect_cmd_touched_nodes(cmd: &Command, out: &mut Vec<NodeId>) {
+    match cmd {
+        Command::Insert { nodes, .. } | Command::InsertPage { nodes, .. } => {
+            for n in nodes {
+                if !out.contains(&n.id) {
+                    out.push(n.id);
+                }
+            }
+        }
+        Command::Remove { id } | Command::Reparent { id, .. } | Command::RemovePage { id } => {
+            if !out.contains(id) {
+                out.push(*id);
+            }
+        }
+        Command::Update { node } => {
+            if !out.contains(&node.id) {
+                out.push(node.id);
+            }
+        }
+        Command::Batch(cmds) => {
+            for c in cmds {
+                collect_cmd_touched_nodes(c, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// The containers an inverse command puts nodes back into: the parent of an `Insert` (where a
+/// deleted child's siblings reflow) and of a `Reparent` (the container a moved node left).
+fn collect_cmd_container_parents(cmd: &Command, out: &mut Vec<NodeId>) {
+    match cmd {
+        Command::Insert { parent, .. } | Command::Reparent { parent, .. } => {
+            if !out.contains(parent) {
+                out.push(*parent);
+            }
+        }
+        Command::Batch(cmds) => {
+            for c in cmds {
+                collect_cmd_container_parents(c, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// The outermost auto-layout frame of the unbroken chain that holds `id` (or is `id`): the frame
+/// whose solve can move `id`'s siblings and resize what hugs it.
+fn auto_layout_root(doc: &Document, id: NodeId) -> Option<NodeId> {
+    let is_auto = |id: NodeId| doc.get(id).and_then(|n| n.kind.frame_props()).is_some_and(|f| f.auto_layout.is_some());
+    let mut top = is_auto(id).then_some(id);
+    let mut cur = doc.get(id).and_then(|n| n.parent);
+    while let Some(c) = cur.filter(|c| is_auto(*c)) {
+        top = Some(c);
+        cur = doc.get(c).and_then(|n| n.parent);
+    }
+    top
+}
+
+/// Whether a connector end, or one of its ancestors, is among the nodes changed by this command.
+/// Re-homing is only valid when an endpoint actually moved; this keeps unrelated connector plans
+/// from changing parent as a side effect of a later layout pass.
+fn connector_ends_moved_with(doc: &Document, cid: NodeId, touched: &[NodeId]) -> bool {
+    let Some(NodeKind::Connector(c)) = doc.get(cid).map(|n| &n.kind) else { return false };
+    [c.start.node, c.end.node].into_iter().flatten().any(|end| {
+        let mut cur = Some(end);
+        for _ in 0..=doc.nodes.len() {
+            let Some(id) = cur else { return false };
+            if touched.contains(&id) {
+                return true;
+            }
+            cur = doc.get(id).and_then(|n| n.parent);
+        }
+        false
+    })
 }
 
 /// Adds the bind warnings (such as a variable that has no value in the node's mode) to a write reply, as `apply_spec` does.
@@ -1291,8 +2022,14 @@ fn attach_warnings(out: &mut Value, warnings: &[designos_doc::SpecWarning]) {
     if warnings.is_empty() {
         return;
     }
-    if let (Some(obj), Ok(v)) = (out.as_object_mut(), serde_json::to_value(warnings)) {
-        obj.insert("warnings".into(), v);
+    let Some(obj) = out.as_object_mut() else { return };
+    let Ok(extra) = serde_json::to_value(warnings) else { return };
+    let Some(extra) = extra.as_array() else { return };
+    match obj.get_mut("warnings") {
+        Some(Value::Array(existing)) => existing.extend(extra.iter().cloned()),
+        _ => {
+            obj.insert("warnings".into(), Value::Array(extra.clone()));
+        }
     }
 }
 
@@ -1309,22 +2046,21 @@ fn summary(doc: &Document, n: &Node) -> Value {
 }
 
 pub(crate) fn parse<T: DeserializeOwned>(args: Value) -> Result<T, ToolError> {
-    let raw = args.clone();
-    serde_json::from_value(args).map_err(|e| crate::tools::errors::from_serde_error_with_args(&e, "", false, Some(&raw)))
+    T::deserialize(&args).map_err(|e| crate::tools::errors::from_serde_error_with_args(&e, "", false, Some(&args)))
 }
 
 pub(crate) fn parse_spec<T: DeserializeOwned>(args: Value) -> Result<T, ToolError> {
-    let raw = args.clone();
-    serde_json::from_value(args).map_err(|e| crate::tools::errors::from_serde_error_with_args(&e, "", true, Some(&raw)))
+    let parsed = T::deserialize(&args).map_err(|e| crate::tools::errors::from_serde_error_with_args(&e, "", true, Some(&args)))?;
+    if let Some(spec_msg) = crate::tools::errors::describe_spec_args_error(&args) {
+        return Err(ToolError::new(ErrorCode::InvalidArguments, "", format!("Invalid arguments: {spec_msg}")));
+    }
+    Ok(parsed)
 }
 
 use crate::tools::bounded_text;
 use crate::tools::fill_write::FillTarget;
 fn default_limit() -> usize {
     100
-}
-fn default_size() -> f32 {
-    100.0
 }
 fn default_true() -> bool {
     true
@@ -1383,10 +2119,10 @@ struct CreateArgs {
     x: f32,
     #[serde(default)]
     y: f32,
-    #[serde(default = "default_size")]
-    width: f32,
-    #[serde(default = "default_size")]
-    height: f32,
+    #[serde(default)]
+    width: Option<f32>,
+    #[serde(default)]
+    height: Option<f32>,
     #[serde(default)]
     fill: Option<String>,
     #[serde(default)]
@@ -1413,6 +2149,12 @@ struct UpdateArgs {
     fill: Option<String>,
     #[serde(default)]
     fills: Option<Vec<designos_doc::Paint>>,
+    /// Component properties of an instance bound to variables: `{property: "var:Collection/Name"}`; `null` unbinds.
+    #[serde(default)]
+    prop_vars: Option<std::collections::BTreeMap<String, Option<String>>>,
+    /// Variable bindings to set or clear keyed by property path (e.g. `{"effects/0/radius": "var:Effect/Blur", "fills/0/stops/0": null}`).
+    #[serde(default)]
+    bindings: Option<std::collections::BTreeMap<String, Option<String>>>,
     #[serde(default)]
     diff_image: bool,
     #[serde(default)]
@@ -1508,6 +2250,337 @@ struct SetInProgressArgs {
 pub(crate) struct ExportFigArgs {
     #[serde(alias = "path")]
     pub output_path: String,
+    #[serde(default)]
+    pub overwrite: bool,
+}
+
+pub(crate) fn has_control_or_bidi_char(s: &str) -> bool {
+    s.chars().any(|c| {
+        c.is_control()
+            || matches!(
+                c,
+                '\u{202A}'..='\u{202E}'
+                    | '\u{2066}'..='\u{2069}'
+                    | '\u{200E}'
+                    | '\u{200F}'
+                    | '\u{061C}'
+            )
+    })
+}
+
+pub(crate) fn is_whitespace_only_output_name(display_path: &str) -> bool {
+    if display_path.trim().is_empty() {
+        return true;
+    }
+    let p = std::path::Path::new(display_path);
+    if p.components().any(|comp| matches!(comp, std::path::Component::Normal(part) if part.to_str().is_some_and(|s| s.trim().is_empty()))) {
+        return true;
+    }
+    p.file_stem().and_then(|s| s.to_str()).is_some_and(|s| s.trim().is_empty())
+}
+
+pub(crate) fn validate_output_name(display_path: &str, ptr: &str) -> Result<(), ToolError> {
+    if has_control_or_bidi_char(display_path) {
+        return Err(ToolError::new(
+            ErrorCode::InvalidName,
+            ptr,
+            format!("{display_path} has a name with a line break or a direction-control character. Rename it, then try again."),
+        )
+        .with_received(json!(display_path)));
+    }
+    if is_whitespace_only_output_name(display_path) {
+        return Err(ToolError::new(ErrorCode::InvalidName, ptr, format!("{display_path} has a blank name. Give the file a name, then try again."))
+            .with_received(json!(display_path)));
+    }
+    for comp in std::path::Path::new(display_path).components() {
+        if let std::path::Component::Normal(part) = comp {
+            if part.len() > 255 {
+                return Err(ToolError::new(ErrorCode::NameTooLong, ptr, format!("{display_path} has a name longer than 255 bytes. Use a shorter name."))
+                    .with_received(json!(display_path)));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// File name endings `designos_open_file` imports (any case), matching `designos_library::load_external`.
+pub const OPEN_IMPORT_EXTENSIONS: [&str; 5] = ["designos", "fig", "svg", "json", "webcapture"];
+
+/// The one file name ending `designos_save_file` writes below the workspace.
+pub const SAVE_EXTENSION: &str = "designos";
+/// The one file name ending `designos_render_png` writes below the workspace.
+pub const RENDER_EXTENSION: &str = "png";
+/// The one file name ending `designos_export_fig_file` writes below the workspace (any case: `.FIG` is accepted).
+pub const EXPORT_FIG_EXTENSION: &str = "fig";
+
+/// Every file name ending the tools of this server create below the workspace (`--workspace`, the open file's folder). A tool refuses
+/// any other, so a file with none of these endings in the workspace is out of its reach, except for the temporary name below. Studio
+/// relies on it: its hook folder lies in the data folder, which can lie inside a workspace, and none of the names kept there ends in
+/// one of these or starts with the temporary prefix (`agent_hook_outputs`).
+pub const WORKSPACE_WRITE_EXTENSIONS: [&str; 3] = [SAVE_EXTENSION, RENDER_EXTENSION, EXPORT_FIG_EXTENSION];
+
+/// The start of the name of the temporary file an overwrite is written to before it replaces its target (`<prefix><pid>-<n>.tmp`,
+/// made with `create_new`, so it never replaces an existing file).
+pub const OUTPUT_TEMP_PREFIX: &str = ".designos-out-";
+
+pub(crate) fn open_import_extension_ok(display_path: &str) -> bool {
+    std::path::Path::new(display_path)
+        .extension()
+        .and_then(|x| x.to_str())
+        .is_some_and(|actual| OPEN_IMPORT_EXTENSIONS.iter().any(|ok| actual.eq_ignore_ascii_case(ok)))
+}
+
+pub(crate) fn unsupported_open_file_type(display_path: &str) -> ToolError {
+    ToolError::new(
+        ErrorCode::UnsupportedFileType,
+        "/path",
+        format!("{display_path} is not a supported design file. Open a .designos, .fig, .svg, .json, or .webcapture file, or a file that holds native design JSON."),
+    )
+    .with_received(json!(display_path))
+    .with_expected(".designos, .fig, .svg, .json, .webcapture")
+    .with_next_step("Stop and tell the user: this file type is not supported. Supported extensions are .designos, .fig, .svg, .json, and .webcapture. Do not retry with the same path.")
+}
+
+pub(crate) fn validate_existing_output_target(
+    target_meta: Option<(bool, bool, bool, bool, bool)>,
+    display_path: &str,
+    ptr: &str,
+    ext: &str,
+    overwrite: bool,
+    supports_overwrite: bool,
+) -> Result<(), ToolError> {
+    let field_name = ptr.trim_start_matches('/');
+    let case_insensitive_ext = ext == "fig";
+    validate_output_name(display_path, ptr)?;
+    if target_meta.is_some_and(|(is_symlink, _, _, _, _)| is_symlink) {
+        return Err(ToolError::new(ErrorCode::InvalidArguments, ptr, format!("{display_path} is a link, not a file. Delete the link, then try again."))
+            .with_received(json!(display_path)));
+    }
+    let looks_like_dir = target_meta.is_some_and(|(_, is_dir, _, _, _)| is_dir)
+        || display_path == "."
+        || display_path.ends_with('/')
+        || display_path.ends_with("/.")
+        || (cfg!(windows) && (display_path.ends_with('\\') || display_path.ends_with("\\.")));
+    if looks_like_dir {
+        return Err(ToolError::new(ErrorCode::InvalidArguments, ptr, format!("{display_path} is a folder, not a file. Choose a file path, then try again."))
+            .with_received(json!(display_path)));
+    }
+    let ext_ok = std::path::Path::new(display_path).extension().and_then(|x| x.to_str()).is_some_and(|actual| {
+        if case_insensitive_ext {
+            actual.eq_ignore_ascii_case(ext)
+        } else {
+            actual == ext
+        }
+    });
+    if !ext_ok {
+        return Err(ToolError::new(
+            ErrorCode::UnsupportedExtension,
+            ptr,
+            format!("{display_path} does not end with .{ext}. Choose a path ending with .{ext}, then try again."),
+        )
+        .with_received(json!(display_path))
+        .with_expected(format!("*.{ext}")));
+    }
+    if let Some((_, _, is_file, is_readonly, second_name)) = target_meta {
+        if !is_file {
+            return Err(ToolError::new(ErrorCode::InvalidArguments, ptr, format!("{display_path} is not a plain file. Delete it, then try again."))
+                .with_received(json!(display_path)));
+        }
+        if !overwrite {
+            if supports_overwrite {
+                return Err(ToolError::new(ErrorCode::FileExists, ptr, format!("{display_path} already exists. Pass overwrite: true to replace it."))
+                    .with_received(json!(display_path))
+                    .with_corrected_example(json!({ field_name: display_path, "overwrite": true })));
+            }
+            return Err(ToolError::new(ErrorCode::FileExists, ptr, format!("{display_path} already exists. Choose a new path, then try again."))
+                .with_received(json!(display_path)));
+        }
+        if second_name {
+            return Err(ToolError::new(
+                ErrorCode::InvalidArguments,
+                ptr,
+                format!("{display_path} has a second name (a hard link). Delete it, then try again."),
+            )
+            .with_received(json!(display_path)));
+        }
+        if is_readonly {
+            return Err(ToolError::new(
+                ErrorCode::InvalidArguments,
+                ptr,
+                format!("{display_path} is read-only. Make it writable first, or choose a new path."),
+            )
+            .with_received(json!(display_path)));
+        }
+    }
+    Ok(())
+}
+
+/// Whether a failed write is something only the user can fix (see `write_checked_output_file`).
+pub(crate) fn write_needs_human(e: &std::io::Error) -> bool {
+    use std::io::ErrorKind as Io;
+    matches!(e.kind(), Io::PermissionDenied | Io::StorageFull | Io::ReadOnlyFilesystem | Io::FileTooLarge)
+}
+
+/// [`write_checked_output_file`] for content that is already in memory.
+pub(crate) fn write_checked_output_bytes(
+    resolved: &std::path::Path,
+    display_path: &str,
+    ptr: &str,
+    bytes: &[u8],
+    overwrite: bool,
+    supports_overwrite: bool,
+) -> Result<(), ToolError> {
+    write_checked_output_file(resolved, display_path, ptr, |out| out.write_all(bytes), overwrite, supports_overwrite)
+}
+
+/// Writes a file the tool was asked for, refusing links, folders, second names and read-only files. The content is
+/// produced while it is written (a whole document goes
+/// straight to the file instead of through one text in memory). `fill` writes the whole content; when it fails
+/// the file is not left behind.
+pub(crate) fn write_checked_output_file(
+    resolved: &std::path::Path,
+    display_path: &str,
+    ptr: &str,
+    fill: impl FnOnce(&mut dyn std::io::Write) -> std::io::Result<()>,
+    overwrite: bool,
+    supports_overwrite: bool,
+) -> Result<(), ToolError> {
+    use std::io::Write;
+    let fill_file = |file: &mut std::fs::File| -> std::io::Result<()> {
+        let mut out = std::io::BufWriter::with_capacity(1 << 20, &mut *file);
+        fill(&mut out)?;
+        out.flush()?;
+        drop(out);
+        file.sync_all()
+    };
+    let map_io_err = |e: std::io::Error| match crate::session_file_io::refusal_of(&e) {
+        Some(crate::session_file_io::Refusal::Link) => {
+            ToolError::new(ErrorCode::InvalidArguments, ptr, format!("{display_path} is a link, not a file. Delete the link, then try again."))
+                .with_received(json!(display_path))
+        }
+        Some(crate::session_file_io::Refusal::SecondName) => {
+            ToolError::new(ErrorCode::InvalidArguments, ptr, format!("{display_path} has a second name (a hard link). Delete it, then try again."))
+                .with_received(json!(display_path))
+        }
+        Some(crate::session_file_io::Refusal::NotPlainFile) => {
+            ToolError::new(ErrorCode::InvalidArguments, ptr, format!("{display_path} is not a plain file. Delete it, then try again."))
+                .with_received(json!(display_path))
+        }
+        // Permissions, a full disk, a read-only disk or a size limit: only the user can change those, so the agent stops.
+        None if write_needs_human(&e) => {
+            ToolError::new(ErrorCode::InternalError, ptr, format!("{display_path} can't be written: {e}. Check its permissions and free space."))
+                .with_error_kind(ErrorKind::NeedsHuman)
+                .with_next_step("Stop and tell the user: this file can't be written (permissions, free space, or a size limit). Do not retry.")
+        }
+        None => ToolError::new(
+            ErrorCode::InternalError,
+            ptr,
+            format!("{display_path} can't be written: {e}. Check its permissions and free space, then try again."),
+        ),
+    };
+    if !overwrite {
+        let mut opts = std::fs::OpenOptions::new();
+        opts.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            opts.custom_flags(libc::O_NOFOLLOW);
+        }
+        let field_name = ptr.trim_start_matches('/');
+        let mut file = opts.open(resolved).map_err(|e| {
+            if e.kind() == std::io::ErrorKind::AlreadyExists {
+                if supports_overwrite {
+                    ToolError::new(ErrorCode::FileExists, ptr, format!("{display_path} already exists. Pass overwrite: true to replace it."))
+                        .with_received(json!(display_path))
+                        .with_corrected_example(json!({ field_name: display_path, "overwrite": true }))
+                } else {
+                    ToolError::new(ErrorCode::FileExists, ptr, format!("{display_path} already exists. Choose a new path, then try again."))
+                        .with_received(json!(display_path))
+                }
+            } else {
+                map_io_err(e)
+            }
+        })?;
+        if let Err(e) = fill_file(&mut file) {
+            drop(file);
+            let removed = std::fs::remove_file(resolved).is_ok();
+            return Err(map_io_err(e).with_safe_to_retry(removed));
+        }
+        return Ok(());
+    }
+
+    let old = match std::fs::symlink_metadata(resolved) {
+        Ok(m) => Some(m),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(e) => return Err(map_io_err(e)),
+    };
+    if let Some(ref m) = old {
+        if m.file_type().is_symlink() {
+            return Err(ToolError::new(ErrorCode::InvalidArguments, ptr, format!("{display_path} is a link, not a file. Delete the link, then try again."))
+                .with_received(json!(display_path)));
+        }
+        if m.is_dir() {
+            return Err(ToolError::new(
+                ErrorCode::InvalidArguments,
+                ptr,
+                format!("{display_path} is a folder, not a file. Choose a file path, then try again."),
+            )
+            .with_received(json!(display_path)));
+        }
+        if !m.file_type().is_file() {
+            return Err(ToolError::new(ErrorCode::InvalidArguments, ptr, format!("{display_path} is not a plain file. Delete it, then try again."))
+                .with_received(json!(display_path)));
+        }
+        #[cfg(unix)]
+        let second_name = std::os::unix::fs::MetadataExt::nlink(m) > 1;
+        #[cfg(not(unix))]
+        let second_name = false;
+        if second_name {
+            return Err(ToolError::new(
+                ErrorCode::InvalidArguments,
+                ptr,
+                format!("{display_path} has a second name (a hard link). Delete it, then try again."),
+            )
+            .with_received(json!(display_path)));
+        }
+        if m.permissions().readonly() {
+            return Err(ToolError::new(
+                ErrorCode::InvalidArguments,
+                ptr,
+                format!("{display_path} is read-only. Make it writable first, or choose a new path."),
+            )
+            .with_received(json!(display_path)));
+        }
+    }
+
+    static TMP_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let dir = resolved.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or_else(|| std::path::Path::new("."));
+    let seq = TMP_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let tmp = dir.join(format!("{OUTPUT_TEMP_PREFIX}{}-{seq}.tmp", std::process::id()));
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.custom_flags(libc::O_NOFOLLOW);
+        if old.is_some() {
+            opts.mode(0o600);
+        }
+    }
+    let mut file = opts.open(&tmp).map_err(&map_io_err)?;
+    let write_res = (|| -> std::io::Result<()> {
+        if let Some(ref old) = old {
+            file.set_permissions(old.permissions())?;
+        }
+        fill_file(&mut file)?;
+        drop(file);
+        std::fs::rename(&tmp, resolved)
+    })();
+    if let Err(e) = write_res {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(map_io_err(e));
+    }
+    Ok(())
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -1562,13 +2635,11 @@ pub fn tools() -> Vec<Value> {
         "description": "Optional agent-supplied idempotency key for deduplicating replayed writes within the active session."
     });
     let mut out = Vec::new();
-    let mut add =
-        |tool: &str, description: &str, properties: Value, required: Vec<&str>, out_props: Value, out_req: &[&str], read_only: bool, idempotent: bool| {
-            out.push(json!({"name":format!("designos_{tool}"),"description":description,
-            "inputSchema":{"type":"object","properties":properties,"required":required,"additionalProperties":false},
-            "outputSchema":tool_output_schema(out_props, out_req),
-            "annotations":{"readOnlyHint":read_only,"destructiveHint":!read_only,"idempotentHint":idempotent,"openWorldHint":false}}));
-        };
+    let mut add = |tool: &str, description: &str, properties: Value, required: Vec<&str>, out_props: Value, out_req: &[&str]| {
+        out.push(json!({"name":format!("designos_{tool}"),"description":description,
+        "inputSchema":{"type":"object","properties":properties,"required":required,"additionalProperties":false},
+        "outputSchema":tool_output_schema(out_props, out_req)}));
+    };
     add(
         "get_document",
         "Summarize the current in-memory document: pages, counts, shared styles (fill, text, effect, grid) with their values, and undo state.",
@@ -1588,8 +2659,6 @@ pub fn tools() -> Vec<Value> {
             "can_redo": {"type": "boolean"}
         }),
         &["name", "pages", "node_count", "can_undo", "can_redo"],
-        true,
-        true,
     );
     add(
         "get_libraries",
@@ -1598,8 +2667,6 @@ pub fn tools() -> Vec<Value> {
         vec![],
         json!({ "libraries": {"type": "array"} }),
         &["libraries"],
-        true,
-        true,
     );
     add(
         "get_metadata",
@@ -1617,8 +2684,6 @@ pub fn tools() -> Vec<Value> {
             "scoped": {"type": "boolean"}
         }),
         &["root_id", "xml", "node_count", "truncated", "remaining_estimate", "hidden_omitted", "lint_ran"],
-        true,
-        true,
     );
     add(
         "search_design_system",
@@ -1636,8 +2701,6 @@ pub fn tools() -> Vec<Value> {
             "libraries_searched": {"type": "array"}
         }),
         &["results", "total", "libraries_searched"],
-        true,
-        true,
     );
     add(
         "list_nodes",
@@ -1651,8 +2714,6 @@ pub fn tools() -> Vec<Value> {
             "next_offset": {"type": ["integer", "null"]}
         }),
         &["nodes", "total", "offset"],
-        true,
-        true,
     );
     add(
         "get_node",
@@ -1661,12 +2722,10 @@ pub fn tools() -> Vec<Value> {
         vec!["node_id"],
         json!({ "node": {"type": "object"} }),
         &["node"],
-        true,
-        true,
     );
     add(
         "get_variables",
-        "Read variable definitions and collections. With node_id, also resolve that node's direct bindings using inherited collection modes.",
+        "Read variable definitions and collections. With node_id, also resolve that node's direct bindings using inherited collection modes. A collection that extends another has an `extension` block (parent_collection_id, mode_map, inherited_variable_ids, overrides with value and parent_value); `extendable` marks a collection others may extend. Set an override with designos_apply_batch set_variables, using the extension's own mode id; a null value there resets the override.",
         json!({"node_id":id}),
         vec![],
         json!({
@@ -1675,8 +2734,6 @@ pub fn tools() -> Vec<Value> {
             "effective_bindings": {"type": ["array", "null"]}
         }),
         &["variables", "collections"],
-        true,
-        true,
     );
     let code_langs: Vec<&str> = designos_export::CodeLanguage::ALL.iter().map(|l| l.id()).chain(std::iter::once("svg")).collect();
     add(
@@ -1690,8 +2747,6 @@ pub fn tools() -> Vec<Value> {
             "code": {"type": "string"}
         }),
         &["node_id", "language", "code"],
-        true,
-        true,
     );
     add(
         "create_node",
@@ -1704,21 +2759,17 @@ pub fn tools() -> Vec<Value> {
             "changed": {"type": "boolean"}
         }),
         &["node", "parent_id", "changed"],
-        false,
-        false,
     );
     add(
         "update_node",
         "Update specified fields of one non-page layer. Coordinates are parent-relative. Replacing text clears text runs and list ranges. Supports undo; changes remain in memory until saved.",
-        json!({"node_id":id,"name":name,"text":text,"x":coordinate,"y":coordinate,"width":size,"height":size,"visible":{"type":"boolean"},"opacity":{"type":"number","minimum":0,"maximum":1},"fill":{"type":"string","maxLength":1024,"description":FILL_DESCRIPTION},"fills":{"type":"array","items":{"type":"object"}},"diff_image":{"type":"boolean","default":false},"lint":lint_opt,"idempotency_key":idempotency_key}),
+        json!({"node_id":id,"name":name,"text":text,"x":coordinate,"y":coordinate,"width":size,"height":size,"visible":{"type":"boolean"},"opacity":{"type":"number","minimum":0,"maximum":1},"fill":{"type":"string","maxLength":1024,"description":FILL_DESCRIPTION},"fills":{"type":"array","items":{"type":"object"}},"prop_vars":{"type":"object","description":"Component properties of an instance bound to variables: {property: \"var:Collection/Name\"}; null unbinds. Boolean, text and variant properties take a boolean or string variable.","additionalProperties":{"type":["string","null"]}},"bindings":{"type":"object","description":"Variable bindings keyed by property path (e.g. `effects/0/radius`, `fills/0/stops/0`). Null or empty unbinds.","additionalProperties":{"type":["string","null"]}},"diff_image":{"type":"boolean","default":false},"lint":lint_opt,"idempotency_key":idempotency_key}),
         vec!["node_id"],
         json!({
             "node": {"type": "object"},
             "changed": {"type": "boolean"}
         }),
         &["node", "changed"],
-        false,
-        true,
     );
     add(
         "delete_node",
@@ -1730,8 +2781,6 @@ pub fn tools() -> Vec<Value> {
             "deleted": {"type": "boolean"}
         }),
         &["node_id", "deleted"],
-        false,
-        false,
     );
     add(
         "list_comments",
@@ -1743,8 +2792,6 @@ pub fn tools() -> Vec<Value> {
             "total": {"type": "integer"}
         }),
         &["comments", "total"],
-        true,
-        true,
     );
     add(
         "add_comment",
@@ -1757,8 +2804,6 @@ pub fn tools() -> Vec<Value> {
             "changed": {"type": "boolean"}
         }),
         &["id", "thread", "changed"],
-        false,
-        false,
     );
     add(
         "reply_comment",
@@ -1770,8 +2815,6 @@ pub fn tools() -> Vec<Value> {
             "changed": {"type": "boolean"}
         }),
         &["thread", "changed"],
-        false,
-        false,
     );
     add(
         "resolve_comment",
@@ -1784,8 +2827,6 @@ pub fn tools() -> Vec<Value> {
             "changed": {"type": "boolean"}
         }),
         &["thread_id", "resolved", "changed"],
-        false,
-        true,
     );
     add(
         "apply_spec",
@@ -1815,21 +2856,18 @@ pub fn tools() -> Vec<Value> {
             "warnings": {"type": "array"}
         }),
         &["root_node_id", "parent_id", "node", "changed", "name_to_id", "instances", "issues"],
-        false,
-        false,
     );
     add(
         "export_spec",
-        "Export a node and its descendants as a declarative NodeSpec JSON tree, enriched with Dev Mode status/annotations and any canvas comment threads pinned within the subtree.",
+        "Export a node and its descendants as a declarative NodeSpec JSON tree, enriched with Dev Mode status/annotations and any canvas comment threads pinned within the subtree. A connector root has no spec: it returns a null spec with a CONNECTORS_SKIPPED warning.",
         json!({"node_id":id}),
         vec!["node_id"],
         json!({
             "node_id": {"type": "integer"},
-            "spec": {"type": "object"}
+            "spec": {"type": ["object", "null"]},
+            "warnings": {"type": "array"}
         }),
         &["node_id", "spec"],
-        true,
-        true,
     );
     add(
         "set_dev_status",
@@ -1842,13 +2880,11 @@ pub fn tools() -> Vec<Value> {
             "changed": {"type": "boolean"}
         }),
         &["node_id", "dev", "changed"],
-        false,
-        false,
     );
     add(
         "export_fig_file",
         "Export the current session document to a Figma binary .fig container (with fig-kiwi header and deflate chunks) inside the workspace.",
-        json!({"output_path":{"type":"string","description":"Destination .fig path inside the workspace."}}),
+        json!({"output_path":{"type":"string","description":"Destination .fig path inside the workspace."},"overwrite":{"type":"boolean","default":false}}),
         vec!["output_path"],
         json!({
             "output_path": {"type": "string"},
@@ -1857,8 +2893,6 @@ pub fn tools() -> Vec<Value> {
             "saved": {"type": "boolean"}
         }),
         &["output_path", "bytes", "saved"],
-        false,
-        true,
     );
     let (q_props, q_req) = crate::tools::query::tool_schema(&id);
     add(
@@ -1888,8 +2922,6 @@ pub fn tools() -> Vec<Value> {
             "cursor": {"type": ["string", "null"]}
         }),
         &["columns", "rows", "count", "scanned", "done", "complete"],
-        true,
-        true,
     );
     add(
         "lint",
@@ -1911,8 +2943,6 @@ pub fn tools() -> Vec<Value> {
             "passed": {"type": "boolean"}
         }),
         &["findings", "total"],
-        true,
-        true,
     );
     add(
         "get_guidelines",
@@ -1935,8 +2965,6 @@ pub fn tools() -> Vec<Value> {
             "sources": {"type": "array"}
         }),
         &[],
-        true,
-        true,
     );
     add(
         "import_web_capture",
@@ -1960,8 +2988,6 @@ pub fn tools() -> Vec<Value> {
             "changed": {"type": "boolean"}
         }),
         &["root_node_id", "page_id", "report", "changed"],
-        false,
-        false,
     );
     add(
         "undo",
@@ -1974,8 +3000,6 @@ pub fn tools() -> Vec<Value> {
             "can_redo": {"type": "boolean"}
         }),
         &["changed", "can_undo", "can_redo"],
-        false,
-        false,
     );
     add(
         "lint_fix",
@@ -1991,11 +3015,10 @@ pub fn tools() -> Vec<Value> {
         json!({
             "changed": {"type": "boolean"},
             "fixed_count": {"type": "integer"},
-            "changes": {"type": "array"}
+            "changes": {"type": "array"},
+            "warnings": {"type": "array"}
         }),
         &["changed", "fixed_count", "changes"],
-        false,
-        false,
     );
     add(
         "redo",
@@ -2008,8 +3031,6 @@ pub fn tools() -> Vec<Value> {
             "can_redo": {"type": "boolean"}
         }),
         &["changed", "can_undo", "can_redo"],
-        false,
-        false,
     );
     out.push(crate::tools::screenshot::tool_descriptor());
     out.push(json!({
@@ -2038,25 +3059,127 @@ pub fn tools() -> Vec<Value> {
                 "changed": {"type": "boolean"}
             }),
             &["updated", "changed"],
-        ),
-        "annotations": {
-            "readOnlyHint": false,
-            "destructiveHint": false,
-            "idempotentHint": true,
-            "openWorldHint": false
-        }
+        )
     }));
     out.push(crate::tools::batch::tool_descriptor());
     out.push(crate::tools::design_context::tool_descriptor());
     out.push(crate::tools::session_options::tool_descriptor());
     out.push(crate::tools::bootstrap::tool_definition());
+    out.extend(crate::tools::docs_descriptors::tool_descriptors());
+    for tool in &mut out {
+        crate::risk::stamp_tool_json(tool);
+    }
     out
+}
+
+/// The `extension` block of an extended collection in `designos_get_variables`: the parent, the mode mapping, the
+/// variables it inherits and each override next to the parent value it replaces.
+fn extension_report(doc: &Document, c: &designos_doc::VariableCollection, ext: &designos_doc::CollectionExtension) -> Value {
+    let overrides: Vec<Value> = ext
+        .overrides
+        .iter()
+        .flat_map(|(variable, by_mode)| {
+            by_mode.iter().map(move |(mode, value)| {
+                let parent_value = ext.mode_map.get(mode).and_then(|pm| {
+                    let parent = doc.variable_collections.get(&ext.parent.collection)?;
+                    if parent.is_extension() {
+                        doc.extended_value(&parent.id, variable, pm)
+                    } else {
+                        let v = doc.variables.get(variable)?;
+                        v.values.get(pm).or_else(|| v.values.get(&parent.default_mode)).cloned()
+                    }
+                });
+                json!({"variable_id":variable,"mode_id":mode,"value":value,"parent_value":parent_value})
+            })
+        })
+        .collect();
+    json!({
+        "parent_collection_id": (!ext.parent.collection.is_empty()).then_some(&ext.parent.collection),
+        "parent_library_key": ext.parent.set_key,
+        "mode_map": ext.mode_map,
+        "inherited_variable_ids": doc.inherited_variable_ids(&c.id),
+        "overrides": overrides,
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use designos_doc::{NodeKind, Rect};
+    use designos_doc::{FrameProps, NodeKind, PageHydrator, Rect};
+    use std::sync::{Arc, Mutex};
+
+    #[derive(Debug)]
+    struct DeferredPageFixture {
+        page: NodeId,
+        instance: NodeId,
+        hydrated: bool,
+    }
+
+    impl PageHydrator for DeferredPageFixture {
+        fn hydrate_page(&mut self, doc: &mut Document, page: NodeId) -> bool {
+            if self.hydrated || page != self.page {
+                return false;
+            }
+            self.hydrated = true;
+            let child = doc.alloc_id();
+            doc.insert(self.instance, designos_doc::Node::rectangle(child, Rect::new(8.0, 8.0, 24.0, 24.0))).is_ok()
+        }
+
+        fn hydrate_all(&mut self, doc: &mut Document) -> bool {
+            self.hydrate_page(doc, self.page)
+        }
+
+        fn is_hydrated(&self, page: NodeId) -> bool {
+            page != self.page || self.hydrated
+        }
+    }
+
+    fn deferred_page_engine() -> (Engine, NodeId, NodeId) {
+        let mut engine = Engine::default();
+        let page = engine.doc.add_page("Deferred");
+        let instance = engine.doc.alloc_id();
+        let mut node = designos_doc::Node::new(instance, NodeKind::Instance { frame: FrameProps::default(), component: None, component_key: None });
+        node.size = designos_doc::Vec2::new(48.0, 48.0);
+        engine.doc.insert(page, node).unwrap();
+        engine.active_page_id = Some(page);
+        engine.doc.page_hydrator = Some(Arc::new(Mutex::new(DeferredPageFixture { page, instance, hydrated: false })));
+        (engine, page, instance)
+    }
+
+    #[test]
+    fn mcp_reads_hydrate_the_owning_deferred_page() {
+        let (mut engine, page, instance) = deferred_page_engine();
+        let node = engine.call("designos_get_node", json!({"node_id": instance.0})).unwrap();
+        assert_eq!(node["node"]["children"].as_array().map(Vec::len), Some(1), "node reads must hydrate deferred instance content");
+
+        let (mut expected, _, expected_instance) = deferred_page_engine();
+        expected.doc.ensure_page_hydrated(page);
+        let expected_screenshot = expected.call("designos_get_screenshot", json!({"node_id": expected_instance.0, "scale": 1.0, "max_long_edge": 0})).unwrap();
+        let actual_screenshot = engine.call("designos_get_screenshot", json!({"node_id": instance.0, "scale": 1.0, "max_long_edge": 0})).unwrap();
+        assert_eq!(actual_screenshot["content"], expected_screenshot["content"], "MCP renders must include hydrated instance content");
+
+        let metadata = engine.call("designos_get_metadata", json!({"node_id": instance.0})).unwrap();
+        assert!(metadata["xml"].as_str().unwrap().contains("Rectangle"), "metadata must expose hydrated children");
+    }
+
+    #[test]
+    fn app_state_outline_hydrates_the_active_deferred_page() {
+        let (mut engine, _, instance) = deferred_page_engine();
+        let state = engine.call("designos_get_app_state", json!({"sections": ["outline"]})).unwrap();
+        let outline = state["markdown"].as_str().unwrap().to_string();
+        assert!(engine.doc.get(instance).unwrap().children.len() == 1, "the call hydrated the page it outlines: {outline}");
+        assert!(outline.contains("Rectangle"), "the outline lists the instance's hydrated child: {outline}");
+    }
+
+    #[test]
+    fn app_state_outline_hydrates_the_page_of_an_explicit_target() {
+        let (mut engine, _, instance) = deferred_page_engine();
+        let other = engine.doc.add_page("Other");
+        engine.active_page_id = Some(other);
+        let state = engine.call("designos_get_app_state", json!({"sections": ["outline"], "target_node_ids": [instance.0]})).unwrap();
+        let outline = state["markdown"].as_str().unwrap().to_string();
+        assert!(outline.contains("Rectangle"), "the outline lists the target's hydrated child: {outline}");
+    }
 
     #[test]
     fn variable_inspection_and_codegen_resolve_inherited_cross_collection_aliases() {
@@ -2118,18 +3241,538 @@ mod tests {
         assert!(svg["code"].as_str().unwrap().contains("width=\"240\""));
         assert_eq!(e.doc.to_json().unwrap(), before);
     }
+
+    #[test]
+    fn apply_spec_and_update_node_bind_effect_glass_and_gradient_stop_variables() {
+        use designos_doc::{
+            Color, Effect, GlassEffect, GradientStop, Paint, PaintKind, Variable, VariableCollection, VariableKind, VariableMode, VariableValue, Vec2,
+        };
+        let mut e = Engine::default();
+        let page = e.doc.pages[0];
+
+        // Insert variable collection "Theme"
+        e.doc.variable_collections.insert(
+            "c_theme".into(),
+            VariableCollection {
+                id: "c_theme".into(),
+                name: "Theme".into(),
+                modes: vec![VariableMode { id: "m_default".into(), name: "Default".into() }],
+                default_mode: "m_default".into(),
+                variables: vec![],
+                key: None,
+                source_library_key: None,
+                extensions: Default::default(),
+            },
+        );
+
+        // Variables: Frost, Depth, Angle, StopColor
+        for (vid, vname, kind, scopes, val) in [
+            ("v_frost", "Frost", VariableKind::Number, vec!["EFFECT_FLOAT"], VariableValue::Number(16.0)),
+            ("v_depth", "Depth", VariableKind::Number, vec!["EFFECT_FLOAT"], VariableValue::Number(6.0)),
+            ("v_angle", "Angle", VariableKind::Number, vec!["EFFECT_FLOAT"], VariableValue::Number(45.0)),
+            ("v_color", "StopColor", VariableKind::Color, vec!["ALL_FILLS"], VariableValue::Color(Color::rgb(0x12, 0x34, 0x56))),
+        ] {
+            e.doc.variables.insert(
+                vid.into(),
+                Variable {
+                    id: vid.into(),
+                    name: vname.into(),
+                    collection: "c_theme".into(),
+                    kind,
+                    values: [("m_default".into(), val)].into_iter().collect(),
+                    description: String::new(),
+                    scopes: scopes.into_iter().map(String::from).collect(),
+                    hidden_from_publishing: false,
+                    key: None,
+                    code_syntax: Default::default(),
+                    extensions: Default::default(),
+                    mode_extensions: Default::default(),
+                },
+            );
+        }
+
+        // Create a style with Glass effect
+        let glass_style_key = "style_glass".to_string();
+        e.doc.styles.insert(
+            glass_style_key.clone(),
+            designos_doc::Style::Effect(vec![Effect::Glass(GlassEffect {
+                frost: 4.0,
+                depth: 1.0,
+                light_angle: 0.0,
+                light_intensity: 0.0,
+                refraction: 0.0,
+                dispersion: 0.0,
+                splay: 0.0,
+                bevel: 0.0,
+                visible: true,
+            })]),
+        );
+        e.doc.style_meta.insert(
+            glass_style_key.clone(),
+            designos_doc::StyleMeta { name: "GlassStyle".into(), property: designos_doc::StyleProperty::Effect, ..Default::default() },
+        );
+
+        // 1. apply_spec with bindings
+        let spec_res = e
+            .call(
+                "designos_apply_spec",
+                json!({
+                    "parent_id": page.0,
+                    "spec": {
+                        "kind": "rectangle",
+                        "name": "GlassNode",
+                        "width": 100.0,
+                        "height": 100.0,
+                        "effect_style": "style:GlassStyle",
+                        "bindings": {
+                            "effects/0/frost": "var:Theme/Frost",
+                            "effects/0/depth": "var:Theme/Depth"
+                        }
+                    }
+                }),
+            )
+            .unwrap();
+
+        let node_id = spec_res["root_node_id"].as_u64().unwrap();
+        let node = e.doc.get(NodeId(node_id)).unwrap();
+        assert_eq!(node.variables.bindings.get("effects/0/frost"), Some(&"v_frost".to_string()));
+        assert_eq!(node.variables.bindings.get("effects/0/depth"), Some(&"v_depth".to_string()));
+        let resolved = designos_doc::resolve_node(&e.doc, node);
+        let Effect::Glass(ref g) = resolved.effects[0] else { panic!("expected Glass") };
+        assert_eq!(g.frost, 16.0);
+        assert_eq!(g.depth, 6.0);
+
+        // Add a gradient fill to the node directly so we can test update_node with bindings
+        e.doc.get_mut(NodeId(node_id)).unwrap().fills = vec![Paint {
+            kind: PaintKind::LinearGradient {
+                handles: [Vec2::new(0.0, 0.5), Vec2::new(1.0, 0.5), Vec2::new(0.0, 1.0)],
+                stops: vec![GradientStop { pos: 0.0, color: Color::WHITE }, GradientStop { pos: 1.0, color: Color::BLACK }],
+            },
+            opacity: 1.0,
+            visible: true,
+            blend: designos_doc::BlendMode::Normal,
+        }];
+
+        // 2. update_node with bindings
+        e.call(
+            "designos_update_node",
+            json!({
+                "node_id": node_id,
+                "bindings": {
+                    "effects/0/lightAngle": "var:Theme/Angle",
+                    "fills/0/stops/0": "var:Theme/StopColor",
+                    "effects/0/frost": null
+                }
+            }),
+        )
+        .unwrap();
+
+        let node = e.doc.get(NodeId(node_id)).unwrap();
+        assert_eq!(node.variables.bindings.get("effects/0/lightAngle"), Some(&"v_angle".to_string()));
+        assert_eq!(node.variables.bindings.get("fills/0/stops/0"), Some(&"v_color".to_string()));
+        assert!(!node.variables.bindings.contains_key("effects/0/frost"));
+
+        let resolved = designos_doc::resolve_node(&e.doc, node);
+        let Effect::Glass(ref g) = resolved.effects[0] else { panic!("expected Glass") };
+        assert_eq!(g.light_angle, 45.0);
+        let PaintKind::LinearGradient { stops: ref st, .. } = resolved.fills[0].kind else { panic!("expected LinearGradient") };
+        assert_eq!(st[0].color, Color::rgb(0x12, 0x34, 0x56));
+    }
+    #[test]
+    fn get_variables_reports_the_parent_and_overrides_of_an_extended_collection() {
+        use designos_doc::{Color, VariableKind, VariableStore, VariableValue};
+        let mut e = Engine::default();
+        let mut store = VariableStore::default();
+        let theme = store.add_collection("Theme");
+        let light = store.collections[&theme].default_mode.clone();
+        let dark = store.add_mode(&theme, "Dark").unwrap();
+        let bg = store.add_variable(&theme, "bg", VariableKind::Color).unwrap();
+        let text = store.add_variable(&theme, "text", VariableKind::Color).unwrap();
+        for (var, mode, c) in [(&bg, &light, Color::WHITE), (&bg, &dark, Color::BLACK), (&text, &light, Color::BLACK), (&text, &dark, Color::WHITE)] {
+            assert!(store.set_value(var, mode, VariableValue::Color(c)));
+        }
+        let brand = store.extend_collection(&theme, "Brand").unwrap();
+        let brand_dark = store.collections[&brand].modes[1].id.clone();
+        assert!(store.set_override(&brand, &bg, &brand_dark, VariableValue::Color(Color::rgb(255, 0, 0))));
+        e.doc.variables = store.variables.clone();
+        e.doc.variable_collections = store.collections.clone();
+
+        let listed = e.call("designos_get_variables", json!({})).unwrap();
+        let ext = &listed["collections"][&brand]["extension"];
+        assert_eq!(ext["parent_collection_id"], json!(theme), "{listed}");
+        assert_eq!(ext["inherited_variable_ids"], json!([bg, text]));
+        assert_eq!(ext["mode_map"][&brand_dark], json!(dark));
+        let overrides = ext["overrides"].as_array().unwrap();
+        assert_eq!(overrides.len(), 1, "{ext}");
+        assert_eq!(overrides[0]["variable_id"], json!(bg));
+        assert_eq!(overrides[0]["mode_id"], json!(brand_dark));
+        assert_eq!(overrides[0]["value"], json!({"Color": Color::rgb(255, 0, 0)}));
+        assert_eq!(overrides[0]["parent_value"], json!({"Color": Color::BLACK}));
+        assert_eq!(listed["collections"][&theme]["extendable"], json!(true));
+        for id in [&theme, &brand] {
+            let raw = listed["collections"][id].get("extensions").and_then(|x| x.as_object());
+            assert!(raw.is_none_or(|x| x.keys().all(|k| !k.starts_with("org.designos."))), "the internal storage blob is not part of the reply: {raw:?}");
+        }
+        assert!(listed["collections"][&theme].get("extension").is_none(), "a plain collection has no extension block");
+    }
+    fn extended_brand(e: &mut Engine) -> (String, String, String, String, String) {
+        use designos_doc::{Color, VariableKind, VariableStore, VariableValue};
+        let mut store = VariableStore::default();
+        let theme = store.add_collection("Theme");
+        let light = store.collections[&theme].default_mode.clone();
+        store.add_mode(&theme, "Dark").unwrap();
+        let bg = store.add_variable(&theme, "bg", VariableKind::Color).unwrap();
+        assert!(store.set_value(&bg, &light, VariableValue::Color(Color::WHITE)));
+        let brand = store.extend_collection(&theme, "Brand").unwrap();
+        let brand_light = store.collections[&brand].modes[0].id.clone();
+        e.doc.variables = store.variables.clone();
+        e.doc.variable_collections = store.collections.clone();
+        (theme, light, bg, brand, brand_light)
+    }
+
+    fn subscribed_library_variable() -> (Engine, String, String) {
+        use designos_doc::{VariableKind, VariableStore};
+        let mut engine = Engine::default();
+        let mut store = VariableStore::default();
+        let collection = store.add_collection("Library");
+        let mode = store.collections[&collection].default_mode.clone();
+        let variable = store.add_variable(&collection, "token", VariableKind::Number).unwrap();
+        assert!(store.set_value(&variable, &mode, designos_doc::VariableValue::Number(8.0)));
+        store.collections.get_mut(&collection).unwrap().source_library_key = Some("library-key".into());
+        engine.doc.variables = store.variables;
+        engine.doc.variable_collections = store.collections;
+        (engine, collection, variable)
+    }
+
+    #[test]
+    fn set_variables_refuses_every_write_to_subscribed_library_data_with_a_specific_error() {
+        for index in 0..5 {
+            let (mut engine, collection, variable) = subscribed_library_variable();
+            let before = (engine.doc.variables.clone(), engine.doc.variable_collections.clone());
+            let op = match index {
+                0 => json!({"upsert_variables": [{"id": variable, "name": "renamed"}]}),
+                1 => json!({"delete_variables": [variable]}),
+                2 => json!({"upsert_collections": [{"id": collection, "name": "renamed"}]}),
+                3 => json!({"upsert_variables": [{"id": "new", "collection": collection, "kind": "number", "values": {"light": 3}}]}),
+                _ => json!({"upsert_collections": [{"id": "new-library", "source_library_key": "library-key"}]}),
+            };
+            let error = set_variables(&mut engine, op).expect_err("library write must be refused");
+            assert_eq!(error.code, ErrorCode::BatchOpFailed, "case {index}: {error}");
+            assert_eq!(error.cause.as_deref().map(|cause| cause.message.as_str()), Some("library variables are read-only"), "case {index}: {error}");
+            assert_eq!((engine.doc.variables, engine.doc.variable_collections), before, "case {index} must be atomic");
+        }
+    }
+
+    #[test]
+    fn set_variables_still_edits_a_local_collection_next_to_a_subscribed_library() {
+        use designos_doc::{VariableKind, VariableStore};
+        let (mut engine, library_collection, library_variable) = subscribed_library_variable();
+        let mut store = VariableStore { variables: engine.doc.variables.clone(), collections: engine.doc.variable_collections.clone() };
+        let local_collection = store.add_collection("Local");
+        let local_variable = store.add_variable(&local_collection, "spacing", VariableKind::Number).unwrap();
+        engine.doc.variables = store.variables;
+        engine.doc.variable_collections = store.collections;
+
+        let reply = set_variables(&mut engine, json!({"upsert_variables": [{"id": local_variable, "name": "gap"}]}));
+
+        assert!(reply.is_ok(), "an ordinary collection stays writable: {reply:?}");
+        assert_eq!(engine.doc.variables[&local_variable].name, "gap");
+        assert_eq!(engine.doc.variables[&library_variable].name, "token", "the library variable is untouched");
+        assert_eq!(engine.doc.variable_collections[&library_collection].name, "Library");
+    }
+
+    #[test]
+    fn set_variables_in_an_extension_mode_writes_an_override_never_the_parent() {
+        use designos_doc::{Color, VariableStore, VariableValue};
+        let mut e = Engine::default();
+        let (_, _, bg, brand, brand_light) = extended_brand(&mut e);
+        e.call(
+            "designos_apply_batch",
+            json!({"ops": [{"op": "set_variables", "upsert_variables": [{"id": bg, "values": { brand_light.clone(): "#00FF00" }}]}]}),
+        )
+        .unwrap();
+        assert!(!e.doc.variables[&bg].values.contains_key(&brand_light), "the parent variable gains no value for an extension mode");
+        assert_eq!(e.doc.extended_value(&brand, &bg, &brand_light), Some(VariableValue::Color(Color::rgb(0, 255, 0))));
+        assert!(VariableStore::from_doc(&e.doc).is_overridden(&brand, &bg, &brand_light));
+        let refused = e.call(
+            "designos_apply_batch",
+            json!({"ops": [{"op": "set_variables", "upsert_variables": [{"id": "not-inherited", "kind": "color", "collection": brand, "values": { brand_light: "#FF0000" }}]}]}),
+        );
+        assert!(refused.is_err(), "an override of a variable the extension does not inherit is refused, not dropped");
+    }
+
+    #[test]
+    fn set_variables_cannot_replace_the_modes_of_an_extension_and_deleting_a_variable_drops_its_overrides() {
+        use designos_doc::{VariableStore, VariableValue};
+        let mut e = Engine::default();
+        let (_, _, bg, brand, brand_light) = extended_brand(&mut e);
+        let refused = e.call(
+            "designos_apply_batch",
+            json!({"ops": [{"op": "set_variables", "upsert_collections": [{"id": brand, "modes": [{"id": "only", "name": "Only"}], "default_mode": "only"}]}]}),
+        );
+        assert!(refused.is_err(), "the modes of an extension follow its parent");
+        let mut store = VariableStore::from_doc(&e.doc);
+        assert!(store.set_value(&bg, &brand_light, VariableValue::Color(designos_doc::Color::BLACK)));
+        e.doc.variables = store.variables;
+        e.doc.variable_collections = store.collections;
+        e.call("designos_apply_batch", json!({"ops": [{"op": "set_variables", "delete_variables": [bg.clone()]}]})).unwrap();
+        assert!(e.doc.variable_collections[&brand].extension().unwrap().overrides.is_empty(), "no override of a deleted variable is left behind");
+    }
+
+    fn set_variables(e: &mut Engine, op: serde_json::Value) -> Result<serde_json::Value, ToolError> {
+        let mut op = op;
+        op["op"] = json!("set_variables");
+        e.call("designos_apply_batch", json!({"ops": [op]}))
+    }
+
+    #[test]
+    fn set_variables_cannot_create_move_or_list_variables_in_an_extension() {
+        let mut e = Engine::default();
+        let (_, _, bg, brand, _) = extended_brand(&mut e);
+        let before = (e.doc.variables.clone(), e.doc.variable_collections.clone());
+        assert!(
+            set_variables(&mut e, json!({"upsert_variables": [{"id": "stray", "kind": "color", "collection": brand}]})).is_err(),
+            "a new variable inside an extension"
+        );
+        assert!(set_variables(&mut e, json!({"upsert_collections": [{"id": brand, "variables": [bg]}]})).is_err(), "a variable list on an extension");
+        assert!(set_variables(&mut e, json!({"upsert_variables": [{"id": bg, "collection": brand}]})).is_err(), "a parent variable moved into the extension");
+        assert_eq!((e.doc.variables.clone(), e.doc.variable_collections.clone()), before, "a refused op changes nothing");
+    }
+
+    #[test]
+    fn set_variables_refuses_a_value_for_a_variable_the_extension_does_not_extend_and_nothing_flips_over_fig() {
+        use designos_doc::{VariableKind, VariableStore, VariableValue};
+        let mut e = Engine::default();
+        let (_, _, _, brand, brand_light) = extended_brand(&mut e);
+        let mut store = VariableStore::from_doc(&e.doc);
+        let spacing = store.add_collection("Spacing");
+        let sm = store.collections[&spacing].default_mode.clone();
+        let gap = store.add_variable(&spacing, "gap", VariableKind::Number).unwrap();
+        assert!(store.set_value(&gap, &sm, VariableValue::Number(8.0)));
+        e.doc.variables = store.variables;
+        e.doc.variable_collections = store.collections;
+        assert!(
+            set_variables(&mut e, json!({"upsert_variables": [{"id": gap, "values": { brand_light.clone(): 4 }}]})).is_err(),
+            "an error, not a stored value"
+        );
+        assert_eq!(e.doc.variables[&gap].values.len(), 1);
+        let back = designos_fig::import_fig(&designos_fig::export_fig(&e.doc).unwrap()).unwrap();
+        let b = back.variable_collections.values().find(|c| c.name == "Brand").unwrap();
+        assert!(b.extension().unwrap().overrides.is_empty(), "no override of gap appears after a .fig round trip");
+        let _ = brand;
+    }
+
+    #[test]
+    fn set_variables_refuses_aliases_that_would_leave_a_variable_without_a_value_in_either_order() {
+        use designos_doc::{VariableKind, VariableStore, VariableValue};
+        for reversed in [false, true] {
+            let mut e = Engine::default();
+            let (theme, light, bg, _, brand_light) = extended_brand(&mut e);
+            let mut store = VariableStore::from_doc(&e.doc);
+            let fg = store.add_variable(&theme, "fg", VariableKind::Color).unwrap();
+            assert!(store.set_value(&fg, &light, VariableValue::Color(designos_doc::Color::BLACK)));
+            e.doc.variables = store.variables;
+            e.doc.variable_collections = store.collections;
+            let ((v1, m1, t1), (v2, m2, t2)) =
+                if reversed { ((&bg, &light, &fg), (&fg, &brand_light, &bg)) } else { ((&fg, &brand_light, &bg), (&bg, &light, &fg)) };
+            set_variables(&mut e, json!({"upsert_variables": [{"id": v1, "values": { m1.clone(): {"alias": t1} }}]})).unwrap();
+            let second = set_variables(&mut e, json!({"upsert_variables": [{"id": v2, "values": { m2.clone(): {"alias": t2} }}]}));
+            assert!(second.is_err(), "the closing alias is refused (reversed: {reversed})");
+            let s = VariableStore::from_doc(&e.doc);
+            assert!(s.resolve(&bg, &brand_light).is_some() && s.resolve(&fg, &brand_light).is_some());
+        }
+    }
+
+    #[test]
+    fn a_null_value_in_an_extension_mode_resets_the_override() {
+        use designos_doc::VariableStore;
+        let mut e = Engine::default();
+        let (_, _, bg, brand, brand_light) = extended_brand(&mut e);
+        set_variables(&mut e, json!({"upsert_variables": [{"id": bg, "values": { brand_light.clone(): "#00FF00" }}]})).unwrap();
+        assert!(VariableStore::from_doc(&e.doc).is_overridden(&brand, &bg, &brand_light));
+        set_variables(&mut e, json!({"upsert_variables": [{"id": bg, "values": { brand_light.clone(): null }}]})).unwrap();
+        assert!(!VariableStore::from_doc(&e.doc).is_overridden(&brand, &bg, &brand_light), "null reset it");
+        assert!(
+            set_variables(&mut e, json!({"upsert_variables": [{"id": bg, "values": { "no-such-mode": null }}]})).is_err(),
+            "null outside an extension mode is an error"
+        );
+    }
+
+    #[test]
+    fn replacing_the_parents_modes_through_mcp_unmaps_the_extension() {
+        let mut e = Engine::default();
+        let (theme, light, _, brand, _) = extended_brand(&mut e);
+        let dark = e.doc.variable_collections[&theme].modes[1].id.clone();
+        set_variables(&mut e, json!({"upsert_collections": [{"id": theme, "modes": [{"id": light, "name": "Light"}]}]})).unwrap();
+        let ext = e.doc.variable_collections[&brand].extension().unwrap();
+        assert!(ext.mode_map.values().all(|m| m != &dark), "no extension maps to a mode the parent no longer has: {:?}", ext.mode_map);
+    }
+
+    fn white_json() -> serde_json::Value {
+        json!({"r": 1.0, "g": 1.0, "b": 1.0, "a": 1.0})
+    }
+
+    fn imported_extension_with_a_local_variable() -> Engine {
+        let w = white_json();
+        let p = json!({"meta": {
+            "variableCollections": {
+                "C:1": {"id": "C:1", "name": "Theme", "defaultModeId": "L", "modes": [{"modeId": "L", "name": "Light"}], "variableIds": ["V:a"]},
+                "C:2": {"id": "C:2", "name": "Brand", "isExtension": true, "parentVariableCollectionId": "C:1", "modes": [{"modeId": "BL", "name": "Light", "parentModeId": "L"}], "variableIds": ["V:a", "V:own"]},
+                "C:3": {"id": "C:3", "name": "Spacing", "defaultModeId": "S", "modes": [{"modeId": "S", "name": "Default"}], "variableIds": ["V:gap"]}
+            },
+            "variables": {
+                "V:a": {"id": "V:a", "name": "a", "resolvedType": "COLOR", "variableCollectionId": "C:1", "valuesByMode": {"L": w.clone()}},
+                "V:own": {"id": "V:own", "name": "own", "resolvedType": "COLOR", "variableCollectionId": "C:2", "valuesByMode": {"BL": w}},
+                "V:gap": {"id": "V:gap", "name": "gap", "resolvedType": "FLOAT", "variableCollectionId": "C:3", "valuesByMode": {"S": 8}}
+            }
+        }});
+        let mut e = Engine::default();
+        designos_fig::import_variables_value(&mut e.doc, &p);
+        e
+    }
+
+    #[test]
+    fn an_imported_extension_local_variable_does_not_lock_writes_to_other_variables_and_stays_listed() {
+        let mut e = imported_extension_with_a_local_variable();
+        let listed = e.call("designos_get_variables", json!({})).unwrap();
+        assert!(listed["variables"].get("V:own").is_some(), "an imported extension-local variable is kept and listed");
+        let r = set_variables(&mut e, json!({"upsert_variables": [{"id": "V:gap", "values": {"S": 12}}]}));
+        assert!(r.is_ok(), "an edit that breaks nothing new is accepted: {r:?}");
+        assert_eq!(e.doc.variables["V:gap"].values["S"], designos_doc::VariableValue::Number(12.0));
+        let adds = set_variables(&mut e, json!({"upsert_variables": [{"id": "V:new", "kind": "color", "collection": "C:2"}]}));
+        assert!(adds.is_err(), "a write that adds a new violation is still refused");
+    }
+
+    #[test]
+    fn adding_another_imported_extension_local_variable_is_refused() {
+        let mut e = imported_extension_with_a_local_variable();
+        let before = e.doc.variable_collections["C:2"].variables.clone();
+        let mut variables = before.clone();
+        variables.push("V:another".into());
+        let result = set_variables(&mut e, json!({"upsert_collections": [{"id": "C:2", "variables": variables}]}));
+        assert!(result.is_err(), "adding a second extension-owned variable adds a new violation: {result:?}");
+        assert_eq!(e.doc.variable_collections["C:2"].variables, before, "refusal leaves the document unchanged");
+    }
+
+    #[test]
+    fn a_stray_extension_mode_key_on_one_variable_does_not_lock_writes_to_another() {
+        use designos_doc::{VariableKind, VariableStore, VariableValue};
+        let mut e = Engine::default();
+        let mut s = VariableStore::default();
+        let theme = s.add_collection("Theme");
+        let brand = s.extend_collection(&theme, "Brand").unwrap();
+        let bl = s.collections[&brand].modes[0].id.clone();
+        let sp = s.add_collection("Spacing");
+        let sm = s.collections[&sp].default_mode.clone();
+        let gap = s.add_variable(&sp, "gap", VariableKind::Number).unwrap();
+        let pad = s.add_variable(&sp, "pad", VariableKind::Number).unwrap();
+        s.variables.get_mut(&gap).unwrap().values.insert(bl, VariableValue::Number(4.0));
+        e.doc.variables = s.variables;
+        e.doc.variable_collections = s.collections;
+        let r = set_variables(&mut e, json!({"upsert_variables": [{"id": pad, "values": { sm: 12 }}]}));
+        assert!(r.is_ok(), "{r:?}");
+    }
+
+    #[test]
+    fn an_alias_to_a_variable_created_later_in_the_same_op_is_accepted_and_a_cycle_inside_one_op_is_not() {
+        use designos_doc::{Color, VariableKind, VariableStore, VariableValue};
+        let mut e = Engine::default();
+        let mut s = VariableStore::default();
+        let theme = s.add_collection("Theme");
+        let light = s.collections[&theme].default_mode.clone();
+        let fg = s.add_variable(&theme, "fg", VariableKind::Color).unwrap();
+        assert!(s.set_value(&fg, &light, VariableValue::Color(Color::BLACK)));
+        e.doc.variables = s.variables;
+        e.doc.variable_collections = s.collections;
+        let ok = set_variables(
+            &mut e,
+            json!({"upsert_variables": [
+                {"id": fg, "values": { light.clone(): {"alias": "prim"} }},
+                {"id": "prim", "kind": "color", "collection": theme, "values": { light.clone(): "#123456" }}
+            ]}),
+        );
+        assert!(ok.is_ok(), "a valid batch does not depend on list order: {ok:?}");
+        let cycle = set_variables(
+            &mut e,
+            json!({"upsert_variables": [
+                {"id": "prim", "values": { light.clone(): {"alias": "fg"} }}
+            ]}),
+        );
+        assert!(cycle.is_err(), "fg -> prim -> fg is refused");
+    }
+
+    #[test]
+    fn variable_listing_leaves_out_soft_deleted_variables_but_a_binding_to_one_still_resolves() {
+        use designos_doc::{Variable, VariableCollection, VariableKind, VariableMode, VariableValue};
+        let mut e = Engine::default();
+        let id = create(&mut e, "rectangle", "Box");
+        e.doc.variable_collections.insert(
+            "size".into(),
+            VariableCollection {
+                id: "size".into(),
+                name: "size".into(),
+                modes: vec![VariableMode { id: "light".into(), name: "Light".into() }],
+                default_mode: "light".into(),
+                variables: vec!["live".into()],
+                key: None,
+                source_library_key: None,
+                extensions: Default::default(),
+            },
+        );
+        for (vid, width, deleted) in [("live", 10.0, false), ("gone", 240.0, true)] {
+            let mut v = Variable {
+                id: vid.into(),
+                name: vid.into(),
+                collection: "size".into(),
+                kind: VariableKind::Number,
+                values: [("light".to_string(), VariableValue::Number(width))].into_iter().collect(),
+                description: String::new(),
+                scopes: vec![],
+                hidden_from_publishing: false,
+                key: None,
+                code_syntax: Default::default(),
+                extensions: Default::default(),
+                mode_extensions: Default::default(),
+            };
+            if deleted {
+                v.extensions.insert(designos_doc::SOFT_DELETED_EXTENSION_KEY.into(), json!(true));
+            }
+            e.doc.variables.insert(vid.into(), v);
+        }
+        e.doc.get_mut(NodeId(id)).unwrap().variables.bindings.insert("width".into(), "gone".into());
+
+        assert_eq!(e.call("designos_get_document", json!({})).unwrap()["variable_count"], json!(1), "the document summary counts live variables");
+        let listed = e.call("designos_get_variables", json!({})).unwrap();
+        assert_eq!(listed["variables"].as_object().unwrap().keys().collect::<Vec<_>>(), ["live"], "{listed}");
+        assert_eq!(listed["collections"]["size"]["variables"], json!(["live"]));
+
+        let bound = e.call("designos_get_variables", json!({"node_id":id})).unwrap();
+        assert_eq!(bound["effective_bindings"][0]["value"], json!({"Number":240.0}), "the binding still resolves through the deleted variable");
+        assert_eq!(bound["effective_bindings"][0]["deleted_but_referenced"], json!(true));
+        assert!(bound["variables"].get("gone").is_none());
+    }
     #[test]
     fn get_document_lists_shared_effect_and_grid_styles_and_nodes_carry_their_links() {
         use designos_doc::{Color, Effect, LayoutGrid, Style, StyleMeta, StyleProperty, Vec2};
         let mut e = Engine::default();
         let id = create(&mut e, "frame", "Card");
         assert_eq!(e.call("designos_get_document", json!({})).unwrap()["styles"], json!([]), "no styles yet");
-        let shadow =
-            Effect::DropShadow { color: Color::rgba(0, 0, 0, 64), offset: Vec2::new(0.0, 4.0), radius: 8.0, spread: 0.0, visible: true, show_behind: false };
+        let shadow = Effect::DropShadow {
+            color: Color::rgba(0, 0, 0, 64),
+            offset: Vec2::new(0.0, 4.0),
+            radius: 8.0,
+            spread: 0.0,
+            visible: true,
+            show_behind: false,
+            blend: Default::default(),
+        };
         e.doc.styles.insert("Shadow/Card".into(), Style::Effect(vec![shadow]));
         e.doc.styles.insert("Layout/Cols".into(), Style::Grid(vec![LayoutGrid::columns(12, 20.0, 0.0, Color::rgba(255, 0, 0, 26))]));
         for (key, name, property) in [("Shadow/Card", "Shadow/Card", StyleProperty::Effect), ("Layout/Cols", "Layout / 12 col", StyleProperty::Grid)] {
-            e.doc.style_meta.insert(key.into(), StyleMeta { name: name.into(), key: None, description: String::new(), property, bindings: Default::default() });
+            e.doc.style_meta.insert(
+                key.into(),
+                StyleMeta { name: name.into(), key: None, description: String::new(), property, bindings: Default::default(), ..Default::default() },
+            );
         }
         e.doc.get_mut(NodeId(id)).unwrap().style_refs.insert("effect".into(), "Shadow/Card".into());
         let doc = e.call("designos_get_document", json!({})).unwrap();
@@ -2142,6 +3785,33 @@ mod tests {
         assert_eq!(by_key("Layout/Cols")["values"]["Grid"][0]["Columns"]["count"], 12);
         let node = e.call("designos_get_node", json!({"node_id":id})).unwrap();
         assert_eq!(node["node"]["style_refs"]["effect"], "Shadow/Card");
+    }
+    #[test]
+    fn get_node_names_the_text_style_properties_a_layer_overrides() {
+        let mut e = Engine::new();
+        let id = create(&mut e, "text", "Title");
+        e.doc.styles.insert("Body".into(), designos_doc::Style::Text(designos_doc::TextStyle::default()));
+        e.doc
+            .style_meta
+            .insert("Body".into(), designos_doc::StyleMeta { name: "Body".into(), property: designos_doc::StyleProperty::Text, ..Default::default() });
+        let n = e.doc.get_mut(NodeId(id)).unwrap();
+        n.style_refs.insert("text".into(), "Body".into());
+        let plain = e.call("designos_get_node", json!({"node_id":id})).unwrap();
+        assert!(plain["node"].get("text_style_overrides").is_none(), "nothing is reported without overrides");
+        let n = e.doc.get_mut(NodeId(id)).unwrap();
+        if let Some(t) = n.kind.any_text_mut() {
+            t.style.set_font_weight(700);
+            // A bold range reports too, without a stored bit.
+            t.runs.push(designos_doc::TextRun {
+                start: 0,
+                end: 1,
+                style: designos_doc::TextStyle { decoration: designos_doc::TextDecoration::Underline, ..t.style.clone() },
+            });
+        }
+        n.text_style_overrides.insert(designos_doc::OwnedField::Weight);
+        let node = e.call("designos_get_node", json!({"node_id":id})).unwrap();
+        assert_eq!(node["node"]["text_style_overrides"], json!(["Weight", "Decoration"]));
+        assert_eq!(node["node"]["style_refs"]["text"], "Body");
     }
     fn create(e: &mut Engine, kind: &str, name: &str) -> u64 {
         e.call("designos_create_node", json!({"parent_id":1,"kind":kind,"name":name})).unwrap()["node"]["id"].as_u64().unwrap()
@@ -2212,6 +3882,24 @@ mod tests {
         assert!(err.message.contains("uikit") && err.message.contains(android_id) && err.message.contains("html"), "{err}");
         assert!(e.call("designos_list_nodes", json!({"limit":501})).is_err());
         assert!(e.call("designos_get_node", json!({"node_id":"2"})).is_err());
+    }
+
+    #[test]
+    fn mcp_comments_use_the_write_time_clock() {
+        designos_doc::set_thread_mock_now_ms(Some(1_700_000_000_000));
+        let mut e = Engine::default();
+        let added = e.call("designos_add_comment", json!({"author": "A", "text": "one"})).unwrap();
+        assert_eq!(added["messages"][0]["created"], "2023-11-14T22:13:20.000Z");
+
+        designos_doc::advance_thread_mock_now_ms(2_000);
+        let replied = e.call("designos_reply_comment", json!({"thread_id": "t1", "author": "B", "text": "two"})).unwrap();
+        let messages = replied["thread"]["messages"].as_array().unwrap();
+        assert_eq!(messages[1]["created"], "2023-11-14T22:13:22.000Z");
+        assert!(messages[1]["created"].as_str().unwrap() > messages[0]["created"].as_str().unwrap());
+
+        let listed = e.call("designos_list_comments", json!({})).unwrap();
+        assert_eq!(listed["comments"][0]["messages"][0]["created"], "2023-11-14T22:13:20.000Z");
+        designos_doc::set_thread_mock_now_ms(None);
     }
 
     #[test]
@@ -2398,6 +4086,55 @@ mod tests {
     }
 
     #[test]
+    fn apply_spec_on_a_linked_text_records_a_weight_override_and_detaches_for_a_size() {
+        let mut e = Engine::default();
+        let page = e.resolve_default_page().unwrap();
+        e.doc.styles.insert("Body".into(), designos_doc::Style::Text(designos_doc::TextStyle { font_size: 16.0, ..Default::default() }));
+        e.doc
+            .style_meta
+            .insert("Body".into(), designos_doc::StyleMeta { name: "Body".into(), property: designos_doc::StyleProperty::Text, ..Default::default() });
+        let bold = e
+            .call("designos_apply_spec", json!({"parent_id": page.0, "spec": {"kind": "text", "text": "Hi", "text_style": "Body", "font_weight": 700}}))
+            .unwrap();
+        assert_eq!(bold["node"]["style_refs"]["text"], "Body", "a weight keeps the style");
+        assert_eq!(bold["warnings"].as_array().map(Vec::len), Some(0));
+        let id = bold["root_node_id"].as_u64().unwrap();
+        let read = e.call("designos_get_node", json!({"node_id": id})).unwrap();
+        assert_eq!(read["node"]["text_style_overrides"], json!(["Weight"]));
+
+        let big =
+            e.call("designos_apply_spec", json!({"parent_id": page.0, "spec": {"kind": "text", "text": "Hi", "text_style": "Body", "font_size": 24}})).unwrap();
+        assert!(big["node"]["style_refs"].get("text").is_none(), "a size detaches the style");
+        assert!(big["warnings"].as_array().unwrap().iter().any(|w| w["code"] == "STYLE_DETACHED_BY_SPEC"));
+        assert!(big["node"].get("text_style_overrides").is_none());
+    }
+
+    #[test]
+    fn every_reply_that_carries_a_node_names_its_text_style_overrides() {
+        let mut e = Engine::default();
+        let page = e.resolve_default_page().unwrap();
+        e.doc.styles.insert("Body".into(), designos_doc::Style::Text(designos_doc::TextStyle { font_size: 16.0, ..Default::default() }));
+        e.doc
+            .style_meta
+            .insert("Body".into(), designos_doc::StyleMeta { name: "Body".into(), property: designos_doc::StyleProperty::Text, ..Default::default() });
+        let applied = e
+            .call("designos_apply_spec", json!({"parent_id": page.0, "spec": {"kind": "text", "text": "Hi", "text_style": "Body", "font_weight": 700}}))
+            .unwrap();
+        let id = applied["root_node_id"].as_u64().unwrap();
+        let names = json!(["Weight"]);
+        assert_eq!(applied["node"]["text_style_overrides"], names, "apply_spec");
+        let got = e.call("designos_get_node", json!({"node_id": id})).unwrap();
+        assert_eq!(got["node"]["text_style_overrides"], names, "get_node");
+        let updated = e.call("designos_update_node", json!({"node_id": id, "name": "Renamed"})).unwrap();
+        assert_eq!(updated["node"]["text_style_overrides"], names, "update_node");
+        // A layer without overrides has no field in any reply, never a number.
+        let plain = e.call("designos_create_node", json!({"parent_id": page.0, "kind": "text", "name": "Plain"})).unwrap();
+        assert!(plain["node"].get("text_style_overrides").is_none(), "create_node");
+        let unstyled = e.call("designos_apply_spec", json!({"parent_id": page.0, "spec": {"kind": "text", "text": "Hi"}})).unwrap();
+        assert!(unstyled["node"].get("text_style_overrides").is_none(), "apply_spec without a style");
+    }
+
+    #[test]
     fn apply_spec_commits_variables_with_the_nodes_and_reports_them() {
         let mut e = Engine::default();
         let page = e.resolve_default_page().unwrap();
@@ -2466,6 +4203,67 @@ mod tests {
         assert!(e.doc.variable_collections.is_empty());
         assert!(e.doc.variables.is_empty());
         assert_eq!(e.history.undo_depth(), depth);
+    }
+
+    #[test]
+    fn binding_by_name_through_apply_spec_and_apply_batch_matches_live_variables_only() {
+        use designos_doc::{Variable, VariableCollection, VariableKind, VariableMode, VariableValue};
+        let mut e = Engine::default();
+        let page = e.resolve_default_page().unwrap();
+        e.doc.variable_collections.insert(
+            "c_t".into(),
+            VariableCollection {
+                id: "c_t".into(),
+                name: "Tokens".into(),
+                modes: vec![VariableMode { id: "m".into(), name: "Default".into() }],
+                default_mode: "m".into(),
+                variables: vec!["b_live".into()],
+                key: None,
+                source_library_key: None,
+                extensions: Default::default(),
+            },
+        );
+        // The deleted twin sorts first, so a lookup that did not skip it would be ambiguous.
+        for (id, name, deleted) in [("a_gone", "Text/Muted", true), ("b_live", "Text/Muted", false), ("c_slate_gone", "Text/Slate", true)] {
+            let mut v = Variable {
+                id: id.into(),
+                name: name.into(),
+                collection: "c_t".into(),
+                kind: VariableKind::Color,
+                values: [("m".to_string(), VariableValue::Color(designos_doc::Color::rgb(0x66, 0x66, 0x66)))].into_iter().collect(),
+                description: String::new(),
+                scopes: vec![],
+                hidden_from_publishing: false,
+                key: None,
+                code_syntax: Default::default(),
+                extensions: Default::default(),
+                mode_extensions: Default::default(),
+            };
+            if deleted {
+                v.extensions.insert(designos_doc::SOFT_DELETED_EXTENSION_KEY.into(), json!(true));
+            }
+            e.doc.variables.insert(id.into(), v);
+        }
+        let fill_of = |e: &Engine, root: &Value| e.doc.get(NodeId(root["root_node_id"].as_u64().unwrap())).unwrap().variables.bindings.get("fills/0").cloned();
+
+        let by_name = e.call("designos_apply_spec", json!({"parent_id": page.0, "spec": {"kind": "rectangle", "fill": "var:Tokens/Text/Muted"}})).unwrap();
+        assert_eq!(fill_of(&e, &by_name).as_deref(), Some("b_live"));
+
+        let depth = e.history.undo_depth();
+        let err = e.call("designos_apply_spec", json!({"parent_id": page.0, "spec": {"kind": "rectangle", "fill": "var:Tokens/Text/Slate"}})).unwrap_err();
+        assert_eq!(err.code, ErrorCode::UnknownVariable, "{err}");
+        assert!(err.valid_options.iter().all(|o| !o.contains("Slate")), "{:?}", err.valid_options);
+        let batch_err = e
+            .call("designos_apply_batch", json!({"ops": [{"op": "apply_spec", "parent_id": page.0, "spec": {"kind": "rectangle", "fill": "var:Text/Slate"}}]}))
+            .unwrap_err();
+        // The batch names the failed op and keeps the same unknown-name message the single call gives.
+        assert_eq!(batch_err.code, ErrorCode::BatchOpFailed, "{batch_err}");
+        assert!(batch_err.message.contains("Unknown variable 'Text/Slate'."), "{batch_err}");
+        assert_eq!(e.history.undo_depth(), depth, "a refused name changes nothing");
+
+        // An id still binds the deleted variable.
+        let by_id = e.call("designos_apply_spec", json!({"parent_id": page.0, "spec": {"kind": "rectangle", "fill": "var:id:c_slate_gone"}})).unwrap();
+        assert_eq!(fill_of(&e, &by_id).as_deref(), Some("c_slate_gone"));
     }
 
     #[test]
@@ -2618,6 +4416,62 @@ mod tests {
         e.call("designos_undo", json!({})).unwrap();
         assert!(e.doc.get(root2).is_none());
         assert!(e.doc.get(root_id).is_some());
+    }
+
+    #[test]
+    fn mcp_export_spec_preserves_instance_arc_override_on_apply_round_trip() {
+        use designos_doc::{create_component, create_instance, record_override, ArcData, Command, OverrideField, Rect, Vec2};
+        use std::f32::consts::{PI, TAU};
+
+        let mut e = Engine::default();
+        let page = e.active_page_id.unwrap();
+
+        let comp_id = e.doc.alloc_id();
+        let mut comp_node = Node::frame(comp_id, Rect::new(0.0, 0.0, 48.0, 48.0));
+        comp_node.name = "ProgressRing".into();
+        let comp = e.doc.insert(page, comp_node).unwrap();
+
+        let ring_id = e.doc.alloc_id();
+        let mut ring = Node::ellipse(ring_id, Rect::new(0.0, 0.0, 48.0, 48.0));
+        ring.name = "Ring".into();
+        ring.kind = NodeKind::Ellipse(ArcData { start: 0.0, end: TAU, inner_radius: 0.75 });
+        e.doc.insert(comp, ring).unwrap();
+        create_component(&mut e.doc, comp).apply(&mut e.doc).unwrap();
+        create_instance(&mut e.doc, comp, page, Vec2::new(80.0, 0.0)).apply(&mut e.doc).unwrap();
+        let inst = *e.doc.get(page).unwrap().children.last().unwrap();
+        let inst_ring = e.doc.get(inst).unwrap().children[0];
+
+        let before = e.doc.get(inst_ring).unwrap().clone();
+        let mut own = before.clone();
+        own.kind = NodeKind::Ellipse(ArcData { start: 0.25, end: 0.25 + PI, inner_radius: 0.6 });
+        own.component.overrides.extend(record_override(&before, &own));
+        Command::Update { node: Box::new(own) }.apply(&mut e.doc).unwrap();
+
+        let exported = e.call("designos_export_spec", json!({ "node_id": inst.0 })).unwrap();
+        assert_eq!(exported["spec"]["kind"], "instance");
+        let arc_json = &exported["spec"]["overrides"][0]["arc"];
+        assert!((arc_json["start_angle"].as_f64().unwrap() - 0.25).abs() < 1e-5);
+        assert!((arc_json["sweep_angle"].as_f64().unwrap() - f64::from(PI)).abs() < 1e-5);
+        assert!((arc_json["inner_radius"].as_f64().unwrap() - 0.6).abs() < 1e-5);
+
+        let reapplied = e
+            .call(
+                "designos_apply_spec",
+                json!({
+                    "parent_id": page.0,
+                    "spec": exported["spec"]
+                }),
+            )
+            .unwrap();
+        let inst2 = NodeId(reapplied["root_node_id"].as_u64().unwrap());
+        let inst2_ring = e.doc.get(inst2).unwrap().children[0];
+        let NodeKind::Ellipse(arc2) = &e.doc.get(inst2_ring).unwrap().kind else {
+            panic!("expected ring ellipse");
+        };
+        assert!((arc2.start - 0.25).abs() < 1e-5);
+        assert!((arc2.end - (0.25 + PI)).abs() < 1e-5);
+        assert!((arc2.inner_radius - 0.6).abs() < 1e-5);
+        assert!(e.doc.get(inst2_ring).unwrap().component.overrides.contains(&OverrideField::Arc));
     }
 
     #[test]
@@ -2883,6 +4737,30 @@ mod tests {
             },
         );
 
+        // easing-variable: an easing binding whose variable names an unknown preset
+        e.doc.variables.insert(
+            "v_bad_ease".into(),
+            Variable {
+                id: "v_bad_ease".into(),
+                name: "Motion/Easing".into(),
+                collection: "c1".into(),
+                kind: VariableKind::String,
+                values: [("default".to_string(), VariableValue::String("no-such-curve".into()))].into_iter().collect(),
+                description: String::new(),
+                scopes: Vec::new(),
+                hidden_from_publishing: false,
+                key: None,
+                code_syntax: Default::default(),
+                extensions: Default::default(),
+                mode_extensions: Default::default(),
+            },
+        );
+        let ease_node = e.doc.alloc_id();
+        let mut ease_f = Node::frame(ease_node, Rect::new(300.0, 0.0, 40.0, 40.0));
+        ease_f.name = "EasingBound".into();
+        ease_f.variables.bindings.insert("easingData".into(), "v_bad_ease".into());
+        e.doc.insert(page, ease_f).unwrap();
+
         // 1. overflow-parent: non-clipping frame with overflowing child
         let ov_parent = e.doc.alloc_id();
         let mut ov_f = Node::frame(ov_parent, Rect::new(0.0, 0.0, 100.0, 100.0));
@@ -3024,6 +4902,7 @@ mod tests {
         e.doc.insert(page, btn).unwrap();
 
         bind_style_to_missing_variable(&mut e);
+        bind_property_to_missing_variable(&mut e, page);
         let res = e.call("designos_lint", json!({"preset": "strict", "limit": 500})).unwrap();
         assert!(res.get("passed").is_none(), "old two-rule `passed` field must be gone");
         let by_rule = res["by_rule"].as_object().expect("by_rule map");
@@ -3088,6 +4967,27 @@ mod tests {
     }
 
     #[test]
+    fn lint_font_fix_warns_when_detaching_a_text_style() {
+        let mut e = Engine::default();
+        let page = e.resolve_default_page().unwrap();
+        let id = e.doc.alloc_id();
+        let mut text = Node::text(id, designos_doc::Rect::new(0.0, 0.0, 100.0, 20.0), "Tiny", designos_doc::TextStyle { font_size: 9.0, ..Default::default() });
+        text.style_refs.insert("text".into(), "Body".into());
+        e.doc.insert(page, text).unwrap();
+        e.doc.styles.insert("Body".into(), designos_doc::Style::Text(designos_doc::TextStyle { font_size: 9.0, ..Default::default() }));
+        let before = e.doc.get(id).unwrap().clone();
+
+        let result = e.call("designos_lint_fix", json!({"node_id": id.0, "rules": ["tiny-text"]})).unwrap();
+        assert!(result["warnings"].as_array().is_some_and(|warnings| warnings.iter().any(|w| w["code"] == "STYLE_DETACHED_BY_LINT_FIX")), "{result}");
+        let fixed = e.doc.get(id).unwrap();
+        assert_eq!(fixed.kind.any_text().unwrap().style.font_size, 12.0);
+        assert!(!fixed.style_refs.contains_key("text"));
+        assert_eq!(fixed.kind.any_text().unwrap().content, "Tiny");
+        e.call("designos_undo", json!({})).unwrap();
+        assert_eq!(e.doc.get(id).unwrap(), &before);
+    }
+
+    #[test]
     fn mcp_lint_error_contracts_and_history_fix() {
         let mut e = Engine::default();
         let id = create(&mut e, "frame", "Frame 1");
@@ -3145,6 +5045,19 @@ mod tests {
         assert!(catalog.iter().any(|t| t["name"] == "designos_lint_fix" && t["annotations"]["readOnlyHint"] == false));
     }
 
+    /// An instance whose boolean property is bound to a variable the document does not hold.
+    fn bind_property_to_missing_variable(e: &mut Engine, page: NodeId) {
+        use designos_doc::{add_prop, create_component, create_instance, ComponentPropDef, PropKind, PropValue, Rect, Vec2};
+        let d = &mut e.doc;
+        let id = d.alloc_id();
+        let comp = d.insert(page, Node::frame(id, Rect::new(2000.0, 0.0, 40.0, 40.0))).unwrap();
+        create_component(d, comp).apply(d).unwrap();
+        add_prop(d, comp, ComponentPropDef { name: "Show".into(), kind: PropKind::Boolean, default: PropValue::Bool(true) }).apply(d).unwrap();
+        create_instance(d, comp, page, Vec2::new(2100.0, 0.0)).apply(d).unwrap();
+        let inst = *d.get(page).unwrap().children.last().unwrap();
+        d.get_mut(inst).unwrap().variables.bindings.insert(designos_doc::prop_binding_key("Show"), "var-deleted".into());
+    }
+
     fn bind_style_to_missing_variable(e: &mut Engine) {
         let mut bindings = std::collections::BTreeMap::new();
         bindings.insert("fill".to_string(), "var-deleted".to_string());
@@ -3156,6 +5069,7 @@ mod tests {
                 description: String::new(),
                 property: designos_doc::StyleProperty::Fill,
                 bindings,
+                ..Default::default()
             },
         );
     }
@@ -3490,6 +5404,30 @@ mod tests {
     }
 
     #[test]
+    fn mcp_delete_rejects_a_linked_instance_child() {
+        let mut e = Engine::default();
+        let page = e.active_page_id.unwrap();
+        let component_id = e.doc.alloc_id();
+        let mut component = Node::new(component_id, NodeKind::Component(designos_doc::FrameProps::default()));
+        component.name = "Card".into();
+        e.doc.insert(page, component).unwrap();
+        let child_id = e.doc.alloc_id();
+        e.doc.insert(component_id, Node::rectangle(child_id, Rect::new(0.0, 0.0, 80.0, 24.0))).unwrap();
+        designos_doc::create_instance(&mut e.doc, component_id, page, Vec2::new(160.0, 0.0)).apply(&mut e.doc).unwrap();
+        let instance_id = designos_doc::instances_of(&e.doc, component_id)[0];
+        let instance_child = e.doc.get(instance_id).unwrap().children[0];
+        let before = e.doc.to_json().unwrap();
+
+        let err = e.call("designos_delete_node", json!({"node_id": instance_child.0})).unwrap_err();
+
+        assert_eq!(err.code, ErrorCode::InstanceChild);
+        assert!(!err.safe_to_retry, "{err}");
+        assert!(err.message.contains("instance"), "{err}");
+        assert_eq!(e.doc.to_json().unwrap(), before);
+        assert!(!e.history.can_undo(), "a rejected delete must not create history");
+    }
+
+    #[test]
     fn recording_a_marked_insert_does_not_clone_the_document() {
         use designos_doc::live_patch::batch_doc_clones;
 
@@ -3673,5 +5611,1501 @@ mod tests {
         let replayed_main = editor_doc.get(main_comp_id).expect("imported library main component must exist in replayed document");
         assert_eq!(replayed_main.name, "Icon/Arrow");
         assert_eq!(replayed_main.parent, editor_doc.library_page);
+    }
+
+    #[test]
+    fn delete_button_label_has_equal_side_padding() {
+        let mut e = Engine::new();
+        let page = e.resolve_default_page().unwrap();
+        let res = e
+            .call(
+                "designos_apply_spec",
+                json!({
+                    "parent_id": page.0,
+                    "spec": {
+                        "kind": "frame",
+                        "name": "DeleteBtn",
+                        "height": 28.0,
+                        "width_sizing": "hug",
+                        "height_sizing": "fixed",
+                        "layout": {
+                            "direction": "row",
+                            "padding": [0.0, 12.0, 0.0, 12.0],
+                            "align": "center"
+                        },
+                        "children": [
+                            {
+                                "kind": "text",
+                                "name": "Label",
+                                "text": "Delete",
+                                "font_size": 14.0,
+                                "font_weight": 600
+                            }
+                        ]
+                    }
+                }),
+            )
+            .unwrap();
+        let btn_id = NodeId(res["root_node_id"].as_u64().unwrap());
+        let label_id = NodeId(res["name_to_id"]["DeleteBtn/Label"].as_u64().unwrap());
+        let btn = e.doc.get(btn_id).unwrap();
+        let label = e.doc.get(label_id).unwrap();
+        let NodeKind::Text(tp) = &label.kind else { panic!("expected text node") };
+        let measured = designos_render::measure_text_box(tp, None);
+        assert_eq!(label.transform.tx, 12.0, "label x must equal left padding 12.0");
+        assert!(
+            ((btn.size.x - (label.transform.tx + label.size.x)) - 12.0).abs() <= 0.5,
+            "right padding ({}) must equal left padding (12.0) within 0.5px",
+            btn.size.x - (label.transform.tx + label.size.x)
+        );
+        assert!(
+            (label.size.x - measured.x).abs() <= 0.5 && label.size.x < 46.0,
+            "label width ({}) must match measured_text_box ({}) within 0.5px and be < 46.0 (not 48.0/52.0)",
+            label.size.x,
+            measured.x
+        );
+    }
+
+    #[test]
+    fn create_node_text_without_size_hugs_its_content() {
+        let mut e = Engine::new();
+        let page = e.resolve_default_page().unwrap();
+        let res = e
+            .call(
+                "designos_create_node",
+                json!({
+                    "parent_id": page.0,
+                    "kind": "text",
+                    "name": "CancelLabel",
+                    "text": "Cancel"
+                }),
+            )
+            .unwrap();
+        let id = NodeId(res["node"]["id"].as_u64().unwrap());
+        let node = e.doc.get(id).unwrap();
+        let NodeKind::Text(tp) = &node.kind else { panic!("expected text node") };
+        assert_eq!(tp.auto_resize, designos_doc::TextAutoResize::WidthAndHeight);
+        assert!(node.size.x < 60.0, "expected 'Cancel' width < 60.0 (not 100.0), got {}", node.size.x);
+    }
+
+    #[test]
+    fn create_node_text_with_size_is_fixed() {
+        let mut e = Engine::new();
+        let page = e.resolve_default_page().unwrap();
+        let res = e
+            .call(
+                "designos_create_node",
+                json!({
+                    "parent_id": page.0,
+                    "kind": "text",
+                    "name": "CancelFixed",
+                    "text": "Cancel",
+                    "width": 100.0,
+                    "height": 24.0
+                }),
+            )
+            .unwrap();
+        let id = NodeId(res["node"]["id"].as_u64().unwrap());
+        let node = e.doc.get(id).unwrap();
+        let NodeKind::Text(tp) = &node.kind else { panic!("expected text node") };
+        assert_eq!(tp.auto_resize, designos_doc::TextAutoResize::None);
+        assert_eq!((node.size.x, node.size.y), (100.0, 24.0));
+    }
+
+    #[test]
+    fn update_node_text_change_remeasures_hug_text() {
+        let mut e = Engine::new();
+        let page = e.resolve_default_page().unwrap();
+        let res = e
+            .call(
+                "designos_apply_spec",
+                json!({
+                    "parent_id": page.0,
+                    "spec": {
+                        "kind": "frame",
+                        "name": "ActionBtn",
+                        "height": 28.0,
+                        "width_sizing": "hug",
+                        "height_sizing": "fixed",
+                        "layout": {
+                            "direction": "row",
+                            "padding": [0.0, 12.0, 0.0, 12.0],
+                            "align": "center"
+                        },
+                        "children": [
+                            {
+                                "kind": "text",
+                                "name": "Label",
+                                "text": "OK",
+                                "font_size": 14.0,
+                                "font_weight": 600
+                            }
+                        ]
+                    }
+                }),
+            )
+            .unwrap();
+        let btn_id = NodeId(res["root_node_id"].as_u64().unwrap());
+        let label_id = NodeId(res["name_to_id"]["ActionBtn/Label"].as_u64().unwrap());
+        let w_label_before = e.doc.get(label_id).unwrap().size.x;
+        let w_btn_before = e.doc.get(btn_id).unwrap().size.x;
+
+        e.call(
+            "designos_update_node",
+            json!({
+                "node_id": label_id.0,
+                "text": "Save changes"
+            }),
+        )
+        .unwrap();
+
+        let w_label_after = e.doc.get(label_id).unwrap().size.x;
+        let w_btn_after = e.doc.get(btn_id).unwrap().size.x;
+        assert!(w_label_after > w_label_before, "label width must grow from {w_label_before} to {w_label_after}");
+        assert!(w_btn_after > w_btn_before, "button width must grow from {w_btn_before} to {w_btn_after}");
+
+        e.call("designos_undo", json!({})).unwrap();
+        assert!((e.doc.get(label_id).unwrap().size.x - w_label_before).abs() <= 1e-3, "one undo must restore label width");
+        assert!((e.doc.get(btn_id).unwrap().size.x - w_btn_before).abs() <= 1e-3, "one undo must restore button width");
+    }
+
+    #[test]
+    fn instance_text_override_is_measured() {
+        let mut e = Engine::new();
+        let page = e.resolve_default_page().unwrap();
+        let comp_res = e
+            .call(
+                "designos_apply_spec",
+                json!({
+                    "parent_id": page.0,
+                    "spec": {
+                        "kind": "component",
+                        "name": "CtaButton",
+                        "height": 32.0,
+                        "width_sizing": "hug",
+                        "height_sizing": "fixed",
+                        "layout": {
+                            "direction": "row",
+                            "padding": [0.0, 12.0, 0.0, 12.0],
+                            "align": "center"
+                        },
+                        "children": [
+                            {
+                                "kind": "text",
+                                "name": "Label",
+                                "text": "OK",
+                                "font_size": 14.0,
+                                "font_weight": 600
+                            }
+                        ]
+                    }
+                }),
+            )
+            .unwrap();
+        let _comp_id = comp_res["root_node_id"].as_u64().unwrap();
+
+        let inst_res = e
+            .call(
+                "designos_apply_spec",
+                json!({
+                    "parent_id": page.0,
+                    "spec": {
+                        "kind": "instance",
+                        "name": "CheckoutInst",
+                        "component": "CtaButton",
+                        "overrides": [
+                            {
+                                "path": "Label",
+                                "text": "Continue to checkout"
+                            }
+                        ]
+                    }
+                }),
+            )
+            .unwrap();
+        let inst_label_id = NodeId(inst_res["name_to_id"]["CheckoutInst/Label"].as_u64().unwrap());
+        let label = e.doc.get(inst_label_id).unwrap();
+        let NodeKind::Text(tp) = &label.kind else { panic!("expected text node") };
+        let measured = designos_render::measure_text_box(tp, None);
+        assert!(
+            (label.size.x - measured.x).abs() <= 0.5 && label.size.x <= 145.0,
+            "instance override label width ({}) must match measured ({}) within 0.5px and be <= 145.0 (not 157.0)",
+            label.size.x,
+            measured.x
+        );
+    }
+
+    #[test]
+    fn apply_spec_is_one_undo_step_and_one_patch() {
+        let mut e = Engine::new();
+        let page = e.resolve_default_page().unwrap();
+        e.live_ops = Some(Vec::new());
+        let undo_before = e.history.undo_depth();
+
+        let res = e
+            .call(
+                "designos_apply_spec",
+                json!({
+                    "parent_id": page.0,
+                    "spec": {
+                        "kind": "frame",
+                        "name": "OnePatchBtn",
+                        "width_sizing": "hug",
+                        "height_sizing": "hug",
+                        "layout": {
+                            "direction": "row",
+                            "padding": [6.0, 12.0, 6.0, 12.0]
+                        },
+                        "children": [
+                            {
+                                "kind": "text",
+                                "name": "Label",
+                                "text": "Delete",
+                                "font_size": 14.0,
+                                "font_weight": 600
+                            }
+                        ]
+                    }
+                }),
+            )
+            .unwrap();
+        let root_id = NodeId(res["root_node_id"].as_u64().unwrap());
+        assert_eq!(e.history.undo_depth(), undo_before + 1, "apply_spec must be one undo step");
+
+        let ops = e.take_live_ops();
+        assert_eq!(ops.len(), 1, "apply_spec must record exactly one LiveOp::Insert, got {ops:?}");
+        match &ops[0] {
+            designos_doc::live_patch::LiveOp::Insert { nodes, .. } => {
+                let text_node = nodes.iter().find(|n| n.name == "Label").expect("Label node in LiveOp::Insert");
+                assert!(text_node.size.x < 46.0, "LiveOp::Insert text node must already carry measured width (< 46.0), got {}", text_node.size.x);
+            }
+            other => panic!("expected LiveOp::Insert, got {other:?}"),
+        }
+
+        e.call("designos_undo", json!({})).unwrap();
+        assert!(e.doc.get(root_id).is_none(), "one designos_undo must remove the whole subtree");
+    }
+
+    #[test]
+    fn fallback_font_is_reported() {
+        let mut e = Engine::new();
+        let page = e.resolve_default_page().unwrap();
+        let res = e
+            .call(
+                "designos_apply_spec",
+                json!({
+                    "parent_id": page.0,
+                    "spec": {
+                        "kind": "text",
+                        "name": "FallbackText",
+                        "text": "Missing face",
+                        "font_family": "NotARealFontFamily"
+                    }
+                }),
+            )
+            .unwrap();
+        let tid = res["root_node_id"].as_u64().unwrap();
+        let fb = res["measured_with_fallback"].as_array().expect("measured_with_fallback array in apply_spec reply");
+        assert!(fb.contains(&json!(tid)), "measured_with_fallback must contain text node id {tid}, got {fb:?}");
+        let warnings = res["warnings"].as_array().expect("warnings array in apply_spec reply");
+        assert!(
+            warnings.iter().any(|w| w["code"] == "TEXT_MEASURED_WITH_FALLBACK_FONT"),
+            "warnings must include TEXT_MEASURED_WITH_FALLBACK_FONT, got {warnings:?}"
+        );
+    }
+
+    fn assert_whole_hug(node: &designos_doc::Node, label: &str) {
+        let NodeKind::Text(tp) = &node.kind else { panic!("{label} is not a text node") };
+        let measured = designos_render::measure_text_box(tp, None);
+        assert_eq!(node.size.x.fract(), 0.0, "{label} width {} is not a whole pixel", node.size.x);
+        assert_eq!(node.size.y.fract(), 0.0, "{label} height {} is not a whole pixel", node.size.y);
+        assert!(node.size.x >= 1.0 && node.size.y >= 1.0, "{label} must be at least 1px, got {:?}", node.size);
+        assert_eq!(node.size, measured, "{label} size {:?} must equal measure_text_box {:?}", node.size, measured);
+    }
+
+    fn text_style_json(font_size: f32) -> serde_json::Value {
+        json!({
+            "font_family": "Inter",
+            "font_weight": 600,
+            "italic": false,
+            "font_size": font_size,
+            "line_height": "Auto",
+            "letter_spacing": 0.0,
+            "paragraph_spacing": 0.0,
+            "align_h": "Left",
+            "align_v": "Top",
+            "case": "Original",
+            "decoration": "None",
+            "fills": []
+        })
+    }
+
+    /// Hug width and height are whole pixels on every agent path (spec text, generated
+    /// label, instance override, create, update, set_style, set_variables).
+    #[test]
+    fn hug_text_sizes_are_whole_pixels() {
+        let mut e = Engine::new();
+        let page = e.resolve_default_page().unwrap();
+
+        let spec_res = e
+            .call(
+                "designos_apply_spec",
+                json!({
+                    "parent_id": page.0,
+                    "spec": {
+                        "kind": "text",
+                        "name": "SpecLabel",
+                        "text": "Delete",
+                        "font_size": 14.0,
+                        "font_weight": 600
+                    }
+                }),
+            )
+            .unwrap();
+        let spec_id = NodeId(spec_res["root_node_id"].as_u64().unwrap());
+        assert_whole_hug(e.doc.get(spec_id).unwrap(), "spec text");
+
+        let gen_res = e
+            .call(
+                "designos_apply_spec",
+                json!({
+                    "parent_id": page.0,
+                    "spec": {
+                        "kind": "frame",
+                        "name": "GenBtn",
+                        "width_sizing": "hug",
+                        "height_sizing": "hug",
+                        "text": "Delete",
+                        "font_size": 14.0,
+                        "font_weight": 600
+                    }
+                }),
+            )
+            .unwrap();
+        let gen_id = NodeId(gen_res["name_to_id"]["GenBtn/Delete"].as_u64().unwrap());
+        assert_whole_hug(e.doc.get(gen_id).unwrap(), "generated label");
+
+        let _comp = e
+            .call(
+                "designos_apply_spec",
+                json!({
+                    "parent_id": page.0,
+                    "spec": {
+                        "kind": "component",
+                        "name": "WholeBtn",
+                        "width_sizing": "hug",
+                        "height_sizing": "hug",
+                        "layout": { "direction": "row", "align": "center" },
+                        "children": [{
+                            "kind": "text",
+                            "name": "Label",
+                            "text": "OK",
+                            "font_size": 14.0,
+                            "font_weight": 600
+                        }]
+                    }
+                }),
+            )
+            .unwrap();
+        let inst = e
+            .call(
+                "designos_apply_spec",
+                json!({
+                    "parent_id": page.0,
+                    "spec": {
+                        "kind": "instance",
+                        "name": "WholeInst",
+                        "component": "WholeBtn",
+                        "overrides": [{ "path": "Label", "text": "Delete" }]
+                    }
+                }),
+            )
+            .unwrap();
+        let inst_label = NodeId(inst["name_to_id"]["WholeInst/Label"].as_u64().unwrap());
+        assert_whole_hug(e.doc.get(inst_label).unwrap(), "instance override");
+
+        let created = e
+            .call(
+                "designos_create_node",
+                json!({
+                    "parent_id": page.0,
+                    "kind": "text",
+                    "name": "Created",
+                    "text": "Delete"
+                }),
+            )
+            .unwrap();
+        let created_id = NodeId(created["node"]["id"].as_u64().unwrap());
+        assert_whole_hug(e.doc.get(created_id).unwrap(), "create_node");
+
+        let height_only = e
+            .call(
+                "designos_create_node",
+                json!({
+                    "parent_id": page.0,
+                    "kind": "text",
+                    "name": "HeightOnly",
+                    "text": "Delete",
+                    "height": 40.0
+                }),
+            )
+            .unwrap();
+        let height_id = NodeId(height_only["node"]["id"].as_u64().unwrap());
+        let height_node = e.doc.get(height_id).unwrap();
+        let NodeKind::Text(htp) = &height_node.kind else { panic!("height-only create is not text") };
+        assert_eq!(htp.auto_resize, designos_doc::TextAutoResize::None, "height-only create keeps the given height fixed");
+        assert_eq!(height_node.size.y, 40.0);
+        assert_eq!(height_node.size.x.fract(), 0.0, "height-only width {} is not a whole pixel", height_node.size.x);
+        assert!(height_node.size.x >= 1.0);
+
+        e.call("designos_update_node", json!({ "node_id": created_id.0, "text": "Save changes" })).unwrap();
+        assert_whole_hug(e.doc.get(created_id).unwrap(), "update_node");
+
+        let styled = e
+            .call(
+                "designos_apply_spec",
+                json!({
+                    "parent_id": page.0,
+                    "spec": {
+                        "kind": "text",
+                        "name": "Styled",
+                        "text": "Delete",
+                        "font_size": 14.0,
+                        "font_weight": 600
+                    }
+                }),
+            )
+            .unwrap();
+        let styled_id = NodeId(styled["root_node_id"].as_u64().unwrap());
+        e.call(
+            "designos_apply_batch",
+            json!({
+                "ops": [{
+                    "op": "set_style",
+                    "upsert": [{
+                        "key": "label_style",
+                        "name": "Label Style",
+                        "property": "text",
+                        "text_style": text_style_json(22.0)
+                    }],
+                    "apply": [{ "node": styled_id.0, "style": "label_style" }]
+                }]
+            }),
+        )
+        .unwrap();
+        assert_whole_hug(e.doc.get(styled_id).unwrap(), "set_style apply");
+
+        e.call(
+            "designos_apply_batch",
+            json!({
+                "ops": [{
+                    "op": "set_style",
+                    "upsert": [{
+                        "key": "label_style",
+                        "text_style": text_style_json(36.0)
+                    }]
+                }]
+            }),
+        )
+        .unwrap();
+        let styled_node = e.doc.get(styled_id).unwrap();
+        let NodeKind::Text(stp) = &styled_node.kind else { panic!("styled node is not text") };
+        assert_eq!(stp.style.font_size, 36.0, "upserting a linked text style must update the hug text");
+        assert_whole_hug(styled_node, "set_style upsert");
+
+        e.call(
+            "designos_apply_batch",
+            json!({
+                "ops": [{
+                    "op": "set_variables",
+                    "upsert_collections": [{
+                        "id": "type",
+                        "name": "Type",
+                        "modes": [{ "id": "m", "name": "Default" }],
+                        "default_mode": "m"
+                    }],
+                    "upsert_variables": [{
+                        "id": "type/body",
+                        "name": "Body",
+                        "collection": "type",
+                        "kind": "number",
+                        "values": { "m": 14.0 }
+                    }]
+                }]
+            }),
+        )
+        .unwrap();
+        let bound = e
+            .call(
+                "designos_apply_spec",
+                json!({
+                    "parent_id": page.0,
+                    "spec": {
+                        "kind": "text",
+                        "name": "Bound",
+                        "text": "Delete",
+                        "font_size": "var:type/Body",
+                        "font_weight": 600
+                    }
+                }),
+            )
+            .unwrap();
+        let bound_id = NodeId(bound["root_node_id"].as_u64().unwrap());
+        let before = e.doc.get(bound_id).unwrap().size;
+        e.call(
+            "designos_apply_batch",
+            json!({
+                "ops": [{
+                    "op": "set_variables",
+                    "upsert_variables": [{
+                        "id": "type/body",
+                        "values": { "m": 28.0 }
+                    }]
+                }]
+            }),
+        )
+        .unwrap();
+        let bound_node = e.doc.get(bound_id).unwrap();
+        let drawn = designos_doc::resolve_node(&e.doc, bound_node);
+        let NodeKind::Text(btp) = &drawn.kind else { panic!("bound node is not text") };
+        let expected = designos_render::measure_text_box(btp, None);
+        assert!(expected.x > before.x, "fontSize 14 -> 28 must widen the hug box ({before:?} -> {expected:?})");
+        assert_eq!(bound_node.size.x.fract(), 0.0, "set_variables width {} is not a whole pixel", bound_node.size.x);
+        assert_eq!(bound_node.size.y.fract(), 0.0, "set_variables height {} is not a whole pixel", bound_node.size.y);
+        assert_eq!(bound_node.size, expected, "set_variables size {:?} must match the resolved measure {:?}", bound_node.size, expected);
+    }
+
+    #[test]
+    fn apply_batch_and_apply_spec_instance_swap_name_and_override_rules() {
+        use designos_doc::{
+            add_prop, bind_prop, create_component, create_instance, Color, ComponentPropDef, OverrideField, Paint, PaintKind, PropKind, PropValue, Vec2,
+        };
+
+        let mut e = Engine::default();
+        let page = e.resolve_default_page().unwrap();
+
+        let make_icon = |e: &mut Engine, name: &str, fill: Color, x: f32| -> NodeId {
+            let id = e.doc.alloc_id();
+            let mut f = Node::frame(id, Rect::new(x, 0.0, 16.0, 16.0));
+            f.name = name.into();
+            let comp = e.doc.insert(page, f).unwrap();
+            let gid = e.doc.alloc_id();
+            let mut g = Node::rectangle(gid, Rect::new(0.0, 0.0, 16.0, 16.0));
+            g.name = "Glyph".into();
+            g.fills = vec![Paint::solid(fill)];
+            e.doc.insert(comp, g).unwrap();
+            create_component(&mut e.doc, comp).apply(&mut e.doc).unwrap();
+            comp
+        };
+
+        let icon_plus = make_icon(&mut e, "Icon/Plus", Color::rgb(255, 255, 255), 0.0);
+        let icon_check = make_icon(&mut e, "Icon/Check", Color::rgb(255, 255, 255), 40.0);
+        let icon_diff = make_icon(&mut e, "Icon/Diff", Color::rgb(0, 255, 0), 80.0);
+
+        let btn = {
+            let id = e.doc.alloc_id();
+            let mut f = Node::frame(id, Rect::new(0.0, 60.0, 120.0, 40.0));
+            f.name = "Button/Primary".into();
+            let comp = e.doc.insert(page, f).unwrap();
+            create_component(&mut e.doc, comp).apply(&mut e.doc).unwrap();
+            create_instance(&mut e.doc, icon_plus, comp, Vec2::new(8.0, 10.0)).apply(&mut e.doc).unwrap();
+            let slot = e.doc.get(comp).unwrap().children[0];
+            {
+                let sn = e.doc.get_mut(slot).unwrap();
+                sn.name = "Leading icon".into();
+                sn.visible = false;
+                sn.size = Vec2::new(20.0, 20.0);
+            }
+            let glyph = e.doc.get(slot).unwrap().children[0];
+            {
+                let gn = e.doc.get_mut(glyph).unwrap();
+                gn.fills = vec![Paint::solid(Color::rgb(255, 0, 0))];
+                gn.component.overrides.insert(OverrideField::Fills);
+            }
+            add_prop(&mut e.doc, comp, ComponentPropDef { name: "Has Leading Icon".into(), kind: PropKind::Boolean, default: PropValue::Bool(false) })
+                .apply(&mut e.doc)
+                .unwrap();
+            add_prop(
+                &mut e.doc,
+                comp,
+                ComponentPropDef {
+                    name: "Icon".into(),
+                    kind: PropKind::InstanceSwap { preferred: vec![icon_plus, icon_check, icon_diff] },
+                    default: PropValue::Instance(icon_plus),
+                },
+            )
+            .apply(&mut e.doc)
+            .unwrap();
+            bind_prop(&mut e.doc, slot, OverrideField::Visible, Some("Has Leading Icon")).apply(&mut e.doc).unwrap();
+            bind_prop(&mut e.doc, slot, OverrideField::MainComponent, Some("Icon")).apply(&mut e.doc).unwrap();
+            comp
+        };
+
+        let _ = btn;
+
+        // 1. Button instance swapped via `designos_apply_batch` `apply_spec` with `props` and `overrides[].swap`:
+        // - keeps "Leading icon" name, hidden visibility, 20x20 size, and red fill override when swapping to Icon/Check (same default fill)
+        e.call(
+            "designos_apply_batch",
+            json!({
+                "ops": [{
+                    "op": "apply_spec",
+                    "parent_id": page.0,
+                    "spec": {
+                        "kind": "instance",
+                        "component": "Button/Primary",
+                        "props": { "Icon": "Icon/Check" }
+                    }
+                }]
+            }),
+        )
+        .unwrap();
+        let btn_check = *e.doc.get(page).unwrap().children.last().unwrap();
+        let slot_check_id = e.doc.get(btn_check).unwrap().children[0];
+        let slot_check = e.doc.get(slot_check_id).unwrap();
+        assert_eq!(slot_check.name, "Leading icon");
+        assert!(!slot_check.visible);
+        assert_eq!(slot_check.size, Vec2::new(20.0, 20.0));
+        let glyph_check = e.doc.get(slot_check.children[0]).unwrap();
+        assert_eq!(glyph_check.fills[0].kind, PaintKind::Solid(Color::rgb(255, 0, 0)));
+
+        // 2. Button instance swapped via `designos_apply_spec` `overrides[].swap` to Icon/Diff (different default fill):
+        // - drops red fill override under the originally-matched gate.
+        let applied_diff = e
+            .call(
+                "designos_apply_spec",
+                json!({
+                    "parent_id": page.0,
+                    "spec": {
+                        "kind": "instance",
+                        "component": "Button/Primary",
+                        "overrides": [
+                            { "path": "Leading icon", "swap": "Icon/Diff" }
+                        ]
+                    }
+                }),
+            )
+            .unwrap();
+        let btn_diff = NodeId(applied_diff["root_node_id"].as_u64().unwrap());
+        let slot_diff = e.doc.get(e.doc.get(btn_diff).unwrap().children[0]).unwrap();
+        assert_eq!(slot_diff.name, "Leading icon");
+        let glyph_diff = e.doc.get(slot_diff.children[0]).unwrap();
+        assert_eq!(glyph_diff.fills[0].kind, PaintKind::Solid(Color::rgb(0, 255, 0)), "non-matching default fill drops override on MCP apply_spec swap");
+    }
+
+    fn engine_with_connected_frames() -> (Engine, NodeId, NodeId, NodeId) {
+        use designos_doc::{sync_connector, ConnectorEnd, ConnectorProps, Magnet};
+        let mut doc = Document::new("mcp_connectors");
+        let page = doc.add_page("Page 1");
+        let a = doc.alloc_id();
+        doc.insert(page, Node::frame(a, Rect::new(0.0, 0.0, 120.0, 80.0))).unwrap();
+        let b = doc.alloc_id();
+        doc.insert(page, Node::frame(b, Rect::new(300.0, 0.0, 120.0, 80.0))).unwrap();
+        let c = doc.alloc_id();
+        let props = ConnectorProps { start: ConnectorEnd::attached(a, Magnet::Auto), end: ConnectorEnd::attached(b, Magnet::Auto), ..Default::default() };
+        doc.insert(page, Node::connector(c, props)).unwrap();
+        sync_connector(&mut doc, c);
+        let mut e = Engine::new();
+        e.doc = doc;
+        (e, a, b, c)
+    }
+
+    #[test]
+    fn mcp_batch_preserves_existing_warnings_when_reroute_adds_warning() {
+        use designos_doc::{sync_connector, ConnectorEnd, ConnectorProps, Magnet};
+
+        let mut doc = Document::new("mcp_warning_merge");
+        let page = doc.add_page("Page 1");
+        let other_page = doc.add_page("Page 2");
+        let start = doc.alloc_id();
+        doc.insert(page, Node::frame(start, Rect::new(0.0, 0.0, 120.0, 80.0))).unwrap();
+        let end = doc.alloc_id();
+        doc.insert(page, Node::frame(end, Rect::new(300.0, 0.0, 120.0, 80.0))).unwrap();
+        let connector = doc.alloc_id();
+        let props = ConnectorProps { start: ConnectorEnd::attached(start, Magnet::Auto), end: ConnectorEnd::attached(end, Magnet::Auto), ..Default::default() };
+        doc.insert(page, Node::connector(connector, props)).unwrap();
+        sync_connector(&mut doc, connector);
+
+        let mut e = Engine::new();
+        e.doc = doc;
+        e.active_page_id = Some(page);
+        let reply = e
+            .call(
+                "designos_apply_batch",
+                json!({
+                    "ops": [
+                        {
+                            "op": "apply_spec",
+                            "parent_id": page.0,
+                            "spec": {"kind": "rectangle", "fill": "$easeui.bg.panel"}
+                        },
+                        {"op": "move", "node": end.0, "parent": other_page.0}
+                    ]
+                }),
+            )
+            .unwrap();
+        let warnings = reply["warnings"].as_array().expect("combined warnings array");
+        assert!(warnings.iter().any(|w| w["code"] == "DEPRECATED_EASEUI_TOKEN"), "batch warning was lost: {warnings:?}");
+        assert!(warnings.iter().any(|w| w["code"] == "CONNECTOR_ENDPOINT_DETACHED"), "reroute warning missing: {warnings:?}");
+    }
+
+    #[test]
+    fn mcp_move_of_a_frame_saves_rerouted_connectors() {
+        use designos_doc::connector_geometry;
+        let (mut e, _a, b, c) = engine_with_connected_frames();
+        let before_geom = connector_geometry(&e.doc, c).unwrap();
+
+        e.call("designos_update_node", json!({ "node_id": b.0, "x": 520.0, "y": -180.0 })).unwrap();
+
+        let expected = connector_geometry(&e.doc, c).unwrap();
+        assert_ne!(expected.transform, before_geom.transform);
+        let stored = e.doc.get(c).unwrap();
+        assert_eq!(stored.transform, expected.transform);
+        assert_eq!(stored.size, expected.size);
+        let cp = match &stored.kind {
+            NodeKind::Connector(cp) => cp,
+            _ => unreachable!(),
+        };
+        assert_eq!(cp.start.point, expected.start_point);
+        assert_eq!(cp.end.point, expected.end_point);
+    }
+
+    #[test]
+    fn mcp_update_node_move_undoes_in_one_step() {
+        use designos_doc::connector_geometry;
+        let (mut e, _a, b, c) = engine_with_connected_frames();
+        let orig_b_tx = e.doc.get(b).unwrap().transform;
+        let orig_c_geom = connector_geometry(&e.doc, c).unwrap();
+
+        e.call("designos_update_node", json!({ "node_id": b.0, "x": 500.0, "y": -140.0 })).unwrap();
+        assert_eq!(e.history.undo_depth(), 1);
+        assert_ne!(e.doc.get(c).unwrap().transform, orig_c_geom.transform);
+
+        let u = e.call("designos_undo", json!({})).unwrap();
+        assert_eq!(u["changed"], json!(true));
+        assert_eq!(u["can_undo"], json!(false));
+        assert_eq!(e.history.undo_depth(), 0);
+        assert_eq!(e.doc.get(b).unwrap().transform, orig_b_tx);
+        assert_eq!(e.doc.get(c).unwrap().transform, orig_c_geom.transform);
+        assert_eq!(e.doc.get(c).unwrap().size, orig_c_geom.size);
+        let cp = match &e.doc.get(c).unwrap().kind {
+            NodeKind::Connector(cp) => cp,
+            _ => unreachable!(),
+        };
+        assert_eq!(cp.start.point, orig_c_geom.start_point);
+        assert_eq!(cp.end.point, orig_c_geom.end_point);
+    }
+
+    #[test]
+    fn mcp_undo_and_redo_add_no_reroute_step() {
+        let (mut e, _a, b, c) = engine_with_connected_frames();
+        e.call("designos_update_node", json!({ "node_id": b.0, "x": 480.0, "y": -120.0 })).unwrap();
+        let moved_c_tx = e.doc.get(c).unwrap().transform;
+        assert_eq!(e.history.undo_depth(), 1);
+
+        let u = e.call("designos_undo", json!({})).unwrap();
+        assert_eq!(u["can_undo"], json!(false));
+        assert_eq!(u["can_redo"], json!(true));
+        assert_eq!(e.history.undo_depth(), 0);
+
+        let r = e.call("designos_redo", json!({})).unwrap();
+        assert_eq!(r["can_undo"], json!(true));
+        assert_eq!(r["can_redo"], json!(false));
+        assert_eq!(e.history.undo_depth(), 1);
+        assert_eq!(e.doc.get(c).unwrap().transform, moved_c_tx);
+    }
+
+    /// An auto-layout frame holding `a` then `b` (100x40 each), and a page-level connector from a
+    /// frame below it to `a` or to `b`. Layout is solved before the connector is routed.
+    struct ConnectedStack {
+        engine: Engine,
+        a: NodeId,
+        b: NodeId,
+        connector: NodeId,
+    }
+
+    fn connected_stack(
+        direction: designos_doc::LayoutDirection,
+        frame: (f32, f32),
+        counter_align: designos_doc::LayoutAlign,
+        connector_on_first: bool,
+    ) -> ConnectedStack {
+        use designos_doc::{sync_connector, AutoLayout, ConnectorEnd, ConnectorProps, Magnet, Sizing};
+        let mut doc = Document::new("mcp_stack_connectors");
+        let page = doc.add_page("Page 1");
+        let stack = doc.alloc_id();
+        let mut stack_node = Node::frame(stack, Rect::new(0.0, 0.0, frame.0, frame.1));
+        if let NodeKind::Frame(fp) = &mut stack_node.kind {
+            fp.auto_layout = Some(AutoLayout {
+                direction,
+                item_spacing: 0.0,
+                counter_align,
+                primary_sizing: Sizing::Fixed,
+                counter_sizing: Sizing::Fixed,
+                ..AutoLayout::v1()
+            });
+        }
+        doc.insert(page, stack_node).unwrap();
+        let a = doc.alloc_id();
+        doc.insert(stack, Node::rectangle(a, Rect::new(0.0, 0.0, 100.0, 40.0))).unwrap();
+        let b = doc.alloc_id();
+        doc.insert(stack, Node::rectangle(b, Rect::new(0.0, 0.0, 100.0, 40.0))).unwrap();
+        let outside = doc.alloc_id();
+        doc.insert(page, Node::frame(outside, Rect::new(0.0, 400.0, 100.0, 40.0))).unwrap();
+        doc.relayout_subtree(stack);
+        let connector = doc.alloc_id();
+        let target = if connector_on_first { a } else { b };
+        let props =
+            ConnectorProps { start: ConnectorEnd::attached(outside, Magnet::Auto), end: ConnectorEnd::attached(target, Magnet::Auto), ..Default::default() };
+        doc.insert(page, Node::connector(connector, props)).unwrap();
+        sync_connector(&mut doc, connector);
+        let mut engine = Engine::new();
+        engine.doc = doc;
+        ConnectedStack { engine, a, b, connector }
+    }
+
+    fn assert_connector_follows_its_ends(doc: &Document, connector: NodeId) {
+        let expected = designos_doc::connector_geometry(doc, connector).unwrap();
+        let stored = doc.get(connector).unwrap();
+        assert_eq!(stored.transform, expected.transform, "connector transform");
+        assert_eq!(stored.size, expected.size, "connector size");
+        let NodeKind::Connector(props) = &stored.kind else { unreachable!() };
+        assert_eq!(props.start.point, expected.start_point, "connector start");
+        assert_eq!(props.end.point, expected.end_point, "connector end");
+    }
+
+    fn vertical_stack_with_connector_on_second_child() -> ConnectedStack {
+        let s = connected_stack(designos_doc::LayoutDirection::Vertical, (100.0, 300.0), designos_doc::LayoutAlign::Start, false);
+        assert_eq!(s.engine.doc.get(s.b).unwrap().transform.ty, 40.0, "precondition: b sits under a");
+        assert_connector_follows_its_ends(&s.engine.doc, s.connector);
+        s
+    }
+
+    #[test]
+    fn mcp_batch_resizing_a_stack_child_reroutes_the_connector_on_the_sibling_the_solver_moves() {
+        let ConnectedStack { mut engine, a, b, connector } = vertical_stack_with_connector_on_second_child();
+        let before = engine.doc.get(connector).unwrap().clone();
+
+        engine.call("designos_apply_batch", json!({ "ops": [{ "op": "update", "node": a.0, "height": 80.0 }] })).unwrap();
+        engine.settle_layout();
+
+        assert_eq!(engine.doc.get(b).unwrap().transform.ty, 80.0, "the solver moves b below the taller a");
+        assert_connector_follows_its_ends(&engine.doc, connector);
+        assert_ne!(engine.doc.get(connector).unwrap().transform, before.transform);
+        assert_eq!(engine.history.undo_depth(), 1);
+
+        let saved = Document::from_json(&engine.doc.to_json().unwrap()).unwrap();
+        assert_eq!(saved.get(b).unwrap().transform.ty, 80.0);
+        assert_connector_follows_its_ends(&saved, connector);
+
+        engine.call("designos_undo", json!({})).unwrap();
+        assert_eq!(engine.doc.get(a).unwrap().size.y, 40.0);
+        assert_eq!(engine.doc.get(b).unwrap().transform.ty, 40.0);
+        assert_eq!(engine.doc.get(connector).unwrap().transform, before.transform);
+        assert_eq!(engine.doc.get(connector).unwrap().kind, before.kind);
+    }
+
+    #[test]
+    fn mcp_batch_resize_keeps_a_centered_child_and_its_connector_in_agreement() {
+        let ConnectedStack { mut engine, a, connector, .. } =
+            connected_stack(designos_doc::LayoutDirection::Horizontal, (300.0, 100.0), designos_doc::LayoutAlign::Center, true);
+        assert_eq!(engine.doc.get(a).unwrap().transform.ty, 30.0, "precondition: a is centered across the frame");
+        assert_connector_follows_its_ends(&engine.doc, connector);
+        let before_a = engine.doc.get(a).unwrap().clone();
+        let before_connector = engine.doc.get(connector).unwrap().clone();
+
+        engine.call("designos_apply_batch", json!({ "ops": [{ "op": "update", "node": a.0, "height": 80.0 }] })).unwrap();
+        engine.settle_layout();
+
+        let grown = engine.doc.get(a).unwrap();
+        assert_eq!((grown.size.y, grown.transform.ty), (80.0, 10.0), "a stays centered after it grows");
+        assert_connector_follows_its_ends(&engine.doc, connector);
+        let NodeKind::Connector(props) = &engine.doc.get(connector).unwrap().kind else { unreachable!() };
+        assert_eq!(props.end.point.y, 90.0, "the connector leaves the bottom edge of the grown a");
+        assert_eq!(engine.history.undo_depth(), 1);
+
+        engine.call("designos_undo", json!({})).unwrap();
+        assert_eq!(engine.doc.get(a).unwrap().size, before_a.size);
+        assert_eq!(engine.doc.get(a).unwrap().transform, before_a.transform);
+        assert_eq!(engine.doc.get(connector).unwrap().transform, before_connector.transform);
+        assert_eq!(engine.doc.get(connector).unwrap().kind, before_connector.kind);
+        assert_connector_follows_its_ends(&engine.doc, connector);
+    }
+
+    #[test]
+    fn mcp_batch_deleting_a_stack_child_reroutes_the_connector_on_the_sibling_that_shifts() {
+        let ConnectedStack { mut engine, a, b, connector } = vertical_stack_with_connector_on_second_child();
+
+        engine.call("designos_apply_batch", json!({ "ops": [{ "op": "delete", "node": a.0 }] })).unwrap();
+        engine.settle_layout();
+
+        assert!(engine.doc.get(a).is_none());
+        assert_eq!(engine.doc.get(b).unwrap().transform.ty, 0.0, "b moves up into the gap");
+        assert_connector_follows_its_ends(&engine.doc, connector);
+        assert_eq!(engine.history.undo_depth(), 1);
+    }
+
+    #[test]
+    fn mcp_batch_resizing_a_child_of_a_long_stack_reroutes_the_connector_on_the_last_child() {
+        // More children than the document's change log remembers, so the solve's writes cannot be listed.
+        let ConnectedStack { mut engine, a, connector, .. } = vertical_stack_with_connector_on_second_child();
+        let stack = engine.doc.get(a).unwrap().parent.unwrap();
+        let mut last = a;
+        for _ in 0..600 {
+            last = engine.doc.alloc_id();
+            engine.doc.insert(stack, Node::rectangle(last, Rect::new(0.0, 0.0, 100.0, 40.0))).unwrap();
+        }
+        engine.doc.get_mut(stack).unwrap().size.y = 40.0 * 603.0;
+        engine.doc.relayout_subtree(stack);
+        engine.doc.flush_pending_relayout();
+        if let NodeKind::Connector(props) = &mut engine.doc.get_mut(connector).unwrap().kind {
+            props.end.node = Some(last);
+        }
+        designos_doc::sync_connector(&mut engine.doc, connector);
+        let last_ty = engine.doc.get(last).unwrap().transform.ty;
+        assert_eq!(last_ty, 40.0 * 601.0, "precondition: the stack is laid out");
+
+        engine.call("designos_apply_batch", json!({ "ops": [{ "op": "update", "node": a.0, "height": 80.0 }] })).unwrap();
+        engine.settle_layout();
+
+        assert_eq!(engine.doc.get(last).unwrap().transform.ty, last_ty + 40.0);
+        assert_connector_follows_its_ends(&engine.doc, connector);
+        assert_eq!(engine.history.undo_depth(), 1);
+    }
+
+    #[test]
+    fn mcp_batch_deleting_a_large_stack_child_reroutes_the_connector_on_the_sibling_that_shifts() {
+        // Removing more nodes than the change log tracks one by one: it cannot name what the solve wrote.
+        let ConnectedStack { mut engine, a, b, connector } = vertical_stack_with_connector_on_second_child();
+        let stack = engine.doc.get(a).unwrap().parent.unwrap();
+        let page = engine.doc.get(stack).unwrap().parent.unwrap();
+        let big = engine.doc.alloc_id();
+        engine.doc.insert(page, Node::frame(big, Rect::new(0.0, 0.0, 100.0, 40.0))).unwrap();
+        for _ in 0..70 {
+            let leaf = engine.doc.alloc_id();
+            engine.doc.insert(big, Node::rectangle(leaf, Rect::new(0.0, 0.0, 10.0, 10.0))).unwrap();
+        }
+        engine.doc.reparent(big, stack, 0).unwrap();
+        engine.doc.relayout_subtree(stack);
+        designos_doc::sync_connector(&mut engine.doc, connector);
+        assert_eq!(engine.doc.get(b).unwrap().transform.ty, 80.0, "precondition: b sits under big and a");
+
+        engine.call("designos_apply_batch", json!({ "ops": [{ "op": "delete", "node": big.0 }] })).unwrap();
+        engine.settle_layout();
+
+        assert!(engine.doc.get(big).is_none());
+        assert_eq!(engine.doc.get(b).unwrap().transform.ty, 40.0, "b moves up into the gap");
+        assert_connector_follows_its_ends(&engine.doc, connector);
+        assert_eq!(engine.history.undo_depth(), 1);
+    }
+
+    #[test]
+    fn mcp_batch_dry_run_resizing_a_stack_child_changes_nothing() {
+        let ConnectedStack { mut engine, a, b, connector } = vertical_stack_with_connector_on_second_child();
+        let before = engine.doc.get(connector).unwrap().clone();
+        let epoch = engine.doc.mutation_epoch();
+
+        engine.call("designos_apply_batch", json!({ "dry_run": true, "ops": [{ "op": "update", "node": a.0, "height": 80.0 }] })).unwrap();
+
+        assert_eq!(engine.doc.mutation_epoch(), epoch);
+        assert_eq!(engine.history.undo_depth(), 0);
+        assert_eq!(engine.doc.get(b).unwrap().transform.ty, 40.0);
+        assert_eq!(engine.doc.get(connector).unwrap(), &before);
+    }
+
+    /// The long vertical stack of 602 children (`a`, `b`, then 600 more) with the connector on the last
+    /// one. More children than the document's change log remembers, so a solve's writes cannot be listed.
+    fn long_stack_with_connector_on_last_child() -> (ConnectedStack, NodeId, f32) {
+        let mut s = vertical_stack_with_connector_on_second_child();
+        let stack = s.engine.doc.get(s.a).unwrap().parent.unwrap();
+        let mut last = s.b;
+        for _ in 0..600 {
+            last = s.engine.doc.alloc_id();
+            s.engine.doc.insert(stack, Node::rectangle(last, Rect::new(0.0, 0.0, 100.0, 40.0))).unwrap();
+        }
+        s.engine.doc.get_mut(stack).unwrap().size.y = 40.0 * 603.0;
+        s.engine.doc.relayout_subtree(stack);
+        s.engine.doc.flush_pending_relayout();
+        if let NodeKind::Connector(props) = &mut s.engine.doc.get_mut(s.connector).unwrap().kind {
+            props.end.node = Some(last);
+        }
+        designos_doc::sync_connector(&mut s.engine.doc, s.connector);
+        let last_ty = s.engine.doc.get(last).unwrap().transform.ty;
+        assert_eq!(last_ty, 40.0 * 601.0, "precondition: the stack is laid out");
+        (s, last, last_ty)
+    }
+
+    #[test]
+    fn mcp_batch_moving_the_first_child_of_a_long_stack_out_reroutes_the_connector_on_the_last_child() {
+        let (ConnectedStack { mut engine, a, connector, .. }, last, last_ty) = long_stack_with_connector_on_last_child();
+        let stack = engine.doc.get(a).unwrap().parent.unwrap();
+        let page = engine.doc.get(stack).unwrap().parent.unwrap();
+        let before = engine.doc.get(connector).unwrap().clone();
+
+        engine.call("designos_apply_batch", json!({ "ops": [{ "op": "move", "node": a.0, "parent": page.0 }] })).unwrap();
+        engine.settle_layout();
+
+        assert_eq!(engine.doc.get(a).unwrap().parent, Some(page));
+        assert_eq!(engine.doc.get(last).unwrap().transform.ty, last_ty - 40.0, "the rest of the stack closes the gap");
+        assert_connector_follows_its_ends(&engine.doc, connector);
+        assert_eq!(engine.history.undo_depth(), 1);
+
+        engine.call("designos_undo", json!({})).unwrap();
+        assert_eq!(engine.doc.get(a).unwrap().parent, Some(stack));
+        assert_eq!(engine.doc.get(last).unwrap().transform.ty, last_ty);
+        assert_eq!(engine.doc.get(connector).unwrap(), &before);
+    }
+
+    /// Document-wide edits fail the change log however small the document is.
+    fn document_wide_edits() -> [Value; 2] {
+        [
+            json!({
+                "op": "set_variables",
+                "upsert_collections": [{ "id": "brand", "name": "Brand", "modes": [{ "id": "light", "name": "Light" }], "default_mode": "light" }],
+                "upsert_variables": [{ "id": "brand/accent", "name": "Accent", "collection": "brand", "kind": "color", "values": { "light": "#E36323" } }]
+            }),
+            json!({ "op": "set_style", "upsert": [{ "key": "surface", "name": "Surface", "property": "fill", "fill": "#18181B" }] }),
+        ]
+    }
+
+    #[test]
+    fn mcp_batch_moving_a_stack_child_out_with_a_document_wide_edit_reroutes_the_connector_on_the_remaining_child() {
+        for edit in document_wide_edits() {
+            let op = edit["op"].clone();
+            let ConnectedStack { mut engine, a, b, connector } = vertical_stack_with_connector_on_second_child();
+            let page = engine.doc.get(engine.doc.get(a).unwrap().parent.unwrap()).unwrap().parent.unwrap();
+
+            engine.call("designos_apply_batch", json!({ "ops": [{ "op": "move", "node": a.0, "parent": page.0 }, edit] })).unwrap();
+            engine.settle_layout();
+
+            assert_eq!(engine.doc.get(a).unwrap().parent, Some(page), "{op}");
+            assert_eq!(engine.doc.get(b).unwrap().transform.ty, 0.0, "{op}: b moves up into the gap");
+            assert_connector_follows_its_ends(&engine.doc, connector);
+            assert_eq!(engine.history.undo_depth(), 1, "{op}");
+        }
+    }
+
+    #[test]
+    fn mcp_batch_moving_a_child_between_stacks_reroutes_the_connectors_on_the_siblings_left_behind() {
+        use designos_doc::{AutoLayout, LayoutDirection};
+        for edit in document_wide_edits() {
+            let op = edit["op"].clone();
+            let ConnectedStack { mut engine, a, b, connector } = vertical_stack_with_connector_on_second_child();
+            let page = engine.doc.get(engine.doc.get(a).unwrap().parent.unwrap()).unwrap().parent.unwrap();
+            let dest = engine.doc.alloc_id();
+            let mut dest_node = Node::frame(dest, Rect::new(500.0, 0.0, 100.0, 300.0));
+            if let NodeKind::Frame(fp) = &mut dest_node.kind {
+                fp.auto_layout = Some(AutoLayout { direction: LayoutDirection::Vertical, item_spacing: 0.0, ..AutoLayout::v1() });
+            }
+            engine.doc.insert(page, dest_node).unwrap();
+            let resident = engine.doc.alloc_id();
+            engine.doc.insert(dest, Node::rectangle(resident, Rect::new(0.0, 0.0, 100.0, 40.0))).unwrap();
+            engine.doc.relayout_subtree(dest);
+
+            engine.call("designos_apply_batch", json!({ "ops": [{ "op": "move", "node": a.0, "parent": dest.0 }, edit] })).unwrap();
+            engine.settle_layout();
+
+            assert_eq!(engine.doc.get(a).unwrap().parent, Some(dest), "{op}");
+            assert_eq!(engine.doc.get(a).unwrap().transform.ty, 40.0, "{op}: a lands under the resident");
+            assert_eq!(engine.doc.get(b).unwrap().transform.ty, 0.0, "{op}: b moves up into the gap a left");
+            assert_connector_follows_its_ends(&engine.doc, connector);
+            assert_eq!(engine.history.undo_depth(), 1, "{op}");
+        }
+    }
+
+    /// A vertical stack of `a`, a connector that is itself part of the flow (start on `a`, free end),
+    /// and `b`; a page-level connector runs from a frame below to `b`. The solver measures the flow
+    /// connector, and routing resizes it when `a` changes, so the two feed each other.
+    struct FlowConnectorStack {
+        engine: Engine,
+        a: NodeId,
+        b: NodeId,
+        flow_connector: NodeId,
+        page_connector: NodeId,
+    }
+
+    fn stack_with_a_connector_in_its_flow() -> FlowConnectorStack {
+        use designos_doc::{sync_connector, AutoLayout, ConnectorEnd, ConnectorProps, LayoutDirection, Magnet};
+        let mut doc = Document::new("mcp_flow_connector");
+        let page = doc.add_page("Page 1");
+        let stack = doc.alloc_id();
+        let mut stack_node = Node::frame(stack, Rect::new(0.0, 0.0, 100.0, 300.0));
+        if let NodeKind::Frame(fp) = &mut stack_node.kind {
+            fp.auto_layout = Some(AutoLayout { direction: LayoutDirection::Vertical, item_spacing: 0.0, ..AutoLayout::v1() });
+        }
+        doc.insert(page, stack_node).unwrap();
+        let a = doc.alloc_id();
+        doc.insert(stack, Node::rectangle(a, Rect::new(0.0, 0.0, 100.0, 40.0))).unwrap();
+        let flow_connector = doc.alloc_id();
+        let flow_props =
+            ConnectorProps { start: ConnectorEnd::attached(a, Magnet::Auto), end: ConnectorEnd::free(Vec2::new(250.0, 20.0)), ..Default::default() };
+        doc.insert(stack, Node::connector(flow_connector, flow_props)).unwrap();
+        let b = doc.alloc_id();
+        doc.insert(stack, Node::rectangle(b, Rect::new(0.0, 0.0, 100.0, 40.0))).unwrap();
+        let far = doc.alloc_id();
+        doc.insert(page, Node::frame(far, Rect::new(300.0, 400.0, 100.0, 40.0))).unwrap();
+        let page_connector = doc.alloc_id();
+        let page_props =
+            ConnectorProps { start: ConnectorEnd::attached(far, Magnet::Auto), end: ConnectorEnd::attached(b, Magnet::Auto), ..Default::default() };
+        doc.insert(page, Node::connector(page_connector, page_props)).unwrap();
+        // The flow connector is sized before layout measures it, and layout then leaves it in its slot.
+        sync_connector(&mut doc, flow_connector);
+        doc.relayout_subtree(stack);
+        sync_connector(&mut doc, page_connector);
+        let b_ty = doc.get(b).unwrap().transform.ty;
+        doc.relayout_subtree(stack);
+        assert_eq!(doc.get(b).unwrap().transform.ty, b_ty, "precondition: the stack is laid out");
+        assert_eq!(b_ty, 40.0 + doc.get(flow_connector).unwrap().size.y, "precondition: b sits under the flow connector");
+        let mut grown = doc.clone();
+        grown.get_mut(a).unwrap().size.y = 80.0;
+        sync_connector(&mut grown, flow_connector);
+        assert_ne!(grown.get(flow_connector).unwrap().size, doc.get(flow_connector).unwrap().size, "precondition: a taller a resizes the flow connector");
+        let mut engine = Engine::new();
+        engine.doc = doc;
+        FlowConnectorStack { engine, a, b, flow_connector, page_connector }
+    }
+
+    #[test]
+    fn mcp_batch_resizing_a_stack_child_leaves_a_flow_connector_and_a_page_connector_on_their_routes() {
+        let FlowConnectorStack { mut engine, a, b, flow_connector, page_connector } = stack_with_a_connector_in_its_flow();
+        let before: Vec<Node> = [a, b, flow_connector, page_connector].iter().map(|id| engine.doc.get(*id).unwrap().clone()).collect();
+
+        engine.call("designos_apply_batch", json!({ "ops": [{ "op": "update", "node": a.0, "height": 80.0 }] })).unwrap();
+        engine.settle_layout();
+
+        assert_connector_follows_its_ends(&engine.doc, flow_connector);
+        assert_connector_follows_its_ends(&engine.doc, page_connector);
+        assert_eq!(engine.doc.get(b).unwrap().transform.ty, 80.0 + engine.doc.get(flow_connector).unwrap().size.y, "b sits under the resized flow connector");
+        assert_eq!(engine.history.undo_depth(), 1);
+
+        engine.call("designos_undo", json!({})).unwrap();
+        for (id, was) in [a, b, flow_connector, page_connector].iter().zip(&before) {
+            assert_eq!(engine.doc.get(*id).unwrap(), was, "node {} after undo", id.0);
+        }
+    }
+
+    #[test]
+    fn mcp_fill_edit_on_one_frame_leaves_sibling_auto_layout_children_where_they_were() {
+        use designos_doc::{AutoLayout, FrameProps, LayoutAlign, LayoutDirection, Sizing};
+
+        let mut engine = Engine::new();
+        let page = engine.resolve_default_page().unwrap();
+
+        let screen = engine.doc.alloc_id();
+        let mut screen_node = Node::frame(screen, Rect::new(0.0, 0.0, 800.0, 600.0));
+        screen_node.kind = NodeKind::Frame(FrameProps {
+            auto_layout: Some(AutoLayout {
+                direction: LayoutDirection::Horizontal,
+                primary_sizing: Sizing::Fixed,
+                counter_sizing: Sizing::Fixed,
+                ..AutoLayout::default()
+            }),
+            ..FrameProps::default()
+        });
+        engine.doc.insert(page, screen_node).unwrap();
+
+        let sidebar = engine.doc.alloc_id();
+        let mut sidebar_node = Node::frame(sidebar, Rect::new(0.0, 0.0, 240.0, 600.0));
+        sidebar_node.kind = NodeKind::Frame(FrameProps {
+            auto_layout: Some(AutoLayout {
+                direction: LayoutDirection::Vertical,
+                primary_sizing: Sizing::Fixed,
+                counter_sizing: Sizing::Fixed,
+                ..AutoLayout::default()
+            }),
+            ..FrameProps::default()
+        });
+        engine.doc.insert(screen, sidebar_node).unwrap();
+
+        let chat = engine.doc.alloc_id();
+        let mut chat_node = Node::frame(chat, Rect::new(240.0, 0.0, 560.0, 600.0));
+        chat_node.kind = NodeKind::Frame(FrameProps {
+            auto_layout: Some(AutoLayout {
+                direction: LayoutDirection::Horizontal,
+                primary_sizing: Sizing::Fixed,
+                counter_sizing: Sizing::Fixed,
+                primary_align: LayoutAlign::End,
+                padding: [0.0, 32.0, 0.0, 32.0],
+                ..AutoLayout::default()
+            }),
+            ..FrameProps::default()
+        });
+        engine.doc.insert(screen, chat_node).unwrap();
+
+        let bubble = engine.doc.alloc_id();
+        // Stored at x = 80, y = 12; re-solving `chat` would move `bubble` to (256, 0).
+        engine.doc.insert(chat, Node::rectangle(bubble, Rect::new(80.0, 12.0, 272.0, 44.0))).unwrap();
+
+        engine.call("designos_update_node", json!({ "node_id": sidebar.0, "fill": "#112233" })).unwrap();
+        let after_update = engine.doc.get(bubble).unwrap().transform;
+        assert_eq!((after_update.tx, after_update.ty), (80.0, 12.0), "update_node on sibling frame must not re-solve chat's children");
+
+        engine.call("designos_apply_batch", json!({ "ops": [{ "op": "update", "node": sidebar.0, "fill": "#445566" }] })).unwrap();
+        let after_batch = engine.doc.get(bubble).unwrap().transform;
+        assert_eq!((after_batch.tx, after_batch.ty), (80.0, 12.0), "apply_batch update on sibling frame must not re-solve chat's children");
+    }
+
+    #[test]
+    fn apply_spec_and_update_node_bind_size_limits_and_typography_variables() {
+        use designos_doc::{Variable, VariableCollection, VariableKind, VariableMode, VariableValue};
+
+        let mut e = Engine::default();
+        let page = e.resolve_default_page().unwrap();
+
+        // 1. Create collection "Theme" with 2 modes: "m_a" (Mode A) and "m_b" (Mode B)
+        e.doc.variable_collections.insert(
+            "c_theme".into(),
+            VariableCollection {
+                id: "c_theme".into(),
+                name: "Theme".into(),
+                modes: vec![VariableMode { id: "m_a".into(), name: "ModeA".into() }, VariableMode { id: "m_b".into(), name: "ModeB".into() }],
+                default_mode: "m_a".into(),
+                variables: vec![],
+                key: None,
+                source_library_key: None,
+                extensions: Default::default(),
+            },
+        );
+
+        let n = |x: f32| VariableValue::Number(x);
+        let s = |x: &str| VariableValue::String(x.into());
+
+        for (vid, vname, kind, scopes, val_a, val_b) in [
+            ("v_min_w", "MinWidth", VariableKind::Number, vec!["WIDTH_HEIGHT"], n(60.0), n(90.0)),
+            ("v_max_w", "MaxWidth", VariableKind::Number, vec!["WIDTH_HEIGHT"], n(140.0), n(260.0)),
+            ("v_min_h", "MinHeight", VariableKind::Number, vec!["WIDTH_HEIGHT"], n(40.0), n(50.0)),
+            ("v_max_h", "MaxHeight", VariableKind::Number, vec!["WIDTH_HEIGHT"], n(100.0), n(180.0)),
+            ("v_ff", "FontFamily", VariableKind::String, vec!["FONT_FAMILY"], s("Inter"), s("Roboto Mono")),
+            ("v_fs", "FontStyle", VariableKind::String, vec!["FONT_STYLE"], s("Regular"), s("Bold Italic")),
+            ("v_ps", "ParagraphSpacing", VariableKind::Number, vec!["PARAGRAPH_SPACING"], n(8.0), n(16.0)),
+            ("v_pi", "ParagraphIndent", VariableKind::Number, vec!["PARAGRAPH_INDENT"], n(12.0), n(24.0)),
+        ] {
+            e.doc.variables.insert(
+                vid.into(),
+                Variable {
+                    id: vid.into(),
+                    name: vname.into(),
+                    collection: "c_theme".into(),
+                    kind,
+                    values: [("m_a".into(), val_a), ("m_b".into(), val_b)].into_iter().collect(),
+                    description: String::new(),
+                    scopes: scopes.into_iter().map(String::from).collect(),
+                    hidden_from_publishing: false,
+                    key: None,
+                    code_syntax: Default::default(),
+                    extensions: Default::default(),
+                    mode_extensions: Default::default(),
+                },
+            );
+        }
+
+        // 2. designos_apply_spec with auto-layout container, a fill child and a hug text child
+        let spec_res = e
+            .call(
+                "designos_apply_spec",
+                json!({
+                    "parent_id": page.0,
+                    "spec": {
+                        "kind": "frame",
+                        "name": "AutoLayoutCard",
+                        "width": 400.0,
+                        "height": 200.0,
+                        "layout": {
+                            "direction": "horizontal",
+                            "gap": 16.0,
+                            "padding": [16.0, 16.0, 16.0, 16.0]
+                        },
+                        "children": [
+                            {
+                                "kind": "frame",
+                                "name": "FillBox",
+                                "width_sizing": "fill",
+                                "height_sizing": "fill",
+                                "bindings": {
+                                    "minWidth": "var:Theme/MinWidth",
+                                    "maxWidth": "var:Theme/MaxWidth",
+                                    "minHeight": "var:Theme/MinHeight",
+                                    "maxHeight": "var:Theme/MaxHeight"
+                                }
+                            },
+                            {
+                                "kind": "text",
+                                "name": "HugText",
+                                "text": "Card description line",
+                                "font_family": "var:Theme/FontFamily",
+                                "bindings": {
+                                    "fontStyle": "var:Theme/FontStyle",
+                                    "paragraphSpacing": "var:Theme/ParagraphSpacing",
+                                    "paragraphIndent": "var:Theme/ParagraphIndent"
+                                }
+                            }
+                        ]
+                    }
+                }),
+            )
+            .unwrap();
+
+        let root_id = spec_res["root_node_id"].as_u64().unwrap();
+        let root_node = e.doc.get(NodeId(root_id)).unwrap();
+        assert_eq!(root_node.children.len(), 2);
+        let box_id = root_node.children[0];
+        let text_id = root_node.children[1];
+
+        let box_node = e.doc.get(box_id).unwrap();
+        assert_eq!(box_node.variables.bindings.get("minWidth").map(String::as_str), Some("v_min_w"));
+        assert_eq!(box_node.variables.bindings.get("maxWidth").map(String::as_str), Some("v_max_w"));
+        assert_eq!(box_node.variables.bindings.get("minHeight").map(String::as_str), Some("v_min_h"));
+        assert_eq!(box_node.variables.bindings.get("maxHeight").map(String::as_str), Some("v_max_h"));
+
+        let text_node = e.doc.get(text_id).unwrap();
+        assert_eq!(text_node.variables.bindings.get("fontFamily").map(String::as_str), Some("v_ff"));
+        assert_eq!(text_node.variables.bindings.get("fontStyle").map(String::as_str), Some("v_fs"));
+        assert_eq!(text_node.variables.bindings.get("paragraphSpacing").map(String::as_str), Some("v_ps"));
+        assert_eq!(text_node.variables.bindings.get("paragraphIndent").map(String::as_str), Some("v_pi"));
+
+        // Verify resolve_node in Mode A
+        let res_box_a = designos_doc::resolve_node(&e.doc, box_node);
+        assert_eq!(res_box_a.layout_child.min_w, Some(60.0));
+        assert_eq!(res_box_a.layout_child.max_w, Some(140.0));
+        assert_eq!(res_box_a.layout_child.min_h, Some(40.0));
+        assert_eq!(res_box_a.layout_child.max_h, Some(100.0));
+
+        let res_text_a = designos_doc::resolve_node(&e.doc, text_node);
+        let NodeKind::Text(tp_a) = &res_text_a.kind else { panic!("expected text") };
+        assert_eq!(tp_a.style.font_family, "Inter");
+        assert_eq!(tp_a.style.font_weight, 400);
+        assert!(!tp_a.style.italic);
+        assert_eq!(tp_a.style.paragraph_spacing, 8.0);
+        assert_eq!(tp_a.paragraph.indent, 12.0);
+
+        let measured_a = designos_render::measure_text_box(tp_a, None);
+        assert_eq!(text_node.size, measured_a);
+
+        // Switch to Mode B on the root container and relayout
+        e.doc.get_mut(NodeId(root_id)).unwrap().variables.modes.insert("c_theme".into(), "m_b".into());
+        e.doc.relayout_subtree(NodeId(root_id));
+
+        let box_node_b = e.doc.get(box_id).unwrap();
+        let res_box_b = designos_doc::resolve_node(&e.doc, box_node_b);
+        assert_eq!(res_box_b.layout_child.min_w, Some(90.0));
+        assert_eq!(res_box_b.layout_child.max_w, Some(260.0));
+        assert_eq!(res_box_b.layout_child.min_h, Some(50.0));
+        assert_eq!(res_box_b.layout_child.max_h, Some(180.0));
+
+        let text_node_b = e.doc.get(text_id).unwrap();
+        let res_text_b = designos_doc::resolve_node(&e.doc, text_node_b);
+        let NodeKind::Text(tp_b) = &res_text_b.kind else { panic!("expected text") };
+        assert_eq!(tp_b.style.font_family, "Roboto Mono");
+        assert_eq!(tp_b.style.font_weight, 700);
+        assert!(tp_b.style.italic);
+        assert_eq!(tp_b.style.paragraph_spacing, 16.0);
+        assert_eq!(tp_b.paragraph.indent, 24.0);
+
+        let measured_b = designos_render::measure_text_box(tp_b, None);
+        assert_eq!(text_node_b.size, measured_b);
+
+        // 3. update_node with bindings
+        e.call(
+            "designos_update_node",
+            json!({
+                "node_id": text_id.0,
+                "bindings": {
+                    "maxWidth": "var:Theme/MaxWidth"
+                }
+            }),
+        )
+        .unwrap();
+
+        let updated_text = e.doc.get(text_id).unwrap();
+        assert_eq!(updated_text.variables.bindings.get("maxWidth").map(String::as_str), Some("v_max_w"));
+        let res_updated_text = designos_doc::resolve_node(&e.doc, updated_text);
+        assert_eq!(res_updated_text.layout_child.max_w, Some(260.0));
+
+        e.call(
+            "designos_update_node",
+            json!({
+                "node_id": box_id.0,
+                "bindings": {
+                    "minWidth": null,
+                    "maxWidth": "var:Theme/MinWidth"
+                }
+            }),
+        )
+        .unwrap();
+
+        let updated_box = e.doc.get(box_id).unwrap();
+        assert!(!updated_box.variables.bindings.contains_key("minWidth"));
+        assert_eq!(updated_box.variables.bindings.get("maxWidth").map(String::as_str), Some("v_min_w"));
+        let res_updated_box = designos_doc::resolve_node(&e.doc, updated_box);
+        assert_eq!(res_updated_box.layout_child.min_w, Some(60.0));
+        assert_eq!(res_updated_box.layout_child.max_w, Some(90.0));
+    }
+
+    #[test]
+    fn apply_spec_and_update_node_bind_easing_and_duration_variables() {
+        use designos_doc::{Variable, VariableCollection, VariableKind, VariableMode, VariableValue};
+
+        let mut e = Engine::default();
+        let page = e.resolve_default_page().unwrap();
+        e.doc.variable_collections.insert(
+            "c_motion".into(),
+            VariableCollection {
+                id: "c_motion".into(),
+                name: "Motion".into(),
+                modes: vec![VariableMode { id: "m_a".into(), name: "Calm".into() }, VariableMode { id: "m_b".into(), name: "Snappy".into() }],
+                default_mode: "m_a".into(),
+                variables: vec![],
+                key: None,
+                source_library_key: None,
+                extensions: Default::default(),
+            },
+        );
+        for (vid, vname, kind, a, b) in [
+            ("v_ease", "Easing", VariableKind::String, VariableValue::String("ease-in-out".into()), VariableValue::String("linear".into())),
+            ("v_dur", "Duration", VariableKind::Number, VariableValue::Number(300.0), VariableValue::Number(120.0)),
+        ] {
+            e.doc.variables.insert(
+                vid.into(),
+                Variable {
+                    id: vid.into(),
+                    name: vname.into(),
+                    collection: "c_motion".into(),
+                    kind,
+                    values: [("m_a".into(), a), ("m_b".into(), b)].into_iter().collect(),
+                    description: String::new(),
+                    scopes: vec![],
+                    hidden_from_publishing: false,
+                    key: None,
+                    code_syntax: Default::default(),
+                    extensions: Default::default(),
+                    mode_extensions: Default::default(),
+                },
+            );
+        }
+
+        let res = e
+            .call(
+                "designos_apply_spec",
+                json!({
+                    "parent_id": page.0,
+                    "spec": {
+                        "kind": "frame",
+                        "name": "Animated",
+                        "width": 100.0,
+                        "height": 100.0,
+                        "bindings": { "easingData": "var:Motion/Easing" }
+                    }
+                }),
+            )
+            .unwrap();
+        let id = NodeId(res["root_node_id"].as_u64().unwrap());
+        assert_eq!(e.doc.get(id).unwrap().variables.bindings.get("easingData").map(String::as_str), Some("v_ease"));
+
+        e.call("designos_update_node", json!({ "node_id": id.0, "bindings": { "timelineDuration": "var:Motion/Duration" } })).unwrap();
+        assert_eq!(e.doc.get(id).unwrap().variables.bindings.get("timelineDuration").map(String::as_str), Some("v_dur"));
+
+        // An easing binding must point at a string variable, a duration at a number variable.
+        assert!(e.call("designos_update_node", json!({ "node_id": id.0, "bindings": { "easingData": "var:Motion/Duration" } })).is_err());
+        assert!(e.call("designos_update_node", json!({ "node_id": id.0, "bindings": { "timelineDuration": "var:Motion/Easing" } })).is_err());
     }
 }

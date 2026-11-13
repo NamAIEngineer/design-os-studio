@@ -6,7 +6,7 @@
 //! 16px from the edge, 24px chevrons 8px from the edge, 1px separators with 8px margins.
 
 use super::*;
-use egui::{Area, Key, Modifiers, Order};
+use egui::{Area, Context, Key, Modifiers, Order};
 
 #[derive(Clone, Default)]
 pub struct MenuItem {
@@ -18,6 +18,7 @@ pub struct MenuItem {
     pub disabled: bool,
     pub separator_after: bool,
     pub icon: Option<Icon>,
+    pub trailing_icon: Option<Icon>,
     pub tooltip: String,
     pub children: Vec<MenuItem>,
 }
@@ -47,6 +48,10 @@ impl MenuItem {
         self.icon = Some(i);
         self
     }
+    pub fn trailing_icon(mut self, i: Icon) -> Self {
+        self.trailing_icon = Some(i);
+        self
+    }
     pub fn tooltip(mut self, t: impl Into<String>) -> Self {
         self.tooltip = t.into();
         self
@@ -73,6 +78,18 @@ pub enum TreeResult {
 
 /// Vertical space of a separator between two rows (margin + 1px line + margin).
 pub const SEP_H: f32 = theme::MENU_SEP_MARGIN * 2.0 + theme::BORDER_WIDTH;
+
+/// Height of a menu level made of `items`, before the screen clamps it: the padding at both ends, every row and every
+/// separator block. A caller that places a menu so it clears something takes its height from here.
+pub fn menu_height(items: &[MenuItem]) -> f32 {
+    menu_height_for(items, theme::MENU_ITEM_HEIGHT)
+}
+
+/// Height of a menu level whose rows are `row_h` tall. [`menu_height`] keeps the default pitch.
+pub fn menu_height_for(items: &[MenuItem], row_h: f32) -> f32 {
+    items.iter().fold(2.0 * theme::MENU_PADDING, |h, it| h + row_h + if it.separator_after { SEP_H } else { 0.0 })
+}
+
 /// Width given to submenu panels at minimum.
 const SUBMENU_MIN_W: f32 = 190.0;
 
@@ -131,7 +148,7 @@ pub fn preset_path(ctx: &egui::Context, id: Id, path: &[usize]) {
 /// it resolves widgets with the pointer position at the END of the frame. A menu that picked on that click dropped
 /// picks after a small move or a slow frame, and never saw a press on the opening button slide onto a row. The raw
 /// events know each position, whatever the window batched into one frame.
-fn primary_gesture(events: &[egui::Event], armed: &mut bool, covered: impl Fn(Pos2) -> bool) -> (Option<Pos2>, Option<Pos2>) {
+pub(crate) fn primary_gesture(events: &[egui::Event], armed: &mut bool, covered: impl Fn(Pos2) -> bool) -> (Option<Pos2>, Option<Pos2>) {
     let (mut press, mut release) = (None, None);
     for ev in events {
         if let egui::Event::PointerButton { pos, button, pressed, .. } = ev {
@@ -150,23 +167,70 @@ fn primary_gesture(events: &[egui::Event], armed: &mut bool, covered: impl Fn(Po
     (press, release)
 }
 
+/// The release that picks in a hand-built menu (one that does not go through [`popup_tree`]): the position where the
+/// primary button went up to end a press this menu saw, or `None`. The caller picks the row or cell under that
+/// position instead of waiting for egui's `clicked()`, which drops a release that moved more than 6 px or took longer
+/// than 0.8 s. Call it once per frame, before the rows are built, with the `own` layer the menu's area lives on, its
+/// `panel` rect and the `anchor` of the button that opened it.
+///
+/// A release does not count when a higher layer than `own` (a toast, a tooltip) covers it, when its press was never
+/// seen (it started outside, or before the menu opened), or when its press landed outside the panel and the anchor,
+/// which closes the menu. The press that opened the menu counts: the menu is drawn in the frame that carries it.
+///
+/// `not_a_row` is the part of the panel that is a widget of its own (the Zoom menu's text field), not a row: a press
+/// that began there is that widget's gesture (selecting text), so its release picks nothing.
+pub(crate) fn release_pick(ctx: &egui::Context, id: Id, own: egui::LayerId, panel: Rect, anchor: Option<Rect>, not_a_row: Option<Rect>) -> Option<Pos2> {
+    let key = id.with("release-armed");
+    let now = ctx.cumulative_pass_nr();
+    let (mut armed, seen, mut began_off_row) = ctx.data(|d| d.get_temp::<(bool, u64, bool)>(key)).unwrap_or((false, 0, false));
+    // A press left over from a menu that went away must not arm the next one.
+    if now > seen + 3 {
+        armed = false;
+    }
+    let events = ctx.input(|i| i.events.clone());
+    let covered = |p: Pos2| ctx.layer_id_at(p).is_some_and(|l| l != own && l.order >= own.order);
+    // Where the primary press that armed (or re-armed) the pick went down, in case the release is in a later frame.
+    let mut release_off_row = began_off_row;
+    for ev in &events {
+        if let egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed, .. } = ev {
+            if *pressed {
+                began_off_row = not_a_row.is_some_and(|r| r.contains(*pos));
+            } else {
+                release_off_row = began_off_row;
+            }
+        }
+    }
+    let (press, release) = primary_gesture(&events, &mut armed, covered);
+    ctx.data_mut(|d| d.insert_temp(key, (armed, now, began_off_row)));
+    let press_outside = press.is_some_and(|p| !panel.contains(p) && !anchor.is_some_and(|a| a.contains(p)));
+    release.filter(|_| !press_outside && !release_off_row)
+}
+
+/// Whether a row or cell of a hand-built menu is picked this frame: the `release` from [`release_pick`] ended on
+/// `rect`, or the keyboard (Enter or Space on the focused row) or a screen reader activated it. A pointer click is left
+/// to the release: egui's own click drops a release that moved more than 6 px or took longer than 0.8 s.
+pub(crate) fn row_picked(resp: &egui::Response, rect: Rect, release: Option<Pos2>) -> bool {
+    release.is_some_and(|p| rect.contains(p)) || (resp.clicked() && !resp.clicked_by(egui::PointerButton::Primary))
+}
+
 /// The panel of one menu level: size, per-row tops (relative to the panel top).
 struct Layout {
     w: f32,
     h: f32,
     tops: Vec<f32>,
     has_check: bool,
+    row_h: f32,
 }
 
 impl Layout {
-    fn new(ctx: &egui::Context, items: &[MenuItem], min_w: f32) -> Self {
+    fn new(ctx: &egui::Context, items: &[MenuItem], min_w: f32, row_h: f32) -> Self {
         let font = theme::font_menu();
         let has_check = items.iter().any(|i| i.checkable);
         let mut tops = Vec::with_capacity(items.len());
         let mut y = theme::MENU_PADDING;
         for it in items {
             tops.push(y);
-            y += theme::MENU_ITEM_HEIGHT + if it.separator_after { SEP_H } else { 0.0 };
+            y += row_h + if it.separator_after { SEP_H } else { 0.0 };
         }
         let mut need = 0.0f32;
         ctx.fonts_mut(|f| {
@@ -183,7 +247,7 @@ impl Layout {
                 need = need.max(label_x(it, has_check) + lw + right);
             }
         });
-        Self { w: need.ceil().max(min_w), h: y + theme::MENU_PADDING, tops, has_check }
+        Self { w: need.ceil().max(min_w), h: menu_height_for(items, row_h), tops, has_check, row_h }
     }
 
     /// Whether the level is taller than the `limit` it may fill, so that it scrolls.
@@ -201,7 +265,7 @@ impl Layout {
 
     /// `scroll` moved by the least amount that brings row `i` fully between the panel's vertical paddings.
     fn scroll_to_row(&self, i: usize, scroll: f32, limit: f32) -> f32 {
-        let (top, bottom) = (self.tops[i], self.tops[i] + theme::MENU_ITEM_HEIGHT);
+        let (top, bottom) = (self.tops[i], self.tops[i] + self.row_h);
         scroll.max(bottom + theme::MENU_PADDING - limit).min(top - theme::MENU_PADDING).clamp(0.0, self.max_scroll(limit))
     }
 }
@@ -288,7 +352,12 @@ fn levels<'a>(items: &'a [MenuItem], st: &mut MenuState) -> Vec<&'a [MenuItem]> 
 /// Shows a floating menu at `pos`. `anchor` is the button that opened it (a
 /// press on it does not count as an outside click so the button can toggle).
 pub fn popup_menu(ctx: &egui::Context, id: Id, pos: Pos2, min_w: f32, items: &[MenuItem], anchor: Option<Rect>) -> MenuResult {
-    match popup_tree(ctx, id, pos, min_w, items, anchor) {
+    popup_menu_with_row_h(ctx, id, pos, min_w, items, anchor, theme::MENU_ITEM_HEIGHT)
+}
+
+/// Same as [`popup_menu`] with an explicit row pitch. The default pitch stays [`theme::MENU_ITEM_HEIGHT`].
+pub fn popup_menu_with_row_h(ctx: &egui::Context, id: Id, pos: Pos2, min_w: f32, items: &[MenuItem], anchor: Option<Rect>, row_h: f32) -> MenuResult {
+    match popup_tree_with_row_h(ctx, id, pos, min_w, items, anchor, row_h) {
         TreeResult::Open => MenuResult::Open,
         TreeResult::Closed => MenuResult::Closed,
         TreeResult::Picked(p) => MenuResult::Picked(p[0]),
@@ -297,6 +366,10 @@ pub fn popup_menu(ctx: &egui::Context, id: Id, pos: Pos2, min_w: f32, items: &[M
 
 /// Like `popup_menu` but with submenus: returns the full index path of the picked leaf.
 pub fn popup_tree(ctx: &egui::Context, id: Id, pos: Pos2, min_w: f32, items: &[MenuItem], anchor: Option<Rect>) -> TreeResult {
+    popup_tree_with_row_h(ctx, id, pos, min_w, items, anchor, theme::MENU_ITEM_HEIGHT)
+}
+
+fn popup_tree_with_row_h(ctx: &egui::Context, id: Id, pos: Pos2, min_w: f32, items: &[MenuItem], anchor: Option<Rect>, row_h: f32) -> TreeResult {
     let mut st = load_state(ctx, id, items);
     let before = st.hl.clone();
     let screen = ctx.content_rect();
@@ -371,7 +444,7 @@ pub fn popup_tree(ctx: &egui::Context, id: Id, pos: Pos2, min_w: f32, items: &[M
     let own_layers: Vec<egui::LayerId> = (0..lv.len()).map(|k| egui::LayerId::new(Order::Foreground, id.with(("lvl", k)))).collect();
     let covered = |p: Pos2| ctx.layer_id_at(p).is_some_and(|l| l.order >= Order::Foreground && !own_layers.contains(&l));
     let (press_pos, release_pos) = primary_gesture(&events, &mut st.armed, covered);
-    let lays: Vec<Layout> = lv.iter().enumerate().map(|(k, list)| Layout::new(ctx, list, if k == 0 { min_w } else { SUBMENU_MIN_W })).collect();
+    let lays: Vec<Layout> = lv.iter().enumerate().map(|(k, list)| Layout::new(ctx, list, if k == 0 { min_w } else { SUBMENU_MIN_W }, row_h)).collect();
     let limit = screen.height() - 4.0;
     st.scroll.resize(lays.len(), 0.0);
     for (s, lay) in st.scroll.iter_mut().zip(&lays) {
@@ -430,7 +503,7 @@ pub fn popup_tree(ctx: &egui::Context, id: Id, pos: Pos2, min_w: f32, items: &[M
             let p = if capped { p.with_clip_rect(band) } else { p };
             for (i, it) in list.iter().enumerate() {
                 let top = rect.top() + lay.tops[i] - scroll;
-                let row = Rect::from_min_size(Pos2::new(rect.left(), top), Vec2::new(rect.width(), theme::MENU_ITEM_HEIGHT));
+                let row = Rect::from_min_size(Pos2::new(rect.left(), top), Vec2::new(rect.width(), lay.row_h));
                 #[cfg(test)]
                 record(ui, &format!("menu-row-{k}-{i}"), row);
                 #[cfg(test)]
@@ -438,13 +511,13 @@ pub fn popup_tree(ctx: &egui::Context, id: Id, pos: Pos2, min_w: f32, items: &[M
                 let hit = if capped { row.intersect(band) } else { row };
                 if !hit.is_positive() {
                     if it.separator_after {
-                        hline(&p, rect.left(), rect.right(), row.bottom() + theme::MENU_SEP_MARGIN, theme::BORDER_MENU);
+                        hline(&p, rect.left(), rect.right(), row.bottom() + theme::MENU_SEP_MARGIN, theme::BORDER);
                     }
                     continue;
                 }
                 let pill = Rect::from_min_size(
                     Pos2::new(rect.left() + theme::MENU_PILL_INSET, top),
-                    Vec2::new(rect.width() - theme::MENU_PILL_INSET * 2.0, theme::MENU_ITEM_HEIGHT),
+                    Vec2::new(rect.width() - theme::MENU_PILL_INSET * 2.0, lay.row_h),
                 );
                 let resp = ui.interact(hit, id.with(("row", k, i)), if it.disabled { Sense::hover() } else { Sense::click() });
                 if !it.tooltip.is_empty() {
@@ -462,46 +535,45 @@ pub fn popup_tree(ctx: &egui::Context, id: Id, pos: Pos2, min_w: f32, items: &[M
                 if (released_here || activated) && !it.disabled {
                     clicked = Some((k, i));
                 }
-                if lit {
-                    p.rect_filled(pill, theme::cr(theme::RADIUS_CONTROL), theme::BG_MENU_SELECTED);
-                }
-                let col = if it.disabled { theme::TEXT_DISABLED } else { theme::TEXT };
+                let paint = kit::menu_row_look(it.disabled, lit, it.checked);
+                kit::paint_frame(&p, pill, theme::RADIUS_CONTROL, &paint);
                 let cy = row.center().y;
                 if it.checked {
-                    icons::paint(&p, Icon::Check, Pos2::new(rect.left() + theme::MENU_CHECK_X + theme::MENU_CHECK_BOX / 2.0, cy), theme::MENU_ICON_SIZE, col);
+                    icons::paint(
+                        &p,
+                        Icon::Check,
+                        Pos2::new(rect.left() + theme::MENU_CHECK_X + theme::MENU_CHECK_BOX / 2.0, cy),
+                        theme::MENU_ICON_SIZE,
+                        paint.mark,
+                    );
                 }
                 if let Some(ic) = it.icon {
                     let ix = if lay.has_check { theme::MENU_ICON_X_CHECKED } else { theme::MENU_ICON_X_PLAIN };
-                    icons::paint(&p, ic, Pos2::new(rect.left() + ix + theme::MENU_ICON_BOX / 2.0, cy), theme::MENU_ICON_SIZE, col);
+                    icons::paint(&p, ic, Pos2::new(rect.left() + ix + theme::MENU_ICON_BOX / 2.0, cy), theme::MENU_ICON_SIZE, paint.icon);
                 }
-                p.text(Pos2::new(rect.left() + label_x(it, lay.has_check), cy), Align2::LEFT_CENTER, &it.label, font.clone(), col);
+                p.text(Pos2::new(rect.left() + label_x(it, lay.has_check), cy), Align2::LEFT_CENTER, &it.label, font.clone(), paint.text);
+                let hint = kit::shortcut_look(if it.disabled { kit::State::Disabled } else { kit::State::Default }).text;
                 if it.has_sub() {
-                    let c = if it.disabled {
-                        theme::TEXT_DISABLED
-                    } else if lit {
-                        theme::MENU_SHORTCUT_HIGHLIGHT
-                    } else {
-                        theme::ICON_SECONDARY
-                    };
                     icons::paint(
                         &p,
                         Icon::ChevronRight,
                         Pos2::new(rect.right() - theme::MENU_CHEVRON_PAD - theme::MENU_CHEVRON_BOX / 2.0, cy),
                         theme::MENU_CHEVRON_SIZE,
-                        c,
+                        paint.icon,
+                    );
+                } else if let Some(tic) = it.trailing_icon {
+                    icons::paint(
+                        &p,
+                        tic,
+                        Pos2::new(rect.right() - theme::MENU_CHEVRON_PAD - theme::MENU_CHEVRON_BOX / 2.0, cy),
+                        theme::MENU_ICON_SIZE,
+                        paint.icon,
                     );
                 } else if !it.shortcut.is_empty() {
-                    let c = if it.disabled {
-                        theme::TEXT_DISABLED
-                    } else if lit {
-                        theme::MENU_SHORTCUT_HIGHLIGHT
-                    } else {
-                        theme::TEXT_SECONDARY
-                    };
-                    p.text(Pos2::new(rect.right() - theme::MENU_SHORTCUT_PAD, cy), Align2::RIGHT_CENTER, &it.shortcut, font.clone(), c);
+                    p.text(Pos2::new(rect.right() - theme::MENU_SHORTCUT_PAD, cy), Align2::RIGHT_CENTER, &it.shortcut, font.clone(), hint);
                 }
                 if it.separator_after {
-                    hline(&p, rect.left(), rect.right(), row.bottom() + theme::MENU_SEP_MARGIN, theme::BORDER_MENU);
+                    hline(&p, rect.left(), rect.right(), row.bottom() + theme::MENU_SEP_MARGIN, theme::BORDER);
                 }
             }
             if capped {
@@ -568,42 +640,121 @@ fn scroll_thumb(p: &egui::Painter, band: Rect, content_h: f32, scroll: f32, max_
 }
 
 /// A dropdown field: shows `label` with a chevron; returns the picked option. The option equal to `label` is checked.
+///
+/// Legacy form: a label that reads exactly "Mixed" is drawn as a mixed value. Callers that know whether the
+/// value is mixed use [`dropdown_mixed`], so a user value named "Mixed" keeps the normal ink.
 pub fn dropdown(ui: &mut Ui, rect: Rect, key: impl crate::widgets::Key, label: &str, options: &[String]) -> Option<usize> {
+    dropdown_mixed(ui, rect, key, label, options, label == MIXED)
+}
+
+/// [`dropdown`] with an explicit `mixed` flag: the label is drawn in the mixed ink only when the caller says so.
+pub fn dropdown_mixed(ui: &mut Ui, rect: Rect, key: impl crate::widgets::Key, label: &str, options: &[String], mixed: bool) -> Option<usize> {
     let checked: Vec<bool> = options.iter().map(|o| o == label).collect();
-    dropdown_checked(ui, rect, key, label, options, &checked)
+    let items: Vec<MenuItem> = options.iter().enumerate().map(|(i, o)| MenuItem::new(o.clone()).checked(checked.get(i).copied().unwrap_or(false))).collect();
+    dropdown_items_mixed(ui, rect, key, label, &items, rect.width(), mixed)
 }
 
 /// Like `dropdown`, but `checked[i]` decides whether option `i` shows a check mark, so a multi-select
-/// list marks every selected row regardless of what the closed field shows.
-pub fn dropdown_checked(ui: &mut Ui, rect: Rect, key: impl crate::widgets::Key, label: &str, options: &[String], checked: &[bool]) -> Option<usize> {
+/// list marks every selected row regardless of what the closed field shows. `mixed` is explicit.
+pub fn dropdown_checked_mixed(
+    ui: &mut Ui,
+    rect: Rect,
+    key: impl crate::widgets::Key,
+    label: &str,
+    options: &[String],
+    checked: &[bool],
+    mixed: bool,
+) -> Option<usize> {
+    let items: Vec<MenuItem> = options.iter().enumerate().map(|(i, o)| MenuItem::new(o.clone()).checked(checked.get(i).copied().unwrap_or(false))).collect();
+    dropdown_items_mixed(ui, rect, key, label, &items, rect.width(), mixed)
+}
+
+/// The label of a mixed value, as the legacy dropdown form recognises it.
+const MIXED: &str = "Mixed";
+
+fn dropdown_open_key() -> Id {
+    Id::new("dropdown-menu-open-pass")
+}
+
+fn stamp_dropdown_menu_open(ctx: &Context) {
+    let pass = ctx.cumulative_pass_nr();
+    ctx.data_mut(|d| d.insert_temp(dropdown_open_key(), pass));
+}
+
+/// True when a dropdown menu was drawn open in this pass or the previous one.
+///
+/// The shortcut handler runs before the panels draw, so "open" means open in the frame that just
+/// ended. A dropdown whose host stopped drawing is not stamped again, and the next pass after that
+/// no longer counts.
+pub fn dropdown_menu_was_open(ctx: &Context) -> bool {
+    let now = ctx.cumulative_pass_nr();
+    ctx.data(|d| d.get_temp::<u64>(dropdown_open_key())).is_some_and(|seen| seen == now || seen + 1 == now)
+}
+
+/// Like `dropdown_checked_mixed`, but with ready-made `items` (check marks, dividers) and a menu at least
+/// `min_width` wide.
+pub fn dropdown_items_mixed(
+    ui: &mut Ui,
+    rect: Rect,
+    key: impl crate::widgets::Key,
+    label: &str,
+    items: &[MenuItem],
+    min_width: f32,
+    mixed: bool,
+) -> Option<usize> {
     let id = ui.id().with(("dd", key));
+    super::field_tab::register(ui, rect, id);
+    #[cfg(test)]
+    {
+        let pass = ui.ctx().cumulative_pass_nr();
+        ui.ctx().data_mut(|d| {
+            let last = d.get_temp::<u64>(Id::new("test-dd-pass")).unwrap_or(u64::MAX);
+            if last != pass {
+                d.insert_temp(Id::new("test-dd-list"), Vec::<(Id, Rect)>::new());
+                d.insert_temp(Id::new("test-dd-pass"), pass);
+            }
+            let list = d.get_temp_mut_or_default::<Vec<(Id, Rect)>>(Id::new("test-dd-list"));
+            if !list.iter().any(|(i, _)| *i == id) {
+                list.push((id, rect));
+            }
+        });
+    }
     let r = ui.interact(rect, id, Sense::click());
     let open = ui.data(|d| d.get_temp::<bool>(id)).unwrap_or(false);
     let p = ui.painter();
-    p.rect_filled(rect, theme::cr(theme::RADIUS_CONTROL), theme::BG_SECONDARY);
-    if r.hovered() || open {
-        p.rect_stroke(rect, theme::cr(theme::RADIUS_CONTROL), Stroke::new(1.0, if open { theme::BORDER_SELECTED } else { theme::BORDER }), StrokeKind::Inside);
-    }
+    let state = if open || ui.memory(|mem| mem.has_focus(id)) {
+        kit::State::Focused
+    } else if r.hovered() {
+        kit::State::Hover
+    } else {
+        kit::State::Default
+    };
+    let paint = kit::dropdown_look(state);
+    kit::paint_frame(p, rect, theme::RADIUS_CONTROL, &paint);
     let font = theme::font_menu();
     let shown = elide(p, label, &font, rect.width() - 28.0);
-    p.text(Pos2::new(rect.left() + 8.0, rect.center().y), Align2::LEFT_CENTER, shown, font, theme::TEXT);
-    icons::paint(p, Icon::ChevronDown, Pos2::new(rect.right() - 12.0, rect.center().y), 12.0, theme::ICON_SECONDARY);
+    let label_color = if mixed { theme::TEXT_TERTIARY } else { paint.text };
+    p.text(Pos2::new(rect.left() + 8.0, rect.center().y), Align2::LEFT_CENTER, shown, font, label_color);
+    icons::paint(p, Icon::ChevronDown, Pos2::new(rect.right() - 12.0, rect.center().y), 12.0, paint.icon);
     if r.clicked() {
         ui.data_mut(|d| d.insert_temp(id, !open));
     }
     let mut picked = None;
     if open {
-        let items: Vec<MenuItem> =
-            options.iter().enumerate().map(|(i, o)| MenuItem::new(o.clone()).checked(checked.get(i).copied().unwrap_or(false))).collect();
-        match popup_menu(ui.ctx(), id.with("menu"), rect.left_bottom() + Vec2::new(0.0, 2.0), rect.width(), &items, Some(rect)) {
+        // egui clears keyboard focus on Escape in Focus::begin_pass, before this widget runs.
+        let closed_by_escape = ui.input(|i| i.key_pressed(Key::Escape));
+        match popup_menu(ui.ctx(), id.with("menu"), rect.left_bottom() + Vec2::new(0.0, 2.0), rect.width().max(min_width), items, Some(rect)) {
             MenuResult::Picked(i) => {
                 picked = Some(i);
                 ui.data_mut(|d| d.insert_temp(id, false));
             }
             MenuResult::Closed => {
                 ui.data_mut(|d| d.insert_temp(id, false));
+                if closed_by_escape {
+                    ui.memory_mut(|m| m.request_focus(id));
+                }
             }
-            MenuResult::Open => {}
+            MenuResult::Open => stamp_dropdown_menu_open(ui.ctx()),
         }
     }
     picked
@@ -612,6 +763,26 @@ pub fn dropdown_checked(ui: &mut Ui, rect: Rect, key: impl crate::widgets::Key, 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn menu_height_is_the_height_of_the_panel_the_layout_gives_the_items() {
+        let ctx = egui::Context::default();
+        theme::install_fonts(&ctx);
+        let _ = ctx.run_ui(egui::RawInput::default(), |_| {}); // the fonts are in place from the first pass on
+        let mut items = vec![MenuItem::new("One"), MenuItem::new("Two"), MenuItem::new("Three")];
+        items[1].separator_after = true;
+        assert_eq!(menu_height(&items), 2.0 * theme::MENU_PADDING + 3.0 * theme::MENU_ITEM_HEIGHT + SEP_H);
+        assert_eq!(Layout::new(&ctx, &items, 100.0, theme::MENU_ITEM_HEIGHT).h, menu_height(&items));
+        assert_eq!(menu_height(&[]), 2.0 * theme::MENU_PADDING);
+    }
+
+    #[test]
+    fn menu_height_for_sm_is_taller_than_the_default_pitch() {
+        let items = vec![MenuItem::new("A"), MenuItem::new("B")];
+        let sm = menu_height_for(&items, theme::CONTROL_SM);
+        let xs = menu_height(&items);
+        assert_eq!(sm - xs, 2.0 * (theme::CONTROL_SM - theme::MENU_ITEM_HEIGHT));
+    }
     use crate::proto::DEVICES;
 
     const SCREEN: Vec2 = Vec2::new(900.0, 600.0);
@@ -824,7 +995,7 @@ mod tests {
     /// The panel rect the menu code produced before levels could be capped: size from the layout, then
     /// the 2 px screen-edge clamp on both axes.
     fn uncapped_panel(m: &Popup) -> Rect {
-        let lay = Layout::new(&m.ctx, &m.items, 160.0);
+        let lay = Layout::new(&m.ctx, &m.items, 160.0, theme::MENU_ITEM_HEIGHT);
         let screen = Rect::from_min_size(Pos2::ZERO, SCREEN);
         let x = m.pos.x.min(screen.right() - lay.w - 2.0).max(screen.left() + 2.0);
         let y = m.pos.y.min(screen.bottom() - lay.h - 2.0).max(screen.top() + 2.0);
@@ -994,5 +1165,397 @@ mod tests {
         m.frame(vec![egui::Event::PointerMoved(Pos2::new(x, border + 2.0)), Popup::button(Pos2::new(x, border + 2.0), true)]);
         m.frame(vec![egui::Event::PointerMoved(Pos2::new(x, border - 2.0)), Popup::button(Pos2::new(x, border - 2.0), false)]);
         assert_eq!(m.picked, Some(0));
+    }
+
+    // ---- closed-dropdown focus ring (issue #1273)
+
+    const DD_SCREEN: Vec2 = Vec2::new(400.0, 300.0);
+    const DD_KEY: &str = "weight";
+    const DD2_KEY: &str = "style";
+
+    fn dd_rect() -> Rect {
+        Rect::from_min_size(Pos2::new(40.0, 40.0), Vec2::new(160.0, theme::FIELD_HEIGHT))
+    }
+
+    fn dd2_rect() -> Rect {
+        Rect::from_min_size(Pos2::new(220.0, 40.0), Vec2::new(160.0, theme::FIELD_HEIGHT))
+    }
+
+    fn dd_options() -> Vec<String> {
+        vec!["Regular".into(), "Bold".into()]
+    }
+
+    fn dd_items() -> Vec<MenuItem> {
+        vec![MenuItem::new("Regular").checked(true), MenuItem::new("Bold")]
+    }
+
+    fn key_press(key: Key) -> egui::Event {
+        egui::Event::Key { key, physical_key: Some(key), pressed: true, repeat: false, modifiers: Modifiers::NONE }
+    }
+
+    fn rect_stroke_on(shapes: &[egui::epaint::ClippedShape], target: Rect, color: Color32, width: f32) -> bool {
+        fn walk(shape: &egui::epaint::Shape, target: Rect, color: Color32, width: f32) -> bool {
+            match shape {
+                egui::epaint::Shape::Rect(r) => {
+                    let same = (r.rect.min.x - target.min.x).abs() <= 0.5
+                        && (r.rect.min.y - target.min.y).abs() <= 0.5
+                        && (r.rect.max.x - target.max.x).abs() <= 0.5
+                        && (r.rect.max.y - target.max.y).abs() <= 0.5;
+                    same && r.stroke.color == color && (r.stroke.width - width).abs() <= 0.01 && r.stroke_kind == StrokeKind::Inside
+                }
+                egui::epaint::Shape::Vec(children) => children.iter().any(|c| walk(c, target, color, width)),
+                _ => false,
+            }
+        }
+        shapes.iter().any(|cs| walk(&cs.shape, target, color, width))
+    }
+
+    fn shape_texts(shapes: &[egui::epaint::ClippedShape]) -> Vec<String> {
+        fn walk(shape: &egui::epaint::Shape, out: &mut Vec<String>) {
+            match shape {
+                egui::epaint::Shape::Text(t) => out.push(t.galley.text().to_string()),
+                egui::epaint::Shape::Vec(children) => children.iter().for_each(|c| walk(c, out)),
+                _ => {}
+            }
+        }
+        let mut out = Vec::new();
+        for cs in shapes {
+            walk(&cs.shape, &mut out);
+        }
+        out
+    }
+
+    fn shapes_contain_text(shapes: &[egui::epaint::ClippedShape], needle: &str) -> bool {
+        shape_texts(shapes).iter().any(|t| t.contains(needle))
+    }
+
+    /// The dropdown focus look: a 1px `BORDER_SELECTED` inside stroke.
+    fn focus_ring_on(shapes: &[egui::epaint::ClippedShape], target: Rect) -> bool {
+        rect_stroke_on(shapes, target, theme::BORDER_SELECTED, theme::BORDER_WIDTH)
+    }
+
+    /// The hovered dropdown look: a 1px `BORDER` inside hairline.
+    fn hover_hairline_on(shapes: &[egui::epaint::ClippedShape], target: Rect) -> bool {
+        rect_stroke_on(shapes, target, theme::BORDER, theme::BORDER_WIDTH)
+    }
+
+    fn no_stroke_on(shapes: &[egui::epaint::ClippedShape], target: Rect) -> bool {
+        fn walk(shape: &egui::epaint::Shape, target: Rect) -> bool {
+            match shape {
+                egui::epaint::Shape::Rect(r) => {
+                    let same = (r.rect.min.x - target.min.x).abs() <= 0.5
+                        && (r.rect.min.y - target.min.y).abs() <= 0.5
+                        && (r.rect.max.x - target.max.x).abs() <= 0.5
+                        && (r.rect.max.y - target.max.y).abs() <= 0.5;
+                    !(same && r.stroke.width > 0.0 && r.stroke.color != Color32::TRANSPARENT)
+                }
+                egui::epaint::Shape::Vec(children) => children.iter().all(|c| walk(c, target)),
+                _ => true,
+            }
+        }
+        shapes.iter().all(|cs| walk(&cs.shape, target))
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    enum DropKind {
+        Dropdown,
+        Checked,
+        Items,
+    }
+
+    struct DropSim {
+        ctx: egui::Context,
+        t: f64,
+        shapes: Vec<egui::epaint::ClippedShape>,
+        kind: DropKind,
+        two: bool,
+        enabled: bool,
+        with_tab_neighbors: bool,
+        dd_id: Id,
+        dd2_id: Id,
+        before_id: Id,
+        after_id: Id,
+        neighbor: Rect,
+        focused: Option<Id>,
+        open: bool,
+        picked: Option<usize>,
+    }
+
+    impl DropSim {
+        fn new(kind: DropKind) -> Self {
+            let ctx = egui::Context::default();
+            crate::theme::apply(&ctx);
+            crate::theme::install_fonts(&ctx);
+            let mut s = Self {
+                ctx,
+                t: 0.0,
+                shapes: Vec::new(),
+                kind,
+                two: false,
+                enabled: true,
+                with_tab_neighbors: false,
+                dd_id: Id::NULL,
+                dd2_id: Id::NULL,
+                before_id: Id::NULL,
+                after_id: Id::NULL,
+                neighbor: Rect::NOTHING,
+                focused: None,
+                open: false,
+                picked: None,
+            };
+            s.frame(vec![], None);
+            s
+        }
+
+        fn frame(&mut self, events: Vec<egui::Event>, focus: Option<Id>) {
+            self.t += 0.05;
+            let raw = egui::RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, DD_SCREEN)), time: Some(self.t), events, ..Default::default() };
+            let kind = self.kind;
+            let two = self.two;
+            let enabled = self.enabled;
+            let with_tab_neighbors = self.with_tab_neighbors;
+            let options = dd_options();
+            let items = dd_items();
+            let checked = [true, false];
+            let mut dd_id = Id::NULL;
+            let mut dd2_id = Id::NULL;
+            let mut before_id = Id::NULL;
+            let mut after_id = Id::NULL;
+            let mut neighbor = Rect::NOTHING;
+            let mut picked = None;
+            let mut open = false;
+            let out = self.ctx.run_ui(raw, |ui| {
+                dd_id = ui.id().with(("dd", DD_KEY));
+                dd2_id = ui.id().with(("dd", DD2_KEY));
+                before_id = ui.id().with("dd-before");
+                after_id = ui.id().with("dd-after");
+                if let Some(id) = focus {
+                    ui.memory_mut(|m| m.request_focus(id));
+                }
+                if with_tab_neighbors {
+                    let before = Rect::from_min_size(Pos2::new(40.0, 8.0), Vec2::new(80.0, 24.0));
+                    ui.interact(before, before_id, Sense::click());
+                }
+                let paint = |ui: &mut Ui| match kind {
+                    DropKind::Dropdown => dropdown(ui, dd_rect(), DD_KEY, "Regular", &options),
+                    DropKind::Checked => dropdown_checked_mixed(ui, dd_rect(), DD_KEY, "Regular", &options, &checked, false),
+                    DropKind::Items => dropdown_items_mixed(ui, dd_rect(), DD_KEY, "Regular", &items, dd_rect().width(), false),
+                };
+                picked = if enabled { paint(ui) } else { ui.add_enabled_ui(false, paint).inner };
+                open = ui.data(|d| d.get_temp::<bool>(dd_id)).unwrap_or(false);
+                if two {
+                    let _ = dropdown(ui, dd2_rect(), DD2_KEY, "Solid", &options);
+                }
+                let neighbor_r = Rect::from_min_size(Pos2::new(dd_rect().right() + 8.0, dd_rect().top()), Vec2::new(48.0, theme::FIELD_HEIGHT));
+                ui.interact(neighbor_r, ui.id().with("dd-neighbor"), Sense::hover());
+                crate::widgets::record(ui, "dd-neighbor", neighbor_r);
+                neighbor = neighbor_r;
+                if with_tab_neighbors {
+                    let after = Rect::from_min_size(Pos2::new(280.0, 8.0), Vec2::new(80.0, 24.0));
+                    ui.interact(after, after_id, Sense::click());
+                }
+            });
+            self.shapes = out.shapes;
+            self.dd_id = dd_id;
+            self.dd2_id = dd2_id;
+            self.before_id = before_id;
+            self.after_id = after_id;
+            self.neighbor = neighbor;
+            self.picked = picked;
+            self.open = open;
+            self.focused = self.ctx.memory(|m| m.focused());
+        }
+
+        fn idle(&mut self) {
+            self.frame(vec![], None);
+        }
+
+        fn focus_dd(&mut self) {
+            let id = self.dd_id;
+            self.frame(vec![], Some(id));
+        }
+
+        fn hover(&mut self, at: Pos2) {
+            self.frame(vec![egui::Event::PointerMoved(at)], None);
+        }
+
+        fn focus_and_hover(&mut self, at: Pos2) {
+            let id = self.dd_id;
+            self.frame(vec![egui::Event::PointerMoved(at)], Some(id));
+        }
+
+        fn press_key(&mut self, key: Key) {
+            self.frame(vec![key_press(key)], None);
+        }
+
+        fn settle(&mut self) {
+            self.idle();
+            self.idle();
+        }
+    }
+
+    #[test]
+    fn closed_focused_dropdown_paints_selected_inside_stroke() {
+        let mut s = DropSim::new(DropKind::Dropdown);
+        s.focus_dd();
+        assert_eq!(s.focused, Some(s.dd_id), "the closed dropdown must hold keyboard focus");
+        assert!(!s.open);
+        assert!(focus_ring_on(&s.shapes, dd_rect()), "focused closed dropdown must paint the 1px BORDER_SELECTED inside stroke on its rect");
+        assert!(!hover_hairline_on(&s.shapes, dd_rect()), "focus replaces the hover hairline");
+    }
+
+    #[test]
+    fn closed_idle_dropdown_paints_no_stroke_or_ring() {
+        let mut s = DropSim::new(DropKind::Dropdown);
+        s.idle();
+        assert!(s.focused.is_none(), "an idle dropdown must not hold focus");
+        assert!(!s.open, "an idle dropdown must be closed");
+        assert!(no_stroke_on(&s.shapes, dd_rect()), "an idle dropdown trigger must paint no visible stroke");
+        assert!(!focus_ring_on(&s.shapes, dd_rect()), "an idle closed dropdown must not paint the focus ring");
+    }
+
+    #[test]
+    fn hovered_unfocused_dropdown_paints_hairline() {
+        let mut s = DropSim::new(DropKind::Dropdown);
+        s.idle();
+        let idle_shapes = s.shapes.clone();
+        s.hover(dd_rect().center());
+        assert!(s.focused.is_none() || s.focused != Some(s.dd_id), "hover alone must not focus the dropdown");
+        assert!(!s.open, "hover must leave the dropdown closed");
+        assert!(hover_hairline_on(&s.shapes, dd_rect()), "hover paints a 1px BORDER hairline");
+        assert!(!focus_ring_on(&s.shapes, dd_rect()), "hover without focus must not paint BORDER_SELECTED");
+        assert_ne!(s.shapes, idle_shapes, "hovered trigger shapes must differ from idle trigger shapes");
+    }
+
+    #[test]
+    fn open_dropdown_paints_selected_stroke_and_menu_and_escape_keeps_the_focused_ring() {
+        let mut s = DropSim::new(DropKind::Dropdown);
+        s.focus_dd();
+        s.press_key(Key::Enter);
+        s.settle();
+        assert!(s.open, "Enter on a focused closed dropdown must open the menu on the next frame");
+        assert!(focus_ring_on(&s.shapes, dd_rect()), "an open dropdown must keep the BORDER_SELECTED stroke");
+        assert!(shapes_contain_text(&s.shapes, "Bold"), "the open menu must paint its options, texts={:?}", shape_texts(&s.shapes));
+        s.press_key(Key::Escape);
+        s.settle();
+        assert!(!s.open, "Escape must close the menu");
+        assert!(!shapes_contain_text(&s.shapes, "Bold"), "the closed dropdown must not keep the menu rows");
+        assert_eq!(s.focused, Some(s.dd_id), "Escape must leave keyboard focus on the dropdown");
+        assert!(focus_ring_on(&s.shapes, dd_rect()), "closing with Escape must keep the focused-closed ring, not drop to no ring");
+    }
+
+    #[test]
+    fn tab_moves_focus_onto_and_off_the_dropdown_and_enter_or_space_opens_it() {
+        let mut s = DropSim::new(DropKind::Dropdown);
+        s.with_tab_neighbors = true;
+        s.idle();
+        let before = s.before_id;
+        let after = s.after_id;
+        s.frame(vec![], Some(before));
+        assert_eq!(s.focused, Some(s.before_id));
+        assert!(!focus_ring_on(&s.shapes, dd_rect()), "the dropdown must not show a ring while the previous widget has focus");
+        s.press_key(Key::Tab);
+        s.idle();
+        assert_eq!(s.focused, Some(s.dd_id), "Tab from the previous widget must land on the dropdown");
+        assert!(focus_ring_on(&s.shapes, dd_rect()), "Tab onto the dropdown must paint the focus ring");
+        s.press_key(Key::Tab);
+        s.idle();
+        assert_eq!(s.focused, Some(after), "Tab from the dropdown must move to the next widget");
+        assert!(!focus_ring_on(&s.shapes, dd_rect()), "Tabbing off the dropdown must remove the ring");
+
+        s.frame(vec![], Some(s.dd_id));
+        s.press_key(Key::Enter);
+        s.settle();
+        assert!(s.open, "Enter on a focused dropdown must open the menu");
+        s.press_key(Key::Escape);
+        s.settle();
+        assert!(!s.open);
+
+        s.frame(vec![], Some(s.dd_id));
+        s.press_key(Key::Space);
+        s.settle();
+        assert!(s.open, "Space on a focused dropdown must open the menu");
+    }
+
+    #[test]
+    fn focus_ring_is_inside_the_rect_and_does_not_shift_layout() {
+        let mut s = DropSim::new(DropKind::Dropdown);
+        s.idle();
+        let neighbor_idle = s.neighbor;
+        s.focus_dd();
+        assert!(focus_ring_on(&s.shapes, dd_rect()), "focused dropdown must paint the inside ring on its own rect");
+        assert_eq!(s.neighbor, neighbor_idle, "the inside stroke must not move a neighbor laid out against the dropdown");
+        let on_screen = Rect::from_min_size(Pos2::ZERO, DD_SCREEN);
+        assert!(on_screen.contains_rect(dd_rect()), "the dropdown sits inside the panel, so the inside stroke cannot be clipped by the panel edge");
+        let clip_covers = s.shapes.iter().any(|cs| {
+            if let egui::epaint::Shape::Rect(r) = &cs.shape {
+                r.stroke.color == theme::BORDER_SELECTED && r.stroke.width > 0.0 && cs.clip_rect.contains_rect(dd_rect())
+            } else {
+                false
+            }
+        });
+        assert!(clip_covers, "the focus ring's clip rect must contain the dropdown, so the ring is not clipped");
+    }
+
+    #[test]
+    fn dropdown_dropdown_checked_and_dropdown_items_all_paint_the_focused_ring() {
+        for kind in [DropKind::Dropdown, DropKind::Checked, DropKind::Items] {
+            let mut s = DropSim::new(kind);
+            s.focus_dd();
+            assert!(focus_ring_on(&s.shapes, dd_rect()), "focused closed {kind:?} must paint the BORDER_SELECTED inside stroke through dropdown_items_mixed");
+        }
+    }
+
+    #[test]
+    fn only_the_focused_dropdown_in_a_row_paints_the_ring() {
+        let mut s = DropSim::new(DropKind::Dropdown);
+        s.two = true;
+        s.idle();
+        s.focus_dd();
+        assert!(focus_ring_on(&s.shapes, dd_rect()), "the focused dropdown must show the ring");
+        assert!(!focus_ring_on(&s.shapes, dd2_rect()), "the unfocused sibling in the same row must show no ring");
+        assert!(no_stroke_on(&s.shapes, dd2_rect()), "the unfocused idle sibling paints no visible stroke");
+    }
+
+    #[test]
+    fn focus_wins_over_hover_on_a_closed_dropdown() {
+        let mut s = DropSim::new(DropKind::Dropdown);
+        s.focus_and_hover(dd_rect().center());
+        assert_eq!(s.focused, Some(s.dd_id));
+        assert!(!s.open);
+        assert!(focus_ring_on(&s.shapes, dd_rect()), "focus must paint BORDER_SELECTED even while hovered");
+        assert!(!hover_hairline_on(&s.shapes, dd_rect()), "focus takes precedence over the hover hairline");
+    }
+
+    #[test]
+    fn disabled_dropdown_paints_no_focus_ring() {
+        let mut s = DropSim::new(DropKind::Dropdown);
+        s.enabled = false;
+        s.idle();
+        let id = s.dd_id;
+        s.frame(vec![], Some(id));
+        assert!(!s.open);
+        assert!(!focus_ring_on(&s.shapes, dd_rect()), "a disabled dropdown must not paint a focus ring");
+    }
+
+    #[test]
+    fn a_dropdown_open_stamp_counts_this_pass_and_the_previous_then_expires() {
+        let ctx = egui::Context::default();
+        let pass = |ctx: &egui::Context, stamp: bool| {
+            let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+                if stamp {
+                    stamp_dropdown_menu_open(ui.ctx());
+                }
+            });
+        };
+        pass(&ctx, false);
+        assert!(!dropdown_menu_was_open(&ctx), "nothing is open before a menu is stamped");
+        pass(&ctx, true);
+        let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+            assert!(dropdown_menu_was_open(ui.ctx()), "stamped in the previous pass");
+        });
+        let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+            assert!(!dropdown_menu_was_open(ui.ctx()), "not stamped in the previous pass");
+        });
     }
 }

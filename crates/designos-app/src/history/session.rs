@@ -8,18 +8,28 @@ use designos_doc::{Document, History};
 impl App {
     fn take_snapshot(&mut self) -> Snapshot {
         crate::decks::ui::flush_notes(self);
-        Snapshot { doc: std::mem::take(&mut self.doc), hist: std::mem::take(&mut self.hist), page: self.page, selection: std::mem::take(&mut self.selection) }
+        Snapshot {
+            doc: std::mem::take(&mut self.doc),
+            hist: std::mem::take(&mut self.hist),
+            page: self.page,
+            selection: std::mem::take(&mut self.selection),
+            load_next_id: self.load_next_id,
+        }
     }
 
     /// Puts `doc` on the canvas with the given undo stack, keeping the view.
+    /// A version document records its own [`Document::peek_next_id`] after a page is ensured and before any page hydrates.
     fn install(&mut self, doc: Document, hist: History, page: Option<designos_doc::NodeId>, selection: Vec<designos_doc::NodeId>) {
         self.stop_plugin();
         let mut doc = doc;
         crate::io::ensure_page(&mut doc);
+        let load_next_id = doc.peek_next_id();
         self.page = page.filter(|p| doc.pages.contains(p)).unwrap_or(doc.pages[0]);
+        self.load_next_id = load_next_id;
         self.doc = doc;
         self.decks = Default::default();
         self.hist = hist;
+        self.tabs.retain_converted_images(self);
         self.selection = selection;
         self.selection.retain(|id| self.doc.get(*id).is_some());
         self.hover = None;
@@ -31,6 +41,13 @@ impl App {
         self.fonts.load_for(&self.doc);
         self.comments.close_popovers();
         self.changed();
+    }
+
+    /// Puts a parked editor state back, including the watermark it had when it was parked.
+    fn install_snapshot(&mut self, snapshot: Snapshot) {
+        let load_next_id = snapshot.load_next_id;
+        self.install(snapshot.doc, snapshot.hist, Some(snapshot.page), snapshot.selection);
+        self.load_next_id = load_next_id;
     }
 
     /// Shows version `n` read-only on the canvas.
@@ -55,15 +72,14 @@ impl App {
             }
         };
         let page = Some(self.page);
-        self.install(doc, History::default(), page, vec![]);
         self.history.viewing = Some(Viewing { n, title, saved });
+        self.install(doc, History::default(), page, vec![]);
     }
 
     /// "Back to current": drops the read-only view.
     pub fn exit_version_view(&mut self) {
         let Some(v) = self.history.viewing.take() else { return };
-        let s = v.saved;
-        self.install(s.doc, s.hist, Some(s.page), s.selection);
+        self.install_snapshot(v.saved);
     }
 
     /// "Restore this version": the current state becomes an automatic version first, then
@@ -86,9 +102,9 @@ impl App {
         }
         let before = self.take_snapshot();
         let page = Some(before.page);
-        self.install(old, History::default(), page, vec![]);
         self.history.restore_undo = Some(before);
         self.history.restore_redo = None;
+        self.install(old, History::default(), page, vec![]);
         self.history.dirty = true;
         self.history.last_version_hash = doc_hash(&self.doc);
         self.write_after_restore();
@@ -110,9 +126,11 @@ impl App {
         }
         let Some(snap) = self.history.restore_undo.take() else { return false };
         let now = self.take_snapshot();
-        self.install(snap.doc, snap.hist, Some(snap.page), snap.selection);
-        let expected = doc_hash(&self.doc);
-        self.history.restore_redo = Some((now, expected));
+        self.history.restore_redo = Some((now, 0));
+        self.install_snapshot(snap);
+        if let Some((_, expected)) = self.history.restore_redo.as_mut() {
+            *expected = doc_hash(&self.doc);
+        }
         self.write_after_restore();
         true
     }
@@ -124,11 +142,12 @@ impl App {
         }
         let Some((snap, expected)) = self.history.restore_redo.take() else { return false };
         if doc_hash(&self.doc) != expected {
+            self.tabs.retain_converted_images(self);
             return false;
         }
         let before = self.take_snapshot();
-        self.install(snap.doc, snap.hist, Some(snap.page), snap.selection);
         self.history.restore_undo = Some(before);
+        self.install_snapshot(snap);
         self.write_after_restore();
         true
     }

@@ -1,5 +1,229 @@
 use super::*;
-use crate::{Command, Comment, CommentAnchor, CommentThread, Document, History, Node, NodeId, Rect, Style, Vec2};
+use crate::{create_component, create_instance, Command, Comment, CommentAnchor, CommentThread, Document, History, Node, NodeId, Rect, Style, Vec2};
+
+#[test]
+fn replay_reparent_refuses_a_held_main_cycle() {
+    let mut d = Document::new("cycle");
+    let page = d.add_page("Page");
+    let make = |d: &mut Document, name: &str| {
+        let id = d.alloc_id();
+        d.insert(page, Node::frame(id, Rect::new(0.0, 0.0, 100.0, 100.0))).unwrap();
+        d.get_mut(id).unwrap().name = name.into();
+        create_component(d, id).apply(d).unwrap();
+        id
+    };
+    let b = make(&mut d, "B");
+    let a = make(&mut d, "A");
+    let held = create_instance(&mut d, b, a, Vec2::ZERO);
+    held.apply(&mut d).unwrap();
+    let moving = create_instance(&mut d, a, page, Vec2::ZERO);
+    moving.apply(&mut d).unwrap();
+    let moving = *d.get(page).unwrap().children.last().unwrap();
+    let before = d.to_json().unwrap();
+    let op = LiveOp::Reparent { id: moving, parent: b, at: SiblingHint::default() };
+    let report = replay(&mut d, vec![op], &mut LivePatchState::default());
+    assert_eq!(report.skipped, ["Can't move: B would contain itself (B \u{2192} A \u{2192} B)"]);
+    assert_eq!(d.to_json().unwrap(), before);
+}
+
+#[test]
+fn replay_insert_and_reparent_refuse_concurrent_component_instance_cycle() {
+    let mut base = Document::new("concurrent-cycle");
+    let page = base.add_page("Page");
+    let b = base.alloc_id();
+    base.insert(page, Node::frame(b, Rect::new(0.0, 0.0, 100.0, 100.0))).unwrap();
+    base.get_mut(b).unwrap().name = "B".into();
+    create_component(&mut base, b).apply(&mut base).unwrap();
+
+    let x = base.alloc_id();
+    base.insert(page, Node::frame(x, Rect::new(150.0, 0.0, 100.0, 100.0))).unwrap();
+    base.get_mut(x).unwrap().name = "X".into();
+
+    // Direction 1: editor moved X into B; agent inserted an instance of B into X on its stale copy.
+    let mut main_a = base.clone();
+    Command::Reparent { id: x, parent: b, index: 0 }.apply(&mut main_a).unwrap();
+    let main_a_before = main_a.to_json().unwrap();
+
+    let mut branch_a = base.clone();
+    let insert_cmd = create_instance(&mut branch_a, b, x, Vec2::ZERO);
+    let insert_ops = live_ops_for_command(&branch_a, &insert_cmd).unwrap();
+
+    let report_a = replay(&mut main_a, insert_ops, &mut LivePatchState::default());
+    assert_eq!(report_a.skipped, ["Can't add: B would contain itself (B \u{2192} X \u{2192} B)"], "insert replay refuses with the editor's sentence");
+    assert_eq!(main_a.to_json().unwrap(), main_a_before);
+
+    // Direction 2: editor inserted an instance of B into X; agent moved X into B on its stale copy.
+    let mut main_b = base.clone();
+    create_instance(&mut main_b, b, x, Vec2::ZERO).apply(&mut main_b).unwrap();
+    let main_b_before = main_b.to_json().unwrap();
+
+    let branch_b = base.clone();
+    let move_cmd = Command::Reparent { id: x, parent: b, index: 0 };
+    let move_ops = live_ops_for_command(&branch_b, &move_cmd).unwrap();
+
+    let report_b = replay(&mut main_b, move_ops, &mut LivePatchState::default());
+    assert_eq!(report_b.skipped, ["Can't move: B would contain itself (B \u{2192} X \u{2192} B)"], "reparent replay refuses with the editor's sentence");
+    assert_eq!(main_b.to_json().unwrap(), main_b_before);
+}
+
+#[test]
+fn renaming_a_main_that_already_holds_itself_is_not_refused() {
+    let mut doc = Document::new("legacy-cycle-rename");
+    let page = doc.add_page("Page");
+    let b = doc.alloc_id();
+    let mut comp = Node::new(b, crate::NodeKind::Component(crate::FrameProps::default()));
+    comp.name = "B".into();
+    doc.insert(page, comp).unwrap();
+    let inner = doc.alloc_id();
+    let mut inst = Node::new(inner, crate::NodeKind::Instance { frame: crate::FrameProps::default(), component: Some(b), component_key: None });
+    inst.name = "B self".into();
+    inst.component.source = Some(b);
+    doc.insert(b, inst).unwrap();
+
+    let mut renamed = doc.get(b).unwrap().clone();
+    renamed.name = "B renamed".into();
+    let ops = live_ops_for_command(&doc, &Command::Update { node: Box::new(renamed) }).unwrap();
+
+    let report = replay(&mut doc, ops, &mut LivePatchState::default());
+    assert!(report.skipped.is_empty(), "renaming an existing self-holding main must not be refused: {:?}", report.skipped);
+    assert_eq!(report.applied, 1);
+    assert_eq!(doc.get(b).unwrap().name, "B renamed");
+}
+
+#[test]
+fn editing_inside_an_existing_cycle_is_not_refused() {
+    let mut doc = Document::new("legacy-cycle-edit");
+    let page = doc.add_page("Page");
+    let b = doc.alloc_id();
+    let mut comp = Node::new(b, crate::NodeKind::Component(crate::FrameProps::default()));
+    comp.name = "B".into();
+    doc.insert(page, comp).unwrap();
+    let inner = doc.alloc_id();
+    let mut inst = Node::new(inner, crate::NodeKind::Instance { frame: crate::FrameProps::default(), component: Some(b), component_key: None });
+    inst.name = "B self".into();
+    inst.component.source = Some(b);
+    doc.insert(b, inst).unwrap();
+
+    let mut updated_inner = doc.get(inner).unwrap().clone();
+    updated_inner.opacity = 0.5;
+    let ops = live_ops_for_command(&doc, &Command::Update { node: Box::new(updated_inner) }).unwrap();
+
+    let report = replay(&mut doc, ops, &mut LivePatchState::default());
+    assert!(report.skipped.is_empty(), "editing inside an existing cycle must not be refused: {:?}", report.skipped);
+    assert_eq!(report.applied, 1);
+    assert_eq!(doc.get(inner).unwrap().opacity, 0.5);
+}
+
+#[test]
+fn replay_update_refuses_swapping_instance_into_its_own_main() {
+    let mut doc = Document::new("swap-into-own-main");
+    let page = doc.add_page("Page");
+    let b = doc.alloc_id();
+    let mut comp_b = Node::new(b, crate::NodeKind::Component(crate::FrameProps::default()));
+    comp_b.name = "B".into();
+    doc.insert(page, comp_b).unwrap();
+    let c = doc.alloc_id();
+    let mut comp_c = Node::new(c, crate::NodeKind::Component(crate::FrameProps::default()));
+    comp_c.name = "C".into();
+    doc.insert(page, comp_c).unwrap();
+    let inner = doc.alloc_id();
+    let mut inst = Node::new(inner, crate::NodeKind::Instance { frame: crate::FrameProps::default(), component: Some(c), component_key: None });
+    inst.name = "Slot".into();
+    doc.insert(b, inst).unwrap();
+
+    let mut swapped = doc.get(inner).unwrap().clone();
+    swapped.kind = crate::NodeKind::Instance { frame: crate::FrameProps::default(), component: Some(b), component_key: None };
+    let ops = live_ops_for_command(&doc, &Command::Update { node: Box::new(swapped) }).unwrap();
+
+    let report = replay(&mut doc, ops, &mut LivePatchState::default());
+    assert_eq!(report.applied, 0);
+    assert_eq!(report.skipped, ["Can't swap: B would contain itself (B \u{2192} B)"]);
+}
+
+#[test]
+fn replay_update_refuses_turning_self_holding_frame_into_component() {
+    let mut doc = Document::new("turn-into-comp-cycle");
+    let page = doc.add_page("Page");
+    let f = doc.alloc_id();
+    let mut frame = Node::frame(f, Rect::new(0.0, 0.0, 100.0, 100.0));
+    frame.name = "B".into();
+    doc.insert(page, frame).unwrap();
+    let inner = doc.alloc_id();
+    let mut inst = Node::new(inner, crate::NodeKind::Instance { frame: crate::FrameProps::default(), component: Some(f), component_key: None });
+    inst.name = "B self".into();
+    doc.insert(f, inst).unwrap();
+
+    let mut promoted = doc.get(f).unwrap().clone();
+    promoted.kind = crate::NodeKind::Component(crate::FrameProps::default());
+    let ops = live_ops_for_command(&doc, &Command::Update { node: Box::new(promoted) }).unwrap();
+
+    let report = replay(&mut doc, ops, &mut LivePatchState::default());
+    assert_eq!(report.applied, 0);
+    assert_eq!(report.skipped, ["Can't turn into a component: B would contain itself (B \u{2192} B)"]);
+}
+
+#[test]
+fn replay_insert_refuses_new_main_component_holding_instance_of_itself() {
+    let mut doc = Document::new("insert-self-holding-comp");
+    let page = doc.add_page("Page");
+    let mut branch = doc.clone();
+    let b = branch.alloc_id();
+    let mut comp = Node::new(b, crate::NodeKind::Component(crate::FrameProps::default()));
+    comp.name = "SelfComp".into();
+    branch.insert(page, comp).unwrap();
+    let inner = branch.alloc_id();
+    let mut inst = Node::new(inner, crate::NodeKind::Instance { frame: crate::FrameProps::default(), component: Some(b), component_key: None });
+    inst.name = "SelfInst".into();
+    branch.insert(b, inst).unwrap();
+
+    let ops = live_ops_for_command(
+        &branch,
+        &Command::Insert { parent: page, index: 0, nodes: vec![branch.get(b).unwrap().clone(), branch.get(inner).unwrap().clone()] },
+    )
+    .unwrap();
+
+    let report = replay(&mut doc, ops, &mut LivePatchState::default());
+    assert_eq!(report.applied, 0);
+    assert_eq!(report.skipped, ["Can't add: SelfComp would contain itself (SelfComp \u{2192} SelfComp)"]);
+}
+
+/// A new main that holds itself through another main, `Card`, which already holds an instance of the id the new main
+/// takes: the sentence closes the loop on the new main's own name, although the document has no layer with that name.
+#[test]
+fn replay_insert_of_a_main_that_holds_itself_through_another_main_names_the_loop_with_the_new_name() {
+    let mut doc = Document::new("insert-via-held-main");
+    let page = doc.add_page("Page");
+    let card = doc.alloc_id();
+    let mut card_node = Node::new(card, crate::NodeKind::Component(crate::FrameProps::default()));
+    card_node.name = "Card".into();
+    doc.insert(page, card_node).unwrap();
+    let wrapper = doc.alloc_id();
+    let slot = doc.alloc_id();
+    let mut slot_node = Node::new(slot, crate::NodeKind::Instance { frame: crate::FrameProps::default(), component: Some(wrapper), component_key: None });
+    slot_node.name = "Slot".into();
+    doc.insert(card, slot_node).unwrap();
+    assert!(doc.get(wrapper).is_none(), "the document has no layer for the id that Card's instance points at");
+
+    let mut branch = doc.clone();
+    let mut wrapper_node = Node::new(wrapper, crate::NodeKind::Component(crate::FrameProps::default()));
+    wrapper_node.name = "Wrapper".into();
+    branch.insert(page, wrapper_node).unwrap();
+    let inner = branch.alloc_id();
+    let mut inner_node = Node::new(inner, crate::NodeKind::Instance { frame: crate::FrameProps::default(), component: Some(card), component_key: None });
+    inner_node.name = "CardInst".into();
+    branch.insert(wrapper, inner_node).unwrap();
+    let ops = live_ops_for_command(
+        &branch,
+        &Command::Insert { parent: page, index: 1, nodes: vec![branch.get(wrapper).unwrap().clone(), branch.get(inner).unwrap().clone()] },
+    )
+    .unwrap();
+
+    let before = doc.to_json().unwrap();
+    let report = replay(&mut doc, ops, &mut LivePatchState::default());
+    assert_eq!(report.applied, 0);
+    assert_eq!(report.skipped, ["Can't add: Wrapper would contain itself (Wrapper \u{2192} Card \u{2192} Wrapper)"]);
+    assert_eq!(doc.to_json().unwrap(), before);
+}
 
 /// A page with `frames` top-level frames of `kids` rectangles each, one style, one comment.
 fn full_doc(frames: usize, kids: usize) -> (Document, NodeId, Vec<NodeId>) {
@@ -438,6 +662,7 @@ fn page_flow_library_commands_are_still_refused() {
         (Command::SetGuides { page, guides: Vec::new() }, "Editing guides"),
         (Command::SetPrototypeDevice { device: Default::default() }, "Editing the prototype device"),
         (Command::SetCheckDesignsSettings(Default::default()), "Editing check designs settings"),
+        (Command::SetColorProfile { profile: crate::ColorProfile::DisplayP3 }, "Editing the color profile"),
     ] {
         let err = live_ops_for_command(&doc, &cmd).unwrap_err();
         assert!(err.contains(expected), "expected '{expected}' in '{err}'");
@@ -820,7 +1045,7 @@ fn apply_spec_library_import_with_styles_variables_images_and_slots_replays_and_
         card.style_refs.insert("fill".into(), "Brand".into());
         card.variables.bindings.insert("itemSpacing".into(), "v1".into());
         card.fills.push(Paint {
-            kind: PaintKind::Image { image_ref: "dot_hash".into(), scale_mode: ImageScaleMode::Fill },
+            kind: PaintKind::Image { image_ref: "dot_hash".into(), scale_mode: ImageScaleMode::Fill, params: Default::default() },
             opacity: 1.0,
             visible: true,
             blend: BlendMode::Normal,
@@ -928,6 +1153,7 @@ fn styles_the_agent_adds_merge_into_the_editors_and_undo_removes_only_those() {
             description: String::new(),
             property: crate::StyleProperty::Fill,
             bindings: Default::default(),
+            ..Default::default()
         },
     );
     agent_exec(&mut agent, &mut hist, &mut ops, Command::SetStyles { styles, style_meta: meta });
@@ -1300,4 +1526,34 @@ fn an_agent_undo_of_its_style_keeps_a_style_the_user_edited_since() {
     assert_eq!(full.styles.get("s_agent"), Some(&red_fill(99)), "undo must not delete a style the user edited");
     assert_eq!(r.duplicates, 0);
     assert!(r.skipped.iter().any(|s| s.contains("s_agent")), "{:?}", r.skipped);
+}
+
+#[test]
+fn parked_overrides_round_trip_through_live_patch_when_added_and_cleared() {
+    let (mut full, _page, tops) = full_doc(1, 0);
+    let mut agent = full.clone();
+    let mut hist = History::default();
+    let mut state = LivePatchState::default();
+
+    let parked = vec![crate::ParkedOverride {
+        path: vec![("Subtitle".into(), 0)],
+        field: crate::OverrideField::Visible,
+        value: crate::ParkedOverrideValue::Visible(false),
+        bindings: BTreeMap::new(),
+        origin_source: Some(NodeId(42)),
+    }];
+
+    let mut ops = Vec::new();
+    let mut n = agent.get(tops[0]).unwrap().clone();
+    n.component.parked_overrides = parked.clone();
+    agent_exec(&mut agent, &mut hist, &mut ops, Command::Update { node: Box::new(n) });
+    assert_eq!(replay(&mut full, ops, &mut state).applied, 1);
+    assert_eq!(full.get(tops[0]).unwrap().component.parked_overrides, parked);
+
+    let mut ops_clear = Vec::new();
+    let mut n_clear = agent.get(tops[0]).unwrap().clone();
+    n_clear.component.parked_overrides.clear();
+    agent_exec(&mut agent, &mut hist, &mut ops_clear, Command::Update { node: Box::new(n_clear) });
+    assert_eq!(replay(&mut full, ops_clear, &mut state).applied, 1);
+    assert!(full.get(tops[0]).unwrap().component.parked_overrides.is_empty());
 }

@@ -92,18 +92,37 @@ pub enum MenuKind {
     Palette,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct ShellRegions {
+    pub title_bar: Option<egui::Rect>,
+    pub tab_bar: Option<egui::Rect>,
+    pub rail: Option<egui::Rect>,
+    pub left_panel: Option<egui::Rect>,
+    pub canvas: Option<egui::Rect>,
+    pub notes: Option<egui::Rect>,
+    pub right_panel: Option<egui::Rect>,
+    pub home: Option<egui::Rect>,
+    pub present: Option<egui::Rect>,
+    pub variables_full: Option<egui::Rect>,
+}
+
 #[derive(Default)]
 pub struct UiState {
     pub menu: Option<MenuKind>,
     pub menu_anchor: Option<egui::Rect>,
     pub left_collapsed: bool,
+    /// True while the window is too narrow for a left panel. Derived every frame by the shell, never the user's choice.
+    pub left_auto_collapsed: bool,
     pub left_panel_width: f32,
+    pub pages_height: Option<f32>,
     pub ai_panel_width: f32,
     pub rail: Option<RailItem>,
     pub right_tab: Option<RightTab>,
     pub dev_mode: bool,
     /// Selection context menu position (canvas or layers right-click).
     pub ctx_menu: Option<egui::Pos2>,
+    /// Page-space position where a canvas right-click opened `ctx_menu`.
+    pub ctx_menu_page: Option<Vec2>,
     /// Overlapping layer picker menu position and hit list (`Cmd/Ctrl + Right-Click` on canvas).
     pub layer_picker: Option<(egui::Pos2, Vec<NodeId>)>,
     /// Anchor of the instance "more" menu and of the add-property menu in the inspector.
@@ -121,8 +140,21 @@ pub struct UiState {
     pub hide_layout_grids: bool,
     /// Snap to pixel grid is off (it is on by default, as in Figma).
     pub no_pixel_snap: bool,
+    /// Highlight layers on hover is off (it is on by default, as in Figma).
+    pub hide_hover_highlight: bool,
     /// Whether the Preferences -> Agent permissions modal is open (`#656`).
     pub permissions_modal_open: bool,
+    /// Region rects copied every frame by `Shell::draw` (`#1126`).
+    pub regions: ShellRegions,
+    /// True when launched with `--screenshot` or `apply_launch_defaults(true)` (`#1126`).
+    pub screenshot_chrome: bool,
+}
+
+impl UiState {
+    /// True when no left panel is on screen: the user collapsed it, or the window is too narrow for it.
+    pub fn left_hidden(&self) -> bool {
+        self.left_collapsed || self.left_auto_collapsed
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -135,18 +167,48 @@ pub struct CopiedStyle {
     pub corner_radii: [f32; 4],
     pub corner_smoothing: f32,
     pub text_style: Option<designos_doc::TextStyle>,
+    /// Text-style link of a copied text layer. `None` when the source has no text, or no link.
+    pub text_style_link: Option<String>,
+    /// Overrides stored on that linked text layer. Empty when there is no link.
+    pub text_style_overrides: designos_doc::OwnedFieldSet,
 }
+
+/// The most toasts that wait behind the one on screen.
+pub(crate) const TOAST_QUEUE_CAP: usize = 8;
 
 pub struct Toast {
     pub text: String,
+    /// When the toast leaves. Armed on the first paint (`armed`), so a blocked frame before that paint does not spend it.
     pub until: f64,
     pub error: bool,
     /// A file this toast can show in its folder (the toast then carries a "Show in folder" action).
     pub reveal: Option<PathBuf>,
+    /// True when no file dialog could open and the toast carries an "Enter a path…" fallback action.
+    pub enter_path: bool,
+    /// How long the toast stays once it has been painted.
+    pub(crate) duration: f64,
+    /// False until the shell has painted this toast and set `until` from `duration`.
+    pub(crate) armed: bool,
+}
+
+impl Toast {
+    /// Keeps this toast up for `seconds` from `now`. The first paint arms the same duration again.
+    pub(crate) fn stay_for(&mut self, now: f64, seconds: f64) {
+        self.duration = seconds;
+        self.until = now + seconds;
+    }
+
+    /// True when the toast carries an action button (Show in folder, Enter a path…).
+    pub(crate) fn has_action(&self) -> bool {
+        self.reveal.is_some() || self.enter_path
+    }
 }
 
 pub struct App {
     pub doc: Document,
+    /// [`Document::peek_next_id`] from when this document was opened, before page 0 expanded its instances.
+    /// Ids at or above it belong to that expansion and are not stable across runs.
+    pub load_next_id: designos_doc::NodeId,
     pub hist: History,
     pub page: NodeId,
     pub selection: Vec<NodeId>,
@@ -184,7 +246,14 @@ pub struct App {
     pub system_image: fn() -> Option<crate::system_paste::ClipImage>,
     /// Pastes whose clipboard image is still being read.
     pub paste_jobs: std::collections::VecDeque<crate::system_paste::PasteJob>,
+    /// Work that holds the window for a while, queued behind the status line that announces it (see `deferred_work`).
+    pub(crate) queued_work: Vec<crate::deferred_work::QueuedWork>,
     pub toast: Option<Toast>,
+    pub toast_queue: std::collections::VecDeque<Toast>,
+    /// Counts the error toasts raised, whether they reached the screen or the queue, and keeps the latest text. An
+    /// operation that reports an error through a toast reads these instead of the toast slot.
+    pub(crate) error_toast_seq: u64,
+    pub(crate) last_error_toast: String,
     pub file_path: Option<PathBuf>,
     pub now: f64,
     pub keep_tool: bool,
@@ -196,6 +265,7 @@ pub struct App {
     pub(crate) scrub_opened_at: u64,
     /// Zoom (as a factor) to apply on the first frame instead of fitting the page (`--zoom`).
     pub startup_zoom: Option<f32>,
+    pub startup_fit_selection: bool,
     /// The projects library (None until opened; tests run without one).
     pub lib: Option<designos_library::Library>,
     /// The library file open in the editor, if any (autosaved, shown in the header).
@@ -246,13 +316,20 @@ pub struct App {
     /// Last web capture import report (`T8.27`) and whether its `Details` sheet is open.
     pub web_capture_report: Option<designos_webcapture::ImportReport>,
     pub web_capture_report_open: bool,
+    /// Last `warn` log line emitted when a system file dialog could not open (`#1192`).
+    pub last_dialog_warn: Option<String>,
+    /// Per-window guard so a second click on Import while a chooser is opening opens nothing new (`#1192`).
+    pub dialog_opening: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl App {
     pub fn new(doc: Document) -> Self {
+        crate::textmeasure::install_layout_measurer();
         let page = doc.pages.first().copied().unwrap_or(NodeId(0));
+        let load_next_id = doc.peek_next_id();
         Self {
             doc,
+            load_next_id,
             hist: History::default(),
             page,
             selection: vec![],
@@ -280,7 +357,11 @@ impl App {
             system_text: crate::system_paste::system_text,
             system_image: crate::system_paste::system_image,
             paste_jobs: Default::default(),
+            queued_work: Vec::new(),
             toast: None,
+            toast_queue: Default::default(),
+            error_toast_seq: 0,
+            last_error_toast: String::new(),
             file_path: None,
             now: 0.0,
             keep_tool: false,
@@ -289,6 +370,7 @@ impl App {
             scrub: None,
             scrub_opened_at: 0,
             startup_zoom: None,
+            startup_fit_selection: false,
             lib: None,
             lib_file: None,
             home: None,
@@ -315,6 +397,8 @@ impl App {
             pending_flush_notice: None,
             web_capture_report: None,
             web_capture_report_open: false,
+            last_dialog_warn: None,
+            dialog_opening: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
     }
 
@@ -333,9 +417,17 @@ impl App {
             }
         }
         self.step_text_refit();
+        if !self.fonts.is_loading() && !self.text_refit_pending() {
+            self.finish_pending_vecop();
+        }
     }
 
     pub fn show_toast(&mut self, text: impl Into<String>, error: bool) {
+        self.raise_toast(text, error);
+    }
+
+    /// Raises a toast like [`App::show_toast`] and returns it where it landed, on screen or in the queue.
+    pub(crate) fn raise_toast(&mut self, text: impl Into<String>, error: bool) -> &mut Toast {
         let mut text = text.into();
         let mut error = error;
         if let Some((at, prev)) = self.pending_flush_notice.take() {
@@ -344,16 +436,123 @@ impl App {
                 error = true;
             }
         }
-        self.toast = Some(Toast { text, until: self.now + theme::TOAST_SECONDS, error, reveal: None });
+        self.place_toast(Toast {
+            text,
+            until: self.now + theme::TOAST_SECONDS,
+            error,
+            reveal: None,
+            enter_path: false,
+            duration: theme::TOAST_SECONDS,
+            armed: false,
+        })
+    }
+
+    /// Puts `next` on screen, or in the queue when the toast on screen carries an action that has not run out, when
+    /// `next` is an error and an error is still on screen, or when other toasts already wait. A toast with an action
+    /// is never replaced (the user may be about to press it), an error on screen is never replaced by another error,
+    /// and a plain toast never jumps ahead of one that waits, so a stream of plain toasts cannot hide it.
+    fn place_toast(&mut self, next: Toast) -> &mut Toast {
+        if next.error {
+            self.error_toast_seq += 1;
+            self.last_error_toast = next.text.clone();
+            // The same error again adds nothing: it is on screen or already waits. The count above still moved.
+            let shown = self.toast.as_ref().is_some_and(|t| t.error && t.text == next.text);
+            let queued = self.toast_queue.iter().position(|t| t.error && t.text == next.text);
+            if shown {
+                return self.toast.as_mut().unwrap_or_else(|| unreachable!("checked just above"));
+            }
+            if let Some(i) = queued {
+                return &mut self.toast_queue[i];
+            }
+        }
+        let live = |t: &Toast| !t.armed || self.now < t.until;
+        let live_action = self.toast.as_ref().is_some_and(|t| t.has_action() && live(t));
+        // A different error does not replace an error the user has seen and that still has time left.
+        let live_error = next.error && self.toast.as_ref().is_some_and(|t| t.error && t.armed && self.now < t.until);
+        if live_action || live_error || !self.toast_queue.is_empty() {
+            return self.enqueue_toast(next);
+        }
+        self.toast.insert(next)
+    }
+
+    /// The error for a Show in folder that did not work for `file`. It is about what the user just did, so it does not
+    /// wait behind other toasts: it replaces the toast of `file` when that is on screen, otherwise it goes to the
+    /// front of the queue when a toast with an action for another file is on screen, otherwise it takes the slot.
+    pub(crate) fn show_reveal_failure(&mut self, file: &std::path::Path, text: String) {
+        self.error_toast_seq += 1;
+        self.last_error_toast = text.clone();
+        let own_on_screen = self.toast.as_ref().is_some_and(|t| t.reveal.as_deref() == Some(file));
+        let repeated = self.toast.as_ref().is_some_and(|t| t.error && t.text == text) || self.toast_queue.iter().any(|t| t.error && t.text == text);
+        if own_on_screen {
+            self.toast = None;
+        }
+        if repeated {
+            return;
+        }
+        let error =
+            Toast { until: self.now + theme::TOAST_SECONDS, text, error: true, reveal: None, enter_path: false, duration: theme::TOAST_SECONDS, armed: false };
+        let other_action_live = self.toast.as_ref().is_some_and(|t| t.has_action() && (!t.armed || self.now < t.until));
+        if other_action_live {
+            self.toast_queue.push_front(error);
+        } else {
+            self.toast = Some(error);
+        }
+    }
+
+    /// Adds `next` at the back of the queue. The queue keeps only the latest plain notice (a newer progress or
+    /// info toast replaces an older queued one) and holds at most [`TOAST_QUEUE_CAP`] toasts by dropping the oldest
+    /// plain notice. An error toast or a toast with an action is never merged away or dropped.
+    fn enqueue_toast(&mut self, next: Toast) -> &mut Toast {
+        let is_plain = |t: &Toast| !t.error && !t.has_action();
+        if is_plain(&next) {
+            self.toast_queue.retain(|t| !is_plain(t));
+        }
+        if self.toast_queue.len() >= TOAST_QUEUE_CAP {
+            if let Some(i) = self.toast_queue.iter().position(is_plain) {
+                self.toast_queue.remove(i);
+            }
+        }
+        self.toast_queue.push_back(next);
+        let last = self.toast_queue.len() - 1;
+        &mut self.toast_queue[last]
+    }
+
+    /// The status of work that is about to block the UI ("Saving… loading all pages"). It is on screen for the next
+    /// paint even when a toast with an action is up; that toast waits at the front of the queue and comes back, with
+    /// its full time, once the status is gone.
+    pub(crate) fn show_status_toast(&mut self, text: impl Into<String>) {
+        let now = self.now;
+        if let Some(displaced) = self.toast.take_if(|t| t.has_action() && (!t.armed || now < t.until)) {
+            self.toast_queue.push_front(displaced);
+        }
+        let text = text.into();
+        self.toast = Some(Toast {
+            until: now + theme::TOAST_SECONDS,
+            text,
+            error: false,
+            reveal: None,
+            enter_path: false,
+            duration: theme::TOAST_SECONDS,
+            armed: false,
+        });
     }
 
     /// A toast that stays long enough to read and offers to show `path` in its folder.
     pub fn show_toast_with_reveal(&mut self, text: impl Into<String>, path: PathBuf) {
-        self.show_toast(text, false);
-        if let Some(toast) = self.toast.as_mut() {
-            toast.reveal = Some(path);
-            toast.until = self.now + theme::TOAST_REVEAL_SECONDS;
-        }
+        self.show_toast_with_reveal_status(text, false, path);
+    }
+
+    /// A toast that offers to show `path` in its folder, keeping `error` when a fallback or warning occurred.
+    pub fn show_toast_with_reveal_status(&mut self, text: impl Into<String>, error: bool, path: PathBuf) {
+        self.place_toast(Toast {
+            text: text.into(),
+            until: self.now + theme::TOAST_REVEAL_SECONDS,
+            error,
+            reveal: Some(path),
+            enter_path: false,
+            duration: theme::TOAST_REVEAL_SECONDS,
+            armed: false,
+        });
     }
 
     /// Marks the document as modified so the canvas texture is re-rendered.
@@ -402,9 +601,11 @@ impl App {
             Some(notice) if self.toast.as_ref().is_none_or(|t| !t.error) => self.show_toast(notice, false),
             Some(_) => {}
             None => {
-                if self.toast.as_ref().is_some_and(|t| !t.error && t.text.starts_with(designos_doc::RELAYOUT_NOTICE_PREFIX)) {
+                let is_notice = |t: &Toast| !t.error && !t.has_action() && t.text.starts_with(designos_doc::RELAYOUT_NOTICE_PREFIX);
+                if self.toast.as_ref().is_some_and(is_notice) {
                     self.toast = None;
                 }
+                self.toast_queue.retain(|t| !is_notice(t));
             }
         }
     }
@@ -415,10 +616,12 @@ impl App {
 
     pub fn select_only(&mut self, id: NodeId) {
         self.selection = vec![id];
+        self.canvas.last_hover_query = None;
     }
 
     pub fn clear_selection(&mut self) {
         self.selection.clear();
+        self.canvas.last_hover_query = None;
     }
 
     /// Refreshes the `#693` busy-frame banner state from the current selection and any active canvas edit gesture.
@@ -466,9 +669,6 @@ impl App {
 
     pub fn set_agent_permission_mode(&mut self, mode: crate::agent_permissions::AgentPermissionMode) {
         self.terminal.permission_mode = mode;
-        for entry in &mut self.tabs.entries {
-            entry.terminal.permission_mode = mode;
-        }
         if let Some(lib) = &self.lib {
             // A failed save leaves the older mode on disk. The picked mode keeps applying in this process
             // (`save_permission_mode`), and the user is told it did not persist.

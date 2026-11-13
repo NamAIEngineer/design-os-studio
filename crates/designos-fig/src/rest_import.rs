@@ -3,6 +3,7 @@
 //! The `.fig` importer converts its kiwi message into this same JSON shape and
 //! reuses this mapper, so every field name below is the REST name.
 
+use crate::effect_units;
 use crate::svgpath::parse_path;
 use crate::FigError;
 use designos_doc::*;
@@ -22,6 +23,61 @@ pub(crate) fn fnum(v: &Value, k: &str) -> Option<f32> {
 /// Per-page deferred instances, pages already hydrated, instance targets and expanded instances.
 type DeferredHydration = (HashMap<NodeId, Vec<NodeId>>, HashSet<NodeId>, BTreeMap<NodeId, NodeId>, BTreeSet<NodeId>);
 
+/// Where an unmodelled stroke cap sat on import: on the node, or on the vertex at this index of its network.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum StrokeCapSite {
+    Node,
+    Vertex(usize),
+}
+
+/// `fig_metadata` key that holds the [`StrokeCapSite`] of `fig_metadata["strokeCap"]`. A document without it was
+/// recorded before the site was kept.
+pub(crate) const STROKE_CAP_SITE_KEY: &str = "strokeCapSource";
+
+impl StrokeCapSite {
+    pub(crate) fn encode(self) -> String {
+        match self {
+            Self::Node => "node".into(),
+            Self::Vertex(i) => format!("vertex:{i}"),
+        }
+    }
+
+    pub(crate) fn decode(s: &str) -> Option<Self> {
+        match s.strip_prefix("vertex:") {
+            Some(i) => i.parse().ok().map(Self::Vertex),
+            None => (s == "node").then_some(Self::Node),
+        }
+    }
+}
+
+/// A stroke cap Figma draws that [`StrokeCap`] still has no name for (e.g. `"HIGHLIGHT"`, `"WASHI_TAPE_*"`), on
+/// the node or on any vertex of its network, and where it sat. The baked stroke outline carries that decoration;
+/// the name is kept in `fig_metadata["strokeCap"]` so that a resize keeps scaling the outline instead of drawing a
+/// plain line, and the site in `fig_metadata[STROKE_CAP_SITE_KEY]` so that an export writes it back to the same place.
+fn parse_studio_connector_carrier(v: &Value) -> Option<crate::board::StudioConnectorCarrier> {
+    if let Some(sc) = v.get("studioConnector") {
+        if let Some(s) = sc.as_str() {
+            if let Ok(c) = serde_json::from_str(s) {
+                return Some(c);
+            }
+        }
+        if let Ok(c) = serde_json::from_value(sc.clone()) {
+            return Some(c);
+        }
+    }
+    let pd = v.get("pluginData")?.as_object()?;
+    let raw = pd.get("designos-studio:field:studioConnector").or_else(|| pd.get("field:studioConnector"))?.as_str()?;
+    serde_json::from_str(raw).ok()
+}
+
+fn unmodelled_stroke_cap(v: &Value) -> Option<(&str, StrokeCapSite)> {
+    let unmodelled = |c: &&str| !c.is_empty() && crate::vecnet::cap_from(c).is_none();
+    fstr(v, "strokeCap").filter(unmodelled).map(|c| (c, StrokeCapSite::Node)).or_else(|| {
+        let vertices = v.get("vectorNetwork")?.get("vertices")?.as_array()?;
+        vertices.iter().enumerate().find_map(|(i, x)| fstr(x, "strokeCap").filter(unmodelled).map(|c| (c, StrokeCapSite::Vertex(i))))
+    })
+}
+
 pub(crate) fn fstr<'a>(v: &'a Value, k: &str) -> Option<&'a str> {
     v.get(k).and_then(Value::as_str)
 }
@@ -38,6 +94,22 @@ pub(crate) fn vec2(v: &Value) -> Option<Vec2> {
 
 pub(crate) fn color(v: &Value) -> Option<Color> {
     Some(Color { r: fnum(v, "r")?, g: fnum(v, "g")?, b: fnum(v, "b")?, a: fnum(v, "a").unwrap_or(1.0) })
+}
+
+/// The blend mode an effect carries; absent means Normal.
+fn effect_blend(v: &Value) -> BlendMode {
+    fstr(v, "blendMode").map(blend).unwrap_or(BlendMode::Normal)
+}
+
+/// Maps Figma's REST (`ALPHA` / `VECTOR` / `LUMINANCE`) and `.fig` Kiwi (`ALPHA` / `OUTLINE` / `LUMINANCE`)
+/// mask type names to [`MaskType`].
+fn parse_mask_type(s: &str) -> Option<MaskType> {
+    match s {
+        "ALPHA" => Some(MaskType::Alpha),
+        "VECTOR" | "OUTLINE" => Some(MaskType::Vector),
+        "LUMINANCE" => Some(MaskType::Luminance),
+        _ => None,
+    }
 }
 
 pub(crate) fn blend(s: &str) -> BlendMode {
@@ -67,6 +139,61 @@ pub(crate) fn blend(s: &str) -> BlendMode {
 
 // ------------------------------------------------------------ paints & effects
 
+/// The reference a shader paint or effect carries, kept whole and never read. REST and plugin JSON name the type `SHADER`
+/// and hold the message under `shader`; the flattened `CUSTOM` form (the shape the `.fig` reader hands over) holds it beside
+/// `type`. Keys that sit beside a `shader` object are part of the message too and join it, so none is lost. `modelled` names
+/// the keys the paint or effect holds as its own fields (opacity, visibility, blend mode): they stay out of the message.
+fn shader_ref(v: &Value, modelled: &[&str]) -> ShaderRef {
+    let nested = (fstr(v, "type") == Some("SHADER")).then(|| v.get("shader")).flatten();
+    let mut raw = serde_json::Map::new();
+    if let Some(inner) = nested {
+        // a payload that is not an object is kept as it is: the `.fig` export refuses it by name instead of dropping it
+        let Some(obj) = inner.as_object() else { return ShaderRef { raw: inner.clone() } };
+        raw.extend(obj.iter().filter(|(k, _)| !modelled.contains(&k.as_str())).map(|(k, val)| (k.clone(), val.clone())));
+    }
+    if let Some(obj) = v.as_object() {
+        let container = nested.map(|_| "shader");
+        let beside = obj.iter().filter(|(k, _)| !modelled.contains(&k.as_str()) && container != Some(k.as_str()));
+        for (k, val) in beside {
+            raw.entry(k.clone()).or_insert_with(|| val.clone());
+        }
+    }
+    ShaderRef { raw: Value::Object(raw) }
+}
+
+fn parse_image_params(v: &Value) -> ImageParams {
+    let transform = v.get("imageTransform").and_then(Value::as_array).and_then(|rows| {
+        let r0 = rows.first()?.as_array()?;
+        let r1 = rows.get(1)?.as_array()?;
+        let m = [num(r0.first()?)?, num(r0.get(1)?)?, num(r0.get(2)?)?, num(r1.first()?)?, num(r1.get(1)?)?, num(r1.get(2)?)?];
+        m.iter().all(|x| x.is_finite()).then_some(m)
+    });
+    let rotation = fnum(v, "rotation").filter(|r| r.is_finite()).unwrap_or(0.0);
+    let tile_scale = fnum(v, "scalingFactor").map(clamp_tile_scale).unwrap_or(1.0);
+    let adjust = if let Some(flt) = v.get("filters") {
+        let f = |k: &str| fnum(flt, k).filter(|x| x.is_finite()).unwrap_or(0.0);
+        ImageAdjust {
+            exposure: f("exposure"),
+            contrast: f("contrast"),
+            vibrance: fnum(flt, "vibrance").or_else(|| fnum(flt, "saturation")).filter(|x| x.is_finite()).unwrap_or(0.0),
+            temperature: f("temperature"),
+            tint: f("tint"),
+            highlights: f("highlights"),
+            shadows: f("shadows"),
+            detail: f("detail"),
+            vignette: f("vignette"),
+            brightness: f("brightness"),
+        }
+    } else {
+        ImageAdjust::default()
+    };
+    let color_manage = fbool(v, "imageShouldColorManage");
+    let orig_w = v.get("originalImageWidth").and_then(Value::as_u64).and_then(|x| u32::try_from(x).ok()).unwrap_or(0);
+    let orig_h = v.get("originalImageHeight").and_then(Value::as_u64).and_then(|x| u32::try_from(x).ok()).unwrap_or(0);
+    let original_size = (orig_w > 0 && orig_h > 0).then_some((orig_w, orig_h));
+    ImageParams { transform, rotation, tile_scale, adjust, color_manage, original_size }
+}
+
 pub(crate) fn parse_paint(v: &Value) -> Option<Paint> {
     let t = fstr(v, "type")?;
     let handles = || -> [Vec2; 3] {
@@ -84,14 +211,16 @@ pub(crate) fn parse_paint(v: &Value) -> Option<Paint> {
         "GRADIENT_ANGULAR" => PaintKind::AngularGradient { handles: handles(), stops: stops() },
         "GRADIENT_DIAMOND" => PaintKind::DiamondGradient { handles: handles(), stops: stops() },
         "IMAGE" => PaintKind::Image {
-            image_ref: fstr(v, "imageRef")?.to_string(),
+            image_ref: fstr(v, "imageRef").or_else(|| fstr(v, "imageHash"))?.to_string(),
             scale_mode: match fstr(v, "scaleMode") {
                 Some("FIT") => ImageScaleMode::Fit,
                 Some("TILE") => ImageScaleMode::Tile,
-                Some("STRETCH") => ImageScaleMode::Crop,
+                Some("STRETCH") | Some("CROP") => ImageScaleMode::Crop,
                 _ => ImageScaleMode::Fill,
             },
+            params: parse_image_params(v),
         },
+        "SHADER" | "CUSTOM" => PaintKind::Shader(shader_ref(v, &["type", "opacity", "visible", "blendMode"])),
         _ => return None, // EMOJI, VIDEO, ...
     };
     Some(Paint {
@@ -112,11 +241,31 @@ fn parse_effect(v: &Value) -> Option<Effect> {
     let col = v.get("color").and_then(color).unwrap_or(Color::BLACK.with_alpha(0.25));
     let offset = v.get("offset").and_then(vec2).unwrap_or(Vec2::ZERO);
     let spread = fnum(v, "spread").unwrap_or(0.0);
-    let noise_size = |v: &Value| -> Option<f32> { fnum(v, "noiseSize").or_else(|| v.get("noiseSize").and_then(|ns| fnum(ns, "x").or_else(|| fnum(ns, "y")))) };
+    // A number is one size for both sides; an `{x, y}` pair keeps each side, and a pair with one side uses it for both.
+    let noise_size = |v: &Value| -> Option<(f32, Option<f32>)> {
+        let ns = v.get("noiseSize")?;
+        let (x, y) = match fnum(v, "noiseSize") {
+            Some(one) => (one, one),
+            None => match (fnum(ns, "x"), fnum(ns, "y")) {
+                (Some(x), Some(y)) => (x, y),
+                (Some(one), None) | (None, Some(one)) => (one, one),
+                (None, None) => return None,
+            },
+        };
+        Some(effect_units::noise_size_from_kiwi(x, y))
+    };
     let parse_seed = |v: &Value| -> u32 { v.get("seed").and_then(|s| s.as_u64().map(|n| n as u32).or_else(|| num(s).map(|x| x.max(0.0) as u32))).unwrap_or(1) };
     Some(match fstr(v, "type")? {
-        "DROP_SHADOW" => Effect::DropShadow { color: col, offset, radius, spread, visible, show_behind: fbool(v, "showShadowBehindNode").unwrap_or(false) },
-        "INNER_SHADOW" => Effect::InnerShadow { color: col, offset, radius, spread, visible },
+        "DROP_SHADOW" => Effect::DropShadow {
+            color: col,
+            offset,
+            radius,
+            spread,
+            visible,
+            show_behind: fbool(v, "showShadowBehindNode").unwrap_or(false),
+            blend: effect_blend(v),
+        },
+        "INNER_SHADOW" => Effect::InnerShadow { color: col, offset, radius, spread, visible, blend: effect_blend(v) },
         "LAYER_BLUR" => Effect::LayerBlur { radius, visible },
         "BACKGROUND_BLUR" => Effect::BackgroundBlur { radius, visible },
         // Noise / texture / glass: every field is optional; missing ones fall back to the
@@ -128,9 +277,11 @@ fn parse_effect(v: &Value) -> Option<Effect> {
                 Some("MULTITONE" | "MULTI") => NoiseMode::Multi,
                 _ => NoiseMode::Mono { color: primary },
             };
+            let (size, size_y) = noise_size(v).unwrap_or((1.0, None));
             Effect::Noise(NoiseEffect {
                 mode,
-                size: noise_size(v).unwrap_or(1.0),
+                size,
+                size_y,
                 density: fnum(v, "density").unwrap_or(0.5).clamp(0.0, 1.0),
                 opacity: fnum(v, "opacity").unwrap_or(0.25).clamp(0.0, 1.0),
                 blend: fstr(v, "blendMode").map(blend).unwrap_or(BlendMode::Normal),
@@ -138,22 +289,29 @@ fn parse_effect(v: &Value) -> Option<Effect> {
                 visible,
             })
         }
-        "TEXTURE" | "GRAIN" => Effect::Texture(TextureEffect {
-            size: noise_size(v).unwrap_or(2.0),
-            radius: fnum(v, "radius").unwrap_or(2.0),
-            clip_to_shape: fbool(v, "clipToShape").unwrap_or(true),
-            seed: parse_seed(v),
-            visible,
-        }),
+        "TEXTURE" | "GRAIN" => {
+            let (size, size_y) = noise_size(v).unwrap_or((2.0, None));
+            Effect::Texture(TextureEffect {
+                size,
+                size_y,
+                radius: fnum(v, "radius").unwrap_or(2.0),
+                clip_to_shape: fbool(v, "clipToShape").unwrap_or(true),
+                seed: parse_seed(v),
+                visible,
+            })
+        }
         "GLASS" => Effect::Glass(GlassEffect {
-            light_angle: fnum(v, "lightAngle").or_else(|| fnum(v, "specularAngle")).unwrap_or(315.0),
+            light_angle: fnum(v, "lightAngle").or_else(|| fnum(v, "specularAngle")).map_or(315.0, effect_units::specular_angle_from_kiwi),
             light_intensity: fnum(v, "lightIntensity").or_else(|| fnum(v, "specularIntensity")).unwrap_or(0.5).clamp(0.0, 1.0),
             refraction: fnum(v, "refraction").or_else(|| fnum(v, "refractionIntensity")).unwrap_or(0.5).clamp(0.0, 1.0),
             depth: fnum(v, "depth").or_else(|| fnum(v, "refractionRadius")).unwrap_or(10.0),
             dispersion: fnum(v, "dispersion").or_else(|| fnum(v, "chromaticAberration")).unwrap_or(0.25).clamp(0.0, 1.0),
             frost: fnum(v, "radius").unwrap_or(4.0),
+            splay: fnum(v, "reflectionDistance").unwrap_or(0.0).clamp(0.0, 1.0),
+            bevel: fnum(v, "bevelSize").unwrap_or(0.0).max(0.0),
             visible,
         }),
+        "SHADER" | "CUSTOM" => Effect::Shader { shader: shader_ref(v, &["type", "visible"]), visible },
         _ => return None,
     })
 }
@@ -242,13 +400,94 @@ pub(crate) fn utf16_to_byte_offsets(s: &str) -> Vec<usize> {
     out
 }
 
+/// An instance text override either links the style it names or drops the
+/// inherited one. Bindings the override does not restate go with the link, so
+/// the new style's own bindings (or the raw values, when there is no style)
+/// are what [`designos_doc::resolve_node`] applies. Fill bindings stay.
+fn apply_text_style_link(n: &mut Node, set: &Value) {
+    let clear = fbool(set, "_clearTextStyle") == Some(true);
+    let linked = set.get("styles").and_then(|s| s.get("text")).and_then(Value::as_str);
+    if !clear && linked.is_none() {
+        return;
+    }
+    if let Some(sid) = linked.filter(|_| !clear) {
+        n.style_refs.insert("text".into(), sid.to_string());
+    } else {
+        n.style_refs.remove("text");
+    }
+    let restated = crate::variables::parse_node_variables(set).bindings;
+    for key in [
+        "fontFamily",
+        "fontStyle",
+        "fontSize",
+        "fontWeight",
+        "lineHeight",
+        "letterSpacing",
+        "paragraphSpacing",
+        "paragraphIndent",
+        "listSpacing",
+        "leadingTrim",
+    ] {
+        if !restated.contains_key(key) {
+            n.variables.bindings.remove(key);
+        }
+    }
+}
+
+/// An instance fill or stroke override either links the style it names or drops
+/// the inherited one when it supplies paints or detaches the link.
+fn apply_paint_style_links(n: &mut Node, set: &Value) {
+    let is_text = matches!(n.kind, NodeKind::Text(_));
+    for (paints_key, slot, clear_key, field) in [
+        ("fills", "fill", "_clearFillStyle", if is_text { OverrideField::TextStyle } else { OverrideField::Fills }),
+        ("strokes", "stroke", "_clearStrokeStyle", OverrideField::Stroke),
+    ] {
+        let clear = fbool(set, clear_key) == Some(true);
+        let linked = set.get("styles").and_then(|s| s.get(slot)).and_then(Value::as_str).filter(|s| !s.is_empty());
+        let has_paints = set.get(paints_key).is_some();
+        if !clear && linked.is_none() && !has_paints {
+            continue;
+        }
+        if let Some(sid) = linked.filter(|_| !clear) {
+            n.style_refs.insert(slot.into(), sid.to_string());
+        } else {
+            n.style_refs.remove(slot);
+        }
+        n.component.overrides.insert(field);
+    }
+}
+
+/// An instance effect override either links the style it names or drops the
+/// inherited one when it supplies effects or detaches the link.
+fn apply_effect_style_link(n: &mut Node, set: &Value) {
+    let clear = fbool(set, "_clearEffectStyle") == Some(true);
+    let linked = set.get("styles").and_then(|s| s.get("effect")).and_then(Value::as_str).filter(|s| !s.is_empty());
+    let has_effects = set.get("effects").is_some();
+    if fbool(set, "_inheritedEffectLink") == Some(true) {
+        // The link the instance inherits from its main: restated, not overridden.
+        if let Some(sid) = linked {
+            n.style_refs.insert("effect".into(), sid.to_string());
+        }
+        return;
+    }
+    if !clear && linked.is_none() && !has_effects {
+        return;
+    }
+    if let Some(sid) = linked.filter(|_| !clear) {
+        n.style_refs.insert("effect".into(), sid.to_string());
+    } else {
+        n.style_refs.remove("effect");
+    }
+    n.component.overrides.insert(OverrideField::Effects);
+}
+
 /// Applies the (possibly partial) REST `TypeStyle` fields in `v` onto `ts`.
 pub(crate) fn apply_type_style(ts: &mut TextStyle, v: &Value) {
     if let Some(f) = fstr(v, "fontFamily") {
         ts.font_family = f.to_string();
     }
     if let Some(w) = fnum(v, "fontWeight") {
-        ts.font_weight = w.round().clamp(1.0, 1000.0) as u16;
+        ts.set_font_weight(w.round().clamp(1.0, 1000.0) as u16);
     }
     if let Some(i) = fbool(v, "italic") {
         ts.italic = i;
@@ -276,6 +515,17 @@ pub(crate) fn apply_type_style(ts: &mut TextStyle, v: &Value) {
     }
     if let Some(p) = fnum(v, "paragraphSpacing") {
         ts.paragraph_spacing = p;
+    }
+    if let Some(p) = fnum(v, "paragraphIndent") {
+        ts.paragraph_indent = p.max(0.0);
+    }
+    if let Some(p) = fnum(v, "listSpacing") {
+        ts.list_spacing = p.max(0.0);
+    }
+    match fstr(v, "leadingTrim") {
+        Some("CAP_HEIGHT") => ts.leading_trim = LeadingTrim::CapHeight,
+        Some("NONE") => ts.leading_trim = LeadingTrim::None,
+        _ => {}
     }
     // Percentage spacing from a partial `.fig` override: resolved against the final size.
     if let Some(p) = fnum(v, "letterSpacingPercent") {
@@ -372,6 +622,20 @@ pub const PER_INSTANCE_CLONE_BUDGET: usize = 50_000;
 pub struct ImportReport {
     /// How many component instances were left unexpanded because expanding them would exceed [`CLONE_BUDGET_TOTAL`].
     pub instances_left_unexpanded: usize,
+    /// How many variable bindings on effect fields the importer read and did not carry: each bound field of a glass
+    /// (other than its frost radius) and of a noise (other than its colour and opacity) on every layer and effect
+    /// style. The field keeps its stored value; only the binding is dropped.
+    pub dropped_variable_bindings: usize,
+    /// How many `VARIABLE_OVERRIDE` nodes the file holds and the importer did not read. Their layout is not known
+    /// (no real sample), so an extended collection that Figma stored through them arrives without those overrides.
+    pub dropped_variable_overrides: usize,
+    /// How many distinct variables the document's bindings refer to that are absent from the document's variables.
+    ///
+    /// Every binding counts, whatever it binds (fills, strokes, effects, gradient stops, text metrics or any other
+    /// property), on layers and on shared styles alike. A variable counts once however many bindings name it.
+    /// The bindings remain attached to the document, so importing the variables later (for example a Figma
+    /// `variables/local` response) resolves them. Callers use this count to tell the user the variables are missing.
+    pub missing_variable_bindings: usize,
 }
 
 struct Ctx<'a> {
@@ -411,6 +675,10 @@ struct Ctx<'a> {
     pending_swaps: Vec<(NodeId, String, String, bool)>,
     /// REST `overrides` entries: (instance, node id inside it, field names).
     rest_overrides: Vec<(NodeId, String, Vec<String>)>,
+    /// Instance nodes whose source payload carries a node-level aspect-lock field.
+    /// Presence matters because `false` is a meaningful value, even though it is the
+    /// document model's default.
+    node_lock_fields: HashSet<NodeId>,
     /// Prototype data to resolve once every node id is known.
     proto: Vec<(NodeId, Value)>,
     /// Overlay presentation of potential overlay destinations, by REST id.
@@ -439,6 +707,12 @@ struct Overrides {
     set: Vec<OverrideEntry>,
     derived: Vec<OverrideEntry>,
     fast_derived: Vec<crate::fig::FastDerivedEntry>,
+    /// The entries of `symbolOverrides` as the file states them (`_keptOverrides`, text only a `.fig` writer reads).
+    /// Present only for files large enough to defer pages; it goes with the instance's overrides once they are applied.
+    kept: Option<Box<str>>,
+    /// The keys the instance's own entry carries in the file (`_keptOwnKeys`), which name the fields it overrides on the
+    /// instance itself (see [`crate::own_entry_keys`]). Present with `kept`.
+    own_keys: Vec<Box<str>>,
 }
 
 #[derive(Debug)]
@@ -458,6 +732,10 @@ fn parse_override_entries(v: Option<&Value>) -> Vec<OverrideEntry> {
                 .collect()
         })
         .unwrap_or_default()
+}
+
+fn own_keys_of(v: Option<&Value>) -> Vec<Box<str>> {
+    v.and_then(Value::as_array).map(|a| a.iter().filter_map(|k| k.as_str().map(Box::from)).collect()).unwrap_or_default()
 }
 
 fn take_override_entries(v: Option<&mut Value>) -> Vec<OverrideEntry> {
@@ -541,13 +819,14 @@ pub fn import_rest_json_with_budget(json: &str, clone_budget_total: usize) -> Re
     import_rest_value_with_blobs_and_budget(&v, true, &[], None, clone_budget_total)
 }
 
-/// Maps an already-parsed REST-shaped value. `expand_instances` clones the
-/// component subtree into childless instances (used by `.fig`, where instance
-/// children are often not stored).
+#[cfg(test)]
 pub(crate) fn import_rest_value(v: &Value, expand_instances: bool) -> Result<Document, FigError> {
     import_rest_value_with_blobs(v, expand_instances, &[], None)
 }
 
+/// Maps an already-parsed REST-shaped value. `expand_instances` clones the
+/// component subtree into childless instances (used by `.fig`, where instance
+/// children are often not stored).
 pub(crate) fn import_rest_value_owned_with_budget<'a>(
     mut v: Value,
     expand_instances: bool,
@@ -589,6 +868,7 @@ pub(crate) fn import_rest_value_owned_with_budget<'a>(
         library_keys: BTreeMap::new(),
         pending_swaps: Vec::new(),
         rest_overrides: Vec::new(),
+        node_lock_fields: HashSet::new(),
         proto: Vec::new(),
         overlay_props: BTreeMap::new(),
         flow_pages: Vec::new(),
@@ -611,6 +891,7 @@ pub(crate) fn import_rest_value_owned_with_budget<'a>(
     }
     let doc_lint_ignores =
         v.get("document").and_then(|d| d.get("pluginData")).and_then(|pd| pd.get("designos:lint_ignores")).and_then(Value::as_str).map(str::to_string);
+    let doc_color_profile = v.get("document").and_then(|d| fstr(d, "documentColorProfile")).map(ColorProfile::from_figma_name);
     let pages: Vec<Value> = if has_doc {
         let root = v.get_mut("document").unwrap();
         if fstr(root, "type") == Some("CANVAS") {
@@ -649,6 +930,7 @@ pub(crate) fn import_rest_value_owned_with_budget<'a>(
     }
     cx.finish(expand_instances)?;
     restore_lint_ignores(&mut cx.doc, &cx.ids, doc_lint_ignores.as_deref());
+    cx.doc.color_profile = doc_color_profile.unwrap_or_default();
     cx.register_library_assets();
     cx.doc.kind = DocumentKind::Design;
     if !cx.connectors.is_empty() {
@@ -656,10 +938,17 @@ pub(crate) fn import_rest_value_owned_with_budget<'a>(
     }
     cx.link_remote_components(&v);
     crate::variables::import_variables_value(&mut cx.doc, &v);
+    designos_doc::settle_bound_props(&mut cx.doc);
     apply_style_node_values(&mut cx.doc, v.get("styles"));
     cx.doc.style_meta = style_meta(v.get("styles"), &cx.doc);
+    let missing_variable_bindings = count_missing_variable_bindings(&cx.doc);
     drop(v);
-    let report = ImportReport { instances_left_unexpanded: cx.unexpanded_instances.len() };
+    let report = ImportReport {
+        instances_left_unexpanded: cx.unexpanded_instances.len(),
+        dropped_variable_bindings: 0,
+        dropped_variable_overrides: 0,
+        missing_variable_bindings,
+    };
     cx.install_deferred_hydrator();
     let doc = cx.doc;
     drop(cx.override_keys);
@@ -709,6 +998,7 @@ pub(crate) fn import_rest_value_with_blobs_and_budget<'a>(
         None => return Err(FigError::Format("REST JSON has no `document`".into())),
     };
     let doc_lint_ignores = root.get("pluginData").and_then(|pd| pd.get("designos:lint_ignores")).and_then(Value::as_str);
+    let doc_color_profile = fstr(root, "documentColorProfile").map(ColorProfile::from_figma_name);
     let large_file = fast_derived_map.is_some();
     let mut cx = Ctx {
         doc: Document::new(fstr(v, "name").unwrap_or("Untitled")),
@@ -735,6 +1025,7 @@ pub(crate) fn import_rest_value_with_blobs_and_budget<'a>(
         library_keys: BTreeMap::new(),
         pending_swaps: Vec::new(),
         rest_overrides: Vec::new(),
+        node_lock_fields: HashSet::new(),
         proto: Vec::new(),
         overlay_props: BTreeMap::new(),
         flow_pages: Vec::new(),
@@ -775,6 +1066,7 @@ pub(crate) fn import_rest_value_with_blobs_and_budget<'a>(
     }
     cx.finish(expand_instances)?;
     restore_lint_ignores(&mut cx.doc, &cx.ids, doc_lint_ignores);
+    cx.doc.color_profile = doc_color_profile.unwrap_or_default();
     cx.register_library_assets();
     cx.doc.kind = if crate::board::is_figjam(v) { DocumentKind::Board } else { DocumentKind::Design };
     if cx.doc.kind == DocumentKind::Board {
@@ -785,14 +1077,23 @@ pub(crate) fn import_rest_value_with_blobs_and_budget<'a>(
             }
         }
     }
-    if cx.has_connectors {
+    if !cx.connectors.is_empty() {
+        crate::board::link_connector_list(&mut cx.doc, &cx.ids, &cx.connectors);
+    } else if cx.has_connectors {
         crate::board::link_connectors(&mut cx.doc, &cx.ids, root);
     }
     cx.link_remote_components(v);
     crate::variables::import_variables_value(&mut cx.doc, v);
+    designos_doc::settle_bound_props(&mut cx.doc);
     apply_style_node_values(&mut cx.doc, v.get("styles"));
     cx.doc.style_meta = style_meta(v.get("styles"), &cx.doc);
-    let report = ImportReport { instances_left_unexpanded: cx.unexpanded_instances.len() };
+    let missing_variable_bindings = count_missing_variable_bindings(&cx.doc);
+    let report = ImportReport {
+        instances_left_unexpanded: cx.unexpanded_instances.len(),
+        dropped_variable_bindings: 0,
+        dropped_variable_overrides: 0,
+        missing_variable_bindings,
+    };
     cx.install_deferred_hydrator();
     let doc = cx.doc;
     drop(cx.override_keys);
@@ -889,6 +1190,9 @@ impl<'a> Ctx<'a> {
             }
         }
         if is_instance {
+            if v.get("preserveRatio").is_some() || v.get("lockAspect").is_some() {
+                self.node_lock_fields.insert(id);
+            }
             if let Some(cid) = fstr(&v, "componentId") {
                 self.instances.push((id, cid.to_string()));
             }
@@ -902,8 +1206,19 @@ impl<'a> Ctx<'a> {
                 }
             }
             let fast_derived = fstr(&v, "id").and_then(|sid| self.fast_derived_map.as_deref_mut().and_then(|m| m.remove(sid))).unwrap_or_default();
-            let ov = Overrides { set: take_override_entries(v.get_mut("_overrides")), derived: take_override_entries(v.get_mut("_derived")), fast_derived };
-            if !ov.set.is_empty() || !ov.derived.is_empty() || !ov.fast_derived.is_empty() {
+            let kept = match v.get_mut("_keptOverrides").map(std::mem::take) {
+                Some(Value::String(t)) if !t.is_empty() => Some(t.into_boxed_str()),
+                _ => None,
+            };
+            let own_keys = own_keys_of(v.get("_keptOwnKeys"));
+            let ov = Overrides {
+                set: take_override_entries(v.get_mut("_overrides")),
+                derived: take_override_entries(v.get_mut("_derived")),
+                fast_derived,
+                kept,
+                own_keys,
+            };
+            if !ov.set.is_empty() || !ov.derived.is_empty() || !ov.fast_derived.is_empty() || ov.kept.is_some() {
                 self.overrides.insert(id, ov);
             }
         }
@@ -994,6 +1309,9 @@ impl<'a> Ctx<'a> {
             }
         }
         if is_instance {
+            if v.get("preserveRatio").is_some() || v.get("lockAspect").is_some() {
+                self.node_lock_fields.insert(id);
+            }
             if let Some(cid) = fstr(v, "componentId") {
                 self.instances.push((id, cid.to_string()));
             }
@@ -1007,8 +1325,16 @@ impl<'a> Ctx<'a> {
                 }
             }
             let fast_derived = fstr(v, "id").and_then(|sid| self.fast_derived_map.as_deref_mut().and_then(|m| m.remove(sid))).unwrap_or_default();
-            let ov = Overrides { set: parse_override_entries(v.get("_overrides")), derived: parse_override_entries(v.get("_derived")), fast_derived };
-            if !ov.set.is_empty() || !ov.derived.is_empty() || !ov.fast_derived.is_empty() {
+            let kept = v.get("_keptOverrides").and_then(Value::as_str).filter(|t| !t.is_empty()).map(Box::from);
+            let own_keys = own_keys_of(v.get("_keptOwnKeys"));
+            let ov = Overrides {
+                set: parse_override_entries(v.get("_overrides")),
+                derived: parse_override_entries(v.get("_derived")),
+                fast_derived,
+                kept,
+                own_keys,
+            };
+            if !ov.set.is_empty() || !ov.derived.is_empty() || !ov.fast_derived.is_empty() || ov.kept.is_some() {
                 self.overrides.insert(id, ov);
             }
         }
@@ -1023,7 +1349,10 @@ impl<'a> Ctx<'a> {
     /// Returns the node and, for auto-layout frames, its direction.
     fn build_node(&mut self, id: NodeId, ty: &str, v: &Value, pinfo: ParentInfo) -> (Node, Option<LayoutDirection>) {
         let frame = || frame_props(v);
-        let skip_geo = ty == "TEXT" || (self.large_file && matches!(ty, "FRAME" | "COMPONENT" | "COMPONENT_SET" | "INSTANCE" | "SECTION" | "RECTANGLE"));
+        let studio_carrier = matches!(ty, "VECTOR" | "GROUP").then(|| parse_studio_connector_carrier(v)).flatten();
+        let skip_geo = studio_carrier.is_some()
+            || ty == "TEXT"
+            || (self.large_file && matches!(ty, "FRAME" | "COMPONENT" | "COMPONENT_SET" | "INSTANCE" | "SECTION" | "RECTANGLE"));
         // Text outlines (glyph paths) are not stored; the renderer lays text out itself.
         let mut fill_geo = (!skip_geo)
             .then(|| parse_geometry_cached(farr(v, "fillGeometry"), &mut self.path_cache, &mut self.blob_cache, self.blobs))
@@ -1031,60 +1360,72 @@ impl<'a> Ctx<'a> {
         let stroke_geo = (!skip_geo)
             .then(|| parse_geometry_cached(farr(v, "strokeGeometry"), &mut self.path_cache, &mut self.blob_cache, self.blobs))
             .filter(|g| !g.is_empty());
-        let kind = match ty {
-            "FRAME" => NodeKind::Frame(frame()),
-            "GROUP" => NodeKind::Group,
-            "SECTION" => NodeKind::Section,
-            "STICKY" | "SHAPE_WITH_TEXT" | "STAMP" | "CONNECTOR" => {
-                if ty == "CONNECTOR" {
-                    self.has_connectors = true;
-                    let start_ep = v.get("connectorStart").and_then(|e| fstr(e, "endpointNodeId")).map(String::from);
-                    let end_ep = v.get("connectorEnd").and_then(|e| fstr(e, "endpointNodeId")).map(String::from);
-                    self.connectors.push((id, start_ep, end_ep));
+        let kind = if let Some(carrier) = &studio_carrier {
+            self.has_connectors = true;
+            self.connectors.push((id, carrier.start_node_id.clone(), carrier.end_node_id.clone()));
+            NodeKind::Connector(carrier.props.clone())
+        } else {
+            match ty {
+                "FRAME" => NodeKind::Frame(frame()),
+                "GROUP" => NodeKind::Group,
+                "SECTION" => NodeKind::Section,
+                "STICKY" | "SHAPE_WITH_TEXT" | "STAMP" | "CONNECTOR" => {
+                    if ty == "CONNECTOR" {
+                        self.has_connectors = true;
+                        let ep_id = |key: &str| {
+                            v.get(key)
+                                .filter(|e| !matches!(fstr(e, "magnet"), Some("NONE" | "ABSOLUTE")))
+                                .and_then(|e| fstr(e, "endpointNodeId"))
+                                .map(String::from)
+                        };
+                        self.connectors.push((id, ep_id("connectorStart"), ep_id("connectorEnd")));
+                    }
+                    crate::board::kind_from_json(ty, v, pinfo.origin).unwrap_or(NodeKind::Unknown { type_name: ty.to_string() })
                 }
-                crate::board::kind_from_json(ty, v, pinfo.origin).unwrap_or(NodeKind::Unknown { type_name: ty.to_string() })
+                "COMPONENT" => NodeKind::Component(frame()),
+                "COMPONENT_SET" => NodeKind::ComponentSet(frame()),
+                "INSTANCE" => NodeKind::Instance {
+                    frame: frame(),
+                    component: None,
+                    component_key: fstr(v, "componentId")
+                        .and_then(|c| self.component_keys.get(c).cloned())
+                        .or_else(|| fstr(v, "componentKey").map(String::from)),
+                },
+                "RECTANGLE" => NodeKind::Rectangle,
+                "ELLIPSE" => {
+                    let a = v.get("arcData");
+                    let d = ArcData::default();
+                    NodeKind::Ellipse(ArcData {
+                        start: a.and_then(|a| fnum(a, "startingAngle")).unwrap_or(d.start),
+                        end: a.and_then(|a| fnum(a, "endingAngle")).unwrap_or(d.end),
+                        inner_radius: a.and_then(|a| fnum(a, "innerRadius")).unwrap_or(0.0),
+                    })
+                }
+                "LINE" => NodeKind::Line,
+                "REGULAR_POLYGON" => NodeKind::Polygon { count: v.get("pointCount").and_then(Value::as_u64).unwrap_or(3).clamp(3, 1000) as u32 },
+                "STAR" => NodeKind::Star {
+                    count: v.get("pointCount").and_then(Value::as_u64).unwrap_or(5).clamp(3, 1000) as u32,
+                    inner_ratio: fnum(v, "starInnerRadius").unwrap_or(0.382),
+                },
+                "VECTOR" | "BRUSH" => {
+                    // an editable network when the file carries one; Figma's own outline stays the rendered geometry
+                    let network = v.get("vectorNetwork").and_then(crate::vecnet::network_from_json).filter(|n| !n.vertices.is_empty());
+                    let paths = if self.large_file && network.is_none() {
+                        fill_geo.take().or_else(|| stroke_geo.clone()).unwrap_or_default()
+                    } else {
+                        fill_geo.clone().or_else(|| stroke_geo.clone()).or_else(|| network.as_ref().map(|n| n.to_paths())).unwrap_or_default()
+                    };
+                    NodeKind::Vector { paths, network }
+                }
+                "TEXT" => NodeKind::Text(text_props(v)),
+                "BOOLEAN_OPERATION" => NodeKind::BooleanOp(match fstr(v, "booleanOperation") {
+                    Some("SUBTRACT") => BooleanOp::Subtract,
+                    Some("INTERSECT") => BooleanOp::Intersect,
+                    Some("EXCLUDE") => BooleanOp::Exclude,
+                    _ => BooleanOp::Union,
+                }),
+                other => NodeKind::Unknown { type_name: other.to_string() },
             }
-            "COMPONENT" => NodeKind::Component(frame()),
-            "COMPONENT_SET" => NodeKind::ComponentSet(frame()),
-            "INSTANCE" => NodeKind::Instance {
-                frame: frame(),
-                component: None,
-                component_key: fstr(v, "componentId").and_then(|c| self.component_keys.get(c).cloned()).or_else(|| fstr(v, "componentKey").map(String::from)),
-            },
-            "RECTANGLE" => NodeKind::Rectangle,
-            "ELLIPSE" => {
-                let a = v.get("arcData");
-                let d = ArcData::default();
-                NodeKind::Ellipse(ArcData {
-                    start: a.and_then(|a| fnum(a, "startingAngle")).unwrap_or(d.start),
-                    end: a.and_then(|a| fnum(a, "endingAngle")).unwrap_or(d.end),
-                    inner_radius: a.and_then(|a| fnum(a, "innerRadius")).unwrap_or(0.0),
-                })
-            }
-            "LINE" => NodeKind::Line,
-            "REGULAR_POLYGON" => NodeKind::Polygon { count: v.get("pointCount").and_then(Value::as_u64).unwrap_or(3).clamp(3, 1000) as u32 },
-            "STAR" => NodeKind::Star {
-                count: v.get("pointCount").and_then(Value::as_u64).unwrap_or(5).clamp(3, 1000) as u32,
-                inner_ratio: fnum(v, "starInnerRadius").unwrap_or(0.382),
-            },
-            "VECTOR" | "BRUSH" => {
-                // an editable network when the file carries one; Figma's own outline stays the rendered geometry
-                let network = v.get("vectorNetwork").and_then(crate::vecnet::network_from_json).filter(|n| !n.vertices.is_empty());
-                let paths = if self.large_file && network.is_none() {
-                    fill_geo.take().or_else(|| stroke_geo.clone()).unwrap_or_default()
-                } else {
-                    fill_geo.clone().or_else(|| stroke_geo.clone()).or_else(|| network.as_ref().map(|n| n.to_paths())).unwrap_or_default()
-                };
-                NodeKind::Vector { paths, network }
-            }
-            "TEXT" => NodeKind::Text(text_props(v)),
-            "BOOLEAN_OPERATION" => NodeKind::BooleanOp(match fstr(v, "booleanOperation") {
-                Some("SUBTRACT") => BooleanOp::Subtract,
-                Some("INTERSECT") => BooleanOp::Intersect,
-                Some("EXCLUDE") => BooleanOp::Exclude,
-                _ => BooleanOp::Union,
-            }),
-            other => NodeKind::Unknown { type_name: other.to_string() },
         };
         let is_text = matches!(kind, NodeKind::Text(_));
         let my_layout = kind.frame_props().and_then(|f| f.auto_layout.as_ref()).map(|a| a.direction);
@@ -1104,12 +1445,20 @@ impl<'a> Ctx<'a> {
         n.variables = crate::variables::parse_node_variables(v);
         n.blend = fstr(v, "blendMode").map(blend).unwrap_or(default_blend);
         n.is_mask = fbool(v, "isMask").unwrap_or(false);
+        if let Some(mt) = fstr(v, "maskType").and_then(parse_mask_type) {
+            n.mask_type = mt;
+        } else if fbool(v, "isMaskOutline") == Some(true) {
+            n.mask_type = MaskType::Vector;
+        }
         if let Some(hl) = fstr(v, "hyperlink").filter(|s| !s.is_empty()) {
             n.hyperlink = Some(hl.to_string());
         }
         if let Some(pd) = v.get("pluginData").and_then(Value::as_object) {
             for (k, val) in pd {
                 if let Some(s) = val.as_str() {
+                    if k == "designos-studio:field:studioConnector" || k == "field:studioConnector" {
+                        continue;
+                    }
                     if k == "designos:in_progress" || k == "in_progress" {
                         if let Ok(ip) = serde_json::from_str::<InProgress>(s) {
                             self.doc.in_progress.insert(id, ip);
@@ -1129,6 +1478,10 @@ impl<'a> Ctx<'a> {
         if let Some(lvl) = v.get("overrideLevel").and_then(Value::as_i64) {
             n.component.override_level = Some(lvl as i32);
         }
+        // The bound variant properties picked by hand on a top-level instance (a carrier entry of the node).
+        if let Some(names) = v.get("variantPicks").and_then(Value::as_array) {
+            n.component.variant_picks = names.iter().filter_map(Value::as_str).map(String::from).collect();
+        }
         n.component.is_slot = fbool(v, "isSlot").unwrap_or(false);
         n.component.is_slot_content = fbool(v, "isSlotContent").unwrap_or(false);
         n.component.slot_content_id = fstr(v, "slotContentId").filter(|s| !s.is_empty()).map(String::from);
@@ -1140,6 +1493,13 @@ impl<'a> Ctx<'a> {
             for (k, val) in fm {
                 if let Some(s) = val.as_str() {
                     n.fig_metadata.insert(k.clone(), s.to_string());
+                }
+            }
+        }
+        if let Some(mv) = v.get("motion") {
+            if let Ok(motion) = serde_json::from_value::<designos_doc::NodeMotion>(mv.clone()) {
+                if !motion.is_empty() {
+                    n.motion = Some(Box::new(motion));
                 }
             }
         }
@@ -1189,11 +1549,15 @@ impl<'a> Ctx<'a> {
             Some("OUTSIDE") => StrokeAlign::Outside,
             _ => StrokeAlign::Inside,
         };
-        n.stroke.cap = match fstr(v, "strokeCap") {
-            Some("ROUND") => StrokeCap::Round,
-            Some("SQUARE") => StrokeCap::Square,
-            _ => StrokeCap::None,
-        };
+        n.stroke.cap = fstr(v, "strokeCap").and_then(crate::vecnet::cap_from).unwrap_or(StrokeCap::None);
+        if matches!(ty, "VECTOR" | "BRUSH" | "LINE") && studio_carrier.is_none() {
+            if let Some((cap, site)) = unmodelled_stroke_cap(v) {
+                if let std::collections::btree_map::Entry::Vacant(recorded) = n.fig_metadata.entry("strokeCap".into()) {
+                    recorded.insert(cap.to_string());
+                    n.fig_metadata.insert(STROKE_CAP_SITE_KEY.into(), site.encode());
+                }
+            }
+        }
         n.stroke.join = match fstr(v, "strokeJoin") {
             Some("BEVEL") => StrokeJoin::Bevel,
             Some("ROUND") => StrokeJoin::Round,
@@ -1273,10 +1637,11 @@ impl<'a> Ctx<'a> {
                     "text" => "text",
                     "effect" | "effects" => "effect",
                     "grid" | "grids" => "grid",
+                    "animation" | "animations" => "animation",
                     other => other,
                 };
                 n.style_refs.insert(key.to_string(), sid.to_string());
-                if self.doc.styles.contains_key(sid) {
+                if sid.starts_with("key:") || self.doc.styles.contains_key(sid) {
                     continue;
                 }
                 let def = match key {
@@ -1286,11 +1651,22 @@ impl<'a> Ctx<'a> {
                     })),
                     "stroke" => Some(Style::Fill(n.stroke.paints.clone())),
                     "text" => match &n.kind {
-                        NodeKind::Text(t) => Some(Style::Text(t.style.clone())),
+                        NodeKind::Text(t) => {
+                            // Alignment belongs to the text layer, not the
+                            // shared style. A style inferred from its first
+                            // consumer must use the style defaults here too;
+                            // otherwise a .fig round trip reintroduces the
+                            // consumer's alignment into the style.
+                            let mut style = t.style.clone();
+                            style.align_h = TextAlignH::Left;
+                            style.align_v = TextAlignV::Top;
+                            Some(Style::Text(style))
+                        }
                         _ => None,
                     },
                     "effect" => Some(Style::Effect(n.effects.clone())),
                     "grid" => n.kind.frame_props().map(|f| Style::Grid(f.grids.clone())),
+                    "animation" => Some(Style::Animation(n.motion.as_deref().map(|m| m.timelines.clone()).unwrap_or_default())),
                     _ => None,
                 };
                 if let Some(d) = def {
@@ -1299,6 +1675,21 @@ impl<'a> Ctx<'a> {
             }
         }
         self.parse_component_props(&mut n, v);
+        if let Some(carrier) = studio_carrier {
+            n.fills.clear();
+            n.fill_geometry = None;
+            n.stroke_geometry = None;
+            n.stroke.weight = carrier.stroke_weight;
+            if !carrier.stroke_paints.is_empty() {
+                n.stroke.paints = carrier.stroke_paints;
+            }
+            if !carrier.stroke_dashes.is_empty() {
+                n.stroke.dashes = carrier.stroke_dashes;
+            }
+            if let Some(join) = carrier.stroke_join {
+                n.stroke.join = join;
+            }
+        }
         crate::board::finish_node(&mut n);
         (n, my_layout)
     }
@@ -1372,6 +1763,7 @@ impl<'a> Ctx<'a> {
                                     max_children: opt_u32("maxChildren"),
                                     allow_preferred_values_only: cfg.get("allowPreferredValuesOnly").and_then(Value::as_bool),
                                     preferred: Vec::new(),
+                                    empty_config_written: cfg.is_empty(),
                                     extra,
                                 },
                             );
@@ -1386,6 +1778,12 @@ impl<'a> Ctx<'a> {
                     }
                     _ => continue,
                 };
+                if matches!(kind, PropKind::Boolean | PropKind::Text | PropKind::Variant { .. }) {
+                    let alias = d.get("boundVariables").and_then(|b| b.get("defaultValue"));
+                    if let Some(var) = alias.and_then(|a| fstr(a, "id")).filter(|s| !s.is_empty()) {
+                        n.component.prop_default_variables.insert(name.clone(), var.to_string());
+                    }
+                }
                 n.component.props.push(ComponentPropDef { name, kind, default });
             }
         }
@@ -1416,6 +1814,15 @@ impl<'a> Ctx<'a> {
                     }
                     _ => continue,
                 };
+                // REST `boundVariables.value`: the variable the property follows. An assignment that holds only
+                // the alias leaves its value to the variable (see `settle_bound_props`).
+                let bound = d.get("boundVariables").and_then(|b| b.get("value")).and_then(|a| fstr(a, "id"));
+                if let Some(var) = bound.filter(|_| matches!(fstr(d, "type"), Some("BOOLEAN" | "TEXT" | "VARIANT"))) {
+                    n.variables.bindings.insert(designos_doc::prop_binding_key(&name), var.to_string());
+                    if val.is_none() {
+                        continue;
+                    }
+                }
                 n.component.values.insert(name, pv);
             }
         }
@@ -1642,6 +2049,39 @@ impl<'a> Ctx<'a> {
                 }
             }
         }
+        let mut self_digests: HashMap<NodeId, BTreeMap<OverrideField, u64>> = HashMap::new();
+        for &inst in pending_by_page.values().flatten() {
+            let digests = self.flag_pending_self_overrides(inst);
+            if !digests.is_empty() {
+                self_digests.insert(inst, digests);
+            }
+        }
+        let mut fingerprints = crate::component_fingerprint::Fingerprints::default();
+        let mut instance_fingerprints = HashMap::new();
+        let mut swap_mains_of: HashMap<NodeId, Vec<NodeId>> = HashMap::new();
+        for &inst in pending_by_page.values().flatten() {
+            if self.overrides.get(&inst).is_none_or(|o| o.fast_derived.is_empty()) {
+                continue;
+            }
+            if let Some(&main) = targets.get(&inst) {
+                let swaps = self.record_swap_targets(inst);
+                let mains = crate::component_fingerprint::instance_mains(&self.doc, inst, main, &swaps);
+                instance_fingerprints.insert(inst, fingerprints.of_mains(&self.doc, &mains));
+                swap_mains_of.insert(inst, swaps);
+            }
+        }
+        drop(fingerprints);
+        let mut derived_outlines: HashMap<usize, std::sync::Arc<[u8]>> = HashMap::new();
+        for inst in pending_by_page.values().flatten() {
+            let Some(ov) = self.overrides.get(inst) else { continue };
+            for d in &ov.fast_derived {
+                for &(idx, odd) in d.fill_geometry.iter().chain(d.stroke_geometry.iter()).flatten() {
+                    if let (std::collections::hash_map::Entry::Vacant(slot), Some(path)) = (derived_outlines.entry(idx), self.blob_cache.get(&(idx, odd))) {
+                        slot.insert(crate::fig_export::path_to_commands_blob(path).into());
+                    }
+                }
+            }
+        }
         let hydrator = DeferredFigHydrator {
             pending_by_page,
             hydrated_pages,
@@ -1665,8 +2105,47 @@ impl<'a> Ctx<'a> {
             budget_exhausted: self.budget_exhausted,
             unexpanded_instances: BTreeSet::new(),
             last_error: None,
+            instance_fingerprints,
+            derived_outlines,
+            swap_mains_of,
+            self_digests,
         };
         self.doc.page_hydrator = Some(std::sync::Arc::new(std::sync::Mutex::new(hydrator)));
+    }
+
+    /// Flags on the still childless instance `inst` the fields its file record overrides on the instance itself (the
+    /// entry that names its main), as opening its page would, so that syncing a main component leaves them alone. Returns
+    /// the digests of the instance's overridden fields as they are now (see [`crate::instance_self_digest`]).
+    fn flag_pending_self_overrides(&mut self, inst: NodeId) -> BTreeMap<OverrideField, u64> {
+        let mut flagged: Vec<OverrideField> = Vec::new();
+        if let Some(ov) = self.overrides.get(&inst) {
+            // A field a save can restate is flagged by the keys the file's own entry carries, not by what the loader made
+            // of them: it folds, renames and drops some (a style link without paints, for one).
+            flagged.extend(ov.own_keys.iter().filter_map(|k| crate::own_entry_keys::field_stated_by(k)));
+            // The other fields (layout, text) are only kept from syncing; nothing restates them.
+            let mut no_maps = HashMap::new();
+            for e in ov.set.iter().filter(|e| e.path.len() <= 1) {
+                if self.resolve_path_cached(inst, &e.path, &mut no_maps) != Some(inst) {
+                    continue;
+                }
+                if let Some(obj) = e.set.as_object() {
+                    flagged.extend(obj.keys().filter_map(|k| override_field(k, false)).filter(|f| !crate::instance_self_digest::SELF_FIELDS.contains(f)));
+                }
+            }
+        }
+        // The raw keys are spent once the fields are flagged; the hydrator keeps the rest of the record.
+        if let Some(ov) = self.overrides.get_mut(&inst) {
+            ov.own_keys = Vec::new();
+        }
+        let holds_derived = self.overrides.get(&inst).is_some_and(|o| !o.fast_derived.is_empty());
+        let Some(node) = self.doc.get_mut(inst) else { return BTreeMap::new() };
+        node.component.overrides.extend(flagged);
+        let mut digests = crate::instance_self_digest::digests(node);
+        // The derived data of the instance was computed for the size it has now, flagged or not.
+        if holds_derived {
+            digests.entry(OverrideField::Size).or_insert_with(|| crate::instance_self_digest::size_digest(node));
+        }
+        digests
     }
 
     /// Instances of components defined in other files (`remote: true` in the
@@ -1752,7 +2231,41 @@ impl<'a> Ctx<'a> {
                     n.component.source = Some(*comp);
                 }
             }
+            let mut pair_stack = vec![(*inst, *comp)];
+            while let Some((ic_parent, cc_parent)) = pair_stack.pop() {
+                let ic_kids = self.doc.get(ic_parent).map(|n| n.children.clone()).unwrap_or_default();
+                let cc_kids = self.doc.get(cc_parent).map(|n| n.children.clone()).unwrap_or_default();
+                for (idx, ic) in ic_kids.into_iter().enumerate() {
+                    let Some(in_node) = self.doc.get(ic).cloned() else { continue };
+                    let matched_cc = cc_kids
+                        .get(idx)
+                        .copied()
+                        .filter(|&cc| self.doc.get(cc).is_some_and(|cn| cn.name == in_node.name))
+                        .or_else(|| cc_kids.iter().copied().find(|&cc| self.doc.get(cc).is_some_and(|cn| cn.name == in_node.name)));
+                    let Some(cc) = matched_cc else { continue };
+                    if in_node.component.source.is_none() || in_node.component.source == instance_component(&in_node) {
+                        if let Some(m) = self.doc.get_mut(ic) {
+                            m.component.source = Some(cc);
+                        }
+                    }
+                    if !matches!(in_node.kind, NodeKind::Instance { .. }) && in_node.kind.is_container() {
+                        pair_stack.push((ic, cc));
+                    }
+                }
+            }
+            if self.node_lock_fields.contains(inst) {
+                let differs = self.doc.get(*inst).map(|n| n.lock_aspect) != self.doc.get(*comp).map(|n| n.lock_aspect);
+                if differs {
+                    if let Some(n) = self.doc.get_mut(*inst) {
+                        n.component.overrides.insert(OverrideField::LockAspect);
+                    }
+                }
+            }
         }
+        // An override key names a layer inside one level's main, but the first loop above resolved it against the whole
+        // file, which links a nested copy's layers past the levels in between. Relink them level by level, to the layer
+        // one level up; links that are already right (every copy built from a Figma-authored file) are not touched.
+        relink_copy_layers(&mut self.doc);
     }
 
     fn resolve_pref_target(&self, pref_key: &str) -> Option<NodeId> {
@@ -1990,6 +2503,24 @@ impl<'a> Ctx<'a> {
         }
     }
 
+    /// Components the file's record for `inst` swaps nested instances to.
+    fn record_swap_targets(&self, inst: NodeId) -> Vec<NodeId> {
+        let mut out: Vec<NodeId> = Vec::new();
+        if let Some(ov) = self.overrides.get(&inst) {
+            for e in &ov.set {
+                out.extend(fstr(&e.set, "componentId").and_then(|c| self.ids.get(c)).copied());
+                if let Some(props) = e.set.get("componentProperties").and_then(Value::as_object) {
+                    let swapped = props.values().filter(|p| fstr(p, "type") == Some("INSTANCE_SWAP")).filter_map(|p| p.get("value").and_then(Value::as_str));
+                    out.extend(swapped.filter_map(|c| self.ids.get(c)).copied());
+                }
+            }
+        }
+        out.retain(|t| matches!(self.doc.get(*t).map(|n| &n.kind), Some(NodeKind::Component(_))));
+        out.sort();
+        out.dedup();
+        out
+    }
+
     /// Components the instance's property values and overrides may swap a nested instance to (a superset is
     /// harmless: listing a component's nested instances earlier does not change what they expand to).
     fn swap_target_components(&self, inst: NodeId) -> Vec<NodeId> {
@@ -2079,6 +2610,15 @@ impl<'a> Ctx<'a> {
         Ok(())
     }
 
+    /// REST name override metadata is applied after expansion, so consult the
+    /// source id while an instance swap is being applied.
+    fn has_pending_rest_name_override(&self, id: NodeId) -> bool {
+        let source_id = self.doc.get(id).and_then(|n| n.source_id.as_deref()).map(str::to_owned);
+        self.rest_overrides
+            .iter()
+            .any(|(_, nid, fields)| fields.iter().any(|field| field == "name") && (source_id.as_deref() == Some(nid) || self.ids.get(nid).copied() == Some(id)))
+    }
+
     /// Points the nested instance `d` at `target`, updates its component shell
     /// properties to `target`'s defaults, rebuilds its children, and re-applies
     /// `d`'s own component property values.
@@ -2090,6 +2630,7 @@ impl<'a> Ctx<'a> {
         if current == Some(target) {
             return Ok(());
         }
+        let current_size = current.and_then(|c| self.doc.get(c)).map(|n| n.size);
         let Some(target_node) = self.doc.get(target).cloned() else {
             return Ok(());
         };
@@ -2100,15 +2641,25 @@ impl<'a> Ctx<'a> {
         for k in self.doc.get(d).map(|n| n.children.clone()).unwrap_or_default() {
             let _ = self.doc.remove(k);
         }
+        let current_name_is_component_name =
+            self.doc.get(d).and_then(|n| current.and_then(|c| self.doc.get(c)).map(|source| n.name == source.name)).unwrap_or(false);
+        let pending_rest_name_override = self.has_pending_rest_name_override(d);
         if let Some(dn) = self.doc.get_mut(d) {
+            let keep_resized = current_size.is_some_and(|cs| (dn.size.x - cs.x).abs() > 1e-4 || (dn.size.y - cs.y).abs() > 1e-4);
             dn.kind = NodeKind::Instance { frame: target_fp.clone(), component: Some(target), component_key: None };
-            dn.size = target_node.size;
+            if current_name_is_component_name && !dn.component.overrides.contains(&OverrideField::Name) && !pending_rest_name_override {
+                dn.name = target_node.name.clone();
+            }
+            if !keep_resized {
+                dn.size = target_node.size;
+            }
             dn.fills = target_node.fills;
             dn.stroke = target_node.stroke;
             dn.effects = target_node.effects;
             dn.opacity = target_node.opacity;
             dn.blend = target_node.blend;
             dn.is_mask = target_node.is_mask;
+            dn.mask_type = target_node.mask_type;
             dn.corner_radii = target_node.corner_radii;
             dn.corner_smoothing = target_node.corner_smoothing;
             dn.fill_geometry = target_node.fill_geometry;
@@ -2272,7 +2823,8 @@ impl<'a> Ctx<'a> {
                 self.unexpanded_instances.insert(id);
             }
             if fast_clone {
-                n.fig_metadata.clear();
+                // what decides how a resize treats the baked stroke stays with the clone
+                n.fig_metadata.retain(|k, _| matches!(k.as_str(), "strokeCap" | STROKE_CAP_SITE_KEY | "brushType"));
                 if let Some(sid) = n.source_id.take() {
                     self.override_keys.entry(src).or_insert_with(|| std::sync::Arc::from(sid.rsplit(';').next().unwrap_or(&sid)));
                 }
@@ -2310,6 +2862,9 @@ impl<'a> Ctx<'a> {
             n.component.grid_align_overrides = [false, false];
             n.component.layout_cleared = false;
             n.component.props.clear();
+            n.component.slot_configs.clear();
+            n.component.prop_default_variables.clear();
+            n.component.expose_nested_instances = false;
             let container = n.kind.is_container();
             match parent_idx {
                 Some(idx) => staged[idx].children.push(id),
@@ -2349,7 +2904,7 @@ impl<'a> Ctx<'a> {
     }
 
     fn override_key_of(&self, mut id: NodeId) -> Option<&std::sync::Arc<str>> {
-        for _ in 0..8 {
+        for _ in 0..64 {
             if let Some(k) = self.override_keys.get(&id) {
                 return Some(k);
             }
@@ -2362,33 +2917,81 @@ impl<'a> Ctx<'a> {
         None
     }
 
+    fn resize_override_node(&mut self, id: NodeId, sz: Vec2, has_fill_geo: bool, has_stroke_geo: bool, skip_geo: bool, explicitly_sized: &mut HashSet<NodeId>) {
+        explicitly_sized.insert(id);
+        let Some((old_size, old_transform, preserves_outline, is_container)) = self
+            .doc
+            .get(id)
+            .map(|n| (n.size, n.transform, matches!(n.kind, NodeKind::Vector { .. } | NodeKind::BooleanOp(_) | NodeKind::Line), n.kind.is_container()))
+        else {
+            return;
+        };
+        let size_changed = (old_size.x - sz.x).abs() > 1e-4 || (old_size.y - sz.y).abs() > 1e-4;
+        if !size_changed {
+            if let Some(n) = self.doc.get_mut(id) {
+                n.size = sz;
+            }
+            return;
+        }
+        if let Some(n) = self.doc.get_mut(id) {
+            if !preserves_outline {
+                if !has_fill_geo || skip_geo {
+                    n.fill_geometry = None;
+                }
+                if !has_stroke_geo || skip_geo {
+                    n.stroke_geometry = None;
+                }
+            }
+            designos_doc::apply_constrained_geometry(n, old_transform, sz);
+        }
+        if is_container {
+            for (c, new_transform, new_size) in designos_doc::plan_constraint_pass(&self.doc, id, old_size, sz, MAX_TREE_DEPTH) {
+                if explicitly_sized.contains(&c) {
+                    continue;
+                }
+                if let Some(km) = self.doc.get_mut(c) {
+                    if self.large_file && !matches!(km.kind, NodeKind::Vector { .. } | NodeKind::BooleanOp(_)) {
+                        km.fill_geometry = None;
+                        km.stroke_geometry = None;
+                    }
+                    designos_doc::apply_constrained_geometry(km, new_transform, new_size);
+                }
+            }
+        }
+    }
+
     /// Applies `.fig` `symbolOverrides` and then `derivedSymbolData` to the
     /// instance's copied subtree.
     fn apply_overrides(&mut self, inst: NodeId, targets: &BTreeMap<NodeId, NodeId>, done: &mut BTreeSet<NodeId>) -> Result<(), FigError> {
-        let Some(ov) = self.overrides.remove(&inst) else { return Ok(()) };
+        let Some(mut ov) = self.overrides.remove(&inst) else { return Ok(()) };
         let mut subtree_maps: HashMap<NodeId, HashMap<String, NodeId>> = HashMap::new();
+        let mut explicitly_sized: HashSet<NodeId> = HashSet::new();
         for e in &ov.set {
             if let Some(t) = self.resolve_path_cached(inst, &e.path, &mut subtree_maps) {
-                if self.apply_override(t, &e.set, false, targets, done)? {
+                if self.apply_override(t, &e.set, false, targets, done, &mut explicitly_sized)? {
                     subtree_maps.clear();
                 }
             }
         }
         // Figma's computed results for resized instances win over the raw overrides.
+        // Apply shallowest paths first so parent container resizes propagate
+        // constraints before child-specific derived sizes/geometries run.
+        ov.derived.sort_by_key(|e| e.path.len());
         for e in &ov.derived {
             if let Some(t) = self.resolve_path_cached(inst, &e.path, &mut subtree_maps) {
-                let _ = self.apply_override(t, &e.set, true, targets, done)?;
+                let _ = self.apply_override(t, &e.set, true, targets, done, &mut explicitly_sized)?;
             }
         }
+        ov.fast_derived.sort_by_key(|d| d.path.len());
         for d in &ov.fast_derived {
             if let Some(t) = self.resolve_path_cached(inst, &d.path, &mut subtree_maps) {
-                self.apply_fast_derived(t, d);
+                self.apply_fast_derived(t, d, &mut explicitly_sized);
             }
         }
         Ok(())
     }
 
-    fn apply_fast_derived(&mut self, id: NodeId, d: &crate::fig::FastDerivedEntry) {
+    fn apply_fast_derived(&mut self, id: NodeId, d: &crate::fig::FastDerivedEntry, explicitly_sized: &mut HashSet<NodeId>) {
         let skip_geo = match self.doc.get(id).map(|n| &n.kind) {
             Some(
                 NodeKind::Text(_)
@@ -2448,38 +3051,35 @@ impl<'a> Ctx<'a> {
                 })
             })
             .flatten();
-        let Some(n) = self.doc.get_mut(id) else { return };
-        let is_vec_or_bool = matches!(n.kind, NodeKind::Vector { .. } | NodeKind::BooleanOp(_));
         if let Some(sz) = d.size {
-            if n.size != sz && !is_vec_or_bool {
-                if d.fill_geometry.is_none() || skip_geo {
-                    n.fill_geometry = None;
-                }
-                if d.stroke_geometry.is_none() || skip_geo {
-                    n.stroke_geometry = None;
-                }
-            }
-            n.size = sz;
+            self.resize_override_node(id, sz, d.fill_geometry.is_some(), d.stroke_geometry.is_some(), skip_geo, explicitly_sized);
         }
+        let Some(n) = self.doc.get_mut(id) else { return };
         if let Some(t) = d.transform {
             n.transform = t;
         }
-        if let Some(g) = fill_geo.take() {
+        let has_derived_fill = fill_geo.as_ref().is_some_and(|g| !g.is_empty());
+        if let Some(g) = fill_geo.take().filter(|g| !g.is_empty()) {
             if let NodeKind::Vector { paths, network } = &mut n.kind {
                 *paths = g;
                 *network = None;
                 n.fill_geometry = None;
             } else {
-                n.fill_geometry = Some(g).filter(|g| !g.is_empty());
+                n.fill_geometry = Some(g);
             }
         }
-        if let Some(g) = stroke_geo {
-            n.stroke_geometry = Some(g).filter(|g| !g.is_empty());
+        if let Some(g) = stroke_geo.filter(|g| !g.is_empty()) {
+            if !has_derived_fill && n.fill_geometry.is_none() {
+                if let NodeKind::Vector { paths, .. } = &mut n.kind {
+                    paths.clone_from(&g);
+                }
+            }
+            n.stroke_geometry = Some(g);
         }
     }
 
     fn source_tail_of(&self, mut id: NodeId) -> Option<&str> {
-        for _ in 0..8 {
+        for _ in 0..64 {
             let n = self.doc.get(id)?;
             if let Some(s) = n.source_id.as_deref() {
                 let tail = s.rsplit(';').next().unwrap_or(s);
@@ -2581,9 +3181,27 @@ impl<'a> Ctx<'a> {
         derived_only: bool,
         targets: &BTreeMap<NodeId, NodeId>,
         done: &mut BTreeSet<NodeId>,
+        explicitly_sized: &mut HashSet<NodeId>,
     ) -> Result<bool, FigError> {
         let mut swapped = false;
         if !derived_only {
+            // Studio's own record of a nested copy's own variant bindings (a carrier entry, see `fig_export::carrier`).
+            if let Some(names) = set.get("ownVariantBindings").and_then(Value::as_array) {
+                if let Some(n) = self.doc.get_mut(id) {
+                    n.component.own_variant_bindings = names.iter().filter_map(Value::as_str).map(String::from).collect();
+                }
+            }
+            // The bound variant properties picked by hand on this nested copy, from the same kind of carrier entry.
+            if let Some(names) = set.get("variantPicks").and_then(Value::as_array) {
+                if let Some(n) = self.doc.get_mut(id) {
+                    n.component.variant_picks = names.iter().filter_map(Value::as_str).map(String::from).collect();
+                }
+            }
+            if set.get("name").is_some() {
+                if let Some(n) = self.doc.get_mut(id) {
+                    n.component.overrides.insert(OverrideField::Name);
+                }
+            }
             if let Some(cid) = fstr(set, "componentId") {
                 if let Some(&target_comp) = self.ids.get(cid) {
                     self.swap_nested(id, target_comp, targets, done)?;
@@ -2602,59 +3220,70 @@ impl<'a> Ctx<'a> {
         if !derived_only && set.get("layoutMode").is_none() && !self.no_auto_layout.contains(&id) {
             self.inherit_auto_layout_for_partial_override(id, set);
         }
-        let Some(n) = self.doc.get_mut(id) else { return Ok(swapped) };
         let keep = |k: &str| !derived_only || matches!(k, "size" | "relativeTransform" | "fillGeometry" | "strokeGeometry");
         let has = |k: &str| keep(k) && set.get(k).is_some();
-        let is_vec_or_bool = matches!(n.kind, NodeKind::Vector { .. } | NodeKind::BooleanOp(_));
-        let skip_geo = matches!(n.kind, NodeKind::Text(_) | NodeKind::Sticky(_) | NodeKind::ShapeWithText(_) | NodeKind::Connector(_) | NodeKind::Stamp { .. })
-            || (self.large_file
-                && matches!(
-                    n.kind,
-                    NodeKind::Frame(_)
-                        | NodeKind::Component(_)
-                        | NodeKind::ComponentSet(_)
-                        | NodeKind::Instance { .. }
-                        | NodeKind::Section
-                        | NodeKind::Rectangle
-                ));
+        let Some(skip_geo) = self.doc.get(id).map(|n| {
+            matches!(n.kind, NodeKind::Text(_) | NodeKind::Sticky(_) | NodeKind::ShapeWithText(_) | NodeKind::Connector(_) | NodeKind::Stamp { .. })
+                || (self.large_file
+                    && matches!(
+                        n.kind,
+                        NodeKind::Frame(_)
+                            | NodeKind::Component(_)
+                            | NodeKind::ComponentSet(_)
+                            | NodeKind::Instance { .. }
+                            | NodeKind::Section
+                            | NodeKind::Rectangle
+                    ))
+        }) else {
+            return Ok(swapped);
+        };
         if has("size") {
             if let Some(sz) = set.get("size").and_then(vec2) {
-                if n.size != sz && !is_vec_or_bool {
-                    if !has("fillGeometry") || skip_geo {
-                        n.fill_geometry = None;
-                    }
-                    if !has("strokeGeometry") || skip_geo {
-                        n.stroke_geometry = None;
-                    }
-                }
-                n.size = sz;
+                self.resize_override_node(id, sz, has("fillGeometry"), has("strokeGeometry"), skip_geo, explicitly_sized);
             }
         }
+        let Some(n) = self.doc.get_mut(id) else { return Ok(swapped) };
+        let is_vec_or_bool = matches!(n.kind, NodeKind::Vector { .. } | NodeKind::BooleanOp(_));
         if has("relativeTransform") {
             if let Some(t) = set.get("relativeTransform").and_then(parse_transform) {
                 n.transform = t;
             }
         }
+        let mut has_derived_fill = false;
         if has("fillGeometry") && !skip_geo {
             let g = parse_geometry_cached(farr(set, "fillGeometry"), &mut self.path_cache, &mut self.blob_cache, self.blobs);
-            if let NodeKind::Vector { paths, network } = &mut n.kind {
-                if self.large_file {
-                    *paths = g;
-                    *network = None;
-                    n.fill_geometry = None;
+            if !g.is_empty() {
+                has_derived_fill = true;
+                if let NodeKind::Vector { paths, network } = &mut n.kind {
+                    if self.large_file {
+                        *paths = g;
+                        *network = None;
+                        n.fill_geometry = None;
+                    } else {
+                        *paths = g.clone();
+                        // the new outline replaces what the network described
+                        *network = None;
+                        n.fill_geometry = Some(g);
+                    }
                 } else {
-                    *paths = g.clone();
-                    // the new outline replaces what the network described
-                    *network = None;
-                    n.fill_geometry = Some(g).filter(|g| !g.is_empty());
+                    n.fill_geometry = Some(g);
                 }
             } else {
-                n.fill_geometry = Some(g).filter(|g| !g.is_empty());
+                n.fill_geometry = None;
             }
         }
         if has("strokeGeometry") && !skip_geo {
-            n.stroke_geometry =
-                Some(parse_geometry_cached(farr(set, "strokeGeometry"), &mut self.path_cache, &mut self.blob_cache, self.blobs)).filter(|g| !g.is_empty());
+            let g = parse_geometry_cached(farr(set, "strokeGeometry"), &mut self.path_cache, &mut self.blob_cache, self.blobs);
+            if !g.is_empty() {
+                if !has_derived_fill && n.fill_geometry.is_none() {
+                    if let NodeKind::Vector { paths, .. } = &mut n.kind {
+                        paths.clone_from(&g);
+                    }
+                }
+                n.stroke_geometry = Some(g);
+            } else {
+                n.stroke_geometry = None;
+            }
         }
         if derived_only {
             return Ok(swapped);
@@ -2683,6 +3312,9 @@ impl<'a> Ctx<'a> {
         if let Some(b) = fbool(set, "locked") {
             n.locked = b;
         }
+        if let Some(b) = fbool(set, "preserveRatio").or_else(|| fbool(set, "lockAspect")) {
+            n.lock_aspect = b;
+        }
         if let Some(o) = fnum(set, "opacity") {
             n.opacity = o;
         }
@@ -2691,6 +3323,11 @@ impl<'a> Ctx<'a> {
         }
         if let Some(b) = fbool(set, "isMask") {
             n.is_mask = b;
+        }
+        if let Some(mt) = fstr(set, "maskType").and_then(parse_mask_type) {
+            n.mask_type = mt;
+        } else if let Some(b) = fbool(set, "isMaskOutline") {
+            n.mask_type = if b { MaskType::Vector } else { MaskType::Alpha };
         }
         if set.get("fills").is_some() {
             n.variables.bindings.retain(|k, _| !k.starts_with("fills/"));
@@ -2703,6 +3340,10 @@ impl<'a> Ctx<'a> {
         if set.get("strokes").is_some() {
             n.variables.bindings.retain(|k, _| !k.starts_with("strokes/"));
             n.stroke.paints = parse_paints(set.get("strokes"));
+        }
+        if set.get("effects").is_some() {
+            n.variables.bindings.retain(|k, _| !k.starts_with("effects/"));
+            n.effects = farr(set, "effects").iter().filter_map(parse_effect).collect();
         }
         if set.get("boundVariables").is_some() || set.get("explicitVariableModes").is_some() {
             let ov_vars = crate::variables::parse_node_variables(set);
@@ -2754,8 +3395,47 @@ impl<'a> Ctx<'a> {
                 _ => StrokeAlign::Inside,
             };
         }
-        if set.get("effects").is_some() {
-            n.effects = farr(set, "effects").iter().filter_map(parse_effect).collect();
+        if let Some(c) = fstr(set, "strokeCap") {
+            n.stroke.cap = crate::vecnet::cap_from(c).unwrap_or(StrokeCap::None);
+            if !has("strokeGeometry") {
+                n.stroke_geometry = None;
+            }
+        }
+        if let Some(j) = fstr(set, "strokeJoin") {
+            n.stroke.join = match j {
+                "BEVEL" => StrokeJoin::Bevel,
+                "ROUND" => StrokeJoin::Round,
+                _ => StrokeJoin::Miter,
+            };
+            if !has("strokeGeometry") {
+                n.stroke_geometry = None;
+            }
+        }
+        if let Some(m) = fnum(set, "strokeMiterLimit") {
+            n.stroke.miter_limit = m.max(1.0);
+        } else if let Some(deg) = fnum(set, "strokeMiterAngle") {
+            let rad = (deg * 0.5).to_radians();
+            if rad > 1e-4 {
+                n.stroke.miter_limit = (1.0 / rad.sin()).clamp(1.0, 100.0);
+            }
+        }
+        if set.get("strokeDashes").is_some() {
+            n.stroke.dashes = farr(set, "strokeDashes").iter().filter_map(num).collect();
+            if !has("strokeGeometry") {
+                n.stroke_geometry = None;
+            }
+        }
+        if let (NodeKind::Ellipse(arc), Some(a)) = (&mut n.kind, set.get("arcData").filter(|_| keep("arcData"))) {
+            // an overridden ring or pie: only the keys the override carries replace the main component's arc
+            arc.start = fnum(a, "startingAngle").unwrap_or(arc.start);
+            arc.end = fnum(a, "endingAngle").unwrap_or(arc.end);
+            arc.inner_radius = fnum(a, "innerRadius").unwrap_or(arc.inner_radius);
+            if !has("fillGeometry") {
+                n.fill_geometry = None;
+            }
+            if !has("strokeGeometry") {
+                n.stroke_geometry = None;
+            }
         }
         if let Some(r) = set.get("rectangleCornerRadii").and_then(Value::as_array).filter(|a| a.len() == 4) {
             for (i, x) in r.iter().enumerate() {
@@ -3018,6 +3698,9 @@ impl<'a> Ctx<'a> {
                 _ => Sizing::Fixed,
             };
         }
+        apply_paint_style_links(n, set);
+        apply_effect_style_link(n, set);
+        apply_text_style_link(n, set);
         if let NodeKind::Text(t) = &mut n.kind {
             if let Some(ar) = fbool(set, "autoRename") {
                 t.auto_rename = ar;
@@ -3124,6 +3807,15 @@ struct DeferredFigHydrator {
     budget_exhausted: bool,
     unexpanded_instances: BTreeSet<NodeId>,
     last_error: Option<String>,
+    /// Instance -> the fingerprint, when the file was opened, of every main its derived data was computed against, for
+    /// the instances that still have derived data here (see [`crate::component_fingerprint`]).
+    instance_fingerprints: HashMap<NodeId, u64>,
+    /// Blob index -> the bytes of the outline, for the outlines the derived data of the held instances names.
+    derived_outlines: HashMap<usize, std::sync::Arc<[u8]>>,
+    /// Instance -> the mains its file record swaps nested instances to (part of its fingerprint).
+    swap_mains_of: HashMap<NodeId, Vec<NodeId>>,
+    /// Instance -> digest of each field it overrides on itself, as the file was opened.
+    self_digests: HashMap<NodeId, BTreeMap<OverrideField, u64>>,
 }
 
 impl std::fmt::Debug for DeferredFigHydrator {
@@ -3143,6 +3835,29 @@ impl designos_doc::PageHydrator for DeferredFigHydrator {
         if insts.is_empty() {
             return false;
         }
+        // `derivedSymbolData` is a cache from the file, valid only for the main
+        // components fingerprinted when the file was imported. A main can be
+        // edited while its instance page is still deferred; applying that old
+        // cache during hydration would restore stale sizes/transforms over the
+        // freshly cloned main. The exporter already performs this check for
+        // unopened pages; mirror it before applying the record on open.
+        let mut fingerprints = crate::component_fingerprint::Fingerprints::default();
+        let mut cleared_derived = HashMap::new();
+        for &inst in &insts {
+            let Some(&main) = self.targets.get(&inst) else { continue };
+            let Some(&stored) = self.instance_fingerprints.get(&inst) else { continue };
+            let swaps = self.swap_mains_of.get(&inst).map(Vec::as_slice).unwrap_or(&[]);
+            let mains = crate::component_fingerprint::instance_mains(doc, inst, main, swaps);
+            if fingerprints.of_mains(doc, &mains) != stored {
+                if let Some(ov) = self.overrides.get_mut(&inst) {
+                    let taken = std::mem::take(&mut ov.fast_derived);
+                    if !taken.is_empty() {
+                        cleared_derived.insert(inst, taken);
+                    }
+                }
+            }
+        }
+        drop(fingerprints);
         let next_clone = self.next_clone.max(doc.peek_next_id().0);
         let saved_insts: Vec<(NodeId, Node)> = insts.iter().filter_map(|&id| doc.get(id).cloned().map(|n| (id, n))).collect();
         let saved_done = self.done.clone();
@@ -3155,6 +3870,11 @@ impl designos_doc::PageHydrator for DeferredFigHydrator {
             unresolved: Vec::new(),
             overrides: std::mem::take(&mut self.overrides),
             rest_overrides: Vec::new(),
+            // Node-level lock overrides were recorded during the initial
+            // `link_sources` pass, before deferred hydration starts. Hydrated
+            // pages only clone already-linked nodes, so there is no pending
+            // presence map to carry here.
+            node_lock_fields: HashSet::new(),
             override_keys: std::mem::take(&mut self.override_keys),
             col_anchor_guids: std::mem::take(&mut self.col_anchor_guids),
             row_anchor_guids: std::mem::take(&mut self.row_anchor_guids),
@@ -3199,6 +3919,11 @@ impl designos_doc::PageHydrator for DeferredFigHydrator {
             }
         }
         if let Some(err) = hydration_err {
+            for (inst, derived) in cleared_derived {
+                if let Some(ov) = cx.overrides.get_mut(&inst) {
+                    ov.fast_derived = derived;
+                }
+            }
             cx.doc.nodes.retain(|&id, _| id.0 < next_clone);
             for (id, node) in saved_insts {
                 cx.doc.nodes.insert(id, node);
@@ -3206,24 +3931,26 @@ impl designos_doc::PageHydrator for DeferredFigHydrator {
             self.done = saved_done;
             self.last_error = Some(err.to_string());
             *doc = cx.doc;
-            if !self.pending_by_page.is_empty() {
-                self.ids = cx.ids;
-                self.overrides = cx.overrides;
-                self.override_keys = cx.override_keys;
-                self.col_anchor_guids = cx.col_anchor_guids;
-                self.row_anchor_guids = cx.row_anchor_guids;
-                self.grid_col_track_ids = cx.grid_col_track_ids;
-                self.grid_row_track_ids = cx.grid_row_track_ids;
-                self.no_auto_layout = cx.no_auto_layout;
-                self.scales = cx.scales;
-                self.path_cache = cx.path_cache;
-                self.blob_cache = cx.blob_cache;
-                self.expanded_comps = cx.expanded_comps;
-            } else {
-                self.targets.clear();
-                self.done.clear();
-            }
+            self.ids = cx.ids;
+            self.overrides = cx.overrides;
+            self.override_keys = cx.override_keys;
+            self.col_anchor_guids = cx.col_anchor_guids;
+            self.row_anchor_guids = cx.row_anchor_guids;
+            self.grid_col_track_ids = cx.grid_col_track_ids;
+            self.grid_row_track_ids = cx.grid_row_track_ids;
+            self.no_auto_layout = cx.no_auto_layout;
+            self.scales = cx.scales;
+            self.path_cache = cx.path_cache;
+            self.blob_cache = cx.blob_cache;
+            self.expanded_comps = cx.expanded_comps;
             return false;
+        }
+        for &inst in &cx.unexpanded_instances {
+            if let Some(derived) = cleared_derived.remove(&inst) {
+                if let Some(ov) = cx.overrides.get_mut(&inst) {
+                    ov.fast_derived = derived;
+                }
+            }
         }
         cx.mark_custom_instance_slots();
         if cx.next_clone > 1 {
@@ -3234,7 +3961,7 @@ impl designos_doc::PageHydrator for DeferredFigHydrator {
         self.budget_exhausted = cx.budget_exhausted;
         self.unexpanded_instances.extend(cx.unexpanded_instances);
         *doc = cx.doc;
-        if !self.pending_by_page.is_empty() {
+        if !self.pending_by_page.is_empty() || !self.unexpanded_instances.is_empty() {
             self.ids = cx.ids;
             self.overrides = cx.overrides;
             self.override_keys = cx.override_keys;
@@ -3287,6 +4014,38 @@ impl designos_doc::PageHydrator for DeferredFigHydrator {
     fn take_last_error(&mut self) -> Option<String> {
         self.last_error.take()
     }
+
+    fn pending_instance_overrides(&self, instance: NodeId) -> Option<String> {
+        self.overrides.get(&instance)?.kept.as_deref().map(String::from)
+    }
+
+    fn pending_instance_derived(&self, instance: NodeId) -> Option<designos_doc::PendingDerived> {
+        let derived = &self.overrides.get(&instance)?.fast_derived;
+        let fingerprint = *self.instance_fingerprints.get(&instance)?;
+        let swap_mains = self.swap_mains_of.get(&instance).cloned().unwrap_or_default();
+        let outlines = |list: &Option<Vec<(usize, bool)>>| -> Vec<designos_doc::PendingOutline> {
+            list.iter()
+                .flatten()
+                .filter_map(|&(idx, even_odd)| Some(designos_doc::PendingOutline { id: idx as u64, even_odd, bytes: self.derived_outlines.get(&idx)?.clone() }))
+                .collect()
+        };
+        let entries: Vec<designos_doc::PendingDerivedEntry> = derived
+            .iter()
+            .map(|d| designos_doc::PendingDerivedEntry {
+                path: d.path.clone(),
+                size: d.size.map(|s| [s.x, s.y]),
+                transform: d.transform.map(|t| [t.a, t.b, t.c, t.d, t.tx, t.ty]),
+                fill: outlines(&d.fill_geometry),
+                stroke: outlines(&d.stroke_geometry),
+            })
+            .filter(|e| e.size.is_some() || e.transform.is_some() || !e.fill.is_empty() || !e.stroke.is_empty())
+            .collect();
+        (!entries.is_empty()).then_some(designos_doc::PendingDerived { fingerprint, entries, swap_mains })
+    }
+
+    fn pending_instance_self_digests(&self, instance: NodeId) -> Option<BTreeMap<OverrideField, u64>> {
+        self.self_digests.get(&instance).cloned()
+    }
 }
 
 /// Style values that the file states on the style node (`.fig` imports put them in the `styles`
@@ -3314,10 +4073,32 @@ fn apply_style_node_values(doc: &mut Document, styles: Option<&Value>) {
             Some("EFFECT") if m.get("effects").is_some() => Style::Effect(farr(m, "effects").iter().filter_map(parse_effect).collect()),
             Some("EFFECT") if !doc.styles.contains_key(id) && m.get("boundVariables").is_some() => Style::Effect(Vec::new()),
             Some("GRID") if m.get("layoutGrids").is_some() => Style::Grid(farr(m, "layoutGrids").iter().filter_map(parse_grid).collect()),
+            Some("ANIMATION") => {
+                let timelines: Vec<designos_doc::Timeline> = m.get("timelines").cloned().and_then(|v| serde_json::from_value(v).ok()).unwrap_or_default();
+                for n in doc.nodes.values_mut() {
+                    if n.style_refs.get("animation").is_some_and(|k| k == id)
+                        && n.motion.as_deref().is_none_or(|mo| mo.timelines.is_empty())
+                        && !timelines.is_empty()
+                    {
+                        designos_doc::apply_style_values(n, &Style::Animation(timelines.clone()), id);
+                    }
+                }
+                Style::Animation(timelines)
+            }
             _ => continue,
         };
         doc.styles.insert(id.clone(), style);
     }
+}
+
+/// Counts the variables that layer and style bindings name but the document does not hold, each variable once
+/// however many bindings refer to it. The bindings are not deleted: a variables payload imported later
+/// (`import_variables_json`) makes them live.
+fn count_missing_variable_bindings(doc: &Document) -> usize {
+    let layer_bindings = doc.nodes.values().flat_map(|node| node.variables.bindings.values());
+    let style_bindings = doc.style_meta.values().flat_map(|meta| meta.bindings.values());
+    let missing: BTreeSet<&str> = layer_bindings.chain(style_bindings).filter(|id| !doc.variables.contains_key(*id)).map(String::as_str).collect();
+    missing.len()
 }
 
 /// Library style metadata from the top-level REST `styles` map. A FILL style
@@ -3343,13 +4124,18 @@ fn style_meta(styles: Option<&Value>, doc: &Document) -> BTreeMap<String, StyleM
         }
     }
     for (id, m) in map {
-        if !doc.styles.contains_key(id) {
+        if !doc.styles.contains_key(id)
+            || fbool(m, "isSoftDeleted") == Some(true)
+            || fbool(m, "isSoftDeletedStyle") == Some(true)
+            || fstr(m, "phase") == Some("REMOVED")
+        {
             continue;
         }
         let property = match fstr(m, "styleType") {
             Some("TEXT") => StyleProperty::Text,
             Some("EFFECT") => StyleProperty::Effect,
             Some("GRID") => StyleProperty::Grid,
+            Some("ANIMATION") => StyleProperty::Animation,
             Some("STROKE") => StyleProperty::Stroke,
             _ if used_as_stroke.contains(id.as_str()) && !used_as_fill.contains(id.as_str()) => StyleProperty::Stroke,
             _ => StyleProperty::Fill,
@@ -3363,6 +4149,7 @@ fn style_meta(styles: Option<&Value>, doc: &Document) -> BTreeMap<String, StyleM
                 description: fstr(m, "description").unwrap_or("").to_string(),
                 property,
                 bindings,
+                ..Default::default()
             },
         );
     }
@@ -3395,15 +4182,26 @@ pub(crate) fn override_field(key: &str, is_text: bool) -> Option<OverrideField> 
         "name" => OverrideField::Name,
         "visible" => OverrideField::Visible,
         "locked" => OverrideField::Locked,
+        "preserveRatio" | "lockAspect" => OverrideField::LockAspect,
         "opacity" => OverrideField::Opacity,
         "blendMode" => OverrideField::Blend,
         "size" => OverrideField::Size,
         "relativeTransform" | "transform" => OverrideField::Transform,
-        "fills" if is_text => OverrideField::TextStyle,
-        "fills" => OverrideField::Fills,
-        "strokes" | "strokeWeight" | "strokeAlign" | "strokeCap" | "strokeJoin" | "strokeDashes" | "individualStrokeWeights" => OverrideField::Stroke,
+        "fills" | "_clearFillStyle" if is_text => OverrideField::TextStyle,
+        "fills" | "_clearFillStyle" => OverrideField::Fills,
+        "strokes"
+        | "_clearStrokeStyle"
+        | "strokeWeight"
+        | "strokeAlign"
+        | "strokeCap"
+        | "strokeJoin"
+        | "strokeDashes"
+        | "strokeMiterLimit"
+        | "strokeMiterAngle"
+        | "individualStrokeWeights" => OverrideField::Stroke,
         "effects" => OverrideField::Effects,
         "cornerRadius" | "rectangleCornerRadii" | "cornerSmoothing" => OverrideField::CornerRadii,
+        "arcData" => OverrideField::Arc,
         "characters" => OverrideField::Characters,
         "style"
         | "characterStyleOverrides"
@@ -3418,7 +4216,10 @@ pub(crate) fn override_field(key: &str, is_text: bool) -> Option<OverrideField> 
         | "opentypeFlags"
         | "fontVariations"
         | "textWrapStyle"
-        | "maxLines" => OverrideField::TextStyle,
+        | "maxLines"
+        | "_clearTextStyle" => OverrideField::TextStyle,
+        // On a text node the `.fig` importer writes `styles` only as `{"text": id}`: the text-style link changed.
+        "styles" if is_text => OverrideField::TextStyle,
         "layoutMode"
         | "itemSpacing"
         | "counterAxisSpacing"
@@ -3690,11 +4491,16 @@ fn frame_props(v: &Value) -> FrameProps {
         let grid_columns = v.get("gridColumns").and_then(Value::as_u64).map(|x| x as u32).filter(|&x| x > 0).unwrap_or(sizing_cols);
         let grid_rows = v.get("gridRows").and_then(Value::as_u64).map(|x| x as u32).filter(|&x| x > 0).unwrap_or(sizing_rows);
         let grid_auto_tracks = fstr(v, "gridAutoTracks").map(parse_grid_auto_tracks).unwrap_or_default();
+        let wrap = fstr(v, "layoutWrap") == Some("WRAP");
+        let item_spacing = p("itemSpacing");
+        // An absent counter gap on a wrap frame is Figma's "Auto" line gap: it follows the item spacing.
+        // An explicit value, zero included, is kept.
+        let counter_spacing = fnum(v, "counterAxisSpacing").unwrap_or(if wrap { item_spacing } else { 0.0 });
         AutoLayout {
             direction,
-            wrap: fstr(v, "layoutWrap") == Some("WRAP"),
-            item_spacing: p("itemSpacing"),
-            counter_spacing: p("counterAxisSpacing"),
+            wrap,
+            item_spacing,
+            counter_spacing,
             padding: [p("paddingTop"), p("paddingRight"), p("paddingBottom"), p("paddingLeft")],
             primary_align: align(fstr(v, "primaryAxisAlignItems")),
             counter_align: align(fstr(v, "counterAxisAlignItems")),
@@ -4023,6 +4829,49 @@ mod expand_depth_tests {
         json!({"document": {"type": "DOCUMENT", "children": [{"id": "0:1", "type": "CANVAS", "children": kids}]}})
     }
 
+    /// A shell component contains an icon instance. Swapping that nested instance
+    /// must update its layer name to the selected component's name, just as Figma
+    /// does in the Layers panel.
+    fn nested_instance_swap_names() -> Value {
+        let size = json!({"x": 16, "y": 16});
+        json!({
+            "document": {"type": "DOCUMENT", "children": [{
+                "id": "0:1", "type": "CANVAS", "name": "Page 1", "children": [
+                    {"id": "10:1", "name": "home-line", "type": "COMPONENT", "size": size,
+                     "children": [{"id": "10:2", "name": "home-path", "type": "RECTANGLE", "size": size}]},
+                    {"id": "11:1", "name": "settings-01", "type": "COMPONENT", "size": size,
+                     "children": [{"id": "11:2", "name": "settings-path", "type": "RECTANGLE", "size": size}]},
+                    {"id": "12:1", "name": "Sidebar", "type": "COMPONENT", "size": size,
+                     "children": [{"id": "12:2", "name": "home-line", "type": "INSTANCE", "componentId": "10:1", "size": size}]},
+                    {"id": "1:1", "name": "Sidebar use", "type": "INSTANCE", "componentId": "12:1", "size": size,
+                     "_overrides": [{"path": ["12:2"], "set": {"componentId": "11:1"}}]}
+                ]
+            }]}
+        })
+    }
+
+    /// REST files can carry the nested instance's custom name separately from
+    /// the component swap metadata. The custom name must survive the swap.
+    fn nested_instance_swap_rest_name_override() -> Value {
+        let size = json!({"x": 16, "y": 16});
+        json!({
+            "document": {"type": "DOCUMENT", "children": [{
+                "id": "0:1", "type": "CANVAS", "name": "Page 1", "children": [
+                    {"id": "10:1", "name": "home-line", "type": "COMPONENT", "size": size,
+                     "children": [{"id": "10:2", "name": "home-path", "type": "RECTANGLE", "size": size}]},
+                    {"id": "11:1", "name": "settings-01", "type": "COMPONENT", "size": size,
+                     "children": [{"id": "11:2", "name": "settings-path", "type": "RECTANGLE", "size": size}]},
+                    {"id": "12:1", "name": "Sidebar", "type": "COMPONENT", "size": size,
+                     "children": [{"id": "12:2", "name": "home-line", "type": "INSTANCE", "componentId": "10:1", "size": size}]},
+                    {"id": "1:1", "name": "Sidebar use", "type": "INSTANCE", "componentId": "12:1", "size": size,
+                     "overrides": [{"id": "I1:1;12:2", "overriddenFields": ["name"]}],
+                     "_overrides": [{"path": ["12:2"], "set": {"componentId": "11:1"}}],
+                     "children": [{"id": "I1:1;12:2", "name": "Sidebar icon", "type": "INSTANCE", "componentId": "10:1", "size": size}]}
+                ]
+            }]}
+        })
+    }
+
     /// Same chain, but each `X` swaps `S` through an instance override (`_overrides` with a `componentId`) rather
     /// than through a component property.
     fn override_swap_chain(len: usize) -> Value {
@@ -4064,6 +4913,27 @@ mod expand_depth_tests {
     }
 
     #[test]
+    fn nested_instance_swap_uses_target_component_name() {
+        let doc = import_rest_value(&nested_instance_swap_names(), true).unwrap();
+        let use_node = doc.nodes.values().find(|n| n.name == "Sidebar use").expect("instance use");
+        let swapped = use_node.children.iter().find_map(|id| doc.get(*id)).expect("swapped nested instance");
+        assert!(matches!(swapped.kind, NodeKind::Instance { component: Some(_), .. }));
+        assert_eq!(swapped.name, "settings-01");
+        assert!(swapped.children.iter().any(|id| doc.get(*id).is_some_and(|n| n.name == "settings-path")));
+    }
+
+    #[test]
+    fn nested_instance_swap_preserves_rest_name_override() {
+        let doc = import_rest_value(&nested_instance_swap_rest_name_override(), true).unwrap();
+        let use_node = doc.nodes.values().find(|n| n.name == "Sidebar use").expect("instance use");
+        let swapped = use_node.children.iter().find_map(|id| doc.get(*id)).expect("swapped nested instance");
+        assert!(matches!(swapped.kind, NodeKind::Instance { component: Some(_), .. }));
+        assert_eq!(swapped.name, "Sidebar icon");
+        assert!(swapped.component.overrides.contains(&OverrideField::Name));
+        assert!(swapped.children.iter().any(|id| doc.get(*id).is_some_and(|n| n.name == "settings-path")));
+    }
+
+    #[test]
     fn override_swap_chain_expands_completely_and_on_a_small_stack() {
         for len in [3usize, 20, 80] {
             let doc = import_rest_value(&override_swap_chain(len), true).unwrap();
@@ -4093,22 +4963,29 @@ mod expand_depth_tests {
         handle.join().expect("import must not overflow the stack");
     }
 
+    fn chained_links_test_params() -> (usize, usize, usize) {
+        (500, 80_000, 101)
+    }
+
     #[test]
     fn chained_links_stop_at_the_global_clone_budget() {
-        // 5,000-link chain: without a global budget this clones 12,502,500 nodes; with MAX_IMPORT_CLONES (8,000,000)
-        // it stops at 8,000,000 cloned nodes (never exceeding MAX_IMPORT_CLONES) and leaves 1,001 instances empty.
-        let chain = component_chain(5_000);
-        let base_nodes = 1 + 2 * 5_000 + 1; // page + 5000*(comp + inner) + Use
+        assert_eq!(MAX_IMPORT_CLONES, 8_000_000);
+        let (chain_len, budget, expected_unexpanded) = chained_links_test_params();
+        assert!(budget <= 100_000, "chained_links_stop_at_the_global_clone_budget must stay <= 100,000 clones in CI (got {budget})");
+        // 500-link chain: without a global budget this clones 125,250 nodes; with budget 80,000
+        // it stops at 80,000 cloned nodes (never exceeding the budget) and leaves 101 instances empty.
+        let chain = component_chain(chain_len);
+        let base_nodes = 1 + 2 * chain_len + 1; // page + len*(comp + inner) + Use
         let started = std::time::Instant::now();
-        let (doc, report) = import_rest_value_with_blobs_and_budget(&chain, true, &[], None, MAX_IMPORT_CLONES).unwrap();
+        let (doc, report) = import_rest_value_with_blobs_and_budget(&chain, true, &[], None, budget).unwrap();
         let elapsed = started.elapsed();
         let cloned = doc.nodes.len().saturating_sub(base_nodes);
-        assert!(cloned <= MAX_IMPORT_CLONES, "cloned {cloned} > MAX_IMPORT_CLONES");
-        assert_eq!(cloned, MAX_IMPORT_CLONES);
-        assert_eq!(report.instances_left_unexpanded, 1_001);
+        assert!(cloned <= budget, "cloned {cloned} > {budget}");
+        assert_eq!(cloned, budget);
+        assert_eq!(report.instances_left_unexpanded, expected_unexpanded);
         // The count asserts above prove the budget stops cloning; wall time is bounded in release builds only.
         if !cfg!(debug_assertions) {
-            assert!(elapsed.as_secs() < 15, "5,000-link chain took {elapsed:?}");
+            assert!(elapsed.as_secs() < 15, "chain took {elapsed:?}");
         }
     }
 
@@ -4224,6 +5101,10 @@ mod expand_depth_tests {
             budget_exhausted: false,
             unexpanded_instances: BTreeSet::new(),
             last_error: None,
+            instance_fingerprints: HashMap::new(),
+            derived_outlines: HashMap::new(),
+            swap_mains_of: HashMap::new(),
+            self_digests: HashMap::new(),
         };
         doc_h.page_hydrator = Some(std::sync::Arc::new(std::sync::Mutex::new(hydrator)));
         assert!(!doc_h.ensure_page_hydrated(p2), "hydration that hits u64::MAX must fail cleanly");
@@ -4264,6 +5145,10 @@ mod expand_depth_tests {
             budget_exhausted: false,
             unexpanded_instances: BTreeSet::new(),
             last_error: None,
+            instance_fingerprints: HashMap::new(),
+            derived_outlines: HashMap::new(),
+            swap_mains_of: HashMap::new(),
+            self_digests: HashMap::new(),
         };
         doc_h.page_hydrator = Some(std::sync::Arc::new(std::sync::Mutex::new(hydrator_b)));
         assert!(doc_h.ensure_page_hydrated(p2));
@@ -4331,6 +5216,7 @@ mod expand_depth_tests {
             library_keys: BTreeMap::new(),
             pending_swaps: Vec::new(),
             rest_overrides: Vec::new(),
+            node_lock_fields: HashSet::new(),
             proto: Vec::new(),
             overlay_props: BTreeMap::new(),
             flow_pages: Vec::new(),
@@ -4374,6 +5260,7 @@ mod expand_depth_tests {
             library_keys: BTreeMap::new(),
             pending_swaps: Vec::new(),
             rest_overrides: Vec::new(),
+            node_lock_fields: HashSet::new(),
             proto: Vec::new(),
             overlay_props: BTreeMap::new(),
             flow_pages: Vec::new(),

@@ -8,15 +8,13 @@ use crate::canvas::vector as vec;
 use crate::icons::Icon;
 use crate::theme;
 use crate::widgets::field::{self, Prefix};
-use crate::widgets::menu::dropdown;
+use crate::widgets::menu::dropdown_mixed;
 use crate::widgets::{self};
 use designos_doc::{HandleMirror, StrokeCap};
 use egui::{Align2, Rect, Sense, Ui};
 
 /// Entries of the mirroring dropdown. "Straight" removes the handles.
 const MIRROR: [&str; 4] = ["Straight", "Mirror angle and length", "Mirror angle", "No mirroring"];
-const CAPS: [(&str, Option<StrokeCap>); 4] =
-    [("Inherit", None), ("None", Some(StrokeCap::None)), ("Round", Some(StrokeCap::Round)), ("Square", Some(StrokeCap::Square))];
 
 fn text_button(ui: &mut Ui, rect: Rect, key: &str, label: &str, enabled: bool) -> bool {
     widgets::record(ui, key, rect);
@@ -25,6 +23,19 @@ fn text_button(ui: &mut Ui, rect: Rect, key: &str, label: &str, enabled: bool) -
     ui.painter().rect_filled(rect, theme::cr(theme::RADIUS_CONTROL), bg);
     ui.painter().text(rect.center(), Align2::CENTER_CENTER, label, theme::font_body(), if enabled { theme::TEXT } else { theme::TEXT_SECONDARY });
     enabled && resp.clicked()
+}
+
+/// The stroke-cap dropdown. `"Inherit"` (`None`) is followed by [`super::stroke::ENDPOINT_CAPS`]; a cap the list has no
+/// entry for (or vertices that disagree) reads `"Mixed"` in the mixed ink.
+fn cap_dropdown(ui: &mut Ui, rect: Rect, cap: Option<Option<StrokeCap>>) -> Option<usize> {
+    let caps: Vec<String> = std::iter::once("Inherit").chain(super::stroke::ENDPOINT_CAPS.iter().map(|(label, _)| *label)).map(str::to_string).collect();
+    let at = match cap {
+        Some(None) => Some(0),
+        Some(Some(c)) => super::stroke::ENDPOINT_CAPS.iter().position(|(_, k)| *k == c).map(|i| i + 1),
+        None => None,
+    };
+    let cur = at.map(|i| caps[i].as_str()).unwrap_or("Mixed");
+    dropdown_mixed(ui, rect, "vtx-cap", cur, &caps, at.is_none())
 }
 
 /// The vertex section; no-op unless the selected vector is being edited.
@@ -70,12 +81,10 @@ pub(super) fn section(app: &mut App, ui: &mut Ui, pane: &mut Pane) {
 
         sublabel(ui, pane, "Stroke cap");
         let cap = vec::common_vertex(app, |v| v.cap);
-        let caps: Vec<String> = CAPS.iter().map(|c| c.0.to_string()).collect();
-        let cur = cap.and_then(|c| CAPS.iter().position(|x| x.1 == c)).map(|i| caps[i].as_str()).unwrap_or("Mixed");
         let cap_r = pane.full(0.0);
         widgets::record(ui, "vtx-cap", cap_r);
-        if let Some(i) = dropdown(ui, cap_r, "vtx-cap", cur, &caps) {
-            let c = CAPS[i].1;
+        if let Some(i) = cap_dropdown(ui, cap_r, cap) {
+            let c = i.checked_sub(1).and_then(|j| super::stroke::ENDPOINT_CAPS.get(j)).map(|(_, k)| *k);
             vec::set_vertices(app, |v| v.cap = c);
         }
         row_end(pane);
@@ -100,7 +109,7 @@ pub(super) fn section(app: &mut App, ui: &mut Ui, pane: &mut Pane) {
         let options: Vec<String> = MIRROR.iter().map(|s| s.to_string()).collect();
         let mr = pane.full(0.0);
         widgets::record(ui, "vtx-mirror", mr);
-        if let Some(i) = dropdown(ui, mr, "vtx-mirror", shown, &options) {
+        if let Some(i) = dropdown_mixed(ui, mr, "vtx-mirror", shown, &options, !straight && mode.is_none()) {
             match i {
                 0 => {
                     vec::straighten_selected(app);
@@ -134,4 +143,45 @@ pub(super) fn section(app: &mut App, ui: &mut Ui, pane: &mut Pane) {
     row_end(pane);
     pane.y += 4.0;
     section_sep(ui, pane, false);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use egui::{Color32, Pos2, Vec2};
+
+    fn mixed_ink(cap: Option<Option<StrokeCap>>, label: &str) -> Option<Color32> {
+        let ctx = egui::Context::default();
+        theme::install_fonts(&ctx);
+        let raw = egui::RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(400.0, 200.0))), ..Default::default() };
+        let out = ctx.run_ui(raw, |ui| {
+            let _ = cap_dropdown(ui, Rect::from_min_size(Pos2::new(20.0, 20.0), Vec2::new(200.0, 32.0)), cap);
+        });
+        fn find(shape: &egui::Shape, label: &str) -> Option<Color32> {
+            match shape {
+                egui::Shape::Vec(v) => v.iter().find_map(|s| find(s, label)),
+                egui::Shape::Text(t) if t.galley.text() == label => t.galley.job.sections.first().map(|s| s.format.color),
+                _ => None,
+            }
+        }
+        out.shapes.iter().find_map(|cs| find(&cs.shape, label))
+    }
+
+    #[test]
+    fn an_arrow_cap_reads_by_name_in_the_normal_ink() {
+        assert_eq!(mixed_ink(Some(Some(StrokeCap::ArrowLines)), "Line arrow"), Some(theme::TEXT));
+    }
+
+    #[test]
+    fn every_endpoint_arrow_cap_has_a_vertex_label() {
+        for (label, cap) in super::super::stroke::ENDPOINT_CAPS {
+            assert_eq!(mixed_ink(Some(Some(cap)), label), Some(theme::TEXT), "{label}");
+        }
+    }
+
+    #[test]
+    fn disagreeing_vertices_read_mixed_and_a_listed_cap_keeps_its_ink() {
+        assert_eq!(mixed_ink(None, "Mixed"), Some(theme::TEXT_TERTIARY));
+        assert_eq!(mixed_ink(Some(Some(StrokeCap::Round)), "Round"), Some(theme::TEXT));
+    }
 }

@@ -279,3 +279,7 @@ pub fn assert_rich_survived(rt: &Document) {
     assert_eq!(caps("RoundCaps"), (ConnectorCap::Circle, ConnectorCap::Diamond, ConnectorLine::Curved));
     assert_eq!(find(rt, "Card").plugin_data.get("12345:note").map(String::as_str), Some("ünï ✓ value"));
 }
+
+pub mod deferred_fig;
+pub mod fig_fixture;
+pub mod scan_world;

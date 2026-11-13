@@ -86,6 +86,10 @@ pub enum MergeError {
     DanglingReference(Vec<DanglingReference>),
     /// A generated merge command failed to apply against `main`.
     Apply { step: usize, reason: String },
+    /// The merged working tree would make a component hold an instance of itself.
+    InstanceCycle(String),
+    /// The merged variable store would close a variable alias cycle.
+    AliasCycle(String),
     /// Attempted to merge an archived or already-merged branch (`T10.3 §8.6`).
     BranchArchived(String),
 }
@@ -104,6 +108,7 @@ impl std::fmt::Display for MergeError {
             Self::Apply { step, reason } => {
                 write!(f, "merge command failed at step {step}: {reason}")
             }
+            Self::InstanceCycle(message) | Self::AliasCycle(message) => write!(f, "{message}"),
             Self::BranchArchived(name) => {
                 write!(f, "branch '{name}' is archived or already merged")
             }
@@ -231,11 +236,19 @@ pub fn merge(base: &Document, main: &Document, branch: &Document, diff: &Diff3, 
         let mut step_history = History::default();
         step_history.exec(&mut working, cmd.clone()).map_err(|reason| MergeError::Apply { step, reason: reason.to_string() })?;
     }
+    if let Some((component, cycle_path)) = crate::components::first_new_self_holding_component_cycle(main, &remapped_branch, &working, &commands) {
+        let comp_name = crate::cycle_node_label(&working, component);
+        return Err(MergeError::InstanceCycle(crate::cycle_refusal_message(crate::CycleAction::Merge, &comp_name, &cycle_path)));
+    }
 
     // 6. Validate all references in the merged document (`T10.3 §2`, `§3.7`, `§8.1`, `§8.2`).
     let dangling = validate_merged_references(&working);
     if !dangling.is_empty() {
         return Err(MergeError::DanglingReference(dangling));
+    }
+
+    if let Some(cycle_msg) = first_new_variable_alias_cycle(main, &remapped_branch, &working) {
+        return Err(MergeError::AliasCycle(cycle_msg));
     }
 
     report.command_steps = commands.len();
@@ -359,6 +372,64 @@ fn remap_str(key: &str, map: &BTreeMap<String, String>) -> String {
     map.get(key).cloned().unwrap_or_else(|| key.to_owned())
 }
 
+fn col_needs_mode_remap(collections: &BTreeMap<String, VariableCollection>, col_id: &str, collection_map: &BTreeMap<String, String>) -> bool {
+    let mut cur = col_id;
+    for _ in 0..8 {
+        if collection_map.contains_key(cur) {
+            return true;
+        }
+        let Some(parent) = collections.get(cur).and_then(VariableCollection::extension_parent_id) else {
+            break;
+        };
+        cur = parent;
+    }
+    false
+}
+
+fn remap_mode(old_col_id: &str, mode_id: &str, mode_map: &BTreeMap<(String, String), String>, flat_mode_map: &BTreeMap<String, String>) -> String {
+    mode_map.get(&(old_col_id.to_owned(), mode_id.to_owned())).or_else(|| flat_mode_map.get(mode_id)).cloned().unwrap_or_else(|| mode_id.to_owned())
+}
+
+fn remap_mode_key(old_col_id: &str, mode_key: &str, mode_map: &BTreeMap<(String, String), String>, flat_mode_map: &BTreeMap<String, String>) -> String {
+    if mode_key.contains('+') {
+        mode_key.split('+').map(|part| remap_mode(old_col_id, part, mode_map, flat_mode_map)).collect::<Vec<_>>().join("+")
+    } else {
+        remap_mode(old_col_id, mode_key, mode_map, flat_mode_map)
+    }
+}
+
+fn first_new_variable_alias_cycle(main: &Document, remapped_branch: &Document, merged: &Document) -> Option<String> {
+    let main_store = crate::VariableStore::from_doc(main);
+    let branch_store = crate::VariableStore::from_doc(remapped_branch);
+    let merged_store = crate::VariableStore::from_doc(merged);
+
+    let mut before = main_store.unresolved_pairs();
+    before.extend(branch_store.unresolved_pairs());
+    let after = merged_store.unresolved_pairs();
+    if let Some((var_id, mode_id)) = after.difference(&before).next() {
+        let var_name = merged.variables.get(var_id).map(|v| v.name.as_str()).unwrap_or(var_id.as_str());
+        return Some(format!("ALIAS_CYCLE: cannot merge branch because variable '{var_name}' ({var_id}) in mode '{mode_id}' closes an alias cycle"));
+    }
+
+    for (var_id, var) in &merged_store.variables {
+        for val in var.values.values() {
+            let VariableValue::Alias(target) = val else { continue };
+            if !merged_store.variables.contains_key(target) {
+                continue;
+            }
+            let pre_existing_in = |s: &crate::VariableStore| {
+                s.variables
+                    .get(var_id)
+                    .is_some_and(|v| v.values.values().any(|x| matches!(x, VariableValue::Alias(t) if t == target)) && !s.can_alias(var_id, target))
+            };
+            if !merged_store.can_alias(var_id, target) && !pre_existing_in(&main_store) && !pre_existing_in(&branch_store) {
+                return Some(format!("ALIAS_CYCLE: cannot merge branch because variable '{}' ({var_id}) closes an alias cycle with '{target}'", var.name));
+            }
+        }
+    }
+    None
+}
+
 /// Rewrite all node, style, collection, and variable IDs and references inside a document (`T10.3 §2`, `§3.3`).
 fn rewrite_document_ids(
     doc: &mut Document,
@@ -371,13 +442,26 @@ fn rewrite_document_ids(
         return;
     }
 
+    let mut used_modes: BTreeSet<String> = doc.variable_collections.values().flat_map(|col| col.modes.iter().map(|m| m.id.clone())).collect();
+    let mut mode_map: BTreeMap<(String, String), String> = BTreeMap::new();
+    let mut flat_mode_map: BTreeMap<String, String> = BTreeMap::new();
+    for (old_col_id, col) in &doc.variable_collections {
+        if col_needs_mode_remap(&doc.variable_collections, old_col_id, collection_map) {
+            for mode in &col.modes {
+                let fresh_mode = allocate_branch_key(&mode.id, &mut used_modes);
+                mode_map.insert((old_col_id.clone(), mode.id.clone()), fresh_mode.clone());
+                flat_mode_map.insert(mode.id.clone(), fresh_mode);
+            }
+        }
+    }
+
     doc.pages = doc.pages.iter().map(|&id| remap_node_id(id, node_map)).collect();
     doc.library_page = doc.library_page.map(|p| remap_node_id(p, node_map));
 
     let old_nodes = std::mem::take(&mut doc.nodes);
     for (old_id, mut node) in old_nodes {
         let new_id = remap_node_id(old_id, node_map);
-        rewrite_node_references(&mut node, node_map, style_map, collection_map, variable_map);
+        rewrite_node_references(&mut node, node_map, style_map, collection_map, variable_map, &mode_map, &flat_mode_map);
         node.id = new_id;
         doc.nodes.insert(new_id, node);
     }
@@ -401,18 +485,62 @@ fn rewrite_document_ids(
         let new_id = remap_str(&old_id, collection_map);
         col.id = new_id.clone();
         col.variables = col.variables.into_iter().map(|v| remap_str(&v, variable_map)).collect();
+        for mode in &mut col.modes {
+            mode.id = remap_mode(&old_id, &mode.id, &mode_map, &flat_mode_map);
+        }
+        col.default_mode = remap_mode(&old_id, &col.default_mode, &mode_map, &flat_mode_map);
+        if let Some(mut ext) = col.extension() {
+            let old_parent_id = ext.parent.collection.clone();
+            if !ext.parent.collection.is_empty() {
+                ext.parent.collection = remap_str(&ext.parent.collection, collection_map);
+            }
+            ext.mode_map = ext
+                .mode_map
+                .into_iter()
+                .map(|(own_m, parent_m)| {
+                    (remap_mode(&old_id, &own_m, &mode_map, &flat_mode_map), remap_mode(&old_parent_id, &parent_m, &mode_map, &flat_mode_map))
+                })
+                .collect();
+            ext.overrides = ext
+                .overrides
+                .into_iter()
+                .map(|(var_id, by_mode)| {
+                    let new_var_id = remap_str(&var_id, variable_map);
+                    let new_by_mode = by_mode
+                        .into_iter()
+                        .map(|(m, mut val)| {
+                            if let VariableValue::Alias(target) = &mut val {
+                                *target = remap_str(target, variable_map);
+                            }
+                            (remap_mode(&old_id, &m, &mode_map, &flat_mode_map), val)
+                        })
+                        .collect();
+                    (new_var_id, new_by_mode)
+                })
+                .collect();
+            col.set_extension(&ext);
+        }
         doc.variable_collections.insert(new_id, col);
     }
 
     let old_variables = std::mem::take(&mut doc.variables);
     for (old_id, mut var) in old_variables {
+        let old_col_id = var.collection.clone();
         let new_id = remap_str(&old_id, variable_map);
         var.id = new_id.clone();
-        var.collection = remap_str(&var.collection, collection_map);
-        for val in var.values.values_mut() {
-            if let VariableValue::Alias(target) = val {
+        var.collection = remap_str(&old_col_id, collection_map);
+        let old_values = std::mem::take(&mut var.values);
+        for (mode_key, mut val) in old_values {
+            if let VariableValue::Alias(target) = &mut val {
                 *target = remap_str(target, variable_map);
             }
+            let new_mode_key = remap_mode_key(&old_col_id, &mode_key, &mode_map, &flat_mode_map);
+            var.values.insert(new_mode_key, val);
+        }
+        let old_mode_ext = std::mem::take(&mut var.mode_extensions);
+        for (mode_key, ext_val) in old_mode_ext {
+            let new_mode_key = remap_mode_key(&old_col_id, &mode_key, &mode_map, &flat_mode_map);
+            var.mode_extensions.insert(new_mode_key, ext_val);
         }
         doc.variables.insert(new_id, var);
     }
@@ -460,6 +588,8 @@ fn rewrite_node_references(
     style_map: &BTreeMap<String, String>,
     collection_map: &BTreeMap<String, String>,
     variable_map: &BTreeMap<String, String>,
+    mode_map: &BTreeMap<(String, String), String>,
+    flat_mode_map: &BTreeMap<String, String>,
 ) {
     node.id = remap_node_id(node.id, node_map);
     node.parent = node.parent.map(|p| remap_node_id(p, node_map));
@@ -485,9 +615,14 @@ fn rewrite_node_references(
     for (prop, var_id) in old_bindings {
         node.variables.bindings.insert(prop, remap_str(&var_id, variable_map));
     }
+    let old_prop_defaults = std::mem::take(&mut node.component.prop_default_variables);
+    for (prop, var_id) in old_prop_defaults {
+        node.component.prop_default_variables.insert(prop, remap_str(&var_id, variable_map));
+    }
     let old_modes = std::mem::take(&mut node.variables.modes);
     for (col_id, mode_id) in old_modes {
-        node.variables.modes.insert(remap_str(&col_id, collection_map), mode_id);
+        let new_mode_id = remap_mode(&col_id, &mode_id, mode_map, flat_mode_map);
+        node.variables.modes.insert(remap_str(&col_id, collection_map), new_mode_id);
     }
 
     // Rewrite `node.style_refs`.
@@ -501,7 +636,7 @@ fn rewrite_node_references(
     }
     for reaction in &mut node.prototype.reactions {
         for action in &mut reaction.actions {
-            rewrite_action(action, node_map, collection_map, variable_map);
+            rewrite_action(action, node_map, collection_map, variable_map, mode_map, flat_mode_map);
         }
     }
 }
@@ -543,6 +678,8 @@ fn rewrite_action(
     node_map: &BTreeMap<NodeId, NodeId>,
     collection_map: &BTreeMap<String, String>,
     variable_map: &BTreeMap<String, String>,
+    mode_map: &BTreeMap<(String, String), String>,
+    flat_mode_map: &BTreeMap<String, String>,
 ) {
     match action {
         Action::Navigate { dest, .. }
@@ -557,18 +694,19 @@ fn rewrite_action(
             *variable = remap_str(variable, variable_map);
             rewrite_expression(value, variable_map);
         }
-        Action::SetVariableMode { collection, .. } => {
+        Action::SetVariableMode { collection, mode } => {
+            *mode = remap_mode(collection, mode, mode_map, flat_mode_map);
             *collection = remap_str(collection, collection_map);
         }
         Action::Conditional { branches, otherwise } => {
             for (cond, actions) in branches {
                 rewrite_expression(cond, variable_map);
                 for a in actions {
-                    rewrite_action(a, node_map, collection_map, variable_map);
+                    rewrite_action(a, node_map, collection_map, variable_map, mode_map, flat_mode_map);
                 }
             }
             for a in otherwise {
-                rewrite_action(a, node_map, collection_map, variable_map);
+                rewrite_action(a, node_map, collection_map, variable_map, mode_map, flat_mode_map);
             }
         }
         Action::CloseOverlay | Action::Back | Action::OpenUrl { .. } => {}
@@ -977,8 +1115,14 @@ fn copy_node_group(dst: &mut Node, src: &Node, group: Group) {
         }
         Group::Constraints => dst.constraints = src.constraints,
         Group::LayoutChild => dst.layout_child = src.layout_child,
-        Group::Mask => dst.is_mask = src.is_mask,
-        Group::StyleRefs => dst.style_refs = src.style_refs.clone(),
+        Group::Mask => {
+            dst.is_mask = src.is_mask;
+            dst.mask_type = src.mask_type;
+        }
+        Group::StyleRefs => {
+            dst.style_refs = src.style_refs.clone();
+            dst.text_style_overrides = src.text_style_overrides;
+        }
         Group::Variables => dst.variables = src.variables.clone(),
         Group::Component => {
             dst.component = src.component.clone();
@@ -1026,6 +1170,7 @@ fn copy_node_group(dst: &mut Node, src: &Node, group: Group) {
             dst.hyperlink = src.hyperlink.clone();
             dst.detached_symbol_id = src.detached_symbol_id.clone();
             dst.fig_metadata = src.fig_metadata.clone();
+            dst.motion = src.motion.clone();
         }
         Group::Position => {}
     }
@@ -1165,6 +1310,15 @@ fn merge_variables_and_collections(
                     entry.name = new_name.clone();
                 }
                 renamed_variables.insert(mapped_id, new_name);
+            }
+        }
+    }
+
+    let extended_parents: BTreeSet<String> = out_cols.values().filter_map(|c| c.extension_parent_id().map(str::to_owned)).collect();
+    for parent_id in extended_parents {
+        if let Some(parent_col) = out_cols.get_mut(&parent_id) {
+            if !parent_col.is_library() {
+                parent_col.set_extendable(true);
             }
         }
     }
@@ -1871,7 +2025,14 @@ mod tests {
         main.styles.insert("brand/accent".into(), Style::Fill(vec![Paint::solid(Color::rgb(10, 40, 220))]));
         main.style_meta.insert(
             "brand/accent".into(),
-            StyleMeta { name: "Main Accent".into(), key: None, description: String::new(), property: StyleProperty::Fill, bindings: Default::default() },
+            StyleMeta {
+                name: "Main Accent".into(),
+                key: None,
+                description: String::new(),
+                property: StyleProperty::Fill,
+                bindings: Default::default(),
+                ..Default::default()
+            },
         );
         let col_id = "col-tokens".to_string();
         let mode_id = "mode-light".to_string();
@@ -1967,7 +2128,14 @@ mod tests {
         branch.styles.insert("brand/accent".into(), Style::Fill(vec![Paint::solid(Color::rgb(230, 50, 20))]));
         branch.style_meta.insert(
             "brand/accent".into(),
-            StyleMeta { name: "Branch Accent".into(), key: None, description: String::new(), property: StyleProperty::Fill, bindings: Default::default() },
+            StyleMeta {
+                name: "Branch Accent".into(),
+                key: None,
+                description: String::new(),
+                property: StyleProperty::Fill,
+                bindings: Default::default(),
+                ..Default::default()
+            },
         );
         let alias_var_id = "var-alias".to_string();
         branch.variable_collections.insert(
@@ -2059,6 +2227,67 @@ mod tests {
         assert!(merged.styles.contains_key("brand/accent-branch"));
         assert!(merged.variable_collections.contains_key("col-tokens-branch"));
         assert!(merged.variables.contains_key("var-primary-branch"));
+    }
+
+    #[test]
+    fn branch_merge_remaps_colliding_variable_ids_in_prop_default_variables() {
+        let (base, page) = new_doc_with_page();
+        let mut main = base.clone();
+        let mut branch = base.clone();
+
+        let col_id = "col-tokens".to_string();
+        let mode_id = "mode-1".to_string();
+        let var_id = "var-label".to_string();
+
+        for (doc, text_val) in [(&mut main, "Main Label"), (&mut branch, "Branch Label")] {
+            doc.variable_collections.insert(
+                col_id.clone(),
+                VariableCollection {
+                    id: col_id.clone(),
+                    name: "Tokens".into(),
+                    modes: vec![VariableMode { id: mode_id.clone(), name: "Default".into() }],
+                    default_mode: mode_id.clone(),
+                    variables: vec![var_id.clone()],
+                    key: None,
+                    source_library_key: None,
+                    extensions: Default::default(),
+                },
+            );
+            doc.variables.insert(
+                var_id.clone(),
+                Variable {
+                    id: var_id.clone(),
+                    name: text_val.into(),
+                    collection: col_id.clone(),
+                    kind: VariableKind::String,
+                    values: BTreeMap::from([(mode_id.clone(), VariableValue::String(text_val.into()))]),
+                    description: String::new(),
+                    scopes: Vec::new(),
+                    hidden_from_publishing: false,
+                    key: None,
+                    code_syntax: BTreeMap::new(),
+                    extensions: Default::default(),
+                    mode_extensions: Default::default(),
+                },
+            );
+        }
+
+        let branch_comp = branch.alloc_id();
+        let mut comp_node = Node::new(branch_comp, NodeKind::Component(FrameProps::default()));
+        comp_node.name = "Branch Button".into();
+        comp_node.component.props.push(ComponentPropDef { name: "Label".into(), kind: PropKind::Text, default: PropValue::Text("CTA".into()) });
+        comp_node.component.prop_default_variables.insert("Label".into(), var_id.clone());
+        branch.insert(page, comp_node).unwrap();
+
+        let diff = diff3(&base, &main, &branch);
+        let plan = merge(&base, &main, &branch, &diff, &Resolution::default()).expect("merge succeeds");
+        let merged = &plan.merged_document;
+        let merged_comp = merged.nodes.values().find(|n| n.name == "Branch Button").unwrap();
+        assert_eq!(
+            merged_comp.component.prop_default_variables.get("Label").map(String::as_str),
+            Some("var-label-branch"),
+            "branch merge must remap colliding variable ids in prop_default_variables"
+        );
     }
 
     #[test]
@@ -2229,14 +2458,14 @@ mod tests {
 
         let main_rect = add_rect(&mut base, page, "Main Painted Rect", 0.0, 0.0);
         base.nodes.get_mut(&main_rect).unwrap().fills = vec![Paint {
-            kind: PaintKind::Image { image_ref: hash.clone(), scale_mode: ImageScaleMode::Fill },
+            kind: PaintKind::Image { image_ref: hash.clone(), scale_mode: ImageScaleMode::Fill, params: Default::default() },
             opacity: 1.0,
             visible: true,
             blend: crate::BlendMode::Normal,
         }];
         let branch_rect = add_rect(&mut base, page, "Branch Painted Rect", 120.0, 0.0);
         base.nodes.get_mut(&branch_rect).unwrap().fills = vec![Paint {
-            kind: PaintKind::Image { image_ref: hash.clone(), scale_mode: ImageScaleMode::Fill },
+            kind: PaintKind::Image { image_ref: hash.clone(), scale_mode: ImageScaleMode::Fill, params: Default::default() },
             opacity: 1.0,
             visible: true,
             blend: crate::BlendMode::Normal,
@@ -2396,5 +2625,259 @@ mod tests {
         assert!(history.undo(&mut main).unwrap());
         assert_eq!(main.pages, snapshot_before_merge.pages);
         assert_eq!(main.nodes, snapshot_before_merge.nodes);
+    }
+
+    #[test]
+    fn branch_merge_rejects_instance_cycle_created_by_add_then_move() {
+        let mut base = Document::new("branch-cycle");
+        let page = base.add_page("Page");
+        let comp_id = base.alloc_id();
+        let comp = Node::new(comp_id, NodeKind::Component(crate::FrameProps::default()));
+        base.insert(page, comp).unwrap();
+        let x_id = base.alloc_id();
+        base.insert(page, Node::frame(x_id, crate::Rect::new(0.0, 0.0, 100.0, 100.0))).unwrap();
+
+        let mut main = base.clone();
+        main.reparent(x_id, comp_id, 0).unwrap();
+
+        let mut branch = base.clone();
+        let inst_id = branch.alloc_id();
+        let inst = Node::new(inst_id, NodeKind::Instance { frame: crate::FrameProps::default(), component: Some(comp_id), component_key: None });
+        branch.insert(x_id, inst).unwrap();
+
+        let result = merge_branch(&base, &main, &branch, &Resolution::default());
+        let err = result.expect_err("merge must reject the cycle formed after add then move");
+        let text = err.to_string();
+        assert_eq!(text, "Can't merge: Component would contain itself (Component \u{2192} Frame \u{2192} Component)");
+        assert!(!text.contains("(id "), "error omits internal ids: {text}");
+    }
+
+    #[test]
+    fn branch_merge_refuses_self_holding_cycle_with_component_name_and_path_without_partial_apply() {
+        let mut base = Document::new("branch-cycle-named");
+        let page = base.add_page("Page");
+        let comp_id = base.alloc_id();
+        let mut comp = Node::new(comp_id, NodeKind::Component(crate::FrameProps::default()));
+        comp.name = "B".into();
+        base.insert(page, comp).unwrap();
+        let x_id = base.alloc_id();
+        let mut x = Node::frame(x_id, crate::Rect::new(0.0, 0.0, 100.0, 100.0));
+        x.name = "X".into();
+        base.insert(page, x).unwrap();
+
+        // Case 1: main moves X into B; branch puts an instance of B into X and also adds an unrelated layer.
+        let mut main_a = base.clone();
+        main_a.reparent(x_id, comp_id, 0).unwrap();
+        let main_a_before = main_a.clone();
+
+        let mut branch_a = base.clone();
+        let inst_id = branch_a.alloc_id();
+        let mut inst = Node::new(inst_id, NodeKind::Instance { frame: crate::FrameProps::default(), component: Some(comp_id), component_key: None });
+        inst.name = "B".into();
+        branch_a.insert(x_id, inst).unwrap();
+        let _extra = add_rect(&mut branch_a, page, "Unrelated", 200.0, 200.0);
+
+        let err_a = merge_branch(&base, &main_a, &branch_a, &Resolution::default()).expect_err("add-then-move cycle must be refused");
+        let msg_a = err_a.to_string();
+        assert_eq!(msg_a, "Can't merge: B would contain itself (B \u{2192} X \u{2192} B)");
+        assert_eq!(main_a.nodes, main_a_before.nodes, "whole merge is refused; main is not half-applied");
+
+        // Case 2: main puts an instance of B into X; branch moves X into B and adds an unrelated layer.
+        let mut main_b = base.clone();
+        let inst_main_id = main_b.alloc_id();
+        let mut inst_main = Node::new(inst_main_id, NodeKind::Instance { frame: crate::FrameProps::default(), component: Some(comp_id), component_key: None });
+        inst_main.name = "B".into();
+        main_b.insert(x_id, inst_main).unwrap();
+        let main_b_before = main_b.clone();
+
+        let mut branch_b = base.clone();
+        branch_b.reparent(x_id, comp_id, 0).unwrap();
+        let _extra_b = add_rect(&mut branch_b, page, "Unrelated", 200.0, 200.0);
+
+        let err_b = merge_branch(&base, &main_b, &branch_b, &Resolution::default()).expect_err("move-then-add cycle must be refused");
+        let msg_b = err_b.to_string();
+        assert_eq!(msg_b, "Can't merge: B would contain itself (B \u{2192} X \u{2192} B)");
+        assert_eq!(main_b.nodes, main_b_before.nodes, "whole merge is refused; main is not half-applied");
+
+        // Case 3: base has an instance of B inside X; branch removes the instance and moves X into B (legal).
+        let base_with_inst = main_b.clone();
+        let main_c = base_with_inst.clone();
+        let mut branch_c = base_with_inst.clone();
+        branch_c.remove(inst_main_id).unwrap();
+        branch_c.reparent(x_id, comp_id, 0).unwrap();
+        let (merged_c, _) = merge_branch(&base_with_inst, &main_c, &branch_c, &Resolution::default()).expect("remove-then-move must succeed");
+        assert_eq!(merged_c.get(x_id).unwrap().parent, Some(comp_id));
+        assert!(merged_c.get(inst_main_id).is_none());
+    }
+
+    #[test]
+    fn merge_into_a_file_with_an_existing_cycle_still_applies_unrelated_changes() {
+        let mut base = Document::new("existing-cycle");
+        let page = base.add_page("Page");
+        let b = base.alloc_id();
+        let mut comp = Node::new(b, NodeKind::Component(crate::FrameProps::default()));
+        comp.name = "B".into();
+        base.insert(page, comp).unwrap();
+        let self_inst_id = base.alloc_id();
+        let mut self_inst = Node::new(self_inst_id, NodeKind::Instance { frame: crate::FrameProps::default(), component: Some(b), component_key: None });
+        self_inst.name = "B self".into();
+        self_inst.component.source = Some(b);
+        base.insert(b, self_inst).unwrap();
+
+        let main = base.clone();
+        let mut branch = base.clone();
+        let rect_id = add_rect(&mut branch, page, "Unrelated", 300.0, 300.0);
+
+        let (merged, _) = merge_branch(&base, &main, &branch, &Resolution::default()).expect("existing cycle in file must not block an unrelated branch merge");
+        assert!(merged.get(rect_id).is_some(), "unrelated branch change must be applied");
+    }
+
+    #[test]
+    fn colliding_extended_collection_keeps_parent_overrides_and_modes() {
+        use crate::VariableStore;
+
+        let (base, page) = new_doc_with_page();
+
+        let mut main = base.clone();
+        let mut ms = VariableStore::from_doc(&main);
+        let spacing = ms.add_collection("Spacing");
+        let gap = ms.add_variable(&spacing, "gap", VariableKind::Number).unwrap();
+        let spacing_mode = ms.collections[&spacing].default_mode.clone();
+        assert!(ms.set_value(&gap, &spacing_mode, VariableValue::Number(12.0)));
+        let sizing = ms.add_collection("Sizing");
+        let pad = ms.add_variable(&sizing, "pad", VariableKind::Number).unwrap();
+        let sizing_mode = ms.collections[&sizing].default_mode.clone();
+        assert!(ms.set_value(&pad, &sizing_mode, VariableValue::Number(24.0)));
+        main.variables = ms.variables;
+        main.variable_collections = ms.collections;
+
+        let mut branch = base.clone();
+        let mut bs = VariableStore::from_doc(&branch);
+        let theme = bs.add_collection("Theme");
+        let light = bs.collections[&theme].default_mode.clone();
+        let dark = bs.add_mode(&theme, "Dark").unwrap();
+        let bg = bs.add_variable(&theme, "bg", VariableKind::Color).unwrap();
+        let accent = bs.add_variable(&theme, "accent", VariableKind::Color).unwrap();
+        assert!(bs.set_value(&bg, &light, VariableValue::Color(Color::WHITE)));
+        assert!(bs.set_value(&bg, &dark, VariableValue::Color(Color::BLACK)));
+        assert!(bs.set_value(&accent, &light, VariableValue::Color(Color::rgb(0, 100, 200))));
+        assert!(bs.set_value(&accent, &dark, VariableValue::Color(Color::rgb(0, 50, 100))));
+
+        let brand = bs.extend_collection(&theme, "Brand").unwrap();
+        let brand_light = bs.collections[&brand].modes[0].id.clone();
+        let brand_dark = bs.collections[&brand].modes[1].id.clone();
+        assert!(bs.set_value(&bg, &brand_light, VariableValue::Color(Color::rgb(255, 0, 0))));
+        assert!(bs.set_alias(&accent, &brand_dark, &bg));
+        branch.variables = bs.variables;
+        branch.variable_collections = bs.collections;
+
+        let rect = add_rect(&mut branch, page, "Themed Swatch", 10.0, 10.0);
+        branch.get_mut(rect).unwrap().variables.bindings.insert("fills/0".into(), bg.clone());
+        branch.get_mut(rect).unwrap().variables.modes.insert(brand.clone(), brand_light);
+
+        let (merged, plan) = merge_branch(&base, &main, &branch, &Resolution::default()).expect("merge with colliding extended collection must succeed");
+        let merged_brand = merged.variable_collections.values().find(|c| c.name == "Brand").expect("Brand collection merged");
+        let merged_theme = merged.variable_collections.values().find(|c| c.name == "Theme").expect("Theme collection merged");
+        assert_eq!(merged_brand.extension_parent_id(), Some(merged_theme.id.as_str()), "Brand must still point at Theme, not Spacing");
+
+        let ext = merged_brand.extension().expect("Brand extension data");
+        for (var_id, by_mode) in &ext.overrides {
+            let var = merged.variables.get(var_id).expect("override key must exist in merged variables");
+            assert_eq!(var.collection, merged_theme.id, "override must target a variable in Theme");
+            assert_eq!(var.kind, VariableKind::Color, "Color override must stay on a Color variable, never on Spacing's Number variable");
+            for (mode_id, val) in by_mode {
+                assert!(merged_brand.modes.iter().any(|m| &m.id == mode_id), "override mode must belong to Brand's remapped modes");
+                if let VariableValue::Alias(target) = val {
+                    let target_var = merged.variables.get(target).expect("override alias target must exist");
+                    assert_eq!(target_var.collection, merged_theme.id);
+                    assert_eq!(target_var.kind, VariableKind::Color);
+                }
+            }
+        }
+        for (own_mode, parent_mode) in &ext.mode_map {
+            assert!(merged_brand.modes.iter().any(|m| &m.id == own_mode), "mode_map key must be a mode of Brand");
+            assert!(merged_theme.modes.iter().any(|m| &m.id == parent_mode), "mode_map value must be a mode of Theme");
+        }
+
+        let merged_store = VariableStore::from_doc(&merged);
+        assert!(merged_store.extension_violations().is_empty(), "merged store must have no extension rule violations");
+        let merged_bg = merged.variables.values().find(|v| v.name == "bg").unwrap();
+        let merged_accent = merged.variables.values().find(|v| v.name == "accent").unwrap();
+        let merged_brand_light = &merged_brand.modes[0].id;
+        let merged_brand_dark = &merged_brand.modes[1].id;
+        assert_eq!(merged_store.resolve(&merged_bg.id, merged_brand_light), Some(VariableValue::Color(Color::rgb(255, 0, 0))));
+        assert_eq!(merged_store.resolve(&merged_accent.id, merged_brand_dark), Some(VariableValue::Color(Color::BLACK)));
+        assert_eq!(merged_store.resolve(&gap, &spacing_mode), Some(VariableValue::Number(12.0)));
+
+        let merged_rect = plan.id_remap.get(&rect).copied().unwrap_or(rect);
+        assert_eq!(merged.bound_value(merged_rect, "fills/0"), Some(VariableValue::Color(Color::rgb(255, 0, 0))));
+
+        // Also verify when only the parent collection id collides (main has only Spacing d1; branch has Theme d1 + Brand d2).
+        let mut main_single = base.clone();
+        let mut ms1 = VariableStore::from_doc(&main_single);
+        let spacing1 = ms1.add_collection("Spacing");
+        let gap1 = ms1.add_variable(&spacing1, "gap", VariableKind::Number).unwrap();
+        let spacing1_mode = ms1.collections[&spacing1].default_mode.clone();
+        assert!(ms1.set_value(&gap1, &spacing1_mode, VariableValue::Number(12.0)));
+        main_single.variables = ms1.variables;
+        main_single.variable_collections = ms1.collections;
+
+        let (merged1, _) =
+            merge_branch(&base, &main_single, &branch, &Resolution::default()).expect("merge with single colliding parent collection must succeed");
+        let merged1_brand = merged1.variable_collections.values().find(|c| c.name == "Brand").unwrap();
+        let merged1_theme = merged1.variable_collections.values().find(|c| c.name == "Theme").unwrap();
+        assert_eq!(merged1_brand.extension_parent_id(), Some(merged1_theme.id.as_str()));
+        let ext1 = merged1_brand.extension().unwrap();
+        for var_id in ext1.overrides.keys() {
+            assert_eq!(merged1.variables[var_id].kind, VariableKind::Color);
+        }
+        assert!(VariableStore::from_doc(&merged1).extension_violations().is_empty());
+    }
+
+    #[test]
+    fn merge_refuses_variable_alias_cycle_closed_across_branches() {
+        use crate::VariableStore;
+
+        // 1. Plain collection: main aliases bg -> fg, branch aliases fg -> bg.
+        let (mut base, _page) = new_doc_with_page();
+        let mut s = VariableStore::from_doc(&base);
+        let theme = s.add_collection("Theme");
+        let light = s.collections[&theme].default_mode.clone();
+        let bg = s.add_variable(&theme, "bg", VariableKind::Color).unwrap();
+        let fg = s.add_variable(&theme, "fg", VariableKind::Color).unwrap();
+        assert!(s.set_value(&bg, &light, VariableValue::Color(Color::WHITE)));
+        assert!(s.set_value(&fg, &light, VariableValue::Color(Color::BLACK)));
+        let brand = s.extend_collection(&theme, "Brand").unwrap();
+        let brand_light = s.collections[&brand].modes[0].id.clone();
+        base.variables = s.variables;
+        base.variable_collections = s.collections;
+
+        let mut main = base.clone();
+        let mut ms = VariableStore::from_doc(&main);
+        assert!(ms.set_alias(&bg, &light, &fg));
+        main.variables = ms.variables;
+        main.variable_collections = ms.collections;
+        let main_before = main.clone();
+
+        let mut branch = base.clone();
+        let mut bs = VariableStore::from_doc(&branch);
+        assert!(bs.set_alias(&fg, &light, &bg));
+        branch.variables = bs.variables;
+        branch.variable_collections = bs.collections;
+
+        let err = merge_branch(&base, &main, &branch, &Resolution::default()).expect_err("merge closing a direct alias cycle must be refused");
+        assert!(err.to_string().to_ascii_lowercase().contains("cycle"), "error should mention cycle: {err}");
+        assert_eq!(main.variables, main_before.variables, "main must remain unchanged when merge is refused");
+
+        // 2. Extended collection override: main aliases parent bg -> fg, branch overrides fg -> bg in Brand.
+        let mut branch_ext = base.clone();
+        let mut bes = VariableStore::from_doc(&branch_ext);
+        assert!(bes.set_alias(&fg, &brand_light, &bg));
+        branch_ext.variables = bes.variables;
+        branch_ext.variable_collections = bes.collections;
+
+        let err_ext = merge_branch(&base, &main, &branch_ext, &Resolution::default())
+            .expect_err("merge closing an alias cycle through an extended collection override must be refused");
+        assert!(err_ext.to_string().to_ascii_lowercase().contains("cycle"), "error should mention cycle: {err_ext}");
     }
 }

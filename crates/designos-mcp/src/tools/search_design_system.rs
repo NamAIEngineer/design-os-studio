@@ -249,9 +249,9 @@ impl SearchIndex {
             items.push(build_component_item(node, &name, true, local_origin.clone(), ref_str, None, ComponentSource::Local(doc, snapshots)));
         }
 
-        // 2. Local styles (excluding imported library copies).
+        // 2. Local styles (excluding imported library copies and orphan references).
         for (style_key, style) in &doc.styles {
-            if imported_local_keys.contains(style_key.as_str()) {
+            if !doc.is_table_style(style_key) || imported_local_keys.contains(style_key.as_str()) {
                 continue;
             }
             let meta = doc.style_meta.get(style_key);
@@ -260,9 +260,10 @@ impl SearchIndex {
             items.push(build_style_item(style_key, &name, style, meta, prop, doc, snapshots, None, &imported_local_keys, true, local_origin.clone()));
         }
 
-        // 3. Local variables (excluding imported library copies).
+        // 3. Local variables (excluding imported library copies). A soft-deleted variable still resolves for the
+        // layers bound to it, but it is not offered.
         for (var_id, var) in &doc.variables {
-            if imported_local_keys.contains(var_id.as_str()) || imported_local_keys.contains(var.collection.as_str()) {
+            if var.is_soft_deleted() || imported_local_keys.contains(var_id.as_str()) || imported_local_keys.contains(var.collection.as_str()) {
                 continue;
             }
             if doc.variable_collections.get(&var.collection).is_some_and(|c| c.is_library()) {
@@ -327,6 +328,7 @@ impl SearchIndex {
                     Style::Text(_) => StyleProperty::Text,
                     Style::Effect(_) => StyleProperty::Effect,
                     Style::Grid(_) => StyleProperty::Grid,
+                    Style::Animation(_) => StyleProperty::Animation,
                     Style::Fill(_) => StyleProperty::Fill,
                 });
                 items.push(build_style_item(
@@ -347,7 +349,7 @@ impl SearchIndex {
             // 4c. Library variables (hidden_from_publishing variables are excluded per §8.5).
             let has_var_assets = snap.assets.iter().any(|a| a.kind == LibraryAssetKind::Variable);
             for (var_id, var) in &snap.variables {
-                if var.hidden_from_publishing {
+                if var.hidden_from_publishing || var.is_soft_deleted() {
                     continue;
                 }
                 if has_var_assets && !snap.assets.iter().any(|a| a.kind == LibraryAssetKind::Variable && strip_prefix_or_self(&a.key, "var:") == var_id) {
@@ -787,6 +789,7 @@ fn build_style_item(
         StyleProperty::Text => "text",
         StyleProperty::Effect => "effect",
         StyleProperty::Grid => "grid",
+        StyleProperty::Animation => "animation",
     };
     let summary = summarize_style(style);
     let named_ref = if collides { ref_str.as_str() } else { name };
@@ -794,6 +797,7 @@ fn build_style_item(
         StyleProperty::Text => json!({"text_style": named_ref}),
         StyleProperty::Effect => json!({"effect_style": named_ref}),
         StyleProperty::Grid => json!({"grid_style": named_ref}),
+        StyleProperty::Animation => json!({"animation_style": named_ref}),
         StyleProperty::Stroke => json!({"stroke": ref_str}),
         StyleProperty::Fill => json!({"fill": ref_str}),
     };
@@ -836,7 +840,7 @@ fn style_name_collides(
 ) -> bool {
     let mut local_matches = 0usize;
     for k in doc.styles.keys() {
-        if imported_local_keys.contains(k.as_str()) {
+        if !doc.is_table_style(k) || imported_local_keys.contains(k.as_str()) {
             continue;
         }
         let sname = doc.style_name(k);
@@ -891,6 +895,7 @@ fn summarize_style(style: &Style) -> String {
                     PaintKind::AngularGradient { .. } => "angular-gradient".into(),
                     PaintKind::DiamondGradient { .. } => "diamond-gradient".into(),
                     PaintKind::Image { .. } => "image".into(),
+                    PaintKind::Shader(_) => "shader".into(),
                 }
             } else {
                 "empty".into()
@@ -899,6 +904,7 @@ fn summarize_style(style: &Style) -> String {
         Style::Text(ts) => format!("{} {}px/{}", ts.font_family, ts.font_size, ts.font_weight),
         Style::Effect(fx) => format!("{} effect(s)", fx.len()),
         Style::Grid(grids) => format!("{} grid(s)", grids.len()),
+        Style::Animation(timelines) => format!("{} timeline(s)", timelines.len()),
     }
 }
 
@@ -1071,7 +1077,7 @@ fn var_matches_candidate_path(candidate_path: &str, var: &Variable, collections:
 fn count_system_var_path_matches(candidate_path: &str, doc: &Document, snapshots: &[LibrarySnapshot], imported_local_keys: &BTreeSet<&str>) -> usize {
     let mut count = 0usize;
     for (vid, v) in &doc.variables {
-        if imported_local_keys.contains(vid.as_str()) || imported_local_keys.contains(v.collection.as_str()) {
+        if v.is_soft_deleted() || imported_local_keys.contains(vid.as_str()) || imported_local_keys.contains(v.collection.as_str()) {
             continue;
         }
         if doc.variable_collections.get(&v.collection).is_some_and(|c| c.is_library()) {
@@ -1084,7 +1090,7 @@ fn count_system_var_path_matches(candidate_path: &str, doc: &Document, snapshots
     for snap in snapshots {
         let has_var_assets = snap.assets.iter().any(|a| a.kind == LibraryAssetKind::Variable);
         for (vid, v) in &snap.variables {
-            if v.hidden_from_publishing {
+            if v.hidden_from_publishing || v.is_soft_deleted() {
                 continue;
             }
             if has_var_assets && !snap.assets.iter().any(|a| a.kind == LibraryAssetKind::Variable && strip_prefix_or_self(&a.key, "var:") == vid) {
@@ -1145,7 +1151,7 @@ fn is_unambiguous_var_path(path: &str, target: &Variable, variables: &BTreeMap<S
         return false;
     }
     let remainder = &path[best_len + 1..];
-    let matches_in_coll = variables.values().filter(|v| v.collection == target.collection && v.name == remainder).count();
+    let matches_in_coll = variables.values().filter(|v| v.collection == target.collection && !v.is_soft_deleted() && v.name == remainder).count();
     matches_in_coll == 1
 }
 
@@ -1153,7 +1159,7 @@ fn variable_example(ref_str: &str, kind: VariableKind, scopes: &[String]) -> Val
     let has_scope = |target: &str| scopes.iter().any(|s| s.eq_ignore_ascii_case(target));
     match kind {
         VariableKind::Color => {
-            if has_scope("STROKE_COLOR")
+            if (has_scope("STROKE") || has_scope("STROKE_COLOR"))
                 && !has_scope("ALL_FILLS")
                 && !has_scope("FRAME_FILL")
                 && !has_scope("SHAPE_FILL")
@@ -1348,6 +1354,7 @@ mod tests {
                 description: "Large section heading".into(),
                 property: StyleProperty::Text,
                 bindings: Default::default(),
+                ..Default::default()
             },
         );
 
@@ -1516,12 +1523,26 @@ mod tests {
         host.styles.insert("st_fill".into(), Style::Fill(vec![Paint::solid(Color::rgb(0x11, 0x22, 0x33))]));
         host.style_meta.insert(
             "st_fill".into(),
-            StyleMeta { name: "SurfaceFill".into(), key: None, description: String::new(), property: StyleProperty::Fill, bindings: Default::default() },
+            StyleMeta {
+                name: "SurfaceFill".into(),
+                key: None,
+                description: String::new(),
+                property: StyleProperty::Fill,
+                bindings: Default::default(),
+                ..Default::default()
+            },
         );
         host.styles.insert("st_grid".into(), Style::Grid(vec![LayoutGrid::columns(12, 16.0, 24.0, Color::rgba(255, 0, 0, 25))]));
         host.style_meta.insert(
             "st_grid".into(),
-            StyleMeta { name: "Grid12Col".into(), key: None, description: String::new(), property: StyleProperty::Grid, bindings: Default::default() },
+            StyleMeta {
+                name: "Grid12Col".into(),
+                key: None,
+                description: String::new(),
+                property: StyleProperty::Grid,
+                bindings: Default::default(),
+                ..Default::default()
+            },
         );
 
         let mut engine = crate::engine::Engine { doc: host, active_page_id: Some(page), ..Default::default() };
@@ -1830,6 +1851,115 @@ mod tests {
     }
 
     #[test]
+    fn stroke_scoped_colour_is_offered_for_strokes_not_fills() {
+        for spelling in ["STROKE", "STROKE_COLOR"] {
+            clear_snapshot_cache();
+            clear_search_index_cache();
+            let root = make_temp_dir("var_stroke_scope");
+            let mut doc = Document::new("Tokens");
+            doc.add_page("Page 1");
+            doc.variable_collections.insert(
+                "c_colors".into(),
+                VariableCollection {
+                    extensions: Default::default(),
+                    id: "c_colors".into(),
+                    name: "Colors".into(),
+                    modes: vec![VariableMode { id: "m_light".into(), name: "Light".into() }],
+                    default_mode: "m_light".into(),
+                    variables: vec!["v_border".into()],
+                    key: None,
+                    source_library_key: None,
+                },
+            );
+            doc.variables.insert(
+                "v_border".into(),
+                Variable {
+                    extensions: Default::default(),
+                    mode_extensions: Default::default(),
+                    id: "v_border".into(),
+                    name: "border-strong".into(),
+                    collection: "c_colors".into(),
+                    kind: VariableKind::Color,
+                    values: BTreeMap::from([("m_light".into(), VariableValue::Color(Color::from_hex("#D0D5DD").unwrap()))]),
+                    description: String::new(),
+                    scopes: vec![spelling.into()],
+                    hidden_from_publishing: false,
+                    key: None,
+                    code_syntax: Default::default(),
+                },
+            );
+
+            let for_strokes = search_design_system_at(&doc, json!({"query": "border", "kinds": ["variable"], "property": "strokes/0"}), &root).unwrap();
+            let hits = for_strokes["results"].as_array().unwrap();
+            assert_eq!(hits.len(), 1, "{spelling} colour must be offered for strokes/0: {for_strokes}");
+            assert_eq!(hits[0]["example"], json!({"stroke": "var:Colors/border-strong"}), "{spelling} example must bind a stroke");
+
+            let for_fills = search_design_system_at(&doc, json!({"query": "border", "kinds": ["variable"], "property": "fills/0"}), &root).unwrap();
+            assert!(for_fills["results"].as_array().unwrap().is_empty(), "{spelling} colour must not be offered for fills/0: {for_fills}");
+
+            let _ = std::fs::remove_dir_all(&root);
+        }
+    }
+
+    #[test]
+    fn soft_deleted_variables_are_not_offered_and_do_not_make_a_name_ambiguous() {
+        clear_snapshot_cache();
+        clear_search_index_cache();
+        let root = make_temp_dir("var_soft_deleted");
+        let mut doc = Document::new("Tokens");
+        doc.add_page("Page 1");
+        doc.variable_collections.insert(
+            "c_colors".into(),
+            VariableCollection {
+                extensions: Default::default(),
+                id: "c_colors".into(),
+                name: "Colors".into(),
+                modes: vec![VariableMode { id: "m_light".into(), name: "Light".into() }],
+                default_mode: "m_light".into(),
+                variables: vec!["v_muted".into()],
+                key: None,
+                source_library_key: None,
+            },
+        );
+        let color_variable = |id: &str, name: &str, hex: &str, soft_deleted: bool| {
+            let mut v = Variable {
+                extensions: Default::default(),
+                mode_extensions: Default::default(),
+                id: id.into(),
+                name: name.into(),
+                collection: "c_colors".into(),
+                kind: VariableKind::Color,
+                values: BTreeMap::from([("m_light".into(), VariableValue::Color(Color::from_hex(hex).unwrap()))]),
+                description: String::new(),
+                scopes: Vec::new(),
+                hidden_from_publishing: false,
+                key: None,
+                code_syntax: Default::default(),
+            };
+            if soft_deleted {
+                v.extensions.insert(designos_doc::SOFT_DELETED_EXTENSION_KEY.into(), json!(true));
+            }
+            v
+        };
+        for v in [
+            color_variable("v_muted", "text-muted", "#667085", false),
+            color_variable("v_muted_gone", "text-muted", "#98A2B3", true),
+            color_variable("v_slate_gone", "text-slate", "#344054", true),
+        ] {
+            doc.variables.insert(v.id.clone(), v);
+        }
+
+        let muted = search_design_system_at(&doc, json!({"query": "text-muted", "kinds": ["variable"]}), &root).unwrap();
+        let hits = muted["results"].as_array().unwrap();
+        assert_eq!(hits.len(), 1, "the deleted twin is not offered: {muted}");
+        assert_eq!(hits[0]["example"], json!({"fill": "var:Colors/text-muted"}), "the name is not ambiguous, so the short reference is offered");
+        let slate = search_design_system_at(&doc, json!({"query": "text-slate", "kinds": ["variable"]}), &root).unwrap();
+        assert!(slate["results"].as_array().unwrap().is_empty(), "a deleted variable alone is not offered: {slate}");
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
     fn slot_definitions_included() {
         clear_snapshot_cache();
         clear_search_index_cache();
@@ -1986,6 +2116,7 @@ mod tests {
                 description: "Warm orange fill".into(),
                 property: StyleProperty::Fill,
                 bindings: Default::default(),
+                ..Default::default()
             },
         );
 
@@ -2291,6 +2422,7 @@ mod tests {
                     property: StyleProperty::Text,
                     key: None,
                     bindings: Default::default(),
+                    ..Default::default()
                 },
             );
 
@@ -2356,7 +2488,14 @@ mod tests {
         host.styles.insert("z_local_heading".into(), Style::Text(local_ts));
         host.style_meta.insert(
             "z_local_heading".into(),
-            StyleMeta { name: "Heading L".into(), description: "Local heading".into(), property: StyleProperty::Text, key: None, bindings: Default::default() },
+            StyleMeta {
+                name: "Heading L".into(),
+                description: "Local heading".into(),
+                property: StyleProperty::Text,
+                key: None,
+                bindings: Default::default(),
+                ..Default::default()
+            },
         );
 
         // Add a local variable `Color/Accent` so `Color/Accent` falls back to `var:id:...`.
@@ -2462,5 +2601,34 @@ mod tests {
         assert_eq!(lib_var_node.variables.bindings.get("fills/0").map(String::as_str), Some("lib-brand/v1"));
 
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn us01_ac02_mcp_excludes_orphan_styles_from_search_and_get_document() {
+        let mut doc = Document::new("t");
+        let page = doc.add_page("p");
+        let fx = Style::Effect(vec![designos_doc::Effect::LayerBlur { radius: 4.0, visible: true }]);
+        doc.styles.insert("1186:100350".into(), fx.clone());
+        doc.styles.insert("2:100".into(), fx);
+        doc.style_meta.insert("2:100".into(), StyleMeta { name: "Shadow/Card".into(), property: StyleProperty::Effect, ..Default::default() });
+        let nid = doc.alloc_id();
+        let mut rect = Node::rectangle(nid, designos_doc::Rect::new(0.0, 0.0, 40.0, 40.0));
+        rect.style_refs.insert("effect".into(), "1186:100350".into());
+        doc.insert(page, rect).unwrap();
+        let mut engine = crate::engine::Engine { doc, active_page_id: Some(page), ..Default::default() };
+
+        let search_orphan = engine.call("designos_search_design_system", json!({"query": "1186", "kinds": ["style"]})).unwrap();
+        assert_eq!(search_orphan["results"].as_array().unwrap().len(), 0, "orphan style must not be listed in search_design_system: {search_orphan:?}");
+
+        let search_live = engine.call("designos_search_design_system", json!({"query": "Shadow", "kinds": ["style"]})).unwrap();
+        let results = search_live["results"].as_array().unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0]["name"], "Shadow/Card");
+
+        let doc_info = engine.call("designos_get_document", json!({})).unwrap();
+        let styles = doc_info["styles"].as_array().unwrap();
+        assert_eq!(styles.len(), 1, "orphan style must not be listed in get_document: {styles:?}");
+        assert_eq!(styles[0]["name"], "Shadow/Card");
+        assert_eq!(doc_info["style_count"], 1);
     }
 }

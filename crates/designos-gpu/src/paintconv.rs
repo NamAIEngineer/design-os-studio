@@ -78,8 +78,8 @@ fn stops_key(stops: &[d::GradientStop]) -> u64 {
 }
 
 impl PaintCache {
-    fn ramp(&mut self, stops: &[d::GradientStop]) -> Arc<RampData> {
-        let mut sorted: Vec<d::GradientStop> = stops.to_vec();
+    fn ramp(&mut self, profile: d::ColorProfile, stops: &[d::GradientStop]) -> Arc<RampData> {
+        let mut sorted: Vec<d::GradientStop> = stops.iter().map(|s| d::GradientStop { pos: s.pos, color: profile.to_srgb(&s.color) }).collect();
         sorted.sort_by(|a, b| a.pos.partial_cmp(&b.pos).unwrap_or(std::cmp::Ordering::Equal));
         for s in &mut sorted {
             s.pos = clamp01(s.pos);
@@ -131,10 +131,11 @@ impl PaintCache {
         match &p.kind {
             PaintKind::Solid(c) => {
                 inst.q[0] = KIND_SOLID;
-                inst.c0 = color4(c, a);
+                inst.c0 = color4(&doc.color_profile.to_srgb(c), a);
                 inst.t[2] = 1.0;
                 Some(PaintInst { inst, ramp: None, image: None })
             }
+            PaintKind::Shader(_) => None,
             PaintKind::LinearGradient { handles, stops }
             | PaintKind::RadialGradient { handles, stops }
             | PaintKind::AngularGradient { handles, stops }
@@ -144,7 +145,7 @@ impl PaintCache {
                 }
                 if stops.len() == 1 {
                     inst.q[0] = KIND_SOLID;
-                    inst.c0 = color4(&stops[0].color, a);
+                    inst.c0 = color4(&doc.color_profile.to_srgb(&stops[0].color), a);
                     inst.t[2] = 1.0;
                     return Some(PaintInst { inst, ramp: None, image: None });
                 }
@@ -157,34 +158,29 @@ impl PaintCache {
                 };
                 inst.c1 = [inv.sx, inv.ky, inv.kx, inv.sy];
                 inst.c2 = [inv.tx, inv.ty, 0.0, 0.0];
-                Some(PaintInst { inst, ramp: Some(self.ramp(stops)), image: None })
+                Some(PaintInst { inst, ramp: Some(self.ramp(doc.color_profile, stops)), image: None })
             }
-            PaintKind::Image { image_ref, scale_mode } => {
+            PaintKind::Image { image_ref, scale_mode, params } => {
                 let img = self.image(doc, image_ref)?;
                 let (iw, ih) = (img.w as f32, img.h as f32);
-                let (s, tx, ty) = match scale_mode {
-                    d::ImageScaleMode::Fill | d::ImageScaleMode::Crop => {
-                        let s = (size.x / iw).max(size.y / ih);
-                        (s, (size.x - iw * s) / 2.0, (size.y - ih * s) / 2.0)
-                    }
-                    d::ImageScaleMode::Fit => {
-                        let s = (size.x / iw).min(size.y / ih);
-                        (s, (size.x - iw * s) / 2.0, (size.y - ih * s) / 2.0)
-                    }
-                    d::ImageScaleMode::Tile => (1.0, 0.0, 0.0),
-                };
-                if !s.is_finite() || s <= 0.0 {
-                    return None;
-                }
+                let d::ImageUvMap { u, v, .. } = d::image_uv_map(size, iw, ih, *scale_mode, params)?;
                 inst.q[0] = KIND_IMAGE;
                 inst.q[2] = match scale_mode {
-                    d::ImageScaleMode::Fit => IMG_FIT,
+                    d::ImageScaleMode::Fit | d::ImageScaleMode::Crop => IMG_FIT,
                     d::ImageScaleMode::Tile => IMG_TILE,
-                    _ => IMG_PAD,
+                    d::ImageScaleMode::Fill => IMG_PAD,
                 };
                 // local -> uv (0..1 over the image)
-                inst.c1 = [1.0 / (s * iw), 0.0, 0.0, 1.0 / (s * ih)];
-                inst.c2 = [-tx / (s * iw), -ty / (s * ih), 0.0, 0.0];
+                inst.c1 = [u.0, v.0, u.1, v.1];
+                inst.c2 = [u.2, v.2, 0.0, 0.0];
+                if designos_render::image_adjust::has_rendered_adjustments(&params.adjust) {
+                    let adj = &params.adjust;
+                    inst.q[1] = 1;
+                    inst.c0 = [adj.exposure.clamp(-1.0, 1.0), adj.contrast.clamp(-1.0, 1.0), adj.vibrance.clamp(-1.0, 1.0), adj.temperature.clamp(-1.0, 1.0)];
+                    inst.c2[2] = adj.tint.clamp(-1.0, 1.0);
+                    inst.c2[3] = adj.highlights.clamp(-1.0, 1.0);
+                    inst.t[3] = adj.shadows.clamp(-1.0, 1.0);
+                }
                 Some(PaintInst { inst, ramp: None, image: Some(img) })
             }
         }

@@ -65,6 +65,41 @@ impl LibrarySnapshot {
     }
 }
 
+/// Restores text-style field provenance when reading a snapshot written before
+/// paragraph fields were persisted on shared text styles.
+///
+/// `LibrarySnapshot` is loaded independently of [`Document::from_json`], so a
+/// caller must pass the original JSON alongside the decoded snapshot. The
+/// decoded style values alone cannot distinguish an omitted legacy field from
+/// an explicit modern default.
+pub fn record_snapshot_text_style_fields(snapshot: &mut LibrarySnapshot, raw: &str) {
+    let Some(styles) = serde_json::from_str::<serde_json::Value>(raw).ok().and_then(|v| v.get("styles").and_then(|v| v.as_object()).cloned()) else {
+        return;
+    };
+    for (key, value) in styles {
+        let Some(style) = value.get("Text").or_else(|| value.get("text")).and_then(|v| v.as_object()) else {
+            continue;
+        };
+        let mut bits = 0;
+        if style.contains_key("paragraph_indent") {
+            bits |= 1;
+        }
+        if style.contains_key("list_spacing") {
+            bits |= 2;
+        }
+        if style.contains_key("leading_trim") {
+            bits |= 4;
+        }
+        if let Some(meta) = snapshot.style_meta.get_mut(&key) {
+            meta.text_paragraph_fields = Some(meta.text_paragraph_fields.unwrap_or(0) | bits);
+        } else {
+            snapshot
+                .style_meta
+                .insert(key.clone(), StyleMeta { name: key, property: StyleProperty::Text, text_paragraph_fields: Some(bits), ..Default::default() });
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum UpdateKind {
     /// The library's version differs from the local copy.
@@ -137,7 +172,11 @@ fn fp_tree(nodes: &BTreeMap<NodeId, Node>, id: NodeId, refs: &BTreeMap<NodeId, S
     for v in c.variables.bindings.values_mut() {
         *v = strip(v, prefix).to_string();
     }
-    c.variables.modes = std::mem::take(&mut c.variables.modes).into_iter().map(|(k, v)| (strip(&k, prefix).to_string(), v)).collect();
+    for v in c.component.prop_default_variables.values_mut() {
+        *v = strip(v, prefix).to_string();
+    }
+    c.variables.modes =
+        std::mem::take(&mut c.variables.modes).into_iter().map(|(k, v)| (strip(&k, prefix).to_string(), strip(&v, prefix).to_string())).collect();
     h.write(&serde_json::to_string(&c).unwrap_or_default());
     h.write(&target);
     h.write(&kids.len().to_string());
@@ -174,9 +213,33 @@ fn variable_fingerprint(v: &Variable, prefix: &str) -> u64 {
     h.0
 }
 
-fn collection_fingerprint(c: &VariableCollection) -> u64 {
+fn collection_fingerprint(c: &VariableCollection, prefix: &str) -> u64 {
+    let modes: Vec<(&str, &str)> = c.modes.iter().map(|m| (strip(&m.id, prefix), m.name.as_str())).collect();
+    let default_mode = strip(&c.default_mode, prefix);
+    let ext = c.is_extension().then(|| {
+        let mut e = c.extension().unwrap_or_default();
+        e.parent.collection = strip(&e.parent.collection, prefix).to_string();
+        e.mode_map = e.mode_map.into_iter().map(|(k, v)| (strip(&k, prefix).to_string(), strip(&v, prefix).to_string())).collect();
+        e.overrides = e
+            .overrides
+            .into_iter()
+            .map(|(var, by_mode)| {
+                let by_mode = by_mode
+                    .into_iter()
+                    .map(|(m, mut val)| {
+                        if let VariableValue::Alias(a) = &mut val {
+                            *a = strip(a, prefix).to_string();
+                        }
+                        (strip(&m, prefix).to_string(), val)
+                    })
+                    .collect();
+                (strip(&var, prefix).to_string(), by_mode)
+            })
+            .collect();
+        e
+    });
     let mut h = Fnv::new();
-    h.write(&serde_json::to_string(&(&c.name, &c.modes, &c.default_mode)).unwrap_or_default());
+    h.write(&serde_json::to_string(&(&c.name, &modes, default_mode, &ext)).unwrap_or_default());
     h.0
 }
 
@@ -255,16 +318,41 @@ pub fn publishable_assets(doc: &Document) -> Vec<(String, LibraryAssetKind, Stri
         });
     }
     let imported: BTreeSet<&str> = doc.library.external.values().filter_map(|e| e.local_key.as_deref()).collect();
-    for k in doc.styles.keys().filter(|k| !imported.contains(k.as_str())) {
+    for k in doc.styles.keys().filter(|k| doc.is_table_style(k) && !imported.contains(k.as_str())) {
         out.push((format!("style:{k}"), LibraryAssetKind::Style, doc.style_name(k).to_string()));
     }
-    for (id, c) in doc.variable_collections.iter().filter(|(id, _)| !imported.contains(id.as_str())) {
+    // A soft-deleted collection or variable is not published as an asset (a variable's `is_publishable` says so);
+    // `snapshot` still carries one that a published component binds to, so the component renders as it does here.
+    for (id, c) in doc.variable_collections.iter().filter(|(id, c)| !imported.contains(id.as_str()) && !c.is_soft_deleted()) {
         out.push((format!("col:{id}"), LibraryAssetKind::VariableCollection, c.name.clone()));
     }
-    for (id, v) in doc.variables.iter().filter(|(id, v)| !imported.contains(id.as_str()) && v.is_publishable()) {
+    for (id, v) in doc.variables.iter().filter(|(id, v)| !imported.contains(id.as_str()) && v.is_publishable() && !in_extension(doc, v)) {
         out.push((format!("var:{id}"), LibraryAssetKind::Variable, v.name.clone()));
     }
     out
+}
+
+/// True for a variable whose collection extends another: it is not published, and neither is that collection.
+fn in_extension(doc: &Document, v: &Variable) -> bool {
+    doc.variable_collections.get(&v.collection).is_some_and(VariableCollection::is_extension)
+}
+
+/// Names of the published components that pick a mode of an extended collection. Extended collections are not
+/// published, so the published copy of such a component shows the parent's value instead; the publish flow says so.
+pub fn publish_warnings(doc: &Document) -> Vec<String> {
+    let extensions: BTreeSet<&str> = doc.variable_collections.values().filter(|c| c.is_extension()).map(|c| c.id.as_str()).collect();
+    if extensions.is_empty() {
+        return Vec::new();
+    }
+    let mut names = Vec::new();
+    for (key, kind, name) in publishable_assets(doc) {
+        let root = key.strip_prefix('c').or_else(|| key.strip_prefix('s')).and_then(|s| s.parse::<u64>().ok()).map(NodeId);
+        let (Some(root), true) = (root, matches!(kind, LibraryAssetKind::Component | LibraryAssetKind::ComponentSet)) else { continue };
+        if subtree(&doc.nodes, root).iter().any(|id| doc.nodes.get(id).is_some_and(|n| n.variables.modes.keys().any(|c| extensions.contains(c.as_str())))) {
+            names.push(name);
+        }
+    }
+    names
 }
 
 /// Captures the publishable assets of `doc` (and what they reference) as a
@@ -290,11 +378,36 @@ pub fn snapshot(doc: &Document, library_id: &str, name: &str, version: u32) -> L
     // Styles and variables: all published ones plus whatever the nodes use.
     let mut style_keys: BTreeSet<String> = assets.iter().filter_map(|(k, _, _)| k.strip_prefix("style:").map(String::from)).collect();
     let mut var_ids: BTreeSet<String> = assets.iter().filter_map(|(k, _, _)| k.strip_prefix("var:").map(String::from)).collect();
+    let mut coll_ids: BTreeSet<String> = assets.iter().filter_map(|(k, _, _)| k.strip_prefix("col:").map(String::from)).collect();
     let mut images = BTreeSet::new();
     for n in snap.nodes.values() {
         style_keys.extend(n.style_refs.values().cloned());
         var_ids.extend(n.variables.bindings.values().cloned());
+        var_ids.extend(n.component.prop_default_variables.values().cloned());
+        coll_ids.extend(n.variables.modes.keys().cloned());
         image_refs_of(n, &mut images);
+    }
+    let mut coll_queue: Vec<String> = coll_ids.iter().cloned().collect();
+    while let Some(cid) = coll_queue.pop() {
+        let Some(c) = doc.variable_collections.get(&cid) else { continue };
+        if let Some(pid) = c.extension_parent_id_in(&doc.variable_collections) {
+            if coll_ids.insert(pid.to_string()) {
+                coll_queue.push(pid.to_string());
+            }
+        }
+        if c.is_extension() {
+            var_ids.extend(doc.inherited_variable_ids(&cid));
+        }
+        if let Some(ext) = c.extension() {
+            for (vid, by_mode) in ext.overrides {
+                var_ids.insert(vid);
+                for val in by_mode.into_values() {
+                    if let VariableValue::Alias(a) = val {
+                        var_ids.insert(a);
+                    }
+                }
+            }
+        }
     }
     for k in &style_keys {
         if let Some(m) = doc.style_meta.get(k) {
@@ -321,16 +434,17 @@ pub fn snapshot(doc: &Document, library_id: &str, name: &str, version: u32) -> L
         }
     }
     for id in &var_ids {
-        if let Some(v) = doc.variables.get(id) {
+        // any variable that names an extended collection never travels: no caller can leak one through here
+        if let Some(v) = doc.variables.get(id).filter(|v| !in_extension(doc, v)) {
             snap.variables.insert(id.clone(), v.clone());
             if let Some(c) = doc.variable_collections.get(&v.collection) {
                 snap.variable_collections.insert(c.id.clone(), c.clone());
             }
         }
     }
-    // Published collections are listed even when empty.
-    for (k, _, _) in &assets {
-        if let Some(c) = k.strip_prefix("col:").and_then(|id| doc.variable_collections.get(id)) {
+    // Published collections (and the parents they extend) are listed even when empty.
+    for cid in &coll_ids {
+        if let Some(c) = doc.variable_collections.get(cid) {
             snap.variable_collections.insert(c.id.clone(), c.clone());
         }
     }
@@ -343,6 +457,7 @@ pub fn snapshot(doc: &Document, library_id: &str, name: &str, version: u32) -> L
     for n in snap.nodes.values_mut() {
         n.style_refs.retain(|_, v| styles.contains(v));
         n.variables.bindings.retain(|_, v| vars.contains(v));
+        n.component.prop_default_variables.retain(|_, v| vars.contains(v) || v.starts_with("key:"));
         n.variables.modes.retain(|k, _| colls.contains(k));
     }
     for m in snap.style_meta.values_mut() {
@@ -403,7 +518,7 @@ pub fn snapshot(doc: &Document, library_id: &str, name: &str, version: u32) -> L
             }
             LibraryAssetKind::Variable => (None, snap.variables.get(&key["var:".len()..]).map(|v| variable_fingerprint(v, "")).unwrap_or(0), Vec::new()),
             LibraryAssetKind::VariableCollection => {
-                (None, snap.variable_collections.get(&key["col:".len()..]).map(collection_fingerprint).unwrap_or(0), Vec::new())
+                (None, snap.variable_collections.get(&key["col:".len()..]).map(|c| collection_fingerprint(c, "")).unwrap_or(0), Vec::new())
             }
         };
         snap.assets.push(SnapshotAsset { key, kind, name: aname, node, fingerprint, deps });
@@ -542,7 +657,7 @@ fn local_fingerprint(doc: &Document, lib: &str, raw_key: &str, e: &ExternalAsset
             style_fingerprint(doc.styles.get(k)?, doc.style_meta.get(k), &prefix)
         }
         LibraryAssetKind::Variable => variable_fingerprint(doc.variables.get(e.local_key.as_deref()?)?, &prefix),
-        LibraryAssetKind::VariableCollection => collection_fingerprint(doc.variable_collections.get(e.local_key.as_deref()?)?),
+        LibraryAssetKind::VariableCollection => collection_fingerprint(doc.variable_collections.get(e.local_key.as_deref()?)?, &prefix),
     })
     .filter(|_| !raw_key.is_empty())
 }
@@ -756,7 +871,17 @@ impl<'a> Trial<'a> {
             LibraryAssetKind::VariableCollection => {
                 let raw = &key["col:".len()..];
                 self.import_collection(raw);
-                let members: Vec<String> = self.snap.variable_collections.get(raw).map(|c| c.variables.clone()).unwrap_or_default();
+                let mut cur = Some(raw.to_string());
+                let mut visited = BTreeSet::new();
+                let mut members = Vec::new();
+                while let Some(cid) = cur.filter(|cid| visited.insert(cid.clone())) {
+                    if let Some(c) = self.snap.variable_collections.get(&cid) {
+                        members.extend(c.variables.iter().cloned());
+                        cur = c.extension_parent_id_in(&self.snap.variable_collections).map(String::from);
+                    } else {
+                        cur = None;
+                    }
+                }
                 for v in members.iter().filter(|v| self.snap.variables.contains_key(*v)) {
                     self.import_variable(v);
                 }
@@ -783,15 +908,76 @@ impl<'a> Trial<'a> {
             return;
         }
         let Some(c) = self.snap.variable_collections.get(raw).cloned() else { return };
+        let parent = c.extension_parent_id_in(&self.snap.variable_collections).map(String::from);
         let local = self.ns(raw);
         // the copy is a subscribed one: read-only here, edited in its library file
-        let copy = VariableCollection { id: local.clone(), variables: Vec::new(), key: None, source_library_key: Some(self.snap.library_id.clone()), ..c };
+        let copy = self.rewrite_collection(&c);
         self.edit_vars(|_, colls| {
             colls.insert(local.clone(), copy);
         });
         let version = self.snap.version;
         let library_id = self.snap.library_id.clone();
         self.register(&key, ExternalAsset { library_id, version, kind: LibraryAssetKind::VariableCollection, node: None, local_key: Some(local) });
+        if let Some(p) = parent {
+            self.import_collection(&p);
+            let local_parent = self.ns(&p);
+            self.edit_vars(|_, colls| {
+                if let Some(pc) = colls.get_mut(&local_parent).filter(|pc| !pc.is_extendable()) {
+                    pc.set_extendable(true);
+                }
+            });
+        }
+        if let Some(ext) = c.extension() {
+            for (vid, by_mode) in ext.overrides {
+                self.import_variable(&vid);
+                for val in by_mode.into_values() {
+                    if let VariableValue::Alias(a) = val {
+                        self.import_variable(&a);
+                    }
+                }
+            }
+        }
+    }
+
+    fn rewrite_collection(&self, c: &VariableCollection) -> VariableCollection {
+        let mut copy =
+            VariableCollection { id: self.ns(&c.id), variables: Vec::new(), key: None, source_library_key: Some(self.snap.library_id.clone()), ..c.clone() };
+        if c.is_extension() {
+            for m in &mut copy.modes {
+                m.id = self.ns(&m.id);
+            }
+            if !copy.default_mode.is_empty() {
+                copy.default_mode = self.ns(&copy.default_mode);
+            }
+            if let Some(mut ext) = copy.extension() {
+                let parent_in_snap = c.extension_parent_id_in(&self.snap.variable_collections);
+                let parent_is_ext = parent_in_snap.and_then(|p| self.snap.variable_collections.get(p)).is_some_and(VariableCollection::is_extension);
+                if let Some(p) = parent_in_snap {
+                    ext.parent.collection = self.ns(p);
+                } else if !ext.parent.collection.is_empty() {
+                    ext.parent.collection = self.ns(&ext.parent.collection);
+                }
+                ext.mode_map = ext.mode_map.into_iter().map(|(m, pm)| (self.ns(&m), if parent_is_ext { self.ns(&pm) } else { pm })).collect();
+                ext.overrides = ext
+                    .overrides
+                    .into_iter()
+                    .map(|(vid, by_mode)| {
+                        let by_mode = by_mode
+                            .into_iter()
+                            .map(|(m, mut val)| {
+                                if let VariableValue::Alias(a) = &mut val {
+                                    *a = self.ns(a);
+                                }
+                                (self.ns(&m), val)
+                            })
+                            .collect();
+                        (self.ns(&vid), by_mode)
+                    })
+                    .collect();
+                copy.set_extension(&ext);
+            }
+        }
+        copy
     }
 
     fn import_variable(&mut self, raw: &str) {
@@ -844,6 +1030,7 @@ impl<'a> Trial<'a> {
             let n = &self.snap.nodes[id];
             styles.extend(n.style_refs.values().cloned());
             vars.extend(n.variables.bindings.values().cloned());
+            vars.extend(n.component.prop_default_variables.values().cloned());
             colls.extend(n.variables.modes.keys().cloned());
         }
         for s in styles {
@@ -892,7 +1079,18 @@ impl<'a> Trial<'a> {
         for v in n.variables.bindings.values_mut() {
             *v = self.ns(v);
         }
-        n.variables.modes = std::mem::take(&mut n.variables.modes).into_iter().map(|(k, v)| (self.ns(&k), v)).collect();
+        for v in n.component.prop_default_variables.values_mut() {
+            if !v.starts_with("key:") {
+                *v = self.ns(v);
+            }
+        }
+        n.variables.modes = std::mem::take(&mut n.variables.modes)
+            .into_iter()
+            .map(|(k, v)| {
+                let v = if self.snap.variable_collections.get(&k).is_some_and(VariableCollection::is_extension) { self.ns(&v) } else { v };
+                (self.ns(&k), v)
+            })
+            .collect();
         n
     }
 
@@ -929,15 +1127,24 @@ impl<'a> Trial<'a> {
         for id in &ids {
             idmap.insert(*id, self.doc.alloc_id());
         }
-        let nodes: Vec<Node> = ids
+        let mut nodes: Vec<Node> = ids
             .iter()
             .map(|id| self.convert(*id, if *id == sroot { Some(page) } else { self.snap.nodes[id].parent.and_then(|p| idmap.get(&p).copied()) }, &idmap))
             .collect();
+        // a library file is another document: its Motion ids are renamed and a timeline that is not copied is not matched by id
+        let mut copied: Vec<&mut Node> = nodes.iter_mut().collect();
+        let motion_ids = crate::reid_copied_motion_mapped(self.doc, &mut copied, false, &mut BTreeSet::new(), &BTreeMap::new());
         let index = self.doc.get(page).map(|p| p.children.len()).unwrap_or(0);
         let root = idmap[&sroot];
         self.push(Command::Insert { parent: page, index, nodes });
         let (version, library_id) = (self.snap.version, self.snap.library_id.clone());
         self.register(&asset.key, ExternalAsset { library_id, version, kind: asset.kind, node: Some(root), local_key: None });
+        if !motion_ids.is_empty() {
+            let ekey = self.ns(&asset.key);
+            self.set_state(|st| {
+                st.motion_ids.insert(ekey, motion_ids);
+            });
+        }
     }
 
     fn update_component(&mut self, asset: &SnapshotAsset) {
@@ -960,23 +1167,41 @@ impl<'a> Trial<'a> {
         }
         let Some(parent) = self.doc.get(local_root).and_then(|n| n.parent) else { return };
         let index = self.doc.get(parent).and_then(|p| p.children.iter().position(|c| *c == local_root)).unwrap_or(0);
-        let nodes: Vec<Node> = ids
+        let mut nodes: Vec<Node> = ids
             .iter()
             .map(|id| self.convert(*id, if *id == sroot { Some(parent) } else { self.snap.nodes[id].parent.and_then(|p| idmap.get(&p).copied()) }, &idmap))
             .collect();
+        // Remove the old local copy first, so its Motion ids are free again and an update keeps naming the new ones alike.
         self.push(Command::Remove { id: local_root });
+        // reuse the ids the last import or update gave, so a reference to a local timeline survives the update
+        let ekey = self.ns(&asset.key);
+        // a file that has no map (one made before it existed) just gets fresh ids
+        let preset = self.doc.library.motion_ids.get(&ekey).cloned().unwrap_or_default();
+        let mut copied: Vec<&mut Node> = nodes.iter_mut().collect();
+        let motion_ids = crate::reid_copied_motion_mapped(self.doc, &mut copied, false, &mut BTreeSet::new(), &preset);
         self.push(Command::Insert { parent, index, nodes });
+        if motion_ids != preset {
+            self.set_state(|st| {
+                if motion_ids.is_empty() {
+                    st.motion_ids.remove(&ekey);
+                } else {
+                    st.motion_ids.insert(ekey, motion_ids);
+                }
+            });
+        }
     }
 
     fn update_style(&mut self, raw: &str) {
         let Some(style) = self.snap.styles.get(raw).cloned() else { return };
         let local = self.ns(raw);
+        let paragraph_fields = self.snap.style_meta.get(raw).and_then(|m| m.text_paragraph_fields);
+        let old_style = self.doc.styles.get(&local).cloned();
         self.set_style(&local, style.clone(), self.snap.style_meta.get(raw).cloned());
         let targets: Vec<NodeId> =
             self.doc.nodes.values().filter(|n| n.style_refs.values().any(|v| *v == local) && !is_library_node(self.doc, n.id)).map(|n| n.id).collect();
         for id in targets {
             let mut n = self.doc.nodes[&id].clone();
-            if apply_style_values(&mut n, &style, &local) {
+            if propagate_style_values_with_fields(&mut n, old_style.as_ref(), &style, &local, paragraph_fields) {
                 self.push(Command::Update { node: Box::new(n) });
             }
         }
@@ -984,12 +1209,27 @@ impl<'a> Trial<'a> {
 
     fn update_collection(&mut self, raw: &str) {
         let Some(c) = self.snap.variable_collections.get(raw).cloned() else { return };
+        if let Some(p) = c.extension_parent_id_in(&self.snap.variable_collections).map(String::from) {
+            self.import_collection(&p);
+        }
+        if let Some(ext) = c.extension() {
+            for (vid, by_mode) in ext.overrides {
+                self.import_variable(&vid);
+                for val in by_mode.into_values() {
+                    if let VariableValue::Alias(a) = val {
+                        self.import_variable(&a);
+                    }
+                }
+            }
+        }
         let local = self.ns(raw);
+        let rewritten = self.rewrite_collection(&c);
         self.edit_vars(|_, colls| {
             if let Some(cur) = colls.get_mut(&local) {
-                cur.name = c.name.clone();
-                cur.modes = c.modes.clone();
-                cur.default_mode = c.default_mode.clone();
+                cur.name = rewritten.name;
+                cur.modes = rewritten.modes;
+                cur.default_mode = rewritten.default_mode;
+                cur.extensions = rewritten.extensions;
             }
         });
     }
@@ -1015,6 +1255,7 @@ pub fn style_property(doc: &Document, key: &str) -> StyleProperty {
         Some(Style::Text(_)) => StyleProperty::Text,
         Some(Style::Effect(_)) => StyleProperty::Effect,
         Some(Style::Grid(_)) => StyleProperty::Grid,
+        Some(Style::Animation(_)) => StyleProperty::Animation,
         _ => StyleProperty::Fill,
     })
 }
@@ -1024,6 +1265,11 @@ pub fn style_property(doc: &Document, key: &str) -> StyleProperty {
 /// A colour style may be linked as a fill, as a stroke, or as both; each side
 /// whose link names `key` takes the paints. Returns whether the node changed.
 pub fn apply_style_values(n: &mut Node, style: &Style, key: &str) -> bool {
+    apply_style_values_with_fields(n, style, key, None)
+}
+
+/// Applies a style, optionally preserving paragraph fields omitted by a legacy text style.
+pub fn apply_style_values_with_fields(n: &mut Node, style: &Style, key: &str, paragraph_fields: Option<u8>) -> bool {
     let before = n.clone();
     match style {
         Style::Fill(paints) => {
@@ -1046,9 +1292,29 @@ pub fn apply_style_values(n: &mut Node, style: &Style, key: &str) -> bool {
         Style::Text(ts) => {
             if let NodeKind::Text(t) = &mut n.kind {
                 if n.style_refs.get("text").is_some_and(|k| k == key) {
-                    t.style = TextStyle { fills: t.style.fills.clone(), ..ts.clone() };
+                    // Every value is the style's now, so the layer overrides nothing.
+                    n.text_style_overrides = OwnedFieldSet::default();
+                    let (align_h, align_v) = (t.style.align_h, t.style.align_v);
+                    let paragraph = t.paragraph.clone();
+                    t.style = TextStyle { fills: t.style.fills.clone(), align_h, align_v, ..ts.clone() };
+                    if paragraph_fields.is_none_or(|bits| bits & 1 != 0) {
+                        t.paragraph.indent = ts.paragraph_indent;
+                    } else {
+                        t.paragraph.indent = paragraph.indent;
+                    }
+                    if paragraph_fields.is_none_or(|bits| bits & 2 != 0) {
+                        t.paragraph.list_spacing = ts.list_spacing;
+                    } else {
+                        t.paragraph.list_spacing = paragraph.list_spacing;
+                    }
+                    if paragraph_fields.is_none_or(|bits| bits & 4 != 0) {
+                        t.paragraph.leading_trim = ts.leading_trim;
+                    } else {
+                        t.paragraph.leading_trim = paragraph.leading_trim;
+                    }
                     for r in &mut t.runs {
-                        r.style = TextStyle { fills: r.style.fills.clone(), ..ts.clone() };
+                        let (align_h, align_v) = (r.style.align_h, r.style.align_v);
+                        r.style = TextStyle { fills: r.style.fills.clone(), align_h, align_v, ..ts.clone() };
                     }
                 }
             }
@@ -1065,8 +1331,62 @@ pub fn apply_style_values(n: &mut Node, style: &Style, key: &str) -> bool {
                 }
             }
         }
+        Style::Animation(timelines) => {
+            if n.style_refs.get("animation").is_some_and(|k| k == key) {
+                let m = n.motion.get_or_insert_with(|| Box::new(crate::NodeMotion::default()));
+                let id_map: Vec<(String, String)> =
+                    m.timelines.iter().zip(timelines.iter()).filter(|(old, new)| old.id != new.id).map(|(old, new)| (old.id.clone(), new.id.clone())).collect();
+                for (old_id, new_id) in &id_map {
+                    for track in &mut m.tracks {
+                        if &track.timeline == old_id {
+                            track.timeline = new_id.clone();
+                        }
+                    }
+                    for a in &mut m.assignments {
+                        if &a.timeline == old_id {
+                            a.timeline = new_id.clone();
+                        }
+                        if &a.containing == old_id {
+                            a.containing = new_id.clone();
+                        }
+                    }
+                }
+                let old_tl_ids: Vec<String> = m.timelines.iter().map(|t| t.id.clone()).collect();
+                m.timelines = timelines.clone();
+                m.assignments.retain(|a| !old_tl_ids.contains(&a.timeline) || m.timelines.iter().any(|t| t.id == a.timeline));
+                for tl in timelines {
+                    if let Some(a) = m.assignments.iter_mut().find(|a| a.timeline == tl.id) {
+                        a.autoplay = tl.autoplay;
+                    } else {
+                        m.assignments.push(crate::TimelineAssignment {
+                            timeline: tl.id.clone(),
+                            containing: tl.parent.clone().unwrap_or_else(|| tl.id.clone()),
+                            offset_us: 0,
+                            disabled: false,
+                            autoplay: tl.autoplay,
+                        });
+                    }
+                }
+                if m.is_empty() {
+                    n.motion = None;
+                }
+            }
+        }
     }
     *n != before
+}
+
+/// [`apply_style_values_with_fields`] for a style that was edited from `old_style`: a text layer keeps the
+/// properties it overrides (see [`Node::text_style_overrides`]) and takes the style's values for the
+/// rest. A stored override that equals the old style's value is not one (a bold turned off again), so
+/// the edit reaches it. Any other style kind behaves like the plain apply.
+pub fn propagate_style_values_with_fields(n: &mut Node, old_style: Option<&Style>, style: &Style, key: &str, paragraph_fields: Option<u8>) -> bool {
+    if !matches!(style, Style::Text(_)) {
+        return apply_style_values_with_fields(n, style, key, paragraph_fields);
+    }
+    with_kept_text_style_overrides(n, old_style, |n| {
+        apply_style_values_with_fields(n, style, key, paragraph_fields);
+    })
 }
 
 /// Where to put an instance of an imported component.
@@ -1417,6 +1737,24 @@ mod tests {
     }
 
     #[test]
+    fn soft_deleted_variables_and_collections_are_not_published_but_a_bound_one_travels() {
+        let mut d = lib_doc();
+        let mark = |ext: &mut FigmaExtensions| {
+            ext.insert(SOFT_DELETED_EXTENSION_KEY.into(), serde_json::Value::Bool(true));
+        };
+        mark(&mut d.variables.get_mut("v1").unwrap().extensions);
+        mark(&mut d.variable_collections.get_mut("c1").unwrap().extensions);
+        let keys: Vec<String> = publishable_assets(&d).into_iter().map(|a| a.0).collect();
+        assert!(!keys.contains(&"var:v1".to_string()) && !keys.contains(&"col:c1".to_string()), "soft-deleted assets are not listed: {keys:?}");
+        assert!(keys.contains(&"var:v2".to_string()) && keys.contains(&"col:c2".to_string()), "live assets still are: {keys:?}");
+
+        // v2 aliases the soft-deleted v1, and the Button binds v2: the snapshot keeps what the component needs.
+        let snap = snapshot(&d, "L1", "Lib", 1);
+        assert!(snap.variables.contains_key("v1") && snap.variables["v1"].is_soft_deleted());
+        assert!(snap.variable_collections["c1"].is_soft_deleted());
+    }
+
+    #[test]
     fn import_copies_component_styles_and_variables_with_alias_closure() {
         let lib = lib_doc();
         let snap = snapshot(&lib, "L1", "Lib", 1);
@@ -1498,6 +1836,200 @@ mod tests {
         h.undo(&mut d).unwrap();
         assert_eq!(d.get(comp_local).unwrap().size.x, 100.0);
         assert_eq!(d.library.enabled[0].version, 1);
+    }
+
+    /// A library whose Button animates itself on its own timeline "tl", and whose label has a track on "ext", a
+    /// timeline the component does not own. The consumer owns timelines called "tl" and "ext" too.
+    fn lib_and_consumer_with_motion() -> (Document, Document, String) {
+        let mut lib = lib_doc();
+        let comp = lib.pages.iter().flat_map(|p| lib.get(*p).unwrap().children.clone()).next().unwrap();
+        let label = lib.get(comp).unwrap().children[0];
+        let mut cn = lib.get(comp).unwrap().clone();
+        cn.motion = Some(Box::new(NodeMotion {
+            timelines: vec![Timeline::new("tl", 1_000)],
+            tracks: vec![Track::new("tr", "tl", TrackProperty::Opacity)],
+            ..Default::default()
+        }));
+        run(&mut lib, Command::Update { node: Box::new(cn) });
+        let mut ln = lib.get(label).unwrap().clone();
+        ln.motion = Some(Box::new(NodeMotion { tracks: vec![Track::new("ltr", "ext", TrackProperty::Rotation)], ..Default::default() }));
+        run(&mut lib, Command::Update { node: Box::new(ln) });
+
+        let mut d = consumer();
+        let page = d.pages[0];
+        let id = d.alloc_id();
+        let mut own = Node::new(id, NodeKind::Frame(FrameProps::default()));
+        own.motion = Some(Box::new(NodeMotion {
+            timelines: vec![Timeline::new("tl", 5), Timeline::new("ext", 5)],
+            tracks: vec![Track::new("tr", "tl", TrackProperty::Width)],
+            ..Default::default()
+        }));
+        d.insert(page, own).unwrap();
+        let key = button_key(&lib);
+        (lib, d, key)
+    }
+
+    #[test]
+    fn importing_a_component_gives_it_its_own_motion_ids_and_drops_foreign_timeline_references() {
+        let (lib, mut d, key) = lib_and_consumer_with_motion();
+        let snap = snapshot(&lib, "L1", "Lib", 1);
+        let page = d.pages[0];
+        let cmd = import_asset(&mut d, &snap, &key, Some(Placement { parent: page, at: Vec2::ZERO }));
+        run(&mut d, cmd);
+        let ix = MotionIndex::build(&d);
+        assert!(ix.duplicate_ids().is_empty(), "{:?}", ix.duplicate_ids());
+        let local_comp = d.nodes.values().find(|n| is_library_node(&d, n.id) && matches!(n.kind, NodeKind::Component(_))).unwrap();
+        let m = local_comp.motion.as_deref().unwrap();
+        assert_ne!(m.timelines[0].id, "tl", "the library's id is not reused");
+        assert_eq!(m.tracks[0].timeline, m.timelines[0].id);
+        let label = d.get(local_comp.children[0]).unwrap();
+        assert!(label.motion.is_none(), "the label's track on the library's \"ext\" never plays the consumer's \"ext\": {:?}", label.motion);
+        assert_eq!(ix.tracks_on("ext").len(), 0);
+    }
+
+    #[test]
+    fn updating_a_component_keeps_naming_its_motion_ids_alike() {
+        let (mut lib, mut d, key) = lib_and_consumer_with_motion();
+        let snap1 = snapshot(&lib, "L1", "Lib", 1);
+        let page = d.pages[0];
+        let cmd = import_asset(&mut d, &snap1, &key, Some(Placement { parent: page, at: Vec2::ZERO }));
+        run(&mut d, cmd);
+        let first =
+            d.nodes.values().find(|n| is_library_node(&d, n.id) && matches!(n.kind, NodeKind::Component(_))).unwrap().motion.as_deref().unwrap().timelines[0]
+                .id
+                .clone();
+
+        let comp = lib.pages.iter().flat_map(|p| lib.get(*p).unwrap().children.clone()).next().unwrap();
+        let mut cn = lib.get(comp).unwrap().clone();
+        cn.size = Vec2::new(200.0, 40.0);
+        run(&mut lib, Command::Update { node: Box::new(cn) });
+        let snap2 = snapshot(&lib, "L1", "Lib", 2);
+        let ups = pending_updates(&d, &snap2);
+        let cmd = apply_updates(&mut d, &snap2, &[ups[0].key.clone()]);
+        run(&mut d, cmd);
+        assert!(MotionIndex::build(&d).duplicate_ids().is_empty());
+        let second =
+            d.nodes.values().find(|n| is_library_node(&d, n.id) && matches!(n.kind, NodeKind::Component(_))).unwrap().motion.as_deref().unwrap().timelines[0]
+                .id
+                .clone();
+        assert_eq!(first, second, "an update does not rename the ids again");
+    }
+
+    fn local_button(d: &Document) -> Node {
+        d.nodes.values().find(|n| is_library_node(d, n.id) && matches!(n.kind, NodeKind::Component(_))).unwrap().clone()
+    }
+
+    fn bump_button(lib: &mut Document, f: impl FnOnce(&mut Node)) {
+        let comp = lib.pages.iter().flat_map(|p| lib.get(*p).unwrap().children.clone()).next().unwrap();
+        let mut cn = lib.get(comp).unwrap().clone();
+        cn.size = Vec2::new(200.0, 40.0);
+        f(&mut cn);
+        run(lib, Command::Update { node: Box::new(cn) });
+    }
+
+    #[test]
+    fn an_update_keeps_the_local_timeline_id_when_a_lower_suffix_was_freed_meanwhile() {
+        let (mut lib, mut d, key) = lib_and_consumer_with_motion();
+        let page = d.pages[0];
+        // a copy of the consumer's own animated frame takes `tl~1`, so the import gets `tl~2`
+        let own = d.get(page).unwrap().children[0];
+        let copy = duplicate_subtree(&mut d, own);
+        let copy_id = copy[0].id;
+        run(&mut d, Command::Insert { parent: page, index: 1, nodes: copy });
+        let snap1 = snapshot(&lib, "L1", "Lib", 1);
+        let cmd = import_asset(&mut d, &snap1, &key, Some(Placement { parent: page, at: Vec2::ZERO }));
+        run(&mut d, cmd);
+        let imported = local_button(&d).motion.as_deref().unwrap().timelines[0].id.clone();
+        assert_eq!(imported, "tl~2");
+        // a consumer layer is bound to the local copy's timeline
+        let gid = d.alloc_id();
+        d.insert(page, Node::new(gid, NodeKind::Frame(FrameProps::default()))).unwrap();
+        let cmd = add_track(&d, gid, Track::new("gtr", imported.clone(), TrackProperty::Opacity)).unwrap();
+        run(&mut d, cmd);
+        // the copy that held `tl~1` goes away, so a lowest-free-suffix rule would now rename `tl~2` to `tl~1`
+        run(&mut d, Command::Remove { id: copy_id });
+
+        bump_button(&mut lib, |_| {});
+        let snap2 = snapshot(&lib, "L1", "Lib", 2);
+        let ups = pending_updates(&d, &snap2);
+        let cmd = apply_updates(&mut d, &snap2, &[ups[0].key.clone()]);
+        run(&mut d, cmd);
+        assert_eq!(local_button(&d).motion.as_deref().unwrap().timelines[0].id, imported, "the id is kept");
+        let ix = MotionIndex::build(&d);
+        assert!(ix.timeline(&imported).is_some() && ix.duplicate_ids().is_empty());
+        assert_eq!(d.get(gid).unwrap().motion.as_deref().unwrap().tracks[0].timeline, imported);
+    }
+
+    #[test]
+    fn library_state_without_motion_saves_the_bytes_an_earlier_build_wrote() {
+        // text an earlier build wrote for one enabled library with one component copy
+        let base_written = r#"{"published":null,"enabled":[{"id":"L1","name":"Lib","version":1}],"external":{"L1/c1":{"library_id":"L1","version":1,"kind":"Component","node":3,"local_key":null}}}"#;
+        let state: LibraryState = serde_json::from_str(base_written).unwrap();
+        assert!(state.motion_ids.is_empty(), "an older file has no map");
+        assert_eq!(serde_json::to_string(&state).unwrap(), base_written, "no new key is written when there is no library Motion");
+        // an import of a component without Motion writes no map either
+        let (lib, mut d) = (lib_doc(), consumer());
+        let snap = snapshot(&lib, "L1", "Lib", 1);
+        let page = d.pages[0];
+        let cmd = import_asset(&mut d, &snap, &button_key(&lib), Some(Placement { parent: page, at: Vec2::ZERO }));
+        run(&mut d, cmd);
+        assert!(d.library.motion_ids.is_empty());
+        assert!(!d.to_json().unwrap().contains("motion_ids"));
+    }
+
+    #[test]
+    fn a_file_without_a_motion_id_map_still_updates_and_falls_back_to_fresh_ids() {
+        let (mut lib, mut d, key) = lib_and_consumer_with_motion();
+        let page = d.pages[0];
+        let snap1 = snapshot(&lib, "L1", "Lib", 1);
+        let cmd = import_asset(&mut d, &snap1, &key, Some(Placement { parent: page, at: Vec2::ZERO }));
+        run(&mut d, cmd);
+        assert!(!d.library.motion_ids.is_empty(), "the import recorded the ids it gave");
+        // the same file as an earlier build saved it: no map
+        let mut text = serde_json::to_value(&d).unwrap();
+        text["library"].as_object_mut().unwrap().remove("motion_ids");
+        let mut d: Document = serde_json::from_value(text).unwrap();
+        assert!(d.library.motion_ids.is_empty());
+
+        bump_button(&mut lib, |_| {});
+        let snap2 = snapshot(&lib, "L1", "Lib", 2);
+        let ups = pending_updates(&d, &snap2);
+        let cmd = apply_updates(&mut d, &snap2, &[ups[0].key.clone()]);
+        run(&mut d, cmd);
+        let m = local_button(&d).motion.as_deref().unwrap().clone();
+        assert_eq!(m.tracks[0].timeline, m.timelines[0].id);
+        assert!(MotionIndex::build(&d).duplicate_ids().is_empty());
+        assert!(!d.library.motion_ids.is_empty(), "the update records its ids, so the next one is stable");
+    }
+
+    #[test]
+    fn a_timeline_added_in_a_new_version_never_takes_the_old_local_id() {
+        let (mut lib, mut d, key) = lib_and_consumer_with_motion();
+        let page = d.pages[0];
+        let snap1 = snapshot(&lib, "L1", "Lib", 1);
+        let cmd = import_asset(&mut d, &snap1, &key, Some(Placement { parent: page, at: Vec2::ZERO }));
+        run(&mut d, cmd);
+        let first = local_button(&d).motion.as_deref().unwrap().timelines[0].id.clone();
+        let first_track = local_button(&d).motion.as_deref().unwrap().tracks[0].id.clone();
+
+        // version 2 adds a timeline with the same base, listed before the old one
+        bump_button(&mut lib, |cn| {
+            let m = cn.motion.as_deref_mut().unwrap();
+            m.timelines.insert(0, Timeline::new("tl~7", 500));
+            m.tracks.insert(0, Track::new("tr~7", "tl~7", TrackProperty::Width));
+        });
+        let snap2 = snapshot(&lib, "L1", "Lib", 2);
+        let ups = pending_updates(&d, &snap2);
+        let cmd = apply_updates(&mut d, &snap2, &[ups[0].key.clone()]);
+        run(&mut d, cmd);
+        let m = local_button(&d).motion.as_deref().unwrap().clone();
+        assert_eq!(m.timelines.len(), 2);
+        assert_eq!(m.timelines[1].id, first, "the old timeline keeps its local id");
+        assert_ne!(m.timelines[0].id, first, "the new one gets a different id");
+        assert_eq!(m.tracks[1].id, first_track, "the old track keeps its id");
+        assert_eq!(m.tracks[1].timeline, first);
+        assert_eq!(m.tracks[0].timeline, m.timelines[0].id);
+        assert!(MotionIndex::build(&d).duplicate_ids().is_empty());
     }
 
     #[test]
@@ -1658,5 +2190,110 @@ mod tests {
         assert_eq!(d.get(ids[0]).unwrap().stroke.paints, vec![blue.clone()], "stroke-only link");
         assert_eq!(d.get(ids[1]).unwrap().stroke.paints, vec![blue.clone()], "stroke side of a fill + stroke link");
         assert_eq!(d.get(ids[1]).unwrap().fills, vec![blue]);
+    }
+
+    #[test]
+    fn text_style_update_keeps_layer_overrides_and_undoes_cleanly() {
+        let mut lib = lib_doc();
+        lib.styles.insert("Body".into(), Style::Text(TextStyle { font_size: 16.0, font_weight: 400, ..Default::default() }));
+        lib.style_meta.insert("Body".into(), StyleMeta { name: "Body".into(), property: StyleProperty::Text, ..Default::default() });
+        let snap1 = snapshot(&lib, "L1", "Lib", 1);
+
+        let mut d = consumer();
+        let p = d.pages[0];
+        let c = import_asset(&mut d, &snap1, "style:Body", None);
+        run(&mut d, c);
+
+        let plain = d.alloc_id();
+        let mut plain_node =
+            Node::text(plain, Rect::new(0.0, 0.0, 100.0, 20.0), "Plain", TextStyle { font_size: 16.0, font_weight: 400, ..Default::default() });
+        plain_node.style_refs.insert("text".into(), "L1/Body".into());
+        d.insert(p, plain_node).unwrap();
+
+        let over = d.alloc_id();
+        let mut over_node =
+            Node::text(over, Rect::new(0.0, 30.0, 100.0, 20.0), "Overridden", TextStyle { font_size: 16.0, font_weight: 700, ..Default::default() });
+        if let NodeKind::Text(tp) = &mut over_node.kind {
+            tp.runs.push(TextRun { start: 0, end: 4, style: TextStyle { italic: true, ..tp.style.clone() } });
+        }
+        over_node.style_refs.insert("text".into(), "L1/Body".into());
+        over_node.text_style_overrides.insert(OwnedField::Weight);
+        d.insert(p, over_node).unwrap();
+
+        let before_plain = d.get(plain).unwrap().clone();
+        let before_over = d.get(over).unwrap().clone();
+
+        lib.styles.insert("Body".into(), Style::Text(TextStyle { font_size: 20.0, font_weight: 500, ..Default::default() }));
+        let snap2 = snapshot(&lib, "L1", "Lib", 2);
+        let mut h = History::default();
+        let c = apply_updates(&mut d, &snap2, &["style:Body".into()]);
+        h.exec(&mut d, c).unwrap();
+
+        let plain_tp = d.get(plain).unwrap().kind.any_text().unwrap();
+        assert_eq!((plain_tp.style.font_size, plain_tp.style.font_weight), (20.0, 500));
+        let over_tp = d.get(over).unwrap().kind.any_text().unwrap();
+        assert_eq!((over_tp.style.font_size, over_tp.style.font_weight), (20.0, 700), "weight override survives library update");
+        assert!(over_tp.runs[0].style.italic && over_tp.runs[0].style.font_size == 20.0, "range italic override survives library update");
+
+        h.undo(&mut d).unwrap();
+        assert_eq!(d.get(plain).unwrap(), &before_plain);
+        assert_eq!(d.get(over).unwrap(), &before_over);
+    }
+
+    #[test]
+    fn library_publish_and_insert_preserve_and_namespace_bound_property_defaults() {
+        let mut lib = lib_doc();
+        lib.variable_collections.get_mut("c1").unwrap().variables.push("v_def".into());
+        lib.variables.insert(
+            "v_def".into(),
+            Variable {
+                id: "v_def".into(),
+                name: "DefaultLabel".into(),
+                collection: "c1".into(),
+                kind: VariableKind::String,
+                values: [("m".to_string(), VariableValue::String("Confirm".into()))].into(),
+                description: String::new(),
+                scopes: vec![],
+                hidden_from_publishing: false,
+                key: None,
+                code_syntax: Default::default(),
+                extensions: Default::default(),
+                mode_extensions: Default::default(),
+            },
+        );
+        // Mark v_def soft-deleted so only its reference in `prop_default_variables` pulls it into the snapshot.
+        lib.variables.get_mut("v_def").unwrap().extensions.insert(SOFT_DELETED_EXTENSION_KEY.into(), serde_json::Value::Bool(true));
+
+        let lib_comp_id = lib.nodes.values().find(|n| n.name == "Button").unwrap().id;
+        let lib_comp = lib.get_mut(lib_comp_id).unwrap();
+        lib_comp.component.props.push(ComponentPropDef { name: "Label".into(), kind: PropKind::Text, default: PropValue::Text("Submit".into()) });
+        lib_comp.component.prop_default_variables.insert("Label".into(), "v_def".into());
+        lib_comp.component.prop_default_variables.insert("Remote".into(), "key:remote_var".into());
+        lib_comp.component.prop_default_variables.insert("Dangling".into(), "v_nonexistent".into());
+
+        let snap = snapshot(&lib, "L1", "Lib", 1);
+        assert!(snap.variables.contains_key("v_def"), "snapshot must collect variables referenced in prop_default_variables");
+        let snap_comp = snap.nodes.values().find(|n| n.name == "Button").unwrap();
+        assert!(!snap_comp.component.prop_default_variables.contains_key("Dangling"), "snapshot must prune dangling prop_default_variables");
+        assert_eq!(snap_comp.component.prop_default_variables.get("Label").map(String::as_str), Some("v_def"));
+        assert_eq!(
+            snap_comp.component.prop_default_variables.get("Remote").map(String::as_str),
+            Some("key:remote_var"),
+            "key: id must survive library snapshot retain"
+        );
+
+        let mut d = consumer();
+        let key = button_key(&lib);
+        let page = d.pages[0];
+        let cmd = import_asset(&mut d, &snap, &key, Some(Placement { parent: page, at: Vec2::new(5.0, 6.0) }));
+        run(&mut d, cmd);
+
+        let inst = *d.get(page).unwrap().children.last().unwrap();
+        let comp = instance_component(d.get(inst).unwrap()).unwrap();
+        assert_eq!(d.get(comp).unwrap().component.prop_default_variables.get("Label").map(String::as_str), Some("L1/v_def"));
+        assert_eq!(d.get(comp).unwrap().component.prop_default_variables.get("Remote").map(String::as_str), Some("key:remote_var"));
+        assert!(d.variables.contains_key("L1/v_def"), "the prefixed variable id must exist in the receiving document");
+        assert!(d.get(inst).unwrap().component.prop_default_variables.is_empty(), "instance must not store prop_default_variables");
+        assert_eq!(pending_updates(&d, &snap), vec![], "fingerprint must strip library prefix on prop_default_variables");
     }
 }

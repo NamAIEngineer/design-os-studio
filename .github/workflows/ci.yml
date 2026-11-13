@@ -2,25 +2,387 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, 'train/**']
+    tags: ["v*"]
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+  merge_group:
+    types: [checks_requested]
 
+# A run on main is never cancelled: it can hold the macOS cache seed, and a cancelled seed saves nothing. Runs
+# on main still share one group, so at most one more waits (a newer pending run replaces an older pending one,
+# it never queues behind a growing line) and the push of a quick series of merges does not start several
+# identical dependency compiles at once.
 concurrency:
   group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 env:
   RUST_VERSION: "1.93.1"
   CARGO_TERM_COLOR: always
 
 jobs:
+  changes:
+    name: Detect Rust changes
+    runs-on: ubuntu-latest
+    outputs:
+      rust: ${{ steps.filter.outputs.rust }}
+      reason: ${{ steps.filter.outputs.reason }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - name: Classify changed paths
+        id: filter
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          REF_NAME: ${{ github.ref }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PUSH_BEFORE: ${{ github.event.before }}
+          MG_BASE_SHA: ${{ github.event.merge_group.base_sha }}
+        run: |
+          set -euo pipefail
+          if [[ "$REF_NAME" == refs/tags/v* ]]; then
+            echo "rust=true" >> "$GITHUB_OUTPUT"
+            echo "reason=release-tag" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # A batch train branch combines several PRs; its first push has no "before" commit, so the
+          # HEAD^1 fallback below would see only the last PR. Always run the full suite on it.
+          if [[ "$REF_NAME" == refs/heads/train/* ]]; then
+            echo "rust=true" >> "$GITHUB_OUTPUT"
+            echo "reason=batch-train-branch" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          diff_base=""
+          diff_head="HEAD"
+          if [ "$EVENT_NAME" = "pull_request" ]; then
+            if git rev-parse --verify -q HEAD^2 >/dev/null 2>&1; then
+              diff_base="HEAD^1"
+              diff_head="HEAD"
+            elif [ -n "$PR_BASE_SHA" ] && [ -n "$PR_HEAD_SHA" ]; then
+              git fetch --no-tags --depth=1 origin "$PR_BASE_SHA" "$PR_HEAD_SHA" 2>/dev/null || true
+              diff_base="$PR_BASE_SHA"
+              diff_head="$PR_HEAD_SHA"
+            fi
+          elif [ "$EVENT_NAME" = "merge_group" ] && [ -n "$MG_BASE_SHA" ]; then
+            git fetch --no-tags --depth=1 origin "$MG_BASE_SHA" 2>/dev/null || true
+            diff_base="$MG_BASE_SHA"
+          elif [ "$EVENT_NAME" = "push" ] && [ -n "$PUSH_BEFORE" ] && [ "$PUSH_BEFORE" != "0000000000000000000000000000000000000000" ]; then
+            git fetch --no-tags --depth=1 origin "$PUSH_BEFORE" 2>/dev/null || true
+            diff_base="$PUSH_BEFORE"
+          fi
+          if [ -z "$diff_base" ] || ! git cat-file -e "${diff_base}^{commit}" 2>/dev/null; then
+            if git rev-parse --verify -q HEAD^1 >/dev/null 2>&1; then
+              diff_base="HEAD^1"
+            fi
+          fi
+
+          if [ -z "$diff_base" ] || ! changed_files="$(git -c core.quotePath=false diff --name-only "$diff_base" "$diff_head" 2>/dev/null)"; then
+            echo "rust=true" >> "$GITHUB_OUTPUT"
+            echo "reason=diff-unavailable" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          if [ -z "$changed_files" ]; then
+            echo "rust=true" >> "$GITHUB_OUTPUT"
+            echo "reason=empty-diff" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          rust_changed="false"
+          while IFS= read -r path; do
+            [ -z "$path" ] && continue
+            case "$path" in
+              docs/*|plans/*|.brv/*|site/*|pages/*|llms.txt)
+                ;;
+              *.md)
+                if [[ "$path" == */* ]]; then
+                  rust_changed="true"
+                  break
+                fi
+                ;;
+              *)
+                rust_changed="true"
+                break
+                ;;
+            esac
+          done <<< "$changed_files"
+
+          if [ "$rust_changed" = "true" ]; then
+            echo "rust=true" >> "$GITHUB_OUTPUT"
+            echo "reason=rust-or-code-paths" >> "$GITHUB_OUTPUT"
+          else
+            echo "rust=false" >> "$GITHUB_OUTPUT"
+            echo "reason=docs-only" >> "$GITHUB_OUTPUT"
+            echo "Docs/site/plans/.brv-only change set: skipping heavy macOS test shards."
+          fi
+
+  check:
+    name: Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Linux system libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config libxkbcommon-dev libwayland-dev libx11-dev \
+            libxcursor-dev libxrandr-dev libxi-dev libgl1-mesa-dev \
+            libfontconfig1-dev
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+          components: rustfmt
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Rustfmt
+        run: cargo fmt --all --check
+
+      - name: Check workspace
+        run: cargo check --workspace --all-targets --locked
+
+  # The macOS jobs (this one, lint-budget and the swiftc leg of native-export-compile) skip a push to main:
+  # main requires an up-to-date branch, so the tree on main is the tree the pull request's own macOS checks
+  # just passed, and the repeat would hold all 5 macOS runners of the account for about 20 minutes while the
+  # next pull request queues. That holds only while the rule is on: the train goes live with the rule turned
+  # OFF (docs/releasing.md), so vars.TRAIN_LIVE == 'true' brings the macOS jobs back on main and turns the
+  # seed off. Pull requests, train/** pushes, merge_group and v* tags always run them. The macOS job that
+  # does run on main is cache-seed-macos below: a pull request can only restore caches saved on its own ref
+  # or on main, so main has to keep the dependency caches of the shards and of lint-budget warm. Keep the
+  # `github.event_name == 'push' && github.ref == 'refs/heads/main' && vars.TRAIN_LIVE != 'true'` predicate
+  # identical in the `if` of test-macos and lint-budget (negated), in the native-export-compile matrix
+  # (negated), in cache-seed-macos (as is) and in the "Test (macos-15)" aggregate
+  # (scripts/tests/test_ci_macos_on_main.py checks them).
+  test-macos:
+    name: Test (macos-15, ${{ matrix.partition }}/3)
+    needs: changes
+    if: (github.event_name != 'pull_request' || !github.event.pull_request.draft) && !(github.event_name == 'push' && github.ref == 'refs/heads/main' && vars.TRAIN_LIVE != 'true') && needs.changes.outputs.rust == 'true'
+    runs-on: macos-15
+    # Debug info off, as the Linux leg of the cross-OS "Test" job does: the shards compile the same test
+    # binaries and only need pass/fail. This is a job-level env, not a $GITHUB_ENV step after rust-cache,
+    # because Swatinem/rust-cache hashes CARGO* variables into its key: set late, the key would stay the
+    # same and every run would restore dependencies built with debug info, rebuild them and never save.
+    env:
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
+    strategy:
+      fail-fast: false
+      matrix:
+        partition: [1, 2, 3]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+
+      # shared-key replaces the job id in the cache key so cache-seed-macos can write the very key these
+      # shards read: v0-rust-<shared-key>-<OS>-<arch>-<digest of rustc and CARGO*/RUST* env>-<lockfile hash>.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: macos-test
+
+      - name: Validate packaging scripts syntax
+        shell: bash
+        run: |
+          bash -n scripts/package-macos.sh scripts/package.sh scripts/build-release.sh
+          sh -n packaging/linux/install.sh packaging/linux/uninstall.sh packaging/linux/AppRun
+
+      - name: Validate eval and third-party licence register
+        run: |
+          python3 -B scripts/check_eval_licences.py
+          python3 -B -m unittest scripts/test_check_eval_licences.py
+
+      - name: Validate vendored skills (licence, pin, rules.lock, rule map)
+        run: |
+          python3 -B scripts/check_vendor_skills.py verify
+          python3 -B scripts/check_vendor_skills.py extract
+          python3 -B scripts/check_vendor_skills.py map-coverage
+          python3 -B -m unittest scripts/test_check_vendor_skills.py
+
+      # The designos-webcapture tests drive crates/designos-webcapture/js/capture.js in headless
+      # Chromium through Playwright and fail when Node or Playwright is missing.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install Playwright and Chromium for the web capture harness
+        shell: bash
+        run: |
+          harness_dir="$RUNNER_TEMP/capture-harness"
+          npm install --no-audit --no-fund --prefix "$harness_dir" playwright@1.64.1
+          node "$harness_dir/node_modules/playwright/cli.js" install chromium
+          echo "NODE_PATH=$harness_dir/node_modules" >> "$GITHUB_ENV"
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@v2.87.31
+        with:
+          tool: nextest@0.9.149
+
+      - name: Test workspace (shard ${{ matrix.partition }}/3)
+        run: cargo nextest run --workspace --locked --profile ci --partition hash:${{ matrix.partition }}/3
+
+      - name: Test workspace doctests
+        if: matrix.partition == 1
+        run: cargo test --workspace --doc --locked
+
+  test-macos-required:
+    name: Test (macos-15)
+    needs: [changes, test-macos, lint-budget]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify Test (macos-15) shards or documented skip
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          REF_NAME: ${{ github.ref }}
+          TRAIN_LIVE: ${{ vars.TRAIN_LIVE }}
+          PR_DRAFT: ${{ github.event.pull_request.draft }}
+          CHANGES_RESULT: ${{ needs.changes.result }}
+          RUST_CHANGED: ${{ needs.changes.outputs.rust }}
+          SHARDS_RESULT: ${{ needs.test-macos.result }}
+          LINT_RESULT: ${{ needs.lint-budget.result }}
+        run: |
+          set -euo pipefail
+          # A draft never ends green: marking it ready starts a new run on the same commit, and until that run's
+          # aggregate finishes this draft run's green check would stand for the macOS tests that did not run.
+          if [ "$EVENT_NAME" = "pull_request" ] && [ "$PR_DRAFT" = "true" ]; then
+            echo "::error::The macOS tests did not run because this pull request is a draft. Mark it ready for review to run them."
+            echo "The macOS tests did not run because this pull request is a draft. Mark it ready for review to run them."
+            exit 1
+          fi
+          if [ "$CHANGES_RESULT" != "success" ]; then
+            echo "::error::Path filter job 'changes' did not succeed (result: '$CHANGES_RESULT')"
+            exit 1
+          fi
+          # A push to main does not run the macOS jobs unless vars.TRAIN_LIVE is 'true' (see the note above
+          # test-macos; GitHub compares strings case-insensitively, so lower-case it here too). If they ran
+          # anyway, fall through so their results are still checked below.
+          train_live="$(printf '%s' "${TRAIN_LIVE:-}" | tr '[:upper:]' '[:lower:]')"
+          if [ "$EVENT_NAME" = "push" ] && [ "$REF_NAME" = "refs/heads/main" ] && [ "$train_live" != "true" ] && [ "$SHARDS_RESULT" = "skipped" ] && [ "$LINT_RESULT" = "skipped" ]; then
+            echo "skipped on main: the pull request's checks covered this tree"
+            echo "::notice::skipped on main: the pull request's checks covered this tree"
+            exit 0
+          fi
+          if [ "$RUST_CHANGED" = "false" ]; then
+            if { [ "$SHARDS_RESULT" = "skipped" ] || [ "$SHARDS_RESULT" = "success" ]; } && { [ "$LINT_RESULT" = "skipped" ] || [ "$LINT_RESULT" = "success" ]; }; then
+              echo "skipped: docs-only"
+              echo "::notice::skipped: docs-only"
+              exit 0
+            fi
+            echo "::error::Docs-only PR shard matrix ended with unexpected result '$SHARDS_RESULT'"
+            exit 1
+          fi
+          if [ "$SHARDS_RESULT" != "success" ]; then
+            echo "::error::Test (macos-15) shards did not all succeed (result: '$SHARDS_RESULT')"
+            exit 1
+          fi
+          if [ "$LINT_RESULT" != "success" ]; then
+            echo "::error::Lint budget (macos-15) did not succeed (result: '$LINT_RESULT')"
+            exit 1
+          fi
+          echo "All 3 Test (macos-15) shards and the lint budget succeeded."
+
+  lint-budget:
+    name: Lint budget (macos-15)
+    needs: changes
+    if: (github.event_name != 'pull_request' || !github.event.pull_request.draft) && !(github.event_name == 'push' && github.ref == 'refs/heads/main' && vars.TRAIN_LIVE != 'true') && needs.changes.outputs.rust == 'true'
+    runs-on: macos-15
+    # Same job env as the shards and the cache seed: rust-cache hashes CARGO* variables into its key, and the
+    # seed job's lint leg can only write the key this job reads when both see the same variables. The two
+    # variables set the dev and test profiles only; this job builds with --release, so its artifacts do not change.
+    env:
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+
+      # shared-key replaces the job id in the key so the lint leg of cache-seed-macos can write it.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: macos-lint-budget
+
+      # The large-fixture lint wall-time budget is bounded in release builds only (debug builds skip it).
+      - name: Lint budget on a release build (large fixture)
+        run: cargo test -p designos-render --release --locked --test lint_rules large_fixture_off_thread_budget
+
+  # Not a test job and not part of the "Test (macos-15)" aggregate or any required check: a red run here only
+  # means a cache could not be refreshed. It exists because the macOS shards and lint-budget read a rust-cache
+  # that a pull request can only restore from its own ref or from main, and neither runs on main. On a push to
+  # main each leg checks whether the exact key of the job it serves exists (lookup-only: no download, a few
+  # seconds); only on a miss (Cargo.lock, manifests, .cargo/config.toml, toolchain or the CARGO*/RUST* env
+  # changed) does it restore the nearest older cache, compile the dependencies the way that job does, and save
+  # under the exact key. One leg per job because each leg saves the whole target directory: legs in one job
+  # would each write the other's artifacts into their cache. Everything that feeds a key (runner, toolchain
+  # step, job env, shared-key) must stay equal to the job a leg serves (the test file checks it).
+  cache-seed-macos:
+    name: Cache seed (macos-15, ${{ matrix.leg }})
+    needs: changes
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && vars.TRAIN_LIVE != 'true' && needs.changes.outputs.rust == 'true'
+    runs-on: macos-15
+    timeout-minutes: 45
+    env:
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - leg: shards
+            shared-key: macos-test
+            # The build plan of `cargo nextest run --workspace --locked`, which builds with `cargo test --no-run`.
+            compile: cargo test --workspace --locked --no-run
+          - leg: lint budget
+            shared-key: macos-lint-budget
+            # What the lint-budget job runs, without running it.
+            compile: cargo test -p designos-render --release --locked --test lint_rules --no-run
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+
+      # save-if "false" keeps this step's post action from saving: on a miss it still records state for it.
+      - name: Look up the dependency cache
+        id: lookup
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ${{ matrix.shared-key }}
+          lookup-only: true
+          save-if: "false"
+
+      - name: Restore the nearest older dependency cache (miss only)
+        if: steps.lookup.outputs.cache-hit != 'true'
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ${{ matrix.shared-key }}
+
+      - name: Compile the dependencies (miss only)
+        if: steps.lookup.outputs.cache-hit != 'true'
+        run: ${{ matrix.compile }}
+
   test:
     name: Test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest, macos-14]
+        # Windows runs only for a release: a v* tag, or a pull request from a release/ branch or titled "release:".
+        os: ${{ fromJSON((startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'pull_request' && (startsWith(github.head_ref, 'release/') || startsWith(github.event.pull_request.title, 'release:')))) && '["ubuntu-latest", "windows-latest"]' || '["ubuntu-latest"]') }}
     steps:
       - uses: actions/checkout@v4
 
@@ -57,8 +419,35 @@ jobs:
           python3 -B scripts/check_vendor_skills.py map-coverage
           python3 -B -m unittest scripts/test_check_vendor_skills.py
 
-      - name: Build workspace (designos-studio, designos, designos-mcp, designos-diff)
-        run: cargo build --workspace --all-targets --locked
+      # Guards the macOS-on-main rules of this workflow (skip on push to main, cache seed job, aggregate).
+      # Linux only: the test runs the aggregate's script with bash and reads this file as text.
+      - name: Validate the macOS CI rules of this workflow
+        if: runner.os == 'Linux'
+        run: python3 -B -m unittest scripts/tests/test_ci_macos_on_main.py scripts/tests/test_ci_cache_seed_job.py
+
+      - name: Configure Linux swap and debuginfo
+        if: runner.os == 'Linux'
+        run: |
+          if sudo modprobe zram 2>/dev/null && command -v zramctl >/dev/null 2>&1; then
+            zdev=$(sudo zramctl --find --size 24G --algorithm zstd 2>/dev/null || sudo zramctl --find --size 24G 2>/dev/null || true)
+            if [ -n "$zdev" ]; then
+              sudo mkswap "$zdev" && sudo swapon -p 100 "$zdev" || true
+            fi
+          fi
+          if [ -d /sys/module/zswap/parameters ]; then
+            echo zstd | sudo tee /sys/module/zswap/parameters/compressor >/dev/null 2>&1 || true
+            echo 50 | sudo tee /sys/module/zswap/parameters/max_pool_percent >/dev/null 2>&1 || true
+            echo Y | sudo tee /sys/module/zswap/parameters/enabled >/dev/null 2>&1 || true
+          fi
+          sudo fallocate -l 24G /swapfile_ci
+          sudo chmod 600 /swapfile_ci
+          sudo mkswap /swapfile_ci
+          sudo swapon -p 10 /swapfile_ci
+          swapon --show
+          free -m
+          df -h /
+          echo "CARGO_PROFILE_DEV_DEBUG=0" >> "$GITHUB_ENV"
+          echo "CARGO_PROFILE_TEST_DEBUG=0" >> "$GITHUB_ENV"
 
       # The designos-webcapture tests drive crates/designos-webcapture/js/capture.js in headless
       # Chromium through Playwright and fail when Node or Playwright is missing.
@@ -78,16 +467,27 @@ jobs:
           fi
           echo "NODE_PATH=$harness_dir/node_modules" >> "$GITHUB_ENV"
 
-      - name: Test workspace
-        run: cargo test --workspace --locked
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@v2.87.31
+        with:
+          tool: nextest@0.9.149
 
-      # The large-fixture lint wall-time budget is bounded in release builds only (debug builds skip it).
-      - name: Lint budget on a release build (large fixture)
-        if: runner.os == 'macOS'
-        run: cargo test -p designos-render --release --locked --test lint_rules large_fixture_off_thread_budget
+      - name: Test workspace
+        if: runner.os != 'Linux'
+        run: cargo nextest run --workspace --locked --profile ci
+
+      # The 16 GB Linux runner is killed (SIGKILL, "runner has received a shutdown signal") when
+      # nextest runs one test process per core, so Linux runs two at a time on top of the swap above.
+      - name: Test workspace (Linux)
+        if: runner.os == 'Linux'
+        run: cargo nextest run --workspace --locked --profile ci --test-threads 2
+
+      - name: Test workspace doctests
+        run: cargo test --workspace --doc --locked
 
   lint:
     name: Clippy
+    needs: check
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -133,10 +533,11 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Test scripts/release-sync-pages.py
-        run: python3 -m unittest discover -s scripts/tests -v
+        run: python3 -m unittest scripts/tests/test_release_sync_pages.py scripts/tests/test_release_make_latest.py -v
 
   codegen-validators:
     name: Codegen Validators
+    needs: check
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -164,3 +565,89 @@ jobs:
 
       - name: Validate HTML codegen with html-validate
         run: cargo test -p designos-export --lib html::tests::card_passes_html_validate --locked -- --ignored --exact
+
+  native-export-compile:
+    name: Native Export Compile (${{ matrix.label }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    env:
+      KOTLIN_VERSION: "2.1.10"
+      KOTLIN_SHA256: "c6e9e2636889828e19c8811d5ab890862538c89dc2a3101956dfee3c2a8ba6b1"
+      ANDROID_BUILD_TOOLS_VERSION: "34.0.0"
+      ANDROID_PLATFORM_VERSION: "android-34"
+    strategy:
+      fail-fast: false
+      matrix:
+        # A job-level `if` cannot read the matrix, so the swiftc leg is left out of the matrix itself on a
+        # push to main (see the note above test-macos). Both legs: swift on macos-15, kotlin + android on ubuntu-latest.
+        include: ${{ fromJSON((github.event_name == 'push' && github.ref == 'refs/heads/main' && vars.TRAIN_LIVE != 'true') && '[{"os":"ubuntu-latest","label":"kotlinc + aapt2 · ubuntu-latest","targets":"--target kotlin --target android"}]' || '[{"os":"macos-15","label":"swiftc · macos-15","targets":"--target swift"},{"os":"ubuntu-latest","label":"kotlinc + aapt2 · ubuntu-latest","targets":"--target kotlin --target android"}]') }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+
+      - uses: actions/setup-java@v4
+        if: runner.os == 'Linux'
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Install pinned kotlinc and Android build-tools (aapt2)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            unzip pkg-config libfontconfig1-dev
+          KOTLIN_ZIP="${RUNNER_TEMP}/kotlin-compiler.zip"
+          curl -fsSL -o "$KOTLIN_ZIP" \
+            "https://github.com/JetBrains/kotlin/releases/download/v${KOTLIN_VERSION}/kotlin-compiler-${KOTLIN_VERSION}.zip"
+          echo "${KOTLIN_SHA256}  ${KOTLIN_ZIP}" | sha256sum -c -
+          sudo rm -rf /opt/kotlinc
+          sudo unzip -q "$KOTLIN_ZIP" -d /opt
+          rm -f "$KOTLIN_ZIP"
+          if [[ -f /opt/kotlinc/lib/compose-compiler-plugin.jar && ! -e /opt/kotlinc/lib/kotlin-compose-compiler-plugin.jar ]]; then
+            sudo ln -s /opt/kotlinc/lib/compose-compiler-plugin.jar /opt/kotlinc/lib/kotlin-compose-compiler-plugin.jar
+          fi
+          echo "/opt/kotlinc/bin" >> "$GITHUB_PATH"
+          echo "COMPOSE_COMPILER_PLUGIN_JAR=/opt/kotlinc/lib/kotlin-compose-compiler-plugin.jar" >> "$GITHUB_ENV"
+
+          SDK_ROOT="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}}"
+          SDKMANAGER="${SDK_ROOT}/cmdline-tools/latest/bin/sdkmanager"
+          sdkmanager_install() {
+            local pkg="$1"
+            echo "==> Running sdkmanager fallback for ${pkg}..."
+            set +o pipefail
+            yes | "$SDKMANAGER" --sdk_root="$SDK_ROOT" "$pkg" >/dev/null
+            local rc=$?
+            set -o pipefail
+            echo "==> sdkmanager fallback finished for ${pkg} (exit=${rc})"
+            return "$rc"
+          }
+
+          AAPT2_DIR="${SDK_ROOT}/build-tools/${ANDROID_BUILD_TOOLS_VERSION}"
+          if [[ ! -x "${AAPT2_DIR}/aapt2" ]]; then
+            sdkmanager_install "build-tools;${ANDROID_BUILD_TOOLS_VERSION}"
+          fi
+          ANDROID_JAR="${SDK_ROOT}/platforms/${ANDROID_PLATFORM_VERSION}/android.jar"
+          if [[ ! -f "$ANDROID_JAR" ]]; then
+            sdkmanager_install "platforms;${ANDROID_PLATFORM_VERSION}"
+          fi
+          echo "$AAPT2_DIR" >> "$GITHUB_PATH"
+          echo "ANDROID_JAR=${ANDROID_JAR}" >> "$GITHUB_ENV"
+          /opt/kotlinc/bin/kotlinc -version
+          ls -l /opt/kotlinc/lib/kotlin-compose-compiler-plugin.jar
+          "${AAPT2_DIR}/aapt2" version
+          ls -l "$ANDROID_JAR"
+
+      - name: Validate compile-check script syntax
+        shell: bash
+        run: bash -n scripts/ci/native-export-compile-check.sh
+
+      - name: Compile-check native exports (planted-error self-test + real fixtures)
+        shell: bash
+        run: ./scripts/ci/native-export-compile-check.sh ${{ matrix.targets }} --self-test
+

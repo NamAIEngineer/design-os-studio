@@ -402,6 +402,7 @@ pub fn style_summary(style: &Style) -> String {
         }
         Style::Effect(effs) => format!("{} effect{}", effs.len(), if effs.len() == 1 { "" } else { "s" }),
         Style::Grid(grids) => format!("{} grid{}", grids.len(), if grids.len() == 1 { "" } else { "s" }),
+        Style::Animation(timelines) => format!("{} timeline{}", timelines.len(), if timelines.len() == 1 { "" } else { "s" }),
     }
 }
 
@@ -749,7 +750,7 @@ mod tests {
 
     fn image_paint(image_ref: &str) -> Paint {
         Paint {
-            kind: PaintKind::Image { image_ref: image_ref.into(), scale_mode: ImageScaleMode::Fill },
+            kind: PaintKind::Image { image_ref: image_ref.into(), scale_mode: ImageScaleMode::Fill, params: Default::default() },
             opacity: 1.0,
             visible: true,
             blend: BlendMode::Normal,

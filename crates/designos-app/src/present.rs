@@ -4,7 +4,6 @@
 //! wheel and key input.
 
 use crate::app::App;
-use crate::icons::Icon;
 use crate::proto::geom;
 use crate::proto::player::{content_extent, hit_layer, Effect, Player};
 use crate::proto::smart::{subtree_doc, SmartPlan};
@@ -497,14 +496,14 @@ pub fn show(app: &mut App, ui: &mut Ui) {
         }
         let title = app.doc.get(st.player.current).map(|n| n.name.clone()).unwrap_or_default();
         p.text(Pos2::new(bar.center().x, bar.center().y), Align2::CENTER_CENTER, title, theme::font_body(), theme::TEXT_SECONDARY);
-        widgets::hline(&p, bar.left(), bar.right(), bar.bottom() - 1.0, Color32::from_white_alpha(18));
+        widgets::hline(&p, bar.left(), bar.right(), bar.bottom() - 1.0, theme::BORDER);
     }
 
     // Deck navigation occupies its own footer, outside the prototype hit area.
     let footer_height = if is_deck && !st.fullscreen { 44.0 } else { 0.0 };
     if is_deck && !st.fullscreen {
         let footer = ERect::from_min_max(Pos2::new(full.left(), full.bottom() - footer_height), full.max);
-        widgets::hline(&p, footer.left(), footer.right(), footer.top(), Color32::from_white_alpha(18));
+        widgets::hline(&p, footer.left(), footer.right(), footer.top(), theme::BORDER);
         let previous = ERect::from_center_size(Pos2::new(footer.center().x - 90.0, footer.center().y), EV::new(76.0, 28.0));
         let next = ERect::from_center_size(Pos2::new(footer.center().x + 90.0, footer.center().y), EV::new(76.0, 28.0));
         let ready = st.pending_url.is_none();
@@ -662,11 +661,13 @@ pub fn leave(app: &mut App, ctx: &Context) {
 fn page_bg(app: &App) -> Color32 {
     // A background stored with the prototype device wins.
     if let Some(c) = app.doc.prototype_device.background {
+        let c = app.doc.color_profile.to_srgb(&c);
         return Color32::from_rgb((c.r * 255.0).round() as u8, (c.g * 255.0).round() as u8, (c.b * 255.0).round() as u8);
     }
     // The prototype background is the page background unless it is still the editor default.
     match app.doc.get(app.page).map(|n| &n.kind) {
         Some(NodeKind::Page { background }) => {
+            let background = app.doc.color_profile.to_srgb(background);
             let c = Color32::from_rgb((background.r * 255.0).round() as u8, (background.g * 255.0).round() as u8, (background.b * 255.0).round() as u8);
             if c == theme::rgb(theme::DEFAULT_PAGE_BG) {
                 theme::PRESENT_BG
@@ -789,9 +790,9 @@ fn paint_video_badges(st: &PresentState, p: &egui::Painter) {
         let font = theme::font_body();
         let w = widgets::text_width(p, &reason, &font) + 24.0;
         let pill = ERect::from_center_size(rect.center(), EV::new(w.min(rect.width().max(40.0)), 26.0));
-        p.rect_filled(pill, theme::cr_pill(pill.height()), Color32::from_black_alpha(190));
+        p.rect_filled(pill, theme::cr_pill(pill.height()), theme::BG_PRIMARY_SOLID);
         let shown = widgets::elide(p, &reason, &font, pill.width() - 16.0);
-        p.text(pill.center(), Align2::CENTER_CENTER, shown, font, Color32::WHITE);
+        p.text(pill.center(), Align2::CENTER_CENTER, shown, font, theme::TEXT);
     }
 }
 
@@ -823,9 +824,7 @@ fn paint_vars_panel(ui: &mut Ui, player: &Player, area: ERect) -> ERect {
     let rect = ERect::from_min_size(Pos2::new(area.right() - VARS_W - 12.0, area.top() + 8.0), EV::new(VARS_W, h));
     record(ui, "present-vars-panel", rect);
     let p = ui.painter().clone();
-    widgets::elevation_shadow(&p, rect, theme::RADIUS_FRAME);
-    p.rect_filled(rect, theme::cr(theme::RADIUS_FRAME), theme::BG_MENU);
-    p.rect_stroke(rect, theme::cr(theme::RADIUS_FRAME), egui::Stroke::new(1.0, theme::BORDER_MENU), egui::StrokeKind::Inside);
+    widgets::kit::popover_surface(&p, rect);
     let pc = p.with_clip_rect(rect);
     pc.text(Pos2::new(rect.left() + 16.0, rect.top() + 22.0), Align2::LEFT_CENTER, "Variables", theme::font_body_strong(), theme::TEXT);
     pc.text(Pos2::new(rect.right() - 16.0, rect.top() + 22.0), Align2::RIGHT_CENTER, "live, not saved", theme::font_caption(), theme::TEXT_TERTIARY);
@@ -904,33 +903,68 @@ fn paint_smart(st: &mut PresentState, ctx: &Context, pc: &egui::Painter, stage: 
 fn confirm_bar(ui: &mut Ui, full: ERect, url: &str) -> (bool, bool) {
     let p = ui.painter().clone();
     let w = 520.0f32.min(full.width() - 32.0);
-    let r = ERect::from_min_size(Pos2::new(full.center().x - w / 2.0, full.bottom() - 88.0), EV::new(w, 56.0));
-    widgets::elevation_shadow(&p, r, theme::RADIUS_FRAME);
-    p.rect_filled(r, theme::cr(theme::RADIUS_FRAME), theme::BG_MENU);
+    let r = ERect::from_min_size(Pos2::new(full.center().x - w / 2.0, full.bottom() - 88.0), EV::new(w, 60.0));
+    widgets::kit::popover_surface(&p, r);
     let shown = widgets::elide(&p, url, &theme::font_body(), w - 200.0);
-    p.text(Pos2::new(r.left() + 16.0, r.top() + 18.0), Align2::LEFT_CENTER, "Open this link?", theme::font_body_strong(), theme::TEXT);
-    p.text(Pos2::new(r.left() + 16.0, r.top() + 38.0), Align2::LEFT_CENTER, shown, theme::font_body(), theme::TEXT_SECONDARY);
-    let ob = ERect::from_min_size(Pos2::new(r.right() - 140.0, r.top() + 16.0), EV::new(64.0, 24.0));
-    let cb = ERect::from_min_size(Pos2::new(r.right() - 72.0, r.top() + 16.0), EV::new(60.0, 24.0));
+    let title_font = theme::font_text(theme::FONT_SIZE_TEXT_XS, theme::TextWeight::Semibold);
+    p.text(Pos2::new(r.left() + 16.0, r.top() + 16.0), Align2::LEFT_CENTER, "Open this link?", title_font, theme::TEXT);
+    p.text(Pos2::new(r.left() + 16.0, r.top() + 36.0), Align2::LEFT_CENTER, shown, theme::font_body(), theme::TEXT_SECONDARY);
+    let ob = ERect::from_min_size(Pos2::new(r.right() - 140.0, r.top() + 12.0), EV::new(64.0, theme::CONTROL_SM));
+    let cb = ERect::from_min_size(Pos2::new(r.right() - 72.0, r.top() + 12.0), EV::new(60.0, theme::CONTROL_SM));
     record(ui, "present-url-open", ob);
     record(ui, "present-url-cancel", cb);
-    let or = ui.interact(ob, ui.id().with("url-open"), Sense::click());
-    p.rect_filled(ob, theme::cr_pill(ob.height()), if or.hovered() { theme::BG_BRAND_HOVER } else { theme::BG_BRAND });
-    p.text(ob.center(), Align2::CENTER_CENTER, "Open", theme::font_body(), Color32::WHITE);
-    let cr = ui.interact(cb, ui.id().with("url-cancel"), Sense::click());
-    widgets::button_bg(&p, cb, &cr, false, theme::cr(theme::RADIUS_CONTROL));
-    p.text(cb.center(), Align2::CENTER_CENTER, "Cancel", theme::font_body(), theme::TEXT);
-    (or.clicked(), cr.clicked())
-}
-
-#[allow(dead_code)]
-fn _icons_used(p: &egui::Painter) {
-    crate::icons::paint(p, Icon::Play, Pos2::ZERO, 1.0, Color32::WHITE);
+    let open = widgets::kit::button(ui, ob, "url-open", "Open", widgets::kit::Hierarchy::Primary, widgets::kit::Size::Sm, true).clicked();
+    let cancel = widgets::kit::button(ui, cb, "url-cancel", "Cancel", widgets::kit::Hierarchy::Secondary, widgets::kit::Size::Sm, true).clicked();
+    (open, cancel)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A 100x100 scrolling frame (content runs to y = 300) with a fixed overlay rectangle, both in the
+    /// Display P3 colour (0.5, 0.4, 0.8), which the canvas draws as (132, 101, 211).
+    fn p3_scrolling_frame() -> (Document, NodeId) {
+        let mid = designos_doc::Color { r: 0.5, g: 0.4, b: 0.8, a: 1.0 };
+        let mut doc = Document::new("p3");
+        let page = doc.add_page("p");
+        doc.get_mut(page).unwrap().kind = NodeKind::Page { background: designos_doc::Color::WHITE };
+        let fid = doc.alloc_id();
+        let frame = doc.insert(page, Node::frame(fid, designos_doc::Rect::new(0.0, 0.0, 100.0, 100.0))).unwrap();
+        for (y, h) in [(0.0, 100.0), (200.0, 100.0)] {
+            let id = doc.alloc_id();
+            let mut n = Node::rectangle(id, designos_doc::Rect::new(0.0, y, 100.0, h));
+            n.fills = vec![designos_doc::Paint::solid(mid)];
+            doc.insert(frame, n).unwrap();
+        }
+        let id = doc.alloc_id();
+        let mut fixed = Node::rectangle(id, designos_doc::Rect::new(0.0, 0.0, 100.0, 20.0));
+        fixed.fills = vec![designos_doc::Paint::solid(mid)];
+        let fixed = doc.insert(frame, fixed).unwrap();
+        let f = doc.get_mut(frame).unwrap();
+        f.prototype.overflow = Overflow::Vertical;
+        f.prototype.fixed_children = vec![fixed];
+        doc.color_profile = designos_doc::ColorProfile::DisplayP3;
+        (doc, frame)
+    }
+
+    fn close(p: [u8; 3], want: [u8; 3]) -> bool {
+        p.iter().zip(want).all(|(a, b)| (i32::from(*a) - i32::from(b)).abs() <= 1)
+    }
+
+    fn at(pm: &designos_render::tiny_skia::Pixmap, x: u32, y: u32) -> [u8; 3] {
+        let p = pm.pixel(x, y).unwrap().demultiply();
+        [p.red(), p.green(), p.blue()]
+    }
+
+    #[test]
+    fn a_scrolling_frame_and_its_fixed_overlay_in_a_p3_document_show_the_converted_colour() {
+        let (doc, frame) = p3_scrolling_frame();
+        let (content, fixed, _) = render_layers(&doc, frame, 1.0, 4096.0).unwrap();
+        assert!(close(at(&content, 50, 250), [132, 101, 211]), "scrolling content {:?}", at(&content, 50, 250));
+        let fixed = fixed.expect("the fixed layer is rendered");
+        assert!(close(at(&fixed, 50, 10), [132, 101, 211]), "fixed overlay {:?}", at(&fixed, 50, 10));
+    }
 
     #[test]
     fn slides_follow_declared_order_without_wrapping() {

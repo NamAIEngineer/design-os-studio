@@ -145,6 +145,7 @@ fn sim_on(doc: Document, layers: Layers) -> (Sim, Layers) {
 fn open_in_sim(doc: Document) -> Sim {
     let mut s = Sim::new();
     s.use_stub_agent_clis();
+    s.shell.app.terminal.platform_is_mac_override = Some(true);
     s.shell.app.replace_document(doc, None);
     s.frame(vec![]);
     s.frame(vec![]);
@@ -202,6 +203,36 @@ fn the_palette_button_fix_closes_the_palette_so_cmd_z_undoes_it() {
 
     s.cmd_key(Key::Z);
     assert_same_state(&state(&s), &before, "Cmd+Z undoes the fix, as the toast says");
+}
+
+#[test]
+fn windows_ctrl_z_and_ctrl_y_undo_and_redo_palette_autofix() {
+    let _guard = serialized();
+    let (mut s, _l) = sim_on_fixable_doc();
+    s.shell.app.terminal.platform_is_mac_override = Some(false);
+    let before = state(&s);
+
+    auto_fix(&mut s);
+    let after = state(&s);
+    assert_ne!(after, before, "the fix changed the document");
+
+    // First verify real Windows Ctrl+Z / Ctrl+Y (`ctrl: true, command: true`) when no terminal tab is open.
+    let win_ctrl = Modifiers { alt: false, ctrl: true, shift: false, mac_cmd: false, command: true };
+    s.mods = win_ctrl;
+    s.key(Key::Z);
+    s.mods = Modifiers::NONE;
+    assert_same_state(&state(&s), &before, "Windows Ctrl+Z restores the document when the Agents panel has no focused tab");
+
+    s.mods = win_ctrl;
+    s.key(Key::Y);
+    s.mods = Modifiers::NONE;
+    assert_same_state(&state(&s), &after, "Windows Ctrl+Y replays the fix");
+
+    // And verify the `Sim::cmd_key` harness helper maps to the platform command modifier on non-macOS.
+    s.cmd_key(Key::Z);
+    assert_same_state(&state(&s), &before, "Sim::cmd_key(Key::Z) undoes the fix on Windows");
+    s.cmd_key(Key::Y);
+    assert_same_state(&state(&s), &after, "Sim::cmd_key(Key::Y) redoes the fix on Windows");
 }
 
 #[test]

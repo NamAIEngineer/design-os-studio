@@ -5,11 +5,9 @@
 
 ## Design Quality & Anti-Generic Rules
 
-Enforce these qualitative standards alongside automated linting:
-
-- **Visual hierarchy**: Establish one primary action per view and one focal point per screen. Keep at least a 3:1 size ratio between display headlines and body copy. Never give primary, secondary, and tertiary actions equal visual weight.
-- **Layout rhythm & cards**: Do not wrap every group in a card, and never nest cards inside cards. Avoid a uniform grid of identical cards when a domain-specific layout fits. Use the file's type scale and spacing scale (`var:` / `style:` tokens), with <= 3 gap values per screen and padding increasing with hierarchy (`page >= section >= card >= control`).
-- **Surface & colour discipline**: Keep gradients, shadows, and corner radii restrained and consistent with tokens. Use one primary accent per screen, reserve red/amber/green for semantic status, and express dark-mode depth via surface luminance and subtle borders.
-- **Icons, logos & illustrations**: Never hand-draw logos, illustrations, or icons with vector paths — instantiate library components (`kind: "instance"`) or use a labelled placeholder frame.
-- **Typography**: Use the file's type scale (<= 2 font families, <= 4 font sizes per screen). Keep body line length 45–75 chars, and use `tabular-nums` for prices, metrics, timestamps, and tables.
-- **Content realism**: Use real content, never lorem ipsum (`placeholder-text` flags `"Lorem ipsum"`, `"Card 1 / Card 2 / Card 3"`, `"John Doe"`, `"$99.99"`, `"123456"`). Populate screens with domain-specific labels, realistic uneven numbers, and varied states.
+- **Visual hierarchy**: One primary action per view, >= 3:1 headline-to-body.
+- **Layout & cards**: Do not wrap every group in a card or nest cards. No uniform grid of identical cards. Use the type scale and spacing scale (`var:` / `style:` tokens), <= 3 gaps, padding `page >= section >= card >= control`.
+- **Centred controls**: Buttons, pills, badges: preset `easeui-button-primary` / `easeui-button-secondary` / `easeui-badge`, or `layout` row with `justify` and `align` center (plain `"frame"`: labels top-left).
+- **Surface & colour**: Restrain gradients, shadows, and corner radii. One primary accent per screen; red/amber/green for status.
+- **Icons & illustrations**: Never hand-draw logos, illustrations, or icons as vector paths. Use library instances or labelled placeholders.
+- **Typography**: <= 2 font families, <= 4 sizes, 45–75 char lines. Real copy, no lorem ipsum.

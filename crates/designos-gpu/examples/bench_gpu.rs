@@ -95,13 +95,14 @@ fn big_doc() -> (Document, NodeId, Vec<NodeId>) {
                         spread: 0.0,
                         visible: true,
                         show_behind: false,
+                        blend: Default::default(),
                     }];
                     n
                 }
                 _ => {
                     let mut n = Node::rectangle(id, Rect::new(x, y, w, h));
                     n.fills = vec![Paint {
-                        kind: PaintKind::Image { image_ref: "checker".into(), scale_mode: ImageScaleMode::Fill },
+                        kind: PaintKind::Image { image_ref: "checker".into(), scale_mode: ImageScaleMode::Fill, params: Default::default() },
                         opacity: 1.0,
                         visible: true,
                         blend: BlendMode::Normal,

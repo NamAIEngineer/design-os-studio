@@ -1,6 +1,6 @@
 //! Helpers shared by the code generators (Tailwind, SwiftUI, Compose, React).
 
-use crate::util::{css_color, num};
+use crate::util::{css_color_in, num, ColorFormat};
 use designos_doc::*;
 
 /// Indenting line writer.
@@ -185,9 +185,9 @@ enum Fallback {
     Raw,
 }
 
-fn fallback_text(value: &VariableValue, fmt: Fallback) -> Option<String> {
+fn fallback_text(value: &VariableValue, fmt: Fallback, profile: ColorProfile, color_fmt: ColorFormat) -> Option<String> {
     match (value, fmt) {
-        (VariableValue::Color(c), _) => Some(css_color(c, 1.0)),
+        (VariableValue::Color(c), _) => Some(css_color_in(profile, color_fmt, c, 1.0)),
         (VariableValue::Number(x), Fallback::Px) => Some(format!("{}px", num(*x))),
         (VariableValue::Number(x), Fallback::Raw) => Some(num(*x)),
         _ => None,
@@ -206,12 +206,12 @@ pub fn css_var_display(v: &Variable) -> String {
 
 /// [`css_var_display`] plus, when there is no code syntax, the value `v` resolves to at `n` as the
 /// fallback: `var(--Color-Primary, #0D99FF)`.
-fn css_var_with_fallback(doc: &Document, n: &Node, v: &Variable, fmt: Fallback) -> String {
+fn css_var_with_fallback(doc: &Document, n: &Node, v: &Variable, fmt: Fallback, color_fmt: ColorFormat) -> String {
     if let Some(code) = v.code_syntax_for(CodeSyntaxPlatform::Web) {
         return code.to_string();
     }
     let name = css_var_name(&v.name);
-    match doc.resolve_variable(n.id, &v.id).and_then(|value| fallback_text(&value, fmt)) {
+    match doc.resolve_variable(n.id, &v.id).and_then(|value| fallback_text(&value, fmt, doc.color_profile, color_fmt)) {
         Some(fallback) => format!("var(--{name}, {fallback})"),
         None => format!("var(--{name})"),
     }
@@ -233,11 +233,11 @@ pub(crate) fn token_camel(v: &Variable, drop_color: bool) -> String {
 }
 
 pub(crate) fn first_paint(paints: &[Paint]) -> Option<&Paint> {
-    paints.iter().rev().find(|p| p.visible && p.opacity > 0.0)
+    paints.iter().rev().find(|p| p.visible && p.opacity > 0.0 && !matches!(p.kind, PaintKind::Shader(_)))
 }
 
 pub(crate) fn visible_children<'a>(doc: &'a Document, n: &Node) -> Vec<&'a Node> {
-    n.children.iter().filter_map(|c| doc.get(*c)).filter(|c| c.visible).collect()
+    n.children.iter().filter_map(|c| doc.get(*c)).filter(|c| c.visible && !matches!(c.kind, NodeKind::Connector(_))).collect()
 }
 
 pub(crate) fn is_vector_kind(k: &NodeKind) -> bool {
@@ -420,8 +420,9 @@ pub(crate) struct Sizes {
     pub cross_stretch: bool,
 }
 
-/// Sizing as the stack-based generators (SwiftUI, UIKit, Compose, Android XML) need it. They emit a
-/// grid as a column, so every parent that is not `Horizontal` counts as one.
+/// Sizing as the native generators (SwiftUI, UIKit, Compose, Android XML) need it. For grid children,
+/// `row_parent` stays `false` because horizontal stretch is driven by `Sizing::Fill`, while `grow`
+/// only stretches along the vertical axis when `row_parent` is `false`.
 pub(crate) fn sizes(n: &Node, parent: Parent<'_>) -> Sizes {
     let row_parent = parent.al.map(|a| a.direction == LayoutDirection::Horizontal).unwrap_or(true);
     sizes_along(n, parent, row_parent)
@@ -575,6 +576,466 @@ pub(crate) fn grid_column_count(al: &AutoLayout) -> usize {
     stored.clamp(1, MAX_GRID_TRACKS)
 }
 
+/// Whether the solver packs a grid's rows at the top (`pt + r * row_gap + sum(0..r)`).
+/// Delegates directly to [`designos_doc::layout_solver::grid_packs_auto_rows`].
+pub(crate) fn grid_packs_auto_rows(doc: &Document, n: &Node, al: &AutoLayout) -> bool {
+    if al.direction != LayoutDirection::Grid {
+        return false;
+    }
+    let kids: Vec<designos_doc::layout_solver::ChildIn> = n.children.iter().filter_map(|id| doc.flow_child_input(*id, true)).collect();
+    designos_doc::layout_solver::grid_packs_auto_rows(al, &kids)
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct StackedGridChild {
+    pub id: NodeId,
+    pub placed: designos_doc::layout_solver::Placed,
+    pub offset: (f32, f32),
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct GridCellGroup {
+    pub id: NodeId,
+    pub placed: designos_doc::layout_solver::Placed,
+    pub stacked: Vec<StackedGridChild>,
+}
+
+/// One grid column as a native generator writes it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum ColKind {
+    /// A fixed track, or a flexible one the generators keep at its solved pixels.
+    Fixed(f32),
+    /// A hug track: the platform has no intrinsic column size here, so it exports the solver's pixels.
+    Hug(f32),
+    /// A flexible track that shares the free width by `weight`; `px` is its solved width.
+    Flex { weight: f32, px: f32 },
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct SolvedGrid {
+    pub widths: Vec<f32>,
+    /// How each column exports on the native platforms. `Flex` appears only when a weight reproduces
+    /// the solver's width (see [`native_col_kinds`]); otherwise the column is its solved pixels.
+    pub cols: Vec<ColKind>,
+    pub rows: Vec<f32>,
+    pub col_gap: f32,
+    pub row_gap: f32,
+    pub pad_tl: (f32, f32),
+    /// Left plus right padding the solver used.
+    pub pad_x: f32,
+    pub children: Vec<(NodeId, designos_doc::layout_solver::Placed)>,
+}
+
+impl SolvedGrid {
+    /// Whether any column shares the free width by weight.
+    pub fn has_weights(&self) -> bool {
+        self.cols.iter().any(|c| matches!(c, ColKind::Flex { .. }))
+    }
+
+    /// Whether the grid has a hug column that the generators write as pixels next to weighted ones.
+    pub fn has_hug_px(&self) -> bool {
+        self.has_weights() && self.cols.iter().any(|c| matches!(c, ColKind::Hug(_)))
+    }
+
+    /// The weight of column `c`, when it shares the free width.
+    pub fn weight(&self, c: usize) -> Option<f32> {
+        match self.cols.get(c) {
+            Some(ColKind::Flex { weight, .. }) => Some(*weight),
+            _ => None,
+        }
+    }
+
+    /// The weight of the first weighted column (0 when none is).
+    pub fn weight_of_first(&self) -> f32 {
+        (0..self.cols.len()).find_map(|c| self.weight(c)).unwrap_or(0.0)
+    }
+
+    /// Sum of all column weights.
+    pub fn total_weight(&self) -> f32 {
+        (0..self.cols.len()).filter_map(|c| self.weight(c)).sum()
+    }
+
+    /// Whether every weighted column in the grid has the same weight.
+    pub fn equal_weights(&self) -> bool {
+        self.has_weights() && (0..self.cols.len()).filter_map(|c| self.weight(c)).all(|w| (w - self.weight_of_first()).abs() < 1e-3)
+    }
+
+    /// Whether every column covered by `p` is a flexible weighted column (none is `Fixed` or `Hug`).
+    pub fn span_is_all_flex(&self, p: &designos_doc::layout_solver::Placed) -> bool {
+        p.col_span > 0 && (p.col..p.col + p.col_span).all(|c| self.weight(c).is_some())
+    }
+
+    /// Width the grid's columns take in pixels that no weight shares: fixed and hug columns plus
+    /// every column gap.
+    pub fn fixed_and_gap_width(&self) -> f32 {
+        let fixed: f32 = (0..self.cols.len()).filter(|c| self.weight(*c).is_none()).map(|c| self.widths[c]).sum();
+        fixed + self.col_gap * (self.cols.len().saturating_sub(1) as f32)
+    }
+
+    /// For the cell `p`: the weight its columns share, and the pixels it adds on top (its fixed
+    /// columns and the gaps inside the span).
+    pub fn span_weight_and_px(&self, p: &designos_doc::layout_solver::Placed) -> (f32, f32) {
+        let cols = p.col..p.col + p.col_span;
+        let weight = cols.clone().filter_map(|c| self.weight(c)).sum();
+        let px = cols.filter(|c| self.weight(*c).is_none()).map(|c| self.widths[c]).sum::<f32>() + self.col_gap * (p.col_span.saturating_sub(1) as f32);
+        (weight, px)
+    }
+
+    pub fn cell_width(&self, p: &designos_doc::layout_solver::Placed) -> f32 {
+        (0..p.col_span).map(|dc| self.widths[p.col + dc]).sum::<f32>() + self.col_gap * (p.col_span.saturating_sub(1) as f32)
+    }
+
+    pub fn cell_height(&self, p: &designos_doc::layout_solver::Placed, allow_row_span: bool) -> f32 {
+        let span = if allow_row_span { p.row_span } else { 1 };
+        (0..span).map(|dr| self.rows[p.row + dr]).sum::<f32>() + self.row_gap * (span.saturating_sub(1) as f32)
+    }
+
+    pub fn cell_origin(&self, p: &designos_doc::layout_solver::Placed) -> (f32, f32) {
+        let x = self.pad_tl.0 + self.widths[..p.col].iter().sum::<f32>() + self.col_gap * (p.col as f32);
+        let y = self.pad_tl.1 + self.rows[..p.row].iter().sum::<f32>() + self.row_gap * (p.row as f32);
+        (x, y)
+    }
+
+    pub fn row_cells(&self, r: usize) -> Vec<GridCellGroup> {
+        let mut groups: Vec<GridCellGroup> = Vec::new();
+        for (id, p) in &self.children {
+            if p.row != r {
+                continue;
+            }
+            let c_start = p.col;
+            let c_end = p.col + p.col_span.max(1);
+            if let Some(host) = groups.iter_mut().find(|g| {
+                let g_start = g.placed.col;
+                let g_end = g.placed.col + g.placed.col_span.max(1);
+                c_start < g_end && g_start < c_end
+            }) {
+                let (hx, hy) = self.cell_origin(&host.placed);
+                let (sx, sy) = self.cell_origin(p);
+                host.stacked.push(StackedGridChild { id: *id, placed: *p, offset: (sx - hx, sy - hy) });
+            } else {
+                groups.push(GridCellGroup { id: *id, placed: *p, stacked: Vec::new() });
+            }
+        }
+        groups
+    }
+
+    pub fn overlap_comment(doc: &Document, group: &GridCellGroup) -> Option<String> {
+        if group.stacked.is_empty() {
+            return None;
+        }
+        let primary_name = doc.get(group.id).map(|n| n.name.as_str()).unwrap_or("");
+        let stacked_names: Vec<String> = group.stacked.iter().map(|s| swift_quote(doc.get(s.id).map(|n| n.name.as_str()).unwrap_or(""))).collect();
+        Some(format!("// {}: overlapping grid cells stacked in the cell of {}", stacked_names.join(", "), swift_quote(primary_name)))
+    }
+}
+
+/// `al` as the layout solver reads it for `n`: the auto layout and stroke of the node with its variable
+/// bindings applied, and the stroke's inset folded into the padding. Layout solves from that resolved
+/// node, so item spacing, row spacing, padding and an included stroke weight that are bound to a
+/// variable count at the value the variable resolves to, not at the number stored on the node. The
+/// frame size and size limits stay the stored ones, as they do in layout. `al` is returned (with the
+/// stored stroke folded in) when the resolved node carries no auto layout.
+fn solver_layout(doc: &Document, n: &Node, al: &AutoLayout) -> AutoLayout {
+    let resolved = designos_doc::resolve_node(doc, n);
+    let resolved_al = resolved.kind.frame_props().and_then(|f| f.auto_layout.as_ref()).unwrap_or(al);
+    resolved_al.with_stroke(&resolved.stroke)
+}
+
+/// Padding emitted for a legacy grid whose inward stroke participates in layout.
+/// Both static and bound inward-stroke grids use the solver's resolved layout padding
+/// so the emitted container padding matches the content box used to solve the tracks.
+pub(crate) fn native_grid_layout(doc: &Document, n: &Node, al: &AutoLayout) -> AutoLayout {
+    if al.direction != LayoutDirection::Grid || al.layout_version != 0 || !al.stroke_included {
+        return al.clone();
+    }
+    solver_layout(doc, n, al)
+}
+
+/// Padding binding keys for native layout emission. When a legacy included-stroke grid
+/// folds a non-zero resolved stroke inset into its padding and has a bound padding or
+/// stroke-weight key, all four sides are emitted as resolved pixels from the same
+/// snapshot used for the tracks rather than mixing bound padding tokens with the inset.
+pub(crate) fn native_padding_keys(doc: &Document, n: &Node, al: &AutoLayout) -> [&'static str; 4] {
+    if native_grid_needs_pixel_tracks(doc, n, al) {
+        [""; 4]
+    } else {
+        ["paddingTop", "paddingRight", "paddingBottom", "paddingLeft"]
+    }
+}
+
+/// Whether a legacy included-stroke grid has a non-zero inward stroke inset and a bound
+/// padding or stroke-weight key that cannot be expressed as one portable native padding
+/// expression. Native generators emit resolved pixel padding and pixel column widths in
+/// this case instead of weighted tracks.
+pub(crate) fn native_grid_needs_pixel_tracks(doc: &Document, n: &Node, al: &AutoLayout) -> bool {
+    al.direction == LayoutDirection::Grid
+        && al.layout_version == 0
+        && al.stroke_included
+        && designos_doc::resolve_node(doc, n).stroke.layout_inset().iter().any(|&v| v > 0.0)
+        && [
+            "paddingTop",
+            "paddingRight",
+            "paddingBottom",
+            "paddingLeft",
+            "strokeWeight",
+            "strokeTopWeight",
+            "strokeRightWeight",
+            "strokeBottomWeight",
+            "strokeLeftWeight",
+        ]
+        .iter()
+        .any(|key| bound(doc, n, key).is_some())
+}
+
+pub(crate) fn solved_grid(doc: &Document, n: &Node, al: &AutoLayout) -> Option<SolvedGrid> {
+    if al.direction != LayoutDirection::Grid {
+        return None;
+    }
+    let mut ids = Vec::new();
+    let mut kids = Vec::new();
+    for id in &n.children {
+        if let Some(k) = doc.flow_child_input(*id, true) {
+            ids.push(*id);
+            kids.push(k);
+        }
+    }
+    if kids.is_empty() {
+        return None;
+    }
+    let al_s = solver_layout(doc, n, al);
+    let own = designos_doc::layout_solver::SizeLimits::from(&n.layout_child);
+    let widths = designos_doc::layout_solver::grid_column_widths(&al_s, n.size, own, &kids);
+    let rows = designos_doc::layout_solver::grid_row_heights(&al_s, n.size, own, &kids);
+    let col_gap = al_s.item_spacing.max(0.0);
+    let row_gap = designos_doc::layout_solver::grid_row_gap(&al_s);
+    let placed = designos_doc::layout_solver::place_children(&kids, widths.len());
+    let children = ids.into_iter().zip(placed).collect();
+    let mut cols = native_col_kinds(&al_s, n.size.x, &widths);
+    if native_grid_needs_pixel_tracks(doc, n, al) {
+        for (kind, &px) in cols.iter_mut().zip(&widths) {
+            if matches!(kind, ColKind::Flex { .. }) {
+                *kind = ColKind::Fixed(px);
+            }
+        }
+    }
+    Some(SolvedGrid { widths, cols, rows, col_gap, row_gap, pad_tl: (al_s.padding[3], al_s.padding[0]), pad_x: al_s.padding[1] + al_s.padding[3], children })
+}
+
+/// Whether any gap of the grid `n` (`itemSpacing` for columns, `counterAxisSpacing` for rows) is bound
+/// to a variable. A bound gap exists in the export even when the stored number is 0.
+pub(crate) fn grid_gap_is_bound(doc: &Document, n: &Node) -> bool {
+    ["itemSpacing", "counterAxisSpacing"].iter().any(|k| bound(doc, n, k).is_some())
+}
+
+/// Whether any side of the padding of `n` is bound to a variable. Bound padding exists in the export
+/// even when the stored number is 0.
+pub(crate) fn padding_is_bound(doc: &Document, n: &Node) -> bool {
+    ["paddingTop", "paddingRight", "paddingBottom", "paddingLeft"].iter().any(|k| bound(doc, n, k).is_some())
+}
+
+/// Row gap written for a grid. With flow children this is the same number as [`SolvedGrid::row_gap`]:
+/// the solver's row gap on the layout whose variables are already resolved. That number depends only
+/// on the resolved spacing, so a large stored row count is not laid out. A grid with no flow children
+/// uses the stored layout.
+pub(crate) fn grid_row_gap_px(doc: &Document, n: &Node, al: &AutoLayout) -> f32 {
+    if n.children.iter().any(|id| doc.flow_child_input(*id, true).is_some()) {
+        designos_doc::layout_solver::grid_row_gap(&solver_layout(doc, n, al))
+    } else {
+        designos_doc::layout_solver::grid_row_gap(al)
+    }
+}
+
+/// Variable name for the row gap. This chooses a name, not a size: the row gap is its own
+/// (`counterAxisSpacing`) when that spacing is bound or the stored counter spacing is positive,
+/// and otherwise the row reuses `itemSpacing`.
+pub(crate) fn grid_row_gap_key(doc: &Document, n: &Node, al: &AutoLayout) -> &'static str {
+    if bound(doc, n, "counterAxisSpacing").is_some() || al.counter_spacing > 0.0 {
+        "counterAxisSpacing"
+    } else {
+        "itemSpacing"
+    }
+}
+
+pub(crate) fn grid_cell_align(doc: &Document, child_id: NodeId, al: &AutoLayout) -> (GridChildAlign, GridChildAlign) {
+    let (raw_h, raw_v) =
+        doc.flow_child_input(child_id, true).map(|k| (k.cell.align_h, k.cell.align_v)).unwrap_or((GridChildAlign::Start, GridChildAlign::Start));
+    let resolve = designos_doc::layout_solver::resolve_cell_align;
+    (resolve(raw_h, al.primary_align), resolve(raw_v, al.counter_align))
+}
+
+fn flex_weight(fr: f32) -> f32 {
+    if fr.is_finite() && fr > 0.0 {
+        fr
+    } else {
+        1.0
+    }
+}
+
+/// Whether every flexible column of `al` is as wide as its weight times one shared unit, within half a
+/// pixel. A flexible column the solver holds wider than that (content that does not fit its share)
+/// breaks the proportion, and no weight reproduces the solved layout then.
+fn flex_units_agree(al: &AutoLayout, col_widths: &[f32]) -> bool {
+    let mut ref_unit: Option<f32> = None;
+    for (c, &w) in col_widths.iter().enumerate() {
+        if let GridTrack::Flex(fr) = al.grid_col_tracks.get(c).copied().unwrap_or_default() {
+            let unit = w / flex_weight(fr);
+            match ref_unit {
+                None => ref_unit = Some(unit),
+                Some(r) if (unit - r).abs() > 0.5 => return false,
+                _ => {}
+            }
+        }
+    }
+    true
+}
+
+/// Column kinds for the native generators. Flexible tracks become weights (Compose, Android, SwiftUI,
+/// UIKit proportional constraints) when the grid's width is fixed and the solver's flexible columns
+/// match `weight * free / total_weight` without hitting the 1px floor. A grid that hugs its width, or
+/// whose flexible columns the solver holds off-proportion or at the 1px floor, keeps every column at
+/// its solved pixels, as before.
+fn native_col_kinds(al: &AutoLayout, frame_w: f32, widths: &[f32]) -> Vec<ColKind> {
+    let track = |c: usize| al.grid_col_tracks.get(c).copied().unwrap_or_default();
+    let [_, pr, _, pl] = al.padding;
+    let col_gap = al.item_spacing.max(0.0);
+    let inner_w = (frame_w - pl - pr - col_gap * (widths.len().saturating_sub(1) as f32)).max(0.0);
+    let fixed_used: f32 = (0..widths.len()).filter(|&c| !matches!(track(c), GridTrack::Flex(_))).map(|c| widths[c]).sum();
+    let free = (inner_w - fixed_used).max(0.0);
+    let total_weight: f32 = (0..widths.len())
+        .filter_map(|c| match track(c) {
+            GridTrack::Flex(fr) => Some(flex_weight(fr)),
+            _ => None,
+        })
+        .sum();
+    let matches_free_share = total_weight > 0.0
+        && (0..widths.len()).all(|c| match track(c) {
+            GridTrack::Flex(fr) => (widths[c] - flex_weight(fr) * free / total_weight).abs() <= 0.5,
+            _ => true,
+        });
+    let weighted = al.primary_sizing != Sizing::Hug && flex_units_agree(al, widths) && matches_free_share;
+    widths
+        .iter()
+        .enumerate()
+        .map(|(c, &px)| match track(c) {
+            GridTrack::Flex(fr) if weighted => ColKind::Flex { weight: flex_weight(fr), px },
+            GridTrack::Hug => ColKind::Hug(px),
+            _ => ColKind::Fixed(px),
+        })
+        .collect()
+}
+
+/// Column tracks for `n`: when a hugging grid has any `GridTrack::Hug` column or its solved `Flex`
+/// columns have unequal unit widths (such as `100 / 40 / 60` or `100 / 40 / 40`), returns their
+/// solved pixel widths as fixed tracks so the browser places items at the same x coordinates as
+/// `compute_grid`.
+pub(crate) fn resolved_grid_col_tracks<'a>(doc: &Document, n: &Node, al: &'a AutoLayout) -> std::borrow::Cow<'a, [GridTrack]> {
+    if al.primary_sizing != Sizing::Hug {
+        return hug_columns_as_pixels(doc, n, al);
+    }
+    let kids: Vec<designos_doc::layout_solver::ChildIn> = n.children.iter().filter_map(|id| doc.flow_child_input(*id, true)).collect();
+    if kids.is_empty() {
+        return std::borrow::Cow::Borrowed(&al.grid_col_tracks);
+    }
+    let al_s = solver_layout(doc, n, al);
+    let own = designos_doc::layout_solver::SizeLimits::from(&n.layout_child);
+    let solved = designos_doc::layout_solver::compute_grid(&al_s, n.size, own, &kids);
+    if (n.size.x - solved.frame.x).abs() > 0.5 {
+        return std::borrow::Cow::Borrowed(&al.grid_col_tracks);
+    }
+    let col_widths = designos_doc::layout_solver::grid_column_widths(&al_s, n.size, own, &kids);
+    let needs_px_tracks = al.grid_col_tracks.iter().take(col_widths.len()).any(|t| *t == GridTrack::Hug) || !flex_units_agree(al, &col_widths);
+    if !needs_px_tracks {
+        return std::borrow::Cow::Borrowed(&al.grid_col_tracks);
+    }
+    std::borrow::Cow::Owned(col_widths.into_iter().map(GridTrack::Fixed).collect())
+}
+
+/// Column tracks of a grid that does not hug its width. A `GridTrack::Hug` column is an `auto` track in
+/// CSS, which takes the free width of a fixed container or nothing when its only items fill, while the
+/// solver sizes it from the widest item that sits in it alone. Each such column is written as the
+/// solver's width in pixels; every other track keeps its stored form.
+fn hug_columns_as_pixels<'a>(doc: &Document, n: &Node, al: &'a AutoLayout) -> std::borrow::Cow<'a, [GridTrack]> {
+    let cols = grid_column_count(al);
+    if !al.grid_col_tracks.iter().take(cols).any(|t| *t == GridTrack::Hug) {
+        return std::borrow::Cow::Borrowed(&al.grid_col_tracks);
+    }
+    let kids: Vec<designos_doc::layout_solver::ChildIn> = n.children.iter().filter_map(|id| doc.flow_child_input(*id, true)).collect();
+    if kids.is_empty() {
+        return std::borrow::Cow::Borrowed(&al.grid_col_tracks);
+    }
+    let own = designos_doc::layout_solver::SizeLimits::from(&n.layout_child);
+    let widths = designos_doc::layout_solver::grid_column_widths(&solver_layout(doc, n, al), n.size, own, &kids);
+    std::borrow::Cow::Owned(
+        widths
+            .iter()
+            .enumerate()
+            .map(|(c, &w)| {
+                if al.grid_col_tracks.get(c).copied().unwrap_or_default() == GridTrack::Hug {
+                    GridTrack::Fixed(w)
+                } else {
+                    al.grid_col_tracks.get(c).copied().unwrap_or_default()
+                }
+            })
+            .collect(),
+    )
+}
+
+/// The rows of a packed grid as the solver lays them out, and as it would if every row were sized by its
+/// content alone (no Fixed row or auto track). Only the rows the children fill are solved: a stored row
+/// count is never walked, and the rows past the children hold nothing.
+fn packed_rows(doc: &Document, n: &Node, al: &AutoLayout, kids: &[designos_doc::layout_solver::ChildIn]) -> (Vec<f32>, Vec<f32>) {
+    let mut actual = solver_layout(doc, n, al);
+    actual.grid_rows = actual.grid_rows.min(designos_doc::layout_solver::placed_grid_rows(&actual, kids) as u32);
+    let mut content = actual.clone();
+    content.grid_row_tracks = Default::default();
+    content.grid_auto_tracks = GridAutoTracks::None;
+    content.counter_sizing = Sizing::Hug;
+    let own = designos_doc::layout_solver::SizeLimits::from(&n.layout_child);
+    (designos_doc::layout_solver::grid_row_heights(&actual, n.size, own, kids), designos_doc::layout_solver::grid_row_heights(&content, n.size, own, kids))
+}
+
+/// Row tracks for web exports, and how many rows they cover. The solver levels implicit flex auto rows
+/// across a fixed-height container, so those rows can differ in height, and CSS `grid-auto-rows` has
+/// one value for every implicit row. While the solver levels the rows, emit its resolved row list as
+/// pixel tracks. A packed grid keeps `auto` rows, which the browser sizes by content as the solver does,
+/// unless a Fixed row or a Fixed auto track sets a height: then the solver's rows are pixel tracks too.
+/// A stored Flex row is such a content-sized row (the solver ignores its weight), never `1fr`, which
+/// would stretch it across the container.
+pub(crate) fn resolved_grid_row_tracks<'a>(doc: &Document, n: &Node, al: &'a AutoLayout) -> (std::borrow::Cow<'a, [GridTrack]>, usize) {
+    let explicit = al.grid_rows as usize;
+    let stored = || (std::borrow::Cow::Borrowed(&al.grid_row_tracks[..]), explicit);
+    let pixel_rows = |rows: Vec<f32>| {
+        let tracks: Vec<GridTrack> = rows.into_iter().map(GridTrack::Fixed).collect();
+        let count = tracks.len();
+        (std::borrow::Cow::Owned(tracks), count)
+    };
+    let kids: Vec<designos_doc::layout_solver::ChildIn> = n.children.iter().filter_map(|id| doc.flow_child_input(*id, true)).collect();
+    if kids.is_empty() {
+        return stored();
+    }
+    if !grid_packs_auto_rows(doc, n, al) {
+        // Resolve only the implicit auto rows that the solver levels across a fixed-height container.
+        return match solved_grid(doc, n, al) {
+            Some(solved) if explicit == 0 || solved.rows.len() > explicit => pixel_rows(solved.rows),
+            _ => stored(),
+        };
+    }
+    let (rows, content) = packed_rows(doc, n, al, &kids);
+    // CSS shares a spanning child's extra height out evenly over its `auto` rows, the solver levels them,
+    // so the solver's rows are written whenever a child spans more than one.
+    let spans = kids.iter().any(|k| k.cell.row_span > 1);
+    if spans || rows.len() != content.len() || rows.iter().zip(&content).any(|(a, b)| (a - b).abs() > 0.01) {
+        return pixel_rows(rows);
+    }
+    // The solver's rows are content-sized: a stored Flex row becomes `auto`, and the Flex rows after the
+    // last other stored track are the implicit rows a browser already sizes that way.
+    let row_track = |r: usize| al.grid_row_tracks.get(r).copied().unwrap_or_default();
+    let listed = explicit.min(al.grid_row_tracks.len());
+    let keep = (0..listed).rev().find(|&r| !matches!(row_track(r), GridTrack::Flex(_))).map_or(0, |r| r + 1);
+    let tracks: Vec<GridTrack> = (0..keep).map(|r| if matches!(row_track(r), GridTrack::Flex(_)) { GridTrack::Hug } else { row_track(r) }).collect();
+    (std::borrow::Cow::Owned(tracks), keep)
+}
+
 /// One track. A flex track is `minmax(0, {n}fr)`: the solver hands it a weighted share of the inner
 /// width and lets it shrink to a pixel, while a bare `{n}fr` is `minmax(auto, {n}fr)` and cannot
 /// shrink under its content.
@@ -675,11 +1136,11 @@ fn has_decl(lines: &[String], prop: &str) -> bool {
 
 /// Replaces literal values in CSS declarations by `var(--token)` references for properties
 /// bound to variables.
-pub(crate) fn apply_css_vars(doc: &Document, n: &Node, lines: &mut Vec<String>) {
+pub(crate) fn apply_css_vars(doc: &Document, n: &Node, lines: &mut Vec<String>, color_fmt: ColorFormat) {
     if n.variables.bindings.is_empty() {
         return;
     }
-    let b = |key: &str, fmt: Fallback| bound(doc, n, key).map(|v| css_var_with_fallback(doc, n, v, fmt));
+    let b = |key: &str, fmt: Fallback| bound(doc, n, key).map(|v| css_var_with_fallback(doc, n, v, fmt, color_fmt));
     let is_text = matches!(n.kind, NodeKind::Text(_));
     let visible_fills = if is_text {
         text_of(n).map(|t| t.style.fills.iter().filter(|p| p.visible).count()).unwrap_or(0)
@@ -711,6 +1172,34 @@ pub(crate) fn apply_css_vars(doc: &Document, n: &Node, lines: &mut Vec<String>) 
             }
         }
     }
+    // Stroke widths are emitted by `border` before variable application. Replace only the
+    // width token so style, color, outline offset, and other stroke behavior stay intact.
+    if let Some(v) = b("strokeWeight", Fallback::Px) {
+        for prop in ["border", "border-top", "outline", "-webkit-text-stroke-width"] {
+            let pre = format!("{prop}: ");
+            if let Some(l) = lines.iter_mut().find(|l| l.starts_with(&pre)) {
+                let body = l[pre.len()..].trim_end_matches(';');
+                if prop == "-webkit-text-stroke-width" {
+                    *l = format!("{prop}: {v};");
+                } else if let Some((_, rest)) = body.split_once(' ') {
+                    *l = format!("{prop}: {v} {rest};");
+                }
+            }
+        }
+        if has_decl(lines, "outline-offset") {
+            match n.stroke.align {
+                StrokeAlign::Center => set_decl(lines, "outline-offset", format!("calc(-0.5 * {v})")),
+                StrokeAlign::Inside => set_decl(lines, "outline-offset", format!("calc(-1 * {v})")),
+                StrokeAlign::Outside => {}
+            }
+        }
+    }
+    let side_widths = [("strokeTopWeight", 0usize), ("strokeRightWeight", 1), ("strokeBottomWeight", 2), ("strokeLeftWeight", 3)];
+    if has_decl(lines, "border-width") && side_widths.iter().any(|(key, _)| bound(doc, n, key).is_some()) {
+        let stored = n.stroke.side_weights.unwrap_or([n.stroke.weight; 4]);
+        let vals: Vec<String> = side_widths.iter().map(|(key, i)| b(key, Fallback::Px).unwrap_or_else(|| format!("{}px", num(stored[*i])))).collect();
+        set_decl(lines, "border-width", css_box(&vals));
+    }
     for (key, prop, fmt) in [
         ("width", "width", Fallback::Px),
         ("height", "height", Fallback::Px),
@@ -735,7 +1224,7 @@ pub(crate) fn apply_css_vars(doc: &Document, n: &Node, lines: &mut Vec<String>) 
             if let Some(al) = n.kind.frame_props().and_then(|f| f.auto_layout.as_ref()) {
                 if al.direction == LayoutDirection::Grid {
                     let col_fb = format!("{}px", num(al.item_spacing));
-                    let row_px = if al.counter_spacing > 0.0 { al.counter_spacing } else { al.item_spacing };
+                    let row_px = designos_doc::layout_solver::grid_row_gap(al);
                     let row_fb = format!("{}px", num(row_px));
                     // The column gap is `itemSpacing`, the row gap `counterAxisSpacing`. An unbound row keeps
                     // its own pixel gap; only a row with no spacing of its own (`counterAxisSpacing` unset,
@@ -754,9 +1243,19 @@ pub(crate) fn apply_css_vars(doc: &Document, n: &Node, lines: &mut Vec<String>) 
     }
     // padding: expand to a 4-value shorthand when any side is bound
     let sides = ["paddingTop", "paddingRight", "paddingBottom", "paddingLeft"];
-    if sides.iter().any(|k| bound(doc, n, k).is_some()) {
+    if padding_is_bound(doc, n) {
         if let Some(al) = n.kind.frame_props().and_then(|f| f.auto_layout.as_ref()) {
-            let vals: Vec<String> = sides.iter().enumerate().map(|(i, k)| b(k, Fallback::Px).unwrap_or_else(|| format!("{}px", num(al.padding[i])))).collect();
+            let stroke = crate::grid_stroke::grid_stroke_of(doc, n);
+            let extra = stroke.map_or([0.0; 4], |g| g.pad_extra);
+            let vals: Vec<String> = sides
+                .iter()
+                .enumerate()
+                .map(|(i, k)| match b(k, Fallback::Px) {
+                    Some(v) => padding_with_extra(&v, extra[i]),
+                    None if stroke.is_some_and(|g| g.adjusts_padding(i)) => format!("{}px", num((al.padding[i] + extra[i]).max(0.0))),
+                    None => format!("{}px", num(al.padding[i])),
+                })
+                .collect();
             lines.retain(|l| !l.starts_with("padding: "));
             let value = css_box(&vals);
             // keep declaration order: padding follows the size declarations
@@ -777,6 +1276,27 @@ pub(crate) fn apply_css_vars(doc: &Document, n: &Node, lines: &mut Vec<String>) 
         let vals: Vec<String> =
             corners.iter().enumerate().map(|(i, k)| b(k, Fallback::Px).unwrap_or_else(|| format!("{}px", num(n.corner_radii[i])))).collect();
         set_decl(lines, "border-radius", css_box(&vals));
+    }
+}
+
+/// The stroke colour of `n` as CSS when a variable is bound to it: `var(--Color-Stroke, #333)`.
+pub(crate) fn stroke_color_token(doc: &Document, n: &Node, color_fmt: ColorFormat) -> Option<String> {
+    bound(doc, n, "strokes/0").map(|v| css_var_with_fallback(doc, n, v, Fallback::Color, color_fmt))
+}
+
+/// A number variable `v` bound to a stroke width on `n` as CSS: `var(--Border-Top, 4px)`.
+pub(crate) fn stroke_width_var_css(doc: &Document, n: &Node, v: &Variable, color_fmt: ColorFormat) -> String {
+    css_var_with_fallback(doc, n, v, Fallback::Px, color_fmt)
+}
+
+/// A bound padding side plus the pixels the stroke model of a grid frame asks of it.
+fn padding_with_extra(var: &str, extra: f32) -> String {
+    if extra > 0.0 {
+        format!("calc({var} + {}px)", num(extra))
+    } else if extra < 0.0 {
+        format!("max(0px, calc({var} - {}px))", num(-extra))
+    } else {
+        var.to_string()
     }
 }
 
@@ -995,6 +1515,7 @@ pub(crate) mod fixture {
             spread: 0.0,
             visible: true,
             show_behind: false,
+            blend: Default::default(),
         }];
         if let NodeKind::Frame(f) = &mut card.kind {
             f.clips_content = true;
@@ -1244,5 +1765,481 @@ mod tests {
         // A row taller than the child is where a stretch changes the height.
         let (d, _, rect) = fixture::grid_stretch_child(Some(GridTrack::Fixed(100.0)), false);
         assert_eq!(d.get(rect).unwrap().size, Vec2::new(30.0, 100.0));
+    }
+
+    #[test]
+    fn solved_grid_matches_solver_accessors_and_place_children() {
+        let mut al = AutoLayout {
+            grid_columns: 4,
+            grid_rows: 0,
+            item_spacing: 12.0,
+            counter_spacing: 16.0,
+            padding: [12.0, 12.0, 12.0, 12.0],
+            primary_sizing: Sizing::Fixed,
+            counter_sizing: Sizing::Fixed,
+            ..Default::default()
+        };
+        al.grid_col_tracks[0] = GridTrack::Fixed(120.0);
+        let (mut d, grid) = fixture::grid_frame(al, Vec2::new(428.0, 220.0));
+        let hero = fixture::add_rect(&mut d, grid, Vec2::new(80.0, 40.0));
+        d.get_mut(hero).unwrap().layout_child.col_span = 2;
+        d.get_mut(hero).unwrap().layout_child.row_span = 2;
+        let a = fixture::add_rect(&mut d, grid, Vec2::new(60.0, 32.0));
+        let b = fixture::add_rect(&mut d, grid, Vec2::new(60.0, 32.0));
+        let c = fixture::add_rect(&mut d, grid, Vec2::new(60.0, 48.0));
+        // An absolute child is skipped by `flow_child_input`.
+        let abs = fixture::add_rect(&mut d, grid, Vec2::new(20.0, 20.0));
+        d.get_mut(abs).unwrap().layout_child.absolute = true;
+        d.relayout_subtree(grid);
+
+        let n = d.get(grid).unwrap();
+        let al = n.kind.frame_props().unwrap().auto_layout.as_ref().unwrap();
+        let sg = solved_grid(&d, n, al).expect("solved_grid must return Some for a populated grid");
+
+        let al_s = al.with_stroke(&n.stroke);
+        let own = designos_doc::layout_solver::SizeLimits::from(&n.layout_child);
+        let kids: Vec<designos_doc::layout_solver::ChildIn> = n.children.iter().filter_map(|id| d.flow_child_input(*id, true)).collect();
+        let expected_widths = designos_doc::layout_solver::grid_column_widths(&al_s, n.size, own, &kids);
+        let expected_rows = designos_doc::layout_solver::grid_row_heights(&al_s, n.size, own, &kids);
+        let expected_placed = designos_doc::layout_solver::place_children(&kids, expected_widths.len());
+
+        assert_eq!(sg.widths, expected_widths);
+        assert_eq!(sg.rows, expected_rows);
+        assert_eq!(sg.col_gap, 12.0);
+        assert_eq!(sg.row_gap, 16.0);
+        let actual_ids: Vec<NodeId> = sg.children.iter().map(|(id, _)| *id).collect();
+        let actual_placed: Vec<designos_doc::layout_solver::Placed> = sg.children.iter().map(|(_, p)| *p).collect();
+        assert_eq!(actual_ids, vec![hero, a, b, c]);
+        assert_eq!(actual_placed, expected_placed);
+        assert_eq!(sg.cell_origin(&sg.children[0].1), (12.0, 12.0));
+    }
+
+    #[test]
+    fn bound_row_gap_stored_at_zero_exports_the_resolved_gap() {
+        let mut d = Document::new("t");
+        let page = d.add_page("p");
+        d.variable_collections.insert(
+            "c".into(),
+            VariableCollection {
+                id: "c".into(),
+                name: "Tokens".into(),
+                modes: vec![VariableMode { id: "m".into(), name: "Mode".into() }],
+                default_mode: "m".into(),
+                variables: vec!["row".into()],
+                key: None,
+                source_library_key: None,
+                extensions: Default::default(),
+            },
+        );
+        d.variables.insert(
+            "row".into(),
+            Variable {
+                id: "row".into(),
+                name: "Spacing/Row".into(),
+                collection: "c".into(),
+                kind: VariableKind::Number,
+                values: [("m".to_string(), VariableValue::Number(12.0))].into_iter().collect(),
+                description: String::new(),
+                scopes: vec![],
+                hidden_from_publishing: false,
+                key: None,
+                code_syntax: Default::default(),
+                extensions: Default::default(),
+                mode_extensions: Default::default(),
+            },
+        );
+        let gid = d.alloc_id();
+        let mut g = Node::frame(gid, Rect::new(0.0, 0.0, 200.0, 200.0));
+        g.name = "Cards".into();
+        g.fills.clear();
+        g.kind = NodeKind::Frame(FrameProps {
+            auto_layout: Some(AutoLayout {
+                direction: LayoutDirection::Grid,
+                item_spacing: 4.0,
+                counter_spacing: 0.0,
+                primary_sizing: Sizing::Fixed,
+                counter_sizing: Sizing::Fixed,
+                grid_columns: 2,
+                ..Default::default()
+            }),
+            ..Default::default()
+        });
+        g.variables.bindings.insert("counterAxisSpacing".into(), "row".into());
+        let grid = d.insert(page, g).unwrap();
+        for _ in 0..4 {
+            let cid = d.alloc_id();
+            d.insert(grid, Node::rectangle(cid, Rect::new(0.0, 0.0, 40.0, 30.0))).unwrap();
+        }
+
+        let css = crate::css_for(&d, grid);
+        let gap = css.lines().find_map(|l| l.trim().strip_prefix("gap: ")).map(|v| v.trim_end_matches(';').to_string()).unwrap_or_default();
+        assert_eq!(gap, "var(--Spacing-Row, 12px) 4px", "{css}");
+
+        let tw = crate::tailwind_for(&d, grid);
+        assert!(tw.contains("gap-x-1"), "{tw}");
+        assert!(tw.contains("gap-y-[var(--Spacing-Row)]"), "{tw}");
+
+        let n = d.get(grid).unwrap();
+        let al = n.kind.frame_props().unwrap().auto_layout.as_ref().unwrap();
+        let sg = solved_grid(&d, n, al).expect("grid has flow children");
+        assert_eq!(sg.row_gap, 12.0);
+        let al_s = solver_layout(&d, n, al);
+        let own = designos_doc::layout_solver::SizeLimits::from(&n.layout_child);
+        let kids: Vec<designos_doc::layout_solver::ChildIn> = n.children.iter().filter_map(|id| d.flow_child_input(*id, true)).collect();
+        let out = designos_doc::layout_solver::compute_grid(&al_s, n.size, own, &kids);
+        assert_eq!(sg.children.len(), out.rects.len());
+        for ((_, placed), rect) in sg.children.iter().zip(&out.rects) {
+            let (_, y) = sg.cell_origin(placed);
+            assert!((y - rect.y).abs() < 1e-4, "row {} origin {y} != solver {}", placed.row, rect.y);
+        }
+        let row1 = sg.children.iter().find(|(_, p)| p.row == 1).expect("second row");
+        assert!((sg.cell_origin(&row1.1).1 - 42.0).abs() < 1e-4, "second row at {}", sg.cell_origin(&row1.1).1);
+    }
+
+    #[test]
+    fn native_generators_preserve_legacy_included_stroke_inset() {
+        for (align, weight, pad_str_dp, pad_str_swift, pad_uikit, pad_x, track_w, col1_x, pad_tl) in [
+            (StrokeAlign::Inside, 6.0, "6", "6", "top: 6, left: 6, bottom: 6, right: 6", 12.0, 194.0, 200.0, 6.0),
+            (StrokeAlign::Center, 1.0, "0.5", "0.5", "top: 0.5, left: 0.5, bottom: 0.5, right: 0.5", 1.0, 199.5, 200.0, 0.5),
+        ] {
+            let al = AutoLayout {
+                direction: LayoutDirection::Grid,
+                layout_version: 0,
+                stroke_included: true,
+                grid_columns: 2,
+                grid_col_tracks: vec![GridTrack::Flex(1.0), GridTrack::Flex(1.0)].into(),
+                primary_sizing: Sizing::Fixed,
+                counter_sizing: Sizing::Fixed,
+                ..Default::default()
+            };
+            let (mut d, grid) = fixture::grid_frame(al, Vec2::new(400.0, 120.0));
+            let n = d.get_mut(grid).unwrap();
+            n.stroke.paints = vec![Paint::solid(Color::BLACK)];
+            n.stroke.weight = weight;
+            n.stroke.align = align;
+            for _ in 0..2 {
+                let child = fixture::add_rect(&mut d, grid, Vec2::new(40.0, 30.0));
+                d.get_mut(child).unwrap().layout_child.align_self = AlignSelf::Stretch;
+            }
+            d.relayout_subtree(grid);
+
+            let n = d.get(grid).unwrap();
+            let al = n.kind.frame_props().unwrap().auto_layout.as_ref().unwrap();
+            let sg = solved_grid(&d, n, al).expect("grid has flow children");
+            assert_eq!(sg.widths, vec![track_w, track_w]);
+            assert_eq!(sg.rows, vec![30.0]);
+            assert_eq!(sg.pad_x, pad_x);
+            assert_eq!(n.size.x - sg.pad_x, 400.0 - pad_x);
+            assert_eq!(sg.cols, vec![ColKind::Flex { weight: 1.0, px: track_w }, ColKind::Flex { weight: 1.0, px: track_w }]);
+            assert_eq!(sg.cell_origin(&sg.children[0].1), (pad_tl, pad_tl));
+            assert_eq!(sg.cell_origin(&sg.children[1].1), (col1_x, pad_tl));
+
+            let android = crate::android_xml_for(&d, grid);
+            assert!(android.contains("android:layout_width=\"400dp\""), "{android}");
+            assert!(android.contains("android:layout_height=\"120dp\""), "{android}");
+            assert!(android.contains(&format!("android:padding=\"{pad_str_dp}dp\"")), "{android}");
+            assert_eq!(android.matches("<FrameLayout\n        android:layout_width=\"0dp\"\n        android:layout_height=\"30dp\"").count(), 2, "{android}");
+            assert_eq!(android.matches("android:layout_columnWeight=\"1\"").count(), 2, "{android}");
+
+            let compose = crate::compose_for(&d, grid);
+            assert!(compose.contains(".size(width = 400.dp, height = 120.dp)"), "{compose}");
+            assert!(compose.contains(&format!(".padding({pad_str_dp}.dp)")), "{compose}");
+            assert!(compose.contains("val fixed = listOf(0.dp, 0.dp).map { it.roundToPx() }; val weights = listOf(1f, 1f);"), "{compose}");
+            assert_eq!(compose.matches("Box(Modifier.height(30.dp), contentAlignment = Alignment.TopStart)").count(), 2, "{compose}");
+
+            let swiftui = crate::swiftui_for(&d, grid);
+            assert!(swiftui.contains(&format!(".padding({pad_str_swift})")), "{swiftui}");
+            assert!(swiftui.contains(".frame(width: 400, height: 120, alignment: .topLeading)"), "{swiftui}");
+            assert_eq!(
+                swiftui.matches(".frame(minWidth: 0, maxWidth: .infinity, minHeight: 30, maxHeight: 30, alignment: .topLeading)").count(),
+                2,
+                "{swiftui}"
+            );
+
+            let uikit = crate::uikit_for(&d, grid);
+            assert!(uikit.contains(&format!("UIEdgeInsets({pad_uikit})")), "{uikit}");
+            assert!(uikit.contains("frame.widthAnchor.constraint(equalToConstant: 400),"), "{uikit}");
+            assert!(
+                uikit.contains(&format!("colUnit.widthAnchor.constraint(equalTo: frame.widthAnchor, multiplier: 1.0 / 2, constant: -{} / 2),", num(pad_x))),
+                "{uikit}"
+            );
+            assert!(uikit.contains("cell.widthAnchor.constraint(equalTo: colUnit.widthAnchor, multiplier: 1, constant: 0),"), "{uikit}");
+            assert!(uikit.contains("cell.heightAnchor.constraint(equalToConstant: 30),"), "{uikit}");
+            assert!(uikit.contains("cell2.widthAnchor.constraint(equalTo: colUnit.widthAnchor, multiplier: 1, constant: 0),"), "{uikit}");
+            assert!(uikit.contains("cell2.heightAnchor.constraint(equalToConstant: 30),"), "{uikit}");
+        }
+
+        // Bound strokeWeight (stored 2, resolves to 6) on Inside 400x120 grid with one 30px row:
+        let al = AutoLayout {
+            direction: LayoutDirection::Grid,
+            layout_version: 0,
+            stroke_included: true,
+            grid_columns: 2,
+            grid_col_tracks: vec![GridTrack::Flex(1.0), GridTrack::Flex(1.0)].into(),
+            primary_sizing: Sizing::Fixed,
+            counter_sizing: Sizing::Fixed,
+            ..Default::default()
+        };
+        let (mut d, grid) = fixture::grid_frame(al, Vec2::new(400.0, 120.0));
+        d.variable_collections.insert(
+            "c".into(),
+            VariableCollection {
+                id: "c".into(),
+                name: "Tokens".into(),
+                modes: vec![VariableMode { id: "m".into(), name: "Mode".into() }],
+                default_mode: "m".into(),
+                variables: vec!["stroke".into()],
+                key: None,
+                source_library_key: None,
+                extensions: Default::default(),
+            },
+        );
+        d.variables.insert(
+            "stroke".into(),
+            Variable {
+                id: "stroke".into(),
+                name: "Stroke/Width".into(),
+                collection: "c".into(),
+                kind: VariableKind::Number,
+                values: [("m".to_string(), VariableValue::Number(6.0))].into_iter().collect(),
+                description: String::new(),
+                scopes: vec![],
+                hidden_from_publishing: false,
+                key: None,
+                code_syntax: Default::default(),
+                extensions: Default::default(),
+                mode_extensions: Default::default(),
+            },
+        );
+        let n = d.get_mut(grid).unwrap();
+        n.stroke.paints = vec![Paint::solid(Color::BLACK)];
+        n.stroke.weight = 2.0;
+        n.stroke.align = StrokeAlign::Inside;
+        n.variables.bindings.insert("strokeWeight".into(), "stroke".into());
+        for _ in 0..2 {
+            let child = fixture::add_rect(&mut d, grid, Vec2::new(40.0, 30.0));
+            d.get_mut(child).unwrap().layout_child.align_self = AlignSelf::Stretch;
+        }
+        d.relayout_subtree(grid);
+
+        let android = crate::android_xml_for(&d, grid);
+        assert!(android.contains("android:padding=\"6dp\""), "{android}");
+        assert_eq!(android.matches("<FrameLayout\n        android:layout_width=\"194dp\"\n        android:layout_height=\"30dp\"").count(), 2, "{android}");
+        let compose = crate::compose_for(&d, grid);
+        assert!(compose.contains(".padding(6.dp)"), "{compose}");
+        assert!(compose.contains("listOf(194.dp, 194.dp).map { it.roundToPx() }"), "{compose}");
+        let swiftui = crate::swiftui_for(&d, grid);
+        assert!(swiftui.contains(".padding(6)"), "{swiftui}");
+        assert_eq!(swiftui.matches(".frame(width: 194, height: 30, alignment: .topLeading)").count(), 2, "{swiftui}");
+        let uikit = crate::uikit_for(&d, grid);
+        assert!(uikit.contains("UIEdgeInsets(top: 6, left: 6, bottom: 6, right: 6)"), "{uikit}");
+        assert!(uikit.contains("cell.widthAnchor.constraint(equalToConstant: 194),"), "{uikit}");
+        assert!(uikit.contains("cell2.widthAnchor.constraint(equalToConstant: 194),"), "{uikit}");
+    }
+
+    #[test]
+    fn bound_legacy_included_stroke_uses_resolved_pixel_tracks() {
+        let make_doc = |frame_h: f32, child_h: f32, bind_pad_left: bool| {
+            let al = AutoLayout {
+                direction: LayoutDirection::Grid,
+                layout_version: 0,
+                stroke_included: true,
+                grid_columns: 2,
+                grid_col_tracks: vec![GridTrack::Flex(1.0), GridTrack::Flex(1.0)].into(),
+                primary_sizing: Sizing::Fixed,
+                counter_sizing: Sizing::Fixed,
+                ..Default::default()
+            };
+            let (mut d, grid) = fixture::grid_frame(al, Vec2::new(400.0, frame_h));
+            d.variable_collections.insert(
+                "c".into(),
+                VariableCollection {
+                    id: "c".into(),
+                    name: "Tokens".into(),
+                    modes: vec![VariableMode { id: "m".into(), name: "Mode".into() }],
+                    default_mode: "m".into(),
+                    variables: vec!["stroke".into()],
+                    key: None,
+                    source_library_key: None,
+                    extensions: Default::default(),
+                },
+            );
+            d.variables.insert(
+                "stroke".into(),
+                Variable {
+                    id: "stroke".into(),
+                    name: "Stroke/Width".into(),
+                    collection: "c".into(),
+                    kind: VariableKind::Number,
+                    values: [("m".to_string(), VariableValue::Number(6.0))].into_iter().collect(),
+                    description: String::new(),
+                    scopes: vec![],
+                    hidden_from_publishing: false,
+                    key: None,
+                    code_syntax: Default::default(),
+                    extensions: Default::default(),
+                    mode_extensions: Default::default(),
+                },
+            );
+            let n = d.get_mut(grid).unwrap();
+            n.stroke.paints = vec![Paint::solid(Color::BLACK)];
+            n.stroke.weight = 2.0;
+            n.stroke.align = StrokeAlign::Inside;
+            n.variables.bindings.insert("strokeWeight".into(), "stroke".into());
+            if bind_pad_left {
+                n.variables.bindings.insert("paddingLeft".into(), "stroke".into());
+            }
+            for _ in 0..2 {
+                let child = fixture::add_rect(&mut d, grid, Vec2::new(40.0, child_h));
+                d.get_mut(child).unwrap().layout_child.align_self = AlignSelf::Stretch;
+            }
+            d.relayout_subtree(grid);
+            (d, grid)
+        };
+
+        // Pure strokeWeight bound -> resolves to 6 (stored 2): padding [6, 6, 6, 6], tracks 194 + 194 at x=6 and x=200, row at y=6.
+        let (d, grid) = make_doc(120.0, 30.0, false);
+        let n = d.get(grid).unwrap();
+        let al = n.kind.frame_props().unwrap().auto_layout.as_ref().unwrap();
+        assert_eq!(native_grid_layout(&d, n, al).padding, [6.0, 6.0, 6.0, 6.0]);
+        let sg = solved_grid(&d, n, al).expect("grid has flow children");
+        assert_eq!(sg.widths, vec![194.0, 194.0]);
+        assert_eq!(sg.rows, vec![30.0]);
+        assert_eq!(sg.cols, vec![ColKind::Fixed(194.0), ColKind::Fixed(194.0)]);
+        assert_eq!(sg.cell_origin(&sg.children[0].1), (6.0, 6.0));
+        assert_eq!(sg.cell_origin(&sg.children[1].1), (200.0, 6.0));
+
+        let android = crate::android_xml_for(&d, grid);
+        assert!(android.contains("android:padding=\"6dp\""), "{android}");
+        assert_eq!(android.matches("<FrameLayout\n        android:layout_width=\"194dp\"\n        android:layout_height=\"30dp\"").count(), 2, "{android}");
+        assert!(!android.contains("layout_columnWeight"), "{android}");
+
+        let compose = crate::compose_for(&d, grid);
+        assert!(compose.contains(".padding(6.dp)"), "{compose}");
+        assert!(compose.contains("listOf(194.dp, 194.dp).map { it.roundToPx() }"), "{compose}");
+        assert_eq!(compose.matches("Box(Modifier.height(30.dp), contentAlignment = Alignment.TopStart)").count(), 2, "{compose}");
+
+        let swiftui = crate::swiftui_for(&d, grid);
+        assert!(swiftui.contains(".padding(6)"), "{swiftui}");
+        assert_eq!(swiftui.matches(".frame(width: 194, height: 30, alignment: .topLeading)").count(), 2, "{swiftui}");
+        assert!(!swiftui.contains("maxWidth: .infinity"), "{swiftui}");
+
+        let uikit = crate::uikit_for(&d, grid);
+        assert!(uikit.contains("UIEdgeInsets(top: 6, left: 6, bottom: 6, right: 6)"), "{uikit}");
+        assert!(uikit.contains("cell.widthAnchor.constraint(equalToConstant: 194),"), "{uikit}");
+        assert!(uikit.contains("cell.heightAnchor.constraint(equalToConstant: 30),"), "{uikit}");
+        assert!(uikit.contains("cell2.widthAnchor.constraint(equalToConstant: 194),"), "{uikit}");
+        assert!(uikit.contains("cell2.heightAnchor.constraint(equalToConstant: 30),"), "{uikit}");
+        assert!(!uikit.contains("colUnit"), "{uikit}");
+
+        // strokeWeight and paddingLeft both bound -> resolves to 6: padding [6, 6, 6, 12] as pixels, tracks 191 + 191.
+        let (d, grid) = make_doc(100.0, 20.0, true);
+        let n = d.get(grid).unwrap();
+        let al = n.kind.frame_props().unwrap().auto_layout.as_ref().unwrap();
+        assert_eq!(native_grid_layout(&d, n, al).padding, [6.0, 6.0, 6.0, 12.0]);
+        let sg = solved_grid(&d, n, al).expect("grid has flow children");
+        assert_eq!(sg.widths, vec![191.0, 191.0]);
+        assert_eq!(sg.rows, vec![20.0]);
+        assert_eq!(sg.cols, vec![ColKind::Fixed(191.0), ColKind::Fixed(191.0)]);
+        assert_eq!(sg.cell_origin(&sg.children[0].1), (12.0, 6.0));
+        assert_eq!(sg.cell_origin(&sg.children[1].1), (203.0, 6.0));
+
+        let android = crate::android_xml_for(&d, grid);
+        assert!(android.contains("android:paddingTop=\"6dp\""), "{android}");
+        assert!(android.contains("android:paddingEnd=\"6dp\""), "{android}");
+        assert!(android.contains("android:paddingBottom=\"6dp\""), "{android}");
+        assert!(android.contains("android:paddingStart=\"12dp\""), "{android}");
+        assert!(!android.contains("paddingStart=\"@dimen/"), "{android}");
+        assert_eq!(android.matches("<FrameLayout\n        android:layout_width=\"191dp\"\n        android:layout_height=\"20dp\"").count(), 2, "{android}");
+        assert!(!android.contains("layout_columnWeight"), "{android}");
+
+        let compose = crate::compose_for(&d, grid);
+        assert!(compose.contains(".padding(start = 12.dp, top = 6.dp, end = 6.dp, bottom = 6.dp)"), "{compose}");
+        assert!(compose.contains("listOf(191.dp, 191.dp).map { it.roundToPx() }"), "{compose}");
+
+        let swiftui = crate::swiftui_for(&d, grid);
+        assert!(swiftui.contains(".padding(.leading, 12)"), "{swiftui}");
+        assert!(swiftui.contains(".padding(.trailing, 6)"), "{swiftui}");
+        assert!(swiftui.contains(".padding(.vertical, 6)"), "{swiftui}");
+        assert_eq!(swiftui.matches(".frame(width: 191, height: 20, alignment: .topLeading)").count(), 2, "{swiftui}");
+        assert!(!swiftui.contains("maxWidth: .infinity"), "{swiftui}");
+
+        let uikit = crate::uikit_for(&d, grid);
+        assert!(uikit.contains("UIEdgeInsets(top: 6, left: 12, bottom: 6, right: 6)"), "{uikit}");
+        assert!(uikit.contains("cell.widthAnchor.constraint(equalToConstant: 191),"), "{uikit}");
+        assert!(uikit.contains("cell2.widthAnchor.constraint(equalToConstant: 191),"), "{uikit}");
+        assert!(!uikit.contains("colUnit"), "{uikit}");
+    }
+
+    #[test]
+    fn bound_legacy_stroke_without_inward_inset_keeps_weights() {
+        for (align, visible) in [(StrokeAlign::Outside, true), (StrokeAlign::Inside, false)] {
+            let al = AutoLayout {
+                direction: LayoutDirection::Grid,
+                layout_version: 0,
+                stroke_included: true,
+                grid_columns: 2,
+                grid_col_tracks: vec![GridTrack::Flex(1.0), GridTrack::Flex(1.0)].into(),
+                primary_sizing: Sizing::Fixed,
+                counter_sizing: Sizing::Fixed,
+                ..Default::default()
+            };
+            let (mut d, grid) = fixture::grid_frame(al, Vec2::new(400.0, 120.0));
+            d.variable_collections.insert(
+                "c".into(),
+                VariableCollection {
+                    id: "c".into(),
+                    name: "Tokens".into(),
+                    modes: vec![VariableMode { id: "m".into(), name: "Mode".into() }],
+                    default_mode: "m".into(),
+                    variables: vec!["stroke".into()],
+                    key: None,
+                    source_library_key: None,
+                    extensions: Default::default(),
+                },
+            );
+            d.variables.insert(
+                "stroke".into(),
+                Variable {
+                    id: "stroke".into(),
+                    name: "Stroke/Width".into(),
+                    collection: "c".into(),
+                    kind: VariableKind::Number,
+                    values: [("m".to_string(), VariableValue::Number(6.0))].into_iter().collect(),
+                    description: String::new(),
+                    scopes: vec![],
+                    hidden_from_publishing: false,
+                    key: None,
+                    code_syntax: Default::default(),
+                    extensions: Default::default(),
+                    mode_extensions: Default::default(),
+                },
+            );
+            let n = d.get_mut(grid).unwrap();
+            n.stroke.paints = if visible { vec![Paint::solid(Color::BLACK)] } else { Vec::new() };
+            n.stroke.weight = 2.0;
+            n.stroke.align = align;
+            n.variables.bindings.insert("strokeWeight".into(), "stroke".into());
+            for _ in 0..2 {
+                let child = fixture::add_rect(&mut d, grid, Vec2::new(40.0, 30.0));
+                d.get_mut(child).unwrap().layout_child.align_self = AlignSelf::Stretch;
+            }
+            d.relayout_subtree(grid);
+
+            let n = d.get(grid).unwrap();
+            let al = n.kind.frame_props().unwrap().auto_layout.as_ref().unwrap();
+            let sg = solved_grid(&d, n, al).expect("grid has flow children");
+            assert_eq!(sg.widths, vec![200.0, 200.0]);
+            assert_eq!(sg.cols, vec![ColKind::Flex { weight: 1.0, px: 200.0 }, ColKind::Flex { weight: 1.0, px: 200.0 }]);
+
+            let android = crate::android_xml_for(&d, grid);
+            assert_eq!(android.matches("android:layout_columnWeight=\"1\"").count(), 2, "{android}");
+            let compose = crate::compose_for(&d, grid);
+            assert!(compose.contains("val weights = listOf(1f, 1f)"), "{compose}");
+            let swiftui = crate::swiftui_for(&d, grid);
+            assert_eq!(swiftui.matches("maxWidth: .infinity").count(), 2, "{swiftui}");
+            let uikit = crate::uikit_for(&d, grid);
+            assert!(uikit.contains("colUnit"), "{uikit}");
+        }
     }
 }

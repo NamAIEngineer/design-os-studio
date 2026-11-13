@@ -1,0 +1,279 @@
+{
+ "viewBox": [
+  0,
+  0,
+  1440,
+  900
+ ],
+ "source": "DESIGN:OS Studio 0.7.5 (tag v0.7.5) --screenshot of the Untitled UI PRO v8.0 kit, \"Input field\" selected, zoom 17, 1440x900 at scale 2, --no-toast; sha256:d21f35d862efd4d2dd7ddd3127f9275383485ba1aa32e789e17acbfb73953f30",
+ "scale": "source is 2880x1800 = 2x logical; every stroke vertex is rounded to 0.5 logical px (= 1 source px)",
+ "layers": [
+  {
+   "id": "file",
+   "file": "file.svg",
+   "bbox": [
+    315.5,
+    139.5,
+    883.0,
+    582.5
+   ],
+   "region": [
+    310,
+    52,
+    889,
+    848
+   ],
+   "anchor": [
+    1198.5,
+    430.8
+   ],
+   "anchor_side": "right (ink bbox edge)",
+   "label": "The .fig document",
+   "bytes": 63502,
+   "path_elements": 2,
+   "subpaths": 2575,
+   "shape_subpaths": 1615,
+   "text_bars": 960
+  },
+  {
+   "id": "canvas",
+   "file": "canvas.svg",
+   "bbox": [
+    290.5,
+    32.5,
+    908.0,
+    866.0
+   ],
+   "region": [
+    290,
+    32,
+    909,
+    868
+   ],
+   "anchor": [
+    744.5,
+    900
+   ],
+   "anchor_side": "bottom",
+   "label": "Canvas",
+   "bytes": 14438,
+   "path_elements": 2,
+   "subpaths": 729,
+   "shape_subpaths": 695,
+   "text_bars": 34
+  },
+  {
+   "id": "layers",
+   "file": "layers.svg",
+   "bbox": [
+    49.5,
+    32.5,
+    240.5,
+    866.0
+   ],
+   "region": [
+    49,
+    32,
+    241,
+    868
+   ],
+   "anchor": [
+    169.5,
+    900
+   ],
+   "anchor_side": "bottom",
+   "label": "Layers panel",
+   "bytes": 3519,
+   "path_elements": 2,
+   "subpaths": 103,
+   "shape_subpaths": 79,
+   "text_bars": 24
+  },
+  {
+   "id": "inspector",
+   "file": "inspector.svg",
+   "bbox": [
+    1199.0,
+    32.5,
+    239.5,
+    866.0
+   ],
+   "region": [
+    1199,
+    32,
+    241,
+    868
+   ],
+   "anchor": [
+    1440,
+    450
+   ],
+   "anchor_side": "right",
+   "label": "Inspector",
+   "bytes": 8606,
+   "path_elements": 2,
+   "subpaths": 222,
+   "shape_subpaths": 195,
+   "text_bars": 27
+  },
+  {
+   "id": "rail",
+   "file": "rail.svg",
+   "bbox": [
+    7.5,
+    32.5,
+    41.5,
+    866.0
+   ],
+   "region": [
+    0,
+    32,
+    49,
+    868
+   ],
+   "anchor": [
+    0,
+    450
+   ],
+   "anchor_side": "left",
+   "label": "Agents rail",
+   "bytes": 1749,
+   "path_elements": 1,
+   "subpaths": 39,
+   "shape_subpaths": 39,
+   "text_bars": 0
+  },
+  {
+   "id": "chrome",
+   "file": "chrome.svg",
+   "bbox": [
+    2.0,
+    3.0,
+    1436.5,
+    29.0
+   ],
+   "region": [
+    0,
+    0,
+    1440,
+    32
+   ],
+   "anchor": [
+    720,
+    0
+   ],
+   "anchor_side": "top",
+   "label": "Window chrome",
+   "bytes": 1180,
+   "path_elements": 2,
+   "subpaths": 29,
+   "shape_subpaths": 27,
+   "text_bars": 2
+  }
+ ],
+ "splits": {
+  "note": "measured from the render (source px, 2 px = 1 logical px); border lines belong to the panel whose edge they are",
+  "chrome_bottom_logical": 32.0,
+  "chrome_bottom_src": "tab bar bottom border = rows 62-63",
+  "rail_right_logical": 49.0,
+  "rail_right_src": "rail border = cols 96-97",
+  "layers_right_logical": 290.0,
+  "layers_right_src": "left panel border = cols 578-579",
+  "inspector_left_logical": 1199.0,
+  "inspector_left_src": "inspector border = cols 2398-2399",
+  "ruler_left_right_logical": 310.0,
+  "ruler_left_right_src": "vertical ruler right edge = cols 618-619",
+  "ruler_top_bottom_logical": 52.0,
+  "ruler_top_bottom_src": "horizontal ruler bottom edge = rows 102-103",
+  "toolbar_rect_logical": [
+   463.0,
+   839.0,
+   977.0,
+   889.0
+  ],
+  "toolbar_src": "dark pill 928..1952 x 1680..1776",
+  "size_pill_logical": [
+   714.0,
+   703.0,
+   775.0,
+   708.5
+  ],
+  "canvas_vs_file": "inside the viewport interior a stroke is canvas when it lies within 3 source px of the overlay cyan (selection box, handles, frame names, size pill) or in the tool bar, else file"
+ },
+ "gate": {
+  "tolerance_px": 2,
+  "recall_precision": {
+   "file": {
+    "recall": 1.0,
+    "precision": 1.0,
+    "shifted_6px_dx_recall": 0.88998,
+    "shifted_6px_dx_precision": 0.89519,
+    "shifted_6px_dy_recall": 0.49297,
+    "shifted_6px_dy_precision": 0.49476
+   },
+   "canvas": {
+    "recall": 1.0,
+    "precision": 1.0,
+    "shifted_6px_dx_recall": 0.6078,
+    "shifted_6px_dx_precision": 0.6112,
+    "shifted_6px_dy_recall": 0.38398,
+    "shifted_6px_dy_precision": 0.38216
+   },
+   "layers": {
+    "recall": 1.0,
+    "precision": 1.0,
+    "shifted_6px_dx_recall": 0.66712,
+    "shifted_6px_dx_precision": 0.67397,
+    "shifted_6px_dy_recall": 0.32178,
+    "shifted_6px_dy_precision": 0.31982
+   },
+   "inspector": {
+    "recall": 1.0,
+    "precision": 1.0,
+    "shifted_6px_dx_recall": 0.70692,
+    "shifted_6px_dx_precision": 0.72467,
+    "shifted_6px_dy_recall": 0.25059,
+    "shifted_6px_dy_precision": 0.25075
+   },
+   "rail": {
+    "recall": 1.0,
+    "precision": 1.0,
+    "shifted_6px_dx_recall": 0.23014,
+    "shifted_6px_dx_precision": 0.23088,
+    "shifted_6px_dy_recall": 0.74726,
+    "shifted_6px_dy_precision": 0.75626
+   },
+   "chrome": {
+    "recall": 1.0,
+    "precision": 1.0,
+    "shifted_6px_dx_recall": 0.939,
+    "shifted_6px_dx_precision": 0.94397,
+    "shifted_6px_dy_recall": 0.15818,
+    "shifted_6px_dy_precision": 0.15603
+   },
+   "ALL": {
+    "recall": 1.0,
+    "precision": 1.0,
+    "shifted_6px_dx_recall": 0.83129,
+    "shifted_6px_dx_precision": 0.8368,
+    "shifted_6px_dy_recall": 0.44561,
+    "shifted_6px_dy_precision": 0.44722
+   }
+  },
+  "source_check": {
+   "P_src": 0.99914,
+   "R_src_strong15": 0.84656,
+   "R_src_strong15_outside_text_zones": 0.96477,
+   "R_src_text_zones_widened": 0.98228
+  },
+  "note": "recall/precision compare the rasterised SVG with the structure map the strokes were extracted from (text runs collapsed to their bars, as specified); source_check is the independent comparison with a Sobel gradient of the render: P_src = drawn shape px within 2 px of a gradient >= 6; R_src_strong15 = gradient >= 15 px within the tolerance of any drawn px; _outside_text_zones drops the boxes of the text runs; _text_zones_widened counts a text-zone px as covered (the run is drawn as a bar)"
+ },
+ "notes": [
+  "Text runs are one bar each at the run's skeleton-weighted centre line; a glyph or icon with no neighbour on its line stays an outline",
+  "The vertical ruler's rotated numbers are grouped along y and become vertical bars",
+  "Skeleton components under 3 px outside text runs are dropped; tiny doc-matrix icons shrink to short bars or disappear",
+  "Rounded corners are polylines (Douglas-Peucker 0.5 source px = 0.25 logical px; 0.8 in the document), not arcs; straight segments within 1 px of an axis are snapped to it",
+  "The document is traced with thin edges and tighter text rules (it is drawn at 17% zoom); filled icon interiors and low-contrast detail are not reproduced"
+ ],
+ "stroke_pixel_overlap_between_layers": 0
+}

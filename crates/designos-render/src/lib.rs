@@ -16,11 +16,15 @@ pub mod diff_image;
 mod effects;
 mod fx;
 mod geom;
+pub mod image_adjust;
 mod index;
 pub mod lint_env;
 mod mask;
 mod outline;
 mod paint;
+#[doc(hidden)]
+pub use paint::{converted_image_bytes, image_conversions, image_decodes};
+pub use paint::{decoded_image_bytes, retain_converted_images, MAX_CONVERTED_IMAGE_BYTES, MAX_DECODED_IMAGE_BYTES};
 mod shadow;
 #[cfg(test)]
 mod shadow_tests;
@@ -31,18 +35,19 @@ pub mod vectorops;
 pub use backdrop_index::BackdropIndex;
 use designos_doc::{resolve_node, Document, Effect, Node, NodeId, NodeKind, Vec2};
 pub use diff_image::{render_diff_image, DiffImageResult};
+pub use geom::inscribed_point;
 use geom::{node_shape, to_sk_transform, transformed_bounds, Shape};
 pub use index::SceneIndex;
 pub use lint_env::RenderLintEnv;
-pub use mask::{mask_frame_box, mask_stencil};
+pub use mask::{apply_luminance_mask, mask_frame_box, mask_stencil, vector_mask_descendant_stencil, LUMINANCE_MASK_COEFFS};
 pub use outline::{
-    decoded_image, miter_outline, node_margin, node_stroke_style, outline_of, render_node_into, stroke_outline, stroke_plan, text_outlines, NodeShape,
-    StrokeClip, StrokePlan, TextOutline,
+    dashed_rect_stroke_path, decoded_image, miter_outline, node_margin, node_stroke_style, outline_of, render_node_into, stroke_outline, stroke_plan,
+    text_outlines, NodeShape, StrokeClip, StrokePlan, TextOutline,
 };
 use paint::{blend_mode, fill_paths, stroke_paths, PaintEnv};
 pub use text::{
-    available_families, font_features, font_generation, load_font_data, register_font, resolve_font, text_geometry, text_runs, GlyphRun, GlyphSpan, LineGeom,
-    ResolvedFont, RunLine, TextGeometry, TextRuns,
+    available_families, font_features, font_generation, load_font_data, measure_text_box, register_font, resolve_font, shaping_runs, text_geometry, text_runs,
+    GlyphRun, GlyphSpan, LineGeom, RenderTextMeasure, ResolvedFont, RunLine, TextGeometry, TextRuns,
 };
 pub use tiles::{Tile, TileBudget, TileCache, TileFrame, TileKey, TILE_SIZE};
 pub use tiny_skia;
@@ -95,8 +100,20 @@ impl Default for Viewport {
 
 /// Draws `page` (background + all visible descendants) into `target`.
 pub fn render_page(doc: &Document, page: NodeId, vp: &Viewport, target: &mut tiny_skia::Pixmap) {
+    render_page_with_env(PaintEnv::new(doc), page, vp, target);
+}
+
+/// [`render_page`] that keeps the document's colour numbers as they are instead of converting a
+/// Display P3 document to sRGB: the pixels are in the document's own profile, so the file written
+/// from them must be tagged with it. Identical to [`render_page`] for an sRGB document.
+pub fn render_page_native(doc: &Document, page: NodeId, vp: &Viewport, target: &mut tiny_skia::Pixmap) {
+    render_page_with_env(PaintEnv::native(doc), page, vp, target);
+}
+
+fn render_page_with_env(env: PaintEnv, page: NodeId, vp: &Viewport, target: &mut tiny_skia::Pixmap) {
+    let doc = env.doc;
     let bg = match doc.get(page).map(|n| &n.kind) {
-        Some(NodeKind::Page { background }) => paint::sk_color(background, 1.0),
+        Some(NodeKind::Page { background }) => paint::sk_color(&env.col(background), 1.0),
         _ => sk::Color::from_rgba8(0x5A, 0x5A, 0x5A, 0xFF),
     };
     target.fill(bg);
@@ -104,7 +121,7 @@ pub fn render_page(doc: &Document, page: NodeId, vp: &Viewport, target: &mut tin
     let s = vp.zoom * vp.dpr;
     let ts = sk::Transform::from_row(s, 0.0, 0.0, s, -vp.offset.x * s, -vp.offset.y * s);
     effects::set_grid_origin(&ts);
-    let r = Renderer { doc, env: PaintEnv { doc }, cull: None, runtime_opacities: &[], hide: &[] };
+    let r = Renderer { doc, env, cull: None, runtime_opacities: &[], hide: &[] };
     r.draw_children(&p.children, ts, target, None, None);
 }
 
@@ -137,8 +154,9 @@ pub(crate) fn render_with_transform_and_opacities(
     index: Option<&SceneIndex>,
     runtime_opacities: &[(NodeId, f32)],
 ) {
+    let env = PaintEnv::new(doc);
     let bg = match doc.get(page).map(|n| &n.kind) {
-        Some(NodeKind::Page { background }) => paint::sk_color(background, 1.0),
+        Some(NodeKind::Page { background }) => paint::sk_color(&env.col(background), 1.0),
         _ => sk::Color::from_rgba8(0x5A, 0x5A, 0x5A, 0xFF),
     };
     target.fill(bg);
@@ -150,7 +168,7 @@ pub(crate) fn render_with_transform_and_opacities(
         let win = ((-1.0 - ts.tx) / ts.sx, (-1.0 - ts.ty) / ts.sy, (w + 1.0 - ts.tx) / ts.sx, (h + 1.0 - ts.ty) / ts.sy);
         Cull { index, win }
     });
-    let r = Renderer { doc, env: PaintEnv { doc }, cull, runtime_opacities, hide: &[] };
+    let r = Renderer { doc, env: PaintEnv::new(doc), cull, runtime_opacities, hide: &[] };
     r.draw_children(&p.children, ts, target, None, None);
 }
 
@@ -179,14 +197,24 @@ pub fn checked_pixmap_size(w: f32, h: f32) -> Option<(u32, u32)> {
 /// exports and per-frame diffs. `None` if the node is missing or the image would exceed
 /// [`MAX_PIXMAP_SIDE`] / [`MAX_PIXMAP_PIXELS`].
 pub fn render_node(doc: &Document, node: NodeId, scale: f32) -> Option<tiny_skia::Pixmap> {
+    render_node_with_env(PaintEnv::new(doc), node, scale)
+}
+
+/// [`render_node`] that keeps the document's colour numbers as they are (see [`render_page_native`]).
+pub fn render_node_native(doc: &Document, node: NodeId, scale: f32) -> Option<tiny_skia::Pixmap> {
+    render_node_with_env(PaintEnv::native(doc), node, scale)
+}
+
+fn render_node_with_env(env: PaintEnv, node: NodeId, scale: f32) -> Option<tiny_skia::Pixmap> {
+    let doc = env.doc;
     let n = &*resolve_node(doc, doc.get(node)?);
     let (w, h) = checked_pixmap_size(n.size.x * scale, n.size.y * scale)?;
     let mut pm = tiny_skia::Pixmap::new(w, h)?;
-    let r = Renderer { doc, env: PaintEnv { doc }, cull: None, runtime_opacities: &[], hide: &[] };
+    let r = Renderer { doc, env, cull: None, runtime_opacities: &[], hide: &[] };
     let ts = sk::Transform::from_scale(scale, scale);
     effects::set_grid_origin(&ts);
     if let NodeKind::Page { background } = &n.kind {
-        pm.fill(paint::sk_color(background, 1.0));
+        pm.fill(paint::sk_color(&env.col(background), 1.0));
         r.draw_children(&n.children, ts, &mut pm, None, None);
     } else {
         r.draw_node(n, ts, &mut pm, None, None);
@@ -237,12 +265,12 @@ fn render_backdrop_with(
         }
         _ => designos_doc::Color::WHITE,
     };
-    pm.fill(paint::sk_color(&bg_color, 1.0));
+    pm.fill(paint::sk_color(&PaintEnv::new(doc).col(&bg_color), 1.0));
     let p = doc.get(page)?;
     let ts = sk::Transform::from_row(scale, 0.0, 0.0, scale, -rect.x * scale, -rect.y * scale);
     effects::set_grid_origin(&ts);
     let Some(index) = index else {
-        let r = Renderer { doc, env: PaintEnv { doc }, cull: None, runtime_opacities: &[], hide };
+        let r = Renderer { doc, env: PaintEnv::new(doc), cull: None, runtime_opacities: &[], hide };
         r.draw_children(&p.children, ts, &mut pm, None, None);
         return Some(pm);
     };
@@ -255,7 +283,7 @@ fn render_backdrop_with(
     let reach = scene.blurry.iter().filter(|(b, _)| index::overlaps(*b, win)).map(|(_, r)| *r).fold(0.0f32, f32::max);
     win = (win.0 - reach, win.1 - reach, win.2 + reach, win.3 + reach);
     let children = index.top_level_near(win);
-    let r = Renderer { doc, env: PaintEnv { doc }, cull: Some(Cull { index: scene, win }), runtime_opacities: &[], hide };
+    let r = Renderer { doc, env: PaintEnv::new(doc), cull: Some(Cull { index: scene, win }), runtime_opacities: &[], hide };
     r.draw_children(&children, ts, &mut pm, None, None);
     Some(pm)
 }
@@ -352,6 +380,14 @@ fn shape_mask(w: u32, h: u32, paths: &[(sk::Path, sk::FillRule)], ts: sk::Transf
     Some(sk::Mask::from_pixmap(pm.as_ref(), sk::MaskType::Alpha))
 }
 
+/// How a frame clips its children while a silhouette is drawn.
+enum ContentClip {
+    None,
+    Mask(sk::Mask),
+    /// The frame clips but has no shape to clip by: nothing is visible.
+    Empty,
+}
+
 fn mask_mul(m: &mut sk::Mask, other: &sk::Mask) {
     for (a, b) in m.data_mut().iter_mut().zip(other.data()) {
         *a = ((*a as u32 * *b as u32 + 127) / 255) as u8;
@@ -392,15 +428,42 @@ impl Renderer<'_> {
                 let needs_back = children[i + 1..].iter().any(|c| self.doc.get(*c).is_some_and(|c| self.has_bg_blur(c)));
                 let backdrop = needs_back.then(|| composite_backdrop(back, target));
                 self.draw_children(&children[i + 1..], parent_ts, &mut layer, clip, backdrop.as_ref());
-                // Masks use the shape's alpha regardless of its paints.
+                // Masks use the shape's alpha (or geometry coverage / Rec. 709 luminance) regardless of its paints.
                 let mask_node = mask::mask_stencil(child);
-                self.draw_node(&mask_node, ts, &mut mask_layer, None, None);
+                if child.mask_type == designos_doc::MaskType::Vector && matches!(mask_node.kind, NodeKind::Group) {
+                    self.draw_vector_group_children(&mask_node.children, ts, &mut mask_layer, None, None);
+                } else {
+                    self.draw_node(&mask_node, ts, &mut mask_layer, None, None);
+                }
+                if child.mask_type == designos_doc::MaskType::Luminance {
+                    mask::apply_luminance_mask(&mut mask_layer);
+                }
                 let pp = sk::PixmapPaint { blend_mode: sk::BlendMode::DestinationIn, ..Default::default() };
                 layer.draw_pixmap(0, 0, mask_layer.as_ref(), &pp, sk::Transform::identity(), None);
                 target.draw_pixmap(0, 0, layer.as_ref(), &sk::PixmapPaint::default(), sk::Transform::identity(), None);
                 return;
             }
             self.draw_node(child, ts, target, clip, back);
+        }
+    }
+
+    fn draw_vector_group_children(&self, children: &[NodeId], parent_ts: sk::Transform, target: &mut sk::Pixmap, clip: Option<&sk::Mask>, back: Back) {
+        for cid in children {
+            if self.hide.contains(cid) {
+                continue;
+            }
+            let Some(child) = board::get(self.doc, *cid) else { continue };
+            let child = &*resolve_node(self.doc, &child);
+            if !child.visible {
+                continue;
+            }
+            let ts = parent_ts.pre_concat(to_sk_transform(&child.transform));
+            let stencil_child = mask::vector_mask_descendant_stencil(child);
+            if matches!(stencil_child.kind, NodeKind::Group) {
+                self.draw_vector_group_children(&stencil_child.children, ts, target, clip, back);
+            } else {
+                self.draw_node(&stencil_child, ts, target, clip, back);
+            }
         }
     }
 
@@ -420,13 +483,16 @@ impl Renderer<'_> {
 
     /// Whether `n` or any drawn descendant has a visible background blur.
     fn has_bg_blur(&self, n: &Node) -> bool {
+        let resolved = resolve_node(self.doc, n);
+        let n = &*resolved;
         if !n.visible {
             return false;
         }
         (!matches!(n.kind, NodeKind::Unknown { .. })
-            && n.effects
-                .iter()
-                .any(|e| matches!(e, Effect::BackgroundBlur { visible: true, radius } if *radius > 0.0) || matches!(e, Effect::Glass(g) if g.visible)))
+            && n.effects.iter().any(|e| {
+                (matches!(e, Effect::BackgroundBlur { visible: true, radius } if *radius > 0.0) && n.background_blur_has_surface())
+                    || matches!(e, Effect::Glass(g) if g.visible)
+            }))
             || (Self::draws_children(n) && n.children.iter().any(|c| self.doc.get(*c).is_some_and(|c| self.has_bg_blur(c))))
     }
 
@@ -550,8 +616,8 @@ impl Renderer<'_> {
                 NodeKind::Text(tp) => Some(text::layout(tp, n.size)),
                 _ => None,
             };
-            let sil = |pm: &mut sk::Pixmap, dx: f32, dy: f32, grow: f32, opaque: bool| {
-                self.draw_silhouette(n, ts, shape.as_ref(), text_layout.as_deref(), pm, dx, dy, grow, opaque);
+            let sil = |pm: &mut sk::Pixmap, dx: f32, dy: f32, grow: f32, mode: designos_doc::SilhouetteMode| {
+                self.draw_silhouette(n, ts, shape.as_ref(), text_layout.as_deref(), pm, dx, dy, grow, mode);
             };
             fx::texture(target, self.bbox(n, &ts), scale, t, &sil);
         }
@@ -566,23 +632,24 @@ impl Renderer<'_> {
         };
         let bb = self.bbox(n, &ts);
         let inner_bb = transformed_bounds(&ts, 0.0, 0.0, n.size.x, n.size.y);
-        let sil = |pm: &mut sk::Pixmap, dx: f32, dy: f32, grow: f32, opaque: bool| {
-            self.draw_silhouette(n, ts, shape.as_ref(), text_layout.as_deref(), pm, dx, dy, grow, opaque);
+        let sil = |pm: &mut sk::Pixmap, dx: f32, dy: f32, grow: f32, mode: designos_doc::SilhouetteMode| {
+            self.draw_silhouette(n, ts, shape.as_ref(), text_layout.as_deref(), pm, dx, dy, grow, mode);
         };
 
         // 1. drop shadows + background blur (behind the node)
         let fast_rrect = if blur::reference_mode() { None } else { self.solid_rrect(n, &ts, shape.as_ref()) };
         for e in &n.effects {
             match e {
-                Effect::DropShadow { color, offset, radius, spread, visible: true, show_behind } => {
+                Effect::DropShadow { color, offset, radius, spread, visible: true, show_behind, blend } => {
+                    let color = &self.env.col(color);
                     if let Some((rr, fill_alpha)) = fast_rrect {
-                        if shadow::drop_shadow_rrect(target, clip, rr, scale, color, *offset, *radius, *spread, *show_behind, alpha, fill_alpha, &sil) {
+                        if shadow::drop_shadow_rrect(target, clip, rr, scale, color, *offset, *radius, *spread, *show_behind, *blend, alpha, fill_alpha, &sil) {
                             continue;
                         }
                     }
-                    effects::drop_shadow(target, clip, bb, scale, color, *offset, *radius, *spread, *show_behind, alpha, &sil)
+                    effects::drop_shadow(target, clip, bb, scale, color, *offset, *radius, *spread, *show_behind, *blend, alpha, &sil)
                 }
-                Effect::BackgroundBlur { radius, visible: true } if *radius > 0.0 => {
+                Effect::BackgroundBlur { radius, visible: true } if *radius > 0.0 && n.background_blur_has_surface() => {
                     effects::background_blur(target, back, clip, inner_bb, scale, *radius, &sil)
                 }
                 Effect::Glass(g) if g.visible => fx::glass(target, back, clip, inner_bb, scale, g, &sil),
@@ -603,8 +670,9 @@ impl Renderer<'_> {
 
         // 3. inner shadows
         for e in &n.effects {
-            if let Effect::InnerShadow { color, offset, radius, spread, visible: true } = e {
-                effects::inner_shadow(target, clip, bb, scale, color, *offset, *radius, *spread, alpha, &sil);
+            if let Effect::InnerShadow { color, offset, radius, spread, visible: true, blend } = e {
+                let color = &self.env.col(color);
+                effects::inner_shadow(target, clip, bb, scale, color, *offset, *radius, *spread, *blend, alpha, &sil);
             }
         }
 
@@ -612,7 +680,8 @@ impl Renderer<'_> {
         for e in &n.effects {
             if let Effect::Noise(nz) = e {
                 if nz.visible {
-                    fx::noise(target, clip, bb, scale, nz, alpha, &sil);
+                    let converted = self.env.noise(nz);
+                    fx::noise(target, clip, bb, scale, converted.as_ref().unwrap_or(nz), alpha, &sil);
                 }
             }
         }
@@ -640,6 +709,66 @@ impl Renderer<'_> {
         }
     }
 
+    /// The frame's clip of its children in a silhouette: its shape mask when it clips content.
+    fn content_clip(&self, n: &Node, shape: Option<&Shape>, ts: sk::Transform, pm: &sk::Pixmap) -> ContentClip {
+        if !n.kind.frame_props().is_some_and(|f| f.clips_content) {
+            return ContentClip::None;
+        }
+        let Some(sh) = shape else { return ContentClip::Empty };
+        match shape_mask(pm.width(), pm.height(), &sh.paths, ts) {
+            Some(m) => ContentClip::Mask(m),
+            None => ContentClip::Empty,
+        }
+    }
+
+    /// Draws each visible child's own opaque silhouette (a knockout): paint alpha is ignored,
+    /// hidden and fully transparent children add nothing.
+    fn knockout_children(&self, children: &[NodeId], parent_ts: sk::Transform, pm: &mut sk::Pixmap) {
+        for (i, cid) in children.iter().enumerate() {
+            if self.hide.contains(cid) {
+                continue;
+            }
+            let Some(child) = board::get(self.doc, *cid) else { continue };
+            let child = &*resolve_node(self.doc, &child);
+            if !child.visible || matches!(child.kind, NodeKind::Page { .. }) {
+                continue;
+            }
+            let ts = parent_ts.pre_concat(to_sk_transform(&child.transform));
+            if child.is_mask {
+                let (w, h) = (pm.width(), pm.height());
+                let (Some(mut layer), Some(mut mask_layer)) = (sk::Pixmap::new(w, h), sk::Pixmap::new(w, h)) else {
+                    return;
+                };
+                self.knockout_children(&children[i + 1..], parent_ts, &mut layer);
+                let r = Renderer { doc: self.doc, env: self.env, cull: None, runtime_opacities: self.runtime_opacities, hide: self.hide };
+                let mask_node = mask::mask_stencil(child);
+                if child.mask_type == designos_doc::MaskType::Vector && matches!(mask_node.kind, NodeKind::Group) {
+                    r.draw_vector_group_children(&mask_node.children, ts, &mut mask_layer, None, None);
+                } else {
+                    r.draw_node(&mask_node, ts, &mut mask_layer, None, None);
+                }
+                if child.mask_type == designos_doc::MaskType::Luminance {
+                    mask::apply_luminance_mask(&mut mask_layer);
+                }
+                let pp = sk::PixmapPaint { blend_mode: sk::BlendMode::DestinationIn, ..Default::default() };
+                layer.draw_pixmap(0, 0, mask_layer.as_ref(), &pp, sk::Transform::identity(), None);
+                pm.draw_pixmap(0, 0, layer.as_ref(), &sk::PixmapPaint::default(), sk::Transform::identity(), None);
+                return;
+            }
+            let runtime_mul = self.runtime_opacities.iter().find(|&&(id, _)| id == child.id).map(|&(_, a)| a.clamp(0.0, 1.0)).unwrap_or(1.0);
+            if child.opacity * runtime_mul <= 0.0 {
+                continue;
+            }
+            let scale = ts_scale(&ts);
+            let shape = node_shape(self.doc, child, 0.15 / scale);
+            let text_layout = match &child.kind {
+                NodeKind::Text(t) => Some(text::layout(t, child.size)),
+                _ => None,
+            };
+            self.draw_silhouette(child, ts, shape.as_ref(), text_layout.as_deref(), pm, 0.0, 0.0, 0.0, designos_doc::SilhouetteMode::Knockout);
+        }
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn draw_silhouette(
         &self,
@@ -651,26 +780,28 @@ impl Renderer<'_> {
         dx: f32,
         dy: f32,
         grow: f32,
-        opaque: bool,
+        mode: designos_doc::SilhouetteMode,
     ) {
+        let opaque = mode.ignores_alpha();
         let ts2 = ts.post_translate(dx, dy);
         let fills = self.visible_fills(n);
         let strokes = self.visible_strokes(n);
-        if let Some(tl) = tl {
-            for (i, path) in tl.paths.iter().enumerate() {
-                if let Some(path) = path {
-                    let a = if opaque {
-                        1.0
-                    } else {
-                        tl.styles[i].fills.iter().filter(|p| p.visible).map(designos_doc::Paint::silhouette_alpha).fold(0.0, f32::max)
-                    };
-                    pm.fill_path(path, &black_paint(a), sk::FillRule::Winding, ts2, None);
+        match designos_doc::silhouette_source(n, shape.map(|sh| sh.fillable), mode) {
+            designos_doc::SilhouetteSource::Text => {
+                let Some(tl) = tl else { return };
+                for (i, path) in tl.paths.iter().enumerate() {
+                    if let Some(path) = path {
+                        let a = mode.text_run_alpha(n, &tl.styles[i].fills);
+                        // a run that paints nothing removes nothing from a knockout
+                        if a <= 0.0 && mode == designos_doc::SilhouetteMode::Knockout {
+                            continue;
+                        }
+                        pm.fill_path(path, &black_paint(a), sk::FillRule::Winding, ts2, None);
+                    }
                 }
             }
-            return;
-        }
-        if let Some(sh) = shape {
-            if (sh.fillable && !fills.is_empty()) || !strokes.is_empty() || (opaque && sh.fillable) {
+            designos_doc::SilhouetteSource::OwnShape => {
+                let Some(sh) = shape else { return };
                 if sh.fillable && opaque && fills.is_empty() {
                     for (path, rule) in sh.fill_paths() {
                         pm.fill_path(path, &black_paint(1.0), *rule, ts2, None);
@@ -711,14 +842,31 @@ impl Renderer<'_> {
                         pm.stroke_path(path, &p, &st, ts2, None);
                     }
                 }
-                return;
             }
-        }
-        if Self::draws_children(n) {
-            let kids = n.paint_children();
-            // silhouettes are drawn offset from the page grid, so no culling
-            Renderer { doc: self.doc, env: PaintEnv { doc: self.doc }, cull: None, runtime_opacities: self.runtime_opacities, hide: self.hide }
-                .draw_children(&kids, ts2, pm, None, None);
+            designos_doc::SilhouetteSource::Children => {
+                let kids = n.paint_children();
+                // silhouettes are drawn offset from the page grid, so no culling
+                let r = Renderer { doc: self.doc, env: self.env, cull: None, runtime_opacities: self.runtime_opacities, hide: self.hide };
+                match self.content_clip(n, shape, ts2, pm) {
+                    ContentClip::Mask(m) => r.draw_children(&kids, ts2, pm, Some(&m), None),
+                    ContentClip::Empty => {}
+                    ContentClip::None => r.draw_children(&kids, ts2, pm, None, None),
+                }
+            }
+            designos_doc::SilhouetteSource::ChildrenOpaque => {
+                let kids = n.paint_children();
+                let (w, h) = (pm.width(), pm.height());
+                match self.content_clip(n, shape, ts2, pm) {
+                    ContentClip::Empty => {}
+                    ContentClip::None => self.knockout_children(&kids, ts2, pm),
+                    ContentClip::Mask(m) => {
+                        let Some(mut layer) = sk::Pixmap::new(w, h) else { return };
+                        self.knockout_children(&kids, ts2, &mut layer);
+                        pm.draw_pixmap(0, 0, layer.as_ref(), &sk::PixmapPaint::default(), sk::Transform::identity(), Some(&m));
+                    }
+                }
+            }
+            designos_doc::SilhouetteSource::Nothing => {}
         }
     }
 
@@ -731,39 +879,34 @@ impl Renderer<'_> {
             }
             let strokes = self.visible_strokes(n);
             if !strokes.is_empty() {
-                let st = self.make_stroke(n, n.stroke.weight);
+                let shape = NodeShape { paths: paths.to_vec(), closed: true, fillable: true, is_rect: false, stroke_paths: None, fill_only: None };
+                let scale = ts_scale(&ts);
+                let Some(plan) = outline::stroke_plan(n, &shape, scale) else { continue };
+                let aligned_mask = match plan.clip {
+                    StrokeClip::None => None,
+                    StrokeClip::Inside | StrokeClip::Outside => {
+                        let Some(mut mask) = shape_mask(target.width(), target.height(), shape.fill_paths(), ts) else { continue };
+                        if plan.clip == StrokeClip::Outside {
+                            mask.invert();
+                        }
+                        if let Some(parent) = clip {
+                            mask_mul(&mut mask, parent);
+                        }
+                        Some(mask)
+                    }
+                };
+                let stroke_clip = aligned_mask.as_ref().or(clip);
                 for p in strokes {
-                    stroke_paths(&self.env, target, &paths, &st, ts, n.size, p, alpha, clip);
+                    fill_paths(&self.env, target, &plan.outline, ts, n.size, p, alpha, stroke_clip);
                 }
             }
         }
     }
 
     fn make_stroke(&self, n: &Node, width: f32) -> sk::Stroke {
-        let s = &n.stroke;
-        // per-vertex caps are drawn as decorations over a butt-capped stroke
-        let cap = if vectorops::vertex_caps(n).is_some() { designos_doc::StrokeCap::None } else { s.cap };
-        let mut st = sk::Stroke {
-            width,
-            miter_limit: s.miter_limit.max(1.0),
-            line_cap: match cap {
-                designos_doc::StrokeCap::None => sk::LineCap::Butt,
-                designos_doc::StrokeCap::Round => sk::LineCap::Round,
-                designos_doc::StrokeCap::Square => sk::LineCap::Square,
-            },
-            line_join: match s.join {
-                designos_doc::StrokeJoin::Miter => sk::LineJoin::Miter,
-                designos_doc::StrokeJoin::Bevel => sk::LineJoin::Bevel,
-                designos_doc::StrokeJoin::Round => sk::LineJoin::Round,
-            },
-            dash: None,
-        };
-        if !s.dashes.is_empty() && s.dashes.iter().all(|d| *d >= 0.0) && s.dashes.iter().sum::<f32>() > 0.0 {
-            let mut v = s.dashes.clone();
-            if v.len() % 2 == 1 {
-                v.extend_from_within(..);
-            }
-            st.dash = sk::StrokeDash::new(v, 0.0);
+        let mut st = outline::node_stroke_style(n, width);
+        if vectorops::vertex_caps(n).is_some() {
+            st.line_cap = sk::LineCap::Butt;
         }
         st
     }
@@ -777,9 +920,12 @@ impl Renderer<'_> {
         let align = if sh.closed { n.stroke.align } else { designos_doc::StrokeAlign::Center };
         // precomputed outline: already expanded by weight and alignment
         if let Some(sp) = &sh.stroke_paths {
-            let mask = if align == designos_doc::StrokeAlign::Outside {
+            // an inside or outside stroke is stored centered at double weight: keep the wanted side
+            let mask = if align == designos_doc::StrokeAlign::Outside || (align == designos_doc::StrokeAlign::Inside && !sh.fill_paths().is_empty()) {
                 shape_mask(tw, th, sh.fill_paths(), ts).map(|mut m| {
-                    m.invert();
+                    if align == designos_doc::StrokeAlign::Outside {
+                        m.invert();
+                    }
                     if let Some(c) = clip {
                         mask_mul(&mut m, c);
                     }
@@ -822,11 +968,31 @@ impl Renderer<'_> {
         if w <= 0.0 {
             return;
         }
-        if let Some(caps) = vectorops::vertex_caps(n) {
-            let caps = geom::vector_paths(&caps).paths;
-            for p in &paints {
-                fill_paths(&self.env, target, &caps, ts, n.size, p, alpha, clip);
+        if vectorops::has_mixed_subpath_align(n, sh)
+            || vectorops::has_per_vertex_joins(n)
+            || vectorops::has_arrow_caps(n)
+            || vectorops::vertex_caps(n).is_some()
+        {
+            let scale = (ts.sx.hypot(ts.ky)).max(ts.kx.hypot(ts.sy)).max(1.0);
+            let Some(plan) = outline::stroke_plan(n, sh, scale) else { return };
+            let mask = match plan.clip {
+                StrokeClip::None => None,
+                StrokeClip::Inside | StrokeClip::Outside => {
+                    let Some(mut m) = shape_mask(tw, th, sh.fill_paths(), ts) else { return };
+                    if plan.clip == StrokeClip::Outside {
+                        m.invert();
+                    }
+                    if let Some(c) = clip {
+                        mask_mul(&mut m, c);
+                    }
+                    Some(m)
+                }
+            };
+            let cl = mask.as_ref().or(clip);
+            for p in paints {
+                fill_paths(&self.env, target, &plan.outline, ts, n.size, p, alpha, cl);
             }
+            return;
         }
         match align {
             designos_doc::StrokeAlign::Center => {
@@ -842,6 +1008,14 @@ impl Renderer<'_> {
                 }
                 if let Some(c) = clip {
                     mask_mul(&mut m, c);
+                }
+                if let Some(center_path) = outline::dashed_rect_stroke_path(n, sh) {
+                    let st = self.make_stroke(n, w);
+                    let paths = [(center_path, sk::FillRule::Winding)];
+                    for p in paints {
+                        stroke_paths(&self.env, target, &paths, &st, ts, n.size, p, alpha, Some(&m));
+                    }
+                    return;
                 }
                 let st = self.make_stroke(n, w * 2.0);
                 for p in paints {

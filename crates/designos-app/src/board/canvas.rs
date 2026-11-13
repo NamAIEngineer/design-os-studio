@@ -52,7 +52,7 @@ pub fn background(app: &App, ui: &Ui, rect: ERect) {
 
 /// Magnet dots of the hovered node and the drop target of a connector being dragged.
 pub fn overlay(app: &App, p: &Painter, rect: ERect) {
-    if !app.is_board() {
+    if !app.wb_connectors_enabled() {
         return;
     }
     let pointer = app.canvas.pointer_page;
@@ -101,7 +101,8 @@ pub fn zoom_pill(app: &mut App, ui: &mut Ui, canvas: ERect) {
     );
     icons::paint(&p, Icon::ChevronDown, Pos2::new(r.right() - 12.0, r.center().y), theme::CHEVRON_SMALL, theme::ICON_SECONDARY);
     crate::widgets::record(ui, "board-zoom", r);
-    if resp.clicked() {
+    // The menu opens on the press, so the same press can slide onto a row and pick it on release.
+    if crate::panels::toolbar::primary_pressed_in(ui, r) || (resp.clicked() && !resp.clicked_by(egui::PointerButton::Primary)) {
         app.ui.menu = if open { None } else { Some(MenuKind::Zoom) };
         app.ui.menu_anchor = Some(r);
     }

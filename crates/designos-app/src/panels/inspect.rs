@@ -52,7 +52,7 @@ fn push_paints(out: &mut Vec<ColorEntry>, paints: &[Paint], role: &'static str, 
                     add(&s.color, "Gradient stop");
                 }
             }
-            PaintKind::Image { .. } => {}
+            PaintKind::Image { .. } | PaintKind::Shader(_) => {}
         }
     }
 }
@@ -222,6 +222,26 @@ pub(crate) fn small_button(ui: &mut Ui, rect: Rect, key: impl widgets::Key, labe
     r.clicked()
 }
 
+/// Button/Secondary xs for the Inspect sections: the kit button (32 tall, 14 Semibold label) under the record name and
+/// interact id `small_button` uses, so nothing downstream sees a different widget.
+fn secondary_button(ui: &mut Ui, rect: Rect, key: impl widgets::Key, label: &str) -> bool {
+    widgets::record(ui, &format!("btn-{key:?}"), rect);
+    widgets::kit::button(ui, rect, ("insp-btn", key), label, widgets::kit::Hierarchy::Secondary, widgets::kit::Size::Xs, true).clicked()
+}
+
+/// Gap under a full-width Inspect button before the next section.
+const BUTTON_GAP: f32 = theme::SPACE_INLINE - theme::INSET_SEGMENT;
+
+/// Horizontal space between the Code Connect badge border and its label, on each side.
+const CODE_CONNECT_BADGE_PAD_X: f32 = theme::SPACE_FACT * 2.0;
+
+/// Badge rect right-aligned in the Code Connect header, sized from the label the kit badge paints.
+fn code_connect_badge_rect(p: &egui::Painter, hdr: Rect, label: &str) -> Rect {
+    let font = theme::font_text(theme::FONT_SIZE_TEXT_XS, theme::TextWeight::Medium);
+    let w = widgets::text_width(p, label, &font) + 2.0 * (CODE_CONNECT_BADGE_PAD_X + theme::BORDER_WIDTH);
+    Rect::from_min_size(Pos2::new(hdr.right() - w, hdr.center().y - 9.0), Vec2::new(w, 18.0))
+}
+
 pub(crate) fn section_title(ui: &Ui, c: &mut Cur, label: &str) {
     widgets::hline(ui.painter(), c.x0, c.x0 + c.w, c.oy + c.y, theme::BORDER);
     c.y += 1.0;
@@ -347,7 +367,8 @@ fn body(app: &mut App, ui: &mut Ui, c: &mut Cur, id: NodeId, count: usize) {
     let link_r = Rect::from_center_size(Pos2::new(hdr.right() - 48.0, hdr.center().y), Vec2::splat(20.0));
     widgets::record(ui, "dev-inspect-link", link_r);
     let link_resp = ui.interact(link_r, ui.id().with("dev-inspect-link"), Sense::click());
-    icons::paint(ui.painter(), Icon::Connector, link_r.center(), 13.0, if link_resp.hovered() { Color32::WHITE } else { theme::ICON_SECONDARY });
+    crate::widgets::kit::paint_icon_bg(ui.painter(), link_r, &link_resp, false, theme::cr(theme::RADIUS_CONTROL));
+    icons::paint(ui.painter(), Icon::Connector, link_r.center(), 13.0, if link_resp.hovered() { theme::ICON_QUATERNARY_HOVER } else { theme::ICON_QUATERNARY });
     if link_resp.on_hover_text("Copy node link").clicked() {
         copy(app, ui, format!("designos://open?node={}", id.0), "node link");
     }
@@ -355,7 +376,8 @@ fn body(app: &mut App, ui: &mut Ui, c: &mut Cur, id: NodeId, count: usize) {
     let code_r = Rect::from_center_size(Pos2::new(hdr.right() - 26.0, hdr.center().y), Vec2::splat(20.0));
     widgets::record(ui, "dev-inspect-code", code_r);
     let code_resp = ui.interact(code_r, ui.id().with("dev-inspect-code"), Sense::click());
-    icons::paint(ui.painter(), Icon::Dev, code_r.center(), 13.0, if code_resp.hovered() { Color32::WHITE } else { theme::ICON_SECONDARY });
+    crate::widgets::kit::paint_icon_bg(ui.painter(), code_r, &code_resp, false, theme::cr(theme::RADIUS_CONTROL));
+    icons::paint(ui.painter(), Icon::Dev, code_r.center(), 13.0, if code_resp.hovered() { theme::ICON_QUATERNARY_HOVER } else { theme::ICON_QUATERNARY });
     if code_resp.on_hover_text("Copy active language snippet").clicked() {
         let snippet = app.dev_code_for(id, app.dev.lang, app.dev.react_tailwind);
         copy(app, ui, snippet, app.dev.lang.label());
@@ -364,12 +386,13 @@ fn body(app: &mut App, ui: &mut Ui, c: &mut Cur, id: NodeId, count: usize) {
     let more_r = Rect::from_center_size(Pos2::new(hdr.right() - 6.0, hdr.center().y), Vec2::splat(20.0));
     widgets::record(ui, "dev-inspect-more", more_r);
     let more_resp = ui.interact(more_r, ui.id().with("dev-inspect-more"), Sense::click());
+    crate::widgets::kit::paint_icon_bg(ui.painter(), more_r, &more_resp, false, theme::cr(theme::RADIUS_CONTROL));
     ui.painter().text(
         more_r.center(),
         Align2::CENTER_CENTER,
         "•••",
         theme::font_caption_strong(),
-        if more_resp.hovered() { Color32::WHITE } else { theme::ICON_SECONDARY },
+        if more_resp.hovered() { theme::ICON_QUATERNARY_HOVER } else { theme::ICON_QUATERNARY },
     );
     if more_resp.on_hover_text("Copy full multi-language code bundle (CSS + React + SwiftUI + UIKit + Compose + Android XML)").clicked() {
         let bundle = format!(
@@ -412,7 +435,7 @@ fn body(app: &mut App, ui: &mut Ui, c: &mut Cur, id: NodeId, count: usize) {
     widgets::record(ui, "dev-mcp-btn", mcp_hdr);
     let mcp_resp = ui.interact(mcp_hdr, ui.id().with("dev-mcp-btn"), Sense::click());
     icons::paint(ui.painter(), Icon::ChevronDown, Pos2::new(mcp_hdr.left() + 5.0, mcp_hdr.center().y), theme::CHEVRON_SMALL, theme::ICON_SECONDARY);
-    ui.painter().text(Pos2::new(mcp_hdr.left() + 16.0, mcp_hdr.center().y), Align2::LEFT_CENTER, "MCP", theme::font_body_strong(), Color32::WHITE);
+    ui.painter().text(Pos2::new(mcp_hdr.left() + 16.0, mcp_hdr.center().y), Align2::LEFT_CENTER, "MCP", theme::font_body_strong(), theme::TEXT);
     icons::paint(ui.painter(), Icon::Help, Pos2::new(mcp_hdr.right() - 44.0, mcp_hdr.center().y), 13.0, theme::ICON_SECONDARY);
     icons::paint(ui.painter(), Icon::StrokeSettings, Pos2::new(mcp_hdr.right() - 24.0, mcp_hdr.center().y), 13.0, theme::ICON_SECONDARY);
     icons::paint(ui.painter(), Icon::Plus, Pos2::new(mcp_hdr.right() - 4.0, mcp_hdr.center().y), 13.0, theme::ICON_SECONDARY);
@@ -438,7 +461,7 @@ fn body(app: &mut App, ui: &mut Ui, c: &mut Cur, id: NodeId, count: usize) {
         Align2::LEFT_CENTER,
         "Selection details",
         theme::font_body_strong(),
-        Color32::from_rgb(0xB3, 0xB3, 0xB3),
+        theme::TEXT_TERTIARY,
     );
     c.y += 22.0;
 
@@ -476,31 +499,15 @@ fn body(app: &mut App, ui: &mut Ui, c: &mut Cur, id: NodeId, count: usize) {
     kv(ui, app, c, "Estimated tokens", &format!("{est_tokens:.1}k"));
     c.y += 4.0;
     let prompt_uri = format!("@designos://design/{}/{}", id.0, n.name.replace(' ', "-"));
-    let prompt_text = format!("Implement this design from design:os.\n{prompt_uri}");
-    let box_r = c.rect(PAD, 0.0, c.w - 2.0 * PAD, 48.0);
-    ui.painter().rect_filled(box_r, theme::cr(6), Color32::from_rgb(0x1E, 0x1E, 0x1E));
-    ui.painter().rect_stroke(box_r, theme::cr(6), Stroke::new(1.0, Color32::from_rgb(0x38, 0x38, 0x38)), egui::StrokeKind::Inside);
-    ui.painter().text(
-        Pos2::new(box_r.left() + 8.0, box_r.top() + 15.0),
-        Align2::LEFT_CENTER,
-        "Implement this design from design:os.",
-        theme::font_mono(),
-        Color32::from_rgb(0xD4, 0xD4, 0xD4),
-    );
-    let uri_line = elide(ui.painter(), &prompt_uri, &theme::font_mono(), box_r.width() - 16.0);
-    ui.painter().text(
-        Pos2::new(box_r.left() + 8.0, box_r.top() + 33.0),
-        Align2::LEFT_CENTER,
-        uri_line,
-        theme::font_mono(),
-        Color32::from_rgb(0x0D, 0x99, 0xFF),
-    );
-    c.y += 54.0;
-    let copy_mcp_r = c.rect(PAD, 0.0, c.w - 2.0 * PAD, 28.0);
-    if small_button(ui, copy_mcp_r, "mcp-copy-prompt", "Copy design:os MCP link") {
+    let prompt_lead = "Implement this design from design:os.";
+    let prompt_text = format!("{prompt_lead}\n{prompt_uri}");
+    crate::dev::code_view::prompt_box(ui, c, prompt_lead, &prompt_uri);
+    c.y += theme::SPACE_INLINE;
+    let copy_mcp_r = c.rect(PAD, 0.0, c.w - 2.0 * PAD, theme::CONTROL_XS);
+    if secondary_button(ui, copy_mcp_r, "mcp-copy-prompt", "Copy design:os MCP link") {
         copy(app, ui, prompt_text.clone(), "MCP prompt");
     }
-    c.y += 34.0;
+    c.y += theme::CONTROL_XS + BUTTON_GAP;
 
     // Section B: `Code Connect` (Dev Mode section with status pill + snippet action).
     widgets::hline(ui.painter(), c.x0, c.x0 + c.w, c.oy + c.y, theme::BORDER);
@@ -508,25 +515,15 @@ fn body(app: &mut App, ui: &mut Ui, c: &mut Cur, id: NodeId, count: usize) {
     let cc_hdr = c.rect(PAD, 0.0, c.w - 2.0 * PAD, theme::SECTION_TITLE_HEIGHT);
     widgets::record(ui, "dev-code-connect", cc_hdr);
     let cc_resp = ui.interact(cc_hdr, ui.id().with("dev-code-connect"), Sense::click());
-    ui.painter().text(Pos2::new(cc_hdr.left(), cc_hdr.center().y), Align2::LEFT_CENTER, "Code Connect", theme::font_body_strong(), Color32::WHITE);
+    if cc_resp.hovered() {
+        ui.painter().rect_filled(cc_hdr.expand2(Vec2::new(theme::SPACE_FACT, 0.0)), theme::cr(theme::RADIUS_CONTROL), theme::BG_HOVER);
+    }
+    ui.painter().text(Pos2::new(cc_hdr.left(), cc_hdr.center().y), Align2::LEFT_CENTER, "Code Connect", theme::font_body_strong(), theme::TEXT);
     let is_connected = n.dev.annotations.iter().any(|a| a.text.contains("Code Connect:"));
-    let pill_w = if is_connected { 68.0 } else { 64.0 };
-    let pill_r = Rect::from_min_size(Pos2::new(cc_hdr.right() - pill_w, cc_hdr.center().y - 9.0), Vec2::new(pill_w, 18.0));
-    let pill_bg = if is_connected {
-        Color32::from_rgb(0x16, 0x4E, 0x33)
-    } else if cc_resp.hovered() {
-        Color32::from_rgb(0x45, 0x45, 0x45)
-    } else {
-        Color32::from_rgb(0x38, 0x38, 0x38)
-    };
-    ui.painter().rect_filled(pill_r, theme::cr(4), pill_bg);
-    ui.painter().text(
-        pill_r.center(),
-        Align2::CENTER_CENTER,
-        if is_connected { "Connected" } else { "Not started" },
-        theme::font_caption(),
-        if is_connected { Color32::from_rgb(0x4A, 0xDE, 0x80) } else { Color32::from_rgb(0xB3, 0xB3, 0xB3) },
-    );
+    let label = if is_connected { "Connected" } else { "Not started" };
+    let pill_r = code_connect_badge_rect(ui.painter(), cc_hdr, label);
+    let tone = if is_connected { crate::widgets::kit::Tone::Success } else { crate::widgets::kit::Tone::Neutral };
+    crate::widgets::kit::count_badge(ui.painter(), pill_r, label, tone);
     if cc_resp.on_hover_text("Click to generate & copy design:os Code Connect snippet").clicked() {
         let comp_ident: String = n.name.chars().filter(|ch| ch.is_alphanumeric()).collect::<String>();
         let comp_ident = if comp_ident.is_empty() { format!("Node{}", id.0) } else { comp_ident };
@@ -547,27 +544,29 @@ fn body(app: &mut App, ui: &mut Ui, c: &mut Cur, id: NodeId, count: usize) {
 
     let cc_desc = "Publish components to a library, then you can connect them to your codebase with Code Connect. Learn more";
     let cc_text_r = c.rect(PAD, 0.0, c.w - 2.0 * PAD, 44.0);
-    let cc_galley = ui.painter().layout(cc_desc.to_string(), theme::font_body(), Color32::from_rgb(0x8C, 0x8C, 0x8C), cc_text_r.width());
+    let cc_galley = ui.painter().layout(cc_desc.to_string(), theme::font_body(), theme::TEXT_TERTIARY, cc_text_r.width());
     let cc_h = cc_galley.size().y;
-    ui.painter().galley(cc_text_r.min, cc_galley, Color32::from_rgb(0x8C, 0x8C, 0x8C));
+    ui.painter().galley(cc_text_r.min, cc_galley, theme::TEXT_TERTIARY);
     c.y += cc_h + 8.0;
 
-    let cc_r = c.rect(PAD, 0.0, c.w - 2.0 * PAD, 26.0);
-    if small_button(ui, cc_r, "code-connect-terminal", "Send to agent") {
+    let cc_r = c.rect(PAD, 0.0, c.w - 2.0 * PAD, theme::CONTROL_XS);
+    if secondary_button(ui, cc_r, "code-connect-terminal", "Send to agent") {
         match crate::terminal::export_selection_and_comments_to_pty(&mut app.terminal, &app.doc, app.page, &app.selection, app.file_path.as_deref()) {
             Ok(_) => app.show_toast("Sent selection to agent", false),
             Err(e) => app.show_toast(e, true),
         }
         app.show_agents_panel();
     }
-    c.y += 32.0;
+    c.y += theme::CONTROL_XS + BUTTON_GAP;
 
     // Section C: `v Layer properties` / Layout.
     widgets::hline(ui.painter(), c.x0, c.x0 + c.w, c.oy + c.y, theme::BORDER);
     c.y += 1.0;
     let lp_hdr = c.rect(PAD, 0.0, c.w - 2.0 * PAD, theme::SECTION_TITLE_HEIGHT);
     icons::paint(ui.painter(), Icon::ChevronDown, Pos2::new(lp_hdr.left() + 5.0, lp_hdr.center().y), theme::CHEVRON_SMALL, theme::ICON_SECONDARY);
-    ui.painter().text(Pos2::new(lp_hdr.left() + 16.0, lp_hdr.center().y), Align2::LEFT_CENTER, "Layer properties", theme::font_body_strong(), Color32::WHITE);
+    ui.painter().text(Pos2::new(lp_hdr.left() + 16.0, lp_hdr.center().y), Align2::LEFT_CENTER, "Layer properties", theme::font_body_strong(), theme::TEXT);
+    // Stays the 88 x 20 small button: Button/Secondary xs with its 14 Semibold label is 102 px wide and would overlap the
+    // 12 px "Layer properties" title in this row, so it waits for a layout decision (own row, shorter copy or a smaller font).
     let redline_r = Rect::from_min_size(Pos2::new(lp_hdr.right() - 88.0, lp_hdr.center().y - 10.0), Vec2::new(88.0, 20.0));
     widgets::record(ui, "dev-add-redlines", redline_r);
     if small_button(ui, redline_r, "dev-add-redlines", "+ Add redlines") {
@@ -621,7 +620,7 @@ fn body(app: &mut App, ui: &mut Ui, c: &mut Cur, id: NodeId, count: usize) {
                     Align2::LEFT_CENTER,
                     group_label,
                     theme::font_caption_strong(),
-                    Color32::from_rgb(0x8C, 0x8C, 0x8C),
+                    theme::TEXT_TERTIARY,
                 );
                 c.y += 20.0;
             }
@@ -633,7 +632,11 @@ fn body(app: &mut App, ui: &mut Ui, c: &mut Cur, id: NodeId, count: usize) {
             }
             let sw = Rect::from_min_size(Pos2::new(r.left(), r.center().y - 8.0), Vec2::splat(16.0));
             widgets::swatch(ui.painter(), sw, c32(&e.color.with_alpha(1.0), e.opacity));
-            let value = if app.dev.color_format == ColorFormat::Hex { e.hex() } else { app.dev.color_format.value(e.color, e.opacity) };
+            let value = if app.dev.color_format == ColorFormat::Hex && app.doc.color_profile.is_srgb() {
+                e.hex()
+            } else {
+                app.dev.color_format.value_in(app.doc.color_profile, e.color, e.opacity)
+            };
             let pct_str = format!("{}%", (e.opacity * 100.0).round() as i32);
             let label = elide(ui.painter(), &value, &theme::font_body(), r.width() - 60.0);
             ui.painter().text(Pos2::new(sw.right() + 8.0, r.top() + 12.0), Align2::LEFT_CENTER, label, theme::font_body(), theme::TEXT);
@@ -707,16 +710,16 @@ fn inspect_keyframes_section(app: &mut App, ui: &mut Ui, c: &mut Cur, n: &Node, 
         return;
     }
     section_title(ui, c, "Animation & Keyframes");
-    let kf_r = c.rect(PAD, 0.0, c.w - 2.0 * PAD, 28.0);
+    let kf_r = c.rect(PAD, 0.0, c.w - 2.0 * PAD, theme::CONTROL_XS);
     widgets::record(ui, "dev-keyframes-copy", kf_r);
     let kf_css = format!(
         "@keyframes node_{}_enter {{\n  from {{ opacity: 0; transform: translateY(4px); }}\n  to {{ opacity: 1; transform: translateY(0); }}\n}}",
         id.0
     );
-    if small_button(ui, kf_r, "dev-keyframes-copy", "Copy @keyframes CSS") {
+    if secondary_button(ui, kf_r, "dev-keyframes-copy", "Copy @keyframes CSS") {
         copy(app, ui, kf_css, "@keyframes CSS");
     }
-    c.y += 34.0;
+    c.y += theme::CONTROL_XS + BUTTON_GAP;
 }
 
 // ------------------------------------------------------------------ measurements
@@ -820,7 +823,7 @@ pub fn measure_overlay(app: &App, ui: &Ui, rect: Rect) {
         let w = text_width(&p, &label, &font) + 10.0;
         let pill = Rect::from_center_size(mid + if horizontal { Vec2::new(0.0, -14.0) } else { Vec2::new(18.0 + w / 2.0, 0.0) }, Vec2::new(w, 16.0));
         p.rect_filled(pill, theme::cr(theme::RADIUS_MARK), MEASURE);
-        p.text(pill.center(), Align2::CENTER_CENTER, label, font, Color32::WHITE);
+        p.text(pill.center(), Align2::CENTER_CENTER, label, font, theme::CANVAS_SIZE_BADGE_TEXT);
     }
 }
 
@@ -973,6 +976,102 @@ mod tests {
         assert!(g.iter().any(|g| (g.value - 30.0).abs() < 1e-3));
     }
 
+    /// Colours painted inside `within`: image tints and text colours.
+    fn colours_in(shapes: &[egui::epaint::ClippedShape], within: Rect) -> Vec<egui::Color32> {
+        fn walk(shape: &egui::Shape, within: Rect, out: &mut Vec<egui::Color32>) {
+            match shape {
+                egui::Shape::Mesh(m) => {
+                    if m.vertices.iter().all(|v| within.contains(v.pos) || within.expand(1.0).contains(v.pos)) {
+                        out.extend(m.vertices.iter().map(|v| v.color));
+                    }
+                }
+                egui::Shape::Text(t) if within.contains(t.pos + t.galley.size() * 0.5) => {
+                    out.extend(t.galley.job.sections.iter().map(|s| s.format.color));
+                }
+                egui::Shape::Vec(v) => v.iter().for_each(|s| walk(s, within, out)),
+                _ => {}
+            }
+        }
+        let mut out = Vec::new();
+        shapes.iter().for_each(|s| walk(&s.shape, within, &mut out));
+        out
+    }
+
+    #[test]
+    fn inspect_header_icons_never_paint_white() {
+        let mut d = Document::new("t");
+        let page = d.add_page("p");
+        let f = d.alloc_id();
+        let f = d.insert(page, Node::frame(f, designos_doc::Rect::new(0.0, 0.0, 200.0, 100.0))).unwrap();
+        let mut app = App::new(d);
+        app.ui.dev_mode = true;
+        app.selection = vec![f];
+        let ctx = egui::Context::default();
+        theme::install_fonts(&ctx);
+        let screen = Rect::from_min_size(Pos2::ZERO, Vec2::new(900.0, 800.0));
+        let region = Rect::from_min_size(Pos2::new(660.0, 100.0), Vec2::new(239.0, 600.0));
+        let mut t = 0.0;
+        let mut frame = |app: &mut App, pointer: Option<Pos2>| {
+            t += 0.1;
+            let events = pointer.map(egui::Event::PointerMoved).into_iter().collect();
+            ctx.run_ui(egui::RawInput { screen_rect: Some(screen), time: Some(t), events, ..Default::default() }, |ui| show(app, ui, region)).shapes
+        };
+        frame(&mut app, None);
+        let rest = frame(&mut app, None);
+        let rect_of = |name: &str| ctx.data(|d| d.get_temp::<Rect>(egui::Id::new(("test-rect", name.to_string())))).unwrap_or_else(|| panic!("no rect {name}"));
+        for name in ["dev-inspect-link", "dev-inspect-code", "dev-inspect-more"] {
+            let r = rect_of(name);
+            let at_rest = colours_in(&rest, r);
+            assert!(at_rest.contains(&theme::ICON_QUATERNARY), "{name}: icon must rest on ICON_QUATERNARY, got {at_rest:?}");
+            assert!(!at_rest.contains(&egui::Color32::WHITE), "{name}: no white at rest");
+            frame(&mut app, Some(r.center()));
+            let hot = frame(&mut app, Some(r.center()));
+            let on_hover = colours_in(&hot, r);
+            assert!(on_hover.contains(&theme::ICON_QUATERNARY_HOVER), "{name}: hover must use ICON_QUATERNARY_HOVER, got {on_hover:?}");
+            assert!(!on_hover.contains(&egui::Color32::WHITE), "{name}: no white on hover");
+            frame(&mut app, Some(Pos2::new(5.0, 5.0)));
+        }
+    }
+
+    #[test]
+    fn code_connect_label_sits_inside_its_badge_with_the_kit_padding() {
+        for (connected, label, fill) in [(false, "Not started", theme::BADGE_NEUTRAL_BG), (true, "Connected", theme::BG_SUCCESS_PRIMARY)] {
+            let mut d = Document::new("t");
+            let page = d.add_page("p");
+            let f = d.alloc_id();
+            let f = d.insert(page, Node::frame(f, designos_doc::Rect::new(0.0, 0.0, 200.0, 100.0))).unwrap();
+            let mut app = App::new(d);
+            app.ui.dev_mode = true;
+            app.selection = vec![f];
+            if connected {
+                app.dev_edit(f, |dev| dev.annotations.push(Annotation { text: "Code Connect: <F />".into(), properties: vec![], category: None }));
+            }
+            let ctx = egui::Context::default();
+            theme::install_fonts(&ctx);
+            let screen = Rect::from_min_size(Pos2::ZERO, Vec2::new(900.0, 800.0));
+            let region = Rect::from_min_size(Pos2::new(660.0, 100.0), Vec2::new(239.0, 600.0));
+            let mut shapes = Vec::new();
+            for i in 0..2 {
+                let raw = egui::RawInput { screen_rect: Some(screen), time: Some(0.1 * (i + 1) as f64), ..Default::default() };
+                shapes = ctx.run_ui(raw, |ui| show(&mut app, ui, region)).shapes;
+            }
+            fn walk(s: &egui::Shape, label: &str, fill: egui::Color32, badge: &mut Option<Rect>, text: &mut Option<Rect>) {
+                match s {
+                    egui::Shape::Rect(r) if r.fill == fill && (r.rect.height() - 18.0).abs() < 0.01 => *badge = Some(r.rect),
+                    egui::Shape::Text(t) if t.galley.job.text == label => *text = Some(Rect::from_min_size(t.pos, t.galley.size())),
+                    egui::Shape::Vec(v) => v.iter().for_each(|s| walk(s, label, fill, badge, text)),
+                    _ => {}
+                }
+            }
+            let (mut badge, mut text) = (None, None);
+            shapes.iter().for_each(|s| walk(&s.shape, label, fill, &mut badge, &mut text));
+            let (badge, text) = (badge.expect("badge rect"), text.expect("badge label"));
+            let pad = CODE_CONNECT_BADGE_PAD_X + theme::BORDER_WIDTH;
+            assert!(text.left() - badge.left() >= pad - 0.5, "{label}: left gap {} < {pad}", text.left() - badge.left());
+            assert!(badge.right() - text.right() >= pad - 0.5, "{label}: right gap {} < {pad}", badge.right() - text.right());
+        }
+    }
+
     #[test]
     fn typography_and_assets() {
         let t = TextProps {
@@ -992,13 +1091,43 @@ mod tests {
         let i = d.alloc_id();
         let mut n = Node::rectangle(i, designos_doc::Rect::new(0.0, 0.0, 5.0, 5.0));
         n.fills = vec![Paint {
-            kind: PaintKind::Image { image_ref: "abc".into(), scale_mode: ImageScaleMode::Fill },
+            kind: PaintKind::Image { image_ref: "abc".into(), scale_mode: ImageScaleMode::Fill, params: Default::default() },
             opacity: 1.0,
             visible: true,
             blend: BlendMode::Normal,
         }];
         d.insert(page, n).unwrap();
         assert_eq!(collect_assets(&d, i), vec![Asset::Image("abc".into()), Asset::Svg, Asset::Png2x]);
+    }
+
+    #[test]
+    fn inspect_section_buttons_are_secondary_xs() {
+        let mut d = Document::new("t");
+        let page = d.add_page("p");
+        let f = d.alloc_id();
+        let f = d.insert(page, Node::frame(f, designos_doc::Rect::new(12.0, 24.0, 320.0, 180.0))).unwrap();
+        let mut app = App::new(d);
+        app.ui.dev_mode = true;
+        app.selection = vec![f];
+        let ctx = egui::Context::default();
+        theme::install_fonts(&ctx);
+        let region = Rect::from_min_size(Pos2::new(960.0, 40.0), Vec2::new(theme::RIGHT_PANEL_WIDTH, 1200.0));
+        let screen = Rect::from_min_size(Pos2::ZERO, Vec2::new(1300.0, 1300.0));
+        let _ = ctx.run_ui(egui::RawInput { screen_rect: Some(screen), ..Default::default() }, |ui| show(&mut app, ui, region));
+        let get_rect =
+            |name: &str| ctx.data(|d| d.get_temp::<Rect>(egui::Id::new(("test-rect", name.to_string())))).unwrap_or_else(|| panic!("no rect {name}"));
+        for name in ["btn-\"mcp-copy-prompt\"", "btn-\"code-connect-terminal\""] {
+            assert_eq!(get_rect(name).height(), theme::CONTROL_XS, "{name} is Button/Secondary xs, 32 tall");
+        }
+        // "+ Add redlines" keeps its 88 x 20 slot: at 14 Semibold the label needs a 102 px button, which overlaps the
+        // 12 px "Layer properties" title in the same row. Changing it needs a layout decision, not a geometry tweak.
+        let redlines = get_rect("dev-add-redlines");
+        assert_eq!((redlines.width(), redlines.height()), (88.0, 20.0));
+        let p = ctx.layer_painter(egui::LayerId::background());
+        let label_w = widgets::text_width(&p, "Add redlines", &theme::font_text(theme::FONT_SIZE_TEXT_SM, theme::TextWeight::Semibold));
+        let title_w = widgets::text_width(&p, "Layer properties", &theme::font_body_strong());
+        let free = (theme::RIGHT_PANEL_WIDTH - 2.0 * PAD) - 16.0 - title_w;
+        assert!(label_w + 2.0 * theme::INSET_CONTROL > free, "if this fails the xs redlines button fits beside its title: label {label_w}, free {free}");
     }
 
     #[test]

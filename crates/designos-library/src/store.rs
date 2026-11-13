@@ -18,7 +18,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Name of the project created on first launch.
 pub const SEED_PROJECT: &str = "Getting started";
+/// Name of the starter file seeded into the "Getting started" project.
+pub const STARTER_FILE_NAME: &str = "DESIGN-OS Studio Starter";
 const SEED_MARKER: &str = ".seeded";
+const STARTER_SEED_MARKER: &str = ".starter-seeded";
 const MANIFEST: &str = "project.json";
 const TRASH_MANIFEST: &str = "trash.json";
 
@@ -64,6 +67,17 @@ pub struct FileEntry {
 pub enum TrashKind {
     File,
     Project,
+    /// A page of a project's docs.
+    Page,
+}
+
+/// Where a trashed docs page came from.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PageTrash {
+    /// The page's path inside the project's docs folder (`spec/payment-methods.md`).
+    pub path: String,
+    /// The manifest group it was listed in (`spec`), if any.
+    pub group: Option<String>,
 }
 
 /// Something in the trash, restorable until the trash is emptied.
@@ -78,6 +92,9 @@ pub struct TrashItem {
     pub project: Option<String>,
     pub project_name: Option<String>,
     pub entry: Option<FileEntry>,
+    /// For pages: the docs path and group they were deleted from.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub page: Option<PageTrash>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -117,11 +134,32 @@ pub(crate) fn write_lock() -> MutexGuard<'static, ()> {
 /// Delegates to [`designos_fonts::write_atomic`] so every crate in the workspace shares the same
 /// atomic save guarantees: symlink traversal (including dangling links), temp-file names truncated
 /// on a char boundary for 249–255 byte filenames, the existing permission mode applied when the
-/// temp file is created, refusal of read-only, unwritable and non-regular targets, and cleanup of
-/// stale temp files left by crashed saves. Because the save renames a new file over the old one,
-/// the old file's ACLs, extended attributes, ownership and hard links are not carried over.
+/// temp file is created, macOS ACL and extended-attribute preservation via `fcopyfile(3)`, refusal
+/// of read-only, unwritable and non-regular targets, and cleanup of stale `.save-<pid>-<seq>.tmp`
+/// files left by crashed saves without touching user `.tmp` files. Because the save renames a new
+/// file over the old one, another user's ownership and hard links are not carried over.
 pub fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
     Ok(designos_fonts::write_atomic(path, bytes)?)
+}
+
+/// [`write_atomic`] for content that is produced while it is written (see [`designos_fonts::write_atomic_with`]).
+pub fn write_atomic_with(path: &Path, fill: impl FnOnce(&mut dyn std::io::Write) -> std::io::Result<()>) -> Result<()> {
+    Ok(designos_fonts::write_atomic_with(path, fill)?)
+}
+
+/// Streams `doc` into `path` atomically: the same bytes as `to_json_counted`, without the whole text in memory.
+/// Returns how many non-finite numbers were written as their neutral value. A document with unloaded pages is
+/// refused before any file is touched.
+pub fn write_document_atomic(path: &Path, doc: &Document) -> Result<usize> {
+    if let Some(why) = doc.pending_pages_error() {
+        return Err(LibraryError::Invalid(why.to_string()));
+    }
+    let mut replaced = 0;
+    write_atomic_with(path, |out| {
+        replaced = doc.to_writer_counted(out).map_err(std::io::Error::from)?;
+        Ok(())
+    })?;
+    Ok(replaced)
 }
 
 /// Loads a document from any importable file: `.designos` / `.json` (native or
@@ -130,11 +168,25 @@ pub fn load_external(path: &Path) -> Result<Document> {
     load_external_counted(path).map(|(doc, _)| doc)
 }
 
+/// What reading a file repaired without failing it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ReadRepairs {
+    /// `null` numbers read as their neutral value.
+    pub non_finite_numbers: usize,
+    /// Motion tracks stored with no property, dropped.
+    pub motion_tracks_dropped: usize,
+}
+
 /// Like [`load_external`], also returning how many `null` numbers were replaced on read.
 pub fn load_external_counted(path: &Path) -> Result<(Document, usize)> {
+    load_external_repairs(path).map(|(doc, repairs)| (doc, repairs.non_finite_numbers))
+}
+
+/// Like [`load_external`], also returning what the read repaired.
+pub fn load_external_repairs(path: &Path) -> Result<(Document, ReadRepairs)> {
     let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_ascii_lowercase();
     let invalid = |m: String| LibraryError::Invalid(m);
-    let mut replaced_on_read = 0;
+    let mut repairs = ReadRepairs::default();
     let mut doc = match ext.as_str() {
         "fig" => designos_fig::import_fig(&std::fs::read(path)?).map_err(|e| invalid(format!("Cannot import .fig: {e}")))?,
         "svg" => {
@@ -158,7 +210,7 @@ pub fn load_external_counted(path: &Path) -> Result<(Document, usize)> {
                         if !report.is_clean() {
                             eprintln!("designos-doc: repaired a damaged document on load: {report:?}");
                         }
-                        replaced_on_read = report.non_finite_numbers;
+                        repairs = ReadRepairs { non_finite_numbers: report.non_finite_numbers, motion_tracks_dropped: report.motion_tracks_dropped };
                         d
                     }
                 }
@@ -169,7 +221,7 @@ pub fn load_external_counted(path: &Path) -> Result<(Document, usize)> {
             if !report.is_clean() {
                 eprintln!("designos-doc: repaired a damaged document on load: {report:?}");
             }
-            replaced_on_read = report.non_finite_numbers;
+            repairs = ReadRepairs { non_finite_numbers: report.non_finite_numbers, motion_tracks_dropped: report.motion_tracks_dropped };
             d
         }
     };
@@ -180,7 +232,7 @@ pub fn load_external_counted(path: &Path) -> Result<(Document, usize)> {
     if doc.pages.is_empty() {
         doc.add_page("Page 1");
     }
-    Ok((doc, replaced_on_read))
+    Ok((doc, repairs))
 }
 
 fn clean_name(name: &str, what: &str) -> Result<String> {
@@ -449,6 +501,13 @@ fn sanitize_document_in_memory(doc: &mut Document) -> Result<()> {
     Ok(())
 }
 
+/// Studio's folder in the user's data directory (`<data dir>/designos`), or `None` when the platform has no data
+/// directory. The library root and Studio-private folders (the agent approval channel) are siblings under it, and
+/// neither depends on where the other is configured.
+pub fn app_data_dir() -> Option<PathBuf> {
+    dirs::data_dir().map(|dir| dir.join("designos"))
+}
+
 impl Library {
     /// `$DESIGNOS_LIBRARY` if set (`$DESIGNOS_LIBRARY_DIR` is accepted as a
     /// deprecated alias), otherwise `<data dir>/designos/library`.
@@ -458,7 +517,7 @@ impl Library {
                 return PathBuf::from(p);
             }
         }
-        dirs::data_dir().unwrap_or_else(|| PathBuf::from(".")).join("designos").join("library")
+        app_data_dir().unwrap_or_else(|| PathBuf::from(".").join("designos")).join("library")
     }
 
     fn project_dir(&self, id: &str) -> PathBuf {
@@ -552,6 +611,7 @@ impl Library {
             project: None,
             project_name: None,
             entry: None,
+            page: None,
         };
         write_atomic(&dir.join(TRASH_MANIFEST), serde_json::to_string_pretty(&item)?.as_bytes())?;
         let dest = dir.join("project");
@@ -633,6 +693,9 @@ impl Library {
 
     /// [`Self::create_file`], also returning how many non-finite numbers (NaN, infinity) were
     /// written as their neutral value, so the stored file always opens.
+    ///
+    /// Fails, and writes nothing, for a document that still has pages whose content is not loaded
+    /// ([`Document::has_pending_pages`]): the caller owns the document and loads them first.
     pub fn create_file_counted(&self, project: &str, folder: Option<&str>, name: &str, doc: &Document) -> Result<(FileEntry, usize)> {
         let _guard = write_lock();
         let name = clean_name(name, "file")?;
@@ -655,9 +718,8 @@ impl Library {
             thumbnail: None,
             branches: vec![],
         };
-        let (json, replaced) = doc.to_json_counted()?;
         let file_path = self.file_path(project, &entry.id);
-        write_atomic(&file_path, json.as_bytes())?;
+        let replaced = write_document_atomic(&file_path, doc)?;
         m.files.push(entry.clone());
         m.project.modified = now;
         if let Err(err) = self.save_manifest(&m) {
@@ -687,11 +749,13 @@ impl Library {
 
     /// [`Self::save_file`], also returning how many non-finite numbers (NaN, infinity) were written
     /// as their neutral value, counted by the one serialization the save performs.
+    ///
+    /// Fails, and writes nothing, for a document that still has pages whose content is not loaded
+    /// ([`Document::has_pending_pages`]); versions and branches refuse the same way.
     pub fn save_file_counted(&self, id: &str, doc: &Document) -> Result<usize> {
         let _guard = write_lock();
         let (mut m, i) = self.find_file(id)?;
-        let (json, replaced) = doc.to_json_counted()?;
-        write_atomic(&self.file_path(&m.project.id, id), json.as_bytes())?;
+        let replaced = write_document_atomic(&self.file_path(&m.project.id, id), doc)?;
         let now = now_ms();
         m.files[i].modified = now;
         m.project.modified = now;
@@ -733,8 +797,9 @@ impl Library {
 
     pub fn load_file(&self, id: &str) -> Result<Document> {
         let (m, _) = self.find_file(id)?;
-        let text = std::fs::read_to_string(self.file_path(&m.project.id, id))?;
-        Ok(Document::from_json(&text)?)
+        // Read as a stream: a stored file of several GB never sits in memory as one text next to the document.
+        let file = std::fs::File::open(self.file_path(&m.project.id, id))?;
+        Ok(Document::from_reader(std::io::BufReader::with_capacity(1 << 20, file))?)
     }
 
     fn update_file(&self, id: &str, f: impl FnOnce(&mut FileEntry)) -> Result<()> {
@@ -854,26 +919,52 @@ impl Library {
     /// Same as [`Self::import_file`], also returning the parsed [`Document`] so callers
     /// (such as background thumbnail rendering) do not re-read and re-parse the saved file.
     pub fn import_file_with_doc(&self, path: &Path, project: &str, folder: Option<&str>) -> Result<(FileEntry, Document)> {
-        self.import_file_with_doc_counted(path, project, folder).map(|(e, d, _)| (e, d))
+        self.import_file_with_doc_counted(path, project, folder).map(|(e, d, _, _)| (e, d))
     }
 
     /// Like [`Self::import_file_with_doc`], also returning how many non-finite numbers were
-    /// replaced by their neutral value on read or write.
-    pub fn import_file_with_doc_counted(&self, path: &Path, project: &str, folder: Option<&str>) -> Result<(FileEntry, Document, usize)> {
-        let (mut doc, replaced_on_read) = load_external_counted(path)?;
+    /// replaced by their neutral value on read or write, and how many instances the file keeps empty for good
+    /// because it has more nested component copies than can be expanded. Every page of the import is loaded
+    /// before the file is written, and the returned document holds them all.
+    pub fn import_file_with_doc_counted(&self, path: &Path, project: &str, folder: Option<&str>) -> Result<(FileEntry, Document, usize, usize)> {
+        self.import_file_with_doc_repairs(path, project, folder).map(|(e, d, replaced, left_empty, _)| (e, d, replaced, left_empty))
+    }
+
+    /// [`Self::import_file_with_doc_counted`], also returning how many Motion tracks with no property the read dropped.
+    pub fn import_file_with_doc_repairs(&self, path: &Path, project: &str, folder: Option<&str>) -> Result<(FileEntry, Document, usize, usize, usize)> {
+        let (doc, repairs) = load_external_repairs(path)?;
         let stem = path.file_stem().and_then(|s| s.to_str()).filter(|s| !s.is_empty());
+        let (entry, doc, replaced, left_empty) = self.store_imported_document(doc, repairs.non_finite_numbers, stem, project, folder)?;
+        Ok((entry, doc, replaced, left_empty, repairs.motion_tracks_dropped))
+    }
+
+    /// Stores a document that was just read from a file. Pages the reader left unloaded are loaded first.
+    fn store_imported_document(
+        &self,
+        mut doc: Document,
+        replaced_on_read: usize,
+        stem: Option<&str>,
+        project: &str,
+        folder: Option<&str>,
+    ) -> Result<(FileEntry, Document, usize, usize)> {
         let name = if !doc.name.is_empty() { doc.name.clone() } else { stem.unwrap_or("Imported").to_string() };
+        // A large `.fig` comes in with its inactive pages deferred (their instances are empty until the page
+        // loads) and the file keeps no copy of the source, so every page is loaded before the first write.
+        let left_empty = doc.load_pending_pages().map_err(|e| LibraryError::Invalid(format!("Cannot import \"{name}\": {e}")))?;
+        if left_empty > 0 {
+            eprintln!("designos-library: imported \"{name}\" with {left_empty} instances left empty because the file has more nested component copies than can be expanded");
+        }
         let (entry, replaced_on_write) = self.create_file_counted(project, folder, &name, &doc)?;
         let total_replaced = replaced_on_read + replaced_on_write;
         if replaced_on_write == 0 {
-            return Ok((entry, doc, total_replaced));
+            return Ok((entry, doc, total_replaced, left_empty));
         }
         // The import produced NaN or infinity and the stored file holds neutral values instead.
         // Sanitise only the affected items in memory so the editor and the file agree without
         // re-reading or re-parsing the whole stored file.
         eprintln!("designos-library: imported \"{name}\" with {replaced_on_write} non-finite numbers replaced by their neutral value");
         sanitize_document_in_memory(&mut doc)?;
-        Ok((entry, doc, total_replaced))
+        Ok((entry, doc, total_replaced, left_empty))
     }
 
     // ------------------------------------------------------------ recents / search
@@ -920,6 +1011,7 @@ impl Library {
             project: Some(m.project.id.clone()),
             project_name: Some(m.project.name.clone()),
             entry: Some(entry.clone()),
+            page: None,
         };
         write_atomic(&dir.join(TRASH_MANIFEST), serde_json::to_string_pretty(&item)?.as_bytes())?;
         std::fs::rename(self.file_path(&m.project.id, id), dir.join("file.designos"))?;
@@ -934,6 +1026,42 @@ impl Library {
         m.files.remove(i);
         m.project.modified = now_ms();
         self.save_manifest(&m)
+    }
+
+    /// Removes a manifest entry whose underlying `.designos` file is missing on disk.
+    pub fn remove_missing_file(&self, id: &str) -> Result<()> {
+        let _guard = write_lock();
+        let (mut m, i) = self.find_file(id)?;
+        let entry = m.files.remove(i);
+        let file_path = self.file_path(&m.project.id, id);
+        if file_path.exists() {
+            let _ = std::fs::remove_file(file_path);
+        }
+        if let Some(t) = &entry.thumbnail {
+            let _ = std::fs::remove_file(self.path(t));
+        }
+        let branches_dir = self.path("branches").join(id);
+        if branches_dir.exists() {
+            let _ = std::fs::remove_dir_all(branches_dir);
+        }
+        self.remove_agent_sessions(id);
+        m.project.modified = now_ms();
+        self.save_manifest(&m)
+    }
+
+    /// Picks a file name in `project` based on `base`, adding a ` (n)` suffix on clash (or always when `always_numbered` is true).
+    pub fn next_available_file_name(&self, project: &str, base: &str, always_numbered: bool) -> Result<String> {
+        let m = self.load_manifest(project)?;
+        if !always_numbered && !m.files.iter().any(|f| f.name == base) {
+            return Ok(base.to_string());
+        }
+        for n in 1usize.. {
+            let candidate = format!("{base} ({n})");
+            if !m.files.iter().any(|f| f.name == candidate) {
+                return Ok(candidate);
+            }
+        }
+        unreachable!()
     }
 
     /// Everything in the trash, most recently trashed first.
@@ -1006,6 +1134,7 @@ impl Library {
     pub fn restore(&self, id: &str) -> Result<()> {
         match self.list_trash().into_iter().find(|t| t.id == id) {
             Some(t) if t.kind == TrashKind::Project => self.restore_project(id).map(|_| ()),
+            Some(t) if t.kind == TrashKind::Page => self.restore_page(id).map(|_| ()),
             Some(_) => self.restore_file(id).map(|_| ()),
             None => Err(LibraryError::NotFound(format!("trash item {id}"))),
         }
@@ -1032,6 +1161,8 @@ impl Library {
             for item in self.list_trash() {
                 match item.kind {
                     TrashKind::File => session_file_ids.push(item.id),
+                    // A page has no agent sessions; its folder goes with the trash.
+                    TrashKind::Page => {}
                     TrashKind::Project => {
                         let proj_manifest = self.trash_dir(&item.id).join("project").join(MANIFEST);
                         if let Ok(text) = std::fs::read_to_string(proj_manifest) {
@@ -1064,12 +1195,54 @@ impl Library {
         }
         let project = self.create_project(SEED_PROJECT)?;
         let mut doc = demo();
-        doc.name = "Welcome".into();
-        let entry = self.create_file(&project.id, None, "Welcome", &doc)?;
+        doc.name = STARTER_FILE_NAME.into();
+        let entry = self.create_file(&project.id, None, STARTER_FILE_NAME, &doc)?;
         write_atomic(&marker, b"1")?;
+        write_atomic(&self.path(STARTER_SEED_MARKER), b"1")?;
         Ok(Some(entry))
     }
+
+    /// Seeds the "DESIGN-OS Studio Starter" sample into "Getting started" on a fresh library or
+    /// once on upgrade from v0.4.0–v0.6.4 (when `.seeded` exists and `.starter-seeded` does not).
+    ///
+    /// On a corrupt or missing starter asset (`load_starter` returning `Err`), returns
+    /// [`LibraryError::Invalid`] without writing `.seeded` or `.starter-seeded` so the next launch
+    /// retries.
+    pub fn seed_starter(&self, load_starter: impl FnOnce() -> std::result::Result<Document, String>) -> Result<Option<FileEntry>> {
+        let starter_marker = self.path(STARTER_SEED_MARKER);
+        if starter_marker.exists() {
+            return Ok(None);
+        }
+        let seed_marker = self.path(SEED_MARKER);
+        let projects = self.list_projects();
+        if !seed_marker.exists() && projects.is_empty() {
+            let mut doc = load_starter().map_err(LibraryError::Invalid)?;
+            let project = self.create_project(SEED_PROJECT)?;
+            doc.name = STARTER_FILE_NAME.into();
+            let entry = self.create_file(&project.id, None, STARTER_FILE_NAME, &doc)?;
+            write_atomic(&seed_marker, b"1")?;
+            write_atomic(&starter_marker, b"1")?;
+            return Ok(Some(entry));
+        }
+        if seed_marker.exists() {
+            let mut doc = load_starter().map_err(LibraryError::Invalid)?;
+            let project = match projects.into_iter().find(|p| p.name == SEED_PROJECT) {
+                Some(p) => p,
+                None => self.create_project(SEED_PROJECT)?,
+            };
+            let file_name = self.next_available_file_name(&project.id, STARTER_FILE_NAME, false)?;
+            doc.name = file_name.clone();
+            let entry = self.create_file(&project.id, None, &file_name, &doc)?;
+            write_atomic(&starter_marker, b"1")?;
+            return Ok(Some(entry));
+        }
+        // Pre-seed library: has existing projects but no `.seeded` marker; leave untouched.
+        Ok(None)
+    }
 }
+
+#[path = "trash_pages.rs"]
+mod trash_pages;
 
 #[cfg(test)]
 mod tests {
@@ -1217,12 +1390,15 @@ mod tests {
         let p = lib.create_project("P").unwrap();
         let e = lib.create_file(&p.id, None, "A", &doc("A", 1)).unwrap();
         let path = lib.file_path(&p.id, &e.id);
-        // a leftover temp file from a crashed write must not corrupt the real one
-        std::fs::write(path.with_extension("designos.tmp"), "garbage").unwrap();
+        // a user file named <name>.tmp must not corrupt the real file or be deleted on save
+        let user_tmp = path.with_extension("designos.tmp");
+        std::fs::write(&user_tmp, "keep-user-tmp").unwrap();
         lib.save_file(&e.id, &doc("A", 3)).unwrap();
         assert_eq!(lib.load_file(&e.id).unwrap().nodes.len(), 4);
-        let names: Vec<_> = std::fs::read_dir(path.parent().unwrap()).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
-        assert_eq!(names, vec![format!("{}.designos", e.id)]);
+        assert_eq!(std::fs::read_to_string(&user_tmp).unwrap(), "keep-user-tmp");
+        let mut names: Vec<_> = std::fs::read_dir(path.parent().unwrap()).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
+        names.sort();
+        assert_eq!(names, vec![format!("{}.designos", e.id), format!("{}.designos.tmp", e.id)]);
     }
 
     #[test]
@@ -1380,5 +1556,76 @@ mod tests {
         // Emptying the trash removes the file's agent-sessions/<id> folder.
         lib.empty_trash().unwrap();
         assert!(!sess_dir.exists(), "empty_trash must remove agent-sessions/<id>");
+    }
+
+    /// A loader with nothing left to load that had to leave `skipped` instances empty (the copy budget).
+    #[derive(Debug)]
+    struct OverBudget {
+        skipped: usize,
+    }
+
+    impl designos_doc::PageHydrator for OverBudget {
+        fn hydrate_page(&mut self, _: &mut Document, _: designos_doc::NodeId) -> bool {
+            false
+        }
+        fn hydrate_all(&mut self, _: &mut Document) -> bool {
+            false
+        }
+        fn is_hydrated(&self, _: designos_doc::NodeId) -> bool {
+            true
+        }
+        fn unexpanded_instances(&self) -> usize {
+            self.skipped
+        }
+        fn take_unexpanded_instances(&mut self) -> usize {
+            std::mem::take(&mut self.skipped)
+        }
+    }
+
+    #[test]
+    fn an_import_reports_how_many_instances_the_file_keeps_empty() {
+        let (_t, lib) = Tmp::new();
+        let p = lib.create_project("P").unwrap();
+        let mut over_budget = doc("big", 1);
+        over_budget.page_hydrator = Some(std::sync::Arc::new(std::sync::Mutex::new(OverBudget { skipped: 3 })));
+
+        let (_, _, replaced, left_empty) = lib.store_imported_document(over_budget, 0, None, &p.id, None).unwrap();
+        assert_eq!((replaced, left_empty), (0, 3), "the caller can tell the user");
+
+        let (_, _, _, left_empty) = lib.store_imported_document(doc("small", 1), 0, None, &p.id, None).unwrap();
+        assert_eq!(left_empty, 0, "a normal file reports nothing");
+    }
+
+    /// A write that hits the file-size limit half way through a document larger than the 1 MiB write buffer keeps
+    /// the disk error kind. The limit is set only in a child process, so the shared test binary is untouched.
+    #[cfg(unix)]
+    #[test]
+    fn a_large_save_that_hits_the_size_limit_keeps_the_disk_error_kind() {
+        let dir = std::env::var("DESIGNOS_FSIZE_CHILD");
+        let mut big = Document::new("Big");
+        big.add_page("Page");
+        big.images.insert("blob".into(), (0..3_000_000u32).map(|i| (i % 251) as u8).collect());
+        let Ok(dir) = dir else {
+            let exe = std::env::current_exe().unwrap();
+            let scratch = std::env::temp_dir().join(format!("designos_lib_fsize_{}_{}", std::process::id(), new_id()));
+            std::fs::create_dir_all(&scratch).unwrap();
+            let out = std::process::Command::new("sh")
+                .arg("-c")
+                .arg("trap '' XFSZ; ulimit -f 2500; exec \"$0\" --exact store::tests::a_large_save_that_hits_the_size_limit_keeps_the_disk_error_kind --test-threads=1")
+                .arg(&exe)
+                .env("DESIGNOS_FSIZE_CHILD", &scratch)
+                .output()
+                .unwrap();
+            let _ = std::fs::remove_dir_all(&scratch);
+            let text = String::from_utf8_lossy(&out.stdout).into_owned() + &String::from_utf8_lossy(&out.stderr);
+            assert!(out.status.success() && text.contains("1 passed"), "child run failed: {text}");
+            return;
+        };
+        let target = PathBuf::from(dir).join("doc.designos");
+        match write_document_atomic(&target, &big) {
+            Err(LibraryError::Io(io)) => assert_eq!(io.kind(), std::io::ErrorKind::FileTooLarge, "{io}"),
+            other => panic!("expected an io error, got {other:?}"),
+        }
+        assert!(!target.exists(), "no partial file");
     }
 }

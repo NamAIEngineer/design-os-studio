@@ -5,8 +5,8 @@
 //! colour/number property via bucketed hash tables.
 
 use crate::{
-    local_key, scope_allows, style_property, Color, Document, LayoutAlign, LibraryAssetKind, LibraryRef, LibrarySnapshot, LineHeight, Node, NodeId, NodeKind,
-    Paint, PaintKind, Style, StyleProperty, TextProps, TextStyle, Variable, VariableCollection, VariableKind, VariableStore, VariableValue,
+    local_key, scope_allows, style_property, Color, Document, LayoutAlign, LeadingTrim, LibraryAssetKind, LibraryRef, LibrarySnapshot, LineHeight, Node,
+    NodeId, NodeKind, Paint, PaintKind, Style, StyleProperty, TextProps, TextStyle, Variable, VariableCollection, VariableKind, VariableStore, VariableValue,
     REMOTE_LIBRARY_PREFIX,
 };
 use std::collections::HashMap;
@@ -139,6 +139,7 @@ pub fn default_style_property(style: &Style) -> StyleProperty {
         Style::Text(_) => StyleProperty::Text,
         Style::Effect(_) => StyleProperty::Effect,
         Style::Grid(_) => StyleProperty::Grid,
+        Style::Animation(_) => StyleProperty::Animation,
     }
 }
 
@@ -156,7 +157,8 @@ impl Index {
         let mut by_num: HashMap<i64, Vec<Entry>> = HashMap::new();
         let mut styles: Vec<StyleEntry> = Vec::new();
 
-        for v in doc.variables.values() {
+        // A soft-deleted variable still resolves for the layers bound to it, but it is never a token to suggest.
+        for v in doc.live_variables() {
             if let Some(lib_id) = variable_library_id(doc, v) {
                 if enabled_library_name(doc, lib_id).is_none() {
                     continue; // Disabled library: never suggest even if previously imported.
@@ -375,7 +377,7 @@ impl Index {
     pub fn matching_text_styles(&self, t: &TextProps) -> Vec<&StyleEntry> {
         self.styles
             .iter()
-            .filter(|s| matches!(&s.style, Style::Text(ts) if same_text_style(&t.style, ts) && t.runs.iter().all(|r| same_text_style(&r.style, ts))))
+            .filter(|s| matches!(&s.style, Style::Text(ts) if same_text_style_props(t, ts) && t.runs.iter().all(|r| same_text_style(&r.style, ts))))
             .collect()
     }
 
@@ -626,14 +628,40 @@ pub fn number_inherited(n: &Node, src: Option<&Node>, key: &str) -> bool {
 
 /// Text properties equal a text style's apart from the colour, which a text style does not carry.
 pub fn same_text_style(own: &TextStyle, style: &TextStyle) -> bool {
-    TextStyle { fills: own.fills.clone(), ..style.clone() } == *own
+    let mut expected = style.clone();
+    // Alignment belongs to the text layer, not its shared style. Keep the
+    // target's alignment while comparing all style-owned typography values.
+    expected.align_h = own.align_h;
+    expected.align_v = own.align_v;
+    // Paragraph values live on TextProps for layers and are compared by
+    // `same_text_style_props`; runs do not carry paragraph state.
+    expected.paragraph_indent = 0.0;
+    expected.list_spacing = 0.0;
+    expected.leading_trim = LeadingTrim::None;
+    let mut own = own.clone();
+    own.paragraph_indent = 0.0;
+    own.list_spacing = 0.0;
+    own.leading_trim = LeadingTrim::None;
+    TextStyle { fills: own.fills.clone(), ..expected } == own
+}
+
+/// Compares a text layer with a shared style, including paragraph values that
+/// are canonical on `TextProps::paragraph` rather than `TextStyle`.
+pub fn same_text_style_props(own: &TextProps, style: &TextStyle) -> bool {
+    if !same_text_style(&own.style, style) {
+        return false;
+    }
+    own.paragraph.indent == style.paragraph_indent && own.paragraph.list_spacing == style.list_spacing && own.paragraph.leading_trim == style.leading_trim
 }
 
 /// Whether the text style of an instance's layer is exactly its main component's, so a text style
 /// finding belongs to the main component and not to the instance.
 pub fn text_style_inherited(n: &Node, src: Option<&Node>) -> bool {
     let (NodeKind::Text(t), Some(NodeKind::Text(st))) = (&n.kind, src.map(|s| &s.kind)) else { return false };
-    same_text_style(&t.style, &st.style) && t.runs.len() == st.runs.len() && t.runs.iter().zip(&st.runs).all(|(a, b)| same_text_style(&a.style, &b.style))
+    same_text_style(&t.style, &st.style)
+        && t.paragraph == st.paragraph
+        && t.runs.len() == st.runs.len()
+        && t.runs.iter().zip(&st.runs).all(|(a, b)| same_text_style(&a.style, &b.style))
 }
 
 /// Concrete `NodeVariables::bindings` keys to write when applying a variable bind, or an
@@ -733,11 +761,11 @@ pub fn style_matches_node(_doc: &Document, n: &Node, s: &Style, property: StyleP
             !n.style_refs.contains_key(slot.ref_key()) && !any_bound && slot.paints(n) == ps.as_slice()
         }
         Style::Text(ts) => match &n.kind {
-            NodeKind::Text(t) => !n.style_refs.contains_key("text") && same_text_style(&t.style, ts) && t.runs.iter().all(|r| same_text_style(&r.style, ts)),
+            NodeKind::Text(t) => !n.style_refs.contains_key("text") && same_text_style_props(t, ts) && t.runs.iter().all(|r| same_text_style(&r.style, ts)),
             _ => false,
         },
         Style::Effect(fx) => !n.style_refs.contains_key("effect") && !n.effects.is_empty() && n.effects == *fx,
-        Style::Grid(_) => false,
+        Style::Grid(_) | Style::Animation(_) => false,
     }
 }
 
@@ -760,4 +788,64 @@ pub fn library_style_is_current(doc: &Document, snap: &LibrarySnapshot, id: Node
     let n: &Node = &resolved;
     let property = snap.style_meta.get(raw_style).map(|m| m.property).unwrap_or_else(|| default_style_property(s));
     style_matches_node(doc, n, s, property)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{Rect, VariableMode, SOFT_DELETED_EXTENSION_KEY};
+
+    fn color_variable(id: &str, name: &str, color: Color, soft_deleted: bool) -> Variable {
+        let mut v = Variable {
+            id: id.into(),
+            name: name.into(),
+            collection: "c".into(),
+            kind: VariableKind::Color,
+            values: [("m".to_string(), VariableValue::Color(color))].into(),
+            description: String::new(),
+            scopes: Vec::new(),
+            hidden_from_publishing: false,
+            key: None,
+            code_syntax: Default::default(),
+            extensions: Default::default(),
+            mode_extensions: Default::default(),
+        };
+        if soft_deleted {
+            v.extensions.insert(SOFT_DELETED_EXTENSION_KEY.into(), serde_json::Value::Bool(true));
+        }
+        v
+    }
+
+    #[test]
+    fn a_soft_deleted_variable_is_never_suggested_as_a_token() {
+        let (red, blue) = (Color::rgb(220, 30, 30), Color::rgb(30, 30, 220));
+        let mut d = Document::new("t");
+        let page = d.add_page("P");
+        let id = d.alloc_id();
+        let rect = d.insert(page, Node::rectangle(id, Rect::new(0.0, 0.0, 10.0, 10.0))).unwrap();
+        d.variable_collections.insert(
+            "c".into(),
+            VariableCollection {
+                id: "c".into(),
+                name: "Theme".into(),
+                modes: vec![VariableMode { id: "m".into(), name: "Default".into() }],
+                default_mode: "m".into(),
+                variables: vec!["live".into()],
+                key: None,
+                source_library_key: None,
+                extensions: Default::default(),
+            },
+        );
+        d.variables.insert("live".into(), color_variable("live", "Brand/Red", red, false));
+        d.variables.insert("gone-same".into(), color_variable("gone-same", "Old/Red", red, true));
+        d.variables.insert("gone-only".into(), color_variable("gone-only", "Old/Blue", blue, true));
+
+        let index = Index::new(&d);
+        let node = d.get(rect).unwrap();
+        match index.find(&d, node, "fills/0", &red) {
+            Match::One(e) => assert_eq!(e.var.id, "live", "the live variable is the only candidate"),
+            other => panic!("expected the live variable alone, got {other:?}"),
+        }
+        assert!(matches!(index.find(&d, node, "fills/0", &blue), Match::None), "a colour only a soft-deleted variable holds has no token");
+    }
 }

@@ -4,9 +4,10 @@
 use super::Section;
 use crate::app::App;
 use crate::theme;
-use crate::widgets::{self, menu_panel};
+use crate::widgets::{self, kit};
 use designos_library::Library;
-use egui::{Align2, Color32, Context, Id, Key, Modifiers, Order, Pos2, Rect, Sense, Vec2};
+use egui::{Align2, Context, Id, Key, Modifiers, Order, Pos2, Rect, Sense, Vec2};
+use std::path::{Path, PathBuf};
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Intent {
@@ -32,6 +33,8 @@ pub enum Intent {
     DiskChanged,
     /// A document with edits no save has written is about to be closed or replaced: Save, Don't save or Cancel.
     SaveChanges,
+    /// Opens / imports a file by path when no system file dialog could open (`#1192`).
+    ImportPath,
 }
 
 /// One row of the project picker: a project or one of its folders.
@@ -43,6 +46,8 @@ pub struct Choice {
     pub depth: usize,
 }
 
+pub const IMPORT_PATH_HINT: &str = "Path to a .fig, .designos, .json or .svg file";
+
 #[derive(Clone, Debug)]
 pub struct Dialog {
     pub intent: Intent,
@@ -51,6 +56,8 @@ pub struct Dialog {
     pub lines: Vec<(String, String)>,
     /// Text field content (for prompts).
     pub input: Option<String>,
+    /// Placeholder shown inside the text field while `input` is empty.
+    pub hint: Option<String>,
     pub choices: Vec<Choice>,
     pub picked: Option<usize>,
     pub ok: String,
@@ -67,9 +74,9 @@ pub struct Dialog {
 }
 
 const W: f32 = 440.0;
-const PAD: f32 = 20.0;
-const BTN_H: f32 = 32.0;
-const ROW_H: f32 = 28.0;
+const PAD: f32 = theme::INSET_MODAL;
+const BTN_H: f32 = theme::CONTROL_MD;
+const ROW_H: f32 = theme::CONTROL_SM;
 const MAX_CHOICES: usize = 8;
 
 impl Dialog {
@@ -79,6 +86,7 @@ impl Dialog {
             title: title.into(),
             lines: vec![],
             input: None,
+            hint: None,
             choices: vec![],
             picked: None,
             ok: ok.into(),
@@ -222,13 +230,20 @@ impl App {
             "Open",
         ));
     }
+
+    /// Opens the in-app file path prompt when the system file chooser is unavailable (`#1192`).
+    pub fn open_import_path_dialog(&mut self) {
+        let mut d = Dialog::prompt(Intent::ImportPath, "Import file", "", "Import");
+        d.hint = Some(IMPORT_PATH_HINT.into());
+        self.dialog = Some(d);
+    }
 }
 
 /// Draws the open dialog (if any) and runs its outcome. Call once per frame.
 pub fn show(app: &mut App, ctx: &Context) {
     let Some(mut d) = app.dialog.take() else { return };
     let screen = ctx.content_rect();
-    let font = theme::font_body();
+    let font = theme::font_text(theme::FONT_SIZE_TEXT_SM, theme::TextWeight::Regular);
     let (enter, esc) = ctx.input_mut(|i| (i.consume_key(Modifiers::NONE, Key::Enter), i.consume_key(Modifiers::NONE, Key::Escape)));
 
     // ---- measure
@@ -236,12 +251,12 @@ pub fn show(app: &mut App, ctx: &Context) {
     let text_w = W - PAD * 2.0;
     let mut lines_h = 0.0;
     for (a, b) in &d.lines {
-        lines_h += if b.is_empty() { measure.layout(a.clone(), font.clone(), Color32::WHITE, text_w).size().y + 8.0 } else { 22.0 };
+        lines_h += if b.is_empty() { measure.layout(a.clone(), font.clone(), theme::TEXT, text_w).size().y + 8.0 } else { 22.0 };
     }
     let visible_choices = d.choices.len().min(MAX_CHOICES);
     let mut h = PAD + 24.0 + 12.0 + lines_h;
     if d.input.is_some() {
-        h += 32.0 + 12.0;
+        h += theme::CONTROL_SM + 12.0;
     }
     if !d.choices.is_empty() {
         h += visible_choices as f32 * ROW_H + 12.0;
@@ -255,21 +270,20 @@ pub fn show(app: &mut App, ctx: &Context) {
     egui::Area::new(Id::new("dialog")).order(Order::Foreground).fixed_pos(screen.min).interactable(true).show(ctx, |ui| {
         let scrim = ui.allocate_rect(screen, Sense::click_and_drag());
         let p = ui.painter().clone();
-        p.rect_filled(screen, 0.0, Color32::from_black_alpha(140));
+        kit::modal_surface(&p, screen, rect);
         if scrim.clicked() && !rect.contains(scrim.interact_pointer_pos().unwrap_or(Pos2::ZERO)) {
             cancel = true;
         }
-        menu_panel(&p, rect, theme::RADIUS_FRAME);
         let x0 = rect.left() + PAD;
         let mut y = rect.top() + PAD;
-        p.text(Pos2::new(x0, y + 12.0), Align2::LEFT_CENTER, &d.title, theme::font_large_strong(), theme::TEXT);
+        p.text(Pos2::new(x0, y + 12.0), Align2::LEFT_CENTER, &d.title, theme::font_text(theme::FONT_SIZE_TEXT_MD, theme::TextWeight::Semibold), theme::TEXT);
         y += 24.0 + 12.0;
         let key_font = if matches!(d.intent, Intent::Shortcuts) { theme::font_mono() } else { font.clone() };
         for (a, b) in &d.lines {
             if b.is_empty() {
-                let galley = p.layout(a.clone(), font.clone(), theme::TEXT_SECONDARY, text_w);
+                let galley = p.layout(a.clone(), font.clone(), theme::TEXT_TERTIARY, text_w);
                 let hh = galley.size().y;
-                p.galley(Pos2::new(x0, y), galley, theme::TEXT_SECONDARY);
+                p.galley(Pos2::new(x0, y), galley, theme::TEXT_TERTIARY);
                 y += hh + 8.0;
             } else {
                 p.text(Pos2::new(x0, y + 11.0), Align2::LEFT_CENTER, a, key_font.clone(), theme::TEXT);
@@ -278,18 +292,22 @@ pub fn show(app: &mut App, ctx: &Context) {
             }
         }
         if let Some(text) = d.input.as_mut() {
-            let r = Rect::from_min_size(Pos2::new(x0, y), Vec2::new(text_w, 32.0));
-            p.rect_filled(r, theme::cr(theme::RADIUS_CONTROL), theme::BG_SECONDARY);
+            let r = Rect::from_min_size(Pos2::new(x0, y), Vec2::new(text_w, theme::CONTROL_SM));
             let id = Id::new("dialog-input");
-            let te = egui::TextEdit::singleline(text)
+            kit::paint_field(ui, r, id, kit::Size::Sm, false);
+            let mut te = egui::TextEdit::singleline(text)
                 .id(id)
                 .font(font.clone())
                 .text_color(theme::TEXT)
-                .frame(egui::Frame::NONE)
-                .margin(egui::Margin::symmetric(10, 0))
+                .frame(egui::Frame::NONE.inner_margin(egui::Margin::symmetric(10, 0)))
                 .vertical_align(egui::Align::Center)
                 .min_size(r.size())
                 .desired_width(r.width());
+            if let Some(hint) = d.hint.as_deref() {
+                te = te.hint_text(egui::RichText::new(hint).font(font.clone()).color(theme::TEXT_PLACEHOLDER));
+            }
+            // The hint colour is egui's weak text colour; point it at the placeholder role for this field only.
+            ui.visuals_mut().weak_text_color = Some(theme::TEXT_PLACEHOLDER);
             let out = ui.put(r, te);
             if d.fresh {
                 out.request_focus();
@@ -299,7 +317,7 @@ pub fn show(app: &mut App, ctx: &Context) {
                 state.store(ui.ctx(), id);
                 d.fresh = false;
             }
-            y += 32.0 + 12.0;
+            y += theme::CONTROL_SM + 12.0;
         }
         if !d.choices.is_empty() {
             let list = Rect::from_min_size(Pos2::new(x0, y), Vec2::new(text_w, visible_choices as f32 * ROW_H));
@@ -317,20 +335,24 @@ pub fn show(app: &mut App, ctx: &Context) {
                         continue;
                     }
                     let r = ui.interact(row, Id::new(("dialog-choice", i)), Sense::click());
-                    if picked == Some(i) {
-                        p.rect_filled(row.shrink2(Vec2::new(4.0, 1.0)), theme::cr(theme::RADIUS_CONTROL), theme::BG_SELECTED);
+                    let row_state = if picked == Some(i) {
+                        kit::State::Selected
                     } else if r.hovered() {
-                        p.rect_filled(row.shrink2(Vec2::new(4.0, 1.0)), theme::cr(theme::RADIUS_CONTROL), theme::BG_HOVER);
-                    }
+                        kit::State::Hover
+                    } else {
+                        kit::State::Default
+                    };
+                    let row_paint = kit::row_look(row_state, kit::Surface::Primary);
+                    kit::paint_frame(&p, row, theme::RADIUS_CONTROL, &row_paint);
                     let ix = row.left() + 12.0 + c.depth as f32 * 16.0;
                     crate::icons::paint(
                         &p,
                         if c.folder.is_some() { crate::icons::Icon::Folder } else { crate::icons::Icon::Frame },
                         Pos2::new(ix + 8.0, row.center().y),
                         16.0,
-                        theme::ICON,
+                        row_paint.icon,
                     );
-                    p.text(Pos2::new(ix + 22.0, row.center().y), Align2::LEFT_CENTER, &c.label, font.clone(), theme::TEXT);
+                    p.text(Pos2::new(ix + 22.0, row.center().y), Align2::LEFT_CENTER, &c.label, font.clone(), row_paint.text);
                     if r.clicked() {
                         new_pick = Some(i);
                     }
@@ -346,51 +368,33 @@ pub fn show(app: &mut App, ctx: &Context) {
             y += list.height() + 12.0;
         }
         // ---- buttons
-        let ok_w = widgets::text_width(&p, &d.ok, &theme::font_body_strong()).max(48.0) + 32.0;
+        let label_font = theme::font_text(theme::FONT_SIZE_TEXT_SM, theme::TextWeight::Semibold);
+        let ok_w = widgets::text_width(&p, &d.ok, &label_font).max(48.0) + 32.0;
         let ok_r = Rect::from_min_size(Pos2::new(rect.right() - PAD - ok_w, y), Vec2::new(ok_w, BTN_H));
         let enabled = d.can_submit();
-        let resp = ui.interact(ok_r, Id::new("dialog-ok"), if enabled { Sense::click() } else { Sense::hover() });
-        let (base, hover, press) =
-            if d.danger { (theme::DANGER, theme::DANGER, theme::DANGER) } else { (theme::BG_BRAND, theme::BG_BRAND_HOVER, theme::BG_BRAND_HOVER) };
-        let bg = if !enabled {
-            theme::BG_TERTIARY
-        } else if resp.is_pointer_button_down_on() {
-            press
-        } else if resp.hovered() {
-            hover
-        } else {
-            base
-        };
-        p.rect_filled(ok_r, theme::cr_pill(ok_r.height()), bg);
-        p.text(ok_r.center(), Align2::CENTER_CENTER, &d.ok, theme::font_body_strong(), if enabled { Color32::WHITE } else { theme::TEXT_DISABLED });
-        widgets::record(ui, "dialog-ok", ok_r);
-        if resp.clicked() {
+        let kind = if d.danger { kit::Hierarchy::Destructive } else { kit::Hierarchy::Primary };
+        if kit::button(ui, ok_r, "dialog-ok", &d.ok, kind, kit::Size::Md, enabled).clicked() {
             submit = true;
         }
+        widgets::record(ui, "dialog-ok", ok_r);
         let mut left_of = ok_r.left();
         if let Some(alt_label) = d.alt_label.as_deref() {
-            let aw = widgets::text_width(&p, alt_label, &font) + 32.0;
+            let aw = widgets::text_width(&p, alt_label, &label_font) + 32.0;
             let ar = Rect::from_min_size(Pos2::new(left_of - 8.0 - aw, y), Vec2::new(aw, BTN_H));
-            let aresp = ui.interact(ar, Id::new("dialog-alt"), Sense::click());
-            widgets::button_bg(&p, ar, &aresp, false, theme::cr(theme::RADIUS_CONTROL));
-            p.text(ar.center(), Align2::CENTER_CENTER, alt_label, font.clone(), theme::TEXT);
-            widgets::record(ui, "dialog-alt", ar);
-            if aresp.clicked() {
+            if kit::button(ui, ar, "dialog-alt", alt_label, kit::Hierarchy::Secondary, kit::Size::Md, true).clicked() {
                 alt = true;
             }
+            widgets::record(ui, "dialog-alt", ar);
             left_of = ar.left();
         }
         if !d.info {
             let cancel_label = d.safe_label.as_deref().unwrap_or("Cancel");
-            let cw = widgets::text_width(&p, cancel_label, &font) + 32.0;
+            let cw = widgets::text_width(&p, cancel_label, &label_font) + 32.0;
             let cr = Rect::from_min_size(Pos2::new(left_of - 8.0 - cw, y), Vec2::new(cw, BTN_H));
-            let cresp = ui.interact(cr, Id::new("dialog-cancel"), Sense::click());
-            widgets::button_bg(&p, cr, &cresp, false, theme::cr(theme::RADIUS_CONTROL));
-            p.text(cr.center(), Align2::CENTER_CENTER, cancel_label, font.clone(), theme::TEXT);
-            widgets::record(ui, "dialog-cancel", cr);
-            if cresp.clicked() {
+            if kit::button(ui, cr, "dialog-cancel", cancel_label, kit::Hierarchy::Secondary, kit::Size::Md, true).clicked() {
                 cancel = true;
             }
+            widgets::record(ui, "dialog-cancel", cr);
         }
     });
 
@@ -433,6 +437,25 @@ pub fn finish(app: &mut App, d: Dialog) {
     if crate::history::finish_dialog(app, &d) || crate::dev::finish_dialog(app, &d) {
         return;
     }
+    if d.intent == Intent::ImportPath {
+        let raw = d.input.unwrap_or_default();
+        let shown = unquote_typed(&raw);
+        if shown.is_empty() {
+            return;
+        }
+        match typed_import_path(&raw) {
+            Ok(path) => {
+                if let Err(reason) = app.try_open_path(path.clone()) {
+                    warn_import_path(app, &path, &reason);
+                }
+            }
+            Err(reason) => {
+                warn_import_path(app, Path::new(shown), &reason);
+                app.show_toast(reason, true);
+            }
+        }
+        return;
+    }
     let Some(lib) = app.lib.clone() else { return };
     let text = d.input.clone().unwrap_or_default().trim().to_string();
     let choice = d.picked.and_then(|i| d.choices.get(i)).cloned();
@@ -473,7 +496,7 @@ pub fn finish(app: &mut App, d: Dialog) {
         Intent::SaveToLibrary => {
             dirty = false;
             if let Some(c) = choice {
-                app.save_to_library_as(&c.project, c.folder.as_deref(), &text);
+                app.save_to_library_as_announced(c.project, c.folder, text.clone());
             }
             Ok(())
         }
@@ -491,7 +514,8 @@ pub fn finish(app: &mut App, d: Dialog) {
         | Intent::NameVersion(_)
         | Intent::OpenDevLink(_)
         | Intent::DiskChanged
-        | Intent::SaveChanges => {
+        | Intent::SaveChanges
+        | Intent::ImportPath => {
             dirty = false;
             Ok(())
         }
@@ -503,5 +527,195 @@ pub fn finish(app: &mut App, d: Dialog) {
         if let Some(h) = app.home.as_mut() {
             h.dirty = true;
         }
+    }
+}
+
+const TYPE_THE_FULL_PATH: &str = "Type the full path to the file, starting with / or ~/.";
+
+/// The path a person typed into the import prompt, before `~` and `file://` resolution.
+fn unquote_typed(raw: &str) -> &str {
+    let trimmed = raw.trim();
+    trimmed.strip_prefix('"').and_then(|s| s.strip_suffix('"')).or_else(|| trimmed.strip_prefix('\'').and_then(|s| s.strip_suffix('\''))).unwrap_or(trimmed)
+}
+
+fn home_dir() -> Option<PathBuf> {
+    #[cfg(test)]
+    if let Some(home) = TEST_IMPORT_HOME.with(|slot| slot.borrow().clone()) {
+        return Some(home);
+    }
+    crate::io::user_home()
+}
+
+/// One line on stderr when a typed import path cannot be opened. The error toast still shows.
+fn warn_import_path(app: &mut App, path: &Path, reason: &str) {
+    let line = format!("designos: warn: import path {}: {reason}", path.display());
+    eprintln!("{line}");
+    app.last_dialog_warn = Some(line);
+}
+
+fn strip_file_scheme(text: &str) -> Option<&str> {
+    const SCHEME: &str = "file://";
+    if text.len() >= SCHEME.len() && text[..SCHEME.len()].eq_ignore_ascii_case(SCHEME) {
+        Some(&text[SCHEME.len()..])
+    } else {
+        None
+    }
+}
+
+fn hex_val(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
+}
+
+/// Decodes `%XX` in a `file://` path. A `%` that is not two hex digits stays as written.
+fn percent_decode(text: &str) -> Result<String, String> {
+    let bytes = text.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' {
+            if let (Some(hi), Some(lo)) = (bytes.get(i + 1).copied().and_then(hex_val), bytes.get(i + 2).copied().and_then(hex_val)) {
+                out.push((hi << 4) | lo);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8(out).map_err(|_| "The file link is not valid text.".to_string())
+}
+
+/// `file:///tmp/a%20b.fig` is `/tmp/a b.fig`. On Windows, `file:///C:/...` drops the extra slash.
+fn path_from_file_url(decoded: &str) -> PathBuf {
+    #[cfg(windows)]
+    {
+        let trimmed = decoded.strip_prefix('/').filter(|rest| rest.as_bytes().get(1) == Some(&b':')).unwrap_or(decoded);
+        return PathBuf::from(trimmed);
+    }
+    #[cfg(not(windows))]
+    {
+        PathBuf::from(decoded)
+    }
+}
+
+/// `~` or `~/…` (and `~\…` on Windows) becomes the home folder. Anything else is `None`.
+fn expand_tilde(text: &str) -> Result<Option<PathBuf>, String> {
+    let rest = if text == "~" {
+        ""
+    } else if let Some(rest) = text.strip_prefix("~/").or_else(|| text.strip_prefix("~\\")) {
+        rest
+    } else {
+        return Ok(None);
+    };
+    let Some(home) = home_dir() else {
+        return Err("The home folder is not set.".to_string());
+    };
+    if rest.is_empty() {
+        Ok(Some(home))
+    } else {
+        Ok(Some(home.join(rest)))
+    }
+}
+
+/// Resolves a path typed into the import prompt.
+///
+/// Trims, strips one pair of matching quotes, expands `~` / `~/…` to the home folder, and turns a
+/// `file://` link (as pasted from a file manager) into a path with `%XX` decoded. A path that is
+/// still not absolute is refused: the prompt has no shell to expand a relative path.
+pub(crate) fn typed_import_path(raw: &str) -> Result<PathBuf, String> {
+    let text = unquote_typed(raw);
+    if text.is_empty() {
+        return Err(TYPE_THE_FULL_PATH.to_string());
+    }
+    let path = if let Some(rest) = strip_file_scheme(text) {
+        path_from_file_url(&percent_decode(rest)?)
+    } else if let Some(expanded) = expand_tilde(text)? {
+        expanded
+    } else {
+        PathBuf::from(text)
+    };
+    if path.is_absolute() {
+        Ok(path)
+    } else {
+        Err(TYPE_THE_FULL_PATH.to_string())
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    static TEST_IMPORT_HOME: std::cell::RefCell<Option<PathBuf>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Restores the typed-import home when the test ends, including on a panic.
+#[cfg(test)]
+pub struct ImportHomeGuard;
+
+#[cfg(test)]
+impl Drop for ImportHomeGuard {
+    fn drop(&mut self) {
+        TEST_IMPORT_HOME.with(|slot| *slot.borrow_mut() = None);
+    }
+}
+
+/// This thread's home folder for `~/` in the import prompt. Other tests keep the process `HOME`.
+#[cfg(test)]
+pub fn set_import_home_for_test(home: PathBuf) -> ImportHomeGuard {
+    TEST_IMPORT_HOME.with(|slot| *slot.borrow_mut() = Some(home));
+    ImportHomeGuard
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const FULL_PATH: &str = "Type the full path to the file, starting with / or ~/.";
+
+    /// An absolute path on every platform: `/home/designer` is not absolute on Windows.
+    fn home() -> (PathBuf, ImportHomeGuard) {
+        let home = std::env::temp_dir().join("designer-home");
+        let guard = set_import_home_for_test(home.clone());
+        (home, guard)
+    }
+
+    #[test]
+    fn typed_import_path_expands_tilde_file() {
+        let (home, _guard) = home();
+        assert_eq!(typed_import_path("~/x.fig").unwrap(), home.join("x.fig"));
+    }
+
+    #[test]
+    fn typed_import_path_expands_tilde_alone() {
+        let (home, _guard) = home();
+        assert_eq!(typed_import_path("~").unwrap(), home);
+    }
+
+    #[test]
+    fn typed_import_path_expands_quoted_tilde_with_space() {
+        let (home, _guard) = home();
+        assert_eq!(typed_import_path("'~/a b.fig'").unwrap(), home.join("a b.fig"));
+    }
+
+    // A Unix file URL; Windows drive-letter URLs (`file:///C:/…`) are not covered here.
+    #[cfg(unix)]
+    #[test]
+    fn typed_import_path_decodes_file_url() {
+        assert_eq!(typed_import_path("file:///tmp/a%20b.fig").unwrap(), PathBuf::from("/tmp/a b.fig"));
+    }
+
+    #[test]
+    fn typed_import_path_refuses_relative() {
+        let err = typed_import_path("docs/x.fig").unwrap_err();
+        assert_eq!(err, FULL_PATH);
+    }
+
+    #[test]
+    fn typed_import_path_keeps_absolute() {
+        let abs = std::env::temp_dir().join("x.fig");
+        assert_eq!(typed_import_path(abs.to_str().unwrap()).unwrap(), abs);
     }
 }

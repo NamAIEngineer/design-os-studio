@@ -55,11 +55,11 @@ impl VariableStore {
         self.variables == doc.variables && self.collections == doc.variable_collections
     }
 
-    fn fresh_id(&self, prefix: &str) -> String {
+    pub(crate) fn fresh_id(&self, prefix: &str) -> String {
         self.fresh_id_avoiding(prefix, &BTreeSet::new())
     }
 
-    fn fresh_id_avoiding(&self, prefix: &str, avoid: &BTreeSet<String>) -> String {
+    pub(crate) fn fresh_id_avoiding(&self, prefix: &str, avoid: &BTreeSet<String>) -> String {
         let mut n = 1u64;
         loop {
             let id = format!("{prefix}:d{n}");
@@ -74,9 +74,10 @@ impl VariableStore {
         }
     }
 
-    /// Name not used by another variable of the collection (appends " 2", " 3"...).
+    /// Name not used by another variable of the collection (appends " 2", " 3"...). A soft-deleted variable keeps
+    /// its name for the bindings that still use it, but it is not live, so it does not take the name.
     fn unique_variable_name(&self, coll: &str, wanted: &str, except: Option<&str>) -> String {
-        let taken = |n: &str| self.variables.values().any(|v| v.collection == coll && Some(v.id.as_str()) != except && v.name == n);
+        let taken = |n: &str| self.variables.values().any(|v| v.collection == coll && Some(v.id.as_str()) != except && !v.is_soft_deleted() && v.name == n);
         if !taken(wanted) {
             return wanted.to_string();
         }
@@ -88,6 +89,13 @@ impl VariableStore {
             }
             i += 1;
         }
+    }
+
+    /// Ids of every variable that belongs to `coll`, soft-deleted ones included: they keep a value for each mode
+    /// of the collection, so layers still bound to them resolve in every mode.
+    fn member_ids(&self, coll: &str) -> Vec<String> {
+        let listed: BTreeSet<&str> = self.collections.get(coll).map(|c| c.variables.iter().map(String::as_str).collect()).unwrap_or_default();
+        self.variables.values().filter(|v| v.collection == coll || listed.contains(v.id.as_str())).map(|v| v.id.clone()).collect()
     }
 
     /// True when `coll` is a subscribed copy of a library's collection: it is edited in its library
@@ -197,19 +205,32 @@ impl VariableStore {
                 }
             }
         }
-        self.collections.insert(
-            new_id.clone(),
-            VariableCollection {
-                id: new_id.clone(),
-                name: format!("{} copy", src.name),
-                modes,
-                default_mode,
-                variables: var_ids,
-                key: None,
-                source_library_key: None,
-                extensions: src.extensions.clone(),
-            },
-        );
+        let mut copy = VariableCollection {
+            id: new_id.clone(),
+            name: format!("{} copy", src.name),
+            modes,
+            default_mode,
+            variables: var_ids,
+            key: None,
+            source_library_key: None,
+            extensions: src.extensions.clone(),
+        };
+        // the copy of a parent is not extendable until it is extended; the copy of an extension keeps its parent and
+        // follows its own new mode ids
+        copy.set_extendable(false);
+        if let Some(ext) = src.extension() {
+            let remap = |m: &String| mode_map.get(m).cloned();
+            copy.set_extension(&CollectionExtension {
+                parent: ext.parent,
+                mode_map: ext.mode_map.into_iter().filter_map(|(m, parent_mode)| Some((remap(&m)?, parent_mode))).collect(),
+                overrides: ext
+                    .overrides
+                    .into_iter()
+                    .map(|(var, by_mode)| (var, by_mode.into_iter().filter_map(|(m, value)| Some((remap(&m)?, value))).collect()))
+                    .collect(),
+            });
+        }
+        self.collections.insert(new_id.clone(), copy);
         Some(new_id)
     }
 
@@ -219,6 +240,7 @@ impl VariableStore {
             return Vec::new();
         }
         let Some(c) = self.collections.remove(id) else { return Vec::new() };
+        self.remove_extensions_of(id);
         let mut gone: Vec<String> = c.variables.clone();
         gone.extend(self.variables.values().filter(|v| v.collection == id).map(|v| v.id.clone()));
         gone.sort();
@@ -234,13 +256,13 @@ impl VariableStore {
     // ------------------------------------------------------------ modes
 
     pub fn add_mode(&mut self, coll: &str, name: &str) -> Option<String> {
-        if self.is_library_collection(coll) {
+        if self.is_structure_locked(coll) {
             return None;
         }
         let id = self.fresh_id("VariableModeId");
         let c = self.collections.get(coll)?;
         let base = c.default_mode.clone();
-        let ids = c.variables.clone();
+        let ids = self.member_ids(coll);
         for vid in ids {
             if let Some(v) = self.variables.get_mut(&vid) {
                 let val = v.values.get(&base).cloned().unwrap_or_else(|| default_value(v.kind));
@@ -252,7 +274,7 @@ impl VariableStore {
     }
 
     pub fn rename_mode(&mut self, coll: &str, mode: &str, name: &str) {
-        if self.is_library_collection(coll) {
+        if self.is_structure_locked(coll) {
             return;
         }
         if let Some(m) = self.collections.get_mut(coll).and_then(|c| c.modes.iter_mut().find(|m| m.id == mode)) {
@@ -261,12 +283,12 @@ impl VariableStore {
     }
 
     pub fn duplicate_mode(&mut self, coll: &str, mode: &str) -> Option<String> {
-        if self.is_library_collection(coll) {
+        if self.is_structure_locked(coll) {
             return None;
         }
         let name = self.collections.get(coll)?.modes.iter().find(|m| m.id == mode)?.name.clone();
         let id = self.fresh_id("VariableModeId");
-        let ids = self.collections.get(coll)?.variables.clone();
+        let ids = self.member_ids(coll);
         for vid in ids {
             if let Some(v) = self.variables.get_mut(&vid) {
                 if let Some(x) = v.values.get(mode).cloned() {
@@ -285,7 +307,7 @@ impl VariableStore {
 
     /// Deletes a mode (the last one cannot be deleted). Returns whether it was removed.
     pub fn delete_mode(&mut self, coll: &str, mode: &str) -> bool {
-        if self.is_library_collection(coll) {
+        if self.is_structure_locked(coll) {
             return false;
         }
         let Some(c) = self.collections.get_mut(coll) else { return false };
@@ -296,9 +318,9 @@ impl VariableStore {
         if c.default_mode == mode {
             c.default_mode = c.modes[0].id.clone();
         }
-        let ids = c.variables.clone();
-        for v in self.variables.values_mut() {
-            if v.collection == coll || ids.contains(&v.id) {
+        self.unmap_parent_mode(coll, mode);
+        for id in self.member_ids(coll) {
+            if let Some(v) = self.variables.get_mut(&id) {
                 v.values.remove(mode);
                 v.mode_extensions.remove(mode);
             }
@@ -307,7 +329,7 @@ impl VariableStore {
     }
 
     pub fn set_default_mode(&mut self, coll: &str, mode: &str) {
-        if self.is_library_collection(coll) {
+        if self.is_structure_locked(coll) {
             return;
         }
         if let Some(c) = self.collections.get_mut(coll) {
@@ -320,7 +342,7 @@ impl VariableStore {
     // ------------------------------------------------------------ variables
 
     pub fn add_variable(&mut self, coll: &str, name: &str, kind: VariableKind) -> Option<String> {
-        if self.is_library_collection(coll) {
+        if self.is_structure_locked(coll) {
             return None;
         }
         let id = self.fresh_id("VariableID");
@@ -389,6 +411,16 @@ impl VariableStore {
         for _ in 0..16 {
             let v = self.variables.get(&id)?;
             let c = self.collections.get(&v.collection)?;
+            // a mode of an extended collection shows the override or the parent's value; an alias keeps that mode
+            if let Some(ext) = self.extension_owning_mode(&mode, &id).filter(|_| !self.is_own_mode(&id, &mode)) {
+                match self.extended_value(&ext, &id, &mode)? {
+                    VariableValue::Alias(next) => {
+                        id = next;
+                        continue;
+                    }
+                    other => return Some(other),
+                }
+            }
             let m = if c.modes.iter().any(|x| x.id == mode) { mode.clone() } else { c.default_mode.clone() };
             match v.values.get(&m).or_else(|| v.values.get(&c.default_mode))? {
                 VariableValue::Alias(next) => {
@@ -430,6 +462,15 @@ impl VariableStore {
 
     /// Sets a literal value; ignored when its type does not match the variable.
     pub fn set_value(&mut self, var: &str, mode: &str, value: VariableValue) -> bool {
+        if !self.is_own_mode(var, mode) {
+            if let Some(ext) = self.extension_owning_mode(mode, var) {
+                return self.set_override(&ext, var, mode, value);
+            }
+            // a mode of an extension the variable is not part of: never a value of this variable
+            if self.is_extension_mode(mode) {
+                return false;
+            }
+        }
         if self.is_library_variable(var) {
             return false;
         }
@@ -445,19 +486,42 @@ impl VariableStore {
 
     /// Makes the value in `mode` an alias of `target`.
     pub fn set_alias(&mut self, var: &str, mode: &str, target: &str) -> bool {
+        self.set_alias_with(var, mode, target, true)
+    }
+
+    /// [`VariableStore::set_alias`] with the resolution check optional (a batch checks once, after its last write).
+    pub(crate) fn set_alias_with(&mut self, var: &str, mode: &str, target: &str, guard: bool) -> bool {
+        if !self.is_own_mode(var, mode) {
+            if let Some(ext) = self.extension_owning_mode(mode, var) {
+                return self.can_alias(var, target) && self.set_override_with(&ext, var, mode, VariableValue::Alias(target.to_string()), guard);
+            }
+            if self.is_extension_mode(mode) {
+                return false;
+            }
+        }
         if self.is_library_variable(var) || !self.can_alias(var, target) {
             return false;
         }
-        if let Some(v) = self.variables.get_mut(var) {
+        let write = |s: &mut Self| {
+            let Some(v) = s.variables.get_mut(var) else { return false };
             v.values.insert(mode.to_string(), VariableValue::Alias(target.to_string()));
             v.clear_derived_mode_extensions(mode);
-            return true;
+            true
+        };
+        if guard {
+            self.guard_alias(write)
+        } else {
+            write(self)
         }
-        false
     }
 
     /// Replaces an alias by the literal it currently resolves to.
     pub fn detach_alias(&mut self, var: &str, mode: &str) -> bool {
+        if !self.is_own_mode(var, mode) {
+            if let Some(ext) = self.extension_owning_mode(mode, var) {
+                return self.resolve(var, mode).is_some_and(|lit| self.set_override(&ext, var, mode, lit));
+            }
+        }
         if self.is_library_variable(var) {
             return false;
         }
@@ -474,6 +538,7 @@ impl VariableStore {
 
     fn remove_variable_inner(&mut self, id: &str) {
         let Some(gone) = self.variables.get(id).cloned() else { return };
+        self.forget_overrides_of(id);
         // aliases to the deleted variable become the literal they resolved to
         let affected: Vec<(String, String)> = self
             .variables
@@ -536,7 +601,7 @@ impl VariableStore {
 
     /// Renames a folder: every variable of `coll` whose name starts with `old/`.
     pub fn rename_folder(&mut self, coll: &str, old: &str, new: &str) {
-        if self.is_library_collection(coll) {
+        if self.is_structure_locked(coll) {
             return;
         }
         let new = new.trim().trim_matches('/');
@@ -567,10 +632,12 @@ pub fn dangling_binding_cleanup(doc: &Document, removed_vars: &[String], removed
     for n in doc.nodes.values() {
         let bad_b = n.variables.bindings.values().any(|v| removed_vars.contains(v));
         let bad_m = n.variables.modes.keys().any(|c| removed_colls.contains(c));
-        if bad_b || bad_m {
+        let bad_d = n.component.prop_default_variables.values().any(|v| removed_vars.contains(v));
+        if bad_b || bad_m || bad_d {
             let mut c = n.clone();
             c.variables.bindings.retain(|_, v| !removed_vars.contains(v));
             c.variables.modes.retain(|k, _| !removed_colls.contains(k));
+            c.component.prop_default_variables.retain(|_, v| !removed_vars.contains(v));
             out.push(c);
         }
     }
@@ -621,6 +688,62 @@ mod tests {
         let d = s.collections[&c].default_mode.clone();
         assert!(s.delete_mode(&c, &d));
         assert_ne!(s.collections[&c].default_mode, d);
+    }
+
+    /// Marks `id` soft-deleted and takes it out of its collection's list, the way an import keeps it.
+    fn soft_delete(s: &mut VariableStore, coll: &str, id: &str) {
+        s.variables.get_mut(id).unwrap().extensions.insert(SOFT_DELETED_EXTENSION_KEY.into(), serde_json::Value::Bool(true));
+        s.collections.get_mut(coll).unwrap().variables.retain(|v| v != id);
+    }
+
+    #[test]
+    fn soft_deleted_variable_name_is_free_for_a_new_variable() {
+        let (mut s, c, a) = store();
+        soft_delete(&mut s, &c, &a);
+        let created = s.add_variable(&c, "Color/Brand/Primary", VariableKind::Color).unwrap();
+        assert_eq!(s.variables[&created].name, "Color/Brand/Primary", "a soft-deleted variable does not take the name");
+        assert_eq!(s.variables[&a].name, "Color/Brand/Primary", "the soft-deleted variable keeps its own name");
+
+        // a rename onto the soft-deleted name is free too, while a live name is still taken
+        let other = s.add_variable(&c, "Other", VariableKind::Color).unwrap();
+        s.rename_variable(&other, "Color/Brand/Primary");
+        assert_eq!(s.variables[&other].name, "Color/Brand/Primary 2", "the live variable holds the name");
+        let copy = s.duplicate_variable(&created).unwrap();
+        assert_eq!(s.variables[&copy].name, "Color/Brand/Primary 3");
+    }
+
+    #[test]
+    fn mode_edits_reach_soft_deleted_variables_of_the_collection() {
+        let (mut s, c, a) = store();
+        let default_mode = s.collections[&c].default_mode.clone();
+        s.set_value(&a, &default_mode, VariableValue::Color(Color::WHITE));
+        soft_delete(&mut s, &c, &a);
+        let added = s.add_mode(&c, "High contrast").unwrap();
+        assert_eq!(s.variables[&a].values[&added], VariableValue::Color(Color::WHITE), "a layer bound to it still resolves in the new mode");
+        let copy = s.duplicate_mode(&c, &added).unwrap();
+        assert_eq!(s.variables[&a].values[&copy], VariableValue::Color(Color::WHITE));
+        assert!(s.delete_mode(&c, &added));
+        assert!(!s.variables[&a].values.contains_key(&added), "a removed mode leaves no value behind");
+    }
+
+    #[test]
+    fn duplicating_a_collection_copies_live_variables_only() {
+        let (mut s, c, a) = store();
+        let b = s.add_variable(&c, "Bg", VariableKind::Color).unwrap();
+        soft_delete(&mut s, &c, &a);
+        let copy = s.duplicate_collection(&c).unwrap();
+        let names: Vec<&str> = s.collections[&copy].variables.iter().map(|id| s.variables[id].name.as_str()).collect();
+        assert_eq!(names, [s.variables[&b].name.as_str()]);
+        assert!(s.variables.values().filter(|v| v.collection == copy).all(|v| !v.is_soft_deleted()));
+    }
+
+    #[test]
+    fn deleting_a_collection_removes_its_soft_deleted_variables_too() {
+        let (mut s, c, a) = store();
+        soft_delete(&mut s, &c, &a);
+        let removed = s.delete_collection(&c);
+        assert_eq!(removed, vec![a]);
+        assert!(s.variables.is_empty());
     }
 
     #[test]
@@ -823,5 +946,37 @@ mod tests {
         assert!(!s.collections.contains_key(&other));
         assert_eq!((s.collections[&lib].clone(), s.variables[&lib_var].clone()), library_before);
         assert_eq!(s.variables[&local_var].values[&mode], VariableValue::Alias(lib_var), "the alias was not baked into a literal");
+    }
+
+    #[test]
+    fn dangling_binding_cleanup_removes_deleted_variables_from_prop_default_variables() {
+        let mut d = Document::new("cleanup");
+        let page = d.add_page("Page 1");
+        let cid = d.alloc_id();
+        let mut comp = Node::new(cid, NodeKind::Component(FrameProps::default()));
+        comp.component.prop_default_variables.insert("Show icon".into(), "var_deleted".into());
+        comp.component.prop_default_variables.insert("Label".into(), "var_kept".into());
+        comp.component.prop_default_variables.insert("Remote".into(), "key:remote_key".into());
+        d.insert(page, comp).unwrap();
+
+        let cleaned = dangling_binding_cleanup(&d, &["var_deleted".to_string()], &[]);
+        assert_eq!(cleaned.len(), 1, "a node whose only stale reference is in prop_default_variables must be returned");
+        assert!(!cleaned[0].component.prop_default_variables.contains_key("Show icon"));
+        assert_eq!(cleaned[0].component.prop_default_variables.get("Label").map(String::as_str), Some("var_kept"));
+        assert_eq!(cleaned[0].component.prop_default_variables.get("Remote").map(String::as_str), Some("key:remote_key"));
+
+        // Executing the variable deletion and cleanup in one History batch and undoing restores the entry.
+        let mut h = crate::History::default();
+        let mut batch: Vec<crate::Command> = vec![crate::Command::SetVariables { variables: Default::default(), collections: Default::default() }];
+        batch.extend(cleaned.into_iter().map(|node| crate::Command::Update { node: Box::new(node) }));
+        h.exec(&mut d, crate::Command::Batch(batch)).unwrap();
+        assert!(!d.get(cid).unwrap().component.prop_default_variables.contains_key("Show icon"));
+
+        h.undo(&mut d).unwrap();
+        assert_eq!(
+            d.get(cid).unwrap().component.prop_default_variables.get("Show icon").map(String::as_str),
+            Some("var_deleted"),
+            "undo after variable delete and cleanup restores the prop_default_variables entry"
+        );
     }
 }

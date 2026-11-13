@@ -368,6 +368,7 @@ fn render_node_in_page_space(doc: &Document, root: NodeId, bounds: Rect, scale_u
         return Some(pm);
     }
     let mut scratch = Document::new(doc.name.clone());
+    scratch.color_profile = doc.color_profile;
     if let Some(max) = doc.nodes.keys().max() {
         scratch.reserve_ids(*max);
     }
@@ -686,13 +687,7 @@ pub fn tool_descriptor() -> Value {
                 "scoped": {"type": "boolean"}
             }),
             &["target", "page_id", "bounds", "scale_requested", "scale_used", "downscaled", "width", "height", "format", "bytes", "visible"],
-        ),
-        "annotations": {
-            "readOnlyHint": true,
-            "destructiveHint": false,
-            "idempotentHint": true,
-            "openWorldHint": false
-        }
+        )
     })
 }
 

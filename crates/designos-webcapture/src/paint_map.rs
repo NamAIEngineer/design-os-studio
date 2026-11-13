@@ -355,7 +355,12 @@ pub fn map_background_paints(el_id: &str, styles: &BTreeMap<String, String>, ima
                                 }
                             };
                             let image_ref = store_image_dedup(images, bytes);
-                            paints.push(Paint { kind: PaintKind::Image { image_ref, scale_mode }, opacity: 1.0, visible: true, blend: BlendMode::Normal });
+                            paints.push(Paint {
+                                kind: PaintKind::Image { image_ref, scale_mode, params: Default::default() },
+                                opacity: 1.0,
+                                visible: true,
+                                blend: BlendMode::Normal,
+                            });
                         }
                     } else {
                         report.unsupported_css.push(UnsupportedCssEntry {
@@ -691,9 +696,9 @@ fn parse_box_shadow_item(item: &str, font_size: f32) -> Option<Effect> {
     }
 
     if inset {
-        Some(Effect::InnerShadow { color: c, offset: Vec2::new(ox, oy), radius: blur, spread, visible: true })
+        Some(Effect::InnerShadow { color: c, offset: Vec2::new(ox, oy), radius: blur, spread, visible: true, blend: Default::default() })
     } else {
-        Some(Effect::DropShadow { color: c, offset: Vec2::new(ox, oy), radius: blur, spread, visible: true, show_behind: false })
+        Some(Effect::DropShadow { color: c, offset: Vec2::new(ox, oy), radius: blur, spread, visible: true, show_behind: false, blend: Default::default() })
     }
 }
 

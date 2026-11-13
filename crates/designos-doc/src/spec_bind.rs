@@ -154,6 +154,8 @@ pub struct SpecApplyReport {
     pub issues: Vec<crate::SpecIssue>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub in_progress: BTreeMap<NodeId, crate::InProgress>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub measured_with_fallback: Vec<u64>,
 }
 
 /// Structured error envelope produced when a spec variable, style, mode, colour, or instance fails validation.
@@ -267,10 +269,14 @@ struct IndexedVar {
 
 impl SpecBindIndex {
     /// Builds the lookup index in a single pass over `doc.variable_collections`, `doc.variables`, and `doc.styles`.
+    ///
+    /// Only live variables and collections are indexed: a name never selects a soft-deleted one, even when it is the only
+    /// match, so a reference by name to it is an unknown name. An explicit `var:id:` reference does not go through the
+    /// index and still resolves, which keeps existing bindings to a deleted variable working.
     pub fn build(doc: &Document) -> Self {
         let mut collections: Vec<IndexedCollection> = Vec::with_capacity(doc.variable_collections.len());
         let mut coll_order: HashMap<&str, (usize, &str)> = HashMap::with_capacity(doc.variable_collections.len());
-        for (cid, coll) in &doc.variable_collections {
+        for (cid, coll) in doc.variable_collections.iter().filter(|(_, c)| !c.is_soft_deleted()) {
             if cid != EASEUI_DEPRECATED_COLLECTION_ID {
                 let idx = collections.len();
                 coll_order.insert(cid.as_str(), (idx, coll.name.as_str()));
@@ -289,7 +295,7 @@ impl SpecBindIndex {
         }
 
         let mut all_vars: Vec<IndexedVar> = Vec::with_capacity(doc.variables.len());
-        for (vid, var) in &doc.variables {
+        for (vid, var) in doc.variables.iter().filter(|(_, v)| !v.is_soft_deleted()) {
             let Some(&(c_idx, c_name)) = coll_order.get(var.collection.as_str()) else {
                 continue;
             };
@@ -683,6 +689,7 @@ pub fn resolve_variable_ref_of_kind(
                 continue;
             };
             if snap.variables.contains_key(raw_id) {
+                check_library_variable_kind(index, snap, raw_id, kind, field_name, spec_path)?;
                 let cmd = crate::import_asset(doc, snap, &format!("var:{raw_id}"), None);
                 let _ = cmd.apply(doc);
                 *index = SpecBindIndex::build(doc);
@@ -697,6 +704,7 @@ pub fn resolve_variable_ref_of_kind(
                 continue;
             }
             if snap.variables.contains_key(id_part) {
+                check_library_variable_kind(index, snap, id_part, kind, field_name, spec_path)?;
                 let asset_key = format!("var:{id_part}");
                 let cmd = crate::import_asset(doc, snap, &asset_key, None);
                 let _ = cmd.apply(doc);
@@ -739,7 +747,7 @@ pub fn resolve_variable_ref_of_kind(
         if !doc.library.enabled.iter().any(|l| l.id == snap.library_id) {
             continue;
         }
-        for (cid, coll) in &snap.variable_collections {
+        for (cid, coll) in snap.variable_collections.iter().filter(|(_, c)| !c.is_soft_deleted()) {
             let id_match = body.strip_prefix(cid.as_str()).and_then(|r| r.strip_prefix('/')).is_some_and(|rem| !rem.is_empty());
             let name_match = body.strip_prefix(coll.name.as_str()).and_then(|r| r.strip_prefix('/')).is_some_and(|rem| !rem.is_empty());
             for len in [id_match.then_some(cid.len()), name_match.then_some(coll.name.len())].into_iter().flatten() {
@@ -763,7 +771,7 @@ pub fn resolve_variable_ref_of_kind(
                 }
             }
         }
-        for (vid, var) in &snap.variables {
+        for (vid, var) in snap.variables.iter().filter(|(_, v)| !v.is_soft_deleted()) {
             let Some(coll) = snap.variable_collections.get(&var.collection) else {
                 continue;
             };
@@ -778,7 +786,7 @@ pub fn resolve_variable_ref_of_kind(
         let rem = &body[prefix_len + 1..];
         for (s_idx, cid, cname) in &lib_candidate_colls {
             let snap = &libraries[*s_idx];
-            for (vid, var) in &snap.variables {
+            for (vid, var) in snap.variables.iter().filter(|(_, v)| !v.is_soft_deleted()) {
                 if var.collection == *cid && var.name == rem {
                     lib_step1.push((*s_idx, vid.clone(), cname.clone()));
                 }
@@ -800,12 +808,15 @@ pub fn resolve_variable_ref_of_kind(
         }
         let (s_idx, vid, _) = &hits[0];
         let snap = &libraries[*s_idx];
+        check_library_variable_kind(index, snap, vid, kind, field_name, spec_path)?;
         let asset_key = format!("var:{vid}");
         let cmd = crate::import_asset(doc, snap, &asset_key, None);
         let _ = cmd.apply(doc);
         *index = SpecBindIndex::build(doc);
         let local_id = crate::local_key(&snap.library_id, vid);
-        return Ok(local_id);
+        if doc.variables.contains_key(&local_id) {
+            return Ok(local_id);
+        }
     }
 
     let valid_options = index.closest_variables(body, 5, kind);
@@ -820,6 +831,33 @@ pub fn resolve_variable_ref_of_kind(
         corrected_example,
         safe_to_retry: true,
     })
+}
+
+fn check_library_variable_kind(
+    index: &SpecBindIndex,
+    snap: &LibrarySnapshot,
+    raw_id: &str,
+    expected_kind: Option<VariableKind>,
+    field_name: &str,
+    spec_path: &str,
+) -> Result<(), SpecBindError> {
+    if let (Some(expected), Some(var)) = (expected_kind, snap.variables.get(raw_id)) {
+        if var.kind != expected {
+            let valid_options = index.variables_of_kind(expected, 5);
+            let corrected_example = valid_options.first().map(|first| serde_json::json!({ field_name: first }));
+            return Err(SpecBindError {
+                code: "VARIABLE_TYPE_MISMATCH".to_string(),
+                message: format!("Property '{field_name}' expects a {expected:?} variable, but '{}' has kind {:?}.", var.name, var.kind),
+                path: spec_path.to_string(),
+                received: Some(format!("{:?}", var.kind)),
+                expected: Some(format!("{expected:?}")),
+                valid_options,
+                corrected_example,
+                safe_to_retry: true,
+            });
+        }
+    }
+    Ok(())
 }
 
 /// `options` are references that each resolve to exactly one of the matching variables (see [`SpecBindIndex::pasteable_ref`]).
@@ -887,7 +925,7 @@ pub fn validate_variable_binding_for_keys(
                 safe_to_retry: true,
             });
         }
-        if !allowed_keys.contains(&key) {
+        if !crate::is_key_bindable_on_node(key, node_kind) {
             return Err(SpecBindError {
                 code: "OVERRIDE_FIELD_NOT_APPLICABLE".to_string(),
                 message: format!("Property '{key}' (from '{field_name}') is not applicable to {} nodes.", node_kind.default_name()),
@@ -933,6 +971,7 @@ fn snapshot_style_property(snap: &LibrarySnapshot, key: &str, style: &Style) -> 
         Style::Text(_) => StyleProperty::Text,
         Style::Effect(_) => StyleProperty::Effect,
         Style::Grid(_) => StyleProperty::Grid,
+        Style::Animation(_) => StyleProperty::Animation,
         Style::Fill(_) => StyleProperty::Fill,
     })
 }
@@ -1071,13 +1110,14 @@ pub fn resolve_mode_map(doc: &Document, mode_spec: &BTreeMap<String, String>, sp
         let Some(coll) = doc
             .variable_collections
             .values()
+            .filter(|c| !c.is_soft_deleted())
             .find(|c| c.id != EASEUI_DEPRECATED_COLLECTION_ID && c.name == *coll_name)
-            .or_else(|| doc.variable_collections.values().find(|c| c.name == *coll_name))
+            .or_else(|| doc.variable_collections.values().filter(|c| !c.is_soft_deleted()).find(|c| c.name == *coll_name))
         else {
             let valid_options: Vec<String> = doc
                 .variable_collections
                 .values()
-                .filter(|c| c.id != EASEUI_DEPRECATED_COLLECTION_ID)
+                .filter(|c| c.id != EASEUI_DEPRECATED_COLLECTION_ID && !c.is_soft_deleted())
                 .flat_map(|c| c.modes.iter().map(move |m| format!("{}:{}", c.name, m.name)))
                 .take(20)
                 .collect();
@@ -1263,6 +1303,18 @@ pub fn detach_fill_paints(node: &mut Node) {
     node.style_refs.remove("fill");
 }
 
+/// Cuts the links between a node's stroke paints and what colours them from outside.
+pub fn detach_stroke_paints(node: &mut Node) {
+    node.variables.bindings.retain(|key, _| !key.starts_with("strokes/"));
+    node.style_refs.remove("stroke");
+}
+
+/// Cuts the links between a node's effects and values supplied by variables or a shared style.
+pub fn detach_effect_bindings(node: &mut Node) {
+    node.variables.bindings.retain(|key, _| !key.starts_with("effects/"));
+    node.style_refs.remove("effect");
+}
+
 /// Binds a variable ID to `prop_keys` on `node_id` in `doc` and writes the resolved value via [`set_bound_property`].
 pub fn apply_variable_binding(
     doc: &mut Document,
@@ -1403,7 +1455,14 @@ pub mod fixtures {
         doc.styles.insert("style_heading_l".to_string(), Style::Text(heading_ts));
         doc.style_meta.insert(
             "style_heading_l".to_string(),
-            StyleMeta { name: "Heading L".to_string(), description: String::new(), property: StyleProperty::Text, key: None, bindings: Default::default() },
+            StyleMeta {
+                name: "Heading L".to_string(),
+                description: String::new(),
+                property: StyleProperty::Text,
+                key: None,
+                bindings: Default::default(),
+                ..Default::default()
+            },
         );
 
         // Effect style: Elevation/2
@@ -1416,11 +1475,19 @@ pub mod fixtures {
                 spread: 0.0,
                 visible: true,
                 show_behind: false,
+                blend: Default::default(),
             }]),
         );
         doc.style_meta.insert(
             "style_elevation_2".to_string(),
-            StyleMeta { name: "Elevation/2".to_string(), description: String::new(), property: StyleProperty::Effect, key: None, bindings: Default::default() },
+            StyleMeta {
+                name: "Elevation/2".to_string(),
+                description: String::new(),
+                property: StyleProperty::Effect,
+                key: None,
+                bindings: Default::default(),
+                ..Default::default()
+            },
         );
 
         doc
@@ -2363,5 +2430,90 @@ mod tests {
         let left: Vec<&str> = node.variables.bindings.keys().map(String::as_str).collect();
         assert_eq!(left, ["strokes/0", "width"]);
         assert_eq!(node.style_refs.keys().map(String::as_str).collect::<Vec<_>>(), ["stroke"]);
+    }
+
+    #[test]
+    fn detach_stroke_paints_drops_every_stroke_binding_and_the_stroke_style_link_only() {
+        let mut node = Node::rectangle(NodeId(1), Rect::new(0.0, 0.0, 10.0, 10.0));
+        for (key, var) in [("strokes/0", "a"), ("strokes/0/opacity", "b"), ("fills/0", "c"), ("width", "d")] {
+            node.variables.bindings.insert(key.to_string(), var.to_string());
+        }
+        node.style_refs.insert("fill".to_string(), "s_fill".to_string());
+        node.style_refs.insert("stroke".to_string(), "s_stroke".to_string());
+
+        detach_stroke_paints(&mut node);
+
+        let left: Vec<&str> = node.variables.bindings.keys().map(String::as_str).collect();
+        assert_eq!(left, ["fills/0", "width"]);
+        assert_eq!(node.style_refs.keys().map(String::as_str).collect::<Vec<_>>(), ["fill"]);
+    }
+
+    #[test]
+    fn detach_effect_bindings_drops_effect_bindings_and_the_effect_style_link_only() {
+        let mut node = Node::rectangle(NodeId(1), Rect::new(0.0, 0.0, 10.0, 10.0));
+        for (key, var) in [("effects/0/radius", "a"), ("effects/1/color", "b"), ("fills/0", "c"), ("width", "d")] {
+            node.variables.bindings.insert(key.to_string(), var.to_string());
+        }
+        node.style_refs.insert("effect".to_string(), "s_effect".to_string());
+        node.style_refs.insert("fill".to_string(), "s_fill".to_string());
+
+        detach_effect_bindings(&mut node);
+
+        let left: Vec<&str> = node.variables.bindings.keys().map(String::as_str).collect();
+        assert_eq!(left, ["fills/0", "width"]);
+        assert_eq!(node.style_refs.keys().map(String::as_str).collect::<Vec<_>>(), ["fill"]);
+    }
+
+    #[test]
+    fn resolve_variable_ref_of_kind_rejects_library_path_when_import_leaves_variable_absent() {
+        let mut lib_doc = Document::new("Library");
+        lib_doc.variable_collections.insert(
+            "theme".to_string(),
+            VariableCollection {
+                id: "theme".to_string(),
+                name: "Theme".to_string(),
+                modes: vec![VariableMode { id: "light".to_string(), name: "Light".to_string() }],
+                default_mode: "light".to_string(),
+                variables: vec!["title".to_string()],
+                key: None,
+                source_library_key: None,
+                extensions: Default::default(),
+            },
+        );
+        lib_doc.variables.insert(
+            "title".to_string(),
+            Variable {
+                id: "title".to_string(),
+                name: "title".to_string(),
+                collection: "theme".to_string(),
+                kind: VariableKind::String,
+                values: [("light".to_string(), VariableValue::String("Pay".to_string()))].into_iter().collect(),
+                description: String::new(),
+                scopes: Vec::new(),
+                hidden_from_publishing: false,
+                key: None,
+                code_syntax: Default::default(),
+                extensions: Default::default(),
+                mode_extensions: Default::default(),
+            },
+        );
+        let snap = crate::snapshot(&lib_doc, "lib-theme", "Theme", 1);
+
+        let mut doc = Document::new("Host");
+        doc.library.enabled.push(crate::LibraryRef { id: "lib-theme".to_string(), name: "Theme".to_string(), version: 1 });
+        doc.library.external.insert(
+            crate::local_key("lib-theme", "var:title"),
+            crate::ExternalAsset {
+                library_id: "lib-theme".to_string(),
+                version: 1,
+                kind: crate::LibraryAssetKind::Variable,
+                node: None,
+                local_key: Some(crate::local_key("lib-theme", "title")),
+            },
+        );
+        let mut index = SpecBindIndex::build(&doc);
+        let err = resolve_variable_ref_of_kind(&mut doc, &mut index, &[snap], "var:Theme/title", "Label", "/prop_vars/Label", Some(VariableKind::String))
+            .expect_err("must reject library variable reference when import leaves doc.variables without the variable");
+        assert_eq!(err.code, "UNKNOWN_VARIABLE");
     }
 }

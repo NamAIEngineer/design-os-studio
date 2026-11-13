@@ -2,7 +2,7 @@
 
 use super::replay_comments::{resolve_comments, CommentRemap};
 use super::replay_tokens::{filter_missing_token_links_on_insert, filter_missing_token_links_on_update};
-use super::validate::insert_problem;
+use super::validate::{holds_children, insert_problem};
 use super::{log_version_refusal, LiveOp, LivePatch, SiblingHint, STRUCTURAL_FIELDS};
 use crate::{Command, DocError, Document, Node, NodeId, NodeKind, Style, StyleMeta, Variable, VariableCollection};
 use serde::{Deserialize, Serialize};
@@ -125,6 +125,7 @@ pub fn replay_live_patch(
     }
     // A failed replay is cancelled by the caller, so the remaps it made must go too.
     let saved = state.clone();
+    let mut touched_tables = BTreeSet::new();
     if patch.base != state.base {
         // The agent reloaded a canvas the editor wrote with its own ids; earlier remaps would
         // now send its edits to the wrong node or thread.
@@ -146,6 +147,19 @@ pub fn replay_live_patch(
     let is_spec_undo = patch.ops.iter().any(|o| matches!(o, LiveOp::Remove { .. }));
     for op in &patch.ops {
         if let Some(cmd) = resolve(doc, op, is_spec_undo, state, &mut report) {
+            crate::table::touched_tables(doc, &cmd, &mut touched_tables);
+            if let Err(e) = exec(doc, cmd) {
+                *state = saved;
+                return Err(e);
+            }
+            report.applied += 1;
+        }
+    }
+    // Table commands carry geometry from the agent's snapshot. Re-solving after all ops keeps
+    // existing track sizes and user-edited widths while laying out newly inserted cells against
+    // the editor's current table state. The generated commands stay inside the same transaction.
+    for table_id in touched_tables {
+        for cmd in crate::table::relayout(doc, table_id) {
             if let Err(e) = exec(doc, cmd) {
                 *state = saved;
                 return Err(e);
@@ -155,6 +169,52 @@ pub fn replay_live_patch(
     }
     doc.prune_in_progress();
     Ok(report)
+}
+
+/// [`replay_live_patch`] as one all-or-nothing unit that keeps the table rule, for a commit path that
+/// applies commands outside `History`. Each command runs atomically; once the patch is in, every table
+/// it touched must still hold one cell per live position (tables pass through invalid states between
+/// commands, so only the end state is checked). When a command or the check fails, the commands already
+/// applied are undone, `state` is restored and the error is returned: the patch is refused alone.
+pub fn replay_live_patch_checked(doc: &mut Document, patch: &LivePatch, state: &mut LivePatchState) -> Result<LivePatchReport, DocError> {
+    let saved = state.clone();
+    // Commands undo the node graph, but replay also mutates runtime metadata that has no inverse
+    // command: id allocation, transient agent markers, and dirty/layout bookkeeping. Capture it
+    // before replay so a refused patch is observationally a no-op for the whole document.
+    let saved_next_id = doc.next_id;
+    let saved_gap_cursor = doc.gap_cursor;
+    let saved_in_progress = doc.in_progress.clone();
+    let saved_dirty = doc.dirty.clone();
+    let saved_pending_relayout = doc.pending_relayout.clone();
+    let saved_layout_epoch = doc.layout_epoch;
+    let mut touched = BTreeSet::new();
+    let mut inverses: Vec<Command> = Vec::new();
+    let replayed = replay_live_patch(doc, patch, state, &mut |d, c| {
+        crate::table::touched_tables(d, &c, &mut touched);
+        inverses.push(c.apply_atomic(d)?);
+        Ok(())
+    });
+    let outcome = replayed.and_then(|report| crate::table::check_touched(doc, &touched).map(|()| report));
+    if let Err(e) = outcome {
+        let mut rollback = Ok(());
+        while let Some(inv) = inverses.pop() {
+            if let Err(re) = inv.apply(doc) {
+                rollback = Err(re);
+            }
+        }
+        doc.next_id = saved_next_id;
+        doc.gap_cursor = saved_gap_cursor;
+        doc.in_progress = saved_in_progress;
+        doc.dirty = saved_dirty;
+        doc.pending_relayout = saved_pending_relayout;
+        doc.layout_epoch = saved_layout_epoch;
+        *state = saved;
+        return Err(match rollback {
+            Ok(()) => e,
+            Err(re) => DocError::Table(format!("{e} Rolling the patch back also failed: {re}")),
+        });
+    }
+    outcome
 }
 
 fn resolve(doc: &mut Document, op: &LiveOp, is_spec_undo: bool, state: &mut LivePatchState, report: &mut LivePatchReport) -> Option<Command> {
@@ -193,6 +253,7 @@ fn resolve(doc: &mut Document, op: &LiveOp, is_spec_undo: bool, state: &mut Live
                     return None;
                 }
             };
+            merge_table_replay_geometry(cur, &mut merged);
             let skipped_links = filter_missing_token_links_on_update(doc, cur, &mut merged, report);
             if merged == *cur {
                 if skipped_links == 0 {
@@ -205,15 +266,37 @@ fn resolve(doc: &mut Document, op: &LiveOp, is_spec_undo: bool, state: &mut Live
                 report.skipped.push(format!("update of node {} would turn a layer into a page or a page into a layer", id.0));
                 return None;
             }
-            if !cur.children.is_empty() && !merged.kind.is_container() {
+            if !cur.children.is_empty() && !holds_children(&merged.kind) {
                 report.skipped.push(format!("update of node {} would turn a layer with children into one that cannot hold them", id.0));
+                return None;
+            }
+            if crate::instance_component(cur) != crate::instance_component(&merged) {
+                if let Some(comp) = crate::instance_component(&merged) {
+                    let at = merged.parent.unwrap_or(id);
+                    if let Some((held_main, cycle_path)) = crate::held_main_cycle_path_at(doc, comp, at, &[]) {
+                        report.skipped.push(crate::cycle_refusal_message(crate::CycleAction::Swap, &crate::cycle_node_label(doc, held_main), &cycle_path));
+                        return None;
+                    }
+                }
+            }
+            if !matches!(cur.kind, NodeKind::Component(_)) && matches!(merged.kind, NodeKind::Component(_)) && crate::mains_held_by(doc, &[id]).contains(&id) {
+                let held_name = if merged.name.trim().is_empty() { merged.kind.default_name().to_string() } else { merged.name.clone() };
+                let path = crate::component_chain_path(doc, id, id).unwrap_or_else(|| vec![held_name.clone(), held_name.clone()]);
+                report.skipped.push(crate::cycle_refusal_message(crate::CycleAction::MakeComponent, &held_name, &path));
                 return None;
             }
             if set.keys().chain(unset).any(|k| LAYOUT_FIELDS.contains(&k.as_str())) {
                 report.needs_layout.push(id);
             }
-            report.touched.push((id, TouchKind::Updated));
-            Some(crate::writer_command(doc, Command::Update { node: Box::new(merged) }).cmd)
+            let wc = crate::writer_command(doc, Command::Update { node: Box::new(merged) });
+            for part in &wc.parts {
+                if let Command::Update { node } = part {
+                    if !report.touched.contains(&(node.id, TouchKind::Updated)) {
+                        report.touched.push((node.id, TouchKind::Updated));
+                    }
+                }
+            }
+            Some(wc.cmd)
         }
         LiveOp::Reparent { id: agent_id, parent: agent_parent, at } => {
             let (id, id_redirected) = resolve_id(&state.remap, &state.replaced, doc, *agent_id);
@@ -238,6 +321,10 @@ fn resolve(doc: &mut Document, op: &LiveOp, is_spec_undo: bool, state: &mut Live
             };
             if !p.kind.is_container() || id == parent || doc.is_ancestor(id, parent) || node.parent.is_none() {
                 report.skipped.push(format!("move of node {} into {} is not allowed", id.0, parent.0));
+                return None;
+            }
+            if let Some((held_main, cycle_path)) = crate::reparent_held_main_cycle_path(doc, &[id], parent) {
+                report.skipped.push(crate::cycle_refusal_message(crate::CycleAction::Move, &crate::cycle_node_label(doc, held_main), &cycle_path));
                 return None;
             }
             let siblings: Vec<_> = p.children.iter().copied().filter(|c| *c != id).collect();
@@ -619,7 +706,7 @@ fn resolve_insert(
     report: &mut LivePatchReport,
 ) -> Option<Command> {
     let Some(root) = nodes.first() else { return None };
-    if !doc.get(parent).is_some_and(|p| p.kind.is_container()) {
+    if !doc.get(parent).is_some_and(|p| holds_children(&p.kind)) {
         report.skipped.push(format!("insert of node {} into missing parent {}", root.id.0, parent.0));
         return None;
     }
@@ -630,6 +717,61 @@ fn resolve_insert(
     }
     let mut preview: Vec<Node> = nodes.to_vec();
     remap_subtree(&mut preview, &state.remap);
+    let preview_by_id: BTreeMap<NodeId, &Node> = preview.iter().map(|n| (n.id, n)).collect();
+    let node_label = |n: &Node| -> String {
+        if n.name.trim().is_empty() {
+            n.kind.default_name().to_string()
+        } else {
+            n.name.clone()
+        }
+    };
+    for n in &preview {
+        let Some(comp) = crate::instance_component(n) else { continue };
+        let mut extra = Vec::new();
+        let mut cur = n.parent;
+        let mut guard = 0usize;
+        while let Some(pid) = cur.filter(|pid| preview_by_id.contains_key(pid) && guard <= preview.len()) {
+            extra.push(node_label(preview_by_id[&pid]));
+            cur = preview_by_id[&pid].parent;
+            guard += 1;
+        }
+        extra.reverse();
+        if let Some((held_main, cycle_path)) = crate::held_main_cycle_path_at(doc, comp, parent, &extra) {
+            report.skipped.push(crate::cycle_refusal_message(crate::CycleAction::Add, &crate::cycle_node_label(doc, held_main), &cycle_path));
+            return None;
+        }
+        let mut anc = n.parent;
+        let mut anc_guard = 0usize;
+        while let Some(pid) = anc.filter(|pid| preview_by_id.contains_key(pid) && anc_guard <= preview.len()) {
+            let pnode = preview_by_id[&pid];
+            if matches!(pnode.kind, NodeKind::Component(_)) && (comp == pid || crate::mains_held_through(doc, [comp]).contains(&pid)) {
+                let held_name = node_label(pnode);
+                // the layers of the new main down to the instance, then the way back to the main through `comp`
+                let mut below = Vec::new();
+                let mut up = n.parent;
+                while let Some(uid) = up.filter(|uid| *uid != pid && preview_by_id.contains_key(uid) && below.len() <= preview.len()) {
+                    below.push(node_label(preview_by_id[&uid]));
+                    up = preview_by_id[&uid].parent;
+                }
+                below.reverse();
+                let mut path = vec![held_name.clone()];
+                path.extend(below);
+                if comp == pid {
+                    path.push(held_name.clone());
+                } else {
+                    path.extend(crate::component_chain_path(doc, comp, pid).unwrap_or_else(|| vec![crate::cycle_node_label(doc, comp), held_name.clone()]));
+                    // the new main is not in the document yet, so the chain closes on a label it could not look up
+                    if let Some(last) = path.last_mut() {
+                        *last = held_name.clone();
+                    }
+                }
+                report.skipped.push(crate::cycle_refusal_message(crate::CycleAction::Add, &held_name, &path));
+                return None;
+            }
+            anc = pnode.parent;
+            anc_guard += 1;
+        }
+    }
     if let Some(existing) = doc.get(preview[0].id) {
         if existing.parent == Some(parent) && same_props(existing, &preview[0]) {
             report.duplicates += 1;
@@ -745,6 +887,29 @@ fn merge_fields(cur: &Node, set: &Map<String, Value>, unset: &[String]) -> Resul
     merged.parent = cur.parent;
     merged.children = cur.children.clone();
     Ok(merged)
+}
+
+/// Keep the editor's existing track sizes when a structural table patch was built from an older
+/// agent snapshot. The patch still contributes new row/column IDs and merge membership; a final
+/// relayout below recomputes table and cell geometry from the merged tracks.
+fn merge_table_replay_geometry(current: &Node, merged: &mut Node) {
+    let (NodeKind::Table(current_props), NodeKind::Table(merged_props)) = (&current.kind, &mut merged.kind) else { return };
+    let same_ids = |a: &[crate::TableTrack], b: &[crate::TableTrack]| a.iter().map(|t| t.id).eq(b.iter().map(|t| t.id));
+    let structural =
+        !same_ids(&current_props.rows, &merged_props.rows) || !same_ids(&current_props.cols, &merged_props.cols) || current_props.merges != merged_props.merges;
+    if !structural {
+        return;
+    }
+    for track in &mut merged_props.rows {
+        if let Some(old) = current_props.rows.iter().find(|t| t.id == track.id) {
+            track.size = old.size;
+        }
+    }
+    for track in &mut merged_props.cols {
+        if let Some(old) = current_props.cols.iter().find(|t| t.id == track.id) {
+            track.size = old.size;
+        }
+    }
 }
 
 fn same_props(a: &Node, b: &Node) -> bool {

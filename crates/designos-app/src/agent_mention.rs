@@ -211,7 +211,7 @@ pub fn icon_for_node_kind(kind: &NodeKind) -> Icon {
         NodeKind::ShapeWithText(_) => Icon::Shapes,
         NodeKind::Connector(_) => Icon::Connector,
         NodeKind::Stamp { .. } => Icon::Stamp,
-        NodeKind::Unknown { .. } => Icon::Rectangle,
+        NodeKind::Unknown { .. } | NodeKind::Table(_) | NodeKind::TableCell(_) => Icon::Rectangle,
     }
 }
 
@@ -231,6 +231,7 @@ fn style_property_label(prop: StyleProperty) -> &'static str {
         StyleProperty::Text => "Text style",
         StyleProperty::Effect => "Effect style",
         StyleProperty::Grid => "Grid style",
+        StyleProperty::Animation => "Animation style",
     }
 }
 
@@ -414,8 +415,8 @@ impl MentionSearchJob {
             );
         }
 
-        // 2. Variables
-        for (var_key, var) in &doc.variables {
+        // 2. Variables. A soft-deleted variable still resolves for the layers bound to it, but it is not offered.
+        for (var_key, var) in doc.variables.iter().filter(|(_, v)| !v.is_soft_deleted()) {
             let Some(tier) = match_name_tier(&var.name, &self.query_lower) else { continue };
             let col_name = doc.variable_collections.get(&var.collection).map(|c| c.name.as_str()).unwrap_or("Variables");
             let id = if var.id.is_empty() { var_key.clone() } else { var.id.clone() };
@@ -598,13 +599,6 @@ pub fn format_mention_reference_line(mention: &Mention) -> String {
     format!("References: @{} = {uri} ({detail})", mention.label)
 }
 
-/// Formats the reference snippet pasted into the active agent PTY tab when picking from the
-/// terminal header `Mention` button (`#655` §4).
-pub fn format_terminal_paste_mention(mention: &Mention) -> String {
-    let uri = format_reference_uri(mention.kind, &mention.id);
-    format!("@{} ({uri}) ", mention.label)
-}
-
 /// True when `@<label>` is still present as a mention token in `prompt`.
 pub fn mention_present_in_prompt(prompt: &str, label: &str) -> bool {
     let clean = label.trim();
@@ -736,6 +730,7 @@ mod tests {
                 description: String::new(),
                 property: StyleProperty::Fill,
                 bindings: Default::default(),
+                ..Default::default()
             },
         );
 
@@ -753,6 +748,20 @@ mod tests {
         assert!(results.iter().any(|c| c.category == MentionCategory::Components && c.id == comp_id.0.to_string()));
         assert!(results.iter().any(|c| c.category == MentionCategory::Variables && c.id == var_id));
         assert!(results.iter().any(|c| c.category == MentionCategory::Styles && c.id == style_key));
+    }
+
+    #[test]
+    fn search_does_not_offer_a_soft_deleted_variable() {
+        let (mut doc, page1, _, _, var_id, _) = sample_five_kind_doc();
+        let mut gone = doc.variables[&var_id].clone();
+        gone.id = "var-showcase-gone".to_string();
+        gone.name = "Color/Showcase deleted".to_string();
+        gone.extensions.insert(designos_doc::SOFT_DELETED_EXTENSION_KEY.to_string(), true.into());
+        doc.variables.insert(gone.id.clone(), gone);
+
+        let variables: Vec<MentionCandidate> =
+            search_document(&doc, page1, "showcase").into_iter().filter(|c| c.category == MentionCategory::Variables).collect();
+        assert_eq!(variables.iter().map(|c| c.id.as_str()).collect::<Vec<_>>(), [var_id.as_str()], "only the live variable is offered");
     }
 
     #[test]

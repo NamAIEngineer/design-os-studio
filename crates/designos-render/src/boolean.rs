@@ -3,7 +3,7 @@
 
 use crate::geom::{node_shape, Shape};
 use designos_doc as d;
-use designos_doc::{Document, Node, NodeKind};
+use designos_doc::{resolve_node, Document, Node, NodeKind};
 use i_overlay::core::fill_rule::FillRule;
 use i_overlay::core::overlay_rule::OverlayRule;
 use i_overlay::float::simplify::SimplifyShape;
@@ -100,12 +100,18 @@ fn transform_shapes(shapes: &mut Shapes, a: &d::Affine) {
 
 /// Normalised geometry of `child` in its parent's coordinate space.
 fn child_shapes(doc: &Document, child: &Node, tol: f32) -> Option<Shapes> {
+    let resolved = resolve_node(doc, child);
+    let child = &*resolved;
     if !child.visible {
         return None;
     }
     let mut shapes: Shapes = if matches!(child.kind, NodeKind::Group) {
         combine(doc, child, OverlayRule::Union, tol)?
     } else {
+        // a ring as wide as its disc is an operand with no area, not a missing one
+        if matches!(&child.kind, NodeKind::Ellipse(arc) if crate::geom::is_hairline_ring(arc)) {
+            return Some(Shapes::new());
+        }
         let shape: Shape = node_shape(doc, child, tol)?;
         if !shape.fillable {
             return None;

@@ -46,7 +46,7 @@ pub fn style_property_kind(style: &Style, property: &str) -> Option<VariableKind
             matches!(property, "fontSize" | "lineHeight" | "letterSpacing" | "paragraphSpacing" | "paragraphIndent" | "fontWeight" | "fontFamily" | "fontStyle")
         }
         Style::Effect(_) => property.starts_with("effects/"),
-        Style::Grid(_) => false,
+        Style::Grid(_) | Style::Animation(_) => false,
     };
     valid.then_some(kind)
 }
@@ -56,6 +56,7 @@ pub fn style_ref_key(prop: StyleProperty) -> Option<&'static str> {
     match prop {
         StyleProperty::Effect => Some("effect"),
         StyleProperty::Grid => Some("grid"),
+        StyleProperty::Animation => Some("animation"),
         _ => None,
     }
 }
@@ -72,12 +73,12 @@ pub fn unique_style_key(doc: &Document, base: &str) -> String {
 /// Links `n` to style `key` and copies the style's values onto it. Returns
 /// false (node untouched) when `n` cannot carry the style (a grid on a node
 /// that is not a frame).
-fn link(n: &mut Node, key: &str, style: &Style, prop: StyleProperty, ref_key: &str) -> bool {
+fn link(n: &mut Node, key: &str, style: &Style, prop: StyleProperty, ref_key: &str, paragraph_fields: Option<u8>) -> bool {
     if prop == StyleProperty::Grid && n.kind.frame_props().is_none() {
         return false;
     }
     n.style_refs.insert(ref_key.into(), key.into());
-    apply_style_values(n, style, key);
+    apply_style_values_with_fields(n, style, key, paragraph_fields);
     true
 }
 
@@ -90,6 +91,10 @@ fn values_of_node(n: &Node, prop: StyleProperty) -> Result<Style, StyleOpError> 
             Some(f) if !f.grids.is_empty() => Ok(Style::Grid(f.grids.clone())),
             Some(_) => Err(StyleOpError::NothingToStyle(n.id)),
             None => Err(StyleOpError::WrongNodeKind(n.id)),
+        },
+        StyleProperty::Animation => match n.motion.as_deref() {
+            Some(m) if !m.timelines.is_empty() => Ok(Style::Animation(m.timelines.clone())),
+            _ => Err(StyleOpError::NothingToStyle(n.id)),
         },
         other => Err(StyleOpError::NotEffectOrGrid(other)),
     }
@@ -115,13 +120,22 @@ pub fn create_style_from_node(doc: &Document, node: NodeId, prop: StyleProperty,
     let name = match name.map(str::trim) {
         Some("") => return Err(StyleOpError::EmptyName),
         Some(given) => given.to_string(),
-        None => unique_style_key(doc, if prop == StyleProperty::Effect { "Effect style" } else { "Grid style" }),
+        None => unique_style_key(
+            doc,
+            match prop {
+                StyleProperty::Effect => "Effect style",
+                StyleProperty::Grid => "Grid style",
+                StyleProperty::Animation => "Animation style",
+                _ => "Style",
+            },
+        ),
     };
     let key = if doc.styles.contains_key(&name) { unique_style_key(doc, &name) } else { name.clone() };
     let mut styles = doc.styles.clone();
     let mut style_meta = doc.style_meta.clone();
     styles.insert(key.clone(), style);
-    style_meta.insert(key.clone(), StyleMeta { name, key: None, description: String::new(), property: prop, bindings: Default::default() });
+    style_meta
+        .insert(key.clone(), StyleMeta { name, key: None, description: String::new(), property: prop, bindings: Default::default(), ..Default::default() });
     let link = updated(n, |n| {
         n.style_refs.insert(ref_key.into(), key.clone());
     });
@@ -134,11 +148,12 @@ pub fn apply_style(doc: &Document, nodes: &[NodeId], key: &str) -> Result<Comman
     let style = doc.styles.get(key).ok_or_else(|| StyleOpError::UnknownStyle(key.into()))?;
     let prop = style_property(doc, key);
     let ref_key = effect_or_grid_ref(prop)?;
+    let paragraph_fields = doc.style_meta.get(key).and_then(|m| m.text_paragraph_fields);
     let mut cmds = Vec::with_capacity(nodes.len());
     for id in nodes {
         let n = get_node(doc, *id)?;
         let mut copy = n.clone();
-        if link(&mut copy, key, style, prop, ref_key) {
+        if link(&mut copy, key, style, prop, ref_key, paragraph_fields) {
             cmds.push(Command::Update { node: Box::new(copy) });
         }
     }
@@ -155,6 +170,7 @@ fn ref_keys(style: &Style) -> &'static [&'static str] {
         Style::Text(_) => &["text"],
         Style::Effect(_) => &["effect"],
         Style::Grid(_) => &["grid"],
+        Style::Animation(_) => &["animation"],
     }
 }
 
@@ -182,11 +198,23 @@ pub fn update_style(doc: &Document, key: &str, style: Style) -> Result<Command, 
     }
     let mut styles = doc.styles.clone();
     styles.insert(key.to_string(), style.clone());
-    let mut cmds = vec![Command::SetStyles { styles, style_meta: doc.style_meta.clone() }];
+    let mut style_meta = doc.style_meta.clone();
+    // A text style stored without metadata predates field ownership: the layers keep every paragraph value
+    // the style never held, and only a field this edit changes becomes the style's.
+    let paragraph_fields = match &style {
+        Style::Text(_) => text_style_paragraph_fields_after_update(doc.styles.get(key), &style, recorded_text_paragraph_fields(doc.style_meta.get(key))),
+        _ => None,
+    };
+    if let Some(fields) = paragraph_fields {
+        if let Some(meta) = text_style_meta_mut(&styles, &mut style_meta, key) {
+            meta.text_paragraph_fields = Some(fields);
+        }
+    }
+    let mut cmds = vec![Command::SetStyles { styles, style_meta }];
     for id in linked_style_nodes(doc, key) {
         if let Some(n) = doc.get(id) {
             let mut copy = n.clone();
-            if apply_style_values(&mut copy, &style, key) {
+            if crate::library_ops::propagate_style_values_with_fields(&mut copy, doc.styles.get(key), &style, key, paragraph_fields) {
                 cmds.push(Command::Update { node: Box::new(copy) });
             }
         }
@@ -221,6 +249,7 @@ pub fn bind_style_property(doc: &Document, key: &str, property: &str, variable: 
         description: String::new(),
         property: prop_kind,
         bindings: Default::default(),
+        ..Default::default()
     });
     meta.bindings.insert(property.to_string(), variable.to_string());
     let mut cmds = vec![Command::SetStyles { styles, style_meta }];
@@ -236,10 +265,14 @@ pub fn bind_style_property(doc: &Document, key: &str, property: &str, variable: 
                     }
                 }
             }
-            if n.style_refs.get("fill").is_some_and(|k| k == key)
-                || n.style_refs.get("text").is_some_and(|k| k == key)
-                || n.style_refs.get("effect").is_some_and(|k| k == key)
-            {
+            if n.style_refs.get("text").is_some_and(|k| k == key) {
+                if !copy.variables.bindings.contains_key(property) {
+                    with_kept_text_style_overrides(&mut copy, Some(stored), |copy| {
+                        set_bound_property(copy, property, &val);
+                    });
+                }
+            }
+            if n.style_refs.get("fill").is_some_and(|k| k == key) || n.style_refs.get("effect").is_some_and(|k| k == key) {
                 if !copy.variables.bindings.contains_key(property) {
                     set_bound_property(&mut copy, property, &val);
                 }
@@ -278,6 +311,9 @@ pub fn detach_style(doc: &Document, nodes: &[NodeId], prop: StyleProperty) -> Re
         if n.style_refs.contains_key(ref_key) {
             cmds.push(updated(n, |n| {
                 n.style_refs.remove(ref_key);
+                if prop == StyleProperty::Animation {
+                    n.fig_metadata.remove("styleIdsForAnimation");
+                }
             }));
         }
     }
@@ -304,8 +340,590 @@ pub fn rename_style(doc: &Document, key: &str, name: &str) -> Result<Command, St
         description: String::new(),
         property,
         bindings: Default::default(),
+        ..Default::default()
     });
     Ok(Command::SetStyles { styles: doc.styles.clone(), style_meta })
+}
+
+/// Sets the description of style `key` in one [`Command::SetStyles`] undo step, trimming
+/// trailing whitespace. Setting the same text is a no-op (`Command::Batch(Vec::new())`).
+pub fn set_style_description(doc: &Document, key: &str, text: &str) -> Result<Command, StyleOpError> {
+    if !doc.styles.contains_key(key) {
+        return Err(StyleOpError::UnknownStyle(key.into()));
+    }
+    if is_library_style(doc, key) {
+        return Err(StyleOpError::LibraryStyle(key.into()));
+    }
+    let trimmed = text.trim_end();
+    let current = doc.style_meta.get(key).map(|m| m.description.as_str()).unwrap_or("");
+    if trimmed == current {
+        return Ok(Command::Batch(Vec::new()));
+    }
+    let property = style_property(doc, key);
+    let fallback_name = doc.style_name(key).to_string();
+    let mut style_meta = doc.style_meta.clone();
+    style_meta.entry(key.to_string()).and_modify(|m| m.description = trimmed.to_string()).or_insert_with(|| StyleMeta {
+        name: fallback_name,
+        key: None,
+        description: trimmed.to_string(),
+        property,
+        bindings: Default::default(),
+        ..Default::default()
+    });
+    Ok(Command::SetStyles { styles: doc.styles.clone(), style_meta })
+}
+
+fn clean_folder_path(folder: &str) -> String {
+    folder.split('/').map(str::trim).filter(|s| !s.is_empty()).collect::<Vec<_>>().join("/")
+}
+
+/// Renames folder `old_folder` to `new_folder`, updating the prefix of every member style in
+/// one [`Command::SetStyles`] undo step.
+pub fn rename_style_folder(doc: &Document, old_folder: &str, new_folder: &str) -> Result<Command, StyleOpError> {
+    let old_clean = clean_folder_path(old_folder);
+    let new_clean = clean_folder_path(new_folder);
+    if old_clean.is_empty() || new_clean.is_empty() {
+        return Err(StyleOpError::EmptyName);
+    }
+    let old_segs: Vec<&str> = old_clean.split('/').collect();
+    let mut matched = Vec::new();
+    for key in doc.styles.keys() {
+        let raw_name = doc.style_name(key);
+        let mut offset = 0usize;
+        let mut segs: Vec<(&str, usize)> = Vec::new();
+        for (i, part) in raw_name.split('/').enumerate() {
+            if i > 0 {
+                offset += 1;
+            }
+            let trimmed = part.trim();
+            if !trimmed.is_empty() {
+                segs.push((trimmed, offset + part.trim_end().len()));
+            }
+            offset += part.len();
+        }
+        if segs.len() > old_segs.len() && segs[..old_segs.len()].iter().map(|(s, _)| *s).eq(old_segs.iter().copied()) {
+            if is_library_style(doc, key) {
+                return Err(StyleOpError::LibraryStyle(key.clone()));
+            }
+            let prefix_end = segs[old_segs.len() - 1].1;
+            matched.push((key.clone(), format!("{new_clean}{}", &raw_name[prefix_end..])));
+        }
+    }
+    if matched.is_empty() {
+        return Err(StyleOpError::UnknownStyle(old_clean));
+    }
+    let mut style_meta = doc.style_meta.clone();
+    for (key, new_name) in matched {
+        let property = style_property(doc, &key);
+        style_meta.entry(key).and_modify(|m| m.name = new_name.clone()).or_insert_with(|| StyleMeta {
+            name: new_name,
+            key: None,
+            description: String::new(),
+            property,
+            bindings: Default::default(),
+            ..Default::default()
+        });
+    }
+    Ok(Command::SetStyles { styles: doc.styles.clone(), style_meta })
+}
+
+/// Returns the keys of styles in `doc` (optionally filtered to `prop`), ordered by
+/// [`StyleMeta::sort_position`] when present and falling back to stored map order when absent.
+pub fn ordered_style_keys(doc: &Document, prop: Option<StyleProperty>) -> Vec<String> {
+    let mut items: Vec<(usize, &String, Option<&str>)> = doc
+        .styles
+        .keys()
+        .enumerate()
+        .filter(|(_, k)| prop.is_none_or(|p| style_property(doc, k) == p))
+        .map(|(idx, k)| {
+            let pos = doc.style_meta.get(k).and_then(|m| m.sort_position.as_deref()).filter(|s| !s.is_empty());
+            (idx, k, pos)
+        })
+        .collect();
+    items.sort_by(|(a_idx, _, a_pos), (b_idx, _, b_pos)| match (a_pos, b_pos) {
+        (Some(ap), Some(bp)) => ap.cmp(bp).then_with(|| a_idx.cmp(b_idx)),
+        (Some(_), None) => std::cmp::Ordering::Less,
+        (None, Some(_)) => std::cmp::Ordering::Greater,
+        (None, None) => a_idx.cmp(b_idx),
+    });
+    items.into_iter().map(|(_, k, _)| k.clone()).collect()
+}
+
+thread_local! {
+    static LIBRARY_PAGE_SCANS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static STYLE_MODE_VISITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Returns and resets the number of [`used_on_library_page`] scans on the current thread.
+pub fn take_library_page_scans() -> usize {
+    LIBRARY_PAGE_SCANS.with(|c| c.replace(0))
+}
+
+/// Returns and resets the number of mode combinations visited by [`classify_own_binding_override`]
+/// on the current thread.
+pub fn take_style_mode_visits() -> usize {
+    STYLE_MODE_VISITS.with(|c| c.replace(0))
+}
+
+/// Whether any node on the hidden library page (remote-component copies) links to style `key`.
+pub fn used_on_library_page(doc: &Document, key: &str) -> bool {
+    LIBRARY_PAGE_SCANS.with(|c| c.set(c.get() + 1));
+    let Some(lp) = doc.library_page else { return false };
+    let mut stack = vec![lp];
+    while let Some(id) = stack.pop() {
+        let Some(n) = doc.get(id) else { continue };
+        if n.style_refs.values().any(|k| k == key) {
+            return true;
+        }
+        stack.extend(n.children.iter().copied());
+    }
+    false
+}
+
+const MAX_STYLE_MODE_COMBOS: usize = 4096;
+
+enum StyleBindingOverride {
+    None,
+    AllModes,
+    SomeModesBake { val: VariableValue, fallback: bool },
+    KeepBindingWithFallback,
+}
+
+struct VarCollectionModes<'a> {
+    cid: &'a str,
+    modes: Vec<&'a str>,
+    alias_prefix: Vec<(&'a str, &'a str)>,
+}
+
+/// Whether two alias prefixes pick the same modes for every collection except `cid`. Variables of
+/// `cid` that alias one another resolve in a single mode of `cid`, so its own entry never tells
+/// them apart.
+fn same_parent_modes(a: &[(&str, &str)], b: &[(&str, &str)], cid: &str) -> bool {
+    a.iter().filter(|(c, _)| *c != cid).eq(b.iter().filter(|(c, _)| *c != cid))
+}
+
+/// The collections `start_id` resolves through (itself and every alias target, at most 32
+/// variables), each with the parent modes that lead to it. The flag is set when those collections
+/// cannot be probed one at a time because their modes are coupled: a `+` key picks a value from
+/// several modes at once, and a collection reached through different parent modes may resolve to
+/// a different variable under each of them.
+fn collections_for_var<'a>(doc: &'a Document, start_id: &str) -> (Vec<VarCollectionModes<'a>>, bool) {
+    let mut visited_vars = std::collections::BTreeSet::new();
+    let mut queue: std::collections::VecDeque<(&str, Vec<(&'a str, &'a str)>)> = std::collections::VecDeque::new();
+    queue.push_back((start_id, Vec::new()));
+    let mut colls: Vec<(&'a str, Vec<(&'a str, &'a str)>)> = Vec::new();
+    let mut mode_coupled = false;
+
+    while let Some((id, prefix)) = queue.pop_front() {
+        if visited_vars.len() >= 32 || !visited_vars.insert(id) {
+            continue;
+        }
+        let Some(v) = doc.variables.get(id) else { continue };
+        let v_cid = v.collection.as_str();
+        if doc.variable_collections.contains_key(v_cid) {
+            match colls.iter().find(|(c, _)| *c == v_cid) {
+                None => colls.push((v_cid, prefix.clone())),
+                Some((_, first_prefix)) => mode_coupled |= !same_parent_modes(first_prefix, &prefix, v_cid),
+            }
+        }
+        for (k, val) in &v.values {
+            if k.contains('+') {
+                mode_coupled = true;
+                for part in k.split('+') {
+                    for (cid, coll) in &doc.variable_collections {
+                        if (coll.default_mode == part || coll.modes.iter().any(|m| m.id == part)) && !colls.iter().any(|(c, _)| *c == cid.as_str()) {
+                            colls.push((cid.as_str(), prefix.clone()));
+                        }
+                    }
+                }
+            }
+            if let VariableValue::Alias(next) = val {
+                // The alias is followed only while `v_cid` is in mode `k`, so that mode replaces any
+                // earlier one for the same collection (a hop from another variable of `v_cid`).
+                let mut next_prefix = prefix.clone();
+                if !k.contains('+') && doc.variable_collections.contains_key(v_cid) {
+                    match next_prefix.iter_mut().find(|entry| entry.0 == v_cid) {
+                        Some(entry) => entry.1 = k.as_str(),
+                        None => next_prefix.push((v_cid, k.as_str())),
+                    }
+                }
+                queue.push_back((next.as_str(), next_prefix));
+            }
+        }
+    }
+
+    let mut out = Vec::with_capacity(colls.len());
+    for (cid, alias_prefix) in colls {
+        let Some(coll) = doc.variable_collections.get(cid) else { continue };
+        let modes: Vec<&'a str> = if !coll.modes.is_empty() {
+            coll.modes.iter().map(|m| m.id.as_str()).collect()
+        } else if !coll.default_mode.is_empty() {
+            vec![coll.default_mode.as_str()]
+        } else {
+            Vec::new()
+        };
+        if !modes.is_empty() {
+            out.push(VarCollectionModes { cid, modes, alias_prefix });
+        }
+    }
+    (out, mode_coupled)
+}
+
+/// Classifies how `n`'s existing own bindings interact with moving `node_key` (`style_var`) onto
+/// `n.variables.bindings` across the modes of every collection that `own` or `style_var` uses.
+fn classify_own_binding_override(doc: &Document, id: NodeId, n: &Node, node_key: &str, style_var: &str) -> StyleBindingOverride {
+    let own = &n.variables.bindings;
+    type OverwritePred = fn(&VariableValue) -> bool;
+    let (own_key, overwrites, is_stop): (String, OverwritePred, bool) = if node_key == "fontWeight" {
+        ("fontStyle".into(), |val| matches!(val, VariableValue::String(s) if font_style_weight(s).is_some()), false)
+    } else if let Some(idx) = node_key.strip_prefix("fills/").and_then(|s| s.strip_suffix("/opacity")) {
+        (format!("fills/{idx}"), |val| matches!(val, VariableValue::Color(c) if c.a < 1.0), false)
+    } else if let Some(idx) = node_key.strip_prefix("strokes/").and_then(|s| s.strip_suffix("/opacity")) {
+        (format!("strokes/{idx}"), |val| matches!(val, VariableValue::Color(c) if c.a < 1.0), false)
+    } else if let Some(idx) = node_key.strip_prefix("effects/").and_then(|s| s.strip_suffix("/opacity")) {
+        (format!("effects/{idx}/color"), |val| matches!(val, VariableValue::Color(_)), false)
+    } else if let Some((idx, _)) = node_key.strip_prefix("fills/").and_then(|s| s.split_once("/stops/")) {
+        (format!("fills/{idx}"), |val| matches!(val, VariableValue::Color(_)), true)
+    } else if let Some((idx, _)) = node_key.strip_prefix("strokes/").and_then(|s| s.split_once("/stops/")) {
+        (format!("strokes/{idx}"), |val| matches!(val, VariableValue::Color(_)), true)
+    } else {
+        return StyleBindingOverride::None;
+    };
+
+    let Some(own_var_id) = own.get(&own_key) else {
+        return StyleBindingOverride::None;
+    };
+    let (own_colls, own_coupled) = collections_for_var(doc, own_var_id.as_str());
+    let (style_colls, style_coupled) = collections_for_var(doc, style_var);
+    let mut merged_colls: Vec<(&str, Vec<&str>)> = Vec::with_capacity(own_colls.len() + style_colls.len());
+    for coll in own_colls.iter().chain(style_colls.iter()) {
+        if !merged_colls.iter().any(|(cid, _)| *cid == coll.cid) {
+            merged_colls.push((coll.cid, coll.modes.clone()));
+        }
+    }
+    if merged_colls.is_empty() {
+        return StyleBindingOverride::None;
+    }
+
+    // Independent collections are probed one at a time (the sum of their modes). Coupled modes, and
+    // collections that both variables resolve in, need every combination (the capped product).
+    let crosses_modes = own_coupled || style_coupled || own_colls.iter().any(|c1| style_colls.iter().any(|c2| c1.cid == c2.cid));
+
+    let mut any_overridden = false;
+    let mut all_overridden = true;
+    let mut first_val: Option<VariableValue> = None;
+    let mut style_vals_agree = true;
+    let mut visits = 0usize;
+
+    if !crosses_modes {
+        let mut probe: Vec<(&str, &str)> = Vec::new();
+        if own_colls.is_empty() {
+            all_overridden = false;
+        }
+        for coll in &own_colls {
+            for &m in &coll.modes {
+                if visits == MAX_STYLE_MODE_COMBOS {
+                    return StyleBindingOverride::KeepBindingWithFallback;
+                }
+                visits += 1;
+                STYLE_MODE_VISITS.with(|c| c.set(c.get() + 1));
+                probe.clear();
+                probe.extend_from_slice(&coll.alias_prefix);
+                probe.push((coll.cid, m));
+                let is_overridden = doc.resolve_variable_with_modes(id, own_var_id, &probe).is_some_and(|val| overwrites(&val));
+                if is_overridden {
+                    any_overridden = true;
+                } else {
+                    all_overridden = false;
+                }
+            }
+        }
+        for coll in &style_colls {
+            for &m in &coll.modes {
+                if visits == MAX_STYLE_MODE_COMBOS {
+                    return StyleBindingOverride::KeepBindingWithFallback;
+                }
+                visits += 1;
+                STYLE_MODE_VISITS.with(|c| c.set(c.get() + 1));
+                probe.clear();
+                probe.extend_from_slice(&coll.alias_prefix);
+                probe.push((coll.cid, m));
+                if let Some(val) = doc.resolve_variable_with_modes(id, style_var, &probe) {
+                    match &first_val {
+                        None => first_val = Some(val),
+                        Some(first) if first != &val => style_vals_agree = false,
+                        Some(_) => {}
+                    }
+                }
+            }
+        }
+    } else {
+        let k = merged_colls.len();
+        let mut indices = vec![0usize; k];
+        let mut combo: Vec<(&str, &str)> = merged_colls.iter().map(|(cid, modes)| (*cid, modes[0])).collect();
+        loop {
+            if visits == MAX_STYLE_MODE_COMBOS {
+                return StyleBindingOverride::KeepBindingWithFallback;
+            }
+            visits += 1;
+            STYLE_MODE_VISITS.with(|c| c.set(c.get() + 1));
+            let is_overridden = doc.resolve_variable_with_modes(id, own_var_id, &combo).is_some_and(|val| overwrites(&val));
+            if is_overridden {
+                any_overridden = true;
+            } else {
+                all_overridden = false;
+                if let Some(val) = doc.resolve_variable_with_modes(id, style_var, &combo) {
+                    match &first_val {
+                        None => first_val = Some(val),
+                        Some(first) if first != &val => style_vals_agree = false,
+                        Some(_) => {}
+                    }
+                }
+            }
+
+            let mut pos = k;
+            while pos > 0 {
+                pos -= 1;
+                indices[pos] += 1;
+                if indices[pos] < merged_colls[pos].1.len() {
+                    combo[pos].1 = merged_colls[pos].1[indices[pos]];
+                    break;
+                }
+                indices[pos] = 0;
+                combo[pos].1 = merged_colls[pos].1[0];
+            }
+            if pos == 0 && indices[0] == 0 {
+                break;
+            }
+        }
+    }
+
+    if !any_overridden {
+        return StyleBindingOverride::None;
+    }
+    if all_overridden {
+        return StyleBindingOverride::AllModes;
+    }
+    if is_stop {
+        return StyleBindingOverride::None;
+    }
+    let Some(first_val) = first_val else {
+        return StyleBindingOverride::AllModes;
+    };
+    if style_vals_agree {
+        return StyleBindingOverride::SomeModesBake { val: first_val, fallback: false };
+    }
+
+    let own_wins_at_delete = doc.resolve_variable(id, own_var_id).is_some_and(|val| overwrites(&val));
+    if !own_wins_at_delete {
+        return match doc.resolve_variable(id, style_var) {
+            Some(val) => StyleBindingOverride::SomeModesBake { val, fallback: true },
+            None => StyleBindingOverride::None,
+        };
+    }
+    let default_combo: Vec<(&str, &str)> =
+        merged_colls.iter().filter_map(|(cid, _)| doc.variable_collections.get(*cid).map(|c| (*cid, c.default_mode.as_str()))).collect();
+    let own_wins_in_default = doc.resolve_variable_with_modes(id, own_var_id, &default_combo).is_some_and(|val| overwrites(&val));
+    if !own_wins_in_default {
+        if let Some(val) = doc.resolve_variable_with_modes(id, style_var, &default_combo) {
+            return StyleBindingOverride::SomeModesBake { val, fallback: true };
+        }
+    }
+    StyleBindingOverride::SomeModesBake { val: first_val, fallback: true }
+}
+
+/// Bakes a resolved variable value for a style binding key outside `property_kind` onto `node`
+/// so that unrecognized or legacy keys never vanish silently on style deletion.
+fn bake_unrecognized_style_binding(node: &mut Node, slot: &str, key: &str, val: &VariableValue) {
+    if let Some(stripped) = key.strip_suffix("/0") {
+        if property_kind(stripped).is_some() {
+            set_bound_property(node, stripped, val);
+            return;
+        }
+    }
+    if let Some(prefix) = key.strip_suffix("/color") {
+        if (prefix.starts_with("fills/") || prefix.starts_with("strokes/")) && property_kind(prefix).is_some() {
+            set_bound_property(node, prefix, val);
+            return;
+        }
+    }
+    if let Some(idx) = key.strip_prefix("fillOpacities/") {
+        let k = format!("fills/{idx}/opacity");
+        if property_kind(&k).is_some() {
+            set_bound_property(node, &k, val);
+            return;
+        }
+    }
+    if let Some(idx) = key.strip_prefix("strokeOpacities/") {
+        let k = format!("strokes/{idx}/opacity");
+        if property_kind(&k).is_some() {
+            set_bound_property(node, &k, val);
+            return;
+        }
+    }
+    if let Some((i, j)) = key.strip_prefix("fillStops/").and_then(|s| s.split_once('/')) {
+        let k = format!("fills/{i}/stops/{j}");
+        if property_kind(&k).is_some() {
+            set_bound_property(node, &k, val);
+            return;
+        }
+    }
+    if let Some((i, j)) = key.strip_prefix("strokeStops/").and_then(|s| s.split_once('/')) {
+        let k = format!("strokes/{i}/stops/{j}");
+        if property_kind(&k).is_some() {
+            set_bound_property(node, &k, val);
+            return;
+        }
+    }
+    if let Some(rest) = key.strip_prefix("effects/") {
+        let mapped = if let Some(i) = rest.strip_suffix("/x").or_else(|| rest.strip_suffix("/offset/x")) {
+            Some(format!("effects/{i}/offsetX"))
+        } else {
+            rest.strip_suffix("/y").or_else(|| rest.strip_suffix("/offset/y")).map(|i| format!("effects/{i}/offsetY"))
+        };
+        if let Some(k) = mapped {
+            if property_kind(&k).is_some() {
+                set_bound_property(node, &k, val);
+                return;
+            }
+        }
+    }
+    match (slot, key) {
+        ("fill", "color") => {
+            set_bound_property(node, "fills/0", val);
+            return;
+        }
+        ("stroke", "color") => {
+            set_bound_property(node, "strokes/0", val);
+            return;
+        }
+        ("fill", "opacity") => {
+            set_bound_property(node, "fills/0/opacity", val);
+            return;
+        }
+        ("stroke", "opacity") => {
+            set_bound_property(node, "strokes/0/opacity", val);
+            return;
+        }
+        (
+            "effect",
+            "color" | "opacity" | "radius" | "blur" | "spread" | "offsetX" | "offsetY" | "lightAngle" | "lightIntensity" | "refraction" | "depth"
+            | "dispersion" | "frost",
+        ) => {
+            set_bound_property(node, &format!("effects/0/{key}"), val);
+            return;
+        }
+        ("effect", "x") => {
+            set_bound_property(node, "effects/0/offsetX", val);
+            return;
+        }
+        ("effect", "y") => {
+            set_bound_property(node, "effects/0/offsetY", val);
+            return;
+        }
+        _ => {}
+    }
+    match key {
+        "cornerRadius" => {
+            apply_bound_key_to_node(node, "cornerRadius", val);
+        }
+        "size/x" => set_bound_property(node, "width", val),
+        "size/y" => set_bound_property(node, "height", val),
+        "individualStrokeWeights/top" => set_bound_property(node, "strokeTopWeight", val),
+        "individualStrokeWeights/right" => set_bound_property(node, "strokeRightWeight", val),
+        "individualStrokeWeights/bottom" => set_bound_property(node, "strokeBottomWeight", val),
+        "individualStrokeWeights/left" => set_bound_property(node, "strokeLeftWeight", val),
+        "minWidth" | "maxWidth" | "minHeight" | "maxHeight" => set_bound_property(node, key, val),
+        _ => {
+            set_bound_property(node, key, val);
+        }
+    }
+}
+
+fn is_style_binding_for_slot(slot: &str, node_key: &str) -> bool {
+    match slot {
+        "fill" => node_key.starts_with("fills/"),
+        "stroke" => node_key.starts_with("strokes/"),
+        "text" => crate::text_style_overrides::TEXT_STYLE_BINDING_KEYS.contains(&node_key),
+        "effect" => node_key.starts_with("effects/"),
+        _ => false,
+    }
+}
+
+/// Deletes style `key`, detaching every linked layer while keeping its current
+/// values and moving any variable bindings carried by the style onto each
+/// layer's own properties as a single undoable command. A library style (or a
+/// style used by a remote-component copy on the hidden library page) is refused.
+pub fn delete_style(doc: &Document, key: &str) -> Result<Command, StyleOpError> {
+    delete_style_with_fallbacks(doc, key).map(|(cmd, _)| cmd)
+}
+
+/// Deletes style `key` like [`delete_style`] and also returns the `(NodeId, key)`
+/// pairs where a mixed-mode override used the delete-time/default fallback bake.
+pub fn delete_style_with_fallbacks(doc: &Document, key: &str) -> Result<(Command, Vec<(NodeId, String)>), StyleOpError> {
+    if !doc.styles.contains_key(key) {
+        return Err(StyleOpError::UnknownStyle(key.into()));
+    }
+    if is_library_style(doc, key) || used_on_library_page(doc, key) {
+        return Err(StyleOpError::LibraryStyle(key.into()));
+    }
+    let meta_bindings = doc.style_meta.get(key).map(|m| &m.bindings);
+    let mut styles = doc.styles.clone();
+    styles.remove(key);
+    let mut style_meta = doc.style_meta.clone();
+    style_meta.remove(key);
+    let mut cmds = vec![Command::SetStyles { styles, style_meta }];
+    let mut fallbacks = Vec::new();
+    for id in linked_style_nodes(doc, key) {
+        let Some(n) = doc.get(id) else { continue };
+        let mut copy = n.clone();
+        if let Some(bindings) = meta_bindings {
+            for slot in ["fill", "stroke", "text", "effect"] {
+                if copy.style_refs.get(slot).is_none_or(|k| k != key) {
+                    continue;
+                }
+                for (bkey, variable) in bindings {
+                    let node_key = if slot == "stroke" {
+                        let Some(rest) = bkey.strip_prefix("fills/") else { continue };
+                        format!("strokes/{rest}")
+                    } else {
+                        bkey.clone()
+                    };
+                    if copy.variables.bindings.contains_key(&node_key) {
+                        continue;
+                    }
+                    match classify_own_binding_override(doc, id, n, &node_key, variable) {
+                        StyleBindingOverride::AllModes => continue,
+                        StyleBindingOverride::SomeModesBake { val, fallback } => {
+                            set_bound_property(&mut copy, &node_key, &val);
+                            if fallback {
+                                fallbacks.push((id, node_key));
+                            }
+                            continue;
+                        }
+                        StyleBindingOverride::KeepBindingWithFallback => {
+                            if is_style_binding_for_slot(slot, &node_key) && property_kind(&node_key).is_some() {
+                                copy.variables.bindings.insert(node_key.clone(), variable.clone());
+                            } else if let Some(val) = doc.resolve_variable(id, variable) {
+                                bake_unrecognized_style_binding(&mut copy, slot, &node_key, &val);
+                            }
+                            fallbacks.push((id, node_key));
+                            continue;
+                        }
+                        StyleBindingOverride::None => {}
+                    }
+                    if is_style_binding_for_slot(slot, &node_key) && property_kind(&node_key).is_some() {
+                        copy.variables.bindings.insert(node_key, variable.clone());
+                    } else if let Some(val) = doc.resolve_variable(id, variable) {
+                        bake_unrecognized_style_binding(&mut copy, slot, &node_key, &val);
+                    }
+                }
+            }
+        }
+        copy.style_refs.retain(|_, v| v != key);
+        cmds.push(Command::Update { node: Box::new(copy) });
+    }
+    Ok((Command::Batch(cmds), fallbacks))
 }
 
 #[cfg(test)]
@@ -313,7 +931,15 @@ mod tests {
     use super::*;
 
     fn shadow(radius: f32) -> Effect {
-        Effect::DropShadow { color: Color::rgba(0, 0, 0, 64), offset: Vec2::new(0.0, 4.0), radius, spread: 0.0, visible: true, show_behind: false }
+        Effect::DropShadow {
+            color: Color::rgba(0, 0, 0, 64),
+            offset: Vec2::new(0.0, 4.0),
+            radius,
+            spread: 0.0,
+            visible: true,
+            show_behind: false,
+            blend: Default::default(),
+        }
     }
 
     fn cols(count: u32) -> LayoutGrid {
@@ -359,7 +985,14 @@ mod tests {
         }
         assert_eq!(
             d.style_meta[&key],
-            StyleMeta { name: "Effect style 1".into(), key: None, description: String::new(), property: StyleProperty::Effect, bindings: Default::default() }
+            StyleMeta {
+                name: "Effect style 1".into(),
+                key: None,
+                description: String::new(),
+                property: StyleProperty::Effect,
+                bindings: Default::default(),
+                ..Default::default()
+            }
         );
         assert_eq!(d.get(a).unwrap().style_refs.get("effect"), Some(&key));
         h.undo(&mut d).unwrap();
@@ -463,7 +1096,14 @@ mod tests {
         d.styles.insert("Line".into(), Style::Fill(vec![Paint::solid(Color::rgb(0, 255, 0))]));
         d.style_meta.insert(
             "Line".into(),
-            StyleMeta { name: "Line".into(), key: None, description: String::new(), property: StyleProperty::Stroke, bindings: Default::default() },
+            StyleMeta {
+                name: "Line".into(),
+                key: None,
+                description: String::new(),
+                property: StyleProperty::Stroke,
+                bindings: Default::default(),
+                ..Default::default()
+            },
         );
         d.styles.insert("Body".into(), Style::Text(TextStyle { font_size: 12.0, ..Default::default() }));
         // Metadata that never named the property (it defaults to Fill) must not hide the text layers.
@@ -709,5 +1349,2997 @@ mod tests {
         let mut loaded = loaded;
         h.exec(&mut loaded, c).unwrap();
         assert_eq!(loaded.get(a).unwrap().effects, vec![shadow(2.0)]);
+    }
+
+    #[test]
+    fn deleting_fill_text_effect_and_grid_styles_keeps_layer_values_drops_refs_and_undoes_in_one_step() {
+        let mut d = Document::new("t");
+        let page = d.add_page("p");
+        d.variable_collections.insert(
+            "c1".into(),
+            VariableCollection {
+                id: "c1".into(),
+                name: "Theme".into(),
+                modes: vec![VariableMode { id: "light".into(), name: "Light".into() }, VariableMode { id: "dark".into(), name: "Dark".into() }],
+                default_mode: "light".into(),
+                variables: vec!["v_fill".into()],
+                key: None,
+                source_library_key: None,
+                extensions: Default::default(),
+            },
+        );
+        let light_col = Color::rgb(10, 20, 30);
+        let dark_col = Color::rgb(200, 210, 220);
+        d.variables.insert(
+            "v_fill".into(),
+            Variable {
+                id: "v_fill".into(),
+                name: "Brand/Surface".into(),
+                collection: "c1".into(),
+                kind: VariableKind::Color,
+                values: [("light".to_string(), VariableValue::Color(light_col)), ("dark".to_string(), VariableValue::Color(dark_col))].into_iter().collect(),
+                description: String::new(),
+                scopes: vec![],
+                hidden_from_publishing: false,
+                key: None,
+                code_syntax: Default::default(),
+                extensions: Default::default(),
+                mode_extensions: Default::default(),
+            },
+        );
+
+        let f1_id = d.alloc_id();
+        let mut f1 = Node::frame(f1_id, Rect::new(0.0, 0.0, 100.0, 100.0));
+        f1.fills = vec![Paint::solid(light_col)];
+        f1.effects = vec![shadow(8.0)];
+        f1.kind.frame_props_mut().unwrap().grids = vec![cols(12)];
+        f1.style_refs.insert("fill".into(), "FillStyle".into());
+        f1.style_refs.insert("effect".into(), "EffectStyle".into());
+        f1.style_refs.insert("grid".into(), "GridStyle".into());
+        let f1 = d.insert(page, f1).unwrap();
+
+        let f2_id = d.alloc_id();
+        let mut f2 = Node::frame(f2_id, Rect::new(120.0, 0.0, 100.0, 100.0));
+        f2.variables.modes.insert("c1".into(), "dark".into());
+        f2.fills = vec![Paint::solid(light_col)];
+        f2.effects = vec![shadow(8.0)];
+        f2.kind.frame_props_mut().unwrap().grids = vec![cols(12)];
+        f2.style_refs.insert("fill".into(), "FillStyle".into());
+        f2.style_refs.insert("effect".into(), "EffectStyle".into());
+        f2.style_refs.insert("grid".into(), "GridStyle".into());
+        let f2 = d.insert(page, f2).unwrap();
+
+        let ts = TextStyle { font_size: 24.0, font_weight: 700, ..Default::default() };
+        let t1_id = d.alloc_id();
+        let mut t1 = Node::text(t1_id, Rect::new(0.0, 120.0, 80.0, 30.0), "One", ts.clone());
+        t1.style_refs.insert("text".into(), "TextStyle".into());
+        let t1 = d.insert(page, t1).unwrap();
+
+        let t2_id = d.alloc_id();
+        let mut t2 = Node::text(t2_id, Rect::new(120.0, 120.0, 80.0, 30.0), "Two", ts.clone());
+        t2.style_refs.insert("text".into(), "TextStyle".into());
+        let t2 = d.insert(page, t2).unwrap();
+
+        d.styles.insert("FillStyle".into(), Style::Fill(vec![Paint::solid(light_col)]));
+        d.style_meta.insert(
+            "FillStyle".into(),
+            StyleMeta {
+                name: "FillStyle".into(),
+                key: None,
+                description: String::new(),
+                property: StyleProperty::Fill,
+                bindings: [("fills/0".to_string(), "v_fill".to_string())].into_iter().collect(),
+                ..Default::default()
+            },
+        );
+        d.styles.insert("TextStyle".into(), Style::Text(ts.clone()));
+        d.style_meta.insert("TextStyle".into(), StyleMeta { name: "TextStyle".into(), property: StyleProperty::Text, ..Default::default() });
+        d.styles.insert("EffectStyle".into(), Style::Effect(vec![shadow(8.0)]));
+        d.style_meta.insert("EffectStyle".into(), StyleMeta { name: "EffectStyle".into(), property: StyleProperty::Effect, ..Default::default() });
+        d.styles.insert("GridStyle".into(), Style::Grid(vec![cols(12)]));
+        d.style_meta.insert("GridStyle".into(), StyleMeta { name: "GridStyle".into(), property: StyleProperty::Grid, ..Default::default() });
+
+        let mut h = History::default();
+
+        // 1. Delete FillStyle (bound to v_fill: resolves to light_col on f1, dark_col on f2).
+        let f1_before = resolve_node(&d, d.get(f1).unwrap()).fills.clone();
+        let f2_before = resolve_node(&d, d.get(f2).unwrap()).fills.clone();
+        assert_eq!(f1_before, vec![Paint::solid(light_col)]);
+        assert_eq!(f2_before, vec![Paint::solid(dark_col)]);
+
+        let c = delete_style(&d, "FillStyle");
+        run(&mut d, &mut h, c);
+        assert!(!d.styles.contains_key("FillStyle") && !d.style_meta.contains_key("FillStyle"));
+        assert!(!d.get(f1).unwrap().style_refs.contains_key("fill"));
+        assert!(!d.get(f2).unwrap().style_refs.contains_key("fill"));
+        assert_eq!(d.get(f1).unwrap().variables.bindings.get("fills/0").map(String::as_str), Some("v_fill"));
+        assert_eq!(d.get(f2).unwrap().variables.bindings.get("fills/0").map(String::as_str), Some("v_fill"));
+        assert_eq!(resolve_node(&d, d.get(f1).unwrap()).fills, f1_before, "light-mode layer keeps its look");
+        assert_eq!(resolve_node(&d, d.get(f2).unwrap()).fills, f2_before, "dark-mode layer keeps its look");
+        assert_eq!(d.get(f2).unwrap().fills, vec![Paint::solid(light_col)], "do not bake a resolved dark literal into raw fills");
+        // Switching the layer's mode after delete still changes its colour.
+        d.get_mut(f1).unwrap().variables.modes.insert("c1".into(), "dark".into());
+        d.get_mut(f2).unwrap().variables.modes.insert("c1".into(), "light".into());
+        assert_eq!(resolve_node(&d, d.get(f1).unwrap()).fills, vec![Paint::solid(dark_col)]);
+        assert_eq!(resolve_node(&d, d.get(f2).unwrap()).fills, vec![Paint::solid(light_col)]);
+        d.get_mut(f1).unwrap().variables.modes.remove("c1");
+        d.get_mut(f2).unwrap().variables.modes.insert("c1".into(), "dark".into());
+
+        h.undo(&mut d).unwrap();
+        assert!(d.styles.contains_key("FillStyle") && d.style_meta.contains_key("FillStyle"));
+        assert_eq!(d.get(f1).unwrap().style_refs.get("fill").map(String::as_str), Some("FillStyle"));
+        assert_eq!(d.get(f2).unwrap().style_refs.get("fill").map(String::as_str), Some("FillStyle"));
+        assert!(d.get(f1).unwrap().variables.bindings.is_empty());
+        assert!(d.get(f2).unwrap().variables.bindings.is_empty());
+        h.redo(&mut d).unwrap();
+        assert!(!d.styles.contains_key("FillStyle") && !d.get(f1).unwrap().style_refs.contains_key("fill"));
+
+        // 2. Delete TextStyle.
+        let c = delete_style(&d, "TextStyle");
+        run(&mut d, &mut h, c);
+        assert!(!d.styles.contains_key("TextStyle") && !d.style_meta.contains_key("TextStyle"));
+        for id in [t1, t2] {
+            let n = d.get(id).unwrap();
+            assert!(!n.style_refs.contains_key("text"));
+            match &n.kind {
+                NodeKind::Text(tp) => assert_eq!((tp.style.font_size, tp.style.font_weight), (24.0, 700)),
+                other => panic!("expected text, got {other:?}"),
+            }
+        }
+        h.undo(&mut d).unwrap();
+        assert!(d.styles.contains_key("TextStyle"));
+        assert_eq!(d.get(t1).unwrap().style_refs.get("text").map(String::as_str), Some("TextStyle"));
+        assert_eq!(d.get(t2).unwrap().style_refs.get("text").map(String::as_str), Some("TextStyle"));
+        h.redo(&mut d).unwrap();
+
+        // 3. Delete EffectStyle.
+        let c = delete_style(&d, "EffectStyle");
+        run(&mut d, &mut h, c);
+        assert!(!d.styles.contains_key("EffectStyle") && !d.style_meta.contains_key("EffectStyle"));
+        for id in [f1, f2] {
+            let n = d.get(id).unwrap();
+            assert!(!n.style_refs.contains_key("effect"));
+            assert_eq!(n.effects, vec![shadow(8.0)]);
+        }
+        h.undo(&mut d).unwrap();
+        assert!(d.styles.contains_key("EffectStyle"));
+        assert_eq!(d.get(f1).unwrap().style_refs.get("effect").map(String::as_str), Some("EffectStyle"));
+        assert_eq!(d.get(f2).unwrap().style_refs.get("effect").map(String::as_str), Some("EffectStyle"));
+        h.redo(&mut d).unwrap();
+
+        // 4. Delete GridStyle.
+        let c = delete_style(&d, "GridStyle");
+        run(&mut d, &mut h, c);
+        assert!(!d.styles.contains_key("GridStyle") && !d.style_meta.contains_key("GridStyle"));
+        for id in [f1, f2] {
+            assert!(!d.get(id).unwrap().style_refs.contains_key("grid"));
+            assert_eq!(grids(&d, id), vec![cols(12)]);
+        }
+        h.undo(&mut d).unwrap();
+        assert!(d.styles.contains_key("GridStyle"));
+        assert_eq!(d.get(f1).unwrap().style_refs.get("grid").map(String::as_str), Some("GridStyle"));
+        assert_eq!(d.get(f2).unwrap().style_refs.get("grid").map(String::as_str), Some("GridStyle"));
+    }
+
+    #[test]
+    fn a_style_that_belongs_to_a_library_cannot_be_deleted_in_the_consumer_file() {
+        let (mut d, [fill_node, ..]) = paint_and_text_fixture();
+        d.library.external.insert(
+            "L1/Brand".into(),
+            ExternalAsset { library_id: "L1".into(), version: 1, kind: LibraryAssetKind::Style, node: None, local_key: Some("Brand".into()) },
+        );
+        let err = delete_style(&d, "Brand").unwrap_err();
+        assert!(matches!(&err, StyleOpError::LibraryStyle(k) if k == "Brand"), "expected LibraryStyle error, got {err:?}");
+        assert!(err.to_string().contains("edit it in the library file"));
+        assert!(d.styles.contains_key("Brand"));
+        assert_eq!(d.get(fill_node).unwrap().style_refs.get("fill").map(String::as_str), Some("Brand"));
+        assert!(matches!(delete_style(&d, "nope").unwrap_err(), StyleOpError::UnknownStyle(k) if k == "nope"));
+    }
+
+    fn mixed_run_text(d: &mut Document, page: NodeId, base: TextStyle, run2: TextStyle) -> NodeId {
+        let id = d.alloc_id();
+        let mut t = Node::text(id, Rect::new(0.0, 0.0, 200.0, 30.0), "Hello world", base.clone());
+        if let NodeKind::Text(tp) = &mut t.kind {
+            tp.runs = vec![TextRun { start: 0, end: 5, style: base }, TextRun { start: 5, end: 11, style: run2 }];
+        }
+        d.insert(page, t).unwrap()
+    }
+
+    fn resolved_runs(d: &Document, id: NodeId) -> Vec<(Vec<Paint>, u16, f32)> {
+        let n = resolve_node(d, d.get(id).unwrap()).into_owned();
+        match n.kind {
+            NodeKind::Text(t) => t.runs.iter().map(|r| (r.style.fills.clone(), r.style.font_weight, r.style.font_size)).collect(),
+            other => panic!("expected text, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn deleting_a_colour_style_on_text_keeps_a_highlighted_run() {
+        let mut d = Document::new("t");
+        let page = d.add_page("p");
+        let black = vec![Paint::solid(Color::BLACK)];
+        let red = vec![Paint::solid(Color::rgb(255, 0, 0))];
+        let base = TextStyle { fills: black.clone(), ..Default::default() };
+        let hi = TextStyle { fills: red.clone(), ..Default::default() };
+        let t = mixed_run_text(&mut d, page, base, hi);
+        d.get_mut(t).unwrap().style_refs.insert("fill".into(), "Ink".into());
+        d.styles.insert("Ink".into(), Style::Fill(black.clone()));
+        d.style_meta.insert("Ink".into(), StyleMeta { name: "Ink".into(), property: StyleProperty::Fill, ..Default::default() });
+
+        let before_runs = resolved_runs(&d, t);
+        let mut before_node = resolve_node(&d, d.get(t).unwrap()).into_owned();
+        before_node.style_refs.clear();
+
+        let mut h = History::default();
+        let c = delete_style(&d, "Ink");
+        run(&mut d, &mut h, c);
+
+        let after_runs = resolved_runs(&d, t);
+        let after_node = resolve_node(&d, d.get(t).unwrap()).into_owned();
+        assert_eq!(after_runs, before_runs, "every run keeps its colour after deleting the fill style");
+        assert_eq!(after_runs[0].0, black);
+        assert_eq!(after_runs[1].0, red);
+        assert_eq!(after_node, before_node, "resolved node data matches before and after delete");
+    }
+
+    #[test]
+    fn deleting_a_text_style_keeps_a_bold_run() {
+        let mut d = Document::new("t");
+        let page = d.add_page("p");
+        let base = TextStyle { font_size: 16.0, font_weight: 400, ..Default::default() };
+        let bold = TextStyle { font_weight: 700, ..base.clone() };
+        let t = mixed_run_text(&mut d, page, base.clone(), bold);
+        d.get_mut(t).unwrap().style_refs.insert("text".into(), "Body".into());
+        d.styles.insert("Body".into(), Style::Text(base));
+        d.style_meta.insert("Body".into(), StyleMeta { name: "Body".into(), property: StyleProperty::Text, ..Default::default() });
+
+        let before_runs = resolved_runs(&d, t);
+        let mut before_node = resolve_node(&d, d.get(t).unwrap()).into_owned();
+        before_node.style_refs.clear();
+
+        let mut h = History::default();
+        let c = delete_style(&d, "Body");
+        run(&mut d, &mut h, c);
+
+        let after_runs = resolved_runs(&d, t);
+        let after_node = resolve_node(&d, d.get(t).unwrap()).into_owned();
+        assert_eq!(after_runs, before_runs, "every run keeps its weight after deleting the text style");
+        assert_eq!((after_runs[0].1, after_runs[1].1), (400, 700));
+        assert_eq!(after_node, before_node, "resolved node data matches before and after delete");
+    }
+
+    #[test]
+    fn deleting_a_fill_style_linked_as_fill_and_stroke_moves_both_variable_bindings_and_follows_mode_switches() {
+        let mut d = Document::new("t");
+        let page = d.add_page("p");
+        d.variable_collections.insert(
+            "c1".into(),
+            VariableCollection {
+                id: "c1".into(),
+                name: "Theme".into(),
+                modes: vec![VariableMode { id: "light".into(), name: "Light".into() }, VariableMode { id: "dark".into(), name: "Dark".into() }],
+                default_mode: "light".into(),
+                variables: vec!["v_surface".into()],
+                key: None,
+                source_library_key: None,
+                extensions: Default::default(),
+            },
+        );
+        let light = Color::rgb(250, 250, 250);
+        let dark = Color::rgb(10, 10, 10);
+        d.variables.insert(
+            "v_surface".into(),
+            Variable {
+                id: "v_surface".into(),
+                name: "surface".into(),
+                collection: "c1".into(),
+                kind: VariableKind::Color,
+                values: [("light".to_string(), VariableValue::Color(light)), ("dark".to_string(), VariableValue::Color(dark))].into_iter().collect(),
+                description: String::new(),
+                scopes: vec![],
+                hidden_from_publishing: false,
+                key: None,
+                code_syntax: Default::default(),
+                extensions: Default::default(),
+                mode_extensions: Default::default(),
+            },
+        );
+        let fid = d.alloc_id();
+        let mut f = Node::frame(fid, Rect::new(0.0, 0.0, 200.0, 200.0));
+        f.variables.modes.insert("c1".into(), "dark".into());
+        let f = d.insert(page, f).unwrap();
+        let rid = d.alloc_id();
+        let mut r = Node::rectangle(rid, Rect::new(0.0, 0.0, 50.0, 50.0));
+        r.fills = vec![Paint::solid(light)];
+        r.stroke.paints = vec![Paint::solid(light)];
+        r.style_refs.insert("fill".into(), "S".into());
+        r.style_refs.insert("stroke".into(), "S".into());
+        r.style_refs.insert("effect".into(), "Other".into());
+        let r = d.insert(f, r).unwrap();
+        d.styles.insert("S".into(), Style::Fill(vec![Paint::solid(light)]));
+        d.style_meta.insert(
+            "S".into(),
+            StyleMeta {
+                name: "S".into(),
+                property: StyleProperty::Fill,
+                bindings: [("fills/0".to_string(), "v_surface".to_string())].into_iter().collect(),
+                ..Default::default()
+            },
+        );
+        d.styles.insert("Other".into(), Style::Effect(vec![]));
+
+        let shown_before = resolve_node(&d, d.get(r).unwrap()).into_owned();
+        let mut h = History::default();
+        let c = delete_style(&d, "S");
+        run(&mut d, &mut h, c);
+
+        let n = d.get(r).unwrap();
+        assert_eq!(n.variables.bindings.get("fills/0").map(String::as_str), Some("v_surface"));
+        assert_eq!(n.variables.bindings.get("strokes/0").map(String::as_str), Some("v_surface"));
+        assert_eq!(n.style_refs.get("effect").map(String::as_str), Some("Other"));
+        assert!(!n.style_refs.contains_key("fill") && !n.style_refs.contains_key("stroke"));
+
+        let shown_after = resolve_node(&d, n).into_owned();
+        assert_eq!(shown_after.fills, shown_before.fills);
+        assert_eq!(shown_after.stroke.paints, shown_before.stroke.paints);
+
+        // Switching the parent frame's mode to light changes both fill and stroke colour.
+        d.get_mut(f).unwrap().variables.modes.insert("c1".into(), "light".into());
+        let shown_light = resolve_node(&d, d.get(r).unwrap()).into_owned();
+        assert_eq!(shown_light.fills, vec![Paint::solid(light)]);
+        assert_eq!(shown_light.stroke.paints, vec![Paint::solid(light)]);
+        d.get_mut(f).unwrap().variables.modes.insert("c1".into(), "dark".into());
+
+        h.undo(&mut d).unwrap();
+        let u = d.get(r).unwrap();
+        assert_eq!((u.style_refs.get("fill").map(String::as_str), u.style_refs.get("stroke").map(String::as_str)), (Some("S"), Some("S")));
+        assert!(u.variables.bindings.is_empty());
+    }
+
+    #[test]
+    fn reset_instance_after_refused_delete_of_library_page_style_leaves_no_dangling_ref() {
+        let mut d = Document::new("t");
+        let page = d.add_page("p");
+        let lp = ensure_library_page(&mut d);
+        d.styles.insert("S".into(), Style::Effect(vec![Effect::LayerBlur { radius: 4.0, visible: true }]));
+        d.style_meta.insert("S".into(), StyleMeta { name: "S".into(), property: StyleProperty::Effect, ..Default::default() });
+        let cid = d.alloc_id();
+        let mut comp = Node::frame(cid, Rect::new(0.0, 0.0, 100.0, 100.0));
+        comp.kind = NodeKind::Component(FrameProps::default());
+        comp.name = "Main".into();
+        let comp = d.insert(lp, comp).unwrap();
+        let kid = d.alloc_id();
+        let mut child = Node::rectangle(kid, Rect::new(0.0, 0.0, 10.0, 10.0));
+        child.name = "Child".into();
+        child.effects = vec![Effect::LayerBlur { radius: 4.0, visible: true }];
+        child.style_refs.insert("effect".into(), "S".into());
+        d.insert(comp, child).unwrap();
+
+        let mut h = History::default();
+        let c = create_instance(&mut d, comp, page, Vec2::ZERO);
+        h.exec(&mut d, c).unwrap();
+        let inst = *d.get(page).unwrap().children.last().unwrap();
+
+        let err = delete_style(&d, "S").unwrap_err();
+        assert!(matches!(&err, StyleOpError::LibraryStyle(k) if k == "S"), "expected LibraryStyle error, got {err:?}");
+        assert!(d.styles.contains_key("S"), "refused delete keeps S in doc.styles");
+
+        let c = reset_instance(&mut d, inst);
+        h.exec(&mut d, c).unwrap();
+        let ichild = d.get(inst).unwrap().children[0];
+        let refs = &d.get(ichild).unwrap().style_refs;
+        assert_eq!(refs.get("effect").map(String::as_str), Some("S"));
+        assert!(refs.values().all(|k| d.styles.contains_key(k)), "reset_instance leaves no dangling link: {refs:?}");
+    }
+
+    #[test]
+    fn used_on_library_page_walks_only_the_library_page_subtree_and_probes_300k_nodes() {
+        let mut d = Document::new("t");
+        let p = d.add_page("Page 1");
+        let lp = ensure_library_page(&mut d);
+
+        let local_id = d.alloc_id();
+        let mut local = Node::rectangle(local_id, Rect::new(0.0, 0.0, 10.0, 10.0));
+        local.style_refs.insert("effect".into(), "LocalOnly".into());
+        d.insert(p, local).unwrap();
+
+        let comp_id = d.alloc_id();
+        let mut comp = Node::frame(comp_id, Rect::new(0.0, 0.0, 20.0, 20.0));
+        comp.kind = NodeKind::Component(FrameProps::default());
+        let comp = d.insert(lp, comp).unwrap();
+        let nested_id = d.alloc_id();
+        let mut nested = Node::rectangle(nested_id, Rect::new(0.0, 0.0, 10.0, 10.0));
+        nested.style_refs.insert("effect".into(), "LibUsed".into());
+        d.insert(comp, nested).unwrap();
+
+        // An unlinked node in doc.nodes that is NOT reachable from lp.children
+        // must not be visited when walking only the doc.library_page subtree.
+        let orphan_id = d.alloc_id();
+        let mut orphan = Node::rectangle(orphan_id, Rect::new(0.0, 0.0, 10.0, 10.0));
+        orphan.parent = Some(lp);
+        orphan.style_refs.insert("effect".into(), "OrphanStyle".into());
+        d.nodes.insert(orphan_id, orphan);
+
+        assert!(used_on_library_page(&d, "LibUsed"));
+        assert!(!used_on_library_page(&d, "LocalOnly"));
+        assert!(!used_on_library_page(&d, "OrphanStyle"), "used_on_library_page must walk only the doc.library_page subtree, not doc.nodes.values()");
+
+        // Synthetic 302,000-node document with a 2,000-node library page (probe, not a CI timing assertion).
+        let mut big = Document::new("perf-probe");
+        let big_p = big.add_page("Main");
+        let big_lp = ensure_library_page(&mut big);
+        for _ in 0..300_000 {
+            let id = big.alloc_id();
+            let mut n = Node::rectangle(id, Rect::new(0.0, 0.0, 10.0, 10.0));
+            n.parent = Some(big_p);
+            big.nodes.insert(id, n);
+        }
+        let mut lp_children = Vec::with_capacity(2_000);
+        for i in 0..2_000 {
+            let id = big.alloc_id();
+            let mut n = Node::rectangle(id, Rect::new(0.0, 0.0, 10.0, 10.0));
+            n.parent = Some(big_lp);
+            if i == 1_999 {
+                n.style_refs.insert("effect".into(), "Target".into());
+            }
+            big.nodes.insert(id, n);
+            lp_children.push(id);
+        }
+        big.get_mut(big_lp).unwrap().children = lp_children;
+
+        let full_walk = |doc: &Document, key: &str| -> bool {
+            doc.library_page.is_some()
+                && doc.nodes.values().any(|n| {
+                    let mut cur = Some(n.id);
+                    let mut on_lp = false;
+                    while let Some(id) = cur {
+                        if doc.library_page == Some(id) {
+                            on_lp = true;
+                            break;
+                        }
+                        cur = doc.get(id).and_then(|node| node.parent);
+                    }
+                    on_lp && n.style_refs.values().any(|k| k == key)
+                })
+        };
+
+        let iters = 20u32;
+        let t_sub = std::time::Instant::now();
+        for _ in 0..iters {
+            assert!(!used_on_library_page(&big, "Missing"));
+            assert!(used_on_library_page(&big, "Target"));
+        }
+        let sub_per_call = t_sub.elapsed() / (iters * 2);
+
+        let t_full = std::time::Instant::now();
+        for _ in 0..iters {
+            assert!(!full_walk(&big, "Missing"));
+            assert!(full_walk(&big, "Target"));
+        }
+        let full_per_call = t_full.elapsed() / (iters * 2);
+        eprintln!("[perf-probe] 300k main nodes + 2k library_page nodes: subtree={sub_per_call:?}/call vs full_walk={full_per_call:?}/call");
+    }
+
+    #[test]
+    fn deleting_a_style_with_mixed_own_and_style_bindings_preserves_resolved_look_in_all_modes() {
+        let mut d = Document::new("t");
+        let p = d.add_page("p");
+        d.variable_collections.insert(
+            "c".into(),
+            VariableCollection {
+                id: "c".into(),
+                name: "Theme".into(),
+                modes: vec![VariableMode { id: "light".into(), name: "Light".into() }, VariableMode { id: "dark".into(), name: "Dark".into() }],
+                default_mode: "light".into(),
+                variables: vec!["v_style".into(), "v_weight".into(), "v_fill".into(), "v_op".into()],
+                key: None,
+                source_library_key: None,
+                extensions: Default::default(),
+            },
+        );
+        d.variables.insert(
+            "v_style".into(),
+            Variable {
+                id: "v_style".into(),
+                name: "fontStyle".into(),
+                collection: "c".into(),
+                kind: VariableKind::String,
+                values: [
+                    ("light".to_string(), VariableValue::String("Bold Italic".into())),
+                    ("dark".to_string(), VariableValue::String("SemiBold Italic".into())),
+                ]
+                .into_iter()
+                .collect(),
+                description: String::new(),
+                scopes: vec![],
+                hidden_from_publishing: false,
+                key: None,
+                code_syntax: Default::default(),
+                extensions: Default::default(),
+                mode_extensions: Default::default(),
+            },
+        );
+        d.variables.insert(
+            "v_weight".into(),
+            Variable {
+                id: "v_weight".into(),
+                name: "fontWeight".into(),
+                collection: "c".into(),
+                kind: VariableKind::Number,
+                values: [("light".to_string(), VariableValue::Number(300.0)), ("dark".to_string(), VariableValue::Number(400.0))].into_iter().collect(),
+                description: String::new(),
+                scopes: vec![],
+                hidden_from_publishing: false,
+                key: None,
+                code_syntax: Default::default(),
+                extensions: Default::default(),
+                mode_extensions: Default::default(),
+            },
+        );
+        d.variables.insert(
+            "v_fill".into(),
+            Variable {
+                id: "v_fill".into(),
+                name: "fillColor".into(),
+                collection: "c".into(),
+                kind: VariableKind::Color,
+                values: [
+                    ("light".to_string(), VariableValue::Color(Color::rgba(200, 100, 50, 128))),
+                    ("dark".to_string(), VariableValue::Color(Color::rgba(40, 80, 160, 192))),
+                ]
+                .into_iter()
+                .collect(),
+                description: String::new(),
+                scopes: vec![],
+                hidden_from_publishing: false,
+                key: None,
+                code_syntax: Default::default(),
+                extensions: Default::default(),
+                mode_extensions: Default::default(),
+            },
+        );
+        d.variables.insert(
+            "v_op".into(),
+            Variable {
+                id: "v_op".into(),
+                name: "fillOpacity".into(),
+                collection: "c".into(),
+                kind: VariableKind::Number,
+                values: [("light".to_string(), VariableValue::Number(0.25)), ("dark".to_string(), VariableValue::Number(0.75))].into_iter().collect(),
+                description: String::new(),
+                scopes: vec![],
+                hidden_from_publishing: false,
+                key: None,
+                code_syntax: Default::default(),
+                extensions: Default::default(),
+                mode_extensions: Default::default(),
+            },
+        );
+
+        let tid = d.alloc_id();
+        let mut t = Node::text(tid, Rect::new(0.0, 0.0, 100.0, 30.0), "Hello", TextStyle::default());
+        t.style_refs.insert("text".into(), "Heading".into());
+        t.variables.bindings.insert("fontStyle".into(), "v_style".into());
+        let tid = d.insert(p, t).unwrap();
+
+        let rid = d.alloc_id();
+        let mut r = Node::rectangle(rid, Rect::new(0.0, 40.0, 100.0, 40.0));
+        r.fills = vec![Paint::solid(Color::BLACK)];
+        r.style_refs.insert("fill".into(), "Surface".into());
+        r.variables.bindings.insert("fills/0".into(), "v_fill".into());
+        let rid = d.insert(p, r).unwrap();
+
+        d.styles.insert("Heading".into(), Style::Text(TextStyle::default()));
+        d.style_meta.insert(
+            "Heading".into(),
+            StyleMeta {
+                name: "Heading".into(),
+                property: StyleProperty::Text,
+                bindings: [("fontWeight".to_string(), "v_weight".to_string())].into_iter().collect(),
+                ..Default::default()
+            },
+        );
+        d.styles.insert("Surface".into(), Style::Fill(vec![Paint::solid(Color::BLACK)]));
+        d.style_meta.insert(
+            "Surface".into(),
+            StyleMeta {
+                name: "Surface".into(),
+                property: StyleProperty::Fill,
+                bindings: [("fills/0/opacity".to_string(), "v_op".to_string())].into_iter().collect(),
+                ..Default::default()
+            },
+        );
+
+        let mut text_before_modes = Vec::new();
+        let mut rect_before_modes = Vec::new();
+        for mode in ["light", "dark"] {
+            d.get_mut(tid).unwrap().variables.modes.insert("c".into(), mode.into());
+            let mut rt = resolve_node(&d, d.get(tid).unwrap()).into_owned();
+            rt.style_refs.clear();
+            rt.variables = Default::default();
+            text_before_modes.push((mode, rt));
+
+            d.get_mut(rid).unwrap().variables.modes.insert("c".into(), mode.into());
+            let mut rr = resolve_node(&d, d.get(rid).unwrap()).into_owned();
+            rr.style_refs.clear();
+            rr.variables = Default::default();
+            rect_before_modes.push((mode, rr));
+        }
+        d.get_mut(tid).unwrap().variables.modes.insert("c".into(), "light".into());
+        d.get_mut(rid).unwrap().variables.modes.insert("c".into(), "light".into());
+
+        let mut h = History::default();
+        let c1 = delete_style(&d, "Heading");
+        run(&mut d, &mut h, c1);
+        let c2 = delete_style(&d, "Surface");
+        run(&mut d, &mut h, c2);
+
+        for (mode, expected) in &text_before_modes {
+            d.get_mut(tid).unwrap().variables.modes.insert("c".into(), (*mode).into());
+            let mut actual = resolve_node(&d, d.get(tid).unwrap()).into_owned();
+            actual.variables = Default::default();
+            assert_eq!(actual, *expected, "text resolved look in mode {mode} must match before delete");
+        }
+        for (mode, expected) in &rect_before_modes {
+            d.get_mut(rid).unwrap().variables.modes.insert("c".into(), (*mode).into());
+            let mut actual = resolve_node(&d, d.get(rid).unwrap()).into_owned();
+            actual.variables = Default::default();
+            assert_eq!(actual, *expected, "rect resolved look in mode {mode} must match before delete");
+        }
+    }
+
+    #[test]
+    fn deleting_a_style_bakes_unrecognized_binding_keys_instead_of_dropping_them() {
+        let mut d = Document::new("t");
+        let p = d.add_page("p");
+        d.variable_collections.insert(
+            "c".into(),
+            VariableCollection {
+                id: "c".into(),
+                name: "C".into(),
+                modes: vec![VariableMode { id: "m1".into(), name: "M1".into() }],
+                default_mode: "m1".into(),
+                variables: vec!["v_sz".into(), "v_col".into(), "v_dx".into(), "v_rad".into(), "v_minw".into()],
+                key: None,
+                source_library_key: None,
+                extensions: Default::default(),
+            },
+        );
+        for (id, kind, val) in [
+            ("v_sz", VariableKind::Number, VariableValue::Number(32.0)),
+            ("v_col", VariableKind::Color, VariableValue::Color(Color::rgb(12, 34, 56))),
+            ("v_dx", VariableKind::Number, VariableValue::Number(14.0)),
+            ("v_rad", VariableKind::Number, VariableValue::Number(9.0)),
+            ("v_minw", VariableKind::Number, VariableValue::Number(120.0)),
+        ] {
+            d.variables.insert(
+                id.into(),
+                Variable {
+                    id: id.into(),
+                    name: id.into(),
+                    collection: "c".into(),
+                    kind,
+                    values: [("m1".to_string(), val)].into_iter().collect(),
+                    description: String::new(),
+                    scopes: vec![],
+                    hidden_from_publishing: false,
+                    key: None,
+                    code_syntax: Default::default(),
+                    extensions: Default::default(),
+                    mode_extensions: Default::default(),
+                },
+            );
+        }
+
+        let tid = d.alloc_id();
+        let mut t = Node::text(tid, Rect::new(0.0, 0.0, 100.0, 30.0), "Hi", TextStyle { font_size: 12.0, ..Default::default() });
+        t.style_refs.insert("text".into(), "Txt".into());
+        let tid = d.insert(p, t).unwrap();
+
+        let rid = d.alloc_id();
+        let mut r = Node::rectangle(rid, Rect::new(0.0, 40.0, 100.0, 50.0));
+        r.fills = vec![Paint::solid(Color::WHITE)];
+        r.effects = vec![shadow(4.0)];
+        r.style_refs.insert("fill".into(), "FillS".into());
+        r.style_refs.insert("effect".into(), "FxS".into());
+        let rid = d.insert(p, r).unwrap();
+
+        d.styles.insert("Txt".into(), Style::Text(TextStyle { font_size: 12.0, ..Default::default() }));
+        d.style_meta.insert(
+            "Txt".into(),
+            StyleMeta {
+                name: "Txt".into(),
+                property: StyleProperty::Text,
+                bindings: [("fontSize/0".to_string(), "v_sz".to_string())].into_iter().collect(),
+                ..Default::default()
+            },
+        );
+        d.styles.insert("FillS".into(), Style::Fill(vec![Paint::solid(Color::WHITE)]));
+        d.style_meta.insert(
+            "FillS".into(),
+            StyleMeta {
+                name: "FillS".into(),
+                property: StyleProperty::Fill,
+                bindings: [
+                    ("fills/0/color".to_string(), "v_col".to_string()),
+                    ("cornerRadius".to_string(), "v_rad".to_string()),
+                    ("minWidth".to_string(), "v_minw".to_string()),
+                ]
+                .into_iter()
+                .collect(),
+                ..Default::default()
+            },
+        );
+        d.styles.insert("FxS".into(), Style::Effect(vec![shadow(4.0)]));
+        d.style_meta.insert(
+            "FxS".into(),
+            StyleMeta {
+                name: "FxS".into(),
+                property: StyleProperty::Effect,
+                bindings: [("effects/0/x".to_string(), "v_dx".to_string())].into_iter().collect(),
+                ..Default::default()
+            },
+        );
+
+        let mut h = History::default();
+        for k in ["Txt", "FillS", "FxS"] {
+            let c = delete_style(&d, k);
+            run(&mut d, &mut h, c);
+        }
+
+        match &d.get(tid).unwrap().kind {
+            NodeKind::Text(tp) => assert_eq!(tp.style.font_size, 32.0, "fontSize/0 must bake onto text style"),
+            other => panic!("expected text, got {other:?}"),
+        }
+        let rn = d.get(rid).unwrap();
+        assert_eq!(rn.fills, vec![Paint::solid(Color::rgb(12, 34, 56))], "fills/0/color must bake onto fills[0]");
+        assert_eq!(rn.corner_radii, [9.0; 4], "cornerRadius must bake onto corner_radii");
+        assert_eq!(rn.layout_child.min_w, Some(120.0), "minWidth must bake onto layout_child.min_w");
+        match &rn.effects[0] {
+            Effect::DropShadow { offset, .. } => assert_eq!(offset.x, 14.0, "effects/0/x must bake onto shadow offset.x"),
+            other => panic!("expected drop shadow, got {other:?}"),
+        }
+    }
+
+    fn make_var(id: &str, kind: VariableKind, light: VariableValue, dark: VariableValue) -> Variable {
+        Variable {
+            id: id.into(),
+            name: id.into(),
+            collection: "c".into(),
+            kind,
+            values: [("light".to_string(), light), ("dark".to_string(), dark)].into_iter().collect(),
+            description: String::new(),
+            scopes: vec![],
+            hidden_from_publishing: false,
+            key: None,
+            code_syntax: Default::default(),
+            extensions: Default::default(),
+            mode_extensions: Default::default(),
+        }
+    }
+
+    fn assert_resolved_matches_across_modes(before_doc: &Document, after_doc: &Document, id: NodeId, context: &str) {
+        for mode in ["light", "dark"] {
+            let mut bdoc = before_doc.clone();
+            bdoc.get_mut(id).unwrap().variables.modes.insert("c".into(), mode.into());
+            let mut expected = resolve_node(&bdoc, bdoc.get(id).unwrap()).into_owned();
+            expected.style_refs.clear();
+            expected.variables = Default::default();
+
+            let mut adoc = after_doc.clone();
+            adoc.get_mut(id).unwrap().variables.modes.insert("c".into(), mode.into());
+            let mut actual = resolve_node(&adoc, adoc.get(id).unwrap()).into_owned();
+            actual.style_refs.clear();
+            actual.variables = Default::default();
+
+            assert_eq!(actual, expected, "{context}: resolve_node mismatch in mode '{mode}'");
+        }
+    }
+
+    #[test]
+    fn deleting_in_dark_with_mixed_mode_overrides_preserves_resolved_node_in_light_and_dark() {
+        let mut d = Document::new("t");
+        let p = d.add_page("p");
+        d.variable_collections.insert(
+            "c".into(),
+            VariableCollection {
+                id: "c".into(),
+                name: "Theme".into(),
+                modes: vec![VariableMode { id: "light".into(), name: "Light".into() }, VariableMode { id: "dark".into(), name: "Dark".into() }],
+                default_mode: "light".into(),
+                variables: vec!["v_style".into(), "v_weight".into(), "v_fill".into(), "v_op".into(), "v_style_italic".into(), "v_fill_opaque".into()],
+                key: None,
+                source_library_key: None,
+                extensions: Default::default(),
+            },
+        );
+        d.variables.insert(
+            "v_style".into(),
+            make_var("v_style", VariableKind::String, VariableValue::String("Italic".into()), VariableValue::String("Bold Italic".into())),
+        );
+        d.variables.insert("v_weight".into(), make_var("v_weight", VariableKind::Number, VariableValue::Number(300.0), VariableValue::Number(800.0)));
+        d.variables.insert(
+            "v_fill".into(),
+            make_var("v_fill", VariableKind::Color, VariableValue::Color(Color::rgba(200, 100, 50, 255)), VariableValue::Color(Color::rgba(40, 80, 160, 128))),
+        );
+        d.variables.insert("v_op".into(), make_var("v_op", VariableKind::Number, VariableValue::Number(50.0), VariableValue::Number(25.0)));
+        d.variables.insert(
+            "v_style_italic".into(),
+            make_var("v_style_italic", VariableKind::String, VariableValue::String("Italic".into()), VariableValue::String("Oblique".into())),
+        );
+        d.variables.insert(
+            "v_fill_opaque".into(),
+            make_var(
+                "v_fill_opaque",
+                VariableKind::Color,
+                VariableValue::Color(Color::rgba(200, 100, 50, 255)),
+                VariableValue::Color(Color::rgba(40, 80, 160, 255)),
+            ),
+        );
+
+        let tid = d.alloc_id();
+        let mut t = Node::text(tid, Rect::new(0.0, 0.0, 100.0, 30.0), "Hello", TextStyle::default());
+        t.style_refs.insert("text".into(), "Heading".into());
+        t.variables.bindings.insert("fontStyle".into(), "v_style".into());
+        t.variables.modes.insert("c".into(), "dark".into());
+        let tid = d.insert(p, t).unwrap();
+
+        let rid = d.alloc_id();
+        let mut r = Node::rectangle(rid, Rect::new(0.0, 40.0, 100.0, 40.0));
+        r.fills = vec![Paint::solid(Color::BLACK)];
+        r.style_refs.insert("fill".into(), "Surface".into());
+        r.variables.bindings.insert("fills/0".into(), "v_fill".into());
+        r.variables.modes.insert("c".into(), "dark".into());
+        let rid = d.insert(p, r).unwrap();
+
+        let tid_keep = d.alloc_id();
+        let mut t_keep = Node::text(tid_keep, Rect::new(0.0, 80.0, 100.0, 30.0), "Keep", TextStyle::default());
+        t_keep.style_refs.insert("text".into(), "Heading".into());
+        t_keep.variables.bindings.insert("fontStyle".into(), "v_style_italic".into());
+        t_keep.variables.modes.insert("c".into(), "dark".into());
+        let tid_keep = d.insert(p, t_keep).unwrap();
+
+        let rid_keep = d.alloc_id();
+        let mut r_keep = Node::rectangle(rid_keep, Rect::new(0.0, 120.0, 100.0, 40.0));
+        r_keep.fills = vec![Paint::solid(Color::BLACK)];
+        r_keep.style_refs.insert("fill".into(), "Surface".into());
+        r_keep.variables.bindings.insert("fills/0".into(), "v_fill_opaque".into());
+        r_keep.variables.modes.insert("c".into(), "dark".into());
+        let rid_keep = d.insert(p, r_keep).unwrap();
+
+        d.styles.insert("Heading".into(), Style::Text(TextStyle::default()));
+        d.style_meta.insert(
+            "Heading".into(),
+            StyleMeta {
+                name: "Heading".into(),
+                property: StyleProperty::Text,
+                bindings: [("fontWeight".to_string(), "v_weight".to_string())].into_iter().collect(),
+                ..Default::default()
+            },
+        );
+        d.styles.insert("Surface".into(), Style::Fill(vec![Paint::solid(Color::BLACK)]));
+        d.style_meta.insert(
+            "Surface".into(),
+            StyleMeta {
+                name: "Surface".into(),
+                property: StyleProperty::Fill,
+                bindings: [("fills/0/opacity".to_string(), "v_op".to_string())].into_iter().collect(),
+                ..Default::default()
+            },
+        );
+
+        let before = d.clone();
+        let mut h = History::default();
+        let c1 = delete_style(&d, "Heading");
+        run(&mut d, &mut h, c1);
+        let c2 = delete_style(&d, "Surface");
+        run(&mut d, &mut h, c2);
+
+        assert_resolved_matches_across_modes(&before, &d, tid, "mixed fontStyle/fontWeight deleted in dark");
+        assert_resolved_matches_across_modes(&before, &d, rid, "mixed fills/0 + fills/0/opacity deleted in dark");
+        assert_resolved_matches_across_modes(&before, &d, tid_keep, "non-overriding fontStyle/fontWeight deleted in dark");
+        assert_resolved_matches_across_modes(&before, &d, rid_keep, "non-overriding fills/0 + fills/0/opacity deleted in dark");
+        assert_eq!(d.get(tid_keep).unwrap().variables.bindings.get("fontWeight").map(String::as_str), Some("v_weight"));
+        assert_eq!(d.get(rid_keep).unwrap().variables.bindings.get("fills/0/opacity").map(String::as_str), Some("v_op"));
+    }
+
+    #[test]
+    fn deleting_a_stroke_style_skips_non_fills_prefixed_binding_keys_matching_resolve_node() {
+        let mut d = Document::new("t");
+        let p = d.add_page("p");
+        d.variable_collections.insert(
+            "c".into(),
+            VariableCollection {
+                id: "c".into(),
+                name: "Theme".into(),
+                modes: vec![VariableMode { id: "light".into(), name: "Light".into() }, VariableMode { id: "dark".into(), name: "Dark".into() }],
+                default_mode: "light".into(),
+                variables: vec!["v_green".into(), "v_blue".into()],
+                key: None,
+                source_library_key: None,
+                extensions: Default::default(),
+            },
+        );
+        d.variables.insert(
+            "v_green".into(),
+            make_var("v_green", VariableKind::Color, VariableValue::Color(Color::rgb(0, 200, 0)), VariableValue::Color(Color::rgb(0, 120, 0))),
+        );
+        d.variables.insert(
+            "v_blue".into(),
+            make_var("v_blue", VariableKind::Color, VariableValue::Color(Color::rgb(0, 0, 200)), VariableValue::Color(Color::rgb(0, 0, 120))),
+        );
+
+        let rid = d.alloc_id();
+        let mut r = Node::rectangle(rid, Rect::new(0.0, 0.0, 80.0, 40.0));
+        r.stroke.paints = vec![Paint::solid(Color::BLACK)];
+        r.style_refs.insert("stroke".into(), "Border".into());
+        let rid = d.insert(p, r).unwrap();
+
+        d.styles.insert("Border".into(), Style::Fill(vec![Paint::solid(Color::BLACK)]));
+        d.style_meta.insert(
+            "Border".into(),
+            StyleMeta {
+                name: "Border".into(),
+                property: StyleProperty::Fill,
+                bindings: [("strokes/0".to_string(), "v_green".to_string())].into_iter().collect(),
+                ..Default::default()
+            },
+        );
+
+        let before = d.clone();
+        let mut h = History::default();
+        let c = delete_style(&d, "Border");
+        run(&mut d, &mut h, c);
+
+        assert!(!d.get(rid).unwrap().variables.bindings.contains_key("strokes/0"), "strokes/0 on a stroke-slot style must not be moved onto the layer");
+        assert_resolved_matches_across_modes(&before, &d, rid, "stroke-slot style with non-fills/ key");
+    }
+
+    #[test]
+    fn table_test_delete_style_in_each_mode_matches_resolve_node_in_every_mode_for_all_linked_key_types() {
+        #[derive(Clone)]
+        struct Case {
+            name: &'static str,
+            slot: &'static str,
+            style_prop: StyleProperty,
+            style_val: Style,
+            style_bindings: Vec<(&'static str, &'static str)>,
+            own_bindings: Vec<(&'static str, &'static str)>,
+        }
+
+        let gradient_paint = Paint {
+            kind: PaintKind::LinearGradient {
+                handles: [Vec2::ZERO, Vec2::new(1.0, 0.0), Vec2::new(0.0, 1.0)],
+                stops: vec![GradientStop { pos: 0.0, color: Color::BLACK }, GradientStop { pos: 1.0, color: Color::WHITE }],
+            },
+            opacity: 1.0,
+            visible: true,
+            blend: BlendMode::Normal,
+        };
+
+        let cases = vec![
+            Case {
+                name: "fill_color",
+                slot: "fill",
+                style_prop: StyleProperty::Fill,
+                style_val: Style::Fill(vec![Paint::solid(Color::BLACK)]),
+                style_bindings: vec![("fills/0", "v_col_opaque")],
+                own_bindings: vec![],
+            },
+            Case {
+                name: "fill_opacity_no_own",
+                slot: "fill",
+                style_prop: StyleProperty::Fill,
+                style_val: Style::Fill(vec![Paint::solid(Color::BLACK)]),
+                style_bindings: vec![("fills/0/opacity", "v_op")],
+                own_bindings: vec![],
+            },
+            Case {
+                name: "fill_opacity_with_opaque_own_fill",
+                slot: "fill",
+                style_prop: StyleProperty::Fill,
+                style_val: Style::Fill(vec![Paint::solid(Color::BLACK)]),
+                style_bindings: vec![("fills/0/opacity", "v_op")],
+                own_bindings: vec![("fills/0", "v_col_opaque")],
+            },
+            Case {
+                name: "fill_opacity_with_translucent_own_fill_all_modes",
+                slot: "fill",
+                style_prop: StyleProperty::Fill,
+                style_val: Style::Fill(vec![Paint::solid(Color::BLACK)]),
+                style_bindings: vec![("fills/0/opacity", "v_op")],
+                own_bindings: vec![("fills/0", "v_col_trans")],
+            },
+            Case {
+                name: "fill_opacity_with_mixed_opaque_light_translucent_dark_own_fill",
+                slot: "fill",
+                style_prop: StyleProperty::Fill,
+                style_val: Style::Fill(vec![Paint::solid(Color::BLACK)]),
+                style_bindings: vec![("fills/0/opacity", "v_op")],
+                own_bindings: vec![("fills/0", "v_col_light_opaque_dark_trans")],
+            },
+            Case {
+                name: "fill_opacity_with_mixed_translucent_light_opaque_dark_own_fill",
+                slot: "fill",
+                style_prop: StyleProperty::Fill,
+                style_val: Style::Fill(vec![Paint::solid(Color::BLACK)]),
+                style_bindings: vec![("fills/0/opacity", "v_op")],
+                own_bindings: vec![("fills/0", "v_col_light_trans_dark_opaque")],
+            },
+            Case {
+                name: "fill_stop_no_own",
+                slot: "fill",
+                style_prop: StyleProperty::Fill,
+                style_val: Style::Fill(vec![gradient_paint.clone()]),
+                style_bindings: vec![("fills/0/stops/0", "v_col_opaque")],
+                own_bindings: vec![],
+            },
+            Case {
+                name: "fill_stop_overridden_by_own_fill",
+                slot: "fill",
+                style_prop: StyleProperty::Fill,
+                style_val: Style::Fill(vec![gradient_paint.clone()]),
+                style_bindings: vec![("fills/0/stops/0", "v_col_opaque")],
+                own_bindings: vec![("fills/0", "v_col_trans")],
+            },
+            Case {
+                name: "stroke_color_from_fills_prefix",
+                slot: "stroke",
+                style_prop: StyleProperty::Fill,
+                style_val: Style::Fill(vec![Paint::solid(Color::BLACK)]),
+                style_bindings: vec![("fills/0", "v_col_opaque")],
+                own_bindings: vec![],
+            },
+            Case {
+                name: "stroke_opacity_with_opaque_own_stroke",
+                slot: "stroke",
+                style_prop: StyleProperty::Fill,
+                style_val: Style::Fill(vec![Paint::solid(Color::BLACK)]),
+                style_bindings: vec![("fills/0/opacity", "v_op")],
+                own_bindings: vec![("strokes/0", "v_col_opaque")],
+            },
+            Case {
+                name: "stroke_opacity_with_translucent_own_stroke_all_modes",
+                slot: "stroke",
+                style_prop: StyleProperty::Fill,
+                style_val: Style::Fill(vec![Paint::solid(Color::BLACK)]),
+                style_bindings: vec![("fills/0/opacity", "v_op")],
+                own_bindings: vec![("strokes/0", "v_col_trans")],
+            },
+            Case {
+                name: "stroke_opacity_with_mixed_opaque_light_translucent_dark_own_stroke",
+                slot: "stroke",
+                style_prop: StyleProperty::Fill,
+                style_val: Style::Fill(vec![Paint::solid(Color::BLACK)]),
+                style_bindings: vec![("fills/0/opacity", "v_op")],
+                own_bindings: vec![("strokes/0", "v_col_light_opaque_dark_trans")],
+            },
+            Case {
+                name: "stroke_opacity_with_mixed_translucent_light_opaque_dark_own_stroke",
+                slot: "stroke",
+                style_prop: StyleProperty::Fill,
+                style_val: Style::Fill(vec![Paint::solid(Color::BLACK)]),
+                style_bindings: vec![("fills/0/opacity", "v_op")],
+                own_bindings: vec![("strokes/0", "v_col_light_trans_dark_opaque")],
+            },
+            Case {
+                name: "stroke_stop_overridden_by_own_stroke",
+                slot: "stroke",
+                style_prop: StyleProperty::Fill,
+                style_val: Style::Fill(vec![gradient_paint.clone()]),
+                style_bindings: vec![("fills/0/stops/0", "v_col_opaque")],
+                own_bindings: vec![("strokes/0", "v_col_opaque")],
+            },
+            Case {
+                name: "stroke_non_fills_prefix_skipped",
+                slot: "stroke",
+                style_prop: StyleProperty::Fill,
+                style_val: Style::Fill(vec![Paint::solid(Color::BLACK)]),
+                style_bindings: vec![("strokes/0", "v_col_opaque"), ("strokes/0/opacity", "v_op")],
+                own_bindings: vec![],
+            },
+            Case {
+                name: "text_fields_no_own",
+                slot: "text",
+                style_prop: StyleProperty::Text,
+                style_val: Style::Text(TextStyle::default()),
+                style_bindings: vec![
+                    ("fontSize", "v_num_a"),
+                    ("lineHeight", "v_num_b"),
+                    ("letterSpacing", "v_num_a"),
+                    ("paragraphSpacing", "v_num_b"),
+                    ("paragraphIndent", "v_num_a"),
+                    ("fontFamily", "v_fam"),
+                ],
+                own_bindings: vec![],
+            },
+            Case {
+                name: "text_weight_with_non_weight_own_font_style",
+                slot: "text",
+                style_prop: StyleProperty::Text,
+                style_val: Style::Text(TextStyle::default()),
+                style_bindings: vec![("fontWeight", "v_weight")],
+                own_bindings: vec![("fontStyle", "v_style_italic_only")],
+            },
+            Case {
+                name: "text_weight_with_all_weight_own_font_style",
+                slot: "text",
+                style_prop: StyleProperty::Text,
+                style_val: Style::Text(TextStyle::default()),
+                style_bindings: vec![("fontWeight", "v_weight")],
+                own_bindings: vec![("fontStyle", "v_style_both_weighted")],
+            },
+            Case {
+                name: "text_weight_with_mixed_italic_light_bold_dark_own_font_style",
+                slot: "text",
+                style_prop: StyleProperty::Text,
+                style_val: Style::Text(TextStyle::default()),
+                style_bindings: vec![("fontWeight", "v_weight")],
+                own_bindings: vec![("fontStyle", "v_style_light_italic_dark_bold")],
+            },
+            Case {
+                name: "text_weight_with_mixed_light_weight_dark_italic_own_font_style",
+                slot: "text",
+                style_prop: StyleProperty::Text,
+                style_val: Style::Text(TextStyle::default()),
+                style_bindings: vec![("fontWeight", "v_weight")],
+                own_bindings: vec![("fontStyle", "v_style_light_bold_dark_italic")],
+            },
+            Case {
+                name: "text_style_font_style_with_own_font_weight",
+                slot: "text",
+                style_prop: StyleProperty::Text,
+                style_val: Style::Text(TextStyle::default()),
+                style_bindings: vec![("fontStyle", "v_style_light_italic_dark_bold")],
+                own_bindings: vec![("fontWeight", "v_weight")],
+            },
+            Case {
+                name: "effect_fields_and_opacity_no_own_color",
+                slot: "effect",
+                style_prop: StyleProperty::Effect,
+                style_val: Style::Effect(vec![shadow(4.0)]),
+                style_bindings: vec![
+                    ("effects/0/opacity", "v_op"),
+                    ("effects/0/radius", "v_num_a"),
+                    ("effects/0/spread", "v_num_b"),
+                    ("effects/0/offsetX", "v_num_a"),
+                    ("effects/0/offsetY", "v_num_b"),
+                ],
+                own_bindings: vec![],
+            },
+            Case {
+                name: "effect_opacity_overridden_by_own_effect_color",
+                slot: "effect",
+                style_prop: StyleProperty::Effect,
+                style_val: Style::Effect(vec![shadow(4.0)]),
+                style_bindings: vec![("effects/0/opacity", "v_op")],
+                own_bindings: vec![("effects/0/color", "v_col_opaque")],
+            },
+            Case {
+                name: "fill_opacity_alias_with_mixed_opaque_light_translucent_dark_own_fill",
+                slot: "fill",
+                style_prop: StyleProperty::Fill,
+                style_val: Style::Fill(vec![Paint::solid(Color::BLACK)]),
+                style_bindings: vec![("fills/0/opacity", "v_op_alias")],
+                own_bindings: vec![("fills/0", "v_col_light_opaque_dark_trans")],
+            },
+        ];
+
+        for case in &cases {
+            for active_mode in ["light", "dark"] {
+                let mut d = Document::new("t");
+                let p = d.add_page("p");
+                let vars = vec![
+                    make_var(
+                        "v_col_opaque",
+                        VariableKind::Color,
+                        VariableValue::Color(Color::rgba(210, 40, 40, 255)),
+                        VariableValue::Color(Color::rgba(40, 40, 210, 255)),
+                    ),
+                    make_var(
+                        "v_col_trans",
+                        VariableKind::Color,
+                        VariableValue::Color(Color::rgba(210, 40, 40, 120)),
+                        VariableValue::Color(Color::rgba(40, 40, 210, 180)),
+                    ),
+                    make_var(
+                        "v_col_light_opaque_dark_trans",
+                        VariableKind::Color,
+                        VariableValue::Color(Color::rgba(210, 40, 40, 255)),
+                        VariableValue::Color(Color::rgba(40, 40, 210, 140)),
+                    ),
+                    make_var(
+                        "v_col_light_trans_dark_opaque",
+                        VariableKind::Color,
+                        VariableValue::Color(Color::rgba(210, 40, 40, 140)),
+                        VariableValue::Color(Color::rgba(40, 40, 210, 255)),
+                    ),
+                    make_var("v_op", VariableKind::Number, VariableValue::Number(50.0), VariableValue::Number(25.0)),
+                    make_var("v_op_alias", VariableKind::Number, VariableValue::Alias("v_op".into()), VariableValue::Alias("v_op".into())),
+                    make_var("v_num_a", VariableKind::Number, VariableValue::Number(14.0), VariableValue::Number(22.0)),
+                    make_var("v_num_b", VariableKind::Number, VariableValue::Number(18.0), VariableValue::Number(28.0)),
+                    make_var("v_fam", VariableKind::String, VariableValue::String("Inter".into()), VariableValue::String("Roboto".into())),
+                    make_var("v_weight", VariableKind::Number, VariableValue::Number(300.0), VariableValue::Number(800.0)),
+                    make_var("v_style_italic_only", VariableKind::String, VariableValue::String("Italic".into()), VariableValue::String("Oblique".into())),
+                    make_var(
+                        "v_style_both_weighted",
+                        VariableKind::String,
+                        VariableValue::String("Bold Italic".into()),
+                        VariableValue::String("SemiBold Italic".into()),
+                    ),
+                    make_var(
+                        "v_style_light_italic_dark_bold",
+                        VariableKind::String,
+                        VariableValue::String("Italic".into()),
+                        VariableValue::String("Bold Italic".into()),
+                    ),
+                    make_var(
+                        "v_style_light_bold_dark_italic",
+                        VariableKind::String,
+                        VariableValue::String("Bold Italic".into()),
+                        VariableValue::String("Italic".into()),
+                    ),
+                ];
+                let var_ids = vars.iter().map(|v| v.id.clone()).collect();
+                d.variable_collections.insert(
+                    "c".into(),
+                    VariableCollection {
+                        id: "c".into(),
+                        name: "Theme".into(),
+                        modes: vec![VariableMode { id: "light".into(), name: "Light".into() }, VariableMode { id: "dark".into(), name: "Dark".into() }],
+                        default_mode: "light".into(),
+                        variables: var_ids,
+                        key: None,
+                        source_library_key: None,
+                        extensions: Default::default(),
+                    },
+                );
+                for v in vars {
+                    d.variables.insert(v.id.clone(), v);
+                }
+
+                let nid = d.alloc_id();
+                let mut n = if case.slot == "text" {
+                    Node::text(nid, Rect::new(0.0, 0.0, 100.0, 30.0), "Sample", TextStyle::default())
+                } else {
+                    let mut r = Node::rectangle(nid, Rect::new(0.0, 0.0, 100.0, 40.0));
+                    r.fills = vec![if case.name.starts_with("fill_stop") { gradient_paint.clone() } else { Paint::solid(Color::BLACK) }];
+                    r.stroke.paints = vec![if case.name.starts_with("stroke_stop") { gradient_paint.clone() } else { Paint::solid(Color::BLACK) }];
+                    r.effects = vec![shadow(4.0)];
+                    r
+                };
+                n.style_refs.insert(case.slot.into(), "S".into());
+                for (k, v) in &case.own_bindings {
+                    n.variables.bindings.insert((*k).into(), (*v).into());
+                }
+                n.variables.modes.insert("c".into(), active_mode.into());
+                let nid = d.insert(p, n).unwrap();
+
+                d.styles.insert("S".into(), case.style_val.clone());
+                d.style_meta.insert(
+                    "S".into(),
+                    StyleMeta {
+                        name: "S".into(),
+                        property: case.style_prop,
+                        bindings: case.style_bindings.iter().map(|(k, v)| ((*k).to_string(), (*v).to_string())).collect(),
+                        ..Default::default()
+                    },
+                );
+
+                let before = d.clone();
+                let mut h = History::default();
+                let c = delete_style(&d, "S");
+                run(&mut d, &mut h, c);
+
+                assert_resolved_matches_across_modes(&before, &d, nid, &format!("case={} deleted_in={active_mode}", case.name));
+            }
+        }
+    }
+
+    fn assert_resolved_matches_across_mode_combos(before_doc: &Document, after_doc: &Document, id: NodeId, combos: &[&[(&str, &str)]], context: &str) {
+        for combo in combos {
+            let mut bdoc = before_doc.clone();
+            for (cid, mid) in *combo {
+                bdoc.get_mut(id).unwrap().variables.modes.insert((*cid).into(), (*mid).into());
+            }
+            let mut expected = resolve_node(&bdoc, bdoc.get(id).unwrap()).into_owned();
+            expected.style_refs.clear();
+            expected.variables = Default::default();
+
+            let mut adoc = after_doc.clone();
+            for (cid, mid) in *combo {
+                adoc.get_mut(id).unwrap().variables.modes.insert((*cid).into(), (*mid).into());
+            }
+            let mut actual = resolve_node(&adoc, adoc.get(id).unwrap()).into_owned();
+            actual.style_refs.clear();
+            actual.variables = Default::default();
+
+            assert_eq!(actual, expected, "{context}: resolve_node mismatch in mode combo {combo:?}");
+        }
+    }
+
+    #[test]
+    fn r5_row1_three_modes_mixed_override_uses_fallback_preserves_delete_time_mode_and_reports_pair() {
+        let build_doc = |default_mode: &str, active_mode: &str| -> (Document, NodeId) {
+            let mut d = Document::new("t");
+            let p = d.add_page("p");
+            d.variable_collections.insert(
+                "c".into(),
+                VariableCollection {
+                    id: "c".into(),
+                    name: "Theme".into(),
+                    modes: vec![
+                        VariableMode { id: "light".into(), name: "Light".into() },
+                        VariableMode { id: "dim".into(), name: "Dim".into() },
+                        VariableMode { id: "dark".into(), name: "Dark".into() },
+                    ],
+                    default_mode: default_mode.into(),
+                    variables: vec!["v_fill".into(), "v_op".into()],
+                    key: None,
+                    source_library_key: None,
+                    extensions: Default::default(),
+                },
+            );
+            d.variables.insert(
+                "v_fill".into(),
+                Variable {
+                    id: "v_fill".into(),
+                    name: "v_fill".into(),
+                    collection: "c".into(),
+                    kind: VariableKind::Color,
+                    values: [
+                        ("light".to_string(), VariableValue::Color(Color::rgba(200, 100, 50, 255))),
+                        ("dim".to_string(), VariableValue::Color(Color::rgba(100, 150, 200, 255))),
+                        ("dark".to_string(), VariableValue::Color(Color::rgba(40, 80, 160, 128))),
+                    ]
+                    .into_iter()
+                    .collect(),
+                    description: String::new(),
+                    scopes: vec![],
+                    hidden_from_publishing: false,
+                    key: None,
+                    code_syntax: Default::default(),
+                    extensions: Default::default(),
+                    mode_extensions: Default::default(),
+                },
+            );
+            d.variables.insert(
+                "v_op".into(),
+                Variable {
+                    id: "v_op".into(),
+                    name: "v_op".into(),
+                    collection: "c".into(),
+                    kind: VariableKind::Number,
+                    values: [
+                        ("light".to_string(), VariableValue::Number(80.0)),
+                        ("dim".to_string(), VariableValue::Number(20.0)),
+                        ("dark".to_string(), VariableValue::Number(5.0)),
+                    ]
+                    .into_iter()
+                    .collect(),
+                    description: String::new(),
+                    scopes: vec![],
+                    hidden_from_publishing: false,
+                    key: None,
+                    code_syntax: Default::default(),
+                    extensions: Default::default(),
+                    mode_extensions: Default::default(),
+                },
+            );
+            let rid = d.alloc_id();
+            let mut r = Node::rectangle(rid, Rect::new(0.0, 0.0, 100.0, 40.0));
+            r.fills = vec![Paint::solid(Color::BLACK)];
+            r.style_refs.insert("fill".into(), "Surface".into());
+            r.variables.bindings.insert("fills/0".into(), "v_fill".into());
+            r.variables.modes.insert("c".into(), active_mode.into());
+            let rid = d.insert(p, r).unwrap();
+
+            d.styles.insert("Surface".into(), Style::Fill(vec![Paint::solid(Color::BLACK)]));
+            d.style_meta.insert(
+                "Surface".into(),
+                StyleMeta {
+                    name: "Surface".into(),
+                    property: StyleProperty::Fill,
+                    bindings: [("fills/0/opacity".to_string(), "v_op".to_string())].into_iter().collect(),
+                    ..Default::default()
+                },
+            );
+            (d, rid)
+        };
+
+        // 1. Deleted in "light" (style wins at delete time -> bakes 80%, dim gets 0.8).
+        let (mut d_light, rid_light) = build_doc("light", "light");
+        let before_light = d_light.clone();
+        let mut h = History::default();
+        let (c_light, fb_light) = delete_style_with_fallbacks(&d_light, "Surface").unwrap();
+        assert_eq!(fb_light, vec![(rid_light, "fills/0/opacity".to_string())]);
+        run(&mut d_light, &mut h, Ok(c_light));
+        assert_resolved_matches_across_mode_combos(&before_light, &d_light, rid_light, &[&[("c", "light")], &[("c", "dark")]], "deleted in light");
+        d_light.get_mut(rid_light).unwrap().variables.modes.insert("c".into(), "dim".into());
+        let dim_after_light = resolve_node(&d_light, d_light.get(rid_light).unwrap());
+        assert!((dim_after_light.fills[0].opacity - 0.8).abs() < 1e-6, "dim gets 0.8 when deleted in light");
+
+        // 2. Deleted in "dim" (style wins at delete time -> bakes 20%, dim is exact at 0.2, light gets 0.2).
+        let (mut d_dim, rid_dim) = build_doc("light", "dim");
+        let before_dim = d_dim.clone();
+        let (c_dim, fb_dim) = delete_style_with_fallbacks(&d_dim, "Surface").unwrap();
+        assert_eq!(fb_dim, vec![(rid_dim, "fills/0/opacity".to_string())]);
+        run(&mut d_dim, &mut h, Ok(c_dim));
+        assert_resolved_matches_across_mode_combos(&before_dim, &d_dim, rid_dim, &[&[("c", "dim")], &[("c", "dark")]], "deleted in dim");
+        d_dim.get_mut(rid_dim).unwrap().variables.modes.insert("c".into(), "dim".into());
+        let dim_after_dim = resolve_node(&d_dim, d_dim.get(rid_dim).unwrap());
+        assert!((dim_after_dim.fills[0].opacity - 0.2).abs() < 1e-6, "dim stays exact at 0.2 when deleted in dim");
+
+        // 3. Deleted in "dark" with default_mode="light" (own wins at delete time -> bakes default mode "light" = 80%, dim gets 0.8).
+        let (mut d_dark, rid_dark) = build_doc("light", "dark");
+        let before_dark = d_dark.clone();
+        let (c_dark, fb_dark) = delete_style_with_fallbacks(&d_dark, "Surface").unwrap();
+        assert_eq!(fb_dark, vec![(rid_dark, "fills/0/opacity".to_string())]);
+        run(&mut d_dark, &mut h, Ok(c_dark));
+        assert_resolved_matches_across_mode_combos(&before_dark, &d_dark, rid_dark, &[&[("c", "dark")], &[("c", "light")]], "deleted in dark");
+        d_dark.get_mut(rid_dark).unwrap().variables.modes.insert("c".into(), "dim".into());
+        let dim_after_dark = resolve_node(&d_dark, d_dark.get(rid_dark).unwrap());
+        assert!((dim_after_dark.fills[0].opacity - 0.8).abs() < 1e-6, "dim gets default mode 0.8 when deleted in dark");
+
+        // 4. Deleted in "dark" when default_mode is ALSO "dark" (style loses in both delete-time and default mode -> bakes first style-won mode "light" = 80%, dim gets 0.8).
+        let (mut d_def_loses, rid_def_loses) = build_doc("dark", "dark");
+        let before_def_loses = d_def_loses.clone();
+        let (c_def_loses, fb_def_loses) = delete_style_with_fallbacks(&d_def_loses, "Surface").unwrap();
+        assert_eq!(fb_def_loses, vec![(rid_def_loses, "fills/0/opacity".to_string())]);
+        run(&mut d_def_loses, &mut h, Ok(c_def_loses));
+        assert_resolved_matches_across_mode_combos(
+            &before_def_loses,
+            &d_def_loses,
+            rid_def_loses,
+            &[&[("c", "dark")], &[("c", "light")]],
+            "deleted in dark when default loses",
+        );
+        d_def_loses.get_mut(rid_def_loses).unwrap().variables.modes.insert("c".into(), "dim".into());
+        let dim_after_def_loses = resolve_node(&d_def_loses, d_def_loses.get(rid_def_loses).unwrap());
+        assert!((dim_after_def_loses.fills[0].opacity - 0.8).abs() < 1e-6, "dim gets first style-won mode 0.8 when default mode also loses");
+    }
+
+    #[test]
+    fn r5_row2_three_modes_same_style_opacity_in_every_style_won_mode_is_exact_and_reports_nothing() {
+        for active_mode in ["light", "dim", "dark"] {
+            let mut d = Document::new("t");
+            let p = d.add_page("p");
+            d.variable_collections.insert(
+                "c".into(),
+                VariableCollection {
+                    id: "c".into(),
+                    name: "Theme".into(),
+                    modes: vec![
+                        VariableMode { id: "light".into(), name: "Light".into() },
+                        VariableMode { id: "dim".into(), name: "Dim".into() },
+                        VariableMode { id: "dark".into(), name: "Dark".into() },
+                    ],
+                    default_mode: "light".into(),
+                    variables: vec!["v_fill".into(), "v_op".into()],
+                    key: None,
+                    source_library_key: None,
+                    extensions: Default::default(),
+                },
+            );
+            d.variables.insert(
+                "v_fill".into(),
+                Variable {
+                    id: "v_fill".into(),
+                    name: "v_fill".into(),
+                    collection: "c".into(),
+                    kind: VariableKind::Color,
+                    values: [
+                        ("light".to_string(), VariableValue::Color(Color::rgba(200, 100, 50, 255))),
+                        ("dim".to_string(), VariableValue::Color(Color::rgba(100, 150, 200, 255))),
+                        ("dark".to_string(), VariableValue::Color(Color::rgba(40, 80, 160, 128))),
+                    ]
+                    .into_iter()
+                    .collect(),
+                    description: String::new(),
+                    scopes: vec![],
+                    hidden_from_publishing: false,
+                    key: None,
+                    code_syntax: Default::default(),
+                    extensions: Default::default(),
+                    mode_extensions: Default::default(),
+                },
+            );
+            d.variables.insert(
+                "v_op".into(),
+                Variable {
+                    id: "v_op".into(),
+                    name: "v_op".into(),
+                    collection: "c".into(),
+                    kind: VariableKind::Number,
+                    values: [
+                        ("light".to_string(), VariableValue::Number(80.0)),
+                        ("dim".to_string(), VariableValue::Number(80.0)),
+                        ("dark".to_string(), VariableValue::Number(5.0)),
+                    ]
+                    .into_iter()
+                    .collect(),
+                    description: String::new(),
+                    scopes: vec![],
+                    hidden_from_publishing: false,
+                    key: None,
+                    code_syntax: Default::default(),
+                    extensions: Default::default(),
+                    mode_extensions: Default::default(),
+                },
+            );
+            let rid = d.alloc_id();
+            let mut r = Node::rectangle(rid, Rect::new(0.0, 0.0, 100.0, 40.0));
+            r.fills = vec![Paint::solid(Color::BLACK)];
+            r.style_refs.insert("fill".into(), "Surface".into());
+            r.variables.bindings.insert("fills/0".into(), "v_fill".into());
+            r.variables.modes.insert("c".into(), active_mode.into());
+            let rid = d.insert(p, r).unwrap();
+
+            d.styles.insert("Surface".into(), Style::Fill(vec![Paint::solid(Color::BLACK)]));
+            d.style_meta.insert(
+                "Surface".into(),
+                StyleMeta {
+                    name: "Surface".into(),
+                    property: StyleProperty::Fill,
+                    bindings: [("fills/0/opacity".to_string(), "v_op".to_string())].into_iter().collect(),
+                    ..Default::default()
+                },
+            );
+
+            let before = d.clone();
+            let mut h = History::default();
+            let (c, fb) = delete_style_with_fallbacks(&d, "Surface").unwrap();
+            assert!(fb.is_empty(), "row2 must report no fallback when all style-won modes agree");
+            run(&mut d, &mut h, Ok(c));
+            assert_resolved_matches_across_mode_combos(
+                &before,
+                &d,
+                rid,
+                &[&[("c", "light")], &[("c", "dim")], &[("c", "dark")]],
+                &format!("row2 deleted in {active_mode}"),
+            );
+        }
+    }
+
+    #[test]
+    fn r5_row3_style_variable_in_second_collection_brand_and_own_in_theme() {
+        let all_four: &[&[(&str, &str)]] = &[
+            &[("Theme", "light"), ("Brand", "a")],
+            &[("Theme", "light"), ("Brand", "b")],
+            &[("Theme", "dark"), ("Brand", "a")],
+            &[("Theme", "dark"), ("Brand", "b")],
+        ];
+
+        // Sub-case A: own in Theme (light opaque, dark translucent) and style in Brand (a=50, b=10).
+        // Style wins in (light, a)=50 and (light, b)=10 -> differs across Brand modes -> fallback!
+        // When deleted in (dark, b) (own wins at delete time), fallback bakes default mode (light, a) = 50% (0.5).
+        let mut d = Document::new("t");
+        let p = d.add_page("p");
+        d.variable_collections.insert(
+            "Theme".into(),
+            VariableCollection {
+                id: "Theme".into(),
+                name: "Theme".into(),
+                modes: vec![VariableMode { id: "light".into(), name: "Light".into() }, VariableMode { id: "dark".into(), name: "Dark".into() }],
+                default_mode: "light".into(),
+                variables: vec!["v_fill".into()],
+                key: None,
+                source_library_key: None,
+                extensions: Default::default(),
+            },
+        );
+        d.variable_collections.insert(
+            "Brand".into(),
+            VariableCollection {
+                id: "Brand".into(),
+                name: "Brand".into(),
+                modes: vec![VariableMode { id: "a".into(), name: "A".into() }, VariableMode { id: "b".into(), name: "B".into() }],
+                default_mode: "a".into(),
+                variables: vec!["v_op".into()],
+                key: None,
+                source_library_key: None,
+                extensions: Default::default(),
+            },
+        );
+        d.variables.insert(
+            "v_fill".into(),
+            Variable {
+                id: "v_fill".into(),
+                name: "v_fill".into(),
+                collection: "Theme".into(),
+                kind: VariableKind::Color,
+                values: [
+                    ("light".to_string(), VariableValue::Color(Color::rgba(200, 100, 50, 255))),
+                    ("dark".to_string(), VariableValue::Color(Color::rgba(40, 80, 160, 128))),
+                ]
+                .into_iter()
+                .collect(),
+                description: String::new(),
+                scopes: vec![],
+                hidden_from_publishing: false,
+                key: None,
+                code_syntax: Default::default(),
+                extensions: Default::default(),
+                mode_extensions: Default::default(),
+            },
+        );
+        d.variables.insert(
+            "v_op".into(),
+            Variable {
+                id: "v_op".into(),
+                name: "v_op".into(),
+                collection: "Brand".into(),
+                kind: VariableKind::Number,
+                values: [("a".to_string(), VariableValue::Number(50.0)), ("b".to_string(), VariableValue::Number(10.0))].into_iter().collect(),
+                description: String::new(),
+                scopes: vec![],
+                hidden_from_publishing: false,
+                key: None,
+                code_syntax: Default::default(),
+                extensions: Default::default(),
+                mode_extensions: Default::default(),
+            },
+        );
+        let rid = d.alloc_id();
+        let mut r = Node::rectangle(rid, Rect::new(0.0, 0.0, 100.0, 40.0));
+        r.fills = vec![Paint::solid(Color::BLACK)];
+        r.style_refs.insert("fill".into(), "Surface".into());
+        r.variables.bindings.insert("fills/0".into(), "v_fill".into());
+        r.variables.modes.insert("Theme".into(), "dark".into());
+        r.variables.modes.insert("Brand".into(), "b".into());
+        let rid = d.insert(p, r).unwrap();
+        d.styles.insert("Surface".into(), Style::Fill(vec![Paint::solid(Color::BLACK)]));
+        d.style_meta.insert(
+            "Surface".into(),
+            StyleMeta {
+                name: "Surface".into(),
+                property: StyleProperty::Fill,
+                bindings: [("fills/0/opacity".to_string(), "v_op".to_string())].into_iter().collect(),
+                ..Default::default()
+            },
+        );
+        let before = d.clone();
+        let mut h = History::default();
+        let (c, fb) = delete_style_with_fallbacks(&d, "Surface").unwrap();
+        assert_eq!(fb, vec![(rid, "fills/0/opacity".to_string())]);
+        run(&mut d, &mut h, Ok(c));
+        assert_resolved_matches_across_mode_combos(
+            &before,
+            &d,
+            rid,
+            &[&[("Theme", "dark"), ("Brand", "a")], &[("Theme", "dark"), ("Brand", "b")], &[("Theme", "light"), ("Brand", "a")]],
+            "row3 deleted in (dark, b): delete-time and default combinations are exact",
+        );
+
+        // Sub-case A2: deleted in (light, b) (style wins at delete time -> bakes 10%).
+        let mut d_lb = before.clone();
+        d_lb.get_mut(rid).unwrap().variables.modes.insert("Theme".into(), "light".into());
+        d_lb.get_mut(rid).unwrap().variables.modes.insert("Brand".into(), "b".into());
+        let before_lb = d_lb.clone();
+        let (c_lb, fb_lb) = delete_style_with_fallbacks(&d_lb, "Surface").unwrap();
+        assert_eq!(fb_lb, vec![(rid, "fills/0/opacity".to_string())]);
+        run(&mut d_lb, &mut h, Ok(c_lb));
+        assert_resolved_matches_across_mode_combos(
+            &before_lb,
+            &d_lb,
+            rid,
+            &[&[("Theme", "light"), ("Brand", "b")], &[("Theme", "dark"), ("Brand", "a")], &[("Theme", "dark"), ("Brand", "b")]],
+            "row3 deleted in (light, b): delete-time and dark combinations are exact",
+        );
+
+        // Sub-case B: own in Theme is opaque in both light and dark; style in Brand has a=50, b=10 -> exact over all 4 combinations, nothing reported.
+        let mut d_exact = before.clone();
+        d_exact.variables.get_mut("v_fill").unwrap().values.insert("dark".into(), VariableValue::Color(Color::rgba(40, 80, 160, 255)));
+        let before_exact = d_exact.clone();
+        let (c_exact, fb_exact) = delete_style_with_fallbacks(&d_exact, "Surface").unwrap();
+        assert!(fb_exact.is_empty());
+        run(&mut d_exact, &mut h, Ok(c_exact));
+        assert_resolved_matches_across_mode_combos(&before_exact, &d_exact, rid, all_four, "row3 non-overriding own is exact across all 4 combinations");
+
+        // Sub-case C: own in Theme overrides in dark, and style in Brand agrees across a and b (a=50, b=50) -> exact over all 4 combinations, nothing reported.
+        let mut d_agree = before.clone();
+        d_agree.variables.get_mut("v_op").unwrap().values.insert("b".into(), VariableValue::Number(50.0));
+        let before_agree = d_agree.clone();
+        let (c_agree, fb_agree) = delete_style_with_fallbacks(&d_agree, "Surface").unwrap();
+        assert!(fb_agree.is_empty());
+        run(&mut d_agree, &mut h, Ok(c_agree));
+        assert_resolved_matches_across_mode_combos(&before_agree, &d_agree, rid, all_four, "row3 agreeing Brand modes is exact across all 4 combinations");
+    }
+
+    #[test]
+    fn r5_row4_style_font_weight_missing_in_light_with_own_font_style_italic_and_bold_italic() {
+        for active_mode in ["light", "dark"] {
+            let mut d = Document::new("t");
+            let p = d.add_page("p");
+            d.variable_collections.insert(
+                "c".into(),
+                VariableCollection {
+                    id: "c".into(),
+                    name: "Theme".into(),
+                    modes: vec![VariableMode { id: "light".into(), name: "Light".into() }, VariableMode { id: "dark".into(), name: "Dark".into() }],
+                    default_mode: "light".into(),
+                    variables: vec!["v_style".into(), "v_weight".into()],
+                    key: None,
+                    source_library_key: None,
+                    extensions: Default::default(),
+                },
+            );
+            d.variables.insert(
+                "v_style".into(),
+                make_var("v_style", VariableKind::String, VariableValue::String("Italic".into()), VariableValue::String("Bold Italic".into())),
+            );
+            d.variables.insert(
+                "v_weight".into(),
+                Variable {
+                    id: "v_weight".into(),
+                    name: "v_weight".into(),
+                    collection: "c".into(),
+                    kind: VariableKind::Number,
+                    values: [("dark".to_string(), VariableValue::Number(800.0))].into_iter().collect(),
+                    description: String::new(),
+                    scopes: vec![],
+                    hidden_from_publishing: false,
+                    key: None,
+                    code_syntax: Default::default(),
+                    extensions: Default::default(),
+                    mode_extensions: Default::default(),
+                },
+            );
+            let tid = d.alloc_id();
+            let mut t = Node::text(tid, Rect::new(0.0, 0.0, 100.0, 30.0), "Hello", TextStyle::default());
+            t.style_refs.insert("text".into(), "Heading".into());
+            t.variables.bindings.insert("fontStyle".into(), "v_style".into());
+            t.variables.modes.insert("c".into(), active_mode.into());
+            let tid = d.insert(p, t).unwrap();
+
+            d.styles.insert("Heading".into(), Style::Text(TextStyle::default()));
+            d.style_meta.insert(
+                "Heading".into(),
+                StyleMeta {
+                    name: "Heading".into(),
+                    property: StyleProperty::Text,
+                    bindings: [("fontWeight".to_string(), "v_weight".to_string())].into_iter().collect(),
+                    ..Default::default()
+                },
+            );
+
+            let before = d.clone();
+            let mut h = History::default();
+            let (c, fb) = delete_style_with_fallbacks(&d, "Heading").unwrap();
+            assert!(fb.is_empty(), "row4 must report no fallback when no style-won mode resolves");
+            run(&mut d, &mut h, Ok(c));
+
+            assert_resolved_matches_across_mode_combos(&before, &d, tid, &[&[("c", "light")], &[("c", "dark")]], &format!("row4 deleted in {active_mode}"));
+            d.get_mut(tid).unwrap().variables.modes.insert("c".into(), "dark".into());
+            let dark_node = resolve_node(&d, d.get(tid).unwrap());
+            let NodeKind::Text(ref dark_text) = dark_node.kind else { panic!("expected text") };
+            assert_eq!(dark_text.style.font_weight, 700, "dark stays 700 after delete");
+        }
+    }
+
+    #[test]
+    fn r5_row5_value_stored_only_under_light_plus_compact_key_classified_with_resolve_variable() {
+        let all_four: &[&[(&str, &str)]] = &[
+            &[("theme", "light"), ("density", "compact")],
+            &[("theme", "light"), ("density", "cozy")],
+            &[("theme", "dark"), ("density", "compact")],
+            &[("theme", "dark"), ("density", "cozy")],
+        ];
+
+        for start_combo in all_four {
+            let mut d = Document::new("t");
+            let p = d.add_page("p");
+            d.variable_collections.insert(
+                "theme".into(),
+                VariableCollection {
+                    id: "theme".into(),
+                    name: "Theme".into(),
+                    modes: vec![VariableMode { id: "light".into(), name: "Light".into() }, VariableMode { id: "dark".into(), name: "Dark".into() }],
+                    default_mode: "light".into(),
+                    variables: vec!["v_fill".into(), "v_op".into()],
+                    key: None,
+                    source_library_key: None,
+                    extensions: Default::default(),
+                },
+            );
+            d.variable_collections.insert(
+                "density".into(),
+                VariableCollection {
+                    id: "density".into(),
+                    name: "Density".into(),
+                    modes: vec![VariableMode { id: "compact".into(), name: "Compact".into() }, VariableMode { id: "cozy".into(), name: "Cozy".into() }],
+                    default_mode: "compact".into(),
+                    variables: vec![],
+                    key: None,
+                    source_library_key: None,
+                    extensions: Default::default(),
+                },
+            );
+            d.variables.insert(
+                "v_fill".into(),
+                Variable {
+                    id: "v_fill".into(),
+                    name: "v_fill".into(),
+                    collection: "theme".into(),
+                    kind: VariableKind::Color,
+                    values: [
+                        ("light+compact".to_string(), VariableValue::Color(Color::rgba(200, 100, 50, 128))),
+                        ("light+cozy".to_string(), VariableValue::Color(Color::rgba(200, 100, 50, 255))),
+                        ("dark+compact".to_string(), VariableValue::Color(Color::rgba(40, 80, 160, 255))),
+                        ("dark+cozy".to_string(), VariableValue::Color(Color::rgba(40, 80, 160, 255))),
+                    ]
+                    .into_iter()
+                    .collect(),
+                    description: String::new(),
+                    scopes: vec![],
+                    hidden_from_publishing: false,
+                    key: None,
+                    code_syntax: Default::default(),
+                    extensions: Default::default(),
+                    mode_extensions: Default::default(),
+                },
+            );
+            d.variables.insert(
+                "v_op".into(),
+                Variable {
+                    id: "v_op".into(),
+                    name: "v_op".into(),
+                    collection: "theme".into(),
+                    kind: VariableKind::Number,
+                    values: [
+                        ("light+compact".to_string(), VariableValue::Number(25.0)),
+                        ("light+cozy".to_string(), VariableValue::Number(50.0)),
+                        ("dark+compact".to_string(), VariableValue::Number(50.0)),
+                        ("dark+cozy".to_string(), VariableValue::Number(50.0)),
+                    ]
+                    .into_iter()
+                    .collect(),
+                    description: String::new(),
+                    scopes: vec![],
+                    hidden_from_publishing: false,
+                    key: None,
+                    code_syntax: Default::default(),
+                    extensions: Default::default(),
+                    mode_extensions: Default::default(),
+                },
+            );
+
+            let rid = d.alloc_id();
+            let mut r = Node::rectangle(rid, Rect::new(0.0, 0.0, 100.0, 40.0));
+            r.fills = vec![Paint::solid(Color::BLACK)];
+            r.style_refs.insert("fill".into(), "Surface".into());
+            r.variables.bindings.insert("fills/0".into(), "v_fill".into());
+            for (cid, mid) in *start_combo {
+                r.variables.modes.insert((*cid).into(), (*mid).into());
+            }
+            let rid = d.insert(p, r).unwrap();
+
+            d.styles.insert("Surface".into(), Style::Fill(vec![Paint::solid(Color::BLACK)]));
+            d.style_meta.insert(
+                "Surface".into(),
+                StyleMeta {
+                    name: "Surface".into(),
+                    property: StyleProperty::Fill,
+                    bindings: [("fills/0/opacity".to_string(), "v_op".to_string())].into_iter().collect(),
+                    ..Default::default()
+                },
+            );
+
+            let before = d.clone();
+            let mut h = History::default();
+            let (c, fb) = delete_style_with_fallbacks(&d, "Surface").unwrap();
+            assert!(fb.is_empty(), "row5 must report no fallback when all style-won mode combinations agree");
+            run(&mut d, &mut h, Ok(c));
+            assert_resolved_matches_across_mode_combos(&before, &d, rid, all_four, &format!("row5 deleted in {start_combo:?}"));
+        }
+    }
+
+    #[test]
+    fn r5_row6_mixed_stop_keys_keep_binding_and_match_every_mode() {
+        let gradient_paint = Paint {
+            kind: PaintKind::LinearGradient {
+                handles: [Vec2::ZERO, Vec2::new(1.0, 0.0), Vec2::new(0.0, 1.0)],
+                stops: vec![GradientStop { pos: 0.0, color: Color::BLACK }, GradientStop { pos: 1.0, color: Color::WHITE }],
+            },
+            opacity: 1.0,
+            visible: true,
+            blend: BlendMode::Normal,
+        };
+
+        for active_mode in ["light", "dim", "dark"] {
+            let mut d = Document::new("t");
+            let p = d.add_page("p");
+            d.variable_collections.insert(
+                "c".into(),
+                VariableCollection {
+                    id: "c".into(),
+                    name: "Theme".into(),
+                    modes: vec![
+                        VariableMode { id: "light".into(), name: "Light".into() },
+                        VariableMode { id: "dim".into(), name: "Dim".into() },
+                        VariableMode { id: "dark".into(), name: "Dark".into() },
+                    ],
+                    default_mode: "light".into(),
+                    variables: vec!["v_fill_dark_only".into(), "v_stop".into()],
+                    key: None,
+                    source_library_key: None,
+                    extensions: Default::default(),
+                },
+            );
+            d.variables.insert(
+                "v_fill_dark_only".into(),
+                Variable {
+                    id: "v_fill_dark_only".into(),
+                    name: "v_fill_dark_only".into(),
+                    collection: "c".into(),
+                    kind: VariableKind::Color,
+                    values: [("dark".to_string(), VariableValue::Color(Color::rgba(10, 20, 30, 255)))].into_iter().collect(),
+                    description: String::new(),
+                    scopes: vec![],
+                    hidden_from_publishing: false,
+                    key: None,
+                    code_syntax: Default::default(),
+                    extensions: Default::default(),
+                    mode_extensions: Default::default(),
+                },
+            );
+            d.variables.insert(
+                "v_stop".into(),
+                Variable {
+                    id: "v_stop".into(),
+                    name: "v_stop".into(),
+                    collection: "c".into(),
+                    kind: VariableKind::Color,
+                    values: [
+                        ("light".to_string(), VariableValue::Color(Color::rgba(220, 30, 30, 255))),
+                        ("dim".to_string(), VariableValue::Color(Color::rgba(30, 220, 30, 255))),
+                        ("dark".to_string(), VariableValue::Color(Color::rgba(30, 30, 220, 255))),
+                    ]
+                    .into_iter()
+                    .collect(),
+                    description: String::new(),
+                    scopes: vec![],
+                    hidden_from_publishing: false,
+                    key: None,
+                    code_syntax: Default::default(),
+                    extensions: Default::default(),
+                    mode_extensions: Default::default(),
+                },
+            );
+
+            let rid = d.alloc_id();
+            let mut r = Node::rectangle(rid, Rect::new(0.0, 0.0, 100.0, 40.0));
+            r.fills = vec![gradient_paint.clone()];
+            r.stroke.paints = vec![gradient_paint.clone()];
+            r.style_refs.insert("fill".into(), "Grad".into());
+            r.style_refs.insert("stroke".into(), "Grad".into());
+            r.variables.bindings.insert("fills/0".into(), "v_fill_dark_only".into());
+            r.variables.bindings.insert("strokes/0".into(), "v_fill_dark_only".into());
+            r.variables.modes.insert("c".into(), active_mode.into());
+            let rid = d.insert(p, r).unwrap();
+
+            d.styles.insert("Grad".into(), Style::Fill(vec![gradient_paint.clone()]));
+            d.style_meta.insert(
+                "Grad".into(),
+                StyleMeta {
+                    name: "Grad".into(),
+                    property: StyleProperty::Fill,
+                    bindings: [("fills/0/stops/0".to_string(), "v_stop".to_string())].into_iter().collect(),
+                    ..Default::default()
+                },
+            );
+
+            let before = d.clone();
+            let mut h = History::default();
+            let (c, fb) = delete_style_with_fallbacks(&d, "Grad").unwrap();
+            assert!(fb.is_empty(), "row6 must report no fallback when stop bindings are kept");
+            run(&mut d, &mut h, Ok(c));
+
+            assert_eq!(
+                d.get(rid).unwrap().variables.bindings.get("fills/0/stops/0").map(String::as_str),
+                Some("v_stop"),
+                "mixed fill stop binding must be kept"
+            );
+            assert_eq!(
+                d.get(rid).unwrap().variables.bindings.get("strokes/0/stops/0").map(String::as_str),
+                Some("v_stop"),
+                "mixed stroke stop binding must be kept"
+            );
+            assert_resolved_matches_across_mode_combos(
+                &before,
+                &d,
+                rid,
+                &[&[("c", "light")], &[("c", "dim")], &[("c", "dark")]],
+                &format!("row6 deleted in {active_mode}"),
+            );
+        }
+    }
+
+    #[test]
+    fn style_order_kept_through_native_save_and_load_and_old_file_omits_sort_position() {
+        let mut d = Document::new("StyleOrderDoc");
+        d.add_page("Page 1");
+        // Insert in BTreeMap key order: s1, s2, s3, but assign Figma sortPosition so order is s3, s1, s2.
+        d.styles.insert("s1".into(), Style::Effect(vec![shadow(8.0)]));
+        d.styles.insert("s2".into(), Style::Effect(vec![shadow(16.0)]));
+        d.styles.insert("s3".into(), Style::Effect(vec![shadow(4.0)]));
+        d.style_meta.insert(
+            "s1".into(),
+            StyleMeta { name: "Shadows/md".into(), property: StyleProperty::Effect, sort_position: Some("!~~p~oLf".into()), ..Default::default() },
+        );
+        d.style_meta.insert(
+            "s2".into(),
+            StyleMeta { name: "Shadows/lg".into(), property: StyleProperty::Effect, sort_position: Some("!~~p~oLr".into()), ..Default::default() },
+        );
+        d.style_meta.insert(
+            "s3".into(),
+            StyleMeta { name: "Shadows/xs".into(), property: StyleProperty::Effect, sort_position: Some("!~~p~oL".into()), ..Default::default() },
+        );
+
+        let json = d.to_json().unwrap();
+        let loaded = Document::from_json(&json).unwrap();
+        assert_eq!(loaded.style_meta["s3"].sort_position.as_deref(), Some("!~~p~oL"));
+        assert_eq!(loaded.style_meta["s1"].sort_position.as_deref(), Some("!~~p~oLf"));
+        assert_eq!(loaded.style_meta["s2"].sort_position.as_deref(), Some("!~~p~oLr"));
+        assert_eq!(ordered_style_keys(&loaded, Some(StyleProperty::Effect)), vec!["s3".to_string(), "s1".to_string(), "s2".to_string()]);
+
+        // (d) Old file without `sort_position` loads with stable default order and saving does not add `sort_position`.
+        let mut old_doc = Document::new("LegacyDoc");
+        old_doc.add_page("Page 1");
+        old_doc.styles.insert("b_key".into(), Style::Fill(vec![Paint::solid(Color::WHITE)]));
+        old_doc.styles.insert("a_key".into(), Style::Fill(vec![Paint::solid(Color::BLACK)]));
+        old_doc.style_meta.insert("b_key".into(), StyleMeta { name: "Brand/Zeta".into(), property: StyleProperty::Fill, ..Default::default() });
+        old_doc.style_meta.insert("a_key".into(), StyleMeta { name: "Brand/Alpha".into(), property: StyleProperty::Fill, ..Default::default() });
+        let old_json = old_doc.to_json().unwrap();
+        assert!(!old_json.contains("sort_position"), "old file without sort_position must omit field on save: {old_json}");
+        let old_loaded = Document::from_json(&old_json).unwrap();
+        assert_eq!(old_loaded.style_meta["a_key"].sort_position, None);
+        assert_eq!(old_loaded.style_meta["b_key"].sort_position, None);
+        assert_eq!(ordered_style_keys(&old_loaded, Some(StyleProperty::Fill)), vec!["a_key".to_string(), "b_key".to_string()]);
+        let saved_again = old_loaded.to_json().unwrap();
+        assert!(!saved_again.contains("sort_position"), "saving loaded legacy file must not add sort_position");
+    }
+
+    #[test]
+    fn folder_rename_renames_every_member_and_one_undo_restores_all() {
+        let mut d = Document::new("FolderRenameDoc");
+        d.add_page("Page 1");
+        for (key, name) in [
+            ("s1", "Brand/Primary"),
+            ("s2", "Brand/Secondary"),
+            ("s3", "Brand/Nested/Accent"),
+            ("s4", "BrandNew/Untouched"),
+            ("s5", "Surface"),
+            ("s6", "Brand / Primary"),
+        ] {
+            d.styles.insert(key.into(), Style::Fill(vec![Paint::solid(Color::WHITE)]));
+            d.style_meta.insert(
+                key.into(),
+                StyleMeta { name: name.into(), property: StyleProperty::Fill, sort_position: Some(format!("!00000{key}")), ..Default::default() },
+            );
+        }
+
+        let mut h = History::default();
+        let cmd = rename_style_folder(&d, "Brand", "Theme").unwrap();
+        h.exec(&mut d, cmd).unwrap();
+
+        assert_eq!(d.style_name("s1"), "Theme/Primary");
+        assert_eq!(d.style_name("s2"), "Theme/Secondary");
+        assert_eq!(d.style_name("s3"), "Theme/Nested/Accent");
+        assert_eq!(d.style_name("s4"), "BrandNew/Untouched");
+        assert_eq!(d.style_name("s5"), "Surface");
+        assert_eq!(d.style_name("s6"), "Theme / Primary");
+        assert_eq!(d.style_meta["s1"].sort_position.as_deref(), Some("!00000s1"), "sort_position preserved on folder rename");
+
+        // Single undo step restores all members.
+        assert!(h.undo(&mut d).unwrap());
+        assert_eq!(d.style_name("s1"), "Brand/Primary");
+        assert_eq!(d.style_name("s2"), "Brand/Secondary");
+        assert_eq!(d.style_name("s3"), "Brand/Nested/Accent");
+        assert_eq!(d.style_name("s4"), "BrandNew/Untouched");
+        assert_eq!(d.style_name("s5"), "Surface");
+        assert_eq!(d.style_name("s6"), "Brand / Primary");
+    }
+
+    #[test]
+    fn set_style_description_sets_text_in_one_undo_step_and_keeps_other_fields() {
+        let mut d = Document::new("StyleDescDoc");
+        d.add_page("Page 1");
+        d.styles.insert("s1".into(), Style::Fill(vec![Paint::solid(Color::WHITE)]));
+        let mut bindings = BTreeMap::new();
+        bindings.insert("fills/0".to_string(), "var_primary".to_string());
+        d.style_meta.insert(
+            "s1".into(),
+            StyleMeta {
+                name: "Brand/Primary".into(),
+                key: Some("orig-key".into()),
+                description: "Old description".into(),
+                property: StyleProperty::Fill,
+                bindings: bindings.clone(),
+                sort_position: Some("!~~p~oL".into()),
+                ..Default::default()
+            },
+        );
+
+        let mut h = History::default();
+        let cmd = set_style_description(&d, "s1", "Primary brand fill   \n\t ").unwrap();
+        assert!(matches!(cmd, Command::SetStyles { .. }), "changing description must return Command::SetStyles");
+        h.exec(&mut d, cmd).unwrap();
+
+        let meta = &d.style_meta["s1"];
+        assert_eq!(meta.description, "Primary brand fill");
+        assert_eq!(meta.name, "Brand/Primary");
+        assert_eq!(meta.key.as_deref(), Some("orig-key"));
+        assert_eq!(meta.property, StyleProperty::Fill);
+        assert_eq!(meta.bindings, bindings);
+        assert_eq!(meta.sort_position.as_deref(), Some("!~~p~oL"));
+
+        // Setting the same text (after trailing whitespace trim) is a no-op.
+        let noop = set_style_description(&d, "s1", "Primary brand fill   ").unwrap();
+        assert!(matches!(noop, Command::Batch(ref v) if v.is_empty()), "same text must be a no-op batch");
+
+        // One undo restores the old description and keeps all other fields.
+        assert!(h.undo(&mut d).unwrap());
+        let meta = &d.style_meta["s1"];
+        assert_eq!(meta.description, "Old description");
+        assert_eq!(meta.name, "Brand/Primary");
+        assert_eq!(meta.sort_position.as_deref(), Some("!~~p~oL"));
+        assert_eq!(meta.bindings, bindings);
+        assert!(!h.can_undo(), "must be a single undo step");
+    }
+
+    #[test]
+    fn legacy_text_style_update_preserves_consumer_paragraph_values() {
+        let mut d = Document::new("legacy");
+        let page = d.add_page("Page");
+        let tid = d.alloc_id();
+        let mut text = Node::text(tid, Rect::new(0.0, 0.0, 100.0, 40.0), "hello", TextStyle::default());
+        text.style_refs.insert("text".into(), "Body".into());
+        {
+            let t = text.kind.any_text_mut().unwrap();
+            t.paragraph.indent = 12.0;
+            t.paragraph.list_spacing = 7.0;
+            t.paragraph.leading_trim = LeadingTrim::CapHeight;
+        }
+        d.insert(page, text).unwrap();
+        d.styles.insert("Body".into(), Style::Text(TextStyle { font_size: 14.0, ..Default::default() }));
+        let serialized = d.to_json().unwrap();
+        let legacy = serialized.replace("\"paragraph_indent\":0,", "").replace("\"list_spacing\":0,", "").replace("\"leading_trim\":\"None\",", "");
+        let mut loaded = Document::from_json(&legacy).unwrap();
+        let c = update_style(&loaded, "Body", Style::Text(TextStyle { font_size: 18.0, ..Default::default() })).unwrap();
+        c.apply(&mut loaded).unwrap();
+        let t = loaded.get(tid).unwrap().kind.any_text().unwrap();
+        assert_eq!(t.paragraph.indent, 12.0);
+        assert_eq!(t.paragraph.list_spacing, 7.0);
+        assert_eq!(t.paragraph.leading_trim, LeadingTrim::CapHeight);
+
+        let explicit: serde_json::Value = serde_json::from_str(&serialized).unwrap();
+        let mut explicit = explicit;
+        let style = explicit["styles"]["Body"]["Text"].as_object_mut().unwrap();
+        style.insert("paragraph_indent".into(), serde_json::json!(0.0));
+        style.insert("list_spacing".into(), serde_json::json!(0.0));
+        style.insert("leading_trim".into(), serde_json::json!("None"));
+        let mut modern = Document::from_json(&serde_json::to_string(&explicit).unwrap()).unwrap();
+        assert_eq!(modern.style_meta["Body"].text_paragraph_fields, Some(7));
+        let c = update_style(&modern, "Body", Style::Text(TextStyle { font_size: 20.0, ..Default::default() })).unwrap();
+        c.apply(&mut modern).unwrap();
+        let t = modern.get(tid).unwrap().kind.any_text().unwrap();
+        assert_eq!((t.paragraph.indent, t.paragraph.list_spacing, t.paragraph.leading_trim), (0.0, 0.0, LeadingTrim::None));
+
+        let promoted = update_style(&loaded, "Body", Style::Text(TextStyle { paragraph_indent: 3.0, ..Default::default() })).unwrap();
+        promoted.apply(&mut loaded).unwrap();
+        let t = loaded.get(tid).unwrap().kind.any_text().unwrap();
+        assert_eq!(t.paragraph.indent, 3.0);
+        assert_eq!(loaded.style_meta["Body"].text_paragraph_fields, Some(1));
+    }
+
+    #[test]
+    fn set_style_description_refuses_library_style() {
+        let (mut d, _) = paint_and_text_fixture();
+        d.style_meta.insert(
+            "Brand".into(),
+            StyleMeta { name: "Brand".into(), description: "Published description".into(), property: StyleProperty::Fill, ..Default::default() },
+        );
+        d.library.external.insert(
+            "L1/Brand".into(),
+            ExternalAsset { library_id: "L1".into(), version: 1, kind: LibraryAssetKind::Style, node: None, local_key: Some("Brand".into()) },
+        );
+        let before = d.clone();
+        let err = set_style_description(&d, "Brand", "Local override").unwrap_err();
+        assert!(matches!(err, StyleOpError::LibraryStyle(ref k) if k == "Brand"), "expected LibraryStyle, got {err:?}");
+        assert_eq!(d.style_meta["Brand"].description, "Published description");
+        assert_eq!(d.styles, before.styles);
+        assert_eq!(d.style_meta, before.style_meta);
+    }
+
+    #[test]
+    fn delete_style_walks_mode_sum_across_unrelated_eight_mode_collections() {
+        let mut d = Document::new("t");
+        let p = d.add_page("p");
+        for (cid, var_id) in [("c1", "v_own"), ("c2", "v_style"), ("c3", "v_leaf")] {
+            let modes: Vec<VariableMode> = (0..8).map(|i| VariableMode { id: format!("{cid}_m{i}"), name: format!("{cid}_m{i}") }).collect();
+            d.variable_collections.insert(
+                cid.into(),
+                VariableCollection {
+                    id: cid.into(),
+                    name: cid.into(),
+                    default_mode: format!("{cid}_m0"),
+                    modes,
+                    variables: vec![var_id.into()],
+                    key: None,
+                    source_library_key: None,
+                    extensions: Default::default(),
+                },
+            );
+        }
+
+        let own_vals: BTreeMap<String, VariableValue> = (0..8)
+            .map(|i| {
+                let alpha = if i == 7 { 128 } else { 255 };
+                (format!("c1_m{i}"), VariableValue::Color(Color::rgba(200, 100, 50, alpha)))
+            })
+            .collect();
+        d.variables.insert(
+            "v_own".into(),
+            Variable {
+                id: "v_own".into(),
+                name: "v_own".into(),
+                collection: "c1".into(),
+                kind: VariableKind::Color,
+                values: own_vals,
+                description: String::new(),
+                scopes: vec![],
+                hidden_from_publishing: false,
+                key: None,
+                code_syntax: Default::default(),
+                extensions: Default::default(),
+                mode_extensions: Default::default(),
+            },
+        );
+
+        // The leaf differs from the other style values only in its default mode, so the walk sees it
+        // only when it probes the leaf's collection under the parent mode that aliases to it.
+        let leaf_vals: BTreeMap<String, VariableValue> =
+            (0..8).map(|i| (format!("c3_m{i}"), VariableValue::Number(if i == 0 { 30.0 } else { 60.0 }))).collect();
+        d.variables.insert(
+            "v_leaf".into(),
+            Variable {
+                id: "v_leaf".into(),
+                name: "v_leaf".into(),
+                collection: "c3".into(),
+                kind: VariableKind::Number,
+                values: leaf_vals,
+                description: String::new(),
+                scopes: vec![],
+                hidden_from_publishing: false,
+                key: None,
+                code_syntax: Default::default(),
+                extensions: Default::default(),
+                mode_extensions: Default::default(),
+            },
+        );
+
+        let style_vals: BTreeMap<String, VariableValue> = (0..8)
+            .map(|i| {
+                let val = if i == 0 { VariableValue::Alias("v_leaf".into()) } else { VariableValue::Number(60.0) };
+                (format!("c2_m{i}"), val)
+            })
+            .collect();
+        d.variables.insert(
+            "v_style".into(),
+            Variable {
+                id: "v_style".into(),
+                name: "v_style".into(),
+                collection: "c2".into(),
+                kind: VariableKind::Number,
+                values: style_vals,
+                description: String::new(),
+                scopes: vec![],
+                hidden_from_publishing: false,
+                key: None,
+                code_syntax: Default::default(),
+                extensions: Default::default(),
+                mode_extensions: Default::default(),
+            },
+        );
+
+        let rid = d.alloc_id();
+        let mut r = Node::rectangle(rid, Rect::new(0.0, 0.0, 100.0, 40.0));
+        r.fills = vec![Paint::solid(Color::BLACK)];
+        r.style_refs.insert("fill".into(), "Surface".into());
+        r.variables.bindings.insert("fills/0".into(), "v_own".into());
+        // The layer sits where its own fill wins, away from the parent mode that aliases to the leaf.
+        r.variables.modes.insert("c1".into(), "c1_m7".into());
+        r.variables.modes.insert("c2".into(), "c2_m3".into());
+        r.variables.modes.insert("c3".into(), "c3_m5".into());
+        let rid = d.insert(p, r).unwrap();
+
+        d.styles.insert("Surface".into(), Style::Fill(vec![Paint::solid(Color::BLACK)]));
+        d.style_meta.insert(
+            "Surface".into(),
+            StyleMeta {
+                name: "Surface".into(),
+                property: StyleProperty::Fill,
+                bindings: [("fills/0/opacity".to_string(), "v_style".to_string())].into_iter().collect(),
+                ..Default::default()
+            },
+        );
+
+        take_style_mode_visits();
+        let (cmd, fb) = delete_style_with_fallbacks(&d, "Surface").unwrap();
+        let visits_three_colls = take_style_mode_visits();
+        assert_eq!(
+            visits_three_colls, 24,
+            "three 8-mode collections with variables that do not share a collection must visit 8 + 8 + 8 = 24 modes, not 8^3 = 512"
+        );
+        assert_eq!(
+            fb,
+            vec![(rid, "fills/0/opacity".to_string())],
+            "the leaf disagrees with the other style values once it is probed under its parent mode, so the layer is counted"
+        );
+        let mut h = History::default();
+        run(&mut d, &mut h, Ok(cmd));
+        assert!(
+            (d.get(rid).unwrap().fills[0].opacity - 0.3).abs() < 1e-6,
+            "the bake comes from the default combination, where the parent mode reaches the leaf's default mode"
+        );
+    }
+
+    #[test]
+    fn delete_style_caps_shared_collection_mode_product_at_4096_and_keeps_binding() {
+        let mut d = Document::new("t");
+        let p = d.add_page("p");
+        for cid in ["c1", "c2", "c3", "c4"] {
+            let modes: Vec<VariableMode> = (0..9).map(|i| VariableMode { id: format!("{cid}_m{i}"), name: format!("{cid}_m{i}") }).collect();
+            d.variable_collections.insert(
+                cid.into(),
+                VariableCollection {
+                    id: cid.into(),
+                    name: cid.into(),
+                    default_mode: format!("{cid}_m0"),
+                    modes,
+                    variables: if cid == "c1" { vec!["v_fill".into(), "v_op".into()] } else { vec![] },
+                    key: None,
+                    source_library_key: None,
+                    extensions: Default::default(),
+                },
+            );
+        }
+
+        d.variables.insert(
+            "v_fill".into(),
+            Variable {
+                id: "v_fill".into(),
+                name: "v_fill".into(),
+                collection: "c1".into(),
+                kind: VariableKind::Color,
+                values: [
+                    ("c1_m0+c2_m0+c3_m0+c4_m0".to_string(), VariableValue::Color(Color::rgba(40, 80, 160, 128))),
+                    ("c1_m0".to_string(), VariableValue::Color(Color::rgba(200, 100, 50, 255))),
+                ]
+                .into_iter()
+                .collect(),
+                description: String::new(),
+                scopes: vec![],
+                hidden_from_publishing: false,
+                key: None,
+                code_syntax: Default::default(),
+                extensions: Default::default(),
+                mode_extensions: Default::default(),
+            },
+        );
+        d.variables.insert(
+            "v_op".into(),
+            Variable {
+                id: "v_op".into(),
+                name: "v_op".into(),
+                collection: "c1".into(),
+                kind: VariableKind::Number,
+                values: [("c1_m0+c2_m0+c3_m0+c4_m0".to_string(), VariableValue::Number(80.0)), ("c1_m0".to_string(), VariableValue::Number(80.0))]
+                    .into_iter()
+                    .collect(),
+                description: String::new(),
+                scopes: vec![],
+                hidden_from_publishing: false,
+                key: None,
+                code_syntax: Default::default(),
+                extensions: Default::default(),
+                mode_extensions: Default::default(),
+            },
+        );
+
+        let rid = d.alloc_id();
+        let mut r = Node::rectangle(rid, Rect::new(0.0, 0.0, 100.0, 40.0));
+        r.fills = vec![Paint::solid(Color::BLACK)];
+        r.style_refs.insert("fill".into(), "Surface".into());
+        r.variables.bindings.insert("fills/0".into(), "v_fill".into());
+        let rid = d.insert(p, r).unwrap();
+
+        d.styles.insert("Surface".into(), Style::Fill(vec![Paint::solid(Color::BLACK)]));
+        d.style_meta.insert(
+            "Surface".into(),
+            StyleMeta {
+                name: "Surface".into(),
+                property: StyleProperty::Fill,
+                bindings: [("fills/0/opacity".to_string(), "v_op".to_string())].into_iter().collect(),
+                ..Default::default()
+            },
+        );
+
+        take_style_mode_visits();
+        let (cmd, fb) = delete_style_with_fallbacks(&d, "Surface").unwrap();
+        let visits = take_style_mode_visits();
+        assert_eq!(visits, 4096, "mode walk must stop at 4,096 combinations when the product exceeds the cap");
+        assert_eq!(fb, vec![(rid, "fills/0/opacity".to_string())], "layer past the mode cap must be counted in fallbacks");
+        let mut h = History::default();
+        run(&mut d, &mut h, Ok(cmd));
+        assert_eq!(
+            d.get(rid).unwrap().variables.bindings.get("fills/0/opacity").map(String::as_str),
+            Some("v_op"),
+            "layer past the mode cap must keep its binding instead of baking"
+        );
+        assert!((d.get(rid).unwrap().fills[0].opacity - 1.0).abs() < 1e-6, "layer past the mode cap must not bake opacity");
+
+        let mut single = Document::new("t");
+        let sp = single.add_page("p");
+        let single_modes: Vec<VariableMode> = (0..4100).map(|i| VariableMode { id: format!("m{i}"), name: format!("m{i}") }).collect();
+        single.variable_collections.insert(
+            "c_single".into(),
+            VariableCollection {
+                id: "c_single".into(),
+                name: "c_single".into(),
+                default_mode: "m0".into(),
+                modes: single_modes,
+                variables: vec!["v_fill".into(), "v_op".into()],
+                key: None,
+                source_library_key: None,
+                extensions: Default::default(),
+            },
+        );
+        single.variables.insert(
+            "v_fill".into(),
+            Variable {
+                id: "v_fill".into(),
+                name: "v_fill".into(),
+                collection: "c_single".into(),
+                kind: VariableKind::Color,
+                values: [
+                    ("m0".to_string(), VariableValue::Color(Color::rgba(40, 80, 160, 128))),
+                    ("m1".to_string(), VariableValue::Color(Color::rgba(200, 100, 50, 255))),
+                ]
+                .into_iter()
+                .collect(),
+                description: String::new(),
+                scopes: vec![],
+                hidden_from_publishing: false,
+                key: None,
+                code_syntax: Default::default(),
+                extensions: Default::default(),
+                mode_extensions: Default::default(),
+            },
+        );
+        single.variables.insert(
+            "v_op".into(),
+            Variable {
+                id: "v_op".into(),
+                name: "v_op".into(),
+                collection: "c_single".into(),
+                kind: VariableKind::Number,
+                values: [("m0".to_string(), VariableValue::Number(80.0)), ("m1".to_string(), VariableValue::Number(80.0))].into_iter().collect(),
+                description: String::new(),
+                scopes: vec![],
+                hidden_from_publishing: false,
+                key: None,
+                code_syntax: Default::default(),
+                extensions: Default::default(),
+                mode_extensions: Default::default(),
+            },
+        );
+        let srid = single.alloc_id();
+        let mut sr = Node::rectangle(srid, Rect::new(0.0, 0.0, 100.0, 40.0));
+        sr.fills = vec![Paint::solid(Color::BLACK)];
+        sr.style_refs.insert("fill".into(), "Surface".into());
+        sr.variables.bindings.insert("fills/0".into(), "v_fill".into());
+        let srid = single.insert(sp, sr).unwrap();
+        single.styles.insert("Surface".into(), Style::Fill(vec![Paint::solid(Color::BLACK)]));
+        single.style_meta.insert(
+            "Surface".into(),
+            StyleMeta {
+                name: "Surface".into(),
+                property: StyleProperty::Fill,
+                bindings: [("fills/0/opacity".to_string(), "v_op".to_string())].into_iter().collect(),
+                ..Default::default()
+            },
+        );
+        take_style_mode_visits();
+        let (scmd, sfb) = delete_style_with_fallbacks(&single, "Surface").unwrap();
+        let single_visits = take_style_mode_visits();
+        assert_eq!(single_visits, 4096, "single shared collection with 4,100 modes must also stop at 4,096");
+        assert_eq!(sfb, vec![(srid, "fills/0/opacity".to_string())]);
+        let mut sh = History::default();
+        run(&mut single, &mut sh, Ok(scmd));
+        assert_eq!(single.get(srid).unwrap().variables.bindings.get("fills/0/opacity").map(String::as_str), Some("v_op"));
+    }
+
+    #[test]
+    fn delete_style_with_unresolved_delete_time_style_value_keeps_binding_and_look() {
+        let mut d = Document::new("t");
+        let p = d.add_page("p");
+        d.variable_collections.insert(
+            "c".into(),
+            VariableCollection {
+                id: "c".into(),
+                name: "Theme".into(),
+                modes: vec![
+                    VariableMode { id: "light".into(), name: "Light".into() },
+                    VariableMode { id: "dim".into(), name: "Dim".into() },
+                    VariableMode { id: "warm".into(), name: "Warm".into() },
+                    VariableMode { id: "dark".into(), name: "Dark".into() },
+                ],
+                default_mode: "light".into(),
+                variables: vec!["v_fill".into(), "v_op".into()],
+                key: None,
+                source_library_key: None,
+                extensions: Default::default(),
+            },
+        );
+        d.variables.insert(
+            "v_fill".into(),
+            Variable {
+                id: "v_fill".into(),
+                name: "v_fill".into(),
+                collection: "c".into(),
+                kind: VariableKind::Color,
+                values: [
+                    ("light".to_string(), VariableValue::Color(Color::rgba(200, 100, 50, 255))),
+                    ("dim".to_string(), VariableValue::Color(Color::rgba(200, 100, 50, 255))),
+                    ("warm".to_string(), VariableValue::Color(Color::rgba(200, 100, 50, 255))),
+                    ("dark".to_string(), VariableValue::Color(Color::rgba(40, 80, 160, 128))),
+                ]
+                .into_iter()
+                .collect(),
+                description: String::new(),
+                scopes: vec![],
+                hidden_from_publishing: false,
+                key: None,
+                code_syntax: Default::default(),
+                extensions: Default::default(),
+                mode_extensions: Default::default(),
+            },
+        );
+        d.variables.insert(
+            "v_op".into(),
+            Variable {
+                id: "v_op".into(),
+                name: "v_op".into(),
+                collection: "c".into(),
+                kind: VariableKind::Number,
+                values: [
+                    ("light".to_string(), VariableValue::Number(80.0)),
+                    ("dim".to_string(), VariableValue::Alias("v_unresolved".into())),
+                    ("warm".to_string(), VariableValue::Number(20.0)),
+                    ("dark".to_string(), VariableValue::Number(5.0)),
+                ]
+                .into_iter()
+                .collect(),
+                description: String::new(),
+                scopes: vec![],
+                hidden_from_publishing: false,
+                key: None,
+                code_syntax: Default::default(),
+                extensions: Default::default(),
+                mode_extensions: Default::default(),
+            },
+        );
+
+        let rid = d.alloc_id();
+        let mut r = Node::rectangle(rid, Rect::new(0.0, 0.0, 100.0, 40.0));
+        r.fills = vec![Paint::solid(Color::BLACK)];
+        r.style_refs.insert("fill".into(), "Surface".into());
+        r.variables.bindings.insert("fills/0".into(), "v_fill".into());
+        r.variables.modes.insert("c".into(), "dim".into());
+        let rid = d.insert(p, r).unwrap();
+
+        d.styles.insert("Surface".into(), Style::Fill(vec![Paint::solid(Color::BLACK)]));
+        d.style_meta.insert(
+            "Surface".into(),
+            StyleMeta {
+                name: "Surface".into(),
+                property: StyleProperty::Fill,
+                bindings: [("fills/0/opacity".to_string(), "v_op".to_string())].into_iter().collect(),
+                ..Default::default()
+            },
+        );
+
+        let before = d.clone();
+        let mut h = History::default();
+        let (cmd, _fb) = delete_style_with_fallbacks(&d, "Surface").unwrap();
+        run(&mut d, &mut h, Ok(cmd));
+
+        assert_eq!(
+            d.get(rid).unwrap().variables.bindings.get("fills/0/opacity").map(String::as_str),
+            Some("v_op"),
+            "when style wins at delete time but does not resolve there and other style-won modes disagree, the binding must be kept"
+        );
+        assert_resolved_matches_across_mode_combos(
+            &before,
+            &d,
+            rid,
+            &[&[("c", "dim")], &[("c", "light")], &[("c", "warm")]],
+            "delete-time mode dim and other style-won modes stay exact when binding is kept",
+        );
+    }
+
+    fn mode_collection(cid: &str, modes: &[&str], default_mode: &str, variables: &[&str]) -> VariableCollection {
+        VariableCollection {
+            id: cid.into(),
+            name: cid.into(),
+            modes: modes.iter().map(|m| VariableMode { id: (*m).into(), name: (*m).into() }).collect(),
+            default_mode: default_mode.into(),
+            variables: variables.iter().map(|v| (*v).into()).collect(),
+            key: None,
+            source_library_key: None,
+            extensions: Default::default(),
+        }
+    }
+
+    fn mode_variable(id: &str, collection: &str, kind: VariableKind, values: &[(&str, VariableValue)]) -> Variable {
+        Variable {
+            id: id.into(),
+            name: id.into(),
+            collection: collection.into(),
+            kind,
+            values: values.iter().map(|(mode, val)| ((*mode).to_string(), val.clone())).collect(),
+            description: String::new(),
+            scopes: vec![],
+            hidden_from_publishing: false,
+            key: None,
+            code_syntax: Default::default(),
+            extensions: Default::default(),
+            mode_extensions: Default::default(),
+        }
+    }
+
+    /// Adds a rectangle whose `fills/0` is bound to `own_var` and linked to a fill style `Surface`
+    /// that binds `fills/0/opacity` to `style_var`. `modes` are the layer's explicit mode choices.
+    fn add_surface_layer(d: &mut Document, own_var: &str, style_var: &str, modes: &[(&str, &str)]) -> NodeId {
+        let page = d.pages[0];
+        let rid = d.alloc_id();
+        let mut r = Node::rectangle(rid, Rect::new(0.0, 0.0, 100.0, 40.0));
+        r.fills = vec![Paint::solid(Color::BLACK)];
+        r.style_refs.insert("fill".into(), "Surface".into());
+        r.variables.bindings.insert("fills/0".into(), own_var.into());
+        for (cid, mid) in modes {
+            r.variables.modes.insert((*cid).into(), (*mid).into());
+        }
+        let rid = d.insert(page, r).unwrap();
+        d.styles.insert("Surface".into(), Style::Fill(vec![Paint::solid(Color::BLACK)]));
+        d.style_meta.insert(
+            "Surface".into(),
+            StyleMeta {
+                name: "Surface".into(),
+                property: StyleProperty::Fill,
+                bindings: [("fills/0/opacity".to_string(), style_var.to_string())].into_iter().collect(),
+                ..Default::default()
+            },
+        );
+        rid
+    }
+
+    fn resolved_fill_opacity(d: &Document, id: NodeId, modes: &[(&str, &str)]) -> f32 {
+        let mut doc = d.clone();
+        for (cid, mid) in modes {
+            doc.get_mut(id).unwrap().variables.modes.insert((*cid).into(), (*mid).into());
+        }
+        resolve_node(&doc, doc.get(id).unwrap()).fills[0].opacity
+    }
+
+    #[test]
+    fn delete_style_keeps_every_look_when_one_variable_aliases_to_different_variables_per_parent_mode() {
+        let mut d = Document::new("t");
+        d.add_page("p");
+        d.variable_collections.insert("theme".into(), mode_collection("theme", &["dark", "light"], "dark", &["v_fill"]));
+        d.variable_collections.insert("brand".into(), mode_collection("brand", &["a", "b"], "a", &["v_dark", "v_light"]));
+        d.variable_collections.insert("density".into(), mode_collection("density", &["d"], "d", &["v_op"]));
+        let tint = |alpha: u8| VariableValue::Color(Color::rgba(200, 100, 50, alpha));
+        d.variables.insert(
+            "v_fill".into(),
+            mode_variable(
+                "v_fill",
+                "theme",
+                VariableKind::Color,
+                &[("dark", VariableValue::Alias("v_dark".into())), ("light", VariableValue::Alias("v_light".into()))],
+            ),
+        );
+        d.variables.insert("v_dark".into(), mode_variable("v_dark", "brand", VariableKind::Color, &[("a", tint(128)), ("b", tint(128))]));
+        d.variables.insert("v_light".into(), mode_variable("v_light", "brand", VariableKind::Color, &[("a", tint(128)), ("b", tint(255))]));
+        d.variables.insert("v_op".into(), mode_variable("v_op", "density", VariableKind::Number, &[("d", VariableValue::Number(40.0))]));
+        let rid = add_surface_layer(&mut d, "v_fill", "v_op", &[("theme", "light"), ("brand", "a")]);
+
+        let before = d.clone();
+        assert!(
+            (resolved_fill_opacity(&before, rid, &[("theme", "light"), ("brand", "b")]) - 0.4).abs() < 1e-6,
+            "the translucent tint is absent in (light, b), so the style opacity of 0.4 shows there"
+        );
+        take_style_mode_visits();
+        let (cmd, fb) = delete_style_with_fallbacks(&d, "Surface").unwrap();
+        let visits = take_style_mode_visits();
+        assert!(fb.is_empty(), "the style value is the same in every mode where it wins, so nothing is reported");
+        let mut h = History::default();
+        run(&mut d, &mut h, Ok(cmd));
+
+        assert!(
+            (resolved_fill_opacity(&d, rid, &[("theme", "light"), ("brand", "b")]) - 0.4).abs() < 1e-6,
+            "the 0.4 that showed in (light, b) before the delete must survive it"
+        );
+        assert_resolved_matches_across_mode_combos(
+            &before,
+            &d,
+            rid,
+            &[
+                &[("theme", "light"), ("brand", "a")],
+                &[("theme", "light"), ("brand", "b")],
+                &[("theme", "dark"), ("brand", "a")],
+                &[("theme", "dark"), ("brand", "b")],
+            ],
+            "alias targets that differ per parent mode stay exact in every combination",
+        );
+        assert_eq!(visits, 4, "brand is reached through two variables, so the modes are crossed: 2 x 2 x 1");
+    }
+
+    #[test]
+    fn delete_style_counts_a_fallback_when_the_style_variable_aliases_to_different_variables_per_parent_mode() {
+        let mut d = Document::new("t");
+        d.add_page("p");
+        d.variable_collections.insert("own".into(), mode_collection("own", &["o1", "o2"], "o1", &["v_own"]));
+        d.variable_collections.insert("theme".into(), mode_collection("theme", &["dark", "light"], "dark", &["v_sty"]));
+        d.variable_collections.insert("brand".into(), mode_collection("brand", &["a", "b"], "a", &["v_sd", "v_sl"]));
+        let tint = |alpha: u8| VariableValue::Color(Color::rgba(200, 100, 50, alpha));
+        d.variables.insert("v_own".into(), mode_variable("v_own", "own", VariableKind::Color, &[("o1", tint(128)), ("o2", tint(255))]));
+        d.variables.insert(
+            "v_sty".into(),
+            mode_variable(
+                "v_sty",
+                "theme",
+                VariableKind::Number,
+                &[("dark", VariableValue::Alias("v_sd".into())), ("light", VariableValue::Alias("v_sl".into()))],
+            ),
+        );
+        d.variables.insert(
+            "v_sd".into(),
+            mode_variable("v_sd", "brand", VariableKind::Number, &[("a", VariableValue::Number(40.0)), ("b", VariableValue::Number(40.0))]),
+        );
+        d.variables.insert(
+            "v_sl".into(),
+            mode_variable("v_sl", "brand", VariableKind::Number, &[("a", VariableValue::Number(40.0)), ("b", VariableValue::Number(70.0))]),
+        );
+        let rid = add_surface_layer(&mut d, "v_own", "v_sty", &[("own", "o1"), ("theme", "light"), ("brand", "a")]);
+
+        let before = d.clone();
+        take_style_mode_visits();
+        let (cmd, fb) = delete_style_with_fallbacks(&d, "Surface").unwrap();
+        let visits = take_style_mode_visits();
+        assert_eq!(
+            fb,
+            vec![(rid, "fills/0/opacity".to_string())],
+            "the style value is 70 in (light, b) and 40 elsewhere where it wins, so the layer is counted"
+        );
+        let mut h = History::default();
+        run(&mut d, &mut h, Ok(cmd));
+
+        assert_eq!(d.get(rid).unwrap().variables.bindings.get("fills/0").map(String::as_str), Some("v_own"));
+        assert!(!d.get(rid).unwrap().variables.bindings.contains_key("fills/0/opacity"), "the style binding is baked, not moved");
+        assert_resolved_matches_across_mode_combos(
+            &before,
+            &d,
+            rid,
+            &[
+                &[("own", "o1"), ("theme", "light"), ("brand", "a")],
+                &[("own", "o2"), ("theme", "dark"), ("brand", "a")],
+                &[("own", "o2"), ("theme", "light"), ("brand", "a")],
+            ],
+            "the delete-time look and the modes where the style value is 40 stay exact",
+        );
+        assert_eq!(visits, 8, "the style variable reaches brand through two variables, so the modes are crossed: 2 x 2 x 2");
+    }
+
+    #[test]
+    fn delete_style_keeps_the_mode_sum_when_an_alias_chain_stays_inside_one_collection() {
+        let mut d = Document::new("t");
+        d.add_page("p");
+        let ids = |cid: &str| -> Vec<String> { (0..8).map(|i| format!("{cid}_m{i}")).collect() };
+        let (c1, c2) = (ids("c1"), ids("c2"));
+        fn as_refs(v: &[String]) -> Vec<&str> {
+            v.iter().map(String::as_str).collect()
+        }
+        d.variable_collections.insert("c1".into(), mode_collection("c1", &as_refs(&c1), "c1_m0", &["v_own"]));
+        d.variable_collections.insert("c2".into(), mode_collection("c2", &as_refs(&c2), "c2_m0", &["v_style", "v_base"]));
+        let own_vals: Vec<(&str, VariableValue)> =
+            c1.iter().enumerate().map(|(i, m)| (m.as_str(), VariableValue::Color(Color::rgba(200, 100, 50, if i == 7 { 128 } else { 255 })))).collect();
+        d.variables.insert("v_own".into(), mode_variable("v_own", "c1", VariableKind::Color, &own_vals));
+        let style_vals: Vec<(&str, VariableValue)> = c2
+            .iter()
+            .enumerate()
+            .map(|(i, m)| (m.as_str(), if i == 0 { VariableValue::Alias("v_base".into()) } else { VariableValue::Number(60.0) }))
+            .collect();
+        d.variables.insert("v_style".into(), mode_variable("v_style", "c2", VariableKind::Number, &style_vals));
+        let base_vals: Vec<(&str, VariableValue)> = c2.iter().map(|m| (m.as_str(), VariableValue::Number(60.0))).collect();
+        d.variables.insert("v_base".into(), mode_variable("v_base", "c2", VariableKind::Number, &base_vals));
+        let rid = add_surface_layer(&mut d, "v_own", "v_style", &[]);
+
+        take_style_mode_visits();
+        let (cmd, fb) = delete_style_with_fallbacks(&d, "Surface").unwrap();
+        assert_eq!(take_style_mode_visits(), 16, "an alias inside the same collection resolves in the same mode, so the walk stays 8 + 8, not 8 x 8");
+        assert!(fb.is_empty());
+        let mut h = History::default();
+        run(&mut d, &mut h, Ok(cmd));
+        assert!((d.get(rid).unwrap().fills[0].opacity - 0.6).abs() < 1e-6);
+    }
+
+    #[test]
+    fn delete_style_keeps_every_look_when_a_same_collection_hop_aliases_to_different_variables_per_mode() {
+        let mut d = Document::new("t");
+        d.add_page("p");
+        d.variable_collections.insert("theme".into(), mode_collection("theme", &["a", "b"], "a", &["v_fill", "v_hop"]));
+        d.variable_collections.insert("brand".into(), mode_collection("brand", &["x", "y"], "x", &["v_one", "v_two"]));
+        d.variable_collections.insert("density".into(), mode_collection("density", &["d"], "d", &["v_op"]));
+        let tint = |alpha: u8| VariableValue::Color(Color::rgba(200, 100, 50, alpha));
+        d.variables.insert(
+            "v_fill".into(),
+            mode_variable("v_fill", "theme", VariableKind::Color, &[("a", VariableValue::Alias("v_hop".into())), ("b", VariableValue::Alias("v_hop".into()))]),
+        );
+        d.variables.insert(
+            "v_hop".into(),
+            mode_variable("v_hop", "theme", VariableKind::Color, &[("a", VariableValue::Alias("v_one".into())), ("b", VariableValue::Alias("v_two".into()))]),
+        );
+        d.variables.insert("v_one".into(), mode_variable("v_one", "brand", VariableKind::Color, &[("x", tint(128)), ("y", tint(128))]));
+        d.variables.insert("v_two".into(), mode_variable("v_two", "brand", VariableKind::Color, &[("x", tint(128)), ("y", tint(255))]));
+        d.variables.insert("v_op".into(), mode_variable("v_op", "density", VariableKind::Number, &[("d", VariableValue::Number(40.0))]));
+        let rid = add_surface_layer(&mut d, "v_fill", "v_op", &[("theme", "a")]);
+
+        let before = d.clone();
+        assert!(
+            (resolved_fill_opacity(&before, rid, &[("theme", "b"), ("brand", "y")]) - 0.4).abs() < 1e-6,
+            "the translucent tint is absent in (b, y), so the style opacity of 0.4 shows there"
+        );
+        take_style_mode_visits();
+        let (cmd, fb) = delete_style_with_fallbacks(&d, "Surface").unwrap();
+        let visits = take_style_mode_visits();
+        assert!(fb.is_empty(), "the style value is the same in every mode where it wins, so nothing is reported");
+        let mut h = History::default();
+        run(&mut d, &mut h, Ok(cmd));
+
+        assert!(
+            (resolved_fill_opacity(&d, rid, &[("theme", "b"), ("brand", "y")]) - 0.4).abs() < 1e-6,
+            "the 0.4 that showed in (b, y) before the delete must survive it"
+        );
+        assert_resolved_matches_across_mode_combos(
+            &before,
+            &d,
+            rid,
+            &[&[("theme", "a"), ("brand", "x")], &[("theme", "a"), ("brand", "y")], &[("theme", "b"), ("brand", "x")], &[("theme", "b"), ("brand", "y")]],
+            "a hop inside one collection that aliases to different variables per mode stays exact in every combination",
+        );
+        assert_eq!(visits, 4, "brand is reached through two variables by way of the hop, so the modes are crossed: 2 x 2 x 1");
+    }
+
+    #[test]
+    fn delete_style_counts_a_fallback_when_the_style_variable_hops_inside_one_collection_to_different_variables_per_mode() {
+        let mut d = Document::new("t");
+        d.add_page("p");
+        d.variable_collections.insert("own".into(), mode_collection("own", &["o1", "o2"], "o1", &["v_own"]));
+        d.variable_collections.insert("theme".into(), mode_collection("theme", &["a", "b"], "a", &["v_sty", "v_hop"]));
+        d.variable_collections.insert("brand".into(), mode_collection("brand", &["x", "y"], "x", &["v_sa", "v_sb"]));
+        let tint = |alpha: u8| VariableValue::Color(Color::rgba(200, 100, 50, alpha));
+        d.variables.insert("v_own".into(), mode_variable("v_own", "own", VariableKind::Color, &[("o1", tint(128)), ("o2", tint(255))]));
+        d.variables.insert(
+            "v_sty".into(),
+            mode_variable("v_sty", "theme", VariableKind::Number, &[("a", VariableValue::Alias("v_hop".into())), ("b", VariableValue::Alias("v_hop".into()))]),
+        );
+        d.variables.insert(
+            "v_hop".into(),
+            mode_variable("v_hop", "theme", VariableKind::Number, &[("a", VariableValue::Alias("v_sa".into())), ("b", VariableValue::Alias("v_sb".into()))]),
+        );
+        d.variables.insert(
+            "v_sa".into(),
+            mode_variable("v_sa", "brand", VariableKind::Number, &[("x", VariableValue::Number(40.0)), ("y", VariableValue::Number(40.0))]),
+        );
+        d.variables.insert(
+            "v_sb".into(),
+            mode_variable("v_sb", "brand", VariableKind::Number, &[("x", VariableValue::Number(40.0)), ("y", VariableValue::Number(70.0))]),
+        );
+        let rid = add_surface_layer(&mut d, "v_own", "v_sty", &[("own", "o1"), ("theme", "a"), ("brand", "x")]);
+
+        let before = d.clone();
+        take_style_mode_visits();
+        let (cmd, fb) = delete_style_with_fallbacks(&d, "Surface").unwrap();
+        let visits = take_style_mode_visits();
+        assert_eq!(fb, vec![(rid, "fills/0/opacity".to_string())], "the style value is 70 in (b, y) and 40 elsewhere where it wins, so the layer is counted");
+        let mut h = History::default();
+        run(&mut d, &mut h, Ok(cmd));
+
+        assert!(!d.get(rid).unwrap().variables.bindings.contains_key("fills/0/opacity"), "the style binding is baked, not moved");
+        assert_resolved_matches_across_mode_combos(
+            &before,
+            &d,
+            rid,
+            &[
+                &[("own", "o1"), ("theme", "a"), ("brand", "x")],
+                &[("own", "o2"), ("theme", "a"), ("brand", "x")],
+                &[("own", "o2"), ("theme", "a"), ("brand", "y")],
+                &[("own", "o2"), ("theme", "b"), ("brand", "x")],
+            ],
+            "the delete-time look and the modes where the style value is 40 stay exact",
+        );
+        assert_eq!(visits, 8, "the style variable reaches brand through two variables by way of the hop, so the modes are crossed: 2 x 2 x 2");
+    }
+
+    #[test]
+    fn animation_style_apply_update_and_detach_links_and_updates_timelines() {
+        let mut d = Document::new("t");
+        let p = d.add_page("p");
+        let id1 = d.alloc_id();
+        let mut n1 = Node::frame(id1, Rect::new(0.0, 0.0, 100.0, 100.0));
+        let tl1 = Timeline { autoplay: false, ..Timeline::new("tl:1", 1_000_000) };
+        n1.motion = Some(Box::new(NodeMotion {
+            timelines: vec![tl1.clone()],
+            tracks: Vec::new(),
+            assignments: vec![TimelineAssignment { timeline: "tl:1".into(), containing: "tl:1".into(), offset_us: 0, disabled: false, autoplay: false }],
+        }));
+        let f1 = d.insert(p, n1).unwrap();
+        let id2 = d.alloc_id();
+        let f2 = d.insert(p, Node::frame(id2, Rect::new(120.0, 0.0, 100.0, 100.0))).unwrap();
+
+        let mut h = History::default();
+        let (key, cmd) = create_style_from_node(&d, f1, StyleProperty::Animation, Some("Motion/Pulse")).unwrap();
+        run(&mut d, &mut h, Ok(cmd));
+        assert_eq!(key, "Motion/Pulse");
+        assert_eq!(d.style_meta[&key].property, StyleProperty::Animation);
+        assert_eq!(d.get(f1).unwrap().style_refs.get("animation").map(String::as_str), Some("Motion/Pulse"));
+
+        let cmd = apply_style(&d, &[f2], &key);
+        run(&mut d, &mut h, cmd);
+        let f2_node = d.get(f2).unwrap();
+        assert_eq!(f2_node.style_refs.get("animation").map(String::as_str), Some("Motion/Pulse"));
+        let f2_motion = f2_node.motion.as_deref().expect("applying animation style populates motion on target layer");
+        assert_eq!(f2_motion.timelines, vec![tl1]);
+        assert_eq!(f2_motion.assignments.len(), 1);
+        assert_eq!(f2_motion.assignments[0].timeline, "tl:1");
+
+        let tl2 = Timeline { autoplay: true, ..Timeline::new("tl:1", 500_000) };
+        let cmd = update_style(&d, &key, Style::Animation(vec![tl2.clone()]));
+        run(&mut d, &mut h, cmd);
+        for id in [f1, f2] {
+            let m = d.get(id).unwrap().motion.as_deref().unwrap();
+            assert_eq!(m.timelines, vec![tl2.clone()]);
+            assert!(m.assignments.iter().any(|a| a.timeline == "tl:1" && a.autoplay));
+        }
+
+        let cmd = detach_style(&d, &[f2], StyleProperty::Animation);
+        run(&mut d, &mut h, cmd);
+        assert!(!d.get(f2).unwrap().style_refs.contains_key("animation"));
+        assert_eq!(d.get(f2).unwrap().motion.as_deref().unwrap().timelines, vec![tl2]);
+    }
+
+    #[test]
+    fn legacy_json_without_animation_styles_loads_unchanged() {
+        let mut old_doc = Document::new("legacy");
+        let p = old_doc.add_page("Page 1");
+        let fid = old_doc.alloc_id();
+        let mut frame = Node::frame(fid, Rect::new(0.0, 0.0, 200.0, 120.0));
+        frame.effects.push(shadow(4.0));
+        let fid = old_doc.insert(p, frame).unwrap();
+        old_doc.styles.insert("fx_card".into(), Style::Effect(vec![shadow(4.0)]));
+        old_doc.style_meta.insert("fx_card".into(), StyleMeta { name: "Elevation/Card".into(), property: StyleProperty::Effect, ..Default::default() });
+        old_doc.styles.insert("grid_12".into(), Style::Grid(vec![cols(12)]));
+        old_doc.style_meta.insert("grid_12".into(), StyleMeta { name: "Layout/12 col".into(), property: StyleProperty::Grid, ..Default::default() });
+
+        let raw_json = old_doc.to_json().unwrap();
+        assert!(!raw_json.contains("Animation"), "pre-animation native JSON has no Animation variant");
+        let loaded = Document::from_json(&raw_json).unwrap();
+        assert_eq!(loaded.styles, old_doc.styles);
+        assert_eq!(loaded.style_meta, old_doc.style_meta);
+        assert_eq!(loaded.get(fid).unwrap().effects, vec![shadow(4.0)]);
+        assert!(loaded.get(fid).unwrap().motion.is_none());
     }
 }

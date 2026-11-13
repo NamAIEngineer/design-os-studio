@@ -4,8 +4,10 @@
 pub trait Key: std::hash::Hash + std::fmt::Debug {}
 impl<T: std::hash::Hash + std::fmt::Debug> Key for T {}
 
+pub mod clamp;
 pub mod field;
 pub mod field_tab;
+pub mod kit;
 pub mod menu;
 pub mod picker;
 pub mod popover;
@@ -34,23 +36,30 @@ pub fn text_width(p: &Painter, s: &str, font: &FontId) -> f32 {
     p.layout_no_wrap(s.to_string(), font.clone(), Color32::WHITE).size().x
 }
 
-/// Shortens `s` with an ellipsis so that it fits `max_w`.
-pub fn elide(p: &Painter, s: &str, font: &FontId, max_w: f32) -> String {
-    if text_width(p, s, font) <= max_w {
-        return s.to_string();
+pub(crate) fn elide_with(mut width_of: impl FnMut(&str) -> f32, s: &str, max_w: f32) -> (String, f32) {
+    let full_w = width_of(s);
+    if full_w <= max_w {
+        return (s.to_string(), full_w);
     }
     let chars: Vec<char> = s.chars().collect();
     let (mut lo, mut hi) = (0usize, chars.len());
     while lo < hi {
         let mid = (lo + hi).div_ceil(2);
         let cand: String = chars[..mid].iter().collect::<String>() + "…";
-        if text_width(p, &cand, font) <= max_w {
+        if width_of(&cand) <= max_w {
             lo = mid;
         } else {
             hi = mid - 1;
         }
     }
-    chars[..lo].iter().collect::<String>() + "…"
+    let out = chars[..lo].iter().collect::<String>() + "…";
+    let w = width_of(&out);
+    (out, w)
+}
+
+/// Shortens `s` with an ellipsis so that it fits `max_w`.
+pub fn elide(p: &Painter, s: &str, font: &FontId, max_w: f32) -> String {
+    elide_with(|cand| text_width(p, cand, font), s, max_w).0
 }
 
 pub fn hline(p: &Painter, x0: f32, x1: f32, y: f32, color: Color32) {
@@ -61,56 +70,23 @@ pub fn vline(p: &Painter, x: f32, y0: f32, y1: f32, color: Color32) {
     p.rect_filled(Rect::from_min_max(Pos2::new(x, y0), Pos2::new(x + theme::BORDER_WIDTH, y1)), 0.0, color);
 }
 
-/// Layered soft shadow (approximates a CSS box-shadow with blur).
-pub fn shadow(p: &Painter, rect: Rect, radius: u8, offset: Vec2, blur: f32, color: Color32) {
-    let steps = (blur / 1.5).ceil().max(1.0) as i32;
-    for i in (0..steps).rev() {
-        let t = i as f32 / steps as f32;
-        let grow = blur * t;
-        let a = (color.a() as f32 * (1.0 - t) * (1.0 - t) / steps as f32 * 2.0).clamp(0.0, 255.0) as u8;
-        let c = Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), a);
-        p.rect_filled(rect.translate(offset).expand(grow), CornerRadius::same(radius.saturating_add(grow as u8)), c);
-    }
+/// Floating chrome draws no shadow. The arguments stay so existing callers compile.
+pub fn shadow(_p: &Painter, _rect: Rect, _radius: u8, _offset: Vec2, _blur: f32, _color: Color32) {}
+
+/// Floating chrome draws no shadow.
+pub fn elevation_shadow(_p: &Painter, _rect: Rect, _radius: u8) {}
+
+/// Floating chrome draws no shadow.
+pub fn elevation_400(_p: &Painter, _rect: Rect, _radius: u8) {}
+
+/// Menu chrome. The caller's radius is ignored; the surface uses the frame radius.
+pub fn menu_panel(p: &Painter, rect: Rect, _radius: u8) {
+    kit::menu_surface(p, rect);
 }
 
-/// Elevation 200 style shadow stack used by menus/popovers.
-pub fn elevation_shadow(p: &Painter, rect: Rect, radius: u8) {
-    shadow(p, rect, radius, Vec2::new(0.0, 3.0), 8.0, theme::SHADOW_COLOR);
-    shadow(p, rect, radius, Vec2::new(0.0, 1.0), 3.0, theme::SHADOW_COLOR_STRONG);
-}
-
-/// Elevation 400 (menus): two drop shadows plus a half-pixel inner highlight ring
-/// and a fainter top edge highlight, drawn over the panel fill by `menu_panel`.
-pub fn elevation_400(p: &Painter, rect: Rect, radius: u8) {
-    shadow(p, rect, radius, Vec2::new(0.0, 2.0), 5.0, theme::ELEVATION_400_SHADOW);
-    shadow(p, rect, radius, Vec2::new(0.0, 10.0), 16.0, theme::ELEVATION_400_SHADOW);
-}
-
-/// Panel chrome of a menu: shadow, fill, 0.5px inset ring.
-pub fn menu_panel(p: &Painter, rect: Rect, radius: u8) {
-    elevation_400(p, rect, radius);
-    p.rect_filled(rect, theme::cr(radius), theme::BG_MENU);
-    p.rect_stroke(rect, theme::cr(radius), Stroke::new(1.0, theme::ELEVATION_400_RING), StrokeKind::Inside);
-    p.line_segment(
-        [Pos2::new(rect.left() + radius as f32, rect.top() + 0.5), Pos2::new(rect.right() - radius as f32, rect.top() + 0.5)],
-        Stroke::new(1.0, theme::ELEVATION_400_TOP),
-    );
-}
-
-/// Background for icon-like buttons: hover / pressed / selected states.
+/// Icon-button fill and keyboard ring. The caller owns the corner radius and the glyph.
 pub fn button_bg(p: &Painter, rect: Rect, r: &Response, selected: bool, radius: CornerRadius) {
-    let fill = if selected {
-        theme::BG_SELECTED
-    } else if r.is_pointer_button_down_on() {
-        theme::BG_PRESSED
-    } else if r.hovered() {
-        theme::BG_HOVER
-    } else {
-        Color32::TRANSPARENT
-    };
-    if fill != Color32::TRANSPARENT {
-        p.rect_filled(rect, radius, fill);
-    }
+    kit::paint_icon_bg(p, rect, r, selected, radius);
 }
 
 /// Paints `icon` centered in `boxr` (a button or field slot). Under test the box is
@@ -167,25 +143,44 @@ pub fn field_text(p: &Painter, rect: Rect, dx: f32, pad_r: f32, s: &str, font: F
 
 /// Square icon button used throughout the panels (24px by default).
 pub fn icon_button(ui: &mut Ui, rect: Rect, id: impl crate::widgets::Key, icon: Icon, selected: bool, tip: &str) -> Response {
-    let r = ui.interact(rect, ui.id().with(id), Sense::click());
-    let p = ui.painter();
-    button_bg(p, rect, &r, selected, theme::cr(theme::RADIUS_CONTROL));
-    let col = if selected {
-        theme::ICON_SELECTED
-    } else if r.hovered() {
-        theme::ICON
-    } else {
-        theme::ICON_SECONDARY
-    };
-    paint_icon_in(p, rect, icon, 16.0, col);
+    let r = kit::button_icon(ui, rect, id, icon, kit::Hierarchy::Icon, kit::Size::Xs, ui.is_enabled(), selected);
     if !tip.is_empty() {
         return r.on_hover_text(tip);
     }
     r
 }
 
-/// Checkerboard-backed color swatch.
+thread_local! {
+    static DOCUMENT_PROFILE: std::cell::Cell<designos_doc::ColorProfile> = const { std::cell::Cell::new(designos_doc::ColorProfile::Srgb) };
+}
+
+/// Sets the colour profile of the document the panels are drawing for (once per frame, from the shell).
+pub fn set_document_profile(profile: designos_doc::ColorProfile) {
+    DOCUMENT_PROFILE.with(|c| c.set(profile));
+}
+
+/// A document colour (numbers in the document's profile) as the canvas shows it on screen: converted to
+/// sRGB for a Display P3 document, untouched otherwise.
+pub fn document_color32(c: Color32) -> Color32 {
+    let profile = DOCUMENT_PROFILE.with(std::cell::Cell::get);
+    if profile.is_srgb() {
+        return c;
+    }
+    let [r, g, b, a] = c.to_srgba_unmultiplied();
+    let s = profile.to_srgb(&designos_doc::Color { r: f32::from(r) / 255.0, g: f32::from(g) / 255.0, b: f32::from(b) / 255.0, a: 1.0 });
+    let q = |v: f32| (v * 255.0).round().clamp(0.0, 255.0) as u8;
+    Color32::from_rgba_unmultiplied(q(s.r), q(s.g), q(s.b), a)
+}
+
+/// Checkerboard-backed color swatch. A document colour is drawn as the canvas shows it.
 pub fn swatch(p: &Painter, rect: Rect, color: Color32) {
+    swatch_focused(p, rect, color, false);
+}
+
+/// A swatch inside a control that holds keyboard focus: the control passes its own focus, so the swatch never takes a click.
+#[cfg_attr(not(test), allow(dead_code))]
+pub fn swatch_focused(p: &Painter, rect: Rect, color: Color32, focused: bool) {
+    let color = document_color32(color);
     let r = theme::cr(theme::SWATCH_RADIUS);
     p.rect_filled(rect, r, theme::CHECKER_A);
     if color.a() < 255 {
@@ -194,11 +189,13 @@ pub fn swatch(p: &Painter, rect: Rect, color: Color32) {
         p.rect_filled(Rect::from_min_size(rect.min + Vec2::new(h, h), Vec2::new(h, h)), 0.0, theme::CHECKER_B);
     }
     p.rect_filled(rect, r, color);
-    p.rect_stroke(rect, r, Stroke::new(1.0, theme::BORDER_TRANSLUCENT), StrokeKind::Inside);
+    kit::swatch_ring(p, rect, false, focused);
 }
 
 /// Filled circle swatch with a thin translucent ring; several colours blend along the diagonal.
 pub fn swatch_circle(p: &Painter, c: Pos2, r: f32, colors: &[Color32]) {
+    let shown: Vec<Color32> = colors.iter().map(|c| document_color32(*c)).collect();
+    let colors = shown.as_slice();
     match colors {
         [] => {}
         [one] => {
@@ -225,7 +222,8 @@ pub fn swatch_circle(p: &Painter, c: Pos2, r: f32, colors: &[Color32]) {
             p.add(egui::Shape::mesh(mesh));
         }
     }
-    p.circle_stroke(c, r - 0.5, Stroke::new(1.0, theme::BORDER_TRANSLUCENT));
+    let edge = kit::swatch_look(kit::State::Default);
+    p.circle_stroke(c, r - 0.5, Stroke::new(edge.border_w, edge.border));
 }
 
 /// Sets the AccessKit role and accessible name on `id` when AccessKit is active.
@@ -242,13 +240,53 @@ pub fn labelled(ui: &Ui, id: Id, role: egui::accesskit::Role, name: &str) {
     });
 }
 
-/// Test hook: remembers where a named widget was drawn so UI tests can find it.
+/// Relaxed flag turning on `record` pass listing in release builds (`--layout-json`).
+pub static RECORDING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+thread_local! {
+    static CURRENT_PASS_NAMES: std::cell::RefCell<Vec<(String, Rect)>> = const { std::cell::RefCell::new(Vec::new()) };
+    static LAST_PASS_NAMES: std::cell::RefCell<Vec<(String, Rect)>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Moves the current pass's recorded `(name, rect)` pairs into `last_pass_names`.
+pub fn finish_pass_records() {
+    CURRENT_PASS_NAMES.with(|cur| {
+        LAST_PASS_NAMES.with(|last| {
+            *last.borrow_mut() = std::mem::take(&mut *cur.borrow_mut());
+        });
+    });
+}
+
+/// Returns the `(name, rect)` pairs recorded during the last completed pass.
+#[allow(dead_code)]
+pub fn last_pass_names() -> Vec<(String, Rect)> {
+    LAST_PASS_NAMES.with(|last| last.borrow().clone())
+}
+
+/// Clears any in-progress pass records and `last_pass_names` on the current thread.
+#[allow(dead_code)]
+pub fn clear_pass_records() {
+    CURRENT_PASS_NAMES.with(|cur| cur.borrow_mut().clear());
+    LAST_PASS_NAMES.with(|last| last.borrow_mut().clear());
+}
+
+/// Test hook: remembers where a named widget was drawn so UI tests and layout snapshots can find it.
 #[cfg(test)]
 pub fn record(ui: &Ui, name: &str, rect: Rect) {
     if RECORD_DISABLED.with(std::cell::Cell::get) {
         return;
     }
+    let _ = RECORDING.load(std::sync::atomic::Ordering::Relaxed);
+    let global_rect = ui.ctx().layer_transform_to_global(ui.layer_id()).map_or(rect, |t| t * rect);
     ui.ctx().data_mut(|d| d.insert_temp(Id::new(("test-rect", name.to_string())), rect));
+    CURRENT_PASS_NAMES.with(|cur| cur.borrow_mut().push((name.to_string(), global_rect)));
+}
+
+/// True when [`record`] will store the widget's name and rect on this pass.
+#[cfg(test)]
+#[inline]
+pub fn recording() -> bool {
+    !RECORD_DISABLED.with(std::cell::Cell::get)
 }
 
 #[cfg(test)]
@@ -280,24 +318,51 @@ impl Drop for RecordDisabled {
 }
 #[cfg(not(test))]
 #[inline]
-pub fn record(_ui: &Ui, _name: &str, _rect: Rect) {}
+pub fn record(ui: &Ui, name: &str, rect: Rect) {
+    if RECORDING.load(std::sync::atomic::Ordering::Relaxed) {
+        let global_rect = ui.ctx().layer_transform_to_global(ui.layer_id()).map_or(rect, |t| t * rect);
+        CURRENT_PASS_NAMES.with(|cur| cur.borrow_mut().push((name.to_string(), global_rect)));
+    }
+}
+
+/// True when [`record`] will store the widget's name and rect on this pass.
+#[cfg(not(test))]
+#[inline]
+pub fn recording() -> bool {
+    RECORDING.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Like [`record`], formatting `name` lazily only when [`recording`] is active so release frames
+/// with `RECORDING = false` do not allocate.
+#[inline]
+pub fn record_with<S: AsRef<str>>(ui: &Ui, name: impl FnOnce() -> S, rect: Rect) {
+    if recording() {
+        let s = name();
+        record(ui, s.as_ref(), rect);
+    }
+}
 
 pub use designos_export::util::fmt_num;
+
+/// Display string for a numeric inspector field. Same formatter `num_field` uses.
+pub fn numeric_field_value(v: f32) -> String {
+    fmt_num(v)
+}
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// Value text in a 24px field sits on a baseline 16px below the field's top edge
-    /// (Figma: 11px Inter in a 16px line box centred in the field), at any pixel ratio.
+    /// Value text in a field sits on a baseline 0.3638 em below the field's centre line
+    /// (Inter's centre-to-baseline distance), at any pixel ratio.
     #[test]
-    fn field_text_baseline_is_16px_below_the_top() {
+    fn field_text_baseline_is_centred_in_the_field() {
         for ppp in [1.0f32, 2.0] {
             let ctx = egui::Context::default();
             crate::theme::apply(&ctx);
             crate::theme::install_fonts(&ctx);
             let mut baseline = None;
-            let field = Rect::from_min_size(Pos2::new(40.0, 100.0), Vec2::new(88.0, 24.0));
+            let field = Rect::from_min_size(Pos2::new(40.0, 100.0), Vec2::new(88.0, theme::FIELD_HEIGHT));
             let mut raw = egui::RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(400.0, 300.0))), ..Default::default() };
             raw.viewports.entry(egui::ViewportId::ROOT).or_default().native_pixels_per_point = Some(ppp);
             for _ in 0..2 {
@@ -311,7 +376,8 @@ mod tests {
                 }
             }
             let b = baseline.expect("text painted");
-            assert!((b - (field.top() + 16.0)).abs() <= 0.5 / ppp + 1e-3, "baseline {b} at ppp {ppp}");
+            let expected = field.center().y + 0.3638 * theme::FONT_SIZE_BODY;
+            assert!((b - expected).abs() <= 0.5 / ppp + 1e-3, "baseline {b} at ppp {ppp}, expected {expected}");
         }
     }
 
@@ -322,5 +388,28 @@ mod tests {
         assert_eq!(fmt_num(-0.001), "0");
         assert_eq!(fmt_num(1.239), "1.24");
         assert_eq!(fmt_num(0.0), "0");
+    }
+
+    /// 1b: two calls are listed; none under `RecordDisabled`; the next pass starts empty.
+    #[test]
+    fn record_hook_lists_every_name_of_the_pass() {
+        clear_pass_records();
+        let ctx = egui::Context::default();
+        let r1 = Rect::from_min_size(Pos2::new(10.0, 20.0), Vec2::new(30.0, 40.0));
+        let r2 = Rect::from_min_size(Pos2::new(50.0, 60.0), Vec2::new(70.0, 80.0));
+
+        let raw = egui::RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(400.0, 300.0))), ..Default::default() };
+        let _ = ctx.run_ui(raw.clone(), |ui| {
+            record(ui, "alpha", r1);
+            record(ui, "beta", r2);
+            let _disabled = RecordDisabled::begin();
+            record(ui, "ignored", r1);
+        });
+        finish_pass_records();
+        assert_eq!(last_pass_names(), vec![("alpha".to_string(), r1), ("beta".to_string(), r2)], "two calls must be listed and RecordDisabled call ignored");
+
+        let _ = ctx.run_ui(raw, |_ui| {});
+        finish_pass_records();
+        assert!(last_pass_names().is_empty(), "the next pass with no record calls must start empty");
     }
 }

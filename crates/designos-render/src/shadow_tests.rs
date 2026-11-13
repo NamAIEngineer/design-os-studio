@@ -23,8 +23,9 @@ struct Case {
 
 /// Silhouette closure mirroring `Renderer::draw_silhouette` for a solid
 /// rounded rectangle.
-fn sil_for(c: &Case) -> impl Fn(&mut sk::Pixmap, f32, f32, f32, bool) + '_ {
-    move |pm, dx, dy, grow, opaque| {
+fn sil_for(c: &Case) -> impl Fn(&mut sk::Pixmap, f32, f32, f32, d::SilhouetteMode) + '_ {
+    move |pm, dx, dy, grow, mode| {
+        let opaque = mode.ignores_alpha();
         let path = rounded_rect(c.w, c.h, [c.r; 4]).unwrap();
         let ts = sk::Transform::from_row(c.scale, 0.0, 0.0, c.scale, c.x, c.y).post_translate(dx, dy);
         let black = |a: f32| {
@@ -54,13 +55,14 @@ fn run(c: &Case, fast: bool) -> sk::Pixmap {
     let bbox = (c.x, c.y, c.x + dw, c.y + dh);
     if fast {
         let rr = RRect { x: c.x, y: c.y, w: dw, h: dh, r: c.r.min(c.w.min(c.h) / 2.0) * c.scale };
-        if !drop_shadow_rrect(&mut target, None, rr, c.scale, &color, offset, c.radius, c.spread, c.show_behind, 1.0, c.fill_alpha, &sil) {
+        if !drop_shadow_rrect(&mut target, None, rr, c.scale, &color, offset, c.radius, c.spread, c.show_behind, d::BlendMode::Normal, 1.0, c.fill_alpha, &sil)
+        {
             // declined (sigma below the blur threshold): the generic path draws
             return run(c, false);
         }
     } else {
         let reference = |pm: &mut sk::Pixmap, s: f32, _o: (i32, i32)| gaussian_blur_reference(pm, s);
-        drop_shadow_with(&reference, &mut target, None, bbox, c.scale, &color, offset, c.radius, c.spread, c.show_behind, 1.0, &sil);
+        drop_shadow_with(&reference, &mut target, None, bbox, c.scale, &color, offset, c.radius, c.spread, c.show_behind, d::BlendMode::Normal, 1.0, &sil);
     }
     target
 }
@@ -75,7 +77,7 @@ fn delta(a: &sk::Pixmap, b: &sk::Pixmap, c: &Case) -> u8 {
     let mut skip = vec![false; w * h];
     if !c.show_behind {
         let mut node = sk::Pixmap::new(w as u32, h as u32).unwrap();
-        sil_for(c)(&mut node, 0.0, 0.0, 0.0, true);
+        sil_for(c)(&mut node, 0.0, 0.0, 0.0, d::SilhouetteMode::Knockout);
         for y in 0..h {
             for x in 0..w {
                 let al = node.data()[(y * w + x) * 4 + 3];
@@ -171,7 +173,7 @@ fn identical_shadows_hit_the_cache() {
         };
         let sil = sil_for(&c);
         let rr = RRect { x: c.x, y: c.y, w: c.w, h: c.h, r: c.r };
-        assert!(drop_shadow_rrect(&mut target, None, rr, 1.0, &color, d::Vec2::new(0.0, 4.0), radius, 0.0, true, 1.0, 1.0, &sil));
+        assert!(drop_shadow_rrect(&mut target, None, rr, 1.0, &color, d::Vec2::new(0.0, 4.0), radius, 0.0, true, d::BlendMode::Normal, 1.0, 1.0, &sil));
     }
     assert_eq!(thread_patch_builds() - before, 1, "20 identical shadows must build one patch");
 }
@@ -183,4 +185,31 @@ fn patch_size_independent_of_shape_size() {
     let small = patch_dims(10.0, 410.0, 25, 40).unwrap();
     let big = patch_dims(10.0, 4010.0, 25, 40).unwrap();
     assert_eq!(small, big);
+}
+
+#[test]
+fn shader_paint_has_zero_silhouette_alpha() {
+    let shader_paint = d::Paint { kind: d::PaintKind::Shader(d::ShaderRef::default()), opacity: 1.0, visible: true, blend: d::BlendMode::Normal };
+    assert_eq!(shader_paint.silhouette_alpha(), 0.0);
+
+    let mut doc = d::Document::new("shader-sil");
+    let page = doc.add_page("p");
+    doc.get_mut(page).unwrap().kind = d::NodeKind::Page { background: d::Color::TRANSPARENT };
+    let nid = doc.alloc_id();
+    let mut rect = d::Node::rectangle(nid, d::Rect::new(20.0, 20.0, 60.0, 60.0));
+    rect.fills = vec![shader_paint];
+    rect.effects = vec![d::Effect::DropShadow {
+        color: d::Color::BLACK,
+        offset: d::Vec2::new(8.0, 8.0),
+        radius: 6.0,
+        spread: 0.0,
+        visible: true,
+        show_behind: false,
+        blend: d::BlendMode::Normal,
+    }];
+    doc.insert(page, rect).unwrap();
+
+    let mut pm = sk::Pixmap::new(120, 120).unwrap();
+    crate::render_page(&doc, page, &crate::Viewport::default(), &mut pm);
+    assert!(pm.data().iter().all(|&b| b == 0), "shader-only fill must not cast a drop shadow or emit fill pixels");
 }

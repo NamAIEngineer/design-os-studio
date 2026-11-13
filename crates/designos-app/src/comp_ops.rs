@@ -39,6 +39,7 @@ fn ids_of(doc: &Document, cmd: &Command, out: &mut Vec<NodeId>) {
         | Command::SetVariables { .. }
         | Command::SetGuides { .. }
         | Command::SetPrototypeDevice { .. }
+        | Command::SetColorProfile { .. }
         | Command::SetCheckDesignsSettings(_)
         | Command::SetComments { .. }
         | Command::SetLibraryState { .. }
@@ -107,21 +108,45 @@ pub fn record_overrides(doc: &Document, before: &BTreeMap<NodeId, Node>, cmds: &
     }
 }
 
+fn collect_rename_companions(doc: &Document, cmd: &Command, out: &mut Vec<Command>) {
+    match cmd {
+        Command::Update { node } => {
+            if let Some(stored) = doc.get(node.id) {
+                out.extend(designos_doc::companion_component_rename_updates(doc, node.id, &stored.name, &node.name));
+            }
+        }
+        Command::Batch(cmds) => {
+            for c in cmds {
+                collect_rename_companions(doc, c, out);
+            }
+        }
+        _ => {}
+    }
+}
+
 /// Wraps `cmd` so that editing a main component also re-syncs its instances in
 /// the same undo step. Cascades through components nested in other components.
 pub fn with_sync(doc: &mut Document, cmd: Command) -> Command {
+    let mut companion_renames = Vec::new();
+    collect_rename_companions(doc, &cmd, &mut companion_renames);
     let mut ids = Vec::new();
     ids_of(doc, &cmd, &mut ids);
     let mut queue: Vec<NodeId> = ids.iter().filter_map(|i| owner_of(doc, *i)).collect();
-    if queue.is_empty() {
+    if queue.is_empty() && companion_renames.is_empty() {
         return cmd;
     }
-    let Ok(inv) = cmd.clone().apply(doc) else { return cmd };
+    let Ok(inv) = cmd.clone().apply_atomic(doc) else { return cmd };
     queue.extend(ids.iter().filter_map(|i| owner_of(doc, *i)));
     queue.sort();
     queue.dedup();
     let mut syncs = Vec::new();
     let mut invs = Vec::new();
+    for c in companion_renames {
+        if let Ok(i) = c.clone().apply_atomic(doc) {
+            invs.push(i);
+            syncs.push(c);
+        }
+    }
     let mut rounds = 0;
     while let Some(o) = queue.pop() {
         rounds += 1;
@@ -134,7 +159,7 @@ pub fn with_sync(doc: &mut Document, cmd: Command) -> Command {
         }
         let mut touched = Vec::new();
         ids_of(doc, &s, &mut touched);
-        let Ok(i) = s.clone().apply(doc) else { continue };
+        let Ok(i) = s.clone().apply_atomic(doc) else { continue };
         invs.push(i);
         syncs.push(s);
         for t in touched {
@@ -230,6 +255,16 @@ impl App {
     /// Component an instance was made from.
     pub fn main_of(&self, instance: NodeId) -> Option<NodeId> {
         self.doc.get(instance).and_then(instance_component).filter(|c| self.doc.get(*c).is_some())
+    }
+
+    /// Object-menu and context-menu wording for [`Self::create_component`].
+    /// Several top-level layers use Figma's plural; one layer stays singular.
+    pub fn create_component_label(&self) -> &'static str {
+        if self.top_selection().len() > 1 {
+            "Create multiple components"
+        } else {
+            "Create component"
+        }
     }
 
     /// Ctrl+Alt+K: turns the selection into main components.
@@ -356,6 +391,7 @@ impl App {
             if is_noop(&cmd) {
                 // Inside the component itself (or its descendants): fall back to the page.
                 if attempt == 0 {
+                    self.explain_instance_placed_outside(comp, parent);
                     parent = self.page;
                     continue;
                 }
@@ -404,6 +440,8 @@ impl App {
         }
         let cmd = create_instance(&mut self.doc, comp, slot, Vec2::ZERO);
         let Command::Insert { index, nodes, .. } = cmd else {
+            let refusal = crate::comp_cycle_refusal::insert_refusal(&self.doc, comp, slot);
+            self.explain_refusal(refusal);
             return None;
         };
         let id = nodes.first().map(|n| n.id);
@@ -427,18 +465,46 @@ impl App {
     /// Sets (or with `None` resets) a component property on an instance.
     pub fn set_instance_prop(&mut self, inst: NodeId, name: &str, value: Option<PropValue>) {
         let mut tx = Tx::new();
+        let refused = value.clone();
         let cmd = set_instance_prop(&mut self.doc, inst, name, value);
-        if self.push_cmd(&mut tx, cmd) {
+        if is_noop(&cmd) {
+            let refusal = refused.and_then(|v| designos_doc::prop_cycle_refusal(&self.doc, inst, name, &v));
+            self.explain_refusal(refusal);
+        } else if self.push_cmd(&mut tx, cmd) {
             self.refit_texts(&mut tx, inst);
             self.run_tx(tx);
         }
+    }
+
+    /// Sets (or with `None` resets) a component property on an instance nested in an outer instance: an edit made from
+    /// the outer instance's panel of exposed properties. Text that grew or shrank is refitted in the outer instance.
+    pub fn set_nested_instance_prop(&mut self, nested: NodeId, name: &str, value: Option<PropValue>) {
+        let mut tx = Tx::new();
+        let refused = value.clone();
+        let cmd = set_nested_instance_prop(&mut self.doc, nested, name, value);
+        if is_noop(&cmd) {
+            let refusal = refused.and_then(|v| designos_doc::prop_cycle_refusal(&self.doc, nested, name, &v));
+            self.explain_refusal(refusal);
+        } else if self.push_cmd(&mut tx, cmd) {
+            let outer = instance_root_of(&self.doc, nested).unwrap_or(nested);
+            self.refit_texts(&mut tx, outer);
+            self.run_tx(tx);
+        }
+    }
+
+    /// Sets whether a primary nested instance inside a main component exposes its properties on outer instances.
+    pub fn set_expose_nested_instance(&mut self, nested_inst: NodeId, expose: bool) {
+        self.comp_edit(|d| set_expose_nested_instance(d, nested_inst, expose));
     }
 
     /// Swaps an instance to another component.
     pub fn swap_instance(&mut self, inst: NodeId, comp: NodeId) {
         let mut tx = Tx::new();
         let cmd = swap_instance(&mut self.doc, inst, comp);
-        if self.push_cmd(&mut tx, cmd) {
+        if is_noop(&cmd) {
+            let refusal = crate::comp_cycle_refusal::swap_refusal(&self.doc, inst, comp);
+            self.explain_refusal(refusal);
+        } else if self.push_cmd(&mut tx, cmd) {
             self.run_tx(tx);
         }
     }
@@ -689,5 +755,131 @@ mod tests {
         assert!(!node.plugin_data.contains_key("pen:explicit_height"));
         assert!(node.component.overrides.contains(&OverrideField::Stroke));
         assert!(node.component.overrides.contains(&OverrideField::Size));
+    }
+
+    /// An app holding a 100x50 main component and `count` instances of it, none locked.
+    fn app_with_main_and_instances(count: usize) -> (App, NodeId, Vec<NodeId>) {
+        let mut doc = Document::new("aspect-lock");
+        let page = doc.add_page("Page 1");
+        let frame_id = doc.alloc_id();
+        let main = doc.insert(page, Node::frame(frame_id, designos_doc::Rect::new(0.0, 0.0, 100.0, 50.0))).unwrap();
+        create_component(&mut doc, main).apply(&mut doc).unwrap();
+        let mut instances = Vec::new();
+        for i in 0..count {
+            create_instance(&mut doc, main, page, Vec2::new(200.0 + 150.0 * i as f32, 0.0)).apply(&mut doc).unwrap();
+            instances.push(*doc.get(page).unwrap().children.last().unwrap());
+        }
+        (App::new(doc), main, instances)
+    }
+
+    /// A Card main holding a Stretch button instance, plus one Card instance
+    /// widened to 300 through the editor. Returns (button main, card main,
+    /// card instance, nested button instance).
+    fn app_with_widened_card_instance() -> (App, NodeId, NodeId, NodeId, NodeId) {
+        let mut doc = Document::new("nested-stretch");
+        let page = doc.add_page("Page 1");
+        let id = doc.alloc_id();
+        let btn = doc.insert(page, Node::frame(id, designos_doc::Rect::new(0.0, 300.0, 80.0, 40.0))).unwrap();
+        create_component(&mut doc, btn).apply(&mut doc).unwrap();
+        let id = doc.alloc_id();
+        let card = doc.insert(page, Node::frame(id, designos_doc::Rect::new(0.0, 0.0, 100.0, 100.0))).unwrap();
+        create_component(&mut doc, card).apply(&mut doc).unwrap();
+        create_instance(&mut doc, btn, card, Vec2::new(10.0, 10.0)).apply(&mut doc).unwrap();
+        let slot = doc.get(card).unwrap().children[0];
+        let mut sn = doc.get(slot).unwrap().clone();
+        sn.constraints = Constraints { horizontal: Constraint::Stretch, vertical: Constraint::Min };
+        Command::Update { node: Box::new(sn) }.apply(&mut doc).unwrap();
+        create_instance(&mut doc, card, page, Vec2::new(400.0, 0.0)).apply(&mut doc).unwrap();
+        let ci = *doc.get(page).unwrap().children.last().unwrap();
+        let si = doc.get(ci).unwrap().children[0];
+        let mut app = App::new(doc);
+        let transform = app.doc.get(ci).unwrap().transform;
+        let mut tx = Tx::new();
+        crate::ops::apply_resize(&mut app.doc, &mut tx.ed, ci, Vec2::new(300.0, 100.0), transform, true);
+        app.run_tx(tx);
+        (app, btn, card, ci, si)
+    }
+
+    #[test]
+    fn a_nested_stretch_instance_keeps_its_width_when_the_card_main_syncs() {
+        let (mut app, _btn, card, ci, si) = app_with_widened_card_instance();
+        let widened = app.doc.get(si).unwrap().size.x;
+        assert!(widened > 200.0, "fixture must widen the nested instance, got {widened}");
+        app.edit_nodes(&[card], |n| n.opacity = 0.5);
+        assert_eq!(app.doc.get(ci).unwrap().opacity, 0.5);
+        assert_eq!(app.doc.get(si).unwrap().size.x, widened, "an unrelated Card main edit must not reset the nested width");
+    }
+
+    #[test]
+    fn a_nested_stretch_instance_keeps_its_width_when_the_button_main_syncs() {
+        let (mut app, btn, _card, _ci, si) = app_with_widened_card_instance();
+        let widened = app.doc.get(si).unwrap().size.x;
+        app.edit_nodes(&[btn], |n| n.opacity = 0.5);
+        assert_eq!(app.doc.get(si).unwrap().opacity, 0.5);
+        assert_eq!(app.doc.get(si).unwrap().size.x, widened, "a Button main edit must not reset the nested width");
+    }
+
+    fn aspect_locked(app: &App, id: NodeId) -> bool {
+        app.doc.get(id).unwrap().lock_aspect
+    }
+
+    #[test]
+    fn an_instance_follows_a_change_of_its_main_aspect_lock() {
+        let (mut app, main, instances) = app_with_main_and_instances(1);
+        let inst = instances[0];
+        assert!(!aspect_locked(&app, inst));
+
+        app.edit_nodes(&[main], |n| n.lock_aspect = true);
+        assert!(aspect_locked(&app, inst), "locking the main must lock an instance that did not set its own lock");
+
+        app.edit_nodes(&[main], |n| n.lock_aspect = false);
+        assert!(!aspect_locked(&app, inst), "unlocking the main must unlock an instance that did not set its own lock");
+    }
+
+    #[test]
+    fn an_instance_that_set_its_own_aspect_lock_keeps_it_while_another_instance_follows_the_main() {
+        let (mut app, main, instances) = app_with_main_and_instances(2);
+        let (own, follower) = (instances[0], instances[1]);
+
+        app.edit_nodes(&[own], |n| n.lock_aspect = true);
+        assert!(aspect_locked(&app, own));
+        assert!(!aspect_locked(&app, follower));
+
+        app.edit_nodes(&[main], |n| n.lock_aspect = true);
+        assert!(aspect_locked(&app, follower), "the main's lock must reach the instance that has no lock of its own");
+        assert!(aspect_locked(&app, own));
+
+        app.edit_nodes(&[main], |n| n.lock_aspect = false);
+        assert!(!aspect_locked(&app, follower), "the main's unlock must reach the instance that has no lock of its own");
+        assert!(aspect_locked(&app, own), "an instance that set its own lock must keep it when the main is unlocked");
+
+        // The other direction: an instance that unlocked itself stays unlocked under a locked main.
+        app.edit_nodes(&[main], |n| n.lock_aspect = true);
+        app.edit_nodes(&[own], |n| n.lock_aspect = false);
+        app.edit_nodes(&[main], |n| n.lock_aspect = false);
+        app.edit_nodes(&[main], |n| n.lock_aspect = true);
+        assert!(!aspect_locked(&app, own), "an instance that unlocked itself must stay unlocked when the main is locked again");
+        assert!(aspect_locked(&app, follower));
+    }
+
+    #[test]
+    fn resetting_overrides_returns_an_instance_to_the_aspect_lock_of_its_main() {
+        let (mut app, main, instances) = app_with_main_and_instances(1);
+        let inst = instances[0];
+
+        app.edit_nodes(&[inst], |n| n.lock_aspect = true);
+        assert!(aspect_locked(&app, inst) && !aspect_locked(&app, main));
+        app.reset_node_overrides(inst, &OverrideField::ALL);
+        assert!(!aspect_locked(&app, inst), "reset must give an instance the lock of an unlocked main");
+
+        // Once reset, the instance follows the main again.
+        app.edit_nodes(&[main], |n| n.lock_aspect = true);
+        assert!(aspect_locked(&app, inst), "a reset instance follows the main's lock again");
+
+        // Reset also restores a locked main's value over an instance that unlocked itself.
+        app.edit_nodes(&[inst], |n| n.lock_aspect = false);
+        assert!(!aspect_locked(&app, inst));
+        app.reset_node_overrides(inst, &OverrideField::ALL);
+        assert!(aspect_locked(&app, inst), "reset must give an instance the lock of a locked main");
     }
 }

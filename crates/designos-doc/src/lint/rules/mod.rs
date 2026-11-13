@@ -129,6 +129,8 @@ pub struct ActiveRules {
     pub tiny_text: bool,
     pub detached_text_style: bool,
     pub detached_instance: bool,
+    pub component_property_variable: bool,
+    pub easing_variable: bool,
     pub default_layer_name: bool,
     pub deeply_nested: bool,
     pub empty_container: bool,
@@ -158,6 +160,8 @@ impl ActiveRules {
             tiny_text: config.is_enabled("tiny-text"),
             detached_text_style: config.is_enabled("detached-text-style"),
             detached_instance: config.is_enabled("detached-instance"),
+            component_property_variable: config.is_enabled("component-property-variable"),
+            easing_variable: config.is_enabled("easing-variable"),
             default_layer_name: config.is_enabled("default-layer-name"),
             deeply_nested: config.is_enabled("deeply-nested"),
             empty_container: config.is_enabled("empty-container"),
@@ -245,6 +249,44 @@ pub fn evaluate_node(ctx: &NodeEvalCtx<'_>, out: &mut Vec<Finding>) -> bool {
             ignored: false,
         });
     };
+
+    // A component property bound to a variable it cannot follow keeps its last value.
+    if active.component_property_variable && matches!(n.kind, NodeKind::Instance { .. }) {
+        for (name, _) in crate::prop_bindings_of(n) {
+            if let Some(problem) = crate::prop_binding_problem(doc, n.id, name) {
+                emit(
+                    "component-property-variable",
+                    Category::Components,
+                    n,
+                    ctx.page_bounds,
+                    format!("Property \"{name}\" keeps its last value: {problem}"),
+                    None,
+                    false,
+                );
+            }
+        }
+    }
+
+    // An easing variable bound to an unknown preset keeps its stored easing.
+    if active.easing_variable {
+        for key in n.variables.bindings.keys() {
+            if let Some(problem) = crate::easing_binding_problem(doc, n.id, key) {
+                emit(
+                    "easing-variable",
+                    Category::Tokens,
+                    n,
+                    ctx.page_bounds,
+                    format!("Easing binding \"{key}\" keeps its stored easing: {problem}"),
+                    None,
+                    false,
+                );
+            }
+        }
+    }
+    // An instance mirrored from its main is audited only through its property bindings.
+    if ctx.is_instance_mirror && !config.include_instances {
+        return false;
+    }
 
     // ------------------------------------------------------------------
     // 1. Parent-relative geometric rules: `overflow-parent`, `clipped-partial`, `clipped-full`
@@ -665,7 +707,7 @@ pub fn evaluate_node(ctx: &NodeEvalCtx<'_>, out: &mut Vec<Finding>) -> bool {
     }
 
     if active.non_4px_grid
-        && !matches!(n.kind, NodeKind::Text(_) | NodeKind::Vector { .. } | NodeKind::Line)
+        && !matches!(n.kind, NodeKind::Text(_) | NodeKind::Vector { .. } | NodeKind::Line | NodeKind::Connector(_))
         && (!is_grid_multiple(n.size.x, config.thresholds.grid_step) || !is_grid_multiple(n.size.y, config.thresholds.grid_step))
     {
         let step = config.thresholds.grid_step.max(1.0);
@@ -745,7 +787,7 @@ pub fn evaluate_node(ctx: &NodeEvalCtx<'_>, out: &mut Vec<Finding>) -> bool {
     if active.small_touch_target {
         let role = infer_role_hint(doc, n);
         let min_t = config.thresholds.min_touch_target;
-        if matches!(role, "button" | "input") && (n.size.x < min_t || n.size.y < min_t) {
+        if matches!(role, "button" | "input") && !matches!(n.kind, NodeKind::Connector(_)) && (n.size.x < min_t || n.size.y < min_t) {
             emit(
                 "small-touch-target",
                 Category::Accessibility,

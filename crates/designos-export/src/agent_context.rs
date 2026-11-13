@@ -16,7 +16,7 @@
 
 use designos_doc::{
     parse_variant_name, variant_name, Affine, Color, Document, DocumentKind, LayoutDirection, LibraryRef, Node, NodeId, NodeKind, PropKind, PropValue, Rect,
-    VariableValue, Vec2,
+    Variable, VariableValue, Vec2,
 };
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -38,10 +38,10 @@ pub const CAP_STYLE_TOKENS: usize = 200;
 pub const CAP_RULES_TOKENS: usize = 6_000;
 pub const CAP_SELECTION_TOKENS: usize = 300;
 
-/// Estimates token count using the project's `chars / 4` rule (`§3.1`).
+/// Estimates token count using the project's `chars / 4` rule (`§3.1`), ignoring `\r` so CRLF and LF count identically.
 #[inline]
 pub fn estimate_tokens(s: &str) -> usize {
-    s.chars().count().div_ceil(4)
+    s.chars().filter(|&c| c != '\r').count().div_ceil(4)
 }
 
 /// Formats `SystemTime` (or `SystemTime::now()`) as an UTC RFC 3339 timestamp (`YYYY-MM-DDTHH:MM:SSZ`).
@@ -177,6 +177,8 @@ pub fn xml_tag_name(kind: &NodeKind) -> &'static str {
         NodeKind::Connector(_) => "connector",
         NodeKind::ShapeWithText(_) => "shape-with-text",
         NodeKind::Stamp { .. } => "stamp",
+        NodeKind::Table(_) => "table",
+        NodeKind::TableCell(_) => "table-cell",
         NodeKind::Unknown { type_name } => {
             if type_name.eq_ignore_ascii_case("slice") {
                 "slice"
@@ -377,6 +379,24 @@ impl<'a> WalkCtx<'a> {
                 LayoutDirection::Grid => "grid",
             };
             attrs.push(("layout", dir.to_string()));
+        }
+        match &node.kind {
+            NodeKind::Table(t) => {
+                attrs.push(("rows", t.rows.len().to_string()));
+                attrs.push(("cols", t.cols.len().to_string()));
+            }
+            NodeKind::TableCell(c) => {
+                let index = |tracks: &[designos_doc::TableTrack], id| tracks.iter().position(|t| t.id == id);
+                if let Some(table) = node.parent.and_then(|p| self.doc.get(p)).and_then(|p| if let NodeKind::Table(t) = &p.kind { Some(t) } else { None }) {
+                    attrs.push(("row", index(&table.rows, c.row).map_or("?".to_string(), |i| i.to_string())));
+                    attrs.push(("col", index(&table.cols, c.col).map_or("?".to_string(), |i| i.to_string())));
+                    if let Some(m) = table.merges.iter().find(|m| m.row == c.row && m.col == c.col).filter(|m| m.row_span > 1 || m.col_span > 1) {
+                        attrs.push(("rowspan", m.row_span.to_string()));
+                        attrs.push(("colspan", m.col_span.to_string()));
+                    }
+                }
+            }
+            _ => {}
         }
         if let NodeKind::Instance { component, .. } = &node.kind {
             let (comp_name, variant_str) = resolve_instance_meta(self.doc, node, *component);
@@ -1136,28 +1156,30 @@ fn build_variables_section(doc: &Document, cap_tokens: usize) -> BootstrapSectio
     let mut truncated = false;
     let mut omitted_vars = 0usize;
 
-    for col in doc.variable_collections.values() {
+    // The summary names what the agent can use: a soft-deleted collection or variable stays in the document so
+    // bindings resolve, but it is not listed.
+    for col in doc.variable_collections.values().filter(|c| !c.is_soft_deleted()) {
+        let listed: Vec<&String> = col.variables.iter().filter(|vid| !doc.variables.get(*vid).is_some_and(|v| v.is_soft_deleted())).collect();
         let mode_names: Vec<&str> = col.modes.iter().map(|m| m.name.as_str()).collect();
         let default_mode_name = col.modes.iter().find(|m| m.id == col.default_mode).map(|m| m.name.as_str()).unwrap_or(col.default_mode.as_str());
-        let header =
-            format!("- Collection `{}` (modes: [{}], default: `{}`, count: {}):", col.name, mode_names.join(", "), default_mode_name, col.variables.len());
+        let header = format!("- Collection `{}` (modes: [{}], default: `{}`, count: {}):", col.name, mode_names.join(", "), default_mode_name, listed.len());
         let sep = if lines.is_empty() { 0 } else { 1 };
         if used_chars + sep + header.chars().count() > body_budget_chars {
             truncated = true;
-            omitted_vars += col.variables.len().max(1);
+            omitted_vars += listed.len().max(1);
             continue;
         }
         used_chars += sep + header.chars().count();
         lines.push(header);
 
-        for (i, vid) in col.variables.iter().enumerate() {
+        for (i, vid) in listed.iter().enumerate() {
             if i >= 20 {
-                let rem_in_col = col.variables.len() - 20;
+                let rem_in_col = listed.len() - 20;
                 omitted_vars += rem_in_col;
                 truncated = true;
                 break;
             }
-            if let Some(var) = doc.variables.get(vid) {
+            if let Some(var) = doc.variables.get(*vid) {
                 let val_str = var
                     .values
                     .get(&col.default_mode)
@@ -1167,7 +1189,7 @@ fn build_variables_section(doc: &Document, cap_tokens: usize) -> BootstrapSectio
                 let row = format!("  - `{}` = `{}`", var.name, val_str);
                 if used_chars + 1 + row.chars().count() > body_budget_chars {
                     truncated = true;
-                    omitted_vars += col.variables.len() - i;
+                    omitted_vars += listed.len() - i;
                     break;
                 }
                 used_chars += 1 + row.chars().count();
@@ -1177,10 +1199,11 @@ fn build_variables_section(doc: &Document, cap_tokens: usize) -> BootstrapSectio
     }
 
     // Also handle orphan variables if any collection map was empty
-    if doc.variable_collections.is_empty() && !doc.variables.is_empty() {
-        for (i, var) in doc.variables.values().enumerate() {
+    let orphans: Vec<&Variable> = doc.live_variables().collect();
+    if doc.variable_collections.is_empty() && !orphans.is_empty() {
+        for (i, var) in orphans.iter().enumerate() {
             if i >= 20 {
-                omitted_vars += doc.variables.len() - 20;
+                omitted_vars += orphans.len() - 20;
                 truncated = true;
                 break;
             }
@@ -1188,7 +1211,7 @@ fn build_variables_section(doc: &Document, cap_tokens: usize) -> BootstrapSectio
             let row = format!("- `{}` = `{}`", var.name, val_str);
             if used_chars + 1 + row.chars().count() > body_budget_chars {
                 truncated = true;
-                omitted_vars += doc.variables.len() - i;
+                omitted_vars += orphans.len() - i;
                 break;
             }
             used_chars += 1 + row.chars().count();
@@ -1441,7 +1464,9 @@ fn build_style_section(doc: &Document, current_page: Option<NodeId>, explicit_st
 }
 
 fn build_rules_section(rules: &str, cap_tokens: usize) -> BootstrapSection {
-    let body = rules.trim();
+    let normalized: std::borrow::Cow<'_, str> =
+        if rules.contains('\r') { std::borrow::Cow::Owned(rules.replace("\r\n", "\n").replace('\r', "\n")) } else { std::borrow::Cow::Borrowed(rules) };
+    let body = normalized.trim();
     if body.is_empty() {
         let content = "No rules pack was supplied; call designos_get_guidelines {\"topic\":\"rules\"}.".to_string();
         return BootstrapSection {
@@ -1685,6 +1710,42 @@ mod tests {
         doc.library.enabled.push(LibraryRef { id: "lib-core".into(), name: "EaseUI Core".into(), version: 2 });
 
         (doc, page, vec![sel1, sel2, sel3])
+    }
+
+    #[test]
+    fn variables_summary_leaves_out_soft_deleted_variables_and_collections() {
+        let (mut doc, page, _) = sample_tokens_doc();
+        let live_before = doc.variable_collections["col_brand"].variables.len();
+        let mut gone = doc.variables["v_bg"].clone();
+        gone.id = "v_gone".into();
+        gone.name = "color/gone/900".into();
+        gone.extensions.insert(designos_doc::SOFT_DELETED_EXTENSION_KEY.into(), true.into());
+        // Listed in the collection and not listed: neither shows.
+        let mut gone_listed = gone.clone();
+        gone_listed.id = "v_gone_listed".into();
+        gone_listed.name = "color/gone/listed".into();
+        doc.variable_collections.get_mut("col_brand").unwrap().variables.push("v_gone_listed".into());
+        let mut retired = doc.variable_collections["col_brand"].clone();
+        retired.id = "col_retired".into();
+        retired.name = "Retired Tokens".into();
+        retired.variables = vec!["v_gone_in_retired".into()];
+        retired.extensions.insert(designos_doc::SOFT_DELETED_EXTENSION_KEY.into(), true.into());
+        let mut gone_in_retired = gone.clone();
+        gone_in_retired.id = "v_gone_in_retired".into();
+        gone_in_retired.name = "color/gone/retired".into();
+        gone_in_retired.collection = "col_retired".into();
+        doc.variable_collections.insert("col_retired".into(), retired);
+        for v in [gone, gone_listed, gone_in_retired] {
+            doc.variables.insert(v.id.clone(), v);
+        }
+
+        let opts = BootstrapOptions { current_page_id: Some(page), ..BootstrapOptions::default() };
+        let boot = bootstrap(&doc, &opts, &doc.library.enabled, TEST_RULES_PACK);
+        let section = boot.sections.iter().find(|s| s.id == "variables").unwrap();
+        for gone in ["color/gone/900", "color/gone/listed", "color/gone/retired", "Retired Tokens"] {
+            assert!(!section.content.contains(gone), "`{gone}` must not be summarised:\n{}", section.content);
+        }
+        assert!(section.content.contains("color/bg/surface") && section.content.contains(&format!("count: {live_before})")), "{}", section.content);
     }
 
     #[test]

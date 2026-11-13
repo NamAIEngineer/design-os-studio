@@ -395,7 +395,8 @@ fn find_fill_collection<'a>(doc: &'a Document, node: &Node, bound_var_id: Option
         return None;
     }
     let target = match_color?;
-    for v in doc.variables.values() {
+    // Only a live variable names the collection to suggest from; a bound variable above resolves whether or not it is deleted.
+    for v in doc.live_variables() {
         if v.kind == VariableKind::Color {
             if let Some(c) = resolve_color_variable_at(doc, node.id, &v.id) {
                 if same_rgb(c, target) {
@@ -422,7 +423,7 @@ fn best_passing_fg_in_collection<'a>(
     required: f64,
 ) -> Option<(f64, &'a str)> {
     let mut best: Option<(f64, &'a str)> = None;
-    for v in doc.variables.values() {
+    for v in doc.live_variables() {
         if v.kind != VariableKind::Color || v.collection != collection || bound_var_id == Some(v.id.as_str()) {
             continue;
         }
@@ -446,55 +447,9 @@ fn best_passing_fg_in_collection<'a>(
     best
 }
 
-/// Searches `collection` for a colour variable (resolved at `backdrop_node_id`) that passes
-/// `required` when applied to the backdrop fill role under the current text `(raw_fg, text_alpha)`.
-#[allow(clippy::too_many_arguments)]
-fn best_passing_bg_in_collection<'a>(
-    doc: &'a Document,
-    backdrop_node_id: NodeId,
-    collection: &str,
-    bound_var_id: Option<&str>,
-    bg_paint_opacity: f32,
-    bg_node_opacity: f32,
-    under_bg: Color,
-    current_bg: Color,
-    raw_fg: Color,
-    text_alpha: f32,
-    required: f64,
-) -> Option<(f64, &'a str)> {
-    let mut best: Option<(f64, &'a str)> = None;
-    for v in doc.variables.values() {
-        if v.kind != VariableKind::Color || v.collection != collection || bound_var_id == Some(v.id.as_str()) {
-            continue;
-        }
-        let Some(cand_color) = resolve_color_variable_at(doc, backdrop_node_id, &v.id) else {
-            continue;
-        };
-        let cand_alpha = (cand_color.a * bg_paint_opacity * bg_node_opacity).clamp(0.0, 1.0);
-        let eff_cand_bg = Color {
-            r: cand_color.r * cand_alpha + under_bg.r * (1.0 - cand_alpha),
-            g: cand_color.g * cand_alpha + under_bg.g * (1.0 - cand_alpha),
-            b: cand_color.b * cand_alpha + under_bg.b * (1.0 - cand_alpha),
-            a: 1.0,
-        };
-        let eff_fg_on_cand = Color {
-            r: raw_fg.r * text_alpha + eff_cand_bg.r * (1.0 - text_alpha),
-            g: raw_fg.g * text_alpha + eff_cand_bg.g * (1.0 - text_alpha),
-            b: raw_fg.b * text_alpha + eff_cand_bg.b * (1.0 - text_alpha),
-            a: 1.0,
-        };
-        if contrast_ratio(eff_fg_on_cand, eff_cand_bg) >= required {
-            let de = cie76_delta_e(current_bg, eff_cand_bg);
-            if best.is_none_or(|(best_de, _)| de < best_de) {
-                best = Some((de, &v.name));
-            }
-        }
-    }
-    best
-}
-
-/// Suggests binding the failing text fill or parent backdrop fill to the closest passing variable
-/// in the same collection, scored in the role that would actually change (§3.4).
+/// Suggests binding the failing text fill to the closest passing variable in the same collection,
+/// scored in the role that would actually change (§3.4). Backdrop variables are not suggested:
+/// a finding has no separate parent target, so a parent `fills/*` path would be applied to text.
 pub fn suggest_passing_variable(doc: &Document, raw_node: &Node, resolved_n: &Node, fg: Color, bg: Color, required: f64) -> Option<FixSuggestion> {
     if doc.variables.is_empty() {
         return None;
@@ -516,71 +471,11 @@ pub fn suggest_passing_variable(doc: &Document, raw_node: &Node, resolved_n: &No
     let fg_match_color = (text_alpha >= 1.0 - 1e-4).then_some(raw_fg);
     let fg_candidate = find_fill_collection(doc, raw_node, bound_fg_var, raw_fg, fg_match_color)
         .and_then(|coll| best_passing_fg_in_collection(doc, raw_node.id, coll, bound_fg_var, paint_opacity, resolved_n.opacity, fg, bg, required))
-        .map(|(de, name)| (de, fg_prop, format!("#{}", fg.to_hex()), name));
+        .map(|(de, name)| (de, fg_prop.clone(), format!("#{}", fg.to_hex()), name));
 
-    let bg_candidate = raw_node.parent.and_then(|pid| {
-        let pnode = doc.get(pid)?;
-        let res_p = resolved_node(doc, pid)?;
-        let (bg_idx, bg_paint, raw_bg) = res_p.fills.iter().enumerate().rev().find_map(|(i, p)| match &p.kind {
-            PaintKind::Solid(c) if p.visible && p.opacity > 0.0 && p.blend == BlendMode::Normal => Some((i, p, *c)),
-            _ => None,
-        })?;
-        let fill_alpha = (raw_bg.a * bg_paint.opacity * res_p.opacity).clamp(0.0, 1.0);
-        let under_bg = if fill_alpha >= 1.0 - 1e-4 {
-            if !same_rgb(raw_bg, bg) {
-                return None;
-            }
-            Color::WHITE
-        } else {
-            let inv = 1.0 - fill_alpha;
-            let ur = (bg.r - fill_alpha * raw_bg.r) / inv;
-            let ug = (bg.g - fill_alpha * raw_bg.g) / inv;
-            let ub = (bg.b - fill_alpha * raw_bg.b) / inv;
-            if !(-0.02..=1.02).contains(&ur) || !(-0.02..=1.02).contains(&ug) || !(-0.02..=1.02).contains(&ub) {
-                return None;
-            }
-            Color { r: ur.clamp(0.0, 1.0), g: ug.clamp(0.0, 1.0), b: ub.clamp(0.0, 1.0), a: 1.0 }
-        };
-        let indexed_bg_key = format!("fills/{bg_idx}");
-        let (bg_prop, bound_bg_var) = if let Some(v) = pnode.variables.bindings.get(&indexed_bg_key) {
-            (indexed_bg_key, Some(v.as_str()))
-        } else if bg_idx == 0 {
-            if let Some(v) = pnode.variables.bindings.get("fill") {
-                ("fill".to_string(), Some(v.as_str()))
-            } else if let Some(v) = pnode.variables.bindings.get("background") {
-                ("background".to_string(), Some(v.as_str()))
-            } else {
-                (indexed_bg_key, None)
-            }
-        } else {
-            (indexed_bg_key, None)
-        };
-        let bg_match_color = (fill_alpha >= 1.0 - 1e-4).then_some(bg);
-        let coll = find_fill_collection(doc, pnode, bound_bg_var, raw_bg, bg_match_color)?;
-        let (de, name) =
-            best_passing_bg_in_collection(doc, pnode.id, coll, bound_bg_var, bg_paint.opacity, res_p.opacity, under_bg, bg, raw_fg, text_alpha, required)?;
-        Some((de, bg_prop, format!("#{}", bg.to_hex()), name))
-    });
+    let (_, property, from, name) = fg_candidate?;
 
-    let chosen = match (fg_candidate, bg_candidate) {
-        (Some(f), Some(b)) => {
-            if f.0 <= b.0 {
-                Some((f.1, f.2, f.3))
-            } else {
-                Some((b.1, b.2, b.3))
-            }
-        }
-        (Some(f), None) => Some((f.1, f.2, f.3)),
-        (None, Some(b)) => Some((b.1, b.2, b.3)),
-        (None, None) => None,
-    }?;
-
-    Some(FixSuggestion {
-        kind: "bind".into(),
-        property: chosen.0,
-        from: serde_json::Value::String(chosen.1),
-        to: serde_json::Value::String(format!("var:{}", chosen.2)),
-    })
+    Some(FixSuggestion { kind: "bind".into(), property, from: serde_json::Value::String(from), to: serde_json::Value::String(format!("var:{name}")) })
 }
 
 /// Evaluates the unified `"contrast"` rule on `ctx.node`, appending any finding to `out`.
@@ -712,4 +607,114 @@ pub fn evaluate_contrast(ctx: &NodeEvalCtx<'_>, bounds: &SubtreeBounds, out: &mu
     }
 
     used_pixel_path
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::lint::{lint, LintConfig, NoLintEnv};
+    use crate::{
+        Color, Document, Node, NodeId, NodeKind, Paint, Rect, TextStyle, Variable, VariableCollection, VariableKind, VariableMode, VariableValue,
+        SOFT_DELETED_EXTENSION_KEY,
+    };
+
+    fn hex(h: &str) -> Color {
+        Color::from_hex(h).unwrap()
+    }
+
+    fn colour_variable(id: &str, name: &str, colour: Color, soft_deleted: bool) -> Variable {
+        let mut v = Variable {
+            id: id.into(),
+            name: name.into(),
+            collection: "c".into(),
+            kind: VariableKind::Color,
+            values: [("m".to_string(), VariableValue::Color(colour))].into_iter().collect(),
+            description: String::new(),
+            scopes: Vec::new(),
+            hidden_from_publishing: false,
+            key: None,
+            code_syntax: Default::default(),
+            extensions: Default::default(),
+            mode_extensions: Default::default(),
+        };
+        if soft_deleted {
+            v.extensions.insert(SOFT_DELETED_EXTENSION_KEY.into(), true.into());
+        }
+        v
+    }
+
+    /// White card with grey (#777777, 4.48:1: just below AA) text, and a collection of text colours: the live `Text/Grey`
+    /// the text colour comes from, the live and much darker `Text/Dark`, and a deleted `Text/Slate` (#666666) that is
+    /// closer to the current colour than `Text/Dark` and passes.
+    fn grey_text_on_white() -> (Document, NodeId) {
+        let mut doc = Document::new("Contrast");
+        let page = doc.add_page("Page 1");
+        let card_id = doc.alloc_id();
+        let mut card = Node::frame(card_id, Rect::new(0.0, 0.0, 200.0, 80.0));
+        card.fills = vec![Paint::solid(Color::WHITE)];
+        let card = doc.insert(page, card).unwrap();
+        let text_id = doc.alloc_id();
+        let mut text = Node::text(text_id, Rect::new(8.0, 8.0, 120.0, 20.0), "Quiet note", TextStyle::default());
+        if let NodeKind::Text(tp) = &mut text.kind {
+            tp.style.fills = vec![Paint::solid(hex("#777777"))];
+        }
+        let text = doc.insert(card, text).unwrap();
+        doc.variable_collections.insert(
+            "c".into(),
+            VariableCollection {
+                id: "c".into(),
+                name: "Colors".into(),
+                modes: vec![VariableMode { id: "m".into(), name: "Default".into() }],
+                default_mode: "m".into(),
+                variables: vec!["grey".into(), "dark".into()],
+                key: None,
+                source_library_key: None,
+                extensions: Default::default(),
+            },
+        );
+        for v in [
+            colour_variable("grey", "Text/Grey", hex("#777777"), false),
+            colour_variable("dark", "Text/Dark", hex("#1A1A1A"), false),
+            colour_variable("slate", "Text/Slate", hex("#666666"), true),
+            colour_variable("ink", "Text/Ink", hex("#111111"), true),
+        ] {
+            doc.variables.insert(v.id.clone(), v);
+        }
+        (doc, text)
+    }
+
+    fn contrast_findings(doc: &Document) -> Vec<crate::lint::Finding> {
+        let cfg = LintConfig::from_rule_list(&["contrast".into()]).unwrap();
+        lint(doc, &cfg, &NoLintEnv).findings.into_iter().filter(|f| f.rule == "contrast").collect()
+    }
+
+    #[test]
+    fn a_soft_deleted_variable_is_never_the_suggested_passing_colour() {
+        let (doc, _) = grey_text_on_white();
+        let findings = contrast_findings(&doc);
+        assert_eq!(findings.len(), 1, "{findings:?}");
+        let fix = findings[0].suggested_fix.as_ref().expect("a live variable passes, so there is a suggestion");
+        assert_eq!(fix.to, serde_json::json!("var:Text/Dark"), "the closer passing colour is deleted, so the live one is offered: {fix:?}");
+        assert!(!findings[0].message.contains("Slate"), "{}", findings[0].message);
+    }
+
+    #[test]
+    fn a_deleted_variable_alone_does_not_name_the_collection_to_suggest_from() {
+        let (mut doc, _) = grey_text_on_white();
+        // The text colour now matches only a deleted variable, so no live variable names the collection.
+        doc.variables.get_mut("grey").unwrap().values.insert("m".into(), VariableValue::Color(hex("#778899")));
+        doc.variables.get_mut("slate").unwrap().values.insert("m".into(), VariableValue::Color(hex("#777777")));
+        let findings = contrast_findings(&doc);
+        assert_eq!(findings.len(), 1);
+        assert!(findings[0].suggested_fix.is_none(), "{:?}", findings[0].suggested_fix);
+    }
+
+    #[test]
+    fn a_layer_bound_to_a_soft_deleted_colour_resolves_and_raises_no_false_finding() {
+        let (mut doc, text) = grey_text_on_white();
+        assert_eq!(contrast_findings(&doc).len(), 1, "precondition: the grey text fails");
+        // The binding resolves through the deleted variable to a dark colour that passes.
+        doc.get_mut(text).unwrap().variables.bindings.insert("fills/0".into(), "ink".into());
+        assert!(contrast_findings(&doc).is_empty(), "{:?}", contrast_findings(&doc));
+        assert_eq!(doc.resolve_variable(text, "ink"), Some(VariableValue::Color(hex("#111111"))));
+    }
 }

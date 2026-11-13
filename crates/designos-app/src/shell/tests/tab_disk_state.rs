@@ -17,19 +17,19 @@ const CONFLICT_TITLE: &str = "File changed on disk";
 fn visit_a_library_tab(s: &mut Sim, path: &Path) -> usize {
     s.shell.app.go_home();
     wait(s, SETTLED);
-    let id = s.app().home.as_ref().unwrap().snap.files.iter().find(|f| f.name == "Welcome").unwrap().id.clone();
+    let id = s.app().home.as_ref().unwrap().snap.files.iter().find(|f| f.name == "DESIGN-OS Studio Starter").unwrap().id.clone();
     crate::home::apply(&mut s.shell.app, Act::Open(id));
     wait(s, 2.0);
     s.app().tabs.entries.iter().position(|t| t.file_path.as_deref() == Some(path)).expect("a tab for the file")
 }
 
 /// Writes `doc` over the file with a later modification time than the one the app recorded.
-fn rewrite_on_disk(path: &Path, doc: &Document) {
+pub(super) fn rewrite_on_disk(path: &Path, doc: &Document) {
     std::thread::sleep(Duration::from_millis(30));
     std::fs::write(path, doc.to_json().unwrap()).unwrap();
 }
 
-fn other_document() -> Document {
+pub(super) fn other_document() -> Document {
     let mut d = Document::new("Written by another program");
     let page = d.add_page("P");
     for i in 0..7 {
@@ -296,6 +296,9 @@ fn a_write_of_exactly_the_document_on_screen_asks_nothing_and_clears_the_dot() {
 #[test]
 fn an_agent_that_saves_its_own_live_edit_over_the_open_file_asks_nothing_and_keeps_its_undo_steps() {
     let (mut s, d, path) = external_sim_with(&two_rects());
+    if let Some(root) = s.app().lib.as_ref().map(|l| l.root().to_path_buf()) {
+        crate::comments::settings::save_autosave_ai_changes(&root, false).unwrap();
+    }
     let session_dir = s.app().terminal.session_dir.clone();
     {
         let app = &mut s.shell.app;

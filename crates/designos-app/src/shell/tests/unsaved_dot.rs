@@ -42,14 +42,14 @@ pub(super) fn two_rects() -> Document {
     d
 }
 
-/// A sim on the library's seeded "Welcome" file, tab bar shown.
+/// A sim on the library's seeded "DESIGN-OS Studio Starter" file, tab bar shown.
 pub(super) fn library_sim() -> (Sim, TmpDir) {
     let dir = TmpDir::new();
     let mut s = Sim::with(Options { home: true, library: Some(dir.0.join("lib")), ..Default::default() });
     s.shell.app.tabs.always_visible = true;
     let id = {
         let home = s.app().home.as_ref().unwrap();
-        home.snap.files.iter().find(|f| f.name == "Welcome").unwrap().id.clone()
+        home.snap.files.iter().find(|f| f.name == "DESIGN-OS Studio Starter").unwrap().id.clone()
     };
     crate::home::apply(&mut s.shell.app, Act::Open(id));
     wait(&mut s, SETTLED);
@@ -197,6 +197,9 @@ fn a_save_that_did_not_happen_keeps_the_dot_and_says_why() {
     s.shell.app.save_with(false, &ScriptedDialogs::answering(DialogOutcome::Picked(blocked.clone())));
     wait(&mut s, SETTLED);
     assert!(!blocked.exists());
+    // the earlier error is still on screen and keeps its time; this one waits behind it
+    assert!(s.app().toast_queue.iter().any(|t| t.error && t.text.starts_with("Cannot write")), "the failure waits its turn");
+    wait(&mut s, crate::theme::TOAST_SECONDS);
     assert!(s.app().toast.as_ref().is_some_and(|t| t.error && t.text.starts_with("Cannot write")), "the failure is shown");
     assert!(dot(&s), "the write failed");
 }
@@ -421,20 +424,24 @@ impl PageHydrator for OneNodeHydrator {
 }
 
 #[test]
-fn visiting_a_page_after_a_save_does_not_light_the_dot() {
-    // 14 nodes take the full content hash, 5,100 the cheap epoch hash: neither may see the page visit as an edit
+fn a_save_loads_the_pages_that_were_not_open_and_neither_it_nor_a_page_visit_after_it_lights_the_dot() {
+    // 14 nodes take the full content hash, 5,100 the cheap epoch hash: neither may see the load or the visit as an edit
     for n in [10, 5100] {
         let (doc, page2) = two_page_doc(n);
         let (mut s, _d, _path) = external_sim_with(&doc);
         s.shell.app.doc.page_hydrator = Some(Arc::new(Mutex::new(OneNodeHydrator { page: page2, done: false })));
         edit(&mut s);
+        let before_save = s.app().doc.nodes.len();
         s.cmd_key(Key::S);
+        // The save loads pages, so it waits for the frame after its status was painted; the harness has no such frame.
+        s.shell.app.run_queued_work();
         wait(&mut s, SETTLED);
+        assert!(s.app().doc.nodes.len() > before_save, "the save loaded the page that was not open ({n} rects)");
         assert!(!dot(&s), "saved ({n} rects)");
         let (nodes, depth) = (s.app().doc.nodes.len(), s.app().hist.undo_depth());
         s.shell.app.switch_page(page2);
         wait(&mut s, SETTLED);
-        assert!(s.app().doc.nodes.len() > nodes, "the page was expanded ({n} rects)");
+        assert_eq!(s.app().doc.nodes.len(), nodes, "the page is open already ({n} rects)");
         assert_eq!(s.app().hist.undo_depth(), depth, "no undo step: not an edit ({n} rects)");
         assert!(!dot(&s), "a page visit is not an edit ({n} rects)");
     }

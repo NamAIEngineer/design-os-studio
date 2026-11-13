@@ -1,6 +1,6 @@
 use designos_doc::*;
 use designos_fig::testkit::sample_fig;
-use designos_fig::{commands_blob_to_path, export_fig, import_fig, import_fig_node_changes, path_to_commands_blob};
+use designos_fig::{commands_blob_to_path, decode_fig_to_json, export_fig, import_fig, import_fig_node_changes, path_to_commands_blob};
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
 
@@ -176,7 +176,7 @@ fn export_fig_then_import_fig_roundtrips_sample_and_rich_documents() {
     let f = card.kind.frame_props().expect("Card is a frame");
     let al = f.auto_layout.as_ref().expect("Card has auto_layout");
     assert_eq!(al.direction, LayoutDirection::Vertical);
-    assert_eq!(al.padding, [12.0, 16.0, 12.0, 16.0]);
+    assert_eq!(al.padding, [12.0, 0.0, 0.0, 16.0]);
 
     let title = find(&doc2, "Title");
     let NodeKind::Text(tp) = &title.kind else { panic!("expected Text") };
@@ -314,7 +314,7 @@ fn export_fig_then_import_fig_roundtrips_sample_and_rich_documents() {
     bg_rect.fills = vec![
         Paint::solid(Color::rgb(240, 242, 245)),
         Paint {
-            kind: PaintKind::Image { image_ref: img_hash.into(), scale_mode: ImageScaleMode::Fill },
+            kind: PaintKind::Image { image_ref: img_hash.into(), scale_mode: ImageScaleMode::Fill, params: Default::default() },
             opacity: 0.9,
             visible: true,
             blend: BlendMode::Normal,
@@ -4076,4 +4076,1327 @@ fn bold_text_with_a_wght_axis_keeps_weight_and_axis_through_fig_export_and_impor
     assert_eq!(tp.runs.len(), 1);
     assert_eq!((tp.runs[0].start, tp.runs[0].end), (0, 4));
     assert_eq!((tp.runs[0].style.font_weight, tp.runs[0].style.get_axis("wght")), (700, Some(700.0)), "bold run");
+}
+
+#[test]
+fn mask_types_round_trip_through_fig_and_rest_import() {
+    let rest_payload = json!({
+        "name": "MaskTypesRest",
+        "document": {
+            "id": "0:0",
+            "name": "Document",
+            "type": "DOCUMENT",
+            "children": [{
+                "id": "0:1",
+                "name": "Page 1",
+                "type": "CANVAS",
+                "children": [
+                    {
+                        "id": "1:1",
+                        "name": "MaskAlpha",
+                        "type": "RECTANGLE",
+                        "isMask": true,
+                        "maskType": "ALPHA",
+                        "size": {"x": 40.0, "y": 40.0}
+                    },
+                    {
+                        "id": "1:2",
+                        "name": "MaskVector",
+                        "type": "RECTANGLE",
+                        "isMask": true,
+                        "maskType": "VECTOR",
+                        "size": {"x": 40.0, "y": 40.0}
+                    },
+                    {
+                        "id": "1:3",
+                        "name": "MaskOutline",
+                        "type": "RECTANGLE",
+                        "isMask": true,
+                        "maskType": "OUTLINE",
+                        "size": {"x": 40.0, "y": 40.0}
+                    },
+                    {
+                        "id": "1:4",
+                        "name": "MaskLuminance",
+                        "type": "RECTANGLE",
+                        "isMask": true,
+                        "maskType": "LUMINANCE",
+                        "size": {"x": 40.0, "y": 40.0}
+                    }
+                ]
+            }]
+        }
+    });
+    let doc = designos_fig::import_rest_json(&rest_payload.to_string()).expect("import_rest_json");
+    assert_eq!(find(&doc, "MaskAlpha").mask_type, MaskType::Alpha);
+    assert_eq!(find(&doc, "MaskVector").mask_type, MaskType::Vector);
+    assert_eq!(find(&doc, "MaskOutline").mask_type, MaskType::Vector);
+    assert_eq!(find(&doc, "MaskLuminance").mask_type, MaskType::Luminance);
+    assert!(!find(&doc, "MaskVector").fig_metadata.contains_key("maskType"));
+
+    // Round-trip all three types through .fig export and import
+    let fig_bytes = export_fig(&doc).expect("export_fig");
+    let rt = import_fig(&fig_bytes).expect("import_fig");
+    for (name, expected) in
+        [("MaskAlpha", MaskType::Alpha), ("MaskVector", MaskType::Vector), ("MaskOutline", MaskType::Vector), ("MaskLuminance", MaskType::Luminance)]
+    {
+        let n = find(&rt, name);
+        assert!(n.is_mask, "{name} should stay a mask");
+        assert_eq!(n.mask_type, expected, "{name} mask_type after .fig round-trip");
+    }
+}
+
+#[test]
+fn legacy_metadata_mask_types_survive_fig_export_and_rest_outline_flag_maps_to_vector() {
+    let mut doc = Document::new("legacy-mask-metadata");
+    let page = doc.add_page("Page 1");
+    for (name, is_mask, meta_val) in
+        [("LegacyAlpha", true, "ALPHA"), ("LegacyOutline", true, "OUTLINE"), ("LegacyLuminance", true, "LUMINANCE"), ("NotAMaskOutline", false, "OUTLINE")]
+    {
+        let id = doc.alloc_id();
+        let mut n = Node::rectangle(id, Rect::new(0.0, 0.0, 40.0, 40.0));
+        n.name = name.into();
+        n.is_mask = is_mask;
+        n.fig_metadata.insert("maskType".into(), meta_val.into());
+        doc.insert(page, n).unwrap();
+    }
+
+    let bytes = export_fig(&doc).expect("export_fig");
+    let rt = import_fig(&bytes).expect("import_fig");
+    assert_eq!(find(&rt, "LegacyAlpha").mask_type, MaskType::Alpha);
+    assert_eq!(find(&rt, "LegacyOutline").mask_type, MaskType::Vector);
+    assert_eq!(find(&rt, "LegacyLuminance").mask_type, MaskType::Luminance);
+    let non_mask = find(&rt, "NotAMaskOutline");
+    assert!(!non_mask.is_mask);
+    assert_eq!(non_mask.mask_type, MaskType::Vector);
+
+    let rest_payload = json!({
+        "name": "RestMaskOutlineFlag",
+        "document": {
+            "id": "0:0",
+            "name": "Document",
+            "type": "DOCUMENT",
+            "children": [{
+                "id": "0:1",
+                "name": "Page 1",
+                "type": "CANVAS",
+                "children": [
+                    {
+                        "id": "1:1",
+                        "name": "OutlineFlagMask",
+                        "type": "RECTANGLE",
+                        "isMask": true,
+                        "isMaskOutline": true,
+                        "size": {"x": 40.0, "y": 40.0}
+                    },
+                    {
+                        "id": "1:10",
+                        "name": "MaskHostComp",
+                        "type": "COMPONENT",
+                        "size": {"x": 80.0, "y": 80.0},
+                        "children": [{
+                            "id": "1:11",
+                            "name": "CompMaskChild",
+                            "type": "RECTANGLE",
+                            "isMask": true,
+                            "size": {"x": 40.0, "y": 40.0}
+                        }]
+                    },
+                    {
+                        "id": "1:20",
+                        "name": "MaskHostInst",
+                        "type": "INSTANCE",
+                        "componentId": "1:10",
+                        "size": {"x": 80.0, "y": 80.0},
+                        "_overrides": [{
+                            "path": ["1:11"],
+                            "set": {"isMaskOutline": true}
+                        }]
+                    }
+                ]
+            }]
+        }
+    });
+    let rest_doc = designos_fig::import_rest_json(&rest_payload.to_string()).expect("import_rest_json");
+    let flag_node = find(&rest_doc, "OutlineFlagMask");
+    assert!(flag_node.is_mask);
+    assert_eq!(flag_node.mask_type, MaskType::Vector);
+    let inst = find(&rest_doc, "MaskHostInst");
+    let inst_mask = inst.children.iter().filter_map(|id| rest_doc.get(*id)).find(|n| n.name == "CompMaskChild").expect("CompMaskChild in REST instance");
+    assert_eq!(inst_mask.mask_type, MaskType::Vector, "REST symbol override with isMaskOutline: true must map to MaskType::Vector");
+
+    let g = |s: u64, l: u64| -> Value { json!({"sessionID": s, "localID": l}) };
+    let nc = |id: (u64, u64), parent: (u64, u64), pos: &str, ty: &str, name: &str, extra: Value| -> Value {
+        let mut v = json!({
+            "guid": g(id.0, id.1),
+            "parentIndex": {"guid": g(parent.0, parent.1), "position": pos},
+            "type": ty,
+            "name": name,
+            "phase": "CREATED",
+            "visible": true,
+            "opacity": 1.0,
+            "size": {"x": 80.0, "y": 80.0},
+            "transform": {"m00": 1.0, "m01": 0.0, "m02": 0.0, "m10": 0.0, "m11": 1.0, "m12": 0.0}
+        });
+        for (k, x) in extra.as_object().unwrap() {
+            v[k] = x.clone();
+        }
+        v
+    };
+    let changes = json!([
+        nc((0, 0), (0, 0), "!", "DOCUMENT", "Document", json!({})),
+        nc((0, 1), (0, 0), "!", "CANVAS", "Page 1", json!({})),
+        nc((1, 10), (0, 1), "!", "SYMBOL", "FigMaskComp", json!({"size": {"x": 80.0, "y": 80.0}})),
+        nc((1, 11), (1, 10), "!", "ROUNDED_RECTANGLE", "FigCompMask", json!({"mask": true, "size": {"x": 40.0, "y": 40.0}})),
+        nc(
+            (1, 20),
+            (0, 1),
+            "\"",
+            "INSTANCE",
+            "FigMaskInst",
+            json!({
+                "size": {"x": 80.0, "y": 80.0},
+                "symbolData": {
+                    "symbolID": g(1, 10),
+                    "symbolOverrides": [{
+                        "guidPath": {"guids": [g(1, 11)]},
+                        "isMaskOutline": true
+                    }]
+                }
+            })
+        )
+    ]);
+    let fig_ov_doc = import_fig_node_changes(&changes, "FigSymbolOverrideMaskOutline").expect("import_fig_node_changes");
+    let fig_inst = find(&fig_ov_doc, "FigMaskInst");
+    let fig_inst_mask = fig_inst.children.iter().filter_map(|id| fig_ov_doc.get(*id)).find(|n| n.name == "FigCompMask").expect("FigCompMask in .fig instance");
+    assert_eq!(fig_inst_mask.mask_type, MaskType::Vector, ".fig symbolOverrides with isMaskOutline: true must map to MaskType::Vector");
+}
+
+#[test]
+fn fig_export_import_preserves_dash_cap() {
+    let mut doc = Document::new("FigDashCapRoundtrip");
+    let page = doc.add_page("Page 1");
+
+    // 1. Standalone dashed rectangle with Round dash cap
+    let rect_id = doc.alloc_id();
+    let mut rect = Node::rectangle(rect_id, Rect::new(10.0, 10.0, 80.0, 40.0));
+    rect.name = "DashedRoundRect".into();
+    rect.stroke.paints = vec![Paint::solid(Color::BLACK)];
+    rect.stroke.weight = 3.0;
+    rect.stroke.dashes = vec![8.0, 4.0];
+    rect.stroke.cap = StrokeCap::Round;
+    doc.insert(page, rect).unwrap();
+
+    // 2. Standalone dashed vector with Square dash cap
+    let vec_id = doc.alloc_id();
+    let mut vec_node = Node::new(
+        vec_id,
+        NodeKind::Vector {
+            paths: vec![Path { cmds: vec![PathCmd::MoveTo(Vec2::new(0.0, 0.0)), PathCmd::LineTo(Vec2::new(60.0, 0.0))], fill_rule: FillRule::NonZero }],
+            network: None,
+        },
+    );
+    vec_node.name = "DashedSquareLine".into();
+    vec_node.transform = Affine::translate(10.0, 70.0);
+    vec_node.size = Vec2::new(60.0, 0.0);
+    vec_node.stroke.paints = vec![Paint::solid(Color::BLACK)];
+    vec_node.stroke.weight = 4.0;
+    vec_node.stroke.dashes = vec![10.0, 5.0];
+    vec_node.stroke.cap = StrokeCap::Square;
+    doc.insert(page, vec_node).unwrap();
+
+    // 3. Component instance with overridden dash cap + dashes on child
+    let comp_id = doc.alloc_id();
+    let mut comp = Node::new(comp_id, NodeKind::Component(FrameProps::default()));
+    comp.name = "DashedCardComp".into();
+    comp.transform = Affine::translate(120.0, 10.0);
+    comp.size = Vec2::new(80.0, 40.0);
+    doc.insert(page, comp).unwrap();
+
+    let comp_child_id = doc.alloc_id();
+    let mut comp_child = Node::rectangle(comp_child_id, Rect::new(0.0, 0.0, 80.0, 40.0));
+    comp_child.name = "DashedBorder".into();
+    comp_child.stroke.paints = vec![Paint::solid(Color::BLACK)];
+    comp_child.stroke.weight = 2.0;
+    comp_child.stroke.dashes = vec![6.0, 4.0];
+    comp_child.stroke.cap = StrokeCap::None;
+    doc.insert(comp_id, comp_child).unwrap();
+
+    create_instance(&mut doc, comp_id, page, Vec2::new(220.0, 10.0)).apply(&mut doc).unwrap();
+    let inst_id =
+        *doc.get(page).unwrap().children.iter().find(|&&id| matches!(doc.get(id).map(|n| &n.kind), Some(NodeKind::Instance { .. }))).expect("instance created");
+    doc.get_mut(inst_id).unwrap().name = "DashedCardInst".into();
+    let inst_child_id = doc.get(inst_id).unwrap().children[0];
+    {
+        let ch = doc.get_mut(inst_child_id).unwrap();
+        ch.stroke.cap = StrokeCap::Round;
+        ch.stroke.dashes = vec![12.0, 6.0];
+        ch.component.overrides.insert(OverrideField::Stroke);
+    }
+
+    let bytes = export_fig(&doc).expect("export_fig");
+    let roundtripped = import_fig(&bytes).expect("import_fig");
+
+    let rt_rect = find(&roundtripped, "DashedRoundRect");
+    assert_eq!(rt_rect.stroke.dashes, vec![8.0, 4.0]);
+    assert_eq!(rt_rect.stroke.cap, StrokeCap::Round, "standalone dashed rect preserves Round dash cap across .fig");
+
+    let rt_line = find(&roundtripped, "DashedSquareLine");
+    assert_eq!(rt_line.stroke.dashes, vec![10.0, 5.0]);
+    assert_eq!(rt_line.stroke.cap, StrokeCap::Square, "standalone dashed vector preserves Square dash cap across .fig");
+
+    let rt_inst = find(&roundtripped, "DashedCardInst");
+    let rt_inst_child = roundtripped.get(rt_inst.children[0]).expect("instance child");
+    assert_eq!(rt_inst_child.stroke.dashes, vec![12.0, 6.0], "instance child preserves overridden dash pattern across .fig");
+    assert_eq!(rt_inst_child.stroke.cap, StrokeCap::Round, "instance child preserves overridden Round dash cap across .fig");
+}
+
+#[test]
+fn rest_export_import_preserves_dash_cap() {
+    let mut doc = Document::new("RestDashCapRoundtrip");
+    let page = doc.add_page("Page 1");
+
+    let rect_id = doc.alloc_id();
+    let mut rect = Node::rectangle(rect_id, Rect::new(10.0, 10.0, 80.0, 40.0));
+    rect.name = "RestDashedRoundRect".into();
+    rect.stroke.paints = vec![Paint::solid(Color::BLACK)];
+    rect.stroke.weight = 3.0;
+    rect.stroke.dashes = vec![10.0, 6.0];
+    rect.stroke.cap = StrokeCap::Round;
+    doc.insert(page, rect).unwrap();
+
+    let comp_id = doc.alloc_id();
+    let mut comp = Node::new(comp_id, NodeKind::Component(FrameProps::default()));
+    comp.name = "RestDashedComp".into();
+    comp.transform = Affine::translate(120.0, 10.0);
+    comp.size = Vec2::new(80.0, 40.0);
+    doc.insert(page, comp).unwrap();
+
+    let comp_child_id = doc.alloc_id();
+    let mut comp_child = Node::rectangle(comp_child_id, Rect::new(0.0, 0.0, 80.0, 40.0));
+    comp_child.name = "RestDashedBorder".into();
+    comp_child.stroke.paints = vec![Paint::solid(Color::BLACK)];
+    comp_child.stroke.weight = 2.0;
+    comp_child.stroke.dashes = vec![6.0, 4.0];
+    comp_child.stroke.cap = StrokeCap::None;
+    doc.insert(comp_id, comp_child).unwrap();
+
+    create_instance(&mut doc, comp_id, page, Vec2::new(220.0, 10.0)).apply(&mut doc).unwrap();
+    let inst_id =
+        *doc.get(page).unwrap().children.iter().find(|&&id| matches!(doc.get(id).map(|n| &n.kind), Some(NodeKind::Instance { .. }))).expect("instance created");
+    doc.get_mut(inst_id).unwrap().name = "RestDashedInst".into();
+    let inst_child_id = doc.get(inst_id).unwrap().children[0];
+    {
+        let ch = doc.get_mut(inst_child_id).unwrap();
+        ch.stroke.cap = StrokeCap::Round;
+        ch.stroke.dashes = vec![12.0, 6.0];
+        ch.component.overrides.insert(OverrideField::Stroke);
+    }
+
+    let json_str = designos_fig::export_rest_json(&doc).to_string();
+    let mut roundtripped = designos_fig::import_rest_json(&json_str).expect("import_rest_json");
+
+    let rt_rect = find(&roundtripped, "RestDashedRoundRect");
+    assert_eq!(rt_rect.stroke.dashes, vec![10.0, 6.0]);
+    assert_eq!(rt_rect.stroke.cap, StrokeCap::Round, "standalone dashed rect preserves Round dash cap across REST");
+
+    // Re-syncing component instances after REST import must keep the instance's overridden dash cap (OverrideField::Stroke).
+    let rt_comp_id = find(&roundtripped, "RestDashedComp").id;
+    sync_instances(&mut roundtripped, rt_comp_id).apply(&mut roundtripped).unwrap();
+    let rt_inst = find(&roundtripped, "RestDashedInst");
+    let rt_inst_child = roundtripped.get(rt_inst.children[0]).expect("instance child after REST import + sync");
+    assert_eq!(rt_inst_child.stroke.cap, StrokeCap::Round, "instance child preserves overridden Round dash cap across REST export + import + sync_instances");
+}
+
+#[test]
+fn lock_aspect_and_preserve_ratio_roundtrip_fig_and_rest() {
+    let mut doc = Document::new("lock-aspect-rt");
+    let page = doc.add_page("Page 1");
+
+    let locked_id = doc.alloc_id();
+    let mut locked = Node::rectangle(locked_id, Rect::new(0.0, 0.0, 160.0, 90.0));
+    locked.name = "LockedRect".into();
+    locked.lock_aspect = true;
+    doc.insert(page, locked).unwrap();
+
+    let unlocked_id = doc.alloc_id();
+    let mut unlocked = Node::rectangle(unlocked_id, Rect::new(200.0, 0.0, 120.0, 80.0));
+    unlocked.name = "UnlockedRect".into();
+    unlocked.lock_aspect = false;
+    doc.insert(page, unlocked).unwrap();
+
+    // 1. Binary .fig export -> import preserves lock_aspect on both nodes.
+    let fig_bytes = export_fig(&doc).expect("export_fig");
+    let fig_rt = import_fig(&fig_bytes).expect("import_fig");
+    assert!(find(&fig_rt, "LockedRect").lock_aspect, ".fig round-trip must preserve lock_aspect = true");
+    assert!(!find(&fig_rt, "UnlockedRect").lock_aspect, ".fig round-trip must preserve lock_aspect = false");
+
+    // 2. REST JSON export -> import preserves preserveRatio / lock_aspect on both nodes.
+    let rest_val = designos_fig::export_rest_json(&doc);
+    let rest_rt = designos_fig::import_rest_json(&rest_val.to_string()).expect("import_rest_json");
+    assert!(find(&rest_rt, "LockedRect").lock_aspect, "REST export -> import must preserve preserveRatio / lock_aspect = true");
+    assert!(!find(&rest_rt, "UnlockedRect").lock_aspect, "REST export -> import must preserve lock_aspect = false");
+}
+
+#[test]
+fn an_instance_aspect_lock_override_is_written_as_proportions_constrained() {
+    let mut doc = Document::new("lock-aspect-override");
+    let page = doc.add_page("Page 1");
+    let frame_id = doc.alloc_id();
+    let main = doc.insert(page, Node::frame(frame_id, Rect::new(0.0, 0.0, 100.0, 50.0))).unwrap();
+    create_component(&mut doc, main).apply(&mut doc).unwrap();
+    let mut place = |name: &str, x: f32| {
+        create_instance(&mut doc, main, page, Vec2::new(x, 0.0)).apply(&mut doc).unwrap();
+        let id = *doc.get(page).unwrap().children.last().unwrap();
+        doc.get_mut(id).unwrap().name = name.into();
+        id
+    };
+    let own_lock = place("OwnLock", 200.0);
+    let own_unlock = place("OwnUnlock", 350.0);
+    let follower = place("Follower", 500.0);
+    let n = doc.get_mut(own_lock).unwrap();
+    n.lock_aspect = true;
+    n.component.overrides.insert(OverrideField::LockAspect);
+    doc.get_mut(own_unlock).unwrap().component.overrides.insert(OverrideField::LockAspect);
+    assert!(!doc.get(follower).unwrap().component.overrides.contains(&OverrideField::LockAspect));
+
+    let decoded = decode_fig_to_json(&export_fig(&doc).expect("export_fig")).expect("decode_fig_to_json");
+    let changes = decoded["message"]["nodeChanges"].as_array().expect("node changes");
+    let own_entry = |name: &str| -> Option<Value> {
+        let sd = changes.iter().find(|n| n["name"] == name).unwrap_or_else(|| panic!("no node change named {name}"))["symbolData"].clone();
+        let symbol = sd["symbolID"].clone();
+        sd["symbolOverrides"].as_array().cloned().unwrap_or_default().into_iter().find(|o| o["guidPath"]["guids"] == json!([symbol]))
+    };
+    assert_eq!(own_entry("OwnLock").expect("entry for the locked instance")["proportionsConstrained"], json!(true));
+    assert_eq!(own_entry("OwnUnlock").expect("entry for the unlocked instance")["proportionsConstrained"], json!(false));
+    assert!(own_entry("Follower").is_none_or(|e| e.get("proportionsConstrained").is_none()), "an instance that follows its main writes no lock override");
+}
+
+#[test]
+fn expose_nested_instances_and_nested_overrides_roundtrip_fig_and_rest() {
+    let mut doc = Document::new("expose-nested-rt");
+    let page = doc.add_page("Page 1");
+
+    let mut make_variant = |name: &str, x: f32, w: f32| {
+        let id = doc.alloc_id();
+        let mut f = Node::frame(id, Rect::new(x, 0.0, w, 24.0));
+        f.name = name.into();
+        let comp = doc.insert(page, f).unwrap();
+        let dot_id = doc.alloc_id();
+        let mut dot = Node::ellipse(dot_id, Rect::new(4.0, 8.0, 8.0, 8.0));
+        dot.name = "Dot".into();
+        let dot = doc.insert(comp, dot).unwrap();
+        let txt_id = doc.alloc_id();
+        let mut txt = Node::text(txt_id, Rect::new(16.0, 4.0, 40.0, 16.0), "Badge", TextStyle::default());
+        txt.name = "Text".into();
+        let txt = doc.insert(comp, txt).unwrap();
+        create_component(&mut doc, comp).apply(&mut doc).unwrap();
+        (comp, dot, txt)
+    };
+    let (v_sm, dot_sm, txt_sm) = make_variant("Size=Sm", 0.0, 60.0);
+    let (v_lg, dot_lg, txt_lg) = make_variant("Size=Lg", 80.0, 90.0);
+    combine_as_variants(&mut doc, &[v_sm, v_lg]).apply(&mut doc).unwrap();
+    let badge_set = doc.get(v_sm).unwrap().parent.unwrap();
+    doc.get_mut(badge_set).unwrap().name = "Badge".into();
+
+    add_prop(&mut doc, badge_set, ComponentPropDef { name: "Show dot".into(), kind: PropKind::Boolean, default: PropValue::Bool(true) })
+        .apply(&mut doc)
+        .unwrap();
+    add_prop(&mut doc, badge_set, ComponentPropDef { name: "Label".into(), kind: PropKind::Text, default: PropValue::Text("Badge".into()) })
+        .apply(&mut doc)
+        .unwrap();
+    for (dot, txt) in [(dot_sm, txt_sm), (dot_lg, txt_lg)] {
+        bind_prop(&mut doc, dot, OverrideField::Visible, Some("Show dot")).apply(&mut doc).unwrap();
+        bind_prop(&mut doc, txt, OverrideField::Characters, Some("Label")).apply(&mut doc).unwrap();
+    }
+
+    let card_id = doc.alloc_id();
+    let mut card = Node::frame(card_id, Rect::new(0.0, 100.0, 200.0, 48.0));
+    card.name = "Card".into();
+    let card = doc.insert(page, card).unwrap();
+    create_component(&mut doc, card).apply(&mut doc).unwrap();
+
+    create_instance(&mut doc, v_sm, card, Vec2::new(8.0, 8.0)).apply(&mut doc).unwrap();
+    let exposed_in_card = *doc.get(card).unwrap().children.last().unwrap();
+    doc.get_mut(exposed_in_card).unwrap().name = "ExposedBadge".into();
+
+    create_instance(&mut doc, v_sm, card, Vec2::new(100.0, 8.0)).apply(&mut doc).unwrap();
+    let hidden_in_card = *doc.get(card).unwrap().children.last().unwrap();
+    doc.get_mut(hidden_in_card).unwrap().name = "HiddenBadge".into();
+
+    set_expose_nested_instance(&mut doc, exposed_in_card, true).apply(&mut doc).unwrap();
+
+    create_instance(&mut doc, card, page, Vec2::new(0.0, 200.0)).apply(&mut doc).unwrap();
+    let card_inst = *doc.get(page).unwrap().children.last().unwrap();
+    doc.get_mut(card_inst).unwrap().name = "CardInst".into();
+
+    let inst_exposed_badge = *doc.get(card_inst).unwrap().children.iter().find(|c| doc.get(**c).unwrap().name == "ExposedBadge").unwrap();
+    set_nested_instance_prop(&mut doc, inst_exposed_badge, "Size", Some(PropValue::Variant("Lg".into()))).apply(&mut doc).unwrap();
+    set_instance_prop(&mut doc, inst_exposed_badge, "Show dot", Some(PropValue::Bool(false))).apply(&mut doc).unwrap();
+    set_instance_prop(&mut doc, inst_exposed_badge, "Label", Some(PropValue::Text("Pro".into()))).apply(&mut doc).unwrap();
+
+    // 1. Binary .fig export -> import preserves expose_nested_instances (propsAreBubbled) and nested overrides.
+    let fig_bytes = export_fig(&doc).expect("export_fig");
+    let fig_rt = import_fig(&fig_bytes).expect("import_fig");
+    let card_rt = find(&fig_rt, "Card");
+    let card_exposed_rt = card_rt.children.iter().filter_map(|id| fig_rt.get(*id)).find(|n| n.name == "ExposedBadge").unwrap();
+    let card_hidden_rt = card_rt.children.iter().filter_map(|id| fig_rt.get(*id)).find(|n| n.name == "HiddenBadge").unwrap();
+    assert!(card_exposed_rt.component.expose_nested_instances, ".fig round-trip must preserve expose_nested_instances = true");
+    assert!(!card_hidden_rt.component.expose_nested_instances, ".fig round-trip must preserve expose_nested_instances = false");
+
+    let card_inst_rt = find(&fig_rt, "CardInst");
+    let inst_exposed_rt = card_inst_rt.children.iter().filter_map(|id| fig_rt.get(*id)).find(|n| n.name == "ExposedBadge").unwrap();
+    assert_eq!(exposed_nested_instances(&fig_rt, card_inst_rt.id), vec![inst_exposed_rt.id]);
+    let v_lg_rt = find(&fig_rt, "Size=Lg").id;
+    assert_eq!(instance_component(inst_exposed_rt), Some(v_lg_rt), ".fig round-trip must preserve nested instance variant override");
+    let dot_in_inst = inst_exposed_rt.children.iter().filter_map(|id| fig_rt.get(*id)).find(|n| n.name == "Dot").unwrap();
+    assert!(!dot_in_inst.visible, ".fig round-trip must preserve nested instance boolean prop override");
+    let txt_in_inst = inst_exposed_rt.children.iter().filter_map(|id| fig_rt.get(*id)).find(|n| n.name == "Text").unwrap();
+    assert!(matches!(&txt_in_inst.kind, NodeKind::Text(t) if t.content == "Pro"), ".fig round-trip must preserve nested instance text prop override");
+
+    // The imported switch is a swap of the nested instance: a sync of the outer main keeps it, Reset all changes takes it back.
+    let mut fig_rt = fig_rt;
+    let card_main_rt = find(&fig_rt, "Card").id;
+    let outer_rt = find(&fig_rt, "CardInst").id;
+    let nested_rt = *fig_rt.get(outer_rt).unwrap().children.iter().find(|c| fig_rt.get(**c).unwrap().name == "ExposedBadge").unwrap();
+    assert!(
+        fig_rt.get(nested_rt).unwrap().component.overrides.contains(&OverrideField::MainComponent),
+        "the imported variant switch is a swap of the nested instance"
+    );
+    sync_instances(&mut fig_rt, card_main_rt).apply(&mut fig_rt).unwrap();
+    assert_eq!(instance_component(fig_rt.get(nested_rt).unwrap()), Some(v_lg_rt), "a sync of the outer main keeps the imported switch");
+    reset_instance(&mut fig_rt, outer_rt).apply(&mut fig_rt).unwrap();
+    assert_eq!(instance_component(fig_rt.get(nested_rt).unwrap()), Some(find(&fig_rt, "Size=Sm").id), "Reset all changes takes the imported switch back");
+
+    // 2. REST JSON export -> import preserves propsAreBubbled / expose_nested_instances on the primary nested instance only.
+    let rest_val = designos_fig::export_rest_json(&doc);
+    let rest_rt = designos_fig::import_rest_json(&rest_val.to_string()).expect("import_rest_json");
+    let rest_card = find(&rest_rt, "Card");
+    let rest_card_exposed = rest_card.children.iter().filter_map(|id| rest_rt.get(*id)).find(|n| n.name == "ExposedBadge").unwrap();
+    let rest_card_hidden = rest_card.children.iter().filter_map(|id| rest_rt.get(*id)).find(|n| n.name == "HiddenBadge").unwrap();
+    assert!(rest_card_exposed.component.expose_nested_instances, "REST round-trip must preserve expose_nested_instances = true on main component child");
+    assert!(!rest_card_hidden.component.expose_nested_instances, "REST round-trip must preserve expose_nested_instances = false");
+    let rest_inst = find(&rest_rt, "CardInst");
+    let rest_inst_exposed = rest_inst.children.iter().filter_map(|id| rest_rt.get(*id)).find(|n| n.name == "ExposedBadge").unwrap();
+    assert!(!rest_inst_exposed.component.expose_nested_instances, "REST expand_instance must keep expose_nested_instances = false on outer instance copies");
+    assert_eq!(exposed_nested_instances(&rest_rt, rest_inst.id), vec![rest_inst_exposed.id]);
+}
+
+#[test]
+fn a_nested_instance_is_written_as_swapped_only_when_both_it_and_its_main_side_instance_have_a_component() {
+    let mut doc = Document::new("swapped-symbol");
+    let page = doc.add_page("Page 1");
+    let mut make_main = |name: &str, x: f32| {
+        let id = doc.alloc_id();
+        let mut f = Node::frame(id, Rect::new(x, 0.0, 20.0, 20.0));
+        f.name = name.into();
+        let comp = doc.insert(page, f).unwrap();
+        create_component(&mut doc, comp).apply(&mut doc).unwrap();
+        comp
+    };
+    let badge_a = make_main("BadgeA", 0.0);
+    let badge_b = make_main("BadgeB", 40.0);
+
+    let card_id = doc.alloc_id();
+    let mut card = Node::frame(card_id, Rect::new(0.0, 100.0, 200.0, 48.0));
+    card.name = "Card".into();
+    let card = doc.insert(page, card).unwrap();
+    create_component(&mut doc, card).apply(&mut doc).unwrap();
+    let place = |doc: &mut Document, name: &str, x: f32| {
+        create_instance(doc, badge_a, card, Vec2::new(x, 8.0)).apply(doc).unwrap();
+        let id = *doc.get(card).unwrap().children.last().unwrap();
+        doc.get_mut(id).unwrap().name = name.into();
+        id
+    };
+    place(&mut doc, "Swapped", 8.0);
+    let orphan_main = place(&mut doc, "Orphan", 60.0);
+
+    create_instance(&mut doc, card, page, Vec2::new(0.0, 200.0)).apply(&mut doc).unwrap();
+    let outer = *doc.get(page).unwrap().children.last().unwrap();
+    doc.get_mut(outer).unwrap().name = "CardInst".into();
+    let child_of = |doc: &Document, name: &str| *doc.get(outer).unwrap().children.iter().find(|c| doc.get(**c).unwrap().name == name).unwrap();
+    let swapped_copy = child_of(&doc, "Swapped");
+    swap_instance(&mut doc, swapped_copy, badge_b).apply(&mut doc).unwrap();
+
+    // The main-side instance lost its component (a deleted library, an older file); the outer copy still has one.
+    if let NodeKind::Instance { component, .. } = &mut doc.get_mut(orphan_main).unwrap().kind {
+        *component = None;
+    }
+    let orphan_copy = child_of(&doc, "Orphan");
+    assert!(instance_component(doc.get(orphan_copy).unwrap()).is_some());
+
+    let decoded = decode_fig_to_json(&export_fig(&doc).expect("export_fig")).expect("decode_fig_to_json");
+    let changes = decoded["message"]["nodeChanges"].as_array().expect("node changes");
+    let outer_change = changes.iter().find(|n| n["name"] == "CardInst").expect("node change for the outer instance");
+    let overrides = outer_change["symbolData"]["symbolOverrides"].as_array().cloned().unwrap_or_default();
+    let swapped: Vec<&Value> = overrides.iter().filter(|o| o.get("overriddenSymbolID").is_some()).collect();
+    assert_eq!(swapped.len(), 1, "only the instance swapped to another component is written as swapped: {overrides:?}");
+}
+
+#[test]
+fn fig_instance_stroke_override_preserves_align_join_and_miter() {
+    let mut doc = Document::new("FigStrokeAlignJoinMiterOverride");
+    let page = doc.add_page("Page 1");
+
+    let comp_id = doc.alloc_id();
+    let mut comp = Node::new(comp_id, NodeKind::Component(FrameProps::default()));
+    comp.name = "StrokeMasterComp".into();
+    comp.transform = Affine::translate(10.0, 10.0);
+    comp.size = Vec2::new(80.0, 40.0);
+    doc.insert(page, comp).unwrap();
+
+    let comp_child_id = doc.alloc_id();
+    let mut comp_child = Node::rectangle(comp_child_id, Rect::new(0.0, 0.0, 80.0, 40.0));
+    comp_child.name = "StrokeMasterBorder".into();
+    comp_child.stroke.paints = vec![Paint::solid(Color::BLACK)];
+    comp_child.stroke.weight = 2.0;
+    comp_child.stroke.align = StrokeAlign::Inside;
+    comp_child.stroke.join = StrokeJoin::Miter;
+    comp_child.stroke.miter_limit = 4.0;
+    doc.insert(comp_id, comp_child).unwrap();
+
+    create_instance(&mut doc, comp_id, page, Vec2::new(120.0, 10.0)).apply(&mut doc).unwrap();
+    let inst_id =
+        *doc.get(page).unwrap().children.iter().find(|&&id| matches!(doc.get(id).map(|n| &n.kind), Some(NodeKind::Instance { .. }))).expect("instance created");
+    doc.get_mut(inst_id).unwrap().name = "StrokeOverrideInst".into();
+    let inst_child_id = doc.get(inst_id).unwrap().children[0];
+    {
+        let ch = doc.get_mut(inst_child_id).unwrap();
+        ch.stroke.align = StrokeAlign::Outside;
+        ch.stroke.join = StrokeJoin::Bevel;
+        ch.stroke.miter_limit = 15.0;
+        ch.component.overrides.insert(OverrideField::Stroke);
+    }
+
+    let bytes = export_fig(&doc).expect("export_fig");
+    let mut roundtripped = import_fig(&bytes).expect("import_fig");
+
+    let rt_inst = find(&roundtripped, "StrokeOverrideInst");
+    let rt_child = roundtripped.get(rt_inst.children[0]).expect("instance child");
+    assert_eq!(rt_child.stroke.align, StrokeAlign::Outside, "instance child preserves overridden stroke align across .fig");
+    assert_eq!(rt_child.stroke.join, StrokeJoin::Bevel, "instance child preserves overridden stroke join across .fig");
+    assert!((rt_child.stroke.miter_limit - 15.0).abs() < 1e-3, "instance child preserves overridden miter limit across .fig");
+
+    let rt_comp_id = find(&roundtripped, "StrokeMasterComp").id;
+    sync_instances(&mut roundtripped, rt_comp_id).apply(&mut roundtripped).unwrap();
+    let rt_inst_after = find(&roundtripped, "StrokeOverrideInst");
+    let rt_child_after = roundtripped.get(rt_inst_after.children[0]).expect("instance child after sync");
+    assert_eq!(rt_child_after.stroke.align, StrokeAlign::Outside);
+    assert_eq!(rt_child_after.stroke.join, StrokeJoin::Bevel);
+    assert!((rt_child_after.stroke.miter_limit - 15.0).abs() < 1e-3);
+}
+
+#[test]
+fn fig_instance_stroke_override_clears_dashes() {
+    let mut doc = Document::new("FigStrokeClearDashesOverride");
+    let page = doc.add_page("Page 1");
+
+    let comp_id = doc.alloc_id();
+    let mut comp = Node::new(comp_id, NodeKind::Component(FrameProps::default()));
+    comp.name = "DashedMasterComp".into();
+    comp.transform = Affine::translate(10.0, 10.0);
+    comp.size = Vec2::new(80.0, 40.0);
+    doc.insert(page, comp).unwrap();
+
+    let comp_child_id = doc.alloc_id();
+    let mut comp_child = Node::rectangle(comp_child_id, Rect::new(0.0, 0.0, 80.0, 40.0));
+    comp_child.name = "DashedMasterBorder".into();
+    comp_child.stroke.paints = vec![Paint::solid(Color::BLACK)];
+    comp_child.stroke.weight = 2.0;
+    comp_child.stroke.dashes = vec![10.0, 5.0];
+    comp_child.stroke.cap = StrokeCap::Round;
+    doc.insert(comp_id, comp_child).unwrap();
+
+    create_instance(&mut doc, comp_id, page, Vec2::new(120.0, 10.0)).apply(&mut doc).unwrap();
+    let inst_id =
+        *doc.get(page).unwrap().children.iter().find(|&&id| matches!(doc.get(id).map(|n| &n.kind), Some(NodeKind::Instance { .. }))).expect("instance created");
+    doc.get_mut(inst_id).unwrap().name = "ClearedDashesInst".into();
+    let inst_child_id = doc.get(inst_id).unwrap().children[0];
+    {
+        let ch = doc.get_mut(inst_child_id).unwrap();
+        ch.stroke.dashes.clear();
+        ch.component.overrides.insert(OverrideField::Stroke);
+    }
+
+    let bytes = export_fig(&doc).expect("export_fig");
+    let decoded = designos_fig::decode_fig_to_json(&bytes).expect("decode_fig_to_json");
+    let changes = decoded["message"]["nodeChanges"].as_array().expect("nodeChanges array");
+    let inst_nc = changes.iter().find(|nc| nc["name"] == "ClearedDashesInst").expect("ClearedDashesInst nodeChange");
+    let inst_guid = inst_nc["guid"].clone();
+    let sym_ovs = inst_nc["symbolData"]["symbolOverrides"].as_array().expect("symbolOverrides array");
+    assert_eq!(sym_ovs[0].get("dashPattern"), Some(&json!([])), "symbolOverrides writes empty dashPattern when override clears dashes");
+
+    // Re-importing from the unexpanded instance record (where children are cloned from DashedMasterComp
+    // and symbolOverrides applies the cleared dash pattern) must clear the master's [10.0, 5.0] dashes.
+    let unexpanded_changes: Vec<Value> = changes.iter().filter(|nc| nc["parentIndex"]["guid"] != inst_guid).cloned().collect();
+    let unexpanded_rt =
+        designos_fig::import_fig_node_changes(&Value::Array(unexpanded_changes), "FigStrokeClearDashesOverride").expect("import_fig_node_changes");
+    let unexp_inst = find(&unexpanded_rt, "ClearedDashesInst");
+    let unexp_child = unexpanded_rt.get(unexp_inst.children[0]).expect("instance child from symbolOverrides");
+    assert_eq!(unexp_child.stroke.dashes, Vec::<f32>::new(), "symbolOverrides empty dashPattern clears master dashes on instance expansion");
+
+    let mut roundtripped = import_fig(&bytes).expect("import_fig");
+    let rt_inst = find(&roundtripped, "ClearedDashesInst");
+    let rt_child = roundtripped.get(rt_inst.children[0]).expect("instance child");
+    assert_eq!(rt_child.stroke.dashes, Vec::<f32>::new(), "instance child preserves cleared dash pattern across .fig");
+
+    let rt_comp_id = find(&roundtripped, "DashedMasterComp").id;
+    sync_instances(&mut roundtripped, rt_comp_id).apply(&mut roundtripped).unwrap();
+    let rt_inst_after = find(&roundtripped, "ClearedDashesInst");
+    let rt_child_after = roundtripped.get(rt_inst_after.children[0]).expect("instance child after sync");
+    assert_eq!(rt_child_after.stroke.dashes, Vec::<f32>::new(), "instance child keeps cleared dash pattern after sync_instances");
+}
+
+#[test]
+fn rest_instance_overrides_skips_layout_cleared() {
+    let mut doc = Document::new("RestInstanceLayoutClearedSkip");
+    let page = doc.add_page("Page 1");
+
+    let comp_id = doc.alloc_id();
+    let mut comp = Node::new(comp_id, NodeKind::Component(FrameProps { auto_layout: Some(AutoLayout::default()), ..Default::default() }));
+    comp.name = "AutoLayoutComp".into();
+    comp.size = Vec2::new(100.0, 50.0);
+    doc.insert(page, comp).unwrap();
+
+    create_instance(&mut doc, comp_id, page, Vec2::new(120.0, 0.0)).apply(&mut doc).unwrap();
+    let inst_kept_id = *doc.get(page).unwrap().children.last().unwrap();
+    {
+        let inst = doc.get_mut(inst_kept_id).unwrap();
+        inst.name = "InstLayoutKept".into();
+        inst.component.overrides.insert(OverrideField::Layout);
+        inst.component.layout_cleared = false;
+    }
+
+    create_instance(&mut doc, comp_id, page, Vec2::new(240.0, 0.0)).apply(&mut doc).unwrap();
+    let inst_cleared_id = *doc.get(page).unwrap().children.last().unwrap();
+    {
+        let inst = doc.get_mut(inst_cleared_id).unwrap();
+        inst.name = "InstLayoutCleared".into();
+        inst.component.overrides.insert(OverrideField::Layout);
+        inst.component.overrides.insert(OverrideField::Opacity);
+        inst.component.layout_cleared = true;
+    }
+
+    create_instance(&mut doc, comp_id, page, Vec2::new(360.0, 0.0)).apply(&mut doc).unwrap();
+    let inst_only_cleared_id = *doc.get(page).unwrap().children.last().unwrap();
+    {
+        let inst = doc.get_mut(inst_only_cleared_id).unwrap();
+        inst.name = "InstOnlyLayoutCleared".into();
+        inst.component.overrides.insert(OverrideField::Layout);
+        inst.component.layout_cleared = true;
+    }
+
+    let exported = designos_fig::export_rest_json(&doc);
+    let page_children = exported["document"]["children"][0]["children"].as_array().expect("page children");
+    let find_json = |name: &str| -> &Value { page_children.iter().find(|n| n["name"] == name).unwrap_or_else(|| panic!("missing exported node {name}")) };
+
+    let kept_ovs = find_json("InstLayoutKept")["overrides"].as_array().expect("overrides on InstLayoutKept");
+    assert_eq!(kept_ovs.len(), 1);
+    assert_eq!(kept_ovs[0]["overriddenFields"], json!(["layoutMode"]), "non-cleared Layout override emits layoutMode");
+
+    let cleared_ovs = find_json("InstLayoutCleared")["overrides"].as_array().expect("overrides on InstLayoutCleared");
+    assert_eq!(cleared_ovs.len(), 1);
+    assert_eq!(cleared_ovs[0]["overriddenFields"], json!(["opacity"]), "layout_cleared instance skips layoutMode and keeps other overrides");
+
+    assert!(find_json("InstOnlyLayoutCleared").get("overrides").is_none(), "instance with only layout_cleared Layout override emits no overrides array");
+}
+
+#[test]
+fn fig_round_trip_keeps_transform_rotation_scale_filters_and_flags() {
+    let mut doc = Document::new("ImageParamsFigRoundTrip");
+    let page = doc.add_page("Page 1");
+    let hash = "deadbeef01020304";
+    doc.images.insert(hash.into(), vec![0x89, b'P', b'N', b'G']);
+
+    let expected_params = ImageParams {
+        transform: Some([0.6, 0.0, 0.15, 0.0, 0.75, 0.1]),
+        rotation: 90.0,
+        tile_scale: 0.4,
+        adjust: ImageAdjust {
+            tint: 0.1,
+            shadows: -0.2,
+            highlights: 0.3,
+            detail: 0.4,
+            exposure: -0.5,
+            vignette: 0.6,
+            temperature: -0.7,
+            vibrance: 0.8,
+            contrast: -0.9,
+            brightness: 0.25,
+        },
+        color_manage: Some(true),
+        original_size: Some((1440, 960)),
+    };
+
+    let id = doc.alloc_id();
+    let mut rect = Node::rectangle(id, Rect::new(0.0, 0.0, 120.0, 80.0));
+    rect.name = "CroppedHero".into();
+    rect.fills = vec![Paint {
+        kind: PaintKind::Image { image_ref: hash.into(), scale_mode: ImageScaleMode::Crop, params: expected_params },
+        opacity: 1.0,
+        visible: true,
+        blend: BlendMode::Normal,
+    }];
+    doc.insert(page, rect).unwrap();
+
+    let bytes = export_fig(&doc).expect("export_fig");
+    let raw = designos_fig::decode_fig_to_json(&bytes).expect("decode_fig_to_json");
+    let ncs = raw["message"]["nodeChanges"].as_array().expect("nodeChanges");
+    let raw_node = ncs.iter().find(|n| n["name"] == "CroppedHero").expect("CroppedHero in nodeChanges");
+    let raw_paint = &raw_node["fillPaints"][0];
+    assert!(raw_paint.get("paintFilter").is_some(), "export writes paintFilter");
+    assert!(raw_paint.get("filterColorAdjust").is_none(), "export never writes legacy filterColorAdjust");
+
+    let back = import_fig(&bytes).expect("import_fig");
+    let node = find(&back, "CroppedHero");
+    let PaintKind::Image { image_ref, scale_mode, params } = &node.fills[0].kind else {
+        panic!("expected PaintKind::Image, got {:?}", node.fills[0].kind);
+    };
+    assert_eq!(image_ref, hash);
+    assert_eq!(*scale_mode, ImageScaleMode::Crop);
+    assert_eq!(*params, expected_params);
+}
+
+#[test]
+fn legacy_filter_color_adjust_reads_into_the_adjustment_set() {
+    use designos_fig::container::{write_container, Compression};
+    use designos_fig::kiwi::KiwiValue as V;
+    use designos_fig::testkit::{en, figma_like_schema, fl, guid, matrix, msg, node, st, vec2, IMAGE_HASH};
+
+    let doc_node = msg(vec![("guid", guid(0, 0)), ("type", en("DOCUMENT")), ("name", V::String("Document".into()))]);
+    let page_node = node((0, 1), (0, 0), "!", "CANVAS", "Page 1", vec![]);
+    let legacy_paint = msg(vec![
+        ("type", en("IMAGE")),
+        ("opacity", fl(1.0)),
+        ("visible", V::Bool(true)),
+        ("blendMode", en("NORMAL")),
+        ("image", msg(vec![("hash", V::Bytes(IMAGE_HASH.to_vec())), ("name", V::String("pic".into()))])),
+        ("imageScaleMode", en("FILL")),
+        (
+            "filterColorAdjust",
+            st(vec![
+                ("tint", fl(0.25)),
+                ("shadows", fl(-0.5)),
+                ("highlights", fl(0.75)),
+                ("detail", fl(0.125)),
+                ("exposure", fl(-0.375)),
+                ("vignette", fl(0.625)),
+                ("temperature", fl(-0.25)),
+                ("vibrance", fl(0.5)),
+            ]),
+        ),
+    ]);
+    let rect_node = node(
+        (1, 2),
+        (0, 1),
+        "a",
+        "RECTANGLE",
+        "LegacyFiltered",
+        vec![("size", vec2(80.0, 60.0)), ("transform", matrix(0.0, 0.0)), ("fillPaints", V::Array(vec![legacy_paint]))],
+    );
+    let root_msg = msg(vec![("nodeChanges", V::Array(vec![doc_node, page_node, rect_node]))]);
+    let schema = figma_like_schema();
+    let root = schema.find("Message").unwrap();
+    let body = schema.encode_message(root, &root_msg).unwrap();
+    let fig_bytes = write_container(&schema.encode(), &body, Compression::Deflate, 101);
+
+    let imported = import_fig(&fig_bytes).expect("import legacy filterColorAdjust");
+    let r = find(&imported, "LegacyFiltered");
+    let PaintKind::Image { params, .. } = &r.fills[0].kind else {
+        panic!("expected PaintKind::Image");
+    };
+    assert_eq!(
+        params.adjust,
+        ImageAdjust {
+            tint: 0.25,
+            shadows: -0.5,
+            highlights: 0.75,
+            detail: 0.125,
+            exposure: -0.375,
+            vignette: 0.625,
+            temperature: -0.25,
+            vibrance: 0.5,
+            contrast: 0.0,
+            brightness: 0.0,
+        }
+    );
+
+    let exported = export_fig(&imported).expect("export_fig");
+    let decoded = decode_fig_to_json(&exported).expect("decode_fig_to_json");
+    let ncs = decoded["message"]["nodeChanges"].as_array().expect("nodeChanges");
+    let raw_node = ncs.iter().find(|n| n["name"] == "LegacyFiltered").expect("LegacyFiltered in nodeChanges");
+    let raw_paint = &raw_node["fillPaints"][0];
+    assert!(raw_paint.get("paintFilter").is_some(), "export writes paintFilter");
+    assert!(raw_paint.get("filterColorAdjust").is_none(), "export never writes filterColorAdjust");
+}
+
+#[test]
+fn rest_round_trip_keeps_image_transform_scaling_factor_and_filters() {
+    let mut doc = Document::new("ImageParamsRestRoundTrip");
+    let page = doc.add_page("Page 1");
+    let id = doc.alloc_id();
+    let mut rect = Node::rectangle(id, Rect::new(0.0, 0.0, 100.0, 100.0));
+    rect.name = "RestImageNode".into();
+
+    let crop_params = ImageParams {
+        transform: Some([0.5, 0.0, 0.25, 0.0, 0.75, 0.125]),
+        rotation: 180.0,
+        tile_scale: 1.0,
+        adjust: ImageAdjust {
+            exposure: 0.25,
+            contrast: -0.5,
+            vibrance: 0.75,
+            temperature: -0.25,
+            tint: 0.5,
+            highlights: -0.75,
+            shadows: 0.125,
+            ..Default::default()
+        },
+        color_manage: None,
+        original_size: None,
+    };
+    let tile_params = ImageParams { transform: None, rotation: 90.0, tile_scale: 2.0, adjust: ImageAdjust::default(), color_manage: None, original_size: None };
+
+    rect.fills = vec![
+        Paint {
+            kind: PaintKind::Image { image_ref: "crop_hash".into(), scale_mode: ImageScaleMode::Crop, params: crop_params },
+            opacity: 1.0,
+            visible: true,
+            blend: BlendMode::Normal,
+        },
+        Paint {
+            kind: PaintKind::Image { image_ref: "tile_hash".into(), scale_mode: ImageScaleMode::Tile, params: tile_params },
+            opacity: 1.0,
+            visible: true,
+            blend: BlendMode::Normal,
+        },
+    ];
+    doc.insert(page, rect).unwrap();
+
+    let exported = designos_fig::export_rest_json(&doc);
+    let fills_json = &exported["document"]["children"][0]["children"][0]["fills"];
+    assert_eq!(fills_json[0]["scaleMode"], "STRETCH");
+    assert_eq!(fills_json[0]["imageTransform"], json!([[0.5, 0.0, 0.25], [0.0, 0.75, 0.125]]));
+    assert_eq!(fills_json[0]["rotation"], json!(180.0));
+    assert_eq!(fills_json[0]["filters"]["exposure"], json!(0.25));
+    assert_eq!(fills_json[0]["filters"]["contrast"], json!(-0.5));
+    assert_eq!(fills_json[0]["filters"]["saturation"], json!(0.75));
+    assert_eq!(fills_json[0]["filters"]["temperature"], json!(-0.25));
+    assert_eq!(fills_json[0]["filters"]["tint"], json!(0.5));
+    assert_eq!(fills_json[0]["filters"]["highlights"], json!(-0.75));
+    assert_eq!(fills_json[0]["filters"]["shadows"], json!(0.125));
+    assert_eq!(fills_json[1]["scaleMode"], "TILE");
+    assert_eq!(fills_json[1]["scalingFactor"], json!(2.0));
+    assert_eq!(fills_json[1]["rotation"], json!(90.0));
+
+    let json_str = serde_json::to_string(&exported).unwrap();
+    let reimported = designos_fig::import_rest_json(&json_str).expect("import_rest_json");
+    let node = find(&reimported, "RestImageNode");
+    assert_eq!(node.fills[0].kind, PaintKind::Image { image_ref: "crop_hash".into(), scale_mode: ImageScaleMode::Crop, params: crop_params });
+    assert_eq!(node.fills[1].kind, PaintKind::Image { image_ref: "tile_hash".into(), scale_mode: ImageScaleMode::Tile, params: tile_params });
+}
+
+fn tiled_image_doc(tile_scale: f32) -> Document {
+    let mut doc = Document::new("TileScaleClamp");
+    let page = doc.add_page("Page 1");
+    let id = doc.alloc_id();
+    let mut rect = Node::rectangle(id, Rect::new(0.0, 0.0, 100.0, 100.0));
+    rect.name = "TiledNode".into();
+    rect.fills = vec![Paint {
+        kind: PaintKind::Image {
+            image_ref: "deadbeef01020304".into(),
+            scale_mode: ImageScaleMode::Tile,
+            params: ImageParams { tile_scale, ..Default::default() },
+        },
+        opacity: 1.0,
+        visible: true,
+        blend: BlendMode::Normal,
+    }];
+    doc.insert(page, rect).unwrap();
+    doc
+}
+
+fn imported_tile_scale(doc: &Document) -> f32 {
+    let PaintKind::Image { params, .. } = &find(doc, "TiledNode").fills[0].kind else {
+        panic!("expected PaintKind::Image");
+    };
+    params.tile_scale
+}
+
+#[test]
+fn rest_import_clamps_scaling_factor_into_the_tile_scale_range() {
+    let exported = designos_fig::export_rest_json(&tiled_image_doc(2.0));
+    for (raw, expected) in [(json!(0), 0.01), (json!(0.0), 0.01), (json!(-3.0), 0.01), (json!(0.001), 0.01), (json!(1000.0), 100.0), (json!(2.5), 2.5)] {
+        let mut patched = exported.clone();
+        let fill = &mut patched["document"]["children"][0]["children"][0]["fills"][0];
+        assert_eq!(fill["scaleMode"], "TILE");
+        fill["scalingFactor"] = raw.clone();
+        let reimported = designos_fig::import_rest_json(&serde_json::to_string(&patched).unwrap()).expect("import_rest_json");
+        assert_eq!(imported_tile_scale(&reimported), expected, "REST scalingFactor {raw} imports as {expected}");
+    }
+}
+
+#[test]
+fn fig_import_clamps_the_tile_scale_and_export_writes_the_stored_value() {
+    for (stored, expected) in [(0.0, 0.01), (-2.0, 0.01), (1000.0, 100.0), (0.5, 0.5)] {
+        let bytes = export_fig(&tiled_image_doc(stored)).expect("export_fig");
+        let raw = decode_fig_to_json(&bytes).expect("decode_fig_to_json");
+        let ncs = raw["message"]["nodeChanges"].as_array().expect("nodeChanges");
+        let raw_node = ncs.iter().find(|n| n["name"] == "TiledNode").expect("TiledNode in nodeChanges");
+        assert_eq!(raw_node["fillPaints"][0]["scale"], json!(stored), "export writes the stored tile scale {stored}");
+        let back = import_fig(&bytes).expect("import_fig");
+        assert_eq!(imported_tile_scale(&back), expected, ".fig scale {stored} imports as {expected}");
+    }
+}
+
+#[test]
+fn animation_style_and_style_ids_for_animation_roundtrip() {
+    let g = |s: u64, l: u64| -> Value { json!({"sessionID": s, "localID": l}) };
+    let node = |id: (u64, u64), parent: (u64, u64), pos: &str, ty: &str, name: &str, extra: Value| -> Value {
+        let mut v = json!({
+            "guid": g(id.0, id.1),
+            "parentIndex": {"guid": g(parent.0, parent.1), "position": pos},
+            "type": ty,
+            "name": name,
+            "phase": "CREATED",
+            "visible": true,
+            "opacity": 1.0,
+            "size": {"x": 120.0, "y": 60.0},
+            "transform": {"m00": 1.0, "m01": 0.0, "m02": 0.0, "m10": 0.0, "m11": 1.0, "m12": 0.0}
+        });
+        for (k, x) in extra.as_object().unwrap() {
+            v[k] = x.clone();
+        }
+        v
+    };
+
+    let changes = json!([
+        node((0, 0), (0, 0), "", "DOCUMENT", "AnimStyleDoc", json!({})),
+        node((0, 1), (0, 0), "!", "CANVAS", "Page 1", json!({})),
+        node((0, 2), (0, 0), "\"", "CANVAS", "Internal Only Canvas", json!({"internalOnly": true})),
+        node(
+            (2, 100),
+            (0, 2),
+            "!",
+            "FRAME",
+            "Motion / Pulse",
+            json!({
+                "styleType": "ANIMATION",
+                "styleDescription": "Card entrance pulse",
+                "key": "anim_pulse_key",
+                "timelineDefinitions": {
+                    "entries": [
+                        {
+                            "id": g(3, 10),
+                            "data": {"durationUs": 1200000, "defaultTimeline": true, "autoplay": true}
+                        }
+                    ]
+                }
+            })
+        ),
+        node(
+            (1, 10),
+            (0, 1),
+            "!",
+            "FRAME",
+            "AnimatedCard",
+            json!({
+                "styleIdsForAnimation": [
+                    {
+                        "id": g(4, 1),
+                        "timelineDefId": g(3, 10),
+                        "animationStyleId": {"guid": g(2, 100)},
+                        "timelineOffset": 150000,
+                        "sortPosition": "!"
+                    }
+                ]
+            })
+        ),
+    ]);
+
+    let doc = import_fig_node_changes(&changes, "AnimStyleDoc").expect("import animation style doc");
+    let Style::Animation(timelines) = doc.styles.get("2:100").expect("2:100 in doc.styles") else {
+        panic!("expected Style::Animation, got {:?}", doc.styles.get("2:100"));
+    };
+    assert_eq!(timelines.len(), 1);
+    assert_eq!(timelines[0].id, "3:10");
+    assert_eq!(timelines[0].duration_us, 1_200_000);
+    assert!(timelines[0].autoplay);
+    let meta = doc.style_meta.get("2:100").expect("2:100 in doc.style_meta");
+    assert_eq!(meta.property, StyleProperty::Animation);
+    assert_eq!(meta.name, "Motion / Pulse");
+    assert_eq!(meta.description, "Card entrance pulse");
+    assert_eq!(meta.key.as_deref(), Some("anim_pulse_key"));
+
+    let card = find(&doc, "AnimatedCard");
+    assert_eq!(card.style_refs.get("animation").map(String::as_str), Some("2:100"));
+    assert_eq!(card.motion.as_deref().map(|m| m.timelines.as_slice()), Some(timelines.as_slice()));
+
+    let bytes = export_fig(&doc).expect("export_fig");
+    let raw = decode_fig_to_json(&bytes).expect("decode_fig_to_json");
+    let ncs = raw["message"]["nodeChanges"].as_array().expect("nodeChanges");
+    let raw_style = ncs.iter().find(|n| n["name"] == "Motion / Pulse").expect("style node in nodeChanges");
+    assert_eq!(raw_style["styleType"], json!("ANIMATION"));
+    assert!(raw_style["timelineDefinitions"]["entries"].as_array().is_some_and(|e| !e.is_empty()));
+    let raw_card = ncs.iter().find(|n| n["name"] == "AnimatedCard").expect("AnimatedCard in nodeChanges");
+    assert_eq!(raw_card["styleIdsForAnimation"][0]["animationStyleId"]["guid"], g(2, 100));
+
+    let rt = import_fig(&bytes).expect("re-import .fig");
+    assert_eq!(rt.styles.get("2:100"), doc.styles.get("2:100"));
+    assert_eq!(rt.style_meta.get("2:100").map(|m| m.property), Some(StyleProperty::Animation));
+    assert_eq!(rt.style_meta.get("2:100").map(|m| m.name.as_str()), Some("Motion / Pulse"));
+    let rt_card = find(&rt, "AnimatedCard");
+    assert_eq!(rt_card.style_refs.get("animation").map(String::as_str), Some("2:100"));
+    assert_eq!(rt_card.motion.as_deref().map(|m| m.timelines.as_slice()), Some(timelines.as_slice()));
+}
+
+#[test]
+fn roundtrip_preserves_size_limit_and_typography_variable_bindings() {
+    let mut doc = Document::new("VariableBindingsRoundtrip");
+    let page_id = doc.add_page("Page 1");
+
+    let coll_id = "VariableCollectionId:10:1";
+    let mode_a = "10:0";
+    let mode_b = "10:1";
+
+    let var_min_w = "VariableID:10:1";
+    let var_max_w = "VariableID:10:2";
+    let var_min_h = "VariableID:10:3";
+    let var_max_h = "VariableID:10:4";
+    let var_font_fam = "VariableID:10:5";
+    let var_font_sty = "VariableID:10:6";
+    let var_p_spacing = "VariableID:10:7";
+    let var_p_indent = "VariableID:10:8";
+
+    doc.variable_collections.insert(
+        coll_id.into(),
+        VariableCollection {
+            id: coll_id.into(),
+            name: "Tokens".into(),
+            modes: vec![VariableMode { id: mode_a.into(), name: "ModeA".into() }, VariableMode { id: mode_b.into(), name: "ModeB".into() }],
+            default_mode: mode_a.into(),
+            variables: vec![
+                var_min_w.into(),
+                var_max_w.into(),
+                var_min_h.into(),
+                var_max_h.into(),
+                var_font_fam.into(),
+                var_font_sty.into(),
+                var_p_spacing.into(),
+                var_p_indent.into(),
+            ],
+            key: Some("tokens_coll_key".into()),
+            source_library_key: None,
+            extensions: Default::default(),
+        },
+    );
+
+    let num_var = |id: &str, name: &str, scope: &str, val_a: f32, val_b: f32| {
+        let mut vals = BTreeMap::new();
+        vals.insert(mode_a.into(), VariableValue::Number(val_a));
+        vals.insert(mode_b.into(), VariableValue::Number(val_b));
+        Variable {
+            id: id.into(),
+            name: name.into(),
+            collection: coll_id.into(),
+            kind: VariableKind::Number,
+            values: vals,
+            description: String::new(),
+            scopes: vec![scope.into()],
+            hidden_from_publishing: false,
+            key: Some(format!("key_{id}")),
+            code_syntax: Default::default(),
+            extensions: Default::default(),
+            mode_extensions: Default::default(),
+        }
+    };
+
+    let str_var = |id: &str, name: &str, scope: &str, val_a: &str, val_b: &str| {
+        let mut vals = BTreeMap::new();
+        vals.insert(mode_a.into(), VariableValue::String(val_a.into()));
+        vals.insert(mode_b.into(), VariableValue::String(val_b.into()));
+        Variable {
+            id: id.into(),
+            name: name.into(),
+            collection: coll_id.into(),
+            kind: VariableKind::String,
+            values: vals,
+            description: String::new(),
+            scopes: vec![scope.into()],
+            hidden_from_publishing: false,
+            key: Some(format!("key_{id}")),
+            code_syntax: Default::default(),
+            extensions: Default::default(),
+            mode_extensions: Default::default(),
+        }
+    };
+
+    doc.variables.insert(var_min_w.into(), num_var(var_min_w, "size/min_w", "WIDTH_HEIGHT", 50.0, 70.0));
+    doc.variables.insert(var_max_w.into(), num_var(var_max_w, "size/max_w", "WIDTH_HEIGHT", 150.0, 250.0));
+    doc.variables.insert(var_min_h.into(), num_var(var_min_h, "size/min_h", "WIDTH_HEIGHT", 30.0, 40.0));
+    doc.variables.insert(var_max_h.into(), num_var(var_max_h, "size/max_h", "WIDTH_HEIGHT", 120.0, 220.0));
+    doc.variables.insert(var_font_fam.into(), str_var(var_font_fam, "font/family", "FONT_FAMILY", "Inter", "Roboto Mono"));
+    doc.variables.insert(var_font_sty.into(), str_var(var_font_sty, "font/style", "FONT_STYLE", "Regular", "Bold Italic"));
+    doc.variables.insert(var_p_spacing.into(), num_var(var_p_spacing, "para/spacing", "PARAGRAPH_SPACING", 8.0, 16.0));
+    doc.variables.insert(var_p_indent.into(), num_var(var_p_indent, "para/indent", "PARAGRAPH_INDENT", 12.0, 24.0));
+
+    let frame_id = doc.alloc_id();
+    let mut frame = Node::frame(frame_id, Rect::new(0.0, 0.0, 200.0, 200.0));
+    frame.name = "SizeLimitFrame".into();
+    frame.variables.bindings.insert("minWidth".into(), var_min_w.into());
+    frame.variables.bindings.insert("maxWidth".into(), var_max_w.into());
+    frame.variables.bindings.insert("minHeight".into(), var_min_h.into());
+    frame.variables.bindings.insert("maxHeight".into(), var_max_h.into());
+    doc.insert(page_id, frame).unwrap();
+
+    let text_id = doc.alloc_id();
+    let mut text = Node::text(text_id, Rect::new(0.0, 0.0, 100.0, 50.0), "Hello world", TextStyle::default());
+    text.name = "TypographyText".into();
+    text.variables.bindings.insert("fontFamily".into(), var_font_fam.into());
+    text.variables.bindings.insert("fontStyle".into(), var_font_sty.into());
+    text.variables.bindings.insert("paragraphSpacing".into(), var_p_spacing.into());
+    text.variables.bindings.insert("paragraphIndent".into(), var_p_indent.into());
+    doc.insert(frame_id, text).unwrap();
+
+    // Double round-trip: export -> import -> export -> import
+    let bytes1 = export_fig(&doc).expect("first export_fig");
+    let doc2 = import_fig(&bytes1).expect("first import_fig");
+    let bytes2 = export_fig(&doc2).expect("second export_fig");
+    let mut doc3 = import_fig(&bytes2).expect("second import_fig");
+
+    let imp_frame = find(&doc3, "SizeLimitFrame");
+    let find_var = |d: &Document, name: &str| d.variables.values().find(|v| v.name == name).expect(name).id.clone();
+
+    let rt_min_w = find_var(&doc3, "size/min_w");
+    let rt_max_w = find_var(&doc3, "size/max_w");
+    let rt_min_h = find_var(&doc3, "size/min_h");
+    let rt_max_h = find_var(&doc3, "size/max_h");
+    let rt_ff = find_var(&doc3, "font/family");
+    let rt_fs = find_var(&doc3, "font/style");
+    let rt_ps = find_var(&doc3, "para/spacing");
+    let rt_pi = find_var(&doc3, "para/indent");
+
+    assert_eq!(imp_frame.variables.bindings.get("minWidth"), Some(&rt_min_w));
+    assert_eq!(imp_frame.variables.bindings.get("maxWidth"), Some(&rt_max_w));
+    assert_eq!(imp_frame.variables.bindings.get("minHeight"), Some(&rt_min_h));
+    assert_eq!(imp_frame.variables.bindings.get("maxHeight"), Some(&rt_max_h));
+
+    let imp_text = find(&doc3, "TypographyText");
+    assert_eq!(imp_text.variables.bindings.get("fontFamily"), Some(&rt_ff));
+    assert_eq!(imp_text.variables.bindings.get("fontStyle"), Some(&rt_fs));
+    assert_eq!(imp_text.variables.bindings.get("paragraphSpacing"), Some(&rt_ps));
+    assert_eq!(imp_text.variables.bindings.get("paragraphIndent"), Some(&rt_pi));
+
+    // Verify resolve_node in default Mode A
+    let res_frame_a = resolve_node(&doc3, imp_frame);
+    assert_eq!(res_frame_a.layout_child.min_w, Some(50.0));
+    assert_eq!(res_frame_a.layout_child.max_w, Some(150.0));
+    assert_eq!(res_frame_a.layout_child.min_h, Some(30.0));
+    assert_eq!(res_frame_a.layout_child.max_h, Some(120.0));
+
+    let res_text_a = resolve_node(&doc3, imp_text);
+    let NodeKind::Text(tp_a) = &res_text_a.kind else { panic!("expected text") };
+    assert_eq!(tp_a.style.font_family, "Inter");
+    assert_eq!(tp_a.style.font_weight, 400);
+    assert!(!tp_a.style.italic);
+    assert_eq!(tp_a.style.paragraph_spacing, 8.0);
+    assert_eq!(tp_a.paragraph.indent, 12.0);
+
+    // Verify resolve_node in Mode B via mode override on frame
+    let imp_frame_id = imp_frame.id;
+    let imp_text_id = imp_text.id;
+    let (imp_coll_id, mode_b_id) = {
+        let c = doc3.variable_collections.values().find(|c| c.name == "Tokens").expect("Tokens collection");
+        let m = c.modes.iter().find(|m| m.name == "ModeB").expect("ModeB mode");
+        (c.id.clone(), m.id.clone())
+    };
+    doc3.get_mut(imp_frame_id).unwrap().variables.modes.insert(imp_coll_id, mode_b_id);
+
+    let res_frame_b = resolve_node(&doc3, doc3.get(imp_frame_id).unwrap());
+    assert_eq!(res_frame_b.layout_child.min_w, Some(70.0));
+    assert_eq!(res_frame_b.layout_child.max_w, Some(250.0));
+    assert_eq!(res_frame_b.layout_child.min_h, Some(40.0));
+    assert_eq!(res_frame_b.layout_child.max_h, Some(220.0));
+
+    let res_text_b = resolve_node(&doc3, doc3.get(imp_text_id).unwrap());
+    let NodeKind::Text(tp_b) = &res_text_b.kind else { panic!("expected text") };
+    assert_eq!(tp_b.style.font_family, "Roboto Mono");
+    assert_eq!(tp_b.style.font_weight, 700);
+    assert!(tp_b.style.italic);
+    assert_eq!(tp_b.style.paragraph_spacing, 16.0);
+    assert_eq!(tp_b.paragraph.indent, 24.0);
+}
+
+#[test]
+fn roundtrip_preserves_easing_and_duration_variable_bindings() {
+    let mut doc = Document::new("EasingDurationBindings");
+    let page_id = doc.add_page("Page 1");
+
+    let coll_id = "VariableCollectionId:20:1";
+    let (mode_a, mode_b) = ("20:0", "20:1");
+    let (var_ease, var_dur) = ("VariableID:20:1", "VariableID:20:2");
+
+    doc.variable_collections.insert(
+        coll_id.into(),
+        VariableCollection {
+            id: coll_id.into(),
+            name: "Motion".into(),
+            modes: vec![VariableMode { id: mode_a.into(), name: "Calm".into() }, VariableMode { id: mode_b.into(), name: "Snappy".into() }],
+            default_mode: mode_a.into(),
+            variables: vec![var_ease.into(), var_dur.into()],
+            key: Some("motion_coll_key".into()),
+            source_library_key: None,
+            extensions: Default::default(),
+        },
+    );
+    let mk = |id: &str, name: &str, kind: VariableKind, a: VariableValue, b: VariableValue| Variable {
+        id: id.into(),
+        name: name.into(),
+        collection: coll_id.into(),
+        kind,
+        values: [(mode_a.to_string(), a), (mode_b.to_string(), b)].into_iter().collect(),
+        description: String::new(),
+        scopes: vec![],
+        hidden_from_publishing: false,
+        key: Some(format!("key_{id}")),
+        code_syntax: Default::default(),
+        extensions: Default::default(),
+        mode_extensions: Default::default(),
+    };
+    doc.variables.insert(
+        var_ease.into(),
+        mk(var_ease, "motion/easing", VariableKind::String, VariableValue::String("ease-in-out".into()), VariableValue::String("linear".into())),
+    );
+    doc.variables.insert(var_dur.into(), mk(var_dur, "motion/duration", VariableKind::Number, VariableValue::Number(300.0), VariableValue::Number(120.0)));
+
+    let frame_id = doc.alloc_id();
+    let mut frame = Node::frame(frame_id, Rect::new(0.0, 0.0, 200.0, 200.0));
+    frame.name = "Animated".into();
+    frame.variables.bindings.insert("easingData".into(), var_ease.into());
+    frame.variables.bindings.insert("timelineDuration".into(), var_dur.into());
+    doc.insert(page_id, frame).unwrap();
+
+    let bytes1 = export_fig(&doc).expect("first export_fig");
+    let doc2 = import_fig(&bytes1).expect("first import_fig");
+    let bytes2 = export_fig(&doc2).expect("second export_fig");
+    let doc3 = import_fig(&bytes2).expect("second import_fig");
+
+    let find_var = |d: &Document, name: &str| d.variables.values().find(|v| v.name == name).expect(name).id.clone();
+    let node = find(&doc3, "Animated");
+    assert_eq!(node.variables.bindings.get("easingData"), Some(&find_var(&doc3, "motion/easing")));
+    assert_eq!(node.variables.bindings.get("timelineDuration"), Some(&find_var(&doc3, "motion/duration")));
+
+    let (coll, snappy) = {
+        let c = doc3.variable_collections.values().find(|c| c.name == "Motion").expect("Motion collection");
+        (c.id.clone(), c.modes.iter().find(|m| m.name == "Snappy").expect("Snappy").id.clone())
+    };
+    let id = node.id;
+    let ease_var = find_var(&doc3, "motion/easing");
+    let dur_var = find_var(&doc3, "motion/duration");
+    assert_eq!(doc3.resolve_variable(id, &ease_var), Some(VariableValue::String("ease-in-out".into())));
+    assert_eq!(doc3.resolve_variable(id, &dur_var), Some(VariableValue::Number(300.0)));
+    let mut doc3 = doc3;
+    doc3.get_mut(id).unwrap().variables.modes.insert(coll, snappy);
+    assert_eq!(doc3.resolve_variable(id, &ease_var), Some(VariableValue::String("linear".into())));
+    assert_eq!(doc3.resolve_variable(id, &dur_var), Some(VariableValue::Number(120.0)));
 }

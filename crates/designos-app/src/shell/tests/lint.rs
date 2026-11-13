@@ -78,6 +78,32 @@ fn audit_sim(label: &str, s: &mut Sim, check_canvas_purple: bool) -> Vec<lint::F
     out
 }
 
+/// A window in Dev mode whose selected frame ("Welcome") is in `status`: marked ready first, then edited (Changed) or
+/// completed (Completed).
+fn dev_header_sim(status: designos_doc::DevStatus) -> Sim {
+    use designos_doc::DevStatus;
+    let mut s = Sim::with(Options { select: Some("Welcome".into()), dev: Some("css".into()), ..Options::default() });
+    s.shell.app.tabs.always_visible = true;
+    let id = s.by_name("Welcome");
+    s.shell.app.dev_mark_ready(&[id]);
+    match status {
+        DevStatus::ReadyForDev => {}
+        DevStatus::Changed => {
+            let child = s.shell.app.doc.get(id).unwrap().children[0];
+            s.shell.app.edit_nodes(&[child], |n| n.size.x += 7.0);
+            s.shell.app.dev_refresh(true);
+        }
+        DevStatus::Completed => s.shell.app.dev_mark_completed(&[id]),
+    }
+    // The "Marked ..." toast paints over the canvas Re-center chip (a surface of its own); the `--dev-demo` preset clears it too.
+    s.shell.app.toast = None;
+    for _ in 0..60 {
+        s.frame(vec![]);
+    }
+    assert_eq!(s.app().doc.get(id).unwrap().dev.status, Some(status), "the scene is in the state it names");
+    s
+}
+
 #[test]
 fn design_os_gates_audit_all_studio_screens_zero_overflow_zero_purple_and_valid_contrast() {
     let mut all = Vec::new();
@@ -127,6 +153,13 @@ fn design_os_gates_audit_all_studio_screens_zero_overflow_zero_purple_and_valid_
     ] {
         let mut s = Sim::with(opts);
         s.shell.app.tabs.always_visible = true;
+        all.extend(audit_sim(label, &mut s, false));
+    }
+
+    // The other states of the Dev header (the scene above shows only "Ready for dev"): a ready frame that was edited
+    // afterwards ("Changed", with its Compare changes button) and a completed one.
+    for (label, status) in [("dev changed", designos_doc::DevStatus::Changed), ("dev completed", designos_doc::DevStatus::Completed)] {
+        let mut s = dev_header_sim(status);
         all.extend(audit_sim(label, &mut s, false));
     }
 
@@ -183,4 +216,47 @@ fn design_os_gates_audit_all_studio_screens_zero_overflow_zero_purple_and_valid_
         eprintln!("STUDIO_GATE_LINT {} :: {}", f.what, f.detail);
     }
     assert!(all.is_empty(), "{} studio screen gate findings", all.len());
+}
+
+fn run_of(rect: Rect, clip: Rect) -> lint::TextRun {
+    lint::TextRun { text: "-".into(), rect, clip }
+}
+
+fn band(top: f32, bottom: f32) -> Rect {
+    Rect::from_min_max(Pos2::new(0.0, top), Pos2::new(240.0, bottom))
+}
+
+fn label(top: f32, bottom: f32) -> Rect {
+    Rect::from_min_max(Pos2::new(20.0, top), Pos2::new(60.0, bottom))
+}
+
+#[test]
+fn a_box_under_the_hidden_half_does_not_hold_the_line() {
+    // a scroll region ends at y 100, a bar fills 100..136 below it, and a line sits across the cut
+    let bar = band(100.0, 136.0);
+    let line = Rect::from_min_size(Pos2::new(20.0, 97.0), Vec2::new(40.0, 12.0));
+    assert!(lint::check_text(&[run_of(line, band(0.0, 100.0))], &[bar]).is_empty(), "the bar lies wholly under the hidden half");
+    // the same line with nothing cutting it does sit across the bar's edge
+    assert_eq!(lint::check_text(&[run_of(line, band(0.0, 136.0))], &[bar]).len(), 1);
+}
+
+#[test]
+fn a_label_poking_into_the_row_above_is_flagged_when_its_clip_cuts_at_106() {
+    // row 100..124, label 94..118: 94..100 is painted over the row above, and the cut leaves 94..106 showing
+    let findings = lint::check_text(&[run_of(label(94.0, 118.0), band(0.0, 106.0))], &[band(100.0, 124.0)]);
+    assert_eq!(findings.len(), 1, "{findings:?}");
+}
+
+#[test]
+fn a_label_poking_into_the_row_above_is_flagged_when_its_clip_cuts_at_105() {
+    // one pixel higher: the label's own centre (106) is hidden, and the row is still under the part that shows
+    let findings = lint::check_text(&[run_of(label(94.0, 118.0), band(0.0, 105.0))], &[band(100.0, 124.0)]);
+    assert_eq!(findings.len(), 1, "{findings:?}");
+}
+
+#[test]
+fn a_label_poking_into_the_row_below_is_flagged_when_its_clip_starts_at_14() {
+    // row 0..24, label 8..32: 24..32 is painted over the row below, and the cut leaves 14..32 showing
+    let findings = lint::check_text(&[run_of(label(8.0, 32.0), band(14.0, 200.0))], &[band(0.0, 24.0)]);
+    assert_eq!(findings.len(), 1, "{findings:?}");
 }

@@ -125,13 +125,7 @@ pub fn tool_descriptor() -> Value {
                 "hidden": {"type": "boolean"}
             }),
             &["node_id", "language", "code", "truncated", "screenshot"],
-        ),
-        "annotations": {
-            "readOnlyHint": true,
-            "destructiveHint": false,
-            "idempotentHint": true,
-            "openWorldHint": false
-        }
+        )
     })
 }
 
@@ -320,6 +314,7 @@ fn collect_styles(doc: &Document, root: NodeId) -> (Vec<Value>, usize) {
             StyleProperty::Text => "text",
             StyleProperty::Effect => "effect",
             StyleProperty::Grid => "grid",
+            StyleProperty::Animation => "animation",
         };
         let summary = style.map(style_summary).unwrap_or_default();
         out.push(json!({
@@ -769,6 +764,7 @@ mod tests {
             spread: 0.0,
             visible: true,
             show_behind: false,
+            blend: Default::default(),
         }];
         if let NodeKind::Frame(f) = &mut card.kind {
             f.clips_content = true;
@@ -1057,7 +1053,14 @@ mod tests {
         doc.styles.insert("fill-brand".into(), Style::Fill(vec![Paint::solid(Color::rgb(0x0D, 0x99, 0xFF))]));
         doc.style_meta.insert(
             "fill-brand".into(),
-            StyleMeta { name: "Brand/Primary".into(), key: None, description: String::new(), property: StyleProperty::Fill, bindings: Default::default() },
+            StyleMeta {
+                name: "Brand/Primary".into(),
+                key: None,
+                description: String::new(),
+                property: StyleProperty::Fill,
+                bindings: Default::default(),
+                ..Default::default()
+            },
         );
         let card_mut = doc.get_mut(card_id).unwrap();
         card_mut.style_refs.insert("fill".into(), "fill-brand".into());

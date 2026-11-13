@@ -8,7 +8,7 @@ use crate::rest_import::{color, farr, fbool, fstr};
 use crate::FigError;
 use designos_doc::*;
 use serde_json::{json, Map, Value};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 fn is_alias(v: &Value) -> bool {
     fstr(v, "type") == Some("VARIABLE_ALIAS")
@@ -49,6 +49,25 @@ fn parse_value(ty: &str, v: &Value) -> Option<VariableValue> {
     })
 }
 
+/// A value whose variable is not in the payload (an override of a library variable): its kind comes from its shape.
+fn infer_value(v: &Value) -> Option<VariableValue> {
+    if is_alias(v) {
+        return parse_value("COLOR", v);
+    }
+    match v {
+        Value::Bool(_) => parse_value("BOOLEAN", v),
+        Value::Number(_) => parse_value("FLOAT", v),
+        Value::String(_) => parse_value("STRING", v),
+        Value::Object(_) => parse_value("COLOR", v),
+        _ => None,
+    }
+}
+
+/// REST field (ours; Figma's REST has none) marking a collection other collections may extend.
+const EXTENDABLE_FLAG: &str = "isExtendable";
+/// REST field (ours) naming the Figma key of an extended collection's parent when the file does not hold it.
+const PARENT_KEY_FIELD: &str = "parentVariableCollectionKey";
+
 fn kind_of(ty: &str) -> Option<VariableKind> {
     Some(match ty {
         "COLOR" => VariableKind::Color,
@@ -87,6 +106,19 @@ fn library_key_of(c: &Value) -> Option<String> {
     explicit.or_else(|| remote.then(|| fstr(c, "key").or_else(|| fstr(c, "id")).unwrap_or("remote"))).map(String::from)
 }
 
+/// Figma's REST flag for a variable the editor deleted while the document still refers to it. Payloads built from a
+/// `.fig` and written by [`export_variables_meta`] use it for kept soft-deleted variables and collections too.
+const REST_DELETED_FLAG: &str = "deletedButReferenced";
+
+/// The extensions of an entry whose payload carries the REST deleted flag: the soft-deleted marker, or none.
+fn soft_deleted_extensions(entry: &Value) -> FigmaExtensions {
+    let mut extensions = FigmaExtensions::new();
+    if fbool(entry, REST_DELETED_FLAG) == Some(true) {
+        extensions.insert(SOFT_DELETED_EXTENSION_KEY.to_string(), Value::Bool(true));
+    }
+    extensions
+}
+
 /// Maps `meta.variableCollections` / `meta.variables` into `doc`, replacing
 /// whatever it had. Returns the number of variables imported.
 pub fn import_variables_value(doc: &mut Document, v: &Value) -> usize {
@@ -102,19 +134,28 @@ pub fn import_variables_value(doc: &mut Document, v: &Value) -> usize {
             .filter_map(|m| Some(VariableMode { id: fstr(m, "modeId")?.to_string(), name: fstr(m, "name").unwrap_or("Mode").to_string() }))
             .collect();
         let default_mode = fstr(c, "defaultModeId").map(String::from).or_else(|| modes.first().map(|m| m.id.clone())).unwrap_or_default();
-        collections.insert(
-            id.clone(),
-            VariableCollection {
-                id,
-                name: fstr(c, "name").unwrap_or("Collection").to_string(),
-                modes,
-                default_mode,
-                variables: farr(c, "variableIds").iter().filter_map(|s| s.as_str().map(String::from)).collect(),
-                key: fstr(c, "key").map(String::from),
-                source_library_key: library_key_of(c),
-                extensions: Default::default(),
-            },
-        );
+        let mut collection = VariableCollection {
+            id: id.clone(),
+            name: fstr(c, "name").unwrap_or("Collection").to_string(),
+            modes,
+            default_mode,
+            variables: farr(c, "variableIds").iter().filter_map(|s| s.as_str().map(String::from)).collect(),
+            key: fstr(c, "key").map(String::from),
+            source_library_key: library_key_of(c),
+            extensions: soft_deleted_extensions(c),
+        };
+        collection.set_extendable(fbool(c, EXTENDABLE_FLAG) == Some(true));
+        if fbool(c, "isExtension") == Some(true) {
+            collection.set_extension(&CollectionExtension {
+                parent: ParentCollection {
+                    collection: fstr(c, "parentVariableCollectionId").unwrap_or("").to_string(),
+                    set_key: fstr(c, PARENT_KEY_FIELD).filter(|k| !k.is_empty()).map(String::from),
+                },
+                mode_map: farr(c, "modes").iter().filter_map(|m| Some((fstr(m, "modeId")?.to_string(), fstr(m, "parentModeId")?.to_string()))).collect(),
+                overrides: BTreeMap::new(),
+            });
+        }
+        collections.insert(id, collection);
     }
     let vars = p.get("variables").and_then(Value::as_object).unwrap_or(&empty);
     for (key, v) in vars {
@@ -144,16 +185,49 @@ pub fn import_variables_value(doc: &mut Document, v: &Value) -> usize {
                 hidden_from_publishing: fbool(v, "hiddenFromPublishing").unwrap_or(false),
                 key: fstr(v, "key").map(String::from),
                 code_syntax: parse_code_syntax(v.get("codeSyntax")),
-                extensions: Default::default(),
+                extensions: soft_deleted_extensions(v),
                 mode_extensions: Default::default(),
             },
         );
     }
-    // Display order: the collection's `variableIds`, then anything it left out.
-    for c in collections.values_mut() {
-        c.variables.retain(|id| variables.get(id).is_some_and(|v| v.collection == c.id));
+    // An extension of a library collection also remembers the library collection's key.
+    let library_keys: BTreeMap<String, String> = collections.values().filter(|c| c.is_library()).filter_map(|c| Some((c.id.clone(), c.key.clone()?))).collect();
+    // A parent that is extended allows it: lookups skip the extension scan for a collection that is not extendable.
+    let parents: BTreeSet<String> = collections.values().filter_map(|c| c.extension_parent_id_in(&collections).map(String::from)).collect();
+    for id in &parents {
+        if let Some(parent) = collections.get_mut(id) {
+            parent.set_extendable(true);
+        }
     }
-    for v in variables.values() {
+    for coll in collections.values_mut() {
+        if let Some(mut ext) = coll.extension().filter(|e| e.parent.set_key.is_none()) {
+            if let Some(key) = library_keys.get(&ext.parent.collection) {
+                ext.parent.set_key = Some(key.clone());
+                coll.set_extension(&ext);
+            }
+        }
+    }
+    for (key, c) in colls {
+        let id = fstr(c, "id").unwrap_or(key);
+        let Some(overrides) = c.get("variableOverrides").and_then(Value::as_object) else { continue };
+        let Some(coll) = collections.get_mut(id) else { continue };
+        let Some(mut ext) = coll.extension() else { continue };
+        for (var, by_mode) in overrides {
+            let ty = variables.get(var).map(|v| type_name(v.kind));
+            for (mode, raw) in by_mode.as_object().into_iter().flatten() {
+                if let Some(value) = ty.map_or_else(|| infer_value(raw), |ty| parse_value(ty, raw)) {
+                    ext.overrides.entry(var.clone()).or_default().insert(mode.clone(), value);
+                }
+            }
+        }
+        coll.set_extension(&ext);
+    }
+    // Display order: the collection's `variableIds`, then anything it left out. A soft-deleted variable is never
+    // listed, whatever the payload's list says: it stays in `variables` only so references to it resolve.
+    for c in collections.values_mut() {
+        c.variables.retain(|id| variables.get(id).is_some_and(|v| v.collection == c.id && !v.is_soft_deleted()));
+    }
+    for v in variables.values().filter(|v| !v.is_soft_deleted()) {
         if let Some(c) = collections.get_mut(&v.collection) {
             if !c.variables.contains(&v.id) {
                 c.variables.push(v.id.clone());
@@ -212,9 +286,12 @@ pub fn export_variables_meta(doc: &Document) -> Value {
         m.insert("variableCollectionId".into(), v.collection.clone().into());
         m.insert("resolvedType".into(), type_name(v.kind).into());
         m.insert("valuesByMode".into(), Value::Object(v.values.iter().map(|(k, x)| (k.clone(), value_json(x))).collect()));
-        m.insert("remote".into(), false.into());
+        m.insert("remote".into(), doc.variable_collections.get(&v.collection).is_some_and(VariableCollection::is_library).into());
         m.insert("description".into(), v.description.clone().into());
         m.insert("hiddenFromPublishing".into(), v.hidden_from_publishing.into());
+        if v.is_soft_deleted() {
+            m.insert(REST_DELETED_FLAG.into(), true.into());
+        }
         m.insert("scopes".into(), json!(if v.scopes.is_empty() { vec!["ALL_SCOPES".to_string()] } else { v.scopes.clone() }));
         m.insert("codeSyntax".into(), code_syntax_json(&v.code_syntax));
         vars.insert(v.id.clone(), Value::Object(m));
@@ -234,10 +311,60 @@ pub fn export_variables_meta(doc: &Document) -> Value {
         }
         m.insert("remote".into(), c.is_library().into());
         m.insert("hiddenFromPublishing".into(), false.into());
+        if c.is_soft_deleted() {
+            m.insert(REST_DELETED_FLAG.into(), true.into());
+        }
         m.insert("variableIds".into(), json!(c.variables));
+        if c.is_extendable() {
+            m.insert(EXTENDABLE_FLAG.into(), true.into());
+        }
+        if let Some(ext) = c.extension() {
+            insert_extension_fields(doc, c, &ext, &mut m);
+        }
         colls.insert(c.id.clone(), Value::Object(m));
     }
     json!({"variables": vars, "variableCollections": colls})
+}
+
+/// Figma's extended-collection fields: `isExtension`, the parent and root collection, each mode's `parentModeId`,
+/// the inherited variable ids and `variableOverrides` (variable id -> mode id -> value).
+fn insert_extension_fields(doc: &Document, c: &VariableCollection, ext: &CollectionExtension, m: &mut Map<String, Value>) {
+    m.insert("isExtension".into(), true.into());
+    if !ext.parent.collection.is_empty() {
+        m.insert("parentVariableCollectionId".into(), ext.parent.collection.clone().into());
+    }
+    if let Some(key) = &ext.parent.set_key {
+        m.insert(PARENT_KEY_FIELD.into(), key.clone().into());
+    }
+    let mut root = c.extension_parent_id_in(&doc.variable_collections).unwrap_or(ext.parent.collection.as_str()).to_string();
+    for _ in 0..8 {
+        match doc.variable_collections.get(&root).and_then(|rc| rc.extension_parent_id_in(&doc.variable_collections)) {
+            Some(next) => root = next.to_string(),
+            None => break,
+        }
+    }
+    if !root.is_empty() {
+        m.insert("rootVariableCollectionId".into(), root.into());
+    }
+    let modes = c
+        .modes
+        .iter()
+        .map(|x| {
+            let mut mode = json!({"modeId": x.id, "name": x.name});
+            if let Some(parent_mode) = ext.mode_map.get(&x.id) {
+                mode["parentModeId"] = parent_mode.clone().into();
+            }
+            mode
+        })
+        .collect();
+    m.insert("modes".into(), Value::Array(modes));
+    m.insert("inheritedVariableIds".into(), json!(doc.inherited_variable_ids(&c.id)));
+    let overrides: Map<String, Value> = ext
+        .overrides
+        .iter()
+        .map(|(var, by_mode)| (var.clone(), Value::Object(by_mode.iter().map(|(mode, v)| (mode.clone(), value_json(v))).collect())))
+        .collect();
+    m.insert("variableOverrides".into(), Value::Object(overrides));
 }
 
 /// Full `GET /v1/files/:key/variables/local` response body.
@@ -360,7 +487,9 @@ pub(crate) fn parse_node_variables(v: &Value) -> NodeVariables {
     if let Some(arr) = v.get("effects").and_then(Value::as_array) {
         for (i, e) in arr.iter().enumerate() {
             if let Some(bv) = e.get("boundVariables") {
-                for prop in ["color", "opacity", "radius", "spread", "offsetX", "offsetY"] {
+                for prop in
+                    ["color", "radius", "spread", "offsetX", "offsetY", "opacity", "lightAngle", "lightIntensity", "refraction", "depth", "dispersion", "frost"]
+                {
                     if let Some(id) = bv.get(prop).and_then(|a| fstr(a, "id")) {
                         nv.bindings.entry(format!("effects/{i}/{prop}")).or_insert_with(|| id.to_string());
                     }
@@ -472,6 +601,27 @@ fn fig_value(ty: &str, v: &Value, refs: &Refs) -> Option<Value> {
     }
 }
 
+/// The kiwi `VariableScope` enum spells the stroke colour scope `STROKE`; the document and
+/// REST payloads use `STROKE_COLOR`. Map it back at this boundary so a `.fig` round trip keeps
+/// the stored spelling, keeping order and listing the stroke colour scope once.
+fn rest_scopes_from_fig(scopes: Option<&Value>) -> Value {
+    let Some(list) = scopes.and_then(Value::as_array) else {
+        return scopes.cloned().unwrap_or(json!([]));
+    };
+    let mut mapped: Vec<Value> = Vec::with_capacity(list.len());
+    for scope in list {
+        let scope = match scope.as_str() {
+            Some(name) => json!(crate::variables_dtcg::normalize_scope_on_import(name)),
+            None => scope.clone(),
+        };
+        if scope == "STROKE_COLOR" && mapped.contains(&scope) {
+            continue;
+        }
+        mapped.push(scope);
+    }
+    Value::Array(mapped)
+}
+
 /// Builds a REST-shaped variables payload from the `VARIABLE_SET` and
 /// `VARIABLE` node changes of a `.fig` message (given as JSON).
 ///
@@ -481,8 +631,14 @@ fn fig_value(ty: &str, v: &Value, refs: &Refs) -> Option<Value> {
 /// `variableScopes` and `variableDataValues.entries: [{modeID, variableData}]`
 /// where `variableData.value` is `colorValue`, `floatValue`, `textValue`,
 /// `boolValue` or `alias`.
+#[cfg(test)]
 pub(crate) fn from_fig_entries(entries: &[&Value]) -> Option<Value> {
-    let active = |e: &Value| fstr(e, "phase") != Some("REMOVED") && fbool(e, "isSoftDeleted") != Some(true);
+    from_fig_entries_with_refs(entries, &std::collections::HashSet::new())
+}
+
+pub(crate) fn from_fig_entries_with_refs(entries: &[&Value], referenced_vars: &std::collections::HashSet<String>) -> Option<Value> {
+    let not_removed = |e: &Value| fstr(e, "phase") != Some("REMOVED");
+    let active = |e: &Value| not_removed(e) && fbool(e, "isSoftDeleted") != Some(true);
     let mut refs = Refs { sets: BTreeMap::new(), vars: BTreeMap::new() };
     for e in entries.iter().copied().filter(|e| active(e)) {
         let (Some(key), Some(gid)) = (fstr(e, "key").filter(|k| !k.is_empty()), e.get("guid").and_then(guid)) else { continue };
@@ -491,57 +647,178 @@ pub(crate) fn from_fig_entries(entries: &[&Value]) -> Option<Value> {
             _ => refs.vars.insert(key, format!("VariableID:{gid}")),
         };
     }
+    for e in entries.iter().copied().filter(|e| not_removed(e) && !active(e)) {
+        let (Some(key), Some(gid)) = (fstr(e, "key").filter(|k| !k.is_empty()), e.get("guid").and_then(guid)) else { continue };
+        match fstr(e, "type") {
+            Some("VARIABLE_SET") => {
+                refs.sets.entry(key).or_insert_with(|| format!("VariableCollectionId:{gid}"));
+            }
+            _ => {
+                refs.vars.entry(key).or_insert_with(|| format!("VariableID:{gid}"));
+            }
+        }
+    }
+
+    let mut var_by_id: BTreeMap<String, &Value> = BTreeMap::new();
+    let mut keep_vars: std::collections::HashSet<String> = referenced_vars.clone();
+    for &e in entries.iter().filter(|e| not_removed(e) && fstr(e, "type") == Some("VARIABLE")) {
+        let Some(gid) = e.get("guid").and_then(guid) else { continue };
+        let id = format!("VariableID:{gid}");
+        if active(e) {
+            keep_vars.insert(id.clone());
+            var_by_id.insert(id, e);
+        } else {
+            var_by_id.entry(id).or_insert(e);
+        }
+    }
+    let mut queue: Vec<String> = keep_vars.iter().cloned().collect();
+    while let Some(vid) = queue.pop() {
+        let Some(&e) = var_by_id.get(&vid) else { continue };
+        let list = e.get("variableDataValues").map(|d| farr(d, "entries")).unwrap_or(&[]);
+        for ent in list {
+            let Some(alias) = ent.get("variableData").and_then(|d| d.get("value")).and_then(|x| x.get("alias")) else { continue };
+            let Some(target) = refs.var(alias) else { continue };
+            if keep_vars.insert(target.clone()) {
+                queue.push(target);
+            }
+        }
+    }
+
+    let mut keep_sets: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for &e in entries.iter().filter(|e| active(e) && fstr(e, "type") == Some("VARIABLE_SET")) {
+        if let Some(gid) = e.get("guid").and_then(guid) {
+            keep_sets.insert(format!("VariableCollectionId:{gid}"));
+        }
+    }
+    for vid in &keep_vars {
+        let Some(&e) = var_by_id.get(vid) else { continue };
+        let cid = e
+            .get("variableSetID")
+            .and_then(|s| refs.set(s))
+            .or_else(|| e.get("parentIndex").and_then(|p| p.get("guid")).and_then(guid).map(|g| format!("VariableCollectionId:{g}")));
+        if let Some(cid) = cid {
+            keep_sets.insert(cid);
+        }
+    }
+
     let mut colls = Map::new();
     let mut vars = Map::new();
-    for e in entries.iter().copied().filter(|e| active(e)) {
+    for e in entries.iter().copied().filter(|e| not_removed(e)) {
         if fstr(e, "type") != Some("VARIABLE_SET") {
             continue;
         }
         let Some(gid) = e.get("guid").and_then(guid) else { continue };
         let id = format!("VariableCollectionId:{gid}");
+        if !keep_sets.contains(&id) || (!active(e) && colls.contains_key(&id)) {
+            continue;
+        }
         let mut modes: Vec<(&str, Value)> = farr(e, "variableSetModes")
             .iter()
-            .filter_map(|m| Some((fstr(m, "sortPosition").unwrap_or(""), json!({"modeId": guid(m.get("id")?)?, "name": fstr(m, "name").unwrap_or("Mode")}))))
+            .filter_map(|m| {
+                let mut mode = json!({"modeId": guid(m.get("id")?)?, "name": fstr(m, "name").unwrap_or("Mode")});
+                if let Some(parent_mode) = m.get("parentModeId").and_then(guid) {
+                    mode["parentModeId"] = parent_mode.into();
+                }
+                Some((fstr(m, "sortPosition").unwrap_or(""), mode))
+            })
             .collect();
         modes.sort_by(|a, b| a.0.cmp(b.0));
         let modes: Vec<Value> = modes.into_iter().map(|m| m.1).collect();
         let default = modes.first().and_then(|m| m.get("modeId")).cloned().unwrap_or(Value::Null);
         let mut c = json!({"id": id, "name": fstr(e, "name").unwrap_or("Collection"), "modes": modes, "defaultModeId": default, "variableIds": []});
+        if !active(e) {
+            c[REST_DELETED_FLAG] = true.into();
+        }
         if let Some(k) = fstr(e, "key").filter(|k| !k.is_empty()) {
             c["key"] = k.into();
         }
         if let Some(lib) = fstr(e, "sourceLibraryKey").filter(|k| !k.is_empty()) {
             c["sourceLibraryKey"] = lib.into();
         }
+        if fbool(e, "isCollectionExtendable") == Some(true) {
+            c[EXTENDABLE_FLAG] = true.into();
+        }
+        if let Some(parent) = farr(e, "variableSetModes").iter().find_map(|m| m.get("parentVariableSetId")) {
+            c["isExtension"] = true.into();
+            if let Some(parent_id) = refs.set(parent) {
+                c["parentVariableCollectionId"] = parent_id.into();
+            }
+            if let Some(key) = crate::fig::asset_key(parent) {
+                c[PARENT_KEY_FIELD] = key.into();
+            }
+        }
         colls.insert(id, c);
     }
-    let mut order: Vec<(&str, &Value)> =
-        entries.iter().filter(|e| active(e) && fstr(e, "type") == Some("VARIABLE")).map(|e| (fstr(e, "sortPosition").unwrap_or(""), *e)).collect();
+    // UNVERIFIED layout (no real extended-collection `.fig` was available; the alternative is `VARIABLE_OVERRIDE` nodes,
+    // which `import_fig_with_report` counts and does not read): override values sit on the overridden variable, keyed
+    // by the extending collection's mode ids.
+    let mut extension_of_mode: BTreeMap<String, String> = BTreeMap::new();
+    for &e in entries.iter().filter(|e| active(e) && fstr(e, "type") == Some("VARIABLE_SET")) {
+        let Some(gid) = e.get("guid").and_then(guid) else { continue };
+        for m in farr(e, "variableSetModes").iter().filter(|m| m.get("parentVariableSetId").is_some()) {
+            if let Some(mode) = m.get("id").and_then(guid) {
+                extension_of_mode.insert(mode, format!("VariableCollectionId:{gid}"));
+            }
+        }
+    }
+    let mut overrides: BTreeMap<String, Map<String, Value>> = BTreeMap::new();
+    let mut order: Vec<(&str, &Value)> = entries
+        .iter()
+        .filter(|e| {
+            not_removed(e)
+                && fstr(e, "type") == Some("VARIABLE")
+                && e.get("guid").and_then(guid).is_some_and(|gid| keep_vars.contains(&format!("VariableID:{gid}")))
+        })
+        .map(|e| (fstr(e, "sortPosition").unwrap_or(""), *e))
+        .collect();
     order.sort_by(|a, b| a.0.cmp(b.0));
     for (_, e) in order {
         let Some(gid) = e.get("guid").and_then(guid) else { continue };
-        let cid = e
-            .get("variableSetID")
-            .and_then(|s| refs.set(s))
-            .or_else(|| e.get("parentIndex").and_then(|p| p.get("guid")).and_then(guid).map(|g| format!("VariableCollectionId:{g}")));
-        let Some(cid) = cid else { continue };
+        let id = format!("VariableID:{gid}");
+        if !active(e) && vars.contains_key(&id) {
+            continue;
+        }
+        let cid = match e.get("variableSetID") {
+            Some(s) => refs.set(s),
+            None => e.get("parentIndex").and_then(|p| p.get("guid")).and_then(guid).map(|g| format!("VariableCollectionId:{g}")),
+        };
         let Some(ty) = fstr(e, "variableResolvedType").or_else(|| fstr(e, "variableDataType")) else { continue };
         let mut by_mode = Map::new();
         let list = e.get("variableDataValues").map(|d| farr(d, "entries")).unwrap_or(&[]);
         for ent in list {
             let (Some(mode), Some(data)) = (ent.get("modeID").and_then(guid), ent.get("variableData")) else { continue };
             let Some(val) = data.get("value").and_then(|x| fig_value(ty, x, &refs)) else { continue };
-            by_mode.insert(mode, val);
+            let is_own_mode = cid
+                .as_ref()
+                .and_then(|c| colls.get(c))
+                .and_then(|c| c.get("modes"))
+                .and_then(Value::as_array)
+                .is_some_and(|ms| ms.iter().any(|m| fstr(m, "modeId") == Some(mode.as_str())));
+            match (!is_own_mode).then(|| extension_of_mode.get(&mode)).flatten() {
+                Some(ext) => {
+                    let by_var = overrides.entry(ext.clone()).or_default().entry(id.clone()).or_insert_with(|| Value::Object(Map::new()));
+                    if let Some(o) = by_var.as_object_mut() {
+                        o.insert(mode, val);
+                    }
+                }
+                None => {
+                    by_mode.insert(mode, val);
+                }
+            }
         }
-        let id = format!("VariableID:{gid}");
-        if let Some(c) = colls.get_mut(&cid).and_then(|c| c.get_mut("variableIds")).and_then(Value::as_array_mut) {
-            c.push(json!(id));
-        } else {
-            continue;
+        let Some(cid) = cid else { continue };
+        let Some(listed) = colls.get_mut(&cid).and_then(|c| c.get_mut("variableIds")).and_then(Value::as_array_mut) else { continue };
+        // A soft-deleted variable is kept so the layers, styles and aliases that use it resolve, but it is not one of
+        // its collection's variables: it stays out of the list.
+        if active(e) && !vars.contains_key(&id) {
+            listed.push(json!(id));
         }
         let mut v = json!({"id": id, "name": fstr(e, "name").unwrap_or("Variable"), "variableCollectionId": cid, "resolvedType": ty,
-                   "valuesByMode": by_mode, "scopes": e.get("variableScopes").cloned().unwrap_or(json!([])),
-                   "description": fstr(e, "description").unwrap_or(""), "hiddenFromPublishing": false});
+                   "valuesByMode": by_mode, "scopes": rest_scopes_from_fig(e.get("variableScopes")),
+                   "description": fstr(e, "description").unwrap_or(""), "hiddenFromPublishing": fbool(e, "isPublishable") == Some(false)});
+        if !active(e) {
+            v[REST_DELETED_FLAG] = true.into();
+        }
         if let Some(k) = fstr(e, "key").filter(|k| !k.is_empty()) {
             v["key"] = k.into();
         }
@@ -556,6 +833,11 @@ pub(crate) fn from_fig_entries(entries: &[&Value]) -> Option<Value> {
             v["codeSyntax"] = Value::Object(syntax);
         }
         vars.insert(id, v);
+    }
+    for (ext, by_var) in overrides {
+        if let Some(c) = colls.get_mut(&ext) {
+            c["variableOverrides"] = Value::Object(by_var);
+        }
     }
     (!colls.is_empty()).then(|| json!({"variables": vars, "variableCollections": colls}))
 }
@@ -584,6 +866,21 @@ mod tests {
         assert_eq!(v.values["1:7"], VariableValue::Alias("VariableID:1:9".into()));
         assert!(from_fig_entries(&[]).is_none());
     }
+    #[test]
+    fn fig_stroke_scope_maps_to_rest_spelling_once_and_leaves_others_alone() {
+        let set = fig_set(5, "Theme", "K", None);
+        let var = |scopes: Value| {
+            json!({"type": "VARIABLE", "guid": {"sessionID": 1, "localID": 9}, "name": "edge", "variableResolvedType": "COLOR",
+                "variableSetID": {"guid": {"sessionID": 1, "localID": 5}}, "variableScopes": scopes})
+        };
+        let scopes_of = |scopes: Value| from_fig_entries(&[&set, &var(scopes)]).unwrap()["variables"]["VariableID:1:9"]["scopes"].clone();
+        assert_eq!(scopes_of(json!(["STROKE"])), json!(["STROKE_COLOR"]));
+        assert_eq!(scopes_of(json!(["ALL_FILLS", "STROKE", "STROKE_FLOAT"])), json!(["ALL_FILLS", "STROKE_COLOR", "STROKE_FLOAT"]));
+        assert_eq!(scopes_of(json!(["STROKE", "ALL_FILLS", "STROKE_COLOR"])), json!(["STROKE_COLOR", "ALL_FILLS"]));
+        assert_eq!(scopes_of(json!(["TEXT_FILL", "EFFECT_COLOR"])), json!(["TEXT_FILL", "EFFECT_COLOR"]));
+        assert_eq!(scopes_of(json!([])), json!([]));
+    }
+
     fn fig_set(local: u64, name: &str, key: &str, source_library: Option<&str>) -> Value {
         let mut set = json!({"type": "VARIABLE_SET", "guid": {"sessionID": 1, "localID": local}, "name": name, "key": key,
             "variableSetModes": [{"id": {"sessionID": 1, "localID": local + 100}, "name": "Mode 1"}]});
@@ -623,6 +920,23 @@ mod tests {
         let mut again = Document::new("d2");
         import_variables_value(&mut again, &json!({ "variables": meta }));
         assert_eq!(again.variable_collections, doc.variable_collections);
+    }
+
+    #[test]
+    fn exported_variables_in_subscribed_collections_are_remote() {
+        let mut doc = Document::new("d");
+        let local = fig_set(5, "Local", "K_LOCAL", None);
+        let library = fig_set(20, "Library", "K_LIB", Some("lk-83c0"));
+        let local_var = json!({"type": "VARIABLE", "guid": {"sessionID": 1, "localID": 9}, "name": "local", "variableResolvedType": "FLOAT",
+            "variableSetID": {"guid": {"sessionID": 1, "localID": 5}}, "variableDataValues": {"entries": []}});
+        let library_var = json!({"type": "VARIABLE", "guid": {"sessionID": 1, "localID": 30}, "name": "library", "variableResolvedType": "FLOAT",
+            "variableSetID": {"assetRef": {"key": "K_LIB"}}, "variableDataValues": {"entries": []}});
+        let payload = from_fig_entries(&[&local, &library, &local_var, &library_var]).unwrap();
+        import_variables_value(&mut doc, &json!({"variables": payload}));
+
+        let meta = export_variables_meta(&doc);
+        assert_eq!(meta["variables"]["VariableID:1:9"]["remote"], false);
+        assert_eq!(meta["variables"]["VariableID:1:30"]["remote"], true);
     }
 
     #[test]

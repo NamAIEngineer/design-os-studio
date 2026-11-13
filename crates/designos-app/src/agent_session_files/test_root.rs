@@ -1,0 +1,308 @@
+//! The sessions folder unit tests use: one per test process, in a folder Studio checks before it uses it.
+
+use super::folder::{create_session_folder_in, require_own_real_folder};
+use std::io;
+use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
+
+/// The Cargo target profile folder holds one `designos-test-data/<pid>/sessions` folder per test process, so no test process
+/// writes into the real data folder or into another process's folder. The target profile is outside the agent-writable temp
+/// folder and is removed with the Cargo target cache.
+fn base_dir() -> PathBuf {
+    let executable = std::env::current_exe().expect("the test executable path is available");
+    let profile = executable.parent().and_then(Path::parent).expect("the test executable is below a Cargo target profile");
+    profile.join("designos-test-data")
+}
+
+/// This process's sessions folder, made ready on first use (see [`prepare_base`]).
+pub(super) fn test_sessions_root() -> PathBuf {
+    static ROOT: OnceLock<PathBuf> = OnceLock::new();
+    ROOT.get_or_init(|| {
+        prepare_base(&base_dir(), std::process::id()).unwrap_or_else(|e| {
+            panic!("the folder for the unit tests' session folders cannot be used, so no test can run: {}", crate::agent_session_files::with_next_step(&e))
+        })
+    })
+    .clone()
+}
+
+/// Returns `<base>/<own_pid>/sessions`. `base` must first be a real folder of the user (made if it is missing); a link, a file
+/// or a folder of another user is refused, and then nothing is made. This process's own folder is then made exclusively, and
+/// whatever sits in its place (a link, a file, a folder of another user) is refused. Before that, the roots of test processes that
+/// are no longer alive are removed (see [`cleanup_stale_process_roots`]); a root whose process cannot be shown dead stays.
+pub(super) fn prepare_base(base: &Path, own_pid: u32) -> io::Result<PathBuf> {
+    if matches!(std::fs::symlink_metadata(base), Err(e) if e.kind() == io::ErrorKind::NotFound) {
+        crate::agent_approval_channel::create_private_dir_all(base)?;
+    }
+    require_own_real_folder(None, base, base)?;
+    // Work from the checked real path after the ownership check. A later replacement of the
+    // spelling of `base` cannot redirect cleanup into an agent-writable link target.
+    let base = base.canonicalize()?;
+    cleanup_stale_process_roots(&base, own_pid, process_is_alive)?;
+    let own_dir = base.join(own_pid.to_string());
+    create_session_folder_in(None, &own_dir)?;
+    Ok(own_dir.join("sessions"))
+}
+
+/// Removes dead test-process roots left below the checked Cargo profile.
+///
+/// Only direct numeric children are candidates. Real folders owned by this user whose PID is
+/// still alive, non-PID entries, and links are left untouched. The caller supplies liveness so
+/// tests can cover the cleanup without depending on a particular unused PID.
+fn cleanup_stale_process_roots(base: &Path, own_pid: u32, is_alive: impl Fn(u32) -> bool) -> io::Result<usize> {
+    let mut removed = 0;
+    for entry in std::fs::read_dir(base)? {
+        let entry = entry?;
+        let path = entry.path();
+        let Some(pid) = entry.file_name().to_str().and_then(|name| name.parse::<u32>().ok()).filter(|pid| *pid > 0) else {
+            continue;
+        };
+        if pid == own_pid || is_alive(pid) {
+            continue;
+        }
+        // Another test process can remove this stale root after `read_dir` returns and before
+        // this process inspects it. Treat that race as already-cleaned; only real filesystem
+        // errors should abort test-root setup.
+        let Some(meta) = stale_root_metadata(&path)? else {
+            continue;
+        };
+        if meta.file_type().is_symlink() || !meta.is_dir() {
+            continue;
+        }
+        if require_own_real_folder(None, &path, base).is_err() {
+            continue;
+        }
+        if std::fs::remove_dir_all(&path).is_ok() {
+            removed += 1;
+        }
+    }
+    Ok(removed)
+}
+
+fn stale_root_metadata(path: &Path) -> io::Result<Option<std::fs::Metadata>> {
+    match std::fs::symlink_metadata(path) {
+        Ok(meta) => Ok(Some(meta)),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
+/// Whether a `kill(pid, 0)` probe says the process is alive. Only "no such process" means dead; a refusal (another user's process) or
+/// any other failure means the probe could not tell, and a root whose owner cannot be shown dead is not removed.
+#[cfg(unix)]
+fn kill_probe_says_alive(result: i32, errno: i32) -> bool {
+    result == 0 || errno != libc::ESRCH
+}
+
+#[cfg(unix)]
+fn process_is_alive(pid: u32) -> bool {
+    let Ok(raw) = libc::pid_t::try_from(pid) else {
+        return true;
+    };
+    // SAFETY: signal 0 sends nothing; `kill` only reports whether `raw` could be signalled.
+    let result = unsafe { libc::kill(raw, 0) };
+    let errno = if result == 0 { 0 } else { io::Error::last_os_error().raw_os_error().unwrap_or(0) };
+    kill_probe_says_alive(result, errno)
+}
+
+#[cfg(windows)]
+fn process_is_alive(pid: u32) -> bool {
+    // nextest starts several test processes on Windows. `is_pid_alive` has no Windows
+    // implementation, so ask the native process list and fail closed if it is unavailable.
+    let filter = format!("PID eq {pid}");
+    let Ok(output) = std::process::Command::new("tasklist").args(["/FI", &filter, "/NH", "/FO", "CSV"]).output() else {
+        return true;
+    };
+    if !output.status.success() {
+        return true;
+    }
+    let pid = format!("\"{pid}\"");
+    String::from_utf8_lossy(&output.stdout).lines().any(|line| line.contains(&pid))
+}
+
+#[cfg(not(any(unix, windows)))]
+fn process_is_alive(_pid: u32) -> bool {
+    // Unknown platforms cannot safely prove that a PID is dead; retain the folder.
+    true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_root(base: &Path, name: &str) -> PathBuf {
+        let dir = base.join(name).join("sessions").join("p1-tab-1");
+        std::fs::create_dir_all(&dir).expect("root");
+        std::fs::write(dir.join("owner.json"), b"{}").expect("file");
+        base.join(name)
+    }
+
+    fn scratch_base(tag: &str) -> PathBuf {
+        let base = std::env::temp_dir().join(format!("designos-test-root-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).expect("base");
+        base
+    }
+
+    #[test]
+    fn stale_process_roots_are_removed_without_touching_live_or_foreign_entries() {
+        let base = scratch_base("keep-all");
+        let stale = make_root(&base, "999991");
+        let live = make_root(&base, "999992");
+        let foreign = make_root(&base, "sessions");
+
+        let removed = cleanup_stale_process_roots(&base, 999_993, |pid| pid == 999_992).expect("cleanup");
+
+        assert_eq!(removed, 1);
+        assert!(!stale.exists(), "dead process root was not removed");
+        assert!(live.join("sessions/p1-tab-1/owner.json").is_file(), "live process root was removed");
+        assert!(foreign.join("sessions/p1-tab-1/owner.json").is_file(), "foreign entry was removed");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn a_root_removed_by_another_test_process_is_already_cleaned() {
+        let base = scratch_base("already-cleaned");
+        let stale = make_root(&base, "999991");
+
+        let removed = cleanup_stale_process_roots(&base, 999_992, |pid| {
+            assert_eq!(pid, 999_991);
+            std::fs::remove_dir_all(&stale).expect("sibling removes stale root");
+            false
+        })
+        .expect("a sibling cleanup is not a test-root failure");
+
+        assert_eq!(removed, 0, "the sibling already removed the stale root");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn concurrent_stale_root_cleanup_tolerates_a_sibling_removing_the_root() {
+        let base = scratch_base("concurrent-cleanup");
+        let stale = make_root(&base, "999991");
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+
+        let cleaners: Vec<_> = (0..2)
+            .map(|i| {
+                let base = base.clone();
+                let barrier = barrier.clone();
+                std::thread::spawn(move || {
+                    cleanup_stale_process_roots(&base, 999_992 + i, |pid| {
+                        assert_eq!(pid, 999_991);
+                        barrier.wait();
+                        false
+                    })
+                    .expect("a sibling cleanup is not a test-root failure")
+                })
+            })
+            .collect();
+
+        for cleaner in cleaners {
+            cleaner.join().expect("cleaner thread");
+        }
+
+        assert!(!stale.exists(), "the stale root is gone");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn stale_process_root_links_are_not_followed_or_removed() {
+        let scratch = scratch_base("root-link");
+        let base = scratch.join("profile");
+        std::fs::create_dir_all(&base).expect("profile");
+        let target = scratch.join("target");
+        std::fs::create_dir_all(&target).expect("target");
+        std::fs::write(target.join("keep.txt"), b"keep").expect("sentinel");
+        std::os::unix::fs::symlink(&target, base.join("999991")).expect("root link");
+
+        let removed = cleanup_stale_process_roots(&base, 999_993, |_| false).expect("cleanup");
+
+        assert_eq!(removed, 0);
+        assert!(base.join("999991").is_symlink(), "the planted root link was removed");
+        assert!(target.join("keep.txt").is_file(), "the link target was touched");
+        let _ = std::fs::remove_dir_all(&scratch);
+    }
+
+    #[test]
+    fn test_sessions_root_is_derived_from_the_cargo_target_profile() {
+        let root = test_sessions_root();
+        let executable = std::env::current_exe().expect("the test executable path is available");
+        let profile = executable.parent().and_then(Path::parent).expect("the test executable is below a Cargo target profile");
+
+        assert!(root.starts_with(profile), "test session root {} is not below Cargo profile {}", root.display(), profile.display());
+        assert!(!root.starts_with(std::env::temp_dir()), "test session root {} is still under the temp folder", root.display());
+        assert_eq!(root.file_name().and_then(|name| name.to_str()), Some("sessions"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_link_in_place_of_the_test_data_folder_is_refused_and_nothing_is_made_or_removed_through_it() {
+        let scratch = scratch_base("base-link");
+        let target = scratch.join("target");
+        let (dead, other) = (make_root(&target, "999991"), make_root(&target, "not-a-pid"));
+        let linked_base = scratch.join("designos test data");
+        std::os::unix::fs::symlink(&target, &linked_base).expect("plant the link");
+
+        let err = prepare_base(&linked_base, 999_993).expect_err("a link is not used as the test data folder");
+
+        assert!(err.to_string().contains("is a link, not a folder"), "{err}");
+        assert!(dead.join("sessions/p1-tab-1/owner.json").is_file(), "a folder was removed through the link");
+        assert!(other.join("sessions/p1-tab-1/owner.json").is_file());
+        assert!(!target.join("999993").exists(), "a folder was made through the link");
+        let _ = std::fs::remove_dir_all(&scratch);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_link_in_place_of_this_process_folder_is_refused_and_nothing_is_made_through_it() {
+        let scratch = scratch_base("pid-link");
+        let target = scratch.join("target");
+        let base = scratch.join("designos test data");
+        std::fs::create_dir_all(&target).expect("target");
+        std::fs::create_dir_all(&base).expect("base");
+        std::os::unix::fs::symlink(&target, base.join("999997")).expect("plant the link");
+
+        let err = prepare_base(&base, 999_997).expect_err("a link in place of our folder is refused");
+
+        assert!(err.to_string().contains("is a link, not a folder"), "{err}");
+        assert_eq!(std::fs::read_dir(&target).expect("target").count(), 0, "something was made through the link");
+        let _ = std::fs::remove_dir_all(&scratch);
+    }
+
+    /// A probe that fails, or cannot tell, must never read as "dead": that would delete the root of a test process that is still running.
+    #[cfg(unix)]
+    #[test]
+    fn a_liveness_probe_that_cannot_tell_means_alive() {
+        assert!(kill_probe_says_alive(0, 0), "the process answered");
+        assert!(kill_probe_says_alive(-1, libc::EPERM), "another user's process exists");
+        assert!(kill_probe_says_alive(-1, libc::EAGAIN), "a probe that failed to run tells nothing");
+        assert!(kill_probe_says_alive(-1, libc::EINVAL));
+        assert!(kill_probe_says_alive(-1, 0), "no error number at all tells nothing");
+        assert!(!kill_probe_says_alive(-1, libc::ESRCH), "only no such process is dead");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_default_liveness_check_sees_this_process_and_an_exited_child() {
+        assert!(process_is_alive(std::process::id()));
+        let mut child = std::process::Command::new("true").spawn().expect("a child");
+        let pid = child.id();
+        child.wait().expect("the child exits");
+        assert!(!process_is_alive(pid), "a reaped child is gone");
+    }
+
+    #[test]
+    fn a_missing_test_data_folder_is_made_and_a_file_in_its_place_is_refused() {
+        let scratch = scratch_base("base-made");
+        let base = scratch.join("designos test data");
+        let root = prepare_base(&base, 999_996).expect("a missing base is made");
+        assert_eq!(root, base.canonicalize().unwrap().join("999996").join("sessions"));
+        assert!(base.is_dir());
+
+        let file_base = scratch.join("a file");
+        std::fs::write(&file_base, b"not a folder").expect("file");
+        let err = prepare_base(&file_base, 999_996).expect_err("a file is not the test data folder");
+        assert!(err.to_string().contains("is a file, not a folder"), "{err}");
+        let _ = std::fs::remove_dir_all(&scratch);
+    }
+}

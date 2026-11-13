@@ -5,12 +5,13 @@
 //! - Turn close on stop: applies held live patches, folds the turn's contiguous agent undo steps into
 //!   one `Command::Batch` labelled `"Agent turn (stopped)"` via `History::fold_since`, clears
 //!   `Document::in_progress` flags for the agent, and records `"Stopped by you after <N>s"`.
-//! - Secondary header buttons `"Stop"` and `"Stop all"` (when 2+ tabs run) and chrome-only `Esc`.
+//! - Header button `"Stop"` while a turn runs. `"Stop all"` lives in the sessions menu. Chrome-only `Esc`.
 
 use crate::app::App;
 use crate::terminal::{AgentCliPreset, AgentTabStatus, TerminalAction, TerminalState, TerminalTab};
+use crate::widgets::kit::{self, button_look, paint_frame, Hierarchy};
 use crate::{theme, widgets};
-use egui::{Align2, Id, Painter, Pos2, Rect, Sense, Stroke, StrokeKind, Ui, Vec2};
+use egui::{Align2, Id, Painter, Pos2, Rect, Sense, Ui, Vec2};
 
 /// Undo step label applied by [`designos_doc::History::fold_since`] when a turn is stopped (`§3.4`).
 pub const STOP_UNDO_LABEL: &str = "Agent turn (stopped)";
@@ -118,25 +119,24 @@ pub fn format_stopped_receipt(started_ms: u64, ended_ms: u64) -> String {
     }
 }
 
-/// True when `tab` has a known running turn eligible for Stop (`§3.1`, `§3.7`, `§8.6`).
+/// True when `tab` has a known running turn eligible for Stop (`§3.1`, `§3.7`, `§8.6`, `#1194`).
 pub fn is_tab_turn_running(tab: &TerminalTab) -> bool {
     if tab.is_shell_process() || tab.resumed_without_known_turn {
         return false;
     }
-    let explicit = tab.agent_status.lock().ok().map(|s| s.clone()).unwrap_or_default();
-    match explicit {
-        AgentTabStatus::Working(_) => true,
-        AgentTabStatus::WaitingForInput(_) | AgentTabStatus::Done | AgentTabStatus::Error(_) | AgentTabStatus::Stopped => false,
-        AgentTabStatus::Idle => {
-            matches!(tab.spawn_preset, AgentCliPreset::Codex)
-                && tab.last_output_at.lock().ok().and_then(|g| *g).is_some_and(|ts| ts.elapsed() < std::time::Duration::from_millis(600))
-        }
-    }
+    matches!(tab.effective_status(), AgentTabStatus::Working(_))
 }
 
-/// Number of tabs in `state` whose turn is currently running (`§3.6`).
+/// True when the Stop control can stop `tab`: its turn is running and its CLI has an interrupt row. A CLI with no row gets no
+/// control, since pressing it would send nothing. Gemini CLI is one: a second Ctrl+C exits it, so the usual Esc then Ctrl+C is
+/// not safe to copy for it. [`is_tab_turn_running`] stays as it is, because it also marks where a turn starts in the undo stack.
+pub fn is_tab_stoppable(tab: &TerminalTab) -> bool {
+    interrupt_row_for(tab.spawn_preset).is_some() && is_tab_turn_running(tab)
+}
+
+/// Number of tabs in `state` whose turn is currently running and can be stopped (`§3.6`).
 pub fn running_tab_count(state: &TerminalState) -> usize {
-    state.tabs.iter().filter(|t| is_tab_turn_running(t)).count()
+    state.tabs.iter().filter(|t| is_tab_stoppable(t)).count()
 }
 
 /// Starts the stop sequence on `tab` at `now_ms` (`§3.3`).
@@ -378,65 +378,37 @@ pub fn close_stopped_turn_on_app(app: &mut App, tab_id: usize, turn_start_depth:
     }
 }
 
-/// Paints the secondary `"Stop"` button (and `"Stop all"` when 2+ tabs are running) in the panel
-/// header strip at the right (`§7`), returning the left edge of the painted control group so the
-/// tab strip knows where to stop.
+/// Paints `Stop` in the header, left of `right_anchor_x`, while the active tab can be stopped or a stop
+/// is already in flight. Returns the button's left edge, or `right_anchor_x` when nothing is drawn.
 pub fn paint_header_stop_controls(ui: &mut Ui, p: &Painter, state: &mut TerminalState, bar_r: Rect, right_anchor_x: f32) -> f32 {
     let now = designos_doc::now_ms();
-    let running_count = running_tab_count(state);
-    let active_running = state.tabs.get(state.active_tab).is_some_and(is_tab_turn_running);
     let active_stopping = state.tabs.get(state.active_tab).is_some_and(|t| t.stop_state.is_some());
-
-    if !active_running && running_count < 2 {
+    let active_running = state.tabs.get(state.active_tab).is_some_and(is_tab_stoppable);
+    if !active_running && !active_stopping {
         return right_anchor_x;
     }
 
-    let btn_h = theme::CONTROL_STANDARD;
-    let btn_y = bar_r.center().y - btn_h * 0.5;
-    let mut cursor_right = right_anchor_x - theme::SPACE_INLINE;
-
-    if active_running {
-        let label = state.tabs.get(state.active_tab).and_then(|t| t.stop_state.as_ref()).map_or("Stop", StopState::button_label);
-        let btn_w = theme::CONTROL_ROW + theme::SPACE_SECTION;
-        let stop_rect = Rect::from_min_size(Pos2::new(cursor_right - btn_w, btn_y), Vec2::new(btn_w, btn_h));
-        let resp = ui.interact(stop_rect, Id::new("agents-header-stop-btn"), Sense::click());
-        let bg = if !active_stopping && resp.hovered() { theme::BG_HOVER } else { theme::BG_SECONDARY };
-        p.rect_filled(stop_rect, theme::cr(theme::RADIUS_CONTROL), bg);
-        p.rect_stroke(stop_rect, theme::cr(theme::RADIUS_CONTROL), Stroke::new(theme::BORDER_WIDTH, theme::BORDER), StrokeKind::Inside);
-
-        let sq_side = theme::SPACE_INLINE;
-        let sq_center = Pos2::new(stop_rect.left() + theme::INSET_BUTTON, stop_rect.center().y);
-        let sq_rect = Rect::from_center_size(sq_center, Vec2::splat(sq_side));
-        let fg = if active_stopping { theme::TEXT_SECONDARY } else { theme::TEXT };
-        p.rect_filled(sq_rect, theme::cr(theme::RADIUS_MARK), fg);
-        p.text(Pos2::new(sq_rect.right() + theme::SPACE_FACT, stop_rect.center().y), Align2::LEFT_CENTER, label, theme::font_caption_medium(), fg);
-        widgets::record(ui, "agents-header-stop-btn", stop_rect);
-        if !active_stopping && resp.clicked() {
-            start_stop_active(state, now);
-        }
-        cursor_right = stop_rect.left();
-        if state.tabs.get(state.active_tab).is_some_and(|t| t.stop_state.is_some() && t.still_running_notice.is_none()) {
-            ui.ctx().request_repaint_after(std::time::Duration::from_millis(100));
-        }
+    let btn_h = theme::TARGET_MIN;
+    let btn_w = 64.0;
+    let stop_rect = Rect::from_min_size(Pos2::new(right_anchor_x - theme::SPACE_ROW - btn_w, bar_r.center().y - btn_h * 0.5), Vec2::new(btn_w, btn_h));
+    let resp = ui.interact(stop_rect, Id::new("agents-header-stop-btn"), Sense::click());
+    let paint = button_look(Hierarchy::Destructive, kit::state_of(&resp, false, !active_stopping));
+    paint_frame(p, stop_rect, theme::RADIUS_CONTROL, &paint);
+    let label = state.tabs.get(state.active_tab).and_then(|t| t.stop_state.as_ref()).map_or("Stop", StopState::button_label);
+    let font = theme::font_text(theme::FONT_SIZE_TEXT_XS, theme::TextWeight::Medium);
+    p.text(stop_rect.center(), Align2::CENTER_CENTER, label, font, paint.text);
+    if ui.memory(|m| m.has_focus(resp.id)) {
+        kit::focus_ring(p, stop_rect, theme::RADIUS_CONTROL as f32);
     }
-
-    if running_count >= 2 {
-        let btn_w = theme::CONTROL_ROW + theme::SPACE_SECTION + theme::SPACE_INLINE;
-        let right_x = if active_running { cursor_right - theme::SPACE_INLINE } else { cursor_right };
-        let all_rect = Rect::from_min_size(Pos2::new(right_x - btn_w, btn_y), Vec2::new(btn_w, btn_h));
-        let resp = ui.interact(all_rect, Id::new("agents-header-stop-all-btn"), Sense::click());
-        let bg = if resp.hovered() { theme::BG_HOVER } else { theme::BG_SECONDARY };
-        p.rect_filled(all_rect, theme::cr(theme::RADIUS_CONTROL), bg);
-        p.rect_stroke(all_rect, theme::cr(theme::RADIUS_CONTROL), Stroke::new(theme::BORDER_WIDTH, theme::BORDER), StrokeKind::Inside);
-        p.text(all_rect.center(), Align2::CENTER_CENTER, "Stop all", theme::font_caption_medium(), theme::TEXT);
-        widgets::record(ui, "agents-header-stop-all-btn", all_rect);
-        if resp.clicked() {
-            stop_all(state, now);
-        }
-        cursor_right = all_rect.left();
+    widgets::record(ui, "agents-header-stop-btn", stop_rect);
+    widgets::labelled(ui, resp.id, egui::accesskit::Role::Button, "Stop");
+    if !active_stopping && resp.clicked() {
+        start_stop_active(state, now);
     }
-
-    cursor_right
+    if active_stopping && state.tabs.get(state.active_tab).is_some_and(|t| t.still_running_notice.is_none()) {
+        ui.ctx().request_repaint_after(std::time::Duration::from_millis(100));
+    }
+    stop_rect.left()
 }
 
 #[cfg(test)]
@@ -453,19 +425,23 @@ mod tests {
         App::new(doc)
     }
 
-    /// Spawns `script` in a PTY-backed tab that reports `READY`, then marks the tab as running a turn.
+    /// Spawns `script` in a PTY-backed tab that reports `READY`, then marks the tab as running a turn. It returns once `READY` is on
+    /// the tab's screen: the stub has put its terminal in raw mode by then, so a key sent next reaches it as a key. A runner whose
+    /// `python3` starts slowly (a first call of the macOS shim takes seconds) gets up to 10 s, and a stub that never reports fails here.
     fn spawn_script_stub_tab(id: usize, preset: AgentCliPreset, script: &str) -> TerminalTab {
         let mut cmd = CommandBuilder::new("sh");
         cmd.arg("-c");
         cmd.arg(script);
         let mut tab = TerminalTab::spawn_test_stub(id, preset, cmd).expect("spawn stub tab");
-        let ready_deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
-        while std::time::Instant::now() < ready_deadline {
-            if tab.raw_log.lock().ok().is_some_and(|l| l.contains("READY")) {
-                break;
+        let ready_deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let mut ready = false;
+        while !ready && std::time::Instant::now() < ready_deadline {
+            ready = tab.raw_log.lock().ok().is_some_and(|l| l.contains("READY"));
+            if !ready {
+                std::thread::sleep(std::time::Duration::from_millis(10));
             }
-            std::thread::sleep(std::time::Duration::from_millis(10));
         }
+        assert!(ready, "the stub never printed READY: its python3 did not start within 10 s");
         if let Ok(mut st) = tab.agent_status.lock() {
             *st = AgentTabStatus::Working(Some("Editing layers…".into()));
         }
@@ -504,6 +480,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(windows, ignore = "needs POSIX sh and python tty/termios PTY stub")]
     fn stop_ends_a_looping_stub_within_three_seconds() {
         designos_doc::set_mock_now_ms(Some(1_000));
         let mut tab = spawn_looping_stub_tab(1, AgentCliPreset::Claude, false);
@@ -528,6 +505,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(windows, ignore = "needs POSIX sh and python tty/termios PTY stub")]
     fn second_key_is_sent_only_if_still_running() {
         // Case A: a stub that keeps painting and ignores the first key (Esc) -> gets Ctrl+C at t = 3s, and no third key.
         let mut tab_ignores = spawn_chatty_stub_tab(1, AgentCliPreset::Claude, 2);
@@ -568,6 +546,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(windows, ignore = "needs POSIX sh and python tty/termios PTY stub")]
     fn no_key_is_sent_after_the_turn_ended() {
         let mut tab = spawn_looping_stub_tab(1, AgentCliPreset::Grok, false);
         if let Ok(mut st) = tab.agent_status.lock() {
@@ -693,6 +672,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(windows, ignore = "needs POSIX sh and python tty/termios PTY stub")]
     fn in_progress_flags_clear_on_stop() {
         designos_doc::set_mock_now_ms(Some(10_000));
         let mut app = new_test_app();
@@ -719,6 +699,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(windows, ignore = "needs POSIX sh and python tty/termios PTY stub")]
     fn live_spec_flag_without_run_id_clears_on_stop_of_the_writing_tab() {
         designos_doc::set_mock_now_ms(Some(10_000));
         let mut app = new_test_app();
@@ -785,6 +766,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(windows, ignore = "needs POSIX sh and python tty/termios PTY stub")]
     fn applying_a_spec_does_not_give_the_tab_run_id_to_another_writers_flag_so_stop_leaves_it() {
         designos_doc::set_mock_now_ms(Some(10_000));
         let mut app = app_with_agent_tab("sess-live-1-1");
@@ -803,6 +785,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(windows, ignore = "needs POSIX sh and python tty/termios PTY stub")]
     fn applying_a_spec_does_not_give_the_tab_run_id_to_another_writers_flag_so_turn_end_leaves_it() {
         designos_doc::set_mock_now_ms(Some(10_000));
         let mut app = app_with_agent_tab("sess-live-1-1");
@@ -818,6 +801,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(windows, ignore = "needs POSIX sh and python tty/termios PTY stub")]
     fn nested_spec_flags_without_a_run_id_get_the_agent_tab_run_id_and_explicit_ones_keep_theirs() {
         designos_doc::set_mock_now_ms(Some(10_000));
         let mut app = app_with_agent_tab("sess-live-1-1");
@@ -853,6 +837,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(windows, ignore = "needs POSIX sh and python tty/termios PTY stub")]
     fn stopping_one_tab_keeps_the_in_progress_flags_of_a_parallel_tab_of_the_same_agent() {
         designos_doc::set_mock_now_ms(Some(10_000));
         let mut app = new_test_app();
@@ -883,6 +868,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(windows, ignore = "needs POSIX sh and python tty/termios PTY stub")]
     fn receipt_says_stopped_by_you() {
         assert_eq!(format_stopped_receipt(1_000, 43_000), "Stopped by you after 42s");
 
@@ -898,12 +884,13 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(windows, ignore = "needs POSIX sh and python tty/termios PTY stub")]
     fn stop_after_user_shapes_and_earlier_turn_only_folds_active_turn_and_resets_receipt_clock() {
         designos_doc::set_mock_now_ms(Some(1_000));
         let mut app = new_test_app();
         let page = app.page;
         let _ = std::fs::create_dir_all(&app.terminal.session_dir);
-        let events_file = app.terminal.session_dir.join("agent-events.jsonl");
+        let events_file = app.terminal.prepared_hook_paths().events();
         let _ = std::fs::remove_file(&events_file);
         let append_event = |t: f64, event: &str| {
             use std::io::Write;
@@ -995,6 +982,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(windows, ignore = "needs POSIX sh PTY stub")]
     fn osc_status_in_pty_does_not_erase_stopped_until_new_working_turn() {
         let script = "python3 -u -c 'import sys\nsys.stdout.write(\"READY\\n\")\nsys.stdout.flush()\nline = sys.stdin.readline()\nsys.stdout.write(\"\\x1b]9999;done\\x07AFTER_IDLE\\n\")\nsys.stdout.flush()\nline2 = sys.stdin.readline()\nsys.stdout.write(\"\\x1b]9999;working:Next turn\\x07AFTER_WORK\\n\")\nsys.stdout.flush()\n'";
         let mut cmd = CommandBuilder::new("sh");
@@ -1038,6 +1026,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(windows, ignore = "needs POSIX sh and python tty/termios PTY stub")]
     fn esc_in_the_terminal_reaches_the_cli_unchanged() {
         let mut state = TerminalState::default();
         let tab = spawn_looping_stub_tab(1, AgentCliPreset::Grok, true);
@@ -1053,6 +1042,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(windows, ignore = "needs POSIX sh and python tty/termios PTY stub")]
     fn esc_in_the_chrome_stops() {
         let mut state = TerminalState::default();
         let tab = spawn_looping_stub_tab(1, AgentCliPreset::Grok, true);
@@ -1072,6 +1062,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(windows, ignore = "needs POSIX sh and python tty/termios PTY stub")]
     fn stop_all_stops_every_running_tab() {
         let mut state = TerminalState::default();
         state.tabs.push(spawn_looping_stub_tab(1, AgentCliPreset::Claude, false));
@@ -1094,6 +1085,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(windows, ignore = "needs POSIX sh and python tty/termios PTY stub")]
     fn codex_heuristic_stop_folds_all_patches_and_preserves_elapsed_receipt() {
         designos_doc::set_mock_now_ms(Some(10_000));
         let mut app = new_test_app();
@@ -1226,10 +1218,11 @@ mod tests {
     }
 
     fn hook_record(t: f64, event: &str) -> crate::agent_turn_status::AgentEventRecord {
-        crate::agent_turn_status::AgentEventRecord { t, e: event.to_string(), p: serde_json::json!({ "session_id": "sess-684" }) }
+        crate::agent_turn_status::AgentEventRecord { t, e: event.to_string(), tab: None, p: serde_json::json!({ "session_id": "sess-684" }) }
     }
 
     #[test]
+    #[cfg_attr(windows, ignore = "needs POSIX sh and python tty/termios PTY stub")]
     fn stopped_turn_reads_as_stopped_in_the_receipt_row_and_header_status() {
         let mut tab = spawn_looping_stub_tab(1, AgentCliPreset::Claude, false);
         tab.turn_tracker.on_event(&hook_record(1.0, "UserPromptSubmit"));
@@ -1274,6 +1267,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(windows, ignore = "needs POSIX sh and python tty/termios PTY stub")]
     fn stopped_turn_closes_its_ledger_turn_and_revert_after_a_user_undo_still_covers_every_step() {
         let mut app = new_test_app();
         let page = app.page;
@@ -1338,7 +1332,7 @@ mod tests {
     fn app_with_hooked_turn(tab: TerminalTab) -> (App, std::path::PathBuf) {
         let mut app = new_test_app();
         let _ = std::fs::create_dir_all(&app.terminal.session_dir);
-        let events = app.terminal.session_dir.join("agent-events.jsonl");
+        let events = app.terminal.prepared_hook_paths().events();
         let _ = std::fs::remove_file(&events);
         if let Ok(mut st) = tab.agent_status.lock() {
             *st = AgentTabStatus::Idle;
@@ -1369,6 +1363,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(windows, ignore = "needs POSIX sh and python tty/termios PTY stub")]
     fn stop_closes_when_the_cli_fires_no_interrupt_hook_and_goes_quiet() {
         designos_doc::set_mock_now_ms(Some(10_000));
         let (mut app, _events) = app_with_hooked_turn(spawn_quiet_after_interrupt_stub_tab(1, AgentCliPreset::Claude));
@@ -1426,6 +1421,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(windows, ignore = "needs POSIX sh and python tty/termios PTY stub")]
     fn a_cli_that_prints_nothing_after_the_key_is_not_closed_by_quiet_and_ends_in_the_still_running_notice() {
         designos_doc::set_mock_now_ms(Some(1_000));
         let mut tab = spawn_silent_after_interrupt_stub_tab(1, AgentCliPreset::Claude);
@@ -1454,6 +1450,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(windows, ignore = "needs POSIX sh and python tty/termios PTY stub")]
     fn a_chatty_cli_stays_pending_across_the_real_quiet_window() {
         designos_doc::set_mock_now_ms(Some(1_000));
         // Paints a dot every 50 ms and exits only after two keys, so it is never quiet for 600 ms.
@@ -1474,6 +1471,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(windows, ignore = "needs POSIX sh and python tty/termios PTY stub")]
     fn a_new_prompt_closes_the_pending_stop_so_the_next_turn_never_folds_with_it() {
         designos_doc::set_mock_now_ms(Some(10_000));
         let (mut app, events) = app_with_hooked_turn(spawn_chatty_stub_tab(1, AgentCliPreset::Claude, 99));
@@ -1520,6 +1518,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(windows, ignore = "needs POSIX sh and python tty/termios PTY stub")]
     fn folding_a_stopped_turn_remaps_the_ledger_of_every_tab() {
         let mut app = new_test_app();
         app.terminal.tabs.push(spawn_looping_stub_tab(1, AgentCliPreset::Claude, true));

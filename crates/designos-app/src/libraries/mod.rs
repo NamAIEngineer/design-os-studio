@@ -165,6 +165,21 @@ impl LibrariesState {
         self.pending.values().map(|(_, p)| p.clone()).collect()
     }
 
+    /// Hashes the cached latest and pending library versions without allocating.
+    pub fn hash_versions(&self, h: &mut impl std::hash::Hasher) {
+        use std::hash::Hash;
+        self.latest.len().hash(h);
+        for (id, ver) in &self.latest {
+            id.hash(h);
+            ver.hash(h);
+        }
+        self.pending.len().hash(h);
+        for (id, (_, p)) in &self.pending {
+            id.hash(h);
+            p.version.hash(h);
+        }
+    }
+
     /// Forces the next frame to re-check enabled libraries.
     pub fn invalidate(&mut self) {
         self.next_check = 0.0;
@@ -312,7 +327,13 @@ impl App {
                 if let Some(f) = &self.lib_file {
                     let _ = lib.set_library_source_file(&info.library_id, Some(&f.id));
                 }
-                self.show_toast(format!("Published {} v{}", info.name, info.version), false);
+                // extended collections are not published: say which components then show the parent's values
+                let picks = publish_warnings(&self.doc);
+                let mut text = format!("Published {} v{}", info.name, info.version);
+                if !picks.is_empty() {
+                    text.push_str(&format!(". Extended collections are not published, so {} show the parent's values", picks.join(", ")));
+                }
+                self.show_toast(text, false);
                 self.doc.library.published = Some(info);
                 self.libs.invalidate();
                 self.refresh_libraries();
@@ -735,16 +756,20 @@ impl App {
                 st.pending = None;
             }
         }
+        let linked = linked_style_nodes(&self.doc, style_key);
         let mut tx = Tx::new();
         let res = match self.import_asset_in(&mut tx, library_id, key) {
-            Some(local) => match self.bind_style_variable_in(&mut tx, style_key, property, &local) {
-                Ok(()) => self.run_tx(tx),
-                Err(e) => {
-                    tx.cancel(&mut self.doc);
-                    self.show_toast(format!("Style not changed: {e}"), true);
-                    false
+            Some(local) => {
+                self.end_text_edit_of(&linked);
+                match self.bind_style_variable_in(&mut tx, style_key, property, &local) {
+                    Ok(()) => self.run_tx(tx),
+                    Err(e) => {
+                        tx.cancel(&mut self.doc);
+                        self.show_toast(format!("Style not changed: {e}"), true);
+                        false
+                    }
                 }
-            },
+            }
             None => {
                 tx.cancel(&mut self.doc);
                 self.show_toast("Library variable could not be loaded", true);
@@ -760,6 +785,7 @@ impl App {
     pub fn apply_library_style(&mut self, mut tx: Tx, sel: &[NodeId], library_id: &str, key: &str) {
         match self.import_asset_in(&mut tx, library_id, key) {
             Some(local) => {
+                self.end_text_edit_of(sel);
                 self.apply_style_in(&mut tx, sel, &local);
                 self.run_tx(tx);
             }

@@ -21,6 +21,8 @@ fn shot_sim(gpu: bool, tag: &str) -> (Sim, PathBuf) {
         let g = &mut s.shell.app.canvas.gpu;
         (g.available, g.pref) = (true, true);
         g.set_max_texture(16_384);
+        // debug builds draw a frame in tens of milliseconds: every frame is an idle one here
+        g.frame_work_override = Some(0.0);
     }
     (s, path)
 }
@@ -35,6 +37,7 @@ fn frame_requests_screenshot(s: &mut Sim) -> bool {
     let ctx = s.ctx.clone();
     let shell = &mut s.shell;
     let out = ctx.run_ui(raw_input(s.t, vec![]), |ui| shell.draw(ui));
+    shell.app.canvas.gpu.ack_prepared_for_test();
     out.viewport_output.values().any(|v| v.commands.iter().any(|c| matches!(c, egui::ViewportCommand::Screenshot(_))))
 }
 
@@ -93,6 +96,7 @@ fn run_window(s: &mut Sim, shot: &Path, limit: usize, lag: usize, mut before_fra
         let ctx = s.ctx.clone();
         let shell = &mut s.shell;
         let out = ctx.run_ui(raw_input(s.t, events), |ui| shell.draw(ui));
+        shell.app.canvas.gpu.ack_prepared_for_test();
         run.at_rest.push(s.app().canvas.gpu.at_rest());
         if asked_in.take().is_some() {
             in_flight = Some((n, n + lag));
@@ -144,16 +148,37 @@ fn screenshot_of_a_canvas_not_on_the_gpu_is_taken_as_before() {
 }
 
 #[test]
+fn a_lost_screenshot_request_is_retried_before_the_window_gives_up() {
+    for (gpu, tag) in [(false, "retry_cpu"), (true, "retry_gpu")] {
+        let (mut s, shot) = shot_sim(gpu, tag);
+        frames_until_screenshot(&mut s, 150).expect("the first screenshot request is sent");
+        assert!(s.app().canvas.gpu.at_rest(), "{tag}: the first request waits for an at-rest frame");
+
+        // The platform dropped the first request: no Event::Screenshot is delivered. A later
+        // request must still be sent so a transient macOS/eframe delivery loss does not turn into
+        // the generic "screenshot was not captured" exit.
+        let retry_after = (1..=300).find(|_| frame_requests_screenshot(&mut s)).expect("a dropped screenshot request is retried");
+        assert_eq!(retry_after, crate::shell::SHOT_IMAGE_WAIT_FRAMES, "{tag}: the retry must follow SHOT_IMAGE_WAIT_FRAMES after the lost first request");
+        assert!(s.app().canvas.gpu.at_rest(), "{tag}: the retried request is also sent at rest");
+
+        let image = Arc::new(egui::ColorImage::filled([SIZE.0 as usize, SIZE.1 as usize], egui::Color32::BLACK));
+        s.frame(vec![Event::Screenshot { viewport_id: egui::ViewportId::ROOT, user_data: egui::UserData::default(), image }]);
+        assert!(shot.exists(), "{tag}: the retried request writes the PNG");
+        cleanup(&shot);
+    }
+}
+
+#[test]
 fn screenshot_gives_up_waiting_for_a_view_that_never_settles() {
     let (mut s, shot) = shot_sim(true, "never_settles");
     // a view that moves every frame never goes idle
-    let n = (1..=400)
+    let n = (1..=SHOT_CLOSE_FRAMES + 100)
         .find(|_| {
             s.shell.app.view.offset.x += 1.0;
             frame_requests_screenshot(&mut s)
         })
         .expect("the screenshot is eventually requested");
-    assert!((100..240).contains(&n), "settle limit hit after {n} frames, before the 240 frame close");
+    assert!((100..SHOT_CLOSE_FRAMES).contains(&n), "settle limit hit after {n} frames, before the {SHOT_CLOSE_FRAMES} frame close");
     assert!(!s.app().canvas.gpu.at_rest(), "it captured the interactive frame, as announced");
     cleanup(&shot);
 }
@@ -181,10 +206,14 @@ fn a_cpu_canvas_is_saved_after_the_usual_dozen_frames() {
 #[test]
 fn a_view_that_never_settles_is_saved_before_the_window_closes() {
     let (mut s, shot) = shot_sim(true, "never_saved");
-    let run = run_window(&mut s, &shot, 400, DELIVERY_LAG, |s, _| s.shell.app.view.offset.x += 1.0);
+    let run = run_window(&mut s, &shot, SHOT_CLOSE_FRAMES as usize + 100, DELIVERY_LAG, |s, _| s.shell.app.view.offset.x += 1.0);
     let from = run.saved_from.unwrap_or_else(|| panic!("no image was saved: {run:?}"));
     assert!(!run.at_rest[from], "the view never rested, so the interactive frame is what was kept");
-    assert!(run.closed_at.is_some_and(|n| n + 3 < 240), "closed at frame {:?}, the run itself gives up after 240", run.closed_at);
+    assert!(
+        run.closed_at.is_some_and(|n| n + 3 < SHOT_CLOSE_FRAMES as usize),
+        "closed at frame {:?}, the run itself gives up after {SHOT_CLOSE_FRAMES}",
+        run.closed_at
+    );
     assert_eq!(run.requests.len(), 1, "no retries once the settle limit has passed: {run:?}");
     cleanup(&shot);
 }

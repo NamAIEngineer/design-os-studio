@@ -7,11 +7,11 @@
 //! The synthetic children live in a per-thread registry under ids that cannot clash
 //! with document ids ([`is_synthetic`]); look nodes up through [`get`].
 
-use crate::text::text_geometry;
+use crate::text::{text_geometry, text_line_box};
 use designos_doc as d;
 use designos_doc::{
-    Affine, ArcData, Color, ConnectorCap, Document, Effect, Node, NodeId, NodeKind, Paint, Path, PathCmd, Rect, ShapeKind, StampLayer, StickyProps,
-    StrokeAlign, StrokeCap, StrokeJoin, TextAlignH, TextAlignV, TextAutoResize, TextProps, Vec2,
+    Affine, ArcData, Color, ConnectorCap, Document, Effect, FrameProps, Node, NodeId, NodeKind, Paint, Path, PathCmd, Rect, ShapeKind, StampLayer, StickyProps,
+    StrokeAlign, StrokeCap, StrokeJoin, TableProps, TextAlignH, TextAlignV, TextAutoResize, TextProps, Vec2,
 };
 use std::borrow::Cow;
 use std::cell::RefCell;
@@ -169,6 +169,15 @@ pub fn text_frame(doc: &Document, n: &Node) -> Option<TextFrame> {
     }
 }
 
+/// Background box of connector `n`'s label in the connector's own space: the box the renderer
+/// paints white over the line. `None` without a label or with an empty one (nothing is painted).
+pub fn connector_label_box(doc: &Document, n: &Node) -> Option<Rect> {
+    let NodeKind::Connector(c) = &n.kind else { return None };
+    let label = c.label.as_ref().filter(|l| !l.content.is_empty())?;
+    let route = local_route(doc, n)?;
+    Some(label_frame(route.midpoint(), label).0)
+}
+
 /// Lowers `n` (a board item) to a body node with synthetic children, or `None` for other kinds.
 pub fn lower(doc: &Document, n: &Node) -> Option<Node> {
     let mut extras: Vec<Node> = Vec::new();
@@ -215,13 +224,24 @@ pub fn lower(doc: &Document, n: &Node) -> Option<Node> {
             }
         }
         NodeKind::Connector(_) => lower_connector(doc, n, &mut body, &mut extras)?,
+        NodeKind::TableCell(_) => lower_table_cell(n, &mut body, &mut extras),
+        NodeKind::Table(p) => {
+            lower_table(doc, n, p, &mut body, &mut extras);
+            // the table's own cells come first (real ids), the grid drawn over them last
+            body.children = n.children.iter().copied().chain(extras.iter().map(|e| e.id)).collect();
+        }
         _ => return None,
     }
-    body.children = extras.iter().map(|e| e.id).collect();
+    if !matches!(n.kind, NodeKind::Table(_)) {
+        body.children = extras.iter().map(|e| e.id).collect();
+    }
+    let is_cell = matches!(n.kind, NodeKind::TableCell(_));
     SYNTH.with(|s| {
         let mut s = s.borrow_mut();
-        // ids of deleted items are never reused: forget their children when the table gets big
-        if s.len() > 50_000 {
+        // ids of deleted items are never reused: forget their children when the table gets big.
+        // A cell is lowered while its table's grid child is still waiting to be drawn, so a cell
+        // never clears: the clear would drop the grid (the table's own lowering clears instead).
+        if s.len() > 50_000 && !is_cell {
             s.clear();
         }
         for e in extras {
@@ -243,7 +263,9 @@ pub fn lowered_document(doc: &Document) -> Option<Document> {
     for id in items {
         let Some(n) = doc.get(id) else { continue };
         let Some(body) = lower(doc, n) else { continue };
-        for c in &body.children {
+        // real children (a table's cells) lower themselves; only lowered children are copied in,
+        // or a cell met before its table would be overwritten by the raw document node
+        for c in body.children.iter().filter(|c| is_synthetic(**c)) {
             if let Some(k) = get(doc, *c) {
                 out.nodes.insert(*c, k.into_owned());
             }
@@ -272,6 +294,7 @@ fn lower_sticky(n: &Node, s: &StickyProps, body: &mut Node, extras: &mut Vec<Nod
             spread: 0.0,
             visible: true,
             show_behind: false,
+            blend: Default::default(),
         },
         Effect::DropShadow {
             color: Color { a: 0.12, ..Color::BLACK },
@@ -280,6 +303,7 @@ fn lower_sticky(n: &Node, s: &StickyProps, body: &mut Node, extras: &mut Vec<Nod
             spread: 0.0,
             visible: true,
             show_behind: false,
+            blend: Default::default(),
         },
     ];
     effects.extend(n.effects.iter().cloned());
@@ -351,6 +375,165 @@ fn lower_connector(doc: &Document, n: &Node, body: &mut Node, extras: &mut Vec<N
         extras.push(child(n, 5, NodeKind::Text(f.props), f.rect));
     }
     Some(())
+}
+
+/// A table cell: its fills as a plain rectangle, and its text inside the cell minus the padding.
+/// The text wraps at the cell width and never shrinks to fit. Table layout grows a row to its text, so
+/// the text normally fits. A cell whose text still does not fit (a row held short, a word wider than
+/// the cell) becomes a clipping frame, so the text never paints over its neighbours; every other cell
+/// stays a rectangle and costs no clip mask. The fit test goes by the text's line box ([`text_leaves_cell`]).
+/// The GPU clips to whole pixels where the CPU mask is anti-aliased, so at a fractional zoom or
+/// origin an overflowing line can differ by a pixel at the cell edge.
+fn lower_table_cell(n: &Node, body: &mut Node, extras: &mut Vec<Node>) {
+    let NodeKind::TableCell(c) = &n.kind else { return };
+    body.kind = NodeKind::Rectangle;
+    body.corner_radii = [0.0; 4];
+    body.stroke.paints.clear();
+    body.stroke.weight = 0.0;
+    body.stroke.side_weights = None;
+    let bx = d::table::table_cell_text_rect(n.size);
+    // wraps at the cell width, the width the table layout measures with
+    let mut props = c.text.clone();
+    props.auto_resize = TextAutoResize::Height;
+    if !props.content.is_empty() && text_leaves_cell(n.size, &bx, &props) {
+        body.kind = NodeKind::Frame(FrameProps { clips_content: true, ..FrameProps::default() });
+    }
+    extras.extend(fitted_text(n, 0, TextFrame { rect: bx, props }));
+}
+
+/// Pixels the lines may pass the cell edge before the cell clips them (rounding in the shaper).
+const TEXT_FIT_SLACK: f32 = 0.5;
+
+/// Whether the lines of `props`, laid out in `bx`, pass the edge of the cell of size `cell`. It goes by
+/// the text's line box, the size table layout gives a row, not by glyph ink: ink that overhangs the
+/// line box (accents, descenders at a small line height) still paints, as text does elsewhere. The
+/// line box comes from a small cache of its own and, on a miss, from the layout the painter draws
+/// with, so a text is shaped once however often the cell is lowered.
+fn text_leaves_cell(cell: Vec2, bx: &Rect, props: &TextProps) -> bool {
+    let line_box = text_line_box(props, Vec2::new(bx.w, bx.h));
+    bx.x + line_box.x > cell.x + TEXT_FIT_SLACK || bx.y + line_box.y > cell.y + TEXT_FIT_SLACK
+}
+
+/// A table: its fills as a frame that clips nothing, with the grid lines as one synthetic vector
+/// child (slot 0). The cells are the table's real children, drawn before the grid.
+fn lower_table(doc: &Document, n: &Node, p: &TableProps, body: &mut Node, extras: &mut Vec<Node>) {
+    body.kind = NodeKind::Frame(FrameProps::default());
+    body.stroke.paints.clear();
+    body.stroke.weight = 0.0;
+    body.stroke.side_weights = None;
+    let visible = n.stroke.weight > 0.0 && n.stroke.paints.iter().any(|q| q.visible && q.opacity > 0.0);
+    if !visible {
+        return;
+    }
+    let path = grid_path(doc, n, p);
+    if path.cmds.is_empty() {
+        return;
+    }
+    let mut g = child(n, 0, vector(vec![path]), Rect::new(0.0, 0.0, n.size.x, n.size.y));
+    g.stroke = n.stroke.clone();
+    g.stroke.align = StrokeAlign::Center;
+    g.stroke.side_weights = None;
+    g.stroke.cap = StrokeCap::None;
+    g.stroke.join = StrokeJoin::Miter;
+    extras.push(g);
+}
+
+/// Merged blocks of `p` as `(row, col, row_span, col_span)` by track position, dropping the ones
+/// that name no track or overlap an earlier block (the table model repairs these on load).
+fn merge_blocks(p: &TableProps) -> Vec<(usize, usize, usize, usize)> {
+    let (rows, cols) = (p.rows.len(), p.cols.len());
+    let mut taken = vec![false; rows * cols];
+    let mut out = Vec::new();
+    for m in &p.merges {
+        let (Some(r0), Some(c0)) = (p.row_index(m.row), p.col_index(m.col)) else { continue };
+        let rs = (m.row_span.max(1) as usize).min(rows - r0);
+        let cs = (m.col_span.max(1) as usize).min(cols - c0);
+        let cells = || (r0..r0 + rs).flat_map(move |r| (c0..c0 + cs).map(move |c| r * cols + c));
+        if cells().any(|i| taken[i]) {
+            continue;
+        }
+        cells().for_each(|i| taken[i] = true);
+        out.push((r0, c0, rs, cs));
+    }
+    out
+}
+
+/// The grid of table `n`: the outer border plus every interior row and column boundary, except the
+/// stretches that lie inside a merged block. Positions come from the cells' stored geometry, so the
+/// lines meet the drawn cells even where a row grew to fit its text.
+fn grid_path(doc: &Document, n: &Node, p: &TableProps) -> Path {
+    let (rows, cols) = (p.rows.len(), p.cols.len());
+    let mut path = Path { cmds: Vec::new(), fill_rule: Default::default() };
+    if rows == 0 || cols == 0 {
+        return path;
+    }
+    // boundary offsets: track sizes first, then what the cells say
+    let cum = |tracks: &[d::TableTrack]| {
+        let mut acc = 0.0f32;
+        let mut v = vec![0.0f32];
+        for t in tracks {
+            acc += if t.size.is_finite() && t.size > 0.0 { t.size } else { d::TABLE_MIN_TRACK };
+            v.push(acc);
+        }
+        v
+    };
+    let (mut xs, mut ys) = (cum(&p.cols), cum(&p.rows));
+    let blocks = merge_blocks(p);
+    let mut spans: std::collections::HashMap<(usize, usize), (usize, usize)> = blocks.iter().map(|&(r, c, rs, cs)| ((r, c), (rs, cs))).collect();
+    for cell in n.children.iter().filter_map(|&id| doc.get(id)) {
+        let NodeKind::TableCell(c) = &cell.kind else { continue };
+        let (Some(r), Some(k)) = (p.row_index(c.row), p.col_index(c.col)) else { continue };
+        let (rs, cs) = spans.remove(&(r, k)).unwrap_or((1, 1));
+        let (x, y) = (cell.transform.tx, cell.transform.ty);
+        if [x, y, cell.size.x, cell.size.y].iter().all(|v| v.is_finite()) {
+            xs[k] = x;
+            xs[k + cs] = x + cell.size.x;
+            ys[r] = y;
+            ys[r + rs] = y + cell.size.y;
+        }
+    }
+    // owner[r][c]: the anchor index of the block a position belongs to
+    let mut owner: Vec<usize> = (0..rows * cols).collect();
+    for &(r0, c0, rs, cs) in &blocks {
+        for r in r0..r0 + rs {
+            for c in c0..c0 + cs {
+                owner[r * cols + c] = r0 * cols + c0;
+            }
+        }
+    }
+    let (x0, x1, y0, y1) = (xs[0], xs[cols], ys[0], ys[rows]);
+    let pt = |x: f32, y: f32| Vec2::new(x, y);
+    path.cmds.extend([PathCmd::MoveTo(pt(x0, y0)), PathCmd::LineTo(pt(x1, y0)), PathCmd::LineTo(pt(x1, y1)), PathCmd::LineTo(pt(x0, y1)), PathCmd::Close]);
+    // vertical boundaries: runs of rows where the two sides are different blocks
+    for c in 1..cols {
+        let mut start: Option<usize> = None;
+        for r in 0..=rows {
+            let line = r < rows && owner[r * cols + c - 1] != owner[r * cols + c];
+            match (line, start) {
+                (true, None) => start = Some(r),
+                (false, Some(s)) => {
+                    path.cmds.extend([PathCmd::MoveTo(pt(xs[c], ys[s])), PathCmd::LineTo(pt(xs[c], ys[r]))]);
+                    start = None;
+                }
+                _ => {}
+            }
+        }
+    }
+    for r in 1..rows {
+        let mut start: Option<usize> = None;
+        for c in 0..=cols {
+            let line = c < cols && owner[(r - 1) * cols + c] != owner[r * cols + c];
+            match (line, start) {
+                (true, None) => start = Some(c),
+                (false, Some(s)) => {
+                    path.cmds.extend([PathCmd::MoveTo(pt(xs[s], ys[r])), PathCmd::LineTo(pt(xs[c], ys[r]))]);
+                    start = None;
+                }
+                _ => {}
+            }
+        }
+    }
+    path
 }
 
 fn neg(v: Vec2) -> Vec2 {
@@ -438,6 +621,39 @@ mod tests {
         // two caps, label background and label text
         assert_eq!(body.children.len(), 4);
         assert!(body.children.iter().all(|c| is_synthetic(*c) && get(&doc, *c).is_some()));
+    }
+
+    #[test]
+    fn connector_label_box_is_the_painted_background_and_needs_text() {
+        let mut ids = (NodeId(0), NodeId(0));
+        let doc = doc_with(|d, page| {
+            let a = d.alloc_id();
+            let a = d.insert(page, Node::sticky(a, Rect::new(0.0, 0.0, 100.0, 100.0), "a")).unwrap();
+            let b = d.alloc_id();
+            let b = d.insert(page, Node::sticky(b, Rect::new(300.0, 0.0, 100.0, 100.0), "b")).unwrap();
+            let mut with = |text: &str| {
+                let id = d.alloc_id();
+                let mut props =
+                    ConnectorProps { start: ConnectorEnd::attached(a, Magnet::Auto), end: ConnectorEnd::attached(b, Magnet::Auto), ..Default::default() };
+                let mut label = d::board_text(14.0, TextAlignH::Center, TextAlignV::Center);
+                label.content = text.into();
+                props.label = Some(label);
+                let cid = d.insert(page, Node::connector(id, props)).unwrap();
+                d::sync_connector(d, cid);
+                cid
+            };
+            ids = (with("Open settings"), with(""));
+        });
+        let n = doc.get(ids.0).unwrap();
+        let bx = connector_label_box(&doc, n).expect("a labelled connector has a label box");
+        // the same box the lowered connector paints white over its line
+        let body = lower(&doc, n).unwrap();
+        let bg = body.children.iter().map(|c| get(&doc, *c).unwrap()).find(|c| matches!(c.kind, NodeKind::Rectangle)).expect("label background");
+        assert_eq!((bx.x, bx.y, bx.w, bx.h), (bg.transform.tx, bg.transform.ty, bg.size.x, bg.size.y));
+        // and it sits on the line: the route midpoint is inside it
+        let mid = local_route(&doc, n).unwrap().midpoint();
+        assert!(bx.x <= mid.x && mid.x <= bx.x + bx.w && bx.y <= mid.y && mid.y <= bx.y + bx.h);
+        assert!(connector_label_box(&doc, doc.get(ids.1).unwrap()).is_none(), "an empty label paints no box");
     }
 
     #[test]

@@ -53,9 +53,27 @@ Work ships in **packs**. A pack is one theme a user can describe in one sentence
 
 If a gate fails, the release task files a blocker issue in the same milestone, and the pack stays open. Never tag over a red gate.
 
+## Batch train
+
+`.github/workflows/train.yml` (`scripts/ci/train.sh`) batches up to 5 open, non-draft, non-stacked PRs targeting `main` into a temporary `train/<UTC ts>` branch, waits for the 4 required checks (`Check`, `Test (macos-15)`, `Clippy`, `Rustfmt`) on that combined SHA, and squash-merges each PR in order with `gh pr merge N --squash --match-head-commit <sha>`.
+
+- **Labels:**
+  - `train:ready` — PR is reviewed, has green required checks on its own head, and is queued for the next batch. Removed automatically once the PR lands (or when dropped with `train:conflict` / `train:failed`).
+  - `hotfix` — ordered at the front of the train ahead of normal `train:ready` PRs.
+  - `train:solo` — runs alone in a 1-PR batch (also implied when a PR title starts with `release:`), freezing other merges while the release PR lands.
+  - `train:conflict` — applied when `git merge --no-ff` onto the train branch conflicts; rebase on `main` and re-add `train:ready`.
+  - `train:failed` — applied when the required checks fail on the train branch (either to the single PR whose changed files intersect the failing crate, after which the remaining batch reruns once, or to the whole batch when the failure spans multiple or unknown crates).
+- **Configuration:**
+  - macOS CI on `main`: while the "Require branches to be up to date" rule is on, a push to `main` skips the macOS test jobs (see Checklist step 1) because the pull request's checks covered that tree. A push that changes code starts `Cache seed (macos-15)` instead (two legs, one per cache the macOS jobs read); a docs-only push starts no macOS job. Do not cancel a run on `main`: a cancelled seed saves nothing. The `train/<ts>` branch still runs the test jobs on the combined tree.
+  - `TRAIN_LIVE` (repository variable): scheduled (`*/15 * * * *`) and label-triggered runs stay in dry-run mode until `vars.TRAIN_LIVE` is `'true'` and the `main` ruleset's "Require branches to be up to date before merging" setting is turned OFF. Setting `TRAIN_LIVE` to `'true'` also makes a push to `main` run the macOS test jobs again and turns the cache seed off, because with the up-to-date rule off a merge can land a tree that no macOS job ran. An unset variable is an empty string, so the skip is on by default.
+  - `TRAIN_TOKEN` (repository secret): PAT with `contents: write` and `pull-requests: write` (plus `workflows` if workflow files ride the train) so pushing `train/<ts>` triggers `CI` and the job can squash-merge PRs and update labels.
+- **Dry run:**
+  - In GitHub Actions: `gh workflow run train.yml -f dry_run=true`
+  - Locally (read-only `gh` calls): `DRY_RUN=1 ./scripts/ci/train.sh`
+
 ## Checklist
 
-1. Make sure `main` is green. macOS tests and Clippy must pass; we verify releases on macOS, and the Windows and Linux packages are not verified before release.
+1. Make sure `main` is green. While the "Require branches to be up to date" rule is on (and `TRAIN_LIVE` is not `'true'`), a push to `main` does not re-run the macOS jobs (the three `Test (macos-15, n/3)` shards, `Lint budget (macos-15)` and the swiftc compile check): the tree on `main` is the tree its pull request's macOS checks already passed, and the repeat only queued the next pull request behind it. The `Test (macos-15)` check on `main` therefore reads "skipped on main". A pull request that is still a draft shows that check red ("the macOS tests did not run because this pull request is a draft"); marking it ready runs them. A push to `main` that changes code runs `Cache seed (macos-15)`, in two legs (the shards' cache and the lint budget's): each checks in seconds whether its dependency cache for the current `Cargo.lock` exists and only when it does not, compiles the dependencies and saves it, because a pull request can restore caches only from its own ref or from `main`. It is not a test and not a required check; a red run means a cache was not refreshed, not that `main` is broken. A docs-only push runs no macOS job. What covers the tagged commit is the release PR's own green macOS checks and the dry run below (a packaged build, smoke-tested by hand; it runs no tests). The CI run that the `v*` tag push starts does run the macOS jobs, but `release.yml` does not wait for it, so it is evidence after the fact, not a gate. Linux jobs and Clippy still run on every push to `main`. We verify releases on macOS, and the Windows and Linux packages are not verified before release.
 2. On a branch, bump `version` under `[workspace.package]` in the root `Cargo.toml` and run `cargo update -w` so `Cargo.lock` updates. Commit both (`release: X.Y.Z`) and open a PR. `main` is protected, so the release commit lands through a squash merge like any other change. The workflow's `version-check` job fails the release when the tag and this version differ.
 3. Once the release PR is merged, run the dry run (below) on `main` and smoke-test its `.dmg`. Then tag that same squash commit and push the tag. Release tags cannot be moved or deleted afterwards, so the tagged commit must be the one you tested:
 
@@ -66,7 +84,7 @@ If a gate fails, the release task files a blocker issue in the same milestone, a
    ```
 
    A tag containing a hyphen (`v0.2.0-rc.1`) is published as a pre-release.
-4. Watch the Release workflow. When the macOS build passes, a GitHub Release is created with auto-generated notes. Windows and Linux packages are attached if their builds pass, and a failure there does not block the release. Edit the notes if needed.
+4. Watch the Release workflow. When the macOS build passes, a GitHub Release is created with auto-generated notes. Windows and Linux packages are attached if their builds pass, and a failure there does not block the release. Edit the notes if needed. A release numbered below one that is already published (v0.7.1 after v0.7.5) does not take Latest or the homepage: `release.yml` publishes it with `make_latest: false` (`scripts/release-make-latest.py`), and the sync script skips it once the pages show the higher version (that release's sync PR is merged). `release.yml` runs from the tagged commit, so tag an older number from a branch that carries this guard; otherwise the **Release sync pages** workflow, which runs from `main`, puts Latest back on the highest published release after the fact (its `keep-latest` job). A release a person publishes by hand from the GitHub UI follows the UI's "Set as latest" choice and is not re-asserted.
 5. Let the **Release sync pages** workflow update the README, the homepage and the docs.
    - It runs by itself when the Release workflow finishes on a tag (`workflow_run`, as long as its "Publish release" job succeeded, even if a Windows or Linux leg failed; the release is published with `GITHUB_TOKEN`, which never fires `release: published`) or when a person publishes a release from the UI (`.github/workflows/release-sync-pages.yml`, script `scripts/release-sync-pages.py`). It waits for the release assets, rewrites the files, checks that every new download URL returns HTTP 200, and opens one PR on the branch `release-sync/vX.Y.Z`. It never pushes to `main`.
    - What it rewrites: the `releases/download/v<old>/…` links and their `<small>NN MB</small>` sizes in `docs/index.html` (and any such link in `README.md`, `docs/install.md`, `docs/llms.txt`), the `Download Studio <ver>` heading, every `build-release.sh <ver>` example, and the `<lastmod>` in `docs/sitemap.xml`. It links only assets the release lists: a missing macOS `.dmg` fails the run, a missing optional Windows or Linux package is dropped from the page with a warning in the PR body.
@@ -75,6 +93,7 @@ If a gate fails, the release task files a blocker issue in the same milestone, a
    - Re-run for a release that is already published: Actions → Release sync pages → Run workflow, with `version` set to `X.Y.Z`. The run is idempotent: on an up-to-date tree it opens nothing.
    - **Manual fallback** (workflow broken or the PR is needed locally): on a branch from `main`, run `python3 scripts/release-sync-pages.py X.Y.Z --verify-urls --report /tmp/report.md`. It reads `gh release view vX.Y.Z`, so you need `gh` signed in. Review `git diff`, commit, and open the PR. The tests are `python3 -m unittest discover -s scripts/tests -v`. Without the script, read the names from `gh release view vX.Y.Z --json assets --jq '.assets[].name'`, edit `docs/index.html` and the files above by hand, and link only the assets that list shows.
    - Not covered: the `EXPECT_VERSION` default in `scripts/release-smoke-macos.sh`. The smoke test runs before the tag exists, so a post-release sync would always leave it one version behind. Pass `EXPECT_VERSION=X.Y.Z` when you run it.
+6. Update the homepage's "What's new" (`docs/index.html`) in the same step as the README's (`README.md`), so both list the same release versions.
 
 ## What gets built
 
@@ -82,7 +101,7 @@ If a gate fails, the release task files a blocker issue in the same milestone, a
 |---|---|---|
 | `build` `x86_64-pc-windows-msvc` | `windows-latest` | `designos-<version>-<target>.zip` with `install.ps1` (the exe has the icon and version info embedded by `crates/designos-app/build.rs`). A `-setup.exe` NSIS installer is added only when `makensis` is on the runner's `PATH`; `windows-latest` does not have it, so v0.2.0 and v0.3.0 shipped the zip only. |
 | `build` `x86_64-unknown-linux-gnu` | `ubuntu-latest` | `designos-<version>-<target>.tar.gz` (adds `designos.desktop`, `icons/`, `install.sh`) and `designos_<version>_amd64.deb` (built when `dpkg-deb` is available) |
-| `macos` | `macos-14` (builds `aarch64-apple-darwin` and cross-compiles `x86_64-apple-darwin`; `macos-13` is retired) | `designos-<version>-macos.dmg` and `designos-<version>-macos-universal.tar.gz` |
+| `macos` | `macos-15` (builds `aarch64-apple-darwin` and cross-compiles `x86_64-apple-darwin`; `macos-13` and `macos-14` are retired) | `designos-<version>-macos.dmg` and `designos-<version>-macos-universal.tar.gz` |
 
 Every package holds all four tools (`designos-studio`, `designos`, `designos-mcp`, `designos-diff`) plus `LICENSE` and `README.md`. They are packaged by `scripts/package.sh <target> <version>`, which you can run locally after a release build.
 

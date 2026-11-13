@@ -1,6 +1,7 @@
 //! Dev mode: code languages, Ready for dev status, annotations, dev links and Compare changes.
 
 pub mod annot;
+pub mod code_view;
 pub mod color;
 pub mod compare;
 pub mod data;
@@ -97,6 +98,19 @@ pub fn swift_text(s: &str) -> String {
     out
 }
 
+/// Share of a status colour used as the fill of a status count.
+pub(crate) const STATUS_TINT: f32 = 0.22;
+
+/// Paints the switch track. The caller sizes `track` and owns the hit target.
+pub(crate) fn paint_switch(p: &egui::Painter, track: egui::Rect, on: bool) {
+    let paint = crate::widgets::kit::toggle_look(if on { crate::widgets::kit::State::Selected } else { crate::widgets::kit::State::Default });
+    let radius = crate::theme::radius_full(track.height()).round() as u8;
+    crate::widgets::kit::paint_frame(p, track, radius, &paint);
+    let knob = crate::theme::radius_full(crate::theme::LAYER_ICON_SIZE);
+    let cx = if on { track.right() - crate::theme::INSET_SEGMENT - knob } else { track.left() + crate::theme::INSET_SEGMENT + knob };
+    p.circle_filled(egui::Pos2::new(cx, track.center().y), knob.max(0.0), paint.icon);
+}
+
 /// Ready for dev items can be marked on these layers.
 pub fn markable(app: &App, id: NodeId) -> bool {
     app.doc.get(id).is_some_and(|n| can_mark(&n.kind))
@@ -112,13 +126,14 @@ impl App {
 
     /// Generates code for `id` in `lang`, reflecting any active scratch overrides in the Dev Mode Component Playground.
     pub fn dev_code_for(&self, id: NodeId, lang: Language, react_tailwind: bool) -> String {
+        let opts = (react_tailwind, self.dev.color_format);
         if self.dev.playground.has_overrides_for(id) {
             if let Some((scratch_doc, code_id, _)) = playground::build_scratch_doc(&self.doc, id, &self.dev.playground) {
-                return lang.generate(&scratch_doc, code_id, react_tailwind);
+                return lang.generate(&scratch_doc, code_id, opts);
             }
         }
         let base_doc = if self.doc.nodes.len() <= 2_000 && !self.doc.variables.is_empty() { self.export_doc() } else { std::borrow::Cow::Borrowed(&self.doc) };
-        lang.generate(&base_doc, id, react_tailwind)
+        lang.generate(&base_doc, id, opts)
     }
 
     /// Re-evaluates the Ready for dev / Changed statuses after edits (throttled to 4 per second

@@ -4,7 +4,7 @@
 //! recreated or truncated is noticed even when it has grown past the old read position.
 
 use designos_doc::live_patch::{
-    log_version_refusal, DocEpoch, LiveLogLine, LivePatch, LivePatchState, LIVE_PATCH_VERSION, MAX_LIVE_PATCH_LINE_BYTES, UPDATE_BOTH_HINT,
+    log_version_refusal, CloseIntent, DocEpoch, LiveLogLine, LivePatch, LivePatchState, LIVE_PATCH_VERSION, MAX_LIVE_PATCH_LINE_BYTES, UPDATE_BOTH_HINT,
 };
 use designos_doc::Document;
 use std::io::{Read, Seek, SeekFrom};
@@ -21,6 +21,14 @@ const HEAD_BYTES: usize = 256;
 /// Which file is at the path: inode (Unix) and creation time.
 type FileIdentity = (u64, Option<SystemTime>);
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum StaleClose {
+    #[default]
+    None,
+    Hidden,
+    Before(u64),
+}
+
 fn identity(meta: &std::fs::Metadata) -> FileIdentity {
     #[cfg(unix)]
     let ino = std::os::unix::fs::MetadataExt::ino(meta);
@@ -31,7 +39,7 @@ fn identity(meta: &std::fs::Metadata) -> FileIdentity {
 
 fn read_range(path: &Path, start: u64, len: u64) -> Option<Vec<u8>> {
     let mut buf = Vec::new();
-    let mut f = std::fs::File::open(path).ok()?;
+    let mut f = crate::agent_session_files::open_session_file(path).ok()?;
     f.seek(SeekFrom::Start(start)).ok()?;
     f.take(len).read_to_end(&mut buf).ok()?;
     Some(buf)
@@ -65,6 +73,9 @@ pub struct LivePatchLog {
     /// A document the agent switched to while the user was mid-edit. It replaces the open one
     /// once the canvas is idle, before any patch in `pending` (those were made on it).
     pub pending_doc: Option<Document>,
+    /// The agent closed the document. Applied after held patches, never as a quit of other tabs.
+    pub pending_close: Option<CloseIntent>,
+    stale_close: StaleClose,
     /// Where the agent's documents are written: `doc-sync.designos` next to the log.
     doc_sync_path: PathBuf,
     /// Edits dropped because they were made on a document the agent had already left, or on one
@@ -73,6 +84,8 @@ pub struct LivePatchLog {
     /// The document the agent works on could not be loaded, so its edits are dropped until the
     /// next document switch.
     discarding: bool,
+    /// What `discarding` was when the held close line was read, so a refused close puts it back (AC-02).
+    discarding_before_close: Option<bool>,
     /// `discarding` is not a superseded switch but a failure the user must be told about: edits
     /// dropped meanwhile are reported at once, unless a switch that loads follows in the same
     /// batch (see `ingest`).
@@ -110,7 +123,7 @@ impl UnreadProbe {
     /// Reads at most one line's worth of bytes (the limit on a line) per sought newline, in
     /// chunks, and stops at the first newline that decides it.
     pub fn has_unread_complete_line(&self) -> bool {
-        let Ok(meta) = std::fs::metadata(&self.path) else { return false };
+        let Ok(meta) = crate::agent_session_files::session_file_metadata(&self.path) else { return false };
         let len = meta.len();
         // A recreated or truncated log is unread from its start, exactly as `poll_with_offsets` sees it.
         let rewritten = self.identity.is_some_and(|old| old != identity(&meta)) || len < self.offset || !self.head_unchanged();
@@ -120,7 +133,7 @@ impl UnreadProbe {
         }
         // The end of the discarded tail is not a line; the newline after it ends the next one.
         let mut newlines_needed = if skipping { 2 } else { 1 };
-        let Ok(mut file) = std::fs::File::open(&self.path) else { return false };
+        let Ok(mut file) = crate::agent_session_files::open_session_file(&self.path) else { return false };
         if file.seek(SeekFrom::Start(start)).is_err() {
             return false;
         }
@@ -161,7 +174,7 @@ impl UnreadProbe {
 
 impl LivePatchLog {
     pub fn bind(path: PathBuf) -> Self {
-        let meta = std::fs::metadata(&path).ok();
+        let meta = crate::agent_session_files::session_file_metadata(&path).ok();
         let mut log = Self {
             offset: meta.as_ref().map_or(0, |m| m.len()),
             identity: meta.as_ref().map(identity),
@@ -175,10 +188,13 @@ impl LivePatchLog {
             last_polled_offsets: std::collections::VecDeque::new(),
             pending_epoch_switch: false,
             pending_doc: None,
+            pending_close: None,
+            stale_close: StaleClose::None,
             wake: Default::default(),
             doc_sync_path: path.with_file_name("doc-sync.designos"),
             dropped_old_epoch: 0,
             discarding: false,
+            discarding_before_close: None,
             load_failed: false,
             fenced: false,
             fenced_dropped: 0,
@@ -214,7 +230,7 @@ impl LivePatchLog {
 
     /// Agent changes wait for the canvas to go idle.
     pub fn has_held(&self) -> bool {
-        !self.pending.is_empty() || self.pending_doc.is_some()
+        !self.pending.is_empty() || self.pending_doc.is_some() || self.pending_close.is_some()
     }
 
     /// A complete line (ending in a newline) was appended that no poll has read yet; see
@@ -252,8 +268,11 @@ impl LivePatchLog {
     /// Complete log lines appended since the last poll along with each line's start byte offset
     /// in `doc-patch.jsonl`.
     pub fn poll_with_offsets(&mut self) -> (Vec<(u64, LiveLogLine)>, Vec<String>) {
-        let Ok(meta) = std::fs::metadata(&self.path) else { return Default::default() };
+        let Ok(meta) = crate::agent_session_files::session_file_metadata(&self.path) else { return Default::default() };
         let (len, id) = (meta.len(), identity(&meta));
+        if self.stale_close == StaleClose::Hidden {
+            self.stale_close = StaleClose::Before(len);
+        }
         if len == self.offset && self.identity == Some(id) {
             return Default::default();
         }
@@ -267,8 +286,11 @@ impl LivePatchLog {
             self.last_polled_offsets.clear();
             self.pending_epoch_switch = false;
             self.pending_doc = None;
+            self.pending_close = None;
+            self.stale_close = StaleClose::None;
             self.dropped_old_epoch = 0;
             self.discarding = false;
+            self.discarding_before_close = None;
             self.load_failed = false;
             self.fenced = false;
             self.fenced_dropped = 0;
@@ -363,6 +385,8 @@ impl LivePatchLog {
                     self.dropped_old_epoch += self.pending.len();
                     self.pending.clear();
                     self.pending_offsets.clear();
+                    self.pending_close = None;
+                    self.discarding_before_close = None;
                     self.pending_epoch_switch = true;
                     self.pending_doc = None;
                     self.load_failed = false;
@@ -378,6 +402,26 @@ impl LivePatchLog {
                             self.load_failed = true;
                             errors.push(e);
                         }
+                    }
+                }
+                LiveLogLine::Close(intent) => {
+                    self.fenced = false;
+                    self.fenced_dropped = 0;
+                    self.fence_notice = None;
+                    if self.drops_stale_close(line_offset) {
+                        write_close_result_file(
+                            &self.path,
+                            &intent,
+                            serde_json::json!({
+                                "ok": false,
+                                "code": "EDITOR_NOT_NOTIFIED",
+                                "message": "The close was dropped because the tab was no longer shown.",
+                            }),
+                        );
+                    } else {
+                        self.pending_close = Some(intent);
+                        self.discarding_before_close = Some(self.discarding);
+                        self.discarding = true;
                     }
                 }
             }
@@ -400,8 +444,8 @@ impl LivePatchLog {
         if log_version_refusal(epoch.v).is_some() {
             return Err(format!("Agent document not opened. {}", refusal_next_step(epoch.v)));
         }
-        let bytes =
-            std::fs::read(&self.doc_sync_path).map_err(|e| format!("Cannot read the document the agent opened ({}): {e}", self.doc_sync_path.display()))?;
+        let bytes = crate::agent_session_files::read_session_file(&self.doc_sync_path)
+            .map_err(|e| format!("Cannot read the document the agent opened: {}", crate::agent_session_files::with_next_step(&e)))?;
         if !epoch.matches(&bytes) {
             return Ok(None);
         }
@@ -421,6 +465,52 @@ impl LivePatchLog {
     fn read_range(&self, start: u64, len: u64) -> Option<Vec<u8>> {
         read_range(&self.path, start, len)
     }
+
+    pub fn drop_close_on_hide(&mut self) -> Option<CloseIntent> {
+        self.stale_close = StaleClose::Hidden;
+        let intent = self.pending_close.take();
+        if intent.is_some() {
+            self.close_refused();
+        }
+        intent
+    }
+
+    /// A close line is read as "the document is going away", so edits behind it are dropped. When the editor then
+    /// refuses the close (unsaved changes, a failed save, a tab not shown, a cancel) the document stays open: edits the
+    /// agent writes after the refusal must land, so the reader goes back to what it was before the close line.
+    pub fn close_refused(&mut self) {
+        if let Some(before) = self.discarding_before_close.take() {
+            self.discarding = before;
+        }
+    }
+
+    fn drops_stale_close(&self, line_offset: u64) -> bool {
+        match self.stale_close {
+            StaleClose::Hidden => true,
+            StaleClose::Before(before) => line_offset < before,
+            StaleClose::None => false,
+        }
+    }
+}
+
+pub(crate) fn write_close_result_file(log_path: &Path, intent: &CloseIntent, mut body: serde_json::Value) {
+    let Some(close_id) = intent.close_id else {
+        return;
+    };
+    if let Some(fields) = body.as_object_mut() {
+        fields.insert("close_id".into(), serde_json::json!(close_id));
+        if let Some(tab_id) = intent.tab_id {
+            fields.insert("tab_id".into(), serde_json::json!(tab_id));
+        }
+    }
+    let Some(dir) = log_path.parent() else {
+        return;
+    };
+    let path = dir.join(CloseIntent::RESULT_FILE);
+    let Ok(bytes) = serde_json::to_vec(&body) else {
+        return;
+    };
+    let _ = crate::agent_session_files::atomic_write_session_file(&path, &bytes);
 }
 
 /// What the user is told, once per document epoch, when an edit written by a newer build is read: what was
@@ -469,17 +559,16 @@ mod tests {
             .iter()
             .flat_map(|l| match l {
                 LiveLogLine::Patch(p) => p.ops.iter().collect(),
-                LiveLogLine::DocEpoch(_) | LiveLogLine::Newer { .. } => Vec::new(),
+                LiveLogLine::DocEpoch(_) | LiveLogLine::Close(_) | LiveLogLine::Newer { .. } => Vec::new(),
             })
             .map(|op| if let LiveOp::Remove { id } = op { id.0 } else { 0 })
             .collect()
     }
 
-    fn temp_log(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("designos-patch-log-{name}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        dir.join("doc-patch.jsonl")
+    fn temp_log(name: &str) -> (tempfile::TempDir, PathBuf) {
+        let dir = tempfile::Builder::new().prefix(&format!("designos-patch-log-{name}-")).tempdir().unwrap();
+        let path = dir.path().join("doc-patch.jsonl");
+        (dir, path)
     }
 
     fn append(path: &Path, text: &str) {
@@ -505,7 +594,7 @@ mod tests {
 
     #[test]
     fn an_edit_before_a_newer_one_applies_and_every_edit_after_it_waits_for_the_next_switch() {
-        let path = temp_log("fence");
+        let (_dir, path) = temp_log("fence");
         let mut log = LivePatchLog::bind(path.clone());
         append(&path, &(line(1) + &newer_line() + &line(2) + &newer_line() + &line(3)));
         let errors = read(&mut log);
@@ -521,7 +610,7 @@ mod tests {
     fn an_edit_to_a_layer_a_newer_edit_may_have_removed_is_not_held() {
         // A newer build's line removes layer 7 (this build cannot tell); the next line, in a format this
         // build reads, renames layer 7. Applying it would act on a layer in an unknown state.
-        let path = temp_log("fence-update");
+        let (_dir, path) = temp_log("fence-update");
         let mut log = LivePatchLog::bind(path.clone());
         let mut set = serde_json::Map::new();
         set.insert("name".into(), "Renamed".into());
@@ -534,7 +623,7 @@ mod tests {
 
     #[test]
     fn the_message_shows_once_per_epoch_even_when_the_newer_edits_arrive_in_different_polls() {
-        let path = temp_log("fence-polls");
+        let (_dir, path) = temp_log("fence-polls");
         let mut log = LivePatchLog::bind(path.clone());
         append(&path, &newer_line());
         assert_eq!(read(&mut log), [newer_message()]);
@@ -548,7 +637,7 @@ mod tests {
 
     #[test]
     fn a_document_switch_lifts_the_fence_and_the_next_newer_edit_is_reported_again() {
-        let path = temp_log("fence-switch");
+        let (_dir, path) = temp_log("fence-switch");
         let mut log = LivePatchLog::bind(path.clone());
         let mut doc = Document::new("Switched");
         doc.add_page("Page");
@@ -572,7 +661,7 @@ mod tests {
 
     #[test]
     fn a_recreated_log_is_a_new_epoch_for_the_message() {
-        let path = temp_log("fence-recreate");
+        let (_dir, path) = temp_log("fence-recreate");
         let mut log = LivePatchLog::bind(path.clone());
         append(&path, &(newer_line() + &line(1)));
         assert_eq!(read(&mut log), [newer_message()]);
@@ -585,7 +674,8 @@ mod tests {
 
     #[test]
     fn a_newer_edit_that_reaches_ingest_is_refused_too() {
-        let mut log = LivePatchLog::bind(temp_log("newer-ingest"));
+        let (_dir, path) = temp_log("newer-ingest");
+        let mut log = LivePatchLog::bind(path);
         let errors = log.ingest(vec![LiveLogLine::Newer { v: LIVE_PATCH_VERSION + 1 }]);
         assert_eq!(errors.len(), 1, "{errors:?}");
         assert_eq!(errors[0], format!("Agent edit not applied. {UPDATE_BOTH_HINT}"));
@@ -594,7 +684,7 @@ mod tests {
 
     #[test]
     fn version_one_edits_still_read() {
-        let path = temp_log("version-one");
+        let (_dir, path) = temp_log("version-one");
         let mut log = LivePatchLog::bind(path.clone());
         append(&path, &(version_one_line(3) + &line(4)));
         let (lines, errors) = log.poll();
@@ -606,7 +696,7 @@ mod tests {
 
     #[test]
     fn old_lines_are_ignored_and_partial_lines_wait() {
-        let path = temp_log("partial");
+        let (_dir, path) = temp_log("partial");
         append(&path, &line(1));
         let mut log = LivePatchLog::bind(path.clone());
         let next = line(2);
@@ -618,7 +708,7 @@ mod tests {
 
     #[test]
     fn a_recreated_or_rewritten_log_is_read_from_the_start() {
-        let path = temp_log("rotate");
+        let (_dir, path) = temp_log("rotate");
         append(&path, &line(1));
         let mut log = LivePatchLog::bind(path.clone());
         // Recreated and refilled past the old read position.
@@ -632,7 +722,7 @@ mod tests {
 
     #[test]
     fn oversized_lines_are_reported_and_reading_continues() {
-        let path = temp_log("caps");
+        let (_dir, path) = temp_log("caps");
         let mut log = LivePatchLog::bind(path.clone());
         log.max_line_bytes = 64;
         log.max_poll_bytes = 100;
@@ -652,7 +742,7 @@ mod tests {
 
     #[test]
     fn only_a_complete_unread_line_counts_as_unread() {
-        let path = temp_log("unread");
+        let (_dir, path) = temp_log("unread");
         append(&path, &line(1));
         let mut log = LivePatchLog::bind(path.clone());
         assert!(!log.has_unread_complete_line(), "lines from before the bind are not unread");
@@ -667,7 +757,7 @@ mod tests {
 
     #[test]
     fn a_recreated_log_and_a_discarded_oversized_line_are_judged_like_the_poll_does() {
-        let path = temp_log("unread-rotate");
+        let (_dir, path) = temp_log("unread-rotate");
         append(&path, &line(1));
         let mut log = LivePatchLog::bind(path.clone());
         std::fs::remove_file(&path).unwrap();
@@ -684,7 +774,7 @@ mod tests {
 
     #[test]
     fn a_normal_line_after_an_oversized_tail_and_a_log_recreated_meanwhile_count_as_unread() {
-        let path = temp_log("unread-skipping");
+        let (_dir, path) = temp_log("unread-skipping");
         append(&path, &line(1));
         let mut log = LivePatchLog::bind(path.clone());
         log.max_line_bytes = 64;
@@ -708,14 +798,15 @@ mod tests {
 
     #[test]
     fn the_unread_check_stops_at_the_first_newline_and_ignores_a_line_over_the_limit() {
-        let path = temp_log("unread-bounded");
+        let (_dir, path) = temp_log("unread-bounded");
         let mut log = LivePatchLog::bind(path.clone());
         log.max_line_bytes = 64;
         append(&path, &"z".repeat(300_000));
         assert!(!log.has_unread_complete_line(), "an unfinished line past the limit is never applied");
         append(&path, "\n");
         assert!(!log.has_unread_complete_line(), "a complete line over the limit is reported by the poll, not applied");
-        let mut log = LivePatchLog::bind(temp_log("unread-bounded-ok"));
+        let (_dir_ok, path_ok) = temp_log("unread-bounded-ok");
+        let mut log = LivePatchLog::bind(path_ok);
         append(&log.path.clone(), &(line(5) + &"q".repeat(300_000)));
         assert!(log.has_unread_complete_line(), "the first newline decides, whatever follows it");
         assert_eq!(ids(&log.poll().0), [5]);
@@ -728,7 +819,7 @@ mod tests {
 
     #[test]
     fn a_document_switch_drops_the_edits_held_before_it_and_keeps_those_after_it() {
-        let path = temp_log("switch");
+        let (_dir, path) = temp_log("switch");
         let mut log = LivePatchLog::bind(path.clone());
         let mut doc = Document::new("Switched");
         doc.add_page("Page");
@@ -745,7 +836,7 @@ mod tests {
 
     #[test]
     fn a_version_one_document_switch_still_loads() {
-        let path = temp_log("switch-v1");
+        let (_dir, path) = temp_log("switch-v1");
         let mut log = LivePatchLog::bind(path.clone());
         let mut doc = Document::new("Old switch");
         doc.add_page("Page");
@@ -760,7 +851,7 @@ mod tests {
 
     #[test]
     fn a_switch_whose_document_was_overwritten_by_a_later_one_waits_for_that_later_switch() {
-        let path = temp_log("superseded");
+        let (_dir, path) = temp_log("superseded");
         let mut log = LivePatchLog::bind(path.clone());
         let mut first = Document::new("First");
         first.add_page("Page");
@@ -784,7 +875,7 @@ mod tests {
 
     #[test]
     fn a_switch_to_a_document_that_cannot_be_read_is_reported_and_its_edits_are_dropped() {
-        let path = temp_log("unreadable");
+        let (_dir, path) = temp_log("unreadable");
         let mut log = LivePatchLog::bind(path.clone());
         let mut doc = Document::new("Gone");
         doc.add_page("Page");
@@ -809,7 +900,7 @@ mod tests {
 
     #[test]
     fn edits_dropped_while_stuck_belong_to_the_switch_that_loads_later_in_the_same_batch() {
-        let path = temp_log("stuck-then-switch");
+        let (_dir, path) = temp_log("stuck-then-switch");
         let mut log = LivePatchLog::bind(path.clone());
         let mut doc = Document::new("Recovered");
         doc.add_page("Page");
@@ -828,7 +919,7 @@ mod tests {
 
     #[test]
     fn a_rewritten_log_resets_dropped_edit_count_when_replayed_from_zero() {
-        let path = temp_log("rewrite-dropped-count");
+        let (_dir, path) = temp_log("rewrite-dropped-count");
         let mut log = LivePatchLog::bind(path.clone());
         let mut doc = Document::new("Switched");
         doc.add_page("Page");
@@ -844,5 +935,54 @@ mod tests {
         let (lines, _) = log.poll();
         assert!(log.ingest(lines).is_empty());
         assert_eq!(log.dropped_old_epoch, 1, "rewritten log must reset prior dropped_old_epoch count");
+    }
+
+    fn close_line() -> String {
+        serde_json::to_string(&CloseIntent::of("fail", None)).unwrap() + "\n"
+    }
+
+    #[test]
+    fn edits_after_a_refused_close_are_held_not_dropped() {
+        let (_dir, path) = temp_log("refused-close");
+        let mut log = LivePatchLog::bind(path.clone());
+        append(&path, &(line(1) + &close_line() + &line(2)));
+        read(&mut log);
+        assert!(log.pending_close.is_some(), "the close is held for the editor to answer");
+        assert_eq!(pending_ids(&log), vec![1], "an edit behind a close line is for a document that is going away");
+        assert_eq!(log.dropped_old_epoch, 1);
+
+        // The editor refused: the document stayed open, and the agent writes again once it has read the answer.
+        log.pending_close = None;
+        log.close_refused();
+        append(&path, &line(3));
+        read(&mut log);
+        assert_eq!(pending_ids(&log), vec![1, 3], "an edit after a refused close lands");
+        assert_eq!(log.dropped_old_epoch, 1);
+    }
+
+    #[test]
+    fn a_close_dropped_because_the_tab_was_hidden_stops_dropping_edits() {
+        let (_dir, path) = temp_log("hidden-close");
+        let mut log = LivePatchLog::bind(path.clone());
+        append(&path, &close_line());
+        read(&mut log);
+        assert!(log.drop_close_on_hide().is_some());
+        append(&path, &line(4));
+        read(&mut log);
+        assert_eq!(pending_ids(&log), vec![4]);
+    }
+
+    #[test]
+    fn a_refused_close_does_not_undo_a_drop_that_was_already_on() {
+        let (_dir, path) = temp_log("refused-close-while-stuck");
+        let mut log = LivePatchLog::bind(path.clone());
+        log.discarding = true;
+        append(&path, &close_line());
+        read(&mut log);
+        log.pending_close = None;
+        log.close_refused();
+        append(&path, &line(5));
+        read(&mut log);
+        assert!(log.pending.is_empty(), "edits stay dropped when they were being dropped before the close line");
     }
 }

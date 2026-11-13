@@ -4,11 +4,14 @@
 //! component links must stop at the repeat instead of overflowing the stack. Crash tests run alone with `--exact`:
 //! a stack overflow aborts the whole test binary.
 
+use crate::spec::OverrideSpec;
+use crate::spec_instance::apply_overrides;
 use crate::{
     add_prop, bind_prop, combine_as_variants, create_component, create_instance, instance_component, mains_held_by, reparent_would_hold_itself,
     set_instance_prop, swap_instance, sync_instances, Color, Command, ComponentPropDef, Document, Node, NodeId, NodeKind, OverrideField, Paint, PropKind,
     PropValue, Rect, Vec2,
 };
+use serde_json::json;
 
 /// A main on `parent` with one layer inside it.
 fn main_on(d: &mut Document, parent: NodeId, name: &str) -> NodeId {
@@ -162,6 +165,128 @@ fn a_manual_swap_still_refuses_a_main_that_holds_the_main_it_sits_in() {
     let (mut d, _a, b) = cyclic_pair();
     let i = *d.get(b).unwrap().children.last().unwrap();
     assert!(is_nothing(&swap_instance(&mut d, i, b)), "no instance of B inside B");
+}
+
+#[test]
+fn apply_spec_swap_refuses_a_held_main_without_mutating() {
+    let mut d = Document::new("spec cycle");
+    let page = d.add_page("P");
+    let b = main_on(&mut d, page, "B");
+    let a = main_on(&mut d, page, "A");
+    place(&mut d, b, a);
+    let c = main_on(&mut d, page, "C");
+    place(&mut d, b, c);
+    let root = place(&mut d, c, page);
+    crate::Command::Reparent { id: root, parent: b, index: d.get(b).unwrap().children.len() }.apply(&mut d).unwrap();
+    let before = d.to_json().unwrap();
+    let ov: OverrideSpec = serde_json::from_value(json!({"path":"B", "swap":"A"})).unwrap();
+    let err = apply_overrides(&mut d, root, &[ov], &[]).unwrap_err();
+    assert_eq!(err.code, "INSTANCE_CYCLE");
+    assert_eq!(err.message, "Can't swap: B would contain itself (B \u{2192} C \u{2192} B \u{2192} A \u{2192} B)");
+    assert_eq!(d.to_json().unwrap(), before);
+}
+
+#[test]
+fn apply_spec_create_refuses_a_held_main_without_mutating() {
+    let mut d = Document::new("spec create cycle");
+    let page = d.add_page("P");
+    let b = main_on(&mut d, page, "B");
+    let a = main_on(&mut d, page, "A");
+    place(&mut d, b, a);
+    let parent = layer_of(&d, b);
+    let before = d.to_json().unwrap();
+    let spec: crate::NodeSpec = serde_json::from_value(json!({"kind":"instance", "component":"A"})).unwrap();
+    let err = d.apply_spec(parent, &spec).unwrap_err();
+    assert!(err.contains("INSTANCE_CYCLE") && err.contains("Can't add: B would contain itself (B \u{2192} Layer \u{2192} A \u{2192} B)"), "{err}");
+    assert_eq!(d.to_json().unwrap(), before);
+}
+
+/// A set whose State=One and State=Two are both mains, the variant named by `holds` holding an instance of B. B holds an
+/// instance of W, which holds an instance of Z. Returns (document, the instance of W in B, the name of the Z instance).
+fn swap_and_variant_fixture(holds: &str) -> (Document, NodeId, String) {
+    let mut d = Document::new("swap and variant");
+    let page = d.add_page("P");
+    let b = main_on(&mut d, page, "B");
+    let one = main_on(&mut d, page, "State=One");
+    let two = main_on(&mut d, page, "State=Two");
+    combine_as_variants(&mut d, &[one, two]).apply(&mut d).unwrap();
+    place(&mut d, b, if holds == "One" { one } else { two });
+    let z = main_on(&mut d, page, "Z");
+    let w = main_on(&mut d, page, "W");
+    place(&mut d, z, w);
+    let root = place(&mut d, w, b);
+    let nested = *d.get(root).unwrap().children.iter().find(|c| matches!(d.get(**c).unwrap().kind, NodeKind::Instance { .. })).unwrap();
+    let name = d.get(nested).unwrap().name.clone();
+    (d, root, name)
+}
+
+/// A swap and a variant in one override are one choice: the variant of the set that the pair selects.
+#[test]
+fn a_swap_with_a_variant_that_together_would_make_a_main_hold_itself_is_refused() {
+    let (mut d, root, name) = swap_and_variant_fixture("Two");
+    let before = d.to_json().unwrap();
+    let ov: OverrideSpec = serde_json::from_value(json!({"path": name, "swap": "Component set", "variant": {"State": "Two"}})).unwrap();
+    let err = apply_overrides(&mut d, root, &[ov], &[]).unwrap_err();
+    assert_eq!(err.code, "INSTANCE_CYCLE");
+    assert_eq!(err.message, "Can't swap: B would contain itself (B \u{2192} W \u{2192} Z \u{2192} State=Two \u{2192} B)");
+    assert_eq!(d.to_json().unwrap(), before);
+}
+
+/// The default variant of the set holds B, so a swap alone is refused; with the variant that holds nothing the pair is
+/// legal and applies.
+#[test]
+fn a_swap_with_a_variant_that_together_close_no_cycle_is_applied() {
+    let (mut d, root, name) = swap_and_variant_fixture("One");
+    let alone: OverrideSpec = serde_json::from_value(json!({"path": name, "swap": "Component set"})).unwrap();
+    assert!(apply_overrides(&mut d.clone(), root, &[alone], &[]).is_err(), "the swap alone selects State=One, which holds B");
+    let pair: OverrideSpec = serde_json::from_value(json!({"path": name, "swap": "Component set", "variant": {"State": "Two"}})).unwrap();
+    apply_overrides(&mut d, root, &[pair], &[]).unwrap();
+    let nested = *d.get(root).unwrap().children.iter().find(|c| matches!(d.get(**c).unwrap().kind, NodeKind::Instance { .. })).unwrap();
+    assert_eq!(d.get(instance_component(d.get(nested).unwrap()).unwrap()).unwrap().name, "State=Two");
+    assert!(self_holding(&d).is_empty());
+}
+
+#[test]
+fn apply_spec_variant_override_that_would_make_a_main_hold_itself_refuses_with_the_same_sentence() {
+    let (mut d, b, _two, i) = variant_cycle();
+    let one = instance_component(d.get(i).unwrap()).unwrap();
+    let page = d.pages[0];
+    let w = main_on(&mut d, page, "W");
+    place(&mut d, one, w);
+    let root = place(&mut d, w, b);
+    let nested = *d.get(root).unwrap().children.iter().find(|c| matches!(d.get(**c).unwrap().kind, NodeKind::Instance { .. })).unwrap();
+    let path = d.get(nested).unwrap().name.clone();
+    let before = d.to_json().unwrap();
+    let ov: OverrideSpec = serde_json::from_value(json!({"path": path, "variant": {"State": "Two"}})).unwrap();
+    let err = apply_overrides(&mut d, root, &[ov], &[]).unwrap_err();
+    assert_eq!(err.code, "INSTANCE_CYCLE");
+    assert_eq!(err.message, "Can't switch variant: B would contain itself (B \u{2192} W \u{2192} Component set \u{2192} State=Two \u{2192} B)");
+    assert_eq!(d.to_json().unwrap(), before);
+}
+
+#[test]
+fn apply_spec_create_inside_the_component_set_of_the_instance_refuses_with_the_same_sentence() {
+    let mut d = crate::fixtures::button_library();
+    let set = d.nodes.values().find(|n| matches!(n.kind, NodeKind::ComponentSet(_)) && n.name == "Button").map(|n| n.id).unwrap();
+    let before = d.to_json().unwrap();
+    let spec: crate::NodeSpec = serde_json::from_value(json!({"kind":"instance", "component":"Button"})).unwrap();
+    let err = d.apply_spec(set, &spec).unwrap_err();
+    assert!(err.contains("INSTANCE_CYCLE") && err.contains("Can't add: Button would contain itself (Button \u{2192} Button)"), "{err}");
+    assert_eq!(d.to_json().unwrap(), before);
+}
+
+#[test]
+fn apply_spec_create_inside_an_instance_of_the_same_main_refuses_with_the_same_sentence() {
+    let mut d = Document::new("spec nested instance cycle");
+    let page = d.add_page("P");
+    let x = main_on(&mut d, page, "X");
+    let copy = place(&mut d, x, page);
+    let inside = layer_of(&d, copy);
+    let before = d.to_json().unwrap();
+    let spec: crate::NodeSpec = serde_json::from_value(json!({"kind":"instance", "component":"X"})).unwrap();
+    let err = d.apply_spec(inside, &spec).unwrap_err();
+    assert!(err.contains("INSTANCE_CYCLE") && err.contains("Can't add: X would contain itself (X \u{2192} Layer \u{2192} X)"), "{err}");
+    assert_eq!(d.to_json().unwrap(), before);
 }
 
 // ---------- the shared move check

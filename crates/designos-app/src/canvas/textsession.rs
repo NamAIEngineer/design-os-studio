@@ -13,7 +13,7 @@ use crate::richtext::{self, ListKind};
 use crate::textedit::{self as te, EditKind, Snap, UndoLog};
 use crate::textmeasure as tm;
 use crate::util::*;
-use designos_doc::{NodeKind, TextDecoration, TextProps, TextStyle};
+use designos_doc::{Node, NodeKind, TextDecoration, TextProps, TextStyle};
 use std::ops::Range;
 
 pub struct TextSession {
@@ -73,8 +73,14 @@ pub enum TextCmd {
     Underline,
     SizeUp,
     SizeDown,
+    /// Steps the font size by this many pixels (negative to shrink).
+    SizeBy(f32),
     List(ListKind),
 }
+
+/// Font-size step of `Cmd/Ctrl+Shift+.` and `,` in a text session; `Alt` takes the larger one.
+const SIZE_STEP: f32 = 1.0;
+const SIZE_STEP_ALT: f32 = 10.0;
 
 // ------------------------------------------------------------------ lifecycle
 pub fn begin_text_edit(app: &mut App, id: NodeId) {
@@ -128,7 +134,11 @@ pub fn finish_text(app: &mut App, commit: bool) {
         let id = sess.id;
         // text in Arabic, Hebrew or Devanagari needs its Noto fallback font (fetched once, then cached)
         let complex = app.doc.get(id).and_then(|n| n.kind.any_text()).is_some_and(|t| !designos_fonts::scripts_in(&t.content).is_empty());
-        app.run_tx(sess.tx);
+        if crate::board::table::select::is_cell(&app.doc, id) {
+            crate::board::table::select::commit_cell(app, sess, false);
+        } else {
+            app.run_tx(sess.tx);
+        }
         app.selection = vec![id];
         if complex {
             app.fonts.load_for(&app.doc);
@@ -323,8 +333,52 @@ fn follow_label(doc: &mut designos_doc::Document, tx: &mut Tx, id: NodeId) {
     }
 }
 
+/// The `style_refs` key of the text style a layer is linked to.
+fn text_ref() -> &'static str {
+    crate::styles::StyleKind::Text.ref_key()
+}
+
+/// Applies `f` to `n`'s text and re-fits a text node's box. On a layer linked to a text style, the text
+/// style rule decides the link: weight, italic and decoration edits keep it and are recorded as
+/// overrides; any other style-owned change detaches it (`designos_doc::apply_text_link_rule`).
+pub fn edit_node_text_detaching(n: &mut Node, f: impl FnOnce(&mut TextProps)) {
+    let is_text = matches!(n.kind, NodeKind::Text(_));
+    let linked = n.style_refs.contains_key(text_ref());
+    let Some(t) = n.kind.any_text_mut() else { return };
+    let before = linked.then(|| t.clone());
+    f(t);
+    if let Some(before) = before {
+        designos_doc::apply_text_link_rule(n, &before);
+    }
+    if let (true, Some(t)) = (is_text, n.kind.any_text()) {
+        n.size = layout::fit_text(t, n.size);
+    }
+}
+
+#[derive(Clone, Copy)]
+enum LinkEdit<'a> {
+    Keep,
+    Set(Option<&'a str>),
+    DetachIfStyleOwnedChanged,
+}
+
 /// Runs `f` on the edited text. `log` records an undo step (None = no step, for IME previews).
 fn edit_props(app: &mut App, log: Option<(EditKind, bool)>, f: impl FnOnce(&mut TextProps, &mut usize, &mut usize)) {
+    edit_props_with_link(app, log, LinkEdit::Keep, f);
+}
+
+/// [`edit_props`] that can also change the text style the edited layer is linked to (`link`: `Some(None)`
+/// unlinks), so a style pick and its link are one undo step: the log keeps the link with the values.
+fn edit_props_linked(app: &mut App, log: Option<(EditKind, bool)>, link: Option<Option<&str>>, f: impl FnOnce(&mut TextProps, &mut usize, &mut usize)) {
+    edit_props_with_link(app, log, link.map_or(LinkEdit::Keep, LinkEdit::Set), f);
+}
+
+fn edit_props_with_link(app: &mut App, log: Option<(EditKind, bool)>, link: LinkEdit<'_>, f: impl FnOnce(&mut TextProps, &mut usize, &mut usize)) {
+    // A logged edit must not capture an active IME preview in its undo snapshot. End the
+    // composition first; the following IME commit inserts its final text as a normal edit.
+    if log.is_some() && app.canvas.text.as_ref().is_some_and(|s| s.preedit.is_some()) {
+        preedit(app, "");
+    }
     let now = app.now;
     let App { doc, canvas, .. } = app;
     let Some(sess) = canvas.text.as_mut() else { return };
@@ -334,21 +388,57 @@ fn edit_props(app: &mut App, log: Option<(EditKind, bool)>, f: impl FnOnce(&mut 
     let mut added_faces = Vec::new();
     if let Some(n) = sess.tx.ed.node(doc, id) {
         let is_text = matches!(n.kind, NodeKind::Text(_));
-        if let Some(t) = n.kind.any_text_mut() {
-            let snap = Snap { props: t.clone(), caret, anchor };
-            f(t, &mut caret, &mut anchor);
-            if *t != snap.props {
+        let style_ref = n.style_refs.get(text_ref()).cloned();
+        if n.kind.any_text().is_some() {
+            let snap = Snap { props: n.kind.any_text().cloned().unwrap_or_default(), style_ref, overrides: n.text_style_overrides, caret, anchor };
+            if let Some(t) = n.kind.any_text_mut() {
+                f(t, &mut caret, &mut anchor);
+            }
+            match link {
+                LinkEdit::Set(Some(key)) => {
+                    n.style_refs.insert(text_ref().into(), key.into());
+                    n.text_style_overrides = designos_doc::OwnedFieldSet::default();
+                }
+                LinkEdit::Set(None) => {
+                    n.style_refs.remove(text_ref());
+                    n.text_style_overrides = designos_doc::OwnedFieldSet::default();
+                }
+                // Weight, italic and decoration keep the style and are recorded; the rest detaches it.
+                LinkEdit::DetachIfStyleOwnedChanged => {
+                    designos_doc::apply_text_link_rule(n, &snap.props);
+                }
+                LinkEdit::Keep => {}
+            }
+            let Some(t) = n.kind.any_text_mut() else { return };
+            let props_changed = *t != snap.props;
+            if props_changed {
                 added_faces = designos_fonts::new_faces(&snap.props, t);
+            }
+            if props_changed || n.style_refs.get(text_ref()) != snap.style_ref.as_ref() || n.text_style_overrides != snap.overrides {
                 before = Some(snap);
             }
             if is_text {
-                n.size = layout::fit_text(t, n.size);
+                if let Some(t) = n.kind.any_text() {
+                    n.size = layout::fit_text(t, n.size);
+                }
             }
         }
     }
     follow_label(doc, &mut sess.tx, id);
+    crate::board::table::select::preview_relayout(doc, &mut sess.tx.ed, id);
     if let (Some(b), Some((kind, new_word))) = (before, log) {
-        sess.log.record(b, kind, now, new_word);
+        if kind == EditKind::Style {
+            let after = Snap {
+                props: sess.tx.ed.node(doc, id).and_then(|n| n.kind.any_text()).cloned().unwrap_or_default(),
+                style_ref: sess.tx.ed.node(doc, id).and_then(|n| n.style_refs.get(text_ref()).cloned()),
+                overrides: sess.tx.ed.node(doc, id).map(|n| n.text_style_overrides).unwrap_or_default(),
+                caret,
+                anchor,
+            };
+            sess.log.record_style(b, &after, now, new_word);
+        } else {
+            sess.log.record(b, kind, now, new_word);
+        }
     }
     sess.caret = caret;
     sess.anchor = anchor;
@@ -385,7 +475,7 @@ pub fn insert_text(app: &mut App, s: &str, kind: EditKind) {
     let typing = app.canvas.text.as_mut().and_then(|x| x.typing.take());
     let Some(sess) = app.canvas.text.as_ref() else { return };
     let new_word = props_of(app).is_some_and(|(t, _)| te::starts_new_word(&t.content, sess.range().start, &s)) || s.contains('\n');
-    edit_props(app, Some((kind, new_word)), |t, caret, anchor| {
+    edit_props_with_link(app, Some((kind, new_word)), LinkEdit::DetachIfStyleOwnedChanged, |t, caret, anchor| {
         let r = (*caret).min(*anchor)..(*caret).max(*anchor);
         let end = richtext::splice(t, r, &s, typing.clone());
         *caret = end;
@@ -447,9 +537,11 @@ fn enter(app: &mut App) {
 
 /// Tab / Shift+Tab: nest or un-nest the list items touched by the selection.
 fn change_list_level(app: &mut App, delta: i8) {
-    let Some(range) = app.canvas.text.as_ref().map(|s| s.range()) else { return };
-    edit_props(app, Some((EditKind::Other, true)), |t, _, _| {
-        richtext::change_level(t, range.clone(), delta);
+    if app.canvas.text.is_none() {
+        return;
+    }
+    edit_props(app, Some((EditKind::Other, true)), |t, caret, anchor| {
+        richtext::change_level(t, (*caret).min(*anchor)..(*caret).max(*anchor), delta);
     });
 }
 
@@ -458,7 +550,9 @@ fn undo_step(app: &mut App, redo: bool) {
     let now = (|| {
         let t = stored_of(app)?;
         let s = app.canvas.text.as_ref()?;
-        Some(Snap { props: t, caret: s.caret, anchor: s.anchor })
+        let node = app.doc.get(s.id)?;
+        let style_ref = node.style_refs.get(text_ref()).cloned();
+        Some(Snap { props: t, style_ref, overrides: node.text_style_overrides, caret: s.caret, anchor: s.anchor })
     })();
     let Some(cur) = now else { return };
     let Some(sess) = app.canvas.text.as_mut() else { return };
@@ -469,6 +563,11 @@ fn undo_step(app: &mut App, redo: bool) {
     let id = sess.id;
     if let Some(n) = sess.tx.ed.node(doc, id) {
         let is_text = matches!(n.kind, NodeKind::Text(_));
+        match snap.style_ref {
+            Some(key) => n.style_refs.insert(text_ref().into(), key),
+            None => n.style_refs.remove(text_ref()),
+        };
+        n.text_style_overrides = snap.overrides;
         if let Some(t) = n.kind.any_text_mut() {
             *t = snap.props;
             if is_text {
@@ -487,14 +586,18 @@ fn undo_step(app: &mut App, redo: bool) {
 
 // ------------------------------------------------------------------ styling
 /// Applies `f` to the selected range of the open session (or to the typing style
-/// of a collapsed caret; or to the whole text when it is empty). Returns false
-/// when no session is open.
-pub fn style_selection(app: &mut App, f: impl Fn(&mut TextStyle)) -> bool {
-    style_selection_as(app, f, EditKind::Other)
+/// of a collapsed caret; or to the whole text when it is empty) with an explicit
+/// undo kind (inspector edits coalesce). Returns false when no session is open.
+pub fn style_selection_as(app: &mut App, f: impl Fn(&mut TextStyle), kind: EditKind) -> bool {
+    style_selection_impl(app, f, kind, false)
 }
 
-/// [`style_selection`] with an explicit undo kind (inspector edits coalesce).
-pub fn style_selection_as(app: &mut App, f: impl Fn(&mut TextStyle), kind: EditKind) -> bool {
+/// Typography style edit that detaches a linked text style with the value change.
+pub fn style_selection_detaching_as(app: &mut App, f: impl Fn(&mut TextStyle), kind: EditKind) -> bool {
+    style_selection_impl(app, f, kind, true)
+}
+
+fn style_selection_impl(app: &mut App, f: impl Fn(&mut TextStyle), kind: EditKind, detach_style: bool) -> bool {
     let Some(sess) = app.canvas.text.as_ref() else { return false };
     let range = sess.range();
     let empty_text = props_of(app).is_none_or(|(t, _)| t.content.is_empty());
@@ -508,24 +611,36 @@ pub fn style_selection_as(app: &mut App, f: impl Fn(&mut TextStyle), kind: EditK
         }
         return true;
     }
-    edit_props(app, Some((kind, kind == EditKind::Other)), |t, _, _| {
-        if empty_text {
-            richtext::apply_all(t, &f);
-        } else {
-            richtext::apply_style(t, range.clone(), &f);
-        }
-    });
+    edit_props_with_link(
+        app,
+        Some((kind, kind == EditKind::Other)),
+        if detach_style { LinkEdit::DetachIfStyleOwnedChanged } else { LinkEdit::Keep },
+        |t, _, _| {
+            if empty_text {
+                richtext::apply_all(t, &f);
+            } else {
+                richtext::apply_style(t, range.clone(), &f);
+            }
+        },
+    );
     true
 }
 
 /// Edits the base style of the edited text (paragraph level fields such as alignment).
 pub fn base_style(app: &mut App, f: impl Fn(&mut TextStyle)) {
-    edit_props(app, Some((EditKind::Other, true)), |t, _, _| f(&mut t.style));
+    edit_props_with_link(app, Some((EditKind::Other, true)), LinkEdit::DetachIfStyleOwnedChanged, |t, _, _| f(&mut t.style));
+}
+
+/// [`base_style`] that also links the edited layer to the shared text style `link`, or unlinks it
+/// (`None`). Values and link are one in-session undo step, so undo and redo never leave the layer
+/// linked to a style it does not match.
+pub fn base_style_linked(app: &mut App, link: Option<&str>, f: impl Fn(&mut TextStyle)) {
+    edit_props_linked(app, Some((EditKind::Other, true)), Some(link), |t, _, _| f(&mut t.style));
 }
 
 /// Edits the text properties of the open session's text (paragraph settings, lists, direction).
 pub fn edit_text_props(app: &mut App, f: impl Fn(&mut TextProps)) {
-    edit_props(app, Some((EditKind::Other, true)), |t, _, _| f(t));
+    edit_props_with_link(app, Some((EditKind::Other, true)), LinkEdit::DetachIfStyleOwnedChanged, |t, _, _| f(t));
 }
 
 /// Style summary of the open session's selection (for the inspector).
@@ -545,12 +660,13 @@ pub fn text_command(app: &mut App, cmd: TextCmd) {
         let sum = session_summary(app);
         match cmd {
             TextCmd::List(kind) => {
-                let Some(range) = app.canvas.text.as_ref().map(|s| s.range()) else { return };
-                edit_props(app, Some((EditKind::Other, true)), |t, _, _| richtext::toggle_list(t, range.clone(), kind));
+                edit_props(app, Some((EditKind::Other, true)), |t, caret, anchor| {
+                    richtext::toggle_list(t, (*caret).min(*anchor)..(*caret).max(*anchor), kind);
+                });
             }
             c => {
                 let f = style_fn(c, sum.as_ref());
-                style_selection(app, f);
+                style_selection_detaching_as(app, f, EditKind::Other);
             }
         }
         return;
@@ -575,15 +691,7 @@ pub fn text_command(app: &mut App, cmd: TextCmd) {
                 }
                 c => {
                     let f = style_fn(c, Some(&sum));
-                    app.edit_nodes(&[id], |n| {
-                        let is_text = matches!(n.kind, NodeKind::Text(_));
-                        if let Some(t) = n.kind.any_text_mut() {
-                            richtext::apply_all(t, &f);
-                            if is_text {
-                                n.size = layout::fit_text(t, n.size);
-                            }
-                        }
-                    });
+                    app.edit_nodes(&[id], |n| edit_node_text_detaching(n, |t| richtext::apply_all(t, &f)));
                 }
             }
         }
@@ -595,11 +703,12 @@ fn style_fn(cmd: TextCmd, sum: Option<&richtext::Summary>) -> impl Fn(&mut TextS
     let italic = sum.and_then(|s| s.italic) == Some(true);
     let underline = sum.and_then(|s| s.decoration) == Some(TextDecoration::Underline);
     move |st: &mut TextStyle| match cmd {
-        TextCmd::Bold => st.font_weight = if bold { 400 } else { 700 },
+        TextCmd::Bold => st.set_font_weight(if bold { 400 } else { 700 }),
         TextCmd::Italic => st.italic = !italic,
         TextCmd::Underline => st.decoration = if underline { TextDecoration::None } else { TextDecoration::Underline },
         TextCmd::SizeUp => st.font_size = (st.font_size + 1.0).min(1000.0),
         TextCmd::SizeDown => st.font_size = (st.font_size - 1.0).max(1.0),
+        TextCmd::SizeBy(step) => st.font_size = (st.font_size + step).clamp(1.0, 1000.0),
         TextCmd::List(_) => {}
     }
 }
@@ -657,8 +766,10 @@ fn commit_ime(app: &mut App, text: &str) {
 
 // ------------------------------------------------------------------ events
 pub fn text_keys(app: &mut App, ctx: &Context) {
-    // A focused inspector field owns the keyboard.
-    if ctx.egui_wants_keyboard_input() {
+    // A focused inspector field owns the keyboard. The canvas's own egui focus (Cmd+Alt+J) is where a table cell's
+    // keys belong; every other text session keeps its established rule that any focus holds them back.
+    let in_cell = app.canvas.text.as_ref().is_some_and(|t| crate::board::table::select::is_cell(&app.doc, t.id));
+    if crate::agent_a11y::non_canvas_has_focus(ctx) || (!in_cell && ctx.egui_wants_keyboard_input()) {
         return;
     }
     let tabs = app.canvas.text.as_mut().map(|s| std::mem::take(&mut s.tabs)).unwrap_or_default();
@@ -718,8 +829,8 @@ fn key_event(app: &mut App, key: egui::Key, m: egui::Modifiers) -> bool {
         K::B if ctrl => text_command(app, TextCmd::Bold),
         K::I if ctrl => text_command(app, TextCmd::Italic),
         K::U if ctrl => text_command(app, TextCmd::Underline),
-        K::Period if ctrl && m.shift => text_command(app, TextCmd::SizeUp),
-        K::Comma if ctrl && m.shift => text_command(app, TextCmd::SizeDown),
+        K::Period if ctrl && m.shift => text_command(app, TextCmd::SizeBy(if m.alt { SIZE_STEP_ALT } else { SIZE_STEP })),
+        K::Comma if ctrl && m.shift => text_command(app, TextCmd::SizeBy(-if m.alt { SIZE_STEP_ALT } else { SIZE_STEP })),
         K::Tab if !ctrl => tab(app, m.shift),
         K::Num7 if ctrl && m.shift => text_command(app, TextCmd::List(ListKind::Numbered)),
         K::Num8 if ctrl && m.shift => text_command(app, TextCmd::List(ListKind::Bullet)),
@@ -733,6 +844,10 @@ fn key_event(app: &mut App, key: egui::Key, m: egui::Modifiers) -> bool {
 
 /// Tab: on a sticky note it starts the next one to the right; elsewhere it changes the list level.
 fn tab(app: &mut App, shift: bool) {
+    if app.canvas.text.as_ref().is_some_and(|s| crate::board::table::select::is_cell(&app.doc, s.id)) {
+        crate::board::table::select::tab_in_cell(app, shift);
+        return;
+    }
     let on_sticky = app.canvas.text.as_ref().and_then(|s| app.doc.get(s.id)).is_some_and(|n| matches!(n.kind, NodeKind::Sticky(_)));
     if on_sticky {
         if !shift {
@@ -758,10 +873,21 @@ pub fn caret_screen_rect(app: &App, origin: egui::Pos2) -> Option<ERect> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use designos_doc::{Document, Node};
+    use designos_doc::{Color, Document, Node, Style};
 
     fn app_with_text(s: &str) -> (App, NodeId) {
         app_with_styled_text(s, TextStyle { font_size: 16.0, ..Default::default() })
+    }
+
+    fn app_with_linked_text_style() -> (App, NodeId) {
+        let mut d = Document::new("t");
+        let page = d.add_page("p");
+        let id = d.alloc_id();
+        let mut n = Node::text(id, Rect::new(0.0, 0.0, 120.0, 24.0), "hello", TextStyle { font_size: 16.0, ..Default::default() });
+        n.style_refs.insert("text".into(), "Body".into());
+        d.insert(page, n).unwrap();
+        d.styles.insert("Body".into(), Style::Text(TextStyle { font_size: 16.0, ..Default::default() }));
+        (App::new(d), id)
     }
 
     fn app_with_styled_text(s: &str, style: TextStyle) -> (App, NodeId) {
@@ -783,6 +909,172 @@ mod tests {
             NodeKind::Text(t) => t.clone(),
             _ => panic!(),
         }
+    }
+
+    #[test]
+    fn typography_edit_detaches_a_linked_text_style_in_the_same_undo_step() {
+        let (mut app, id) = app_with_linked_text_style();
+        crate::panels::typography::set_style(&mut app, &[id], |s| s.font_size = 24.0);
+
+        let n = app.doc.get(id).unwrap();
+        let NodeKind::Text(t) = &n.kind else { panic!("text layer") };
+        assert_eq!(t.style.font_size, 24.0);
+        assert!(!n.style_refs.contains_key("text"), "a per-layer Typography edit must detach the shared text style");
+
+        app.undo();
+        let n = app.doc.get(id).unwrap();
+        let NodeKind::Text(t) = &n.kind else { panic!("text layer") };
+        assert_eq!(t.style.font_size, 16.0);
+        assert_eq!(n.style_refs.get("text").map(String::as_str), Some("Body"));
+
+        app.redo();
+        let n = app.doc.get(id).unwrap();
+        let NodeKind::Text(t) = &n.kind else { panic!("text layer") };
+        assert_eq!(t.style.font_size, 24.0);
+        assert!(!n.style_refs.contains_key("text"));
+    }
+
+    #[test]
+    fn typography_edit_detaches_a_linked_text_style_in_an_active_text_session() {
+        let (mut app, id) = app_with_linked_text_style();
+        begin_text_edit(&mut app, id);
+
+        crate::panels::typography::set_style(&mut app, &[id], |s| s.font_size = 24.0);
+
+        let n = app.doc.get(id).unwrap();
+        let NodeKind::Text(t) = &n.kind else { panic!("text layer") };
+        assert_eq!(t.style.font_size, 24.0);
+        assert!(!n.style_refs.contains_key("text"));
+
+        key(&mut app, egui::Key::Z, false, true);
+        let n = app.doc.get(id).unwrap();
+        let NodeKind::Text(t) = &n.kind else { panic!("text layer") };
+        assert_eq!(t.style.font_size, 16.0);
+        assert_eq!(n.style_refs.get("text").map(String::as_str), Some("Body"));
+
+        key(&mut app, egui::Key::Z, true, true);
+        let n = app.doc.get(id).unwrap();
+        let NodeKind::Text(t) = &n.kind else { panic!("text layer") };
+        assert_eq!(t.style.font_size, 24.0);
+        assert!(!n.style_refs.contains_key("text"));
+    }
+
+    #[test]
+    fn typing_after_a_collapsed_style_edit_detaches_the_linked_text_style() {
+        let (mut app, id) = app_with_linked_text_style();
+        begin_text_edit(&mut app, id);
+        set_sel(&mut app, 5, 5, false);
+        text_command(&mut app, TextCmd::SizeUp);
+        insert_text(&mut app, "x", EditKind::Typing);
+
+        let n = app.doc.get(id).unwrap();
+        let NodeKind::Text(t) = &n.kind else { panic!("text layer") };
+        assert_eq!(t.content, "hellox");
+        assert_eq!((t.runs[0].start, t.runs[0].end, t.runs[0].style.font_size), (5, 6, 17.0));
+        assert!(!n.style_refs.contains_key("text"), "a run that differs from the linked style must detach it");
+
+        key(&mut app, egui::Key::Z, false, true);
+        let n = app.doc.get(id).unwrap();
+        let NodeKind::Text(t) = &n.kind else { panic!("text layer") };
+        assert_eq!(t.content, "hello");
+        assert!(t.runs.is_empty());
+        assert_eq!(n.style_refs.get("text").map(String::as_str), Some("Body"));
+    }
+
+    #[test]
+    fn typing_with_the_linked_style_keeps_the_text_style_link() {
+        let (mut app, id) = app_with_linked_text_style();
+        begin_text_edit(&mut app, id);
+        set_sel(&mut app, 5, 5, false);
+        insert_text(&mut app, "x", EditKind::Typing);
+
+        let n = app.doc.get(id).unwrap();
+        let NodeKind::Text(t) = &n.kind else { panic!("text layer") };
+        assert_eq!(t.content, "hellox");
+        assert!(t.runs.is_empty(), "matching typing style should not create a redundant run");
+        assert_eq!(n.style_refs.get("text").map(String::as_str), Some("Body"));
+    }
+
+    fn link_of(app: &App, id: NodeId) -> Option<String> {
+        app.doc.get(id).unwrap().style_refs.get("text").cloned()
+    }
+
+    fn red() -> Vec<designos_doc::Paint> {
+        vec![designos_doc::Paint::solid(designos_doc::Color::rgb(255, 0, 0))]
+    }
+
+    /// A linked text whose characters 0..2 sit in their own run, coloured red and styled like the base.
+    fn linked_text_with_a_red_run() -> (App, NodeId) {
+        let (mut app, id) = app_with_linked_text_style();
+        app.edit_nodes(&[id], |n| {
+            if let NodeKind::Text(t) = &mut n.kind {
+                t.runs = vec![designos_doc::TextRun { start: 0, end: 2, style: TextStyle { fills: red(), ..t.style.clone() } }];
+            }
+        });
+        (app, id)
+    }
+
+    #[test]
+    fn a_colour_only_edit_keeps_the_link_and_merges_the_runs_outside_and_inside_a_session() {
+        for in_session in [false, true] {
+            let (mut app, id) = linked_text_with_a_red_run();
+            if in_session {
+                begin_text_edit(&mut app, id);
+            }
+            crate::panels::typography::set_style(&mut app, &[id], |s| s.fills = red());
+            assert_eq!(link_of(&app, id).as_deref(), Some("Body"), "colour is not a style-owned property (in_session={in_session})");
+            assert!(app.doc.get(id).unwrap().text_style_overrides.is_empty());
+        }
+    }
+
+    #[test]
+    fn a_colour_on_one_word_in_a_session_makes_a_colour_only_run_and_keeps_the_link() {
+        let (mut app, id) = app_with_linked_text_style();
+        begin_text_edit(&mut app, id);
+        set_sel(&mut app, 0, 2, false);
+        crate::panels::typography::set_style(&mut app, &[id], |s| s.fills = red());
+        assert_eq!(text_of(&app, id).runs.len(), 1);
+        assert_eq!(link_of(&app, id).as_deref(), Some("Body"));
+    }
+
+    #[test]
+    fn picking_the_family_the_text_already_has_changes_nothing_and_keeps_the_link() {
+        let (mut app, id) = linked_text_with_a_red_run();
+        let family = text_of(&app, id).style.font_family.clone();
+        // The first pick fits the box to its text; the second changes nothing at all.
+        crate::panels::typography::set_style(&mut app, &[id], |s| s.font_family = family.clone());
+        let depth = app.hist.undo_depth();
+        crate::panels::typography::set_style(&mut app, &[id], |s| s.font_family = family.clone());
+        assert_eq!(link_of(&app, id).as_deref(), Some("Body"), "the same family is not a change");
+        assert_eq!(app.hist.undo_depth(), depth, "and it adds no history");
+    }
+
+    #[test]
+    fn a_size_on_one_word_still_detaches_and_a_weight_on_one_word_does_not() {
+        let (mut app, id) = app_with_linked_text_style();
+        begin_text_edit(&mut app, id);
+        set_sel(&mut app, 0, 2, false);
+        crate::panels::typography::set_style(&mut app, &[id], |s| s.set_font_weight(700));
+        assert_eq!(link_of(&app, id).as_deref(), Some("Body"), "a bold range is an override of the style");
+        assert_eq!(designos_doc::text_style_overrides(&app.doc, app.doc.get(id).unwrap()).labels(), vec!["Weight"]);
+
+        crate::panels::typography::set_style(&mut app, &[id], |s| s.font_size = 30.0);
+        assert_eq!(link_of(&app, id), None, "a size on a word detaches the style");
+        key(&mut app, egui::Key::Z, false, true);
+        assert_eq!(link_of(&app, id).as_deref(), Some("Body"), "undo restores the link");
+        assert_eq!(designos_doc::text_style_overrides(&app.doc, app.doc.get(id).unwrap()).labels(), vec!["Weight"]);
+    }
+
+    #[test]
+    fn typing_in_a_bold_caret_keeps_the_link_and_records_a_weight_override() {
+        let (mut app, id) = app_with_linked_text_style();
+        begin_text_edit(&mut app, id);
+        set_sel(&mut app, 5, 5, false);
+        text_command(&mut app, TextCmd::Bold);
+        insert_text(&mut app, "x", EditKind::Typing);
+        assert_eq!(text_of(&app, id).content, "hellox");
+        assert_eq!(link_of(&app, id).as_deref(), Some("Body"));
+        assert_eq!(designos_doc::text_style_overrides(&app.doc, app.doc.get(id).unwrap()).labels(), vec!["Weight"]);
     }
 
     fn key(app: &mut App, k: egui::Key, shift: bool, ctrl: bool) {
@@ -1271,6 +1563,50 @@ mod tests {
     }
 
     #[test]
+    fn style_edits_on_different_properties_undo_separately() {
+        let (mut app, id) = app_with_text("hello");
+        set_sel(&mut app, 0, 2, false);
+        style_selection_as(&mut app, |s| crate::panels::typography::set_solid(s, Color::rgb(255, 0, 0), None), EditKind::Style);
+        crate::panels::typography::set_style(&mut app, &[id], |s| s.font_size = 24.0);
+        let t = text_of(&app, id);
+        assert_eq!(t.runs.len(), 1, "partial selection must remain a run");
+        assert_eq!(t.runs[0].style.font_size, 24.0);
+        assert!(matches!(t.runs[0].style.fills.first().map(|p| &p.kind), Some(designos_doc::PaintKind::Solid(c)) if *c == Color::rgb(255, 0, 0)));
+        undo_step(&mut app, false);
+        let t = text_of(&app, id);
+        assert_eq!(t.style.font_size, 16.0);
+        assert_eq!(t.runs.len(), 1);
+        assert_eq!(t.runs[0].style.font_size, 16.0);
+        assert!(matches!(t.runs[0].style.fills.first().map(|p| &p.kind), Some(designos_doc::PaintKind::Solid(c)) if *c == Color::rgb(255, 0, 0)));
+        undo_step(&mut app, false);
+        let t = text_of(&app, id);
+        assert!(t.runs.is_empty());
+        assert_eq!(t.style.font_size, 16.0);
+        assert!(matches!(t.style.fills.first().map(|p| &p.kind), Some(designos_doc::PaintKind::Solid(c)) if *c == Color::BLACK));
+        undo_step(&mut app, true);
+        undo_step(&mut app, true);
+        let t = text_of(&app, id);
+        assert_eq!(t.runs.len(), 1);
+        assert_eq!(t.runs[0].style.font_size, 24.0);
+        assert!(matches!(t.runs[0].style.fills.first().map(|p| &p.kind), Some(designos_doc::PaintKind::Solid(c)) if *c == Color::rgb(255, 0, 0)));
+    }
+
+    #[test]
+    fn repeated_style_edits_on_one_property_still_coalesce() {
+        let (mut app, id) = app_with_text("hello");
+        select_all(&mut app);
+        app.now = 0.0;
+        crate::panels::typography::set_style(&mut app, &[id], |s| s.font_size = 20.0);
+        app.now = 0.1;
+        crate::panels::typography::set_style(&mut app, &[id], |s| s.font_size = 24.0);
+        assert_eq!(text_of(&app, id).style.font_size, 24.0);
+        undo_step(&mut app, false);
+        assert_eq!(text_of(&app, id).style.font_size, 16.0);
+        undo_step(&mut app, false);
+        assert_eq!(text_of(&app, id).style.font_size, 16.0, "the two size edits share one undo step");
+    }
+
+    #[test]
     fn undo_steps_follow_words_and_redo() {
         let (mut app, id) = app_with_text("");
         app.now = 0.0;
@@ -1426,6 +1762,21 @@ mod tests {
         assert!(t.runs.is_empty(), "no leftover underline style: {:?}", t.runs);
         assert!(app.canvas.text.as_ref().unwrap().preedit.is_none());
         assert_eq!(app.canvas.text.as_ref().unwrap().caret, "ab日本".len());
+    }
+
+    #[test]
+    fn undo_does_not_restore_ime_preedit_as_committed_text() {
+        let (mut app, id) = app_with_text("");
+        preedit(&mut app, "vie");
+        base_style(&mut app, |style| style.font_weight = 700);
+        commit_ime(&mut app, "việt");
+
+        undo_step(&mut app, false);
+        undo_step(&mut app, false);
+
+        assert_eq!(text_of(&app, id).content, "");
+        assert_eq!(caret_of(&app), 0);
+        assert_eq!(app.canvas.text.as_ref().unwrap().anchor, 0);
     }
 
     #[test]

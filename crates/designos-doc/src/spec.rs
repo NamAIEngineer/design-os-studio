@@ -32,10 +32,10 @@ pub struct LayoutSpec {
     /// `[top, right, bottom, left]` padding in px or `"var:..."` references.
     #[serde(default)]
     pub padding: [NumberOrVar; 4],
-    /// `"start"`, `"center"`, `"end"`, `"space-between"`, `"space-around"`, `"space-evenly"`, or `"baseline"`.
+    /// `"start"`, `"center"`, `"end"`, `"space-between"`, `"space-around"`, `"space-evenly"`, or `"baseline"` (alias: `"justify"`).
     #[serde(default, alias = "justify", skip_serializing_if = "String::is_empty")]
     pub primary_align: String,
-    /// `"start"`, `"center"`, `"end"`, or `"baseline"`.
+    /// `"start"`, `"center"`, `"end"`, or `"baseline"` (alias: `"align"`).
     #[serde(default, alias = "align", skip_serializing_if = "String::is_empty")]
     pub counter_align: String,
     /// Grid column count when using grid layout.
@@ -142,6 +142,10 @@ pub struct NodeSpec {
     /// A `"var:..."` string binds `characters` to a String variable.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub text: Option<String>,
+    /// Font family name (default `"Inter"`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "schema", schemars(skip))]
+    pub font_family: Option<String>,
     /// Font size in px (or `"var:..."`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub font_size: Option<NumberOrVar>,
@@ -178,7 +182,7 @@ pub struct NodeSpec {
     /// Handoff annotations attached to this node.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub annotations: Vec<String>,
-    /// Agent `in_progress` flag: `true`, `false`, or `{run_id, agent, status, stale_after_s}`.
+    /// Agent `in_progress` flag: a bool or a status object.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub in_progress: Option<InProgressSpec>,
     /// Resolved canvas comment threads on export.
@@ -187,6 +191,9 @@ pub struct NodeSpec {
     /// Child `NodeSpec` items.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub children: Vec<NodeSpec>,
+    /// Variable bindings.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub bindings: BTreeMap<String, String>,
 }
 
 /// Literal `false` used by [`SlotFillSpec::Disabled`] (`slots: {"Actions": false}`).
@@ -284,6 +291,20 @@ pub struct OverrideSpec {
     /// Slot fills `{slot: [NodeSpec...] | false}` on a nested instance.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub slots: BTreeMap<String, SlotFillSpec>,
+    /// Override arc data on a descendant ellipse. `sweep_angle` is added to `start_angle` on apply.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "schema", schemars(skip))]
+    pub arc: Option<ArcOverrideSpec>,
+}
+
+/// Arc data carried by an instance override in a declarative spec.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct ArcOverrideSpec {
+    pub start_angle: f32,
+    pub sweep_angle: f32,
+    pub inner_radius: f32,
 }
 
 fn spec_levenshtein(a: &str, b: &str) -> usize {
@@ -504,6 +525,7 @@ pub fn apply_easeui_preset(node: &mut Node, preset: &str) {
                 spread: 0.0,
                 visible: true,
                 show_behind: false,
+                blend: Default::default(),
             }];
             if let Some(f) = node.kind.frame_props_mut() {
                 f.auto_layout = Some(AutoLayout {
@@ -631,7 +653,20 @@ impl Document {
     /// Materializes `spec` under `parent`, resolving `var:`, `style:`, `mode`, `$easeui.*`,
     /// and `"instance"` references against both local tokens/styles/components and enabled `libraries`.
     /// On any error, `self` is rolled back to its exact pre-call state.
+    /// Text keeps the character-width estimate. Pass a measurer with [`Self::apply_spec_with_measure`].
     pub fn apply_spec_with_libraries(&mut self, parent: NodeId, spec: &NodeSpec, libraries: &[LibrarySnapshot]) -> Result<SpecApplyReport, SpecBindError> {
+        self.apply_spec_with_measure(parent, spec, libraries, None)
+    }
+
+    /// [`Self::apply_spec_with_libraries`] that sizes hug text with `measure` when `Some`.
+    /// `None` keeps the character-width estimate. The measurer is visible only to this call.
+    pub fn apply_spec_with_measure<'m>(
+        &mut self,
+        parent: NodeId,
+        spec: &NodeSpec,
+        libraries: &'m [LibrarySnapshot],
+        measure: Option<&'m dyn crate::text_measure::TextMeasure>,
+    ) -> Result<SpecApplyReport, SpecBindError> {
         let pnode = self.get(parent).ok_or_else(|| SpecBindError {
             code: "NODE_NOT_FOUND".to_string(),
             message: format!("Parent node {} not found", parent.0),
@@ -668,6 +703,7 @@ impl Document {
         let data_before = crate::spec_data::SpecDataSnapshot::of(self);
         let mut inserted_ids: Vec<NodeId> = Vec::new();
         let mut ctx = crate::spec_instance::SpecBuildCtx::new(self, libraries);
+        ctx.measure = measure;
         let mut index = SpecBindIndex::build(self);
         let mut report = SpecApplyReport { parent_id: parent, ..Default::default() };
 
@@ -684,9 +720,24 @@ impl Document {
                 report.bindings_created += ctx.bindings_created;
                 report.styles_linked += ctx.styles_linked;
                 report.warnings.extend(ctx.warnings);
-                let relayout_root =
-                    if self.get(parent).and_then(|n| n.kind.frame_props()).and_then(|f| f.auto_layout.as_ref()).is_some() { parent } else { root_id };
-                self.relayout_subtree(relayout_root);
+                for fid in ctx.measured_with_fallback {
+                    if !report.measured_with_fallback.contains(&fid) {
+                        report.measured_with_fallback.push(fid);
+                    }
+                }
+                if !report.measured_with_fallback.is_empty() && !report.warnings.iter().any(|w| w.code == "TEXT_MEASURED_WITH_FALLBACK_FONT") {
+                    report.warnings.push(SpecWarning {
+                        code: "TEXT_MEASURED_WITH_FALLBACK_FONT".to_string(),
+                        path: "spec".to_string(),
+                        token: None,
+                        replacement: None,
+                        message: Some("One or more text nodes were measured with a fallback font because the requested font_family is not loaded.".to_string()),
+                    });
+                }
+                self.relayout_subtree(root_id);
+                if parent_has_al {
+                    self.relayout_seeds_upward(&[parent]);
+                }
                 self.flush_pending_relayout();
                 Ok(report)
             }
@@ -735,6 +786,11 @@ impl Document {
                 ctx.bindings_created += sub_report.bindings_created;
                 ctx.styles_linked += sub_report.styles_linked;
                 ctx.warnings.extend(sub_report.warnings);
+                for fid in sub_report.measured_with_fallback {
+                    if !ctx.measured_with_fallback.contains(&fid) {
+                        ctx.measured_with_fallback.push(fid);
+                    }
+                }
                 Ok(id)
             }
             Err(e) => {
@@ -828,7 +884,7 @@ impl Document {
             "text" => {
                 let mut style = TextStyle::default();
                 style.font_size = spec.font_size.as_ref().and_then(NumberOrVar::as_num).unwrap_or(14.0);
-                style.font_weight = spec.font_weight.unwrap_or(400);
+                style.set_font_weight(spec.font_weight.unwrap_or(400));
                 style.fills = vec![Paint::solid(crate::default_text_colour(self, parent))];
                 let content = if text_var.is_some() { String::new() } else { spec.text.clone().unwrap_or_default() };
                 Node::text(id, rect, content, style)
@@ -1073,9 +1129,10 @@ impl Document {
         if let Some(eff_ref) = &spec.effect_style {
             let style_key = crate::resolve_style_ref(self, index, libraries, eff_ref, StyleProperty::Effect, "effect_style", &format!("{path}.effect_style"))?;
             if let Some(style) = self.styles.get(&style_key).cloned() {
+                let paragraph_fields = self.style_meta.get(&style_key).and_then(|m| m.text_paragraph_fields);
                 if let Some(n) = self.get_mut(id) {
                     n.style_refs.insert("effect".to_string(), style_key.clone());
-                    crate::apply_style_values(n, &style, &style_key);
+                    crate::apply_style_values_with_fields(n, &style, &style_key, paragraph_fields);
                     report.styles_linked += 1;
                 }
             }
@@ -1085,9 +1142,10 @@ impl Document {
         if let Some(grid_ref) = &spec.grid_style {
             let style_key = crate::resolve_style_ref(self, index, libraries, grid_ref, StyleProperty::Grid, "grid_style", &format!("{path}.grid_style"))?;
             if let Some(style) = self.styles.get(&style_key).cloned() {
+                let paragraph_fields = self.style_meta.get(&style_key).and_then(|m| m.text_paragraph_fields);
                 if let Some(n) = self.get_mut(id) {
                     n.style_refs.insert("grid".to_string(), style_key.clone());
-                    crate::apply_style_values(n, &style, &style_key);
+                    crate::apply_style_values_with_fields(n, &style, &style_key, paragraph_fields);
                     report.styles_linked += 1;
                 }
             }
@@ -1098,9 +1156,10 @@ impl Document {
             if let Some(ts_ref) = &spec.text_style {
                 let style_key = crate::resolve_style_ref(self, index, libraries, ts_ref, StyleProperty::Text, "text_style", &format!("{path}.text_style"))?;
                 if let Some(style) = self.styles.get(&style_key).cloned() {
+                    let paragraph_fields = self.style_meta.get(&style_key).and_then(|m| m.text_paragraph_fields);
                     if let Some(n) = self.get_mut(id) {
                         n.style_refs.insert("text".to_string(), style_key.clone());
-                        crate::apply_style_values(n, &style, &style_key);
+                        crate::apply_style_values_with_fields(n, &style, &style_key, paragraph_fields);
                         report.styles_linked += 1;
                     }
                 }
@@ -1138,10 +1197,11 @@ impl Document {
                     }
                     ResolvedColourRef::Style { style_key, .. } => {
                         if let Some(style) = self.styles.get(&style_key).cloned() {
+                            let paragraph_fields = self.style_meta.get(&style_key).and_then(|m| m.text_paragraph_fields);
                             if let Some(n) = self.get_mut(id) {
                                 n.variables.bindings.remove("fills/0");
                                 n.style_refs.insert("fill".to_string(), style_key.clone());
-                                crate::apply_style_values(n, &style, &style_key);
+                                crate::apply_style_values_with_fields(n, &style, &style_key, paragraph_fields);
                                 report.styles_linked += 1;
                             }
                         }
@@ -1172,10 +1232,11 @@ impl Document {
                 }
                 ResolvedColourRef::Style { style_key, .. } => {
                     if let Some(style) = self.styles.get(&style_key).cloned() {
+                        let paragraph_fields = self.style_meta.get(&style_key).and_then(|m| m.text_paragraph_fields);
                         if let Some(n) = self.get_mut(id) {
                             n.variables.bindings.remove("fills/0");
                             n.style_refs.insert("fill".to_string(), style_key.clone());
-                            crate::apply_style_values(n, &style, &style_key);
+                            crate::apply_style_values_with_fields(n, &style, &style_key, paragraph_fields);
                             report.styles_linked += 1;
                         }
                     }
@@ -1210,10 +1271,11 @@ impl Document {
                 }
                 ResolvedColourRef::Style { style_key, .. } => {
                     if let Some(style) = self.styles.get(&style_key).cloned() {
+                        let paragraph_fields = self.style_meta.get(&style_key).and_then(|m| m.text_paragraph_fields);
                         if let Some(n) = self.get_mut(id) {
                             n.variables.bindings.remove("strokes/0");
                             n.style_refs.insert("stroke".to_string(), style_key.clone());
-                            crate::apply_style_values(n, &style, &style_key);
+                            crate::apply_style_values_with_fields(n, &style, &style_key, paragraph_fields);
                             report.styles_linked += 1;
                         }
                     }
@@ -1315,6 +1377,11 @@ impl Document {
             }
         }
 
+        for (prop_key, raw_ref) in &spec.bindings {
+            let fpath = format!("{path}.bindings.{prop_key}");
+            self.bind_variable_ref(id, &node_kind, raw_ref, &[prop_key.as_str()], "bindings", &fpath, index, libraries, report)?;
+        }
+
         // 7. Font size, line height and weight on Text nodes (or when spec.text is None)
         if is_text_kind || spec.text.is_none() {
             self.apply_text_overrides(id, &node_kind, spec, path, index, libraries, report)?;
@@ -1325,23 +1392,36 @@ impl Document {
             self.bind_characters(id, &node_kind, raw_ref, &spec.name, spec.preset.is_some(), &format!("{path}.text"), index, libraries, report)?;
         }
 
-        // Re-estimate intrinsic text bounds after text_style / font_size / line_height application
+        // Measure (or estimate when this call has no measurer) intrinsic text bounds after text_style / font_size / line_height / font_family application,
+        // and align the glyph box with any centring on the parent auto-layout frame when the text hugs that axis.
+        let (parent_centre_h, parent_centre_v) = self.parent_centres_children(parent);
+        let hugs_h = spec.width.is_none() && spec.width_sizing.as_deref().is_none_or(|s| parse_sizing(s) == Sizing::Hug);
+        let hugs_v = spec.height.is_none() && spec.height_sizing.as_deref().is_none_or(|s| parse_sizing(s) == Sizing::Hug);
         if let Some(n) = self.get_mut(id) {
             if let NodeKind::Text(tp) = &mut n.kind {
-                let est = estimate_intrinsic_text_size(tp);
+                if parent_centre_h && spec.text_style.is_none() && tp.style.align_h == TextAlignH::Left && hugs_h {
+                    tp.style.align_h = TextAlignH::Center;
+                }
+                if parent_centre_v && spec.text_style.is_none() && tp.style.align_v == TextAlignV::Top && hugs_v {
+                    tp.style.align_v = TextAlignV::Center;
+                }
+                let needs_measure = spec.width.is_none() || spec.height.is_none();
                 if spec.width.is_some() || spec.width_sizing.as_deref() == Some("fill") {
                     tp.auto_resize = TextAutoResize::Height;
                     if spec.height.is_none() {
-                        let lines = (est.x / n.size.x.max(20.0)).ceil().max(1.0);
-                        n.size.y = (lines * tp.style.font_size.max(8.0) * 1.45).ceil();
+                        n.size.y = ctx.text_size(tp, Some(n.size.x.max(20.0))).y;
                     }
                 } else {
+                    let sz = crate::text_measure::measure_hug_text_with(tp, hugs_h.then_some(n.layout_child.max_w).flatten(), |t, w| ctx.text_size(t, w));
                     if spec.width.is_none() {
-                        n.size.x = est.x;
+                        n.size.x = sz.x;
                     }
                     if spec.height.is_none() {
-                        n.size.y = est.y;
+                        n.size.y = sz.y;
                     }
+                }
+                if needs_measure && ctx.text_fell_back(tp) && !report.measured_with_fallback.contains(&id.0) {
+                    report.measured_with_fallback.push(id.0);
                 }
             }
         }
@@ -1350,6 +1430,7 @@ impl Document {
         // automatically insert a child Text node inside it!
         if !is_text_kind {
             if let Some(label) = &spec.text {
+                let (self_centre_h, self_centre_v) = self.parent_centres_children(id);
                 let tid = self.try_alloc_id().ok_or_else(|| SpecBindError {
                     code: "ID_EXHAUSTED".to_string(),
                     message: "Document has exhausted node IDs".to_string(),
@@ -1362,7 +1443,7 @@ impl Document {
                 })?;
                 let mut style = TextStyle::default();
                 style.font_size = spec.font_size.as_ref().and_then(NumberOrVar::as_num).unwrap_or(13.0);
-                style.font_weight = spec.font_weight.unwrap_or(500);
+                style.set_font_weight(spec.font_weight.unwrap_or(500));
                 style.fills = vec![Paint::solid(crate::default_text_colour(self, id))];
                 let initial = if text_var.is_some() { String::new() } else { label.clone() };
                 let mut tnode = Node::text(tid, Rect::new(0.0, 0.0, 60.0, 18.0), initial, style);
@@ -1385,9 +1466,10 @@ impl Document {
                 if let Some(ts_ref) = &spec.text_style {
                     let style_key = crate::resolve_style_ref(self, index, libraries, ts_ref, StyleProperty::Text, "text_style", &format!("{path}.text_style"))?;
                     if let Some(s) = self.styles.get(&style_key).cloned() {
+                        let paragraph_fields = self.style_meta.get(&style_key).and_then(|m| m.text_paragraph_fields);
                         if let Some(tn) = self.get_mut(tid) {
                             tn.style_refs.insert("text".to_string(), style_key.clone());
-                            crate::apply_style_values(tn, &s, &style_key);
+                            crate::apply_style_values_with_fields(tn, &s, &style_key, paragraph_fields);
                             report.styles_linked += 1;
                         }
                     }
@@ -1416,9 +1498,10 @@ impl Document {
                         }
                         ResolvedColourRef::Style { style_key, .. } => {
                             if let Some(s) = self.styles.get(&style_key).cloned() {
+                                let paragraph_fields = self.style_meta.get(&style_key).and_then(|m| m.text_paragraph_fields);
                                 if let Some(tn) = self.get_mut(tid) {
                                     tn.style_refs.insert("fill".to_string(), style_key.clone());
-                                    crate::apply_style_values(tn, &s, &style_key);
+                                    crate::apply_style_values_with_fields(tn, &s, &style_key, paragraph_fields);
                                     report.styles_linked += 1;
                                 }
                             }
@@ -1431,8 +1514,19 @@ impl Document {
                     self.bind_characters(tid, &tkind, raw_ref, "", false, &format!("{path}.text"), index, libraries, report)?;
                 }
                 if let Some(tn) = self.get_mut(tid) {
-                    if let NodeKind::Text(tp) = &tn.kind {
-                        tn.size = estimate_intrinsic_text_size(tp);
+                    if let NodeKind::Text(tp) = &mut tn.kind {
+                        if self_centre_h && spec.text_style.is_none() && tp.style.align_h == TextAlignH::Left {
+                            tp.style.align_h = TextAlignH::Center;
+                        }
+                        if self_centre_v && spec.text_style.is_none() && tp.style.align_v == TextAlignV::Top {
+                            tp.style.align_v = TextAlignV::Center;
+                        }
+                        let sz = ctx.text_size(tp, None);
+                        let fallback = ctx.text_fell_back(tp);
+                        tn.size = sz;
+                        if fallback && !report.measured_with_fallback.contains(&tid.0) {
+                            report.measured_with_fallback.push(tid.0);
+                        }
                     }
                 }
             }
@@ -1446,9 +1540,10 @@ impl Document {
         Ok(id)
     }
 
-    /// Applies the explicit `font_size`, `line_height` and `font_weight` of `spec` to the text node
-    /// `id` after its text style, so they override the style. Binding `font_size` to a variable
-    /// together with `text_style` detaches the style link (`STYLE_DETACHED_BY_SPEC`).
+    /// Applies the explicit `font_size`, `line_height`, `font_weight` and `font_family` of `spec` to the
+    /// text node `id` after its text style, so they override the style. The text style rule decides what
+    /// that does to the link: a weight keeps it and is recorded as an override; a size, line height or
+    /// family (literal or bound to a variable) detaches it (`STYLE_DETACHED_BY_SPEC`).
     #[allow(clippy::too_many_arguments)]
     fn apply_text_overrides(
         &mut self,
@@ -1460,6 +1555,8 @@ impl Document {
         libraries: &[LibrarySnapshot],
         report: &mut SpecApplyReport,
     ) -> Result<(), SpecBindError> {
+        let before = self.get(id).and_then(|n| n.kind.any_text()).cloned();
+        let mut detach_path = None;
         if let Some(fs) = &spec.font_size {
             if let Some(v) = self.bind_or_eval_number(id, node_kind, fs, &["fontSize"], "font_size", format!("{path}.font_size"), index, libraries, report)? {
                 if let Some(n) = self.get_mut(id) {
@@ -1467,18 +1564,8 @@ impl Document {
                         tp.style.font_size = v.max(1.0);
                     }
                 }
-            } else if spec.text_style.is_some() {
-                if let Some(n) = self.get_mut(id) {
-                    if n.style_refs.remove("text").is_some() {
-                        report.warnings.push(SpecWarning {
-                            code: "STYLE_DETACHED_BY_SPEC".to_string(),
-                            path: format!("{path}.font_size"),
-                            token: spec.text_style.clone(),
-                            replacement: None,
-                            message: Some("A variable-bound font_size overrides and detaches text_style.".to_string()),
-                        });
-                    }
-                }
+            } else {
+                detach_path = Some("font_size");
             }
         }
         if let Some(lh) = &spec.line_height {
@@ -1490,13 +1577,48 @@ impl Document {
                         tp.style.line_height = LineHeight::Pixels(v.max(0.0));
                     }
                 }
+            } else {
+                detach_path = detach_path.or(Some("line_height"));
             }
         }
         if let Some(fw) = spec.font_weight {
             if let Some(n) = self.get_mut(id) {
                 if let NodeKind::Text(tp) = &mut n.kind {
-                    tp.style.font_weight = fw;
+                    tp.style.set_font_weight(fw);
                 }
+            }
+        }
+        if let Some(ref f) = spec.font_family {
+            let trimmed = f.trim();
+            if trimmed.starts_with("var:") {
+                self.bind_variable_ref(id, node_kind, trimmed, &["fontFamily"], "font_family", &format!("{path}.font_family"), index, libraries, report)?;
+                detach_path = detach_path.or(Some("font_family"));
+            } else if let Some(n) = self.get_mut(id) {
+                if let Some(tp) = n.kind.any_text_mut() {
+                    if !trimmed.is_empty() && tp.style.font_family != trimmed {
+                        detach_path = detach_path.or(Some("font_family"));
+                        tp.style.font_family = trimmed.to_string();
+                    }
+                }
+            }
+        }
+        if let (Some(before), Some(n)) = (before, self.get_mut(id)) {
+            let linked = n.style_refs.get("text").cloned();
+            let mut outcome = apply_text_link_rule(n, &before);
+            if outcome == LinkOutcome::Kept && detach_path.is_some() {
+                // A variable-bound size or line height is not in the values, so the rule cannot see it.
+                n.style_refs.remove("text");
+                n.text_style_overrides = OwnedFieldSet::EMPTY;
+                outcome = LinkOutcome::Detached;
+            }
+            if outcome == LinkOutcome::Detached {
+                report.warnings.push(SpecWarning {
+                    code: "STYLE_DETACHED_BY_SPEC".to_string(),
+                    path: format!("{path}.{}", detach_path.unwrap_or("font_size")),
+                    token: linked.or_else(|| spec.text_style.clone()),
+                    replacement: None,
+                    message: Some("A size, line height or family set on the layer overrides and detaches text_style.".to_string()),
+                });
             }
         }
         Ok(())
@@ -1573,7 +1695,7 @@ impl Document {
         Ok(var_id)
     }
 
-    fn export_var_ref(&self, index: &SpecBindIndex, var_id: &str) -> Option<String> {
+    pub(crate) fn export_var_ref(&self, index: &SpecBindIndex, var_id: &str) -> Option<String> {
         index.format_variable_ref(self, var_id)
     }
 
@@ -1773,6 +1895,14 @@ impl Document {
                 children.push(cs);
             }
         }
+        let mut bindings = BTreeMap::new();
+        for (k, vid) in &n.variables.bindings {
+            if k.starts_with("effects/") || k.contains("/stops/") {
+                if let Some(formatted) = self.export_var_ref(index, vid) {
+                    bindings.insert(k.clone(), formatted);
+                }
+            }
+        }
         Ok(NodeSpec {
             id: Some(id.0),
             kind: n.kind.default_name().to_ascii_lowercase(),
@@ -1804,6 +1934,7 @@ impl Document {
             visible,
             clips_content: n.kind.frame_props().and_then(|f| f.clips_content.then_some(true)),
             text,
+            font_family: None,
             font_size,
             line_height,
             font_weight,
@@ -1819,6 +1950,7 @@ impl Document {
             in_progress,
             comments,
             children,
+            bindings,
         })
     }
 
@@ -1884,9 +2016,22 @@ impl Document {
         });
         hit
     }
+
+    /// Returns `(centre_h, centre_v)` indicating whether `parent` is an auto-layout
+    /// container that centres its children horizontally and/or vertically.
+    pub fn parent_centres_children(&self, parent: NodeId) -> (bool, bool) {
+        let Some(al) = self.get(parent).and_then(|p| p.kind.frame_props()).and_then(|f| f.auto_layout.as_ref()) else {
+            return (false, false);
+        };
+        if al.primary_is_horizontal() {
+            (al.primary_align == LayoutAlign::Center, al.counter_align == LayoutAlign::Center)
+        } else {
+            (al.counter_align == LayoutAlign::Center, al.primary_align == LayoutAlign::Center)
+        }
+    }
 }
 
-pub(crate) fn estimate_intrinsic_text_size(tp: &TextProps) -> Vec2 {
+pub fn estimate_intrinsic_text_size(tp: &TextProps) -> Vec2 {
     let lines: Vec<&str> = tp.content.split('\n').collect();
     let fs = tp.style.font_size.max(8.0);
     let weight_boost = if tp.style.font_weight >= 600 { 1.05 } else { 1.0 };
@@ -1915,6 +2060,137 @@ pub(crate) fn estimate_intrinsic_text_size(tp: &TextProps) -> Vec2 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hug_text_max_width_wraps_and_grows_height() {
+        struct Measure;
+        impl crate::text_measure::TextMeasure for Measure {
+            fn measure(&self, _tp: &TextProps, wrap_width: Option<f32>) -> Vec2 {
+                match wrap_width {
+                    None => Vec2::new(500.0, 17.0),
+                    Some(w) => Vec2::new(w, 85.0),
+                }
+            }
+        }
+        let mut doc = Document::new("hug-max-width");
+        let page = doc.add_page("Page");
+        let spec: NodeSpec = serde_json::from_value(serde_json::json!({
+            "kind": "text",
+            "name": "Paragraph",
+            "text": "A long paragraph that must wrap",
+            "font_size": 14,
+            "width_sizing": "hug",
+            "max_width": 200
+        }))
+        .unwrap();
+        let report = doc.apply_spec_with_measure(page, &spec, &[], Some(&Measure)).unwrap();
+        let node = doc.get(report.root_node_id).unwrap();
+        assert_eq!(node.size, Vec2::new(200.0, 85.0));
+        let NodeKind::Text(tp) = &node.kind else { panic!("expected text") };
+        assert_eq!(tp.auto_resize, TextAutoResize::WidthAndHeight);
+
+        // Without max_width, hug text keeps its intrinsic single-line dimensions.
+        let un_clamped: NodeSpec = serde_json::from_value(serde_json::json!({
+            "kind": "text",
+            "name": "SingleLine",
+            "text": "A long paragraph that stays on one line without max_width",
+            "font_size": 14,
+            "width_sizing": "hug"
+        }))
+        .unwrap();
+        let report_unclamped = doc.apply_spec_with_measure(page, &un_clamped, &[], Some(&Measure)).unwrap();
+        let node_unclamped = doc.get(report_unclamped.root_node_id).unwrap();
+        assert_eq!(node_unclamped.size, Vec2::new(500.0, 17.0));
+    }
+
+    #[test]
+    fn hug_text_with_max_width_and_explicit_height_clamps_width() {
+        struct Measure;
+        impl crate::text_measure::TextMeasure for Measure {
+            fn measure(&self, _tp: &TextProps, wrap_width: Option<f32>) -> Vec2 {
+                match wrap_width {
+                    None => Vec2::new(500.0, 17.0),
+                    Some(w) => Vec2::new(w, 85.0),
+                }
+            }
+        }
+        let mut doc = Document::new("hug-max-width-explicit-height");
+        let page = doc.add_page("Page");
+        let spec: NodeSpec = serde_json::from_value(serde_json::json!({
+            "kind": "text",
+            "name": "ExplicitHeightParagraph",
+            "text": "A long paragraph that clamps width while keeping explicit height",
+            "font_size": 14,
+            "width_sizing": "hug",
+            "max_width": 200,
+            "height": 40
+        }))
+        .unwrap();
+        let report = doc.apply_spec_with_measure(page, &spec, &[], Some(&Measure)).unwrap();
+        let node = doc.get(report.root_node_id).unwrap();
+        assert_eq!(node.size, Vec2::new(200.0, 40.0));
+        let NodeKind::Text(tp) = &node.kind else { panic!("expected text") };
+        assert_eq!(tp.auto_resize, TextAutoResize::WidthAndHeight);
+    }
+
+    #[test]
+    fn hug_text_with_max_width_relayouts_when_content_grows_and_shrinks() {
+        struct ProportionalMeasure;
+        impl crate::text_measure::TextMeasure for ProportionalMeasure {
+            fn measure(&self, tp: &TextProps, wrap_width: Option<f32>) -> Vec2 {
+                let raw_w = (tp.content.chars().count() as f32) * 8.0;
+                match wrap_width {
+                    None => Vec2::new(raw_w.max(8.0), 17.0),
+                    Some(w) => {
+                        let lines = (raw_w / w.max(1.0)).ceil().max(1.0);
+                        Vec2::new(w, lines * 17.0)
+                    }
+                }
+            }
+        }
+        let mut doc = Document::new("hug-max-width-relayout");
+        let page = doc.add_page("Page");
+        let spec: NodeSpec = serde_json::from_value(serde_json::json!({
+            "kind": "frame",
+            "name": "Box",
+            "width_sizing": "hug",
+            "height_sizing": "hug",
+            "layout": {"direction": "column", "padding": [16, 16, 16, 16]},
+            "children": [{
+                "kind": "text",
+                "name": "T",
+                "text": "Hi",
+                "font_size": 14,
+                "width_sizing": "hug",
+                "max_width": 200
+            }]
+        }))
+        .unwrap();
+        let report = doc.apply_spec_with_measure(page, &spec, &[], Some(&ProportionalMeasure)).unwrap();
+        let fid = report.root_node_id;
+        let tid = doc.get(fid).unwrap().children[0];
+        assert_eq!(doc.get(tid).unwrap().size, Vec2::new(16.0, 17.0));
+
+        let _guard = crate::text_measure::ThreadLayoutMeasurerGuard::install(std::sync::Arc::new(ProportionalMeasure));
+        {
+            let n = doc.get_mut(tid).unwrap();
+            let NodeKind::Text(tp) = &mut n.kind else { panic!("expected text") };
+            tp.content = "A much longer sentence that exceeds two hundred pixels easily".into();
+        }
+        doc.relayout_subtree(fid);
+        let grown = doc.get(tid).unwrap();
+        assert_eq!(grown.size.x, 200.0);
+        assert!(grown.size.y > 17.0);
+
+        {
+            let n = doc.get_mut(tid).unwrap();
+            let NodeKind::Text(tp) = &mut n.kind else { panic!("expected text") };
+            tp.content = "Hi".into();
+        }
+        doc.relayout_subtree(fid);
+        let shrunk = doc.get(tid).unwrap();
+        assert_eq!(shrunk.size, Vec2::new(16.0, 17.0));
+    }
 
     #[test]
     fn apply_and_export_easeui_spec_with_autolayout_and_comments() {
@@ -2176,5 +2452,67 @@ mod tests {
 
         assert!(doc.in_progress.is_empty(), "the root's flag set before the failure is rolled back");
         assert_eq!(doc.get(page).unwrap().children.len(), children_before, "no node survives the refused spec");
+    }
+
+    #[test]
+    fn no_measurer_keeps_the_estimate() {
+        let mut doc = Document::new("Estimate fallback");
+        let page = doc.add_page("P");
+        let spec: NodeSpec = serde_json::from_value(serde_json::json!({
+            "kind": "text",
+            "name": "DeleteLabel",
+            "text": "Delete",
+            "font_size": 14.0,
+            "font_weight": 600
+        }))
+        .unwrap();
+        let tid = doc.apply_spec(page, &spec).unwrap();
+        let tn = doc.get(tid).unwrap();
+        assert_eq!(tn.size.x, 52.0, "without an installed measurer, 'Delete' at 14px Semibold keeps the 52.0px estimate");
+    }
+
+    /// A measurer passed into one apply must not leak into another thread's apply.
+    #[test]
+    fn measurer_is_per_call_not_process_wide() {
+        struct FixedMeasure;
+        impl crate::text_measure::TextMeasure for FixedMeasure {
+            fn measure(&self, _tp: &TextProps, _wrap: Option<f32>) -> Vec2 {
+                Vec2::new(123.0, 45.0)
+            }
+        }
+
+        let spec_json = serde_json::json!({
+            "kind": "text",
+            "name": "Label",
+            "text": "Delete",
+            "font_size": 14.0,
+            "font_weight": 600
+        });
+
+        for _ in 0..16 {
+            let measured_json = spec_json.clone();
+            let estimated_json = spec_json.clone();
+            let measured = std::thread::spawn(move || {
+                let mut doc = Document::new("Measured");
+                let page = doc.add_page("P");
+                let spec: NodeSpec = serde_json::from_value(measured_json).unwrap();
+                let report = doc.apply_spec_with_measure(page, &spec, &[], Some(&FixedMeasure)).unwrap();
+                let node = doc.get(report.root_node_id).unwrap();
+                assert_eq!(node.size, Vec2::new(123.0, 45.0));
+            });
+            let estimated = std::thread::spawn(move || {
+                let mut doc = Document::new("Estimated");
+                let page = doc.add_page("P");
+                let spec: NodeSpec = serde_json::from_value(estimated_json).unwrap();
+                let report = doc.apply_spec_with_report(page, &spec).unwrap();
+                let node = doc.get(report.root_node_id).unwrap();
+                let NodeKind::Text(tp) = &node.kind else { panic!("expected text") };
+                let est = estimate_intrinsic_text_size(tp);
+                assert_eq!(node.size, est, "an apply with no measurer must keep the estimate");
+                assert_ne!(node.size.x, 123.0, "the other thread's measurer must not be visible");
+            });
+            measured.join().expect("measured thread");
+            estimated.join().expect("estimated thread");
+        }
     }
 }

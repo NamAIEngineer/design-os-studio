@@ -13,6 +13,15 @@ use std::collections::BTreeMap;
 /// Verbatim Figma extension keys (`key -> JSON value`) (`E1-9` §4).
 pub type FigmaExtensions = BTreeMap<String, serde_json::Value>;
 
+/// Extension key (value `true`) on a variable or collection the file has deleted while a layer, style or other
+/// variable still uses it. Such an entry stays in the document so bindings and aliases resolve, but it is not
+/// listed, offered or published, and it does not take a name.
+pub const SOFT_DELETED_EXTENSION_KEY: &str = "org.designos.softDeleted";
+
+fn has_soft_deleted_mark(extensions: &FigmaExtensions) -> bool {
+    extensions.get(SOFT_DELETED_EXTENSION_KEY).and_then(serde_json::Value::as_bool) == Some(true)
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct VariableMode {
     pub id: String,
@@ -44,6 +53,11 @@ impl VariableCollection {
     /// its library file and reaches this one through a library update.
     pub fn is_library(&self) -> bool {
         self.source_library_key.is_some()
+    }
+
+    /// True for a collection the file deleted but still keeps because some variable it holds is in use.
+    pub fn is_soft_deleted(&self) -> bool {
+        has_soft_deleted_mark(&self.extensions)
     }
 }
 
@@ -139,7 +153,13 @@ impl Variable {
     }
 
     pub fn is_publishable(&self) -> bool {
-        !self.hidden_from_publishing
+        !self.hidden_from_publishing && !self.is_soft_deleted()
+    }
+
+    /// True for a variable the file deleted but still keeps because a layer, style or other variable uses it.
+    /// It resolves like any variable; it is not live, so it is left out of lists, pickers, search, code and publishing.
+    pub fn is_soft_deleted(&self) -> bool {
+        has_soft_deleted_mark(&self.extensions)
     }
 
     /// Clears per-mode extension keys that describe how the previous literal value was derived
@@ -177,6 +197,11 @@ impl NodeVariables {
 const MAX_ALIAS_DEPTH: usize = 16;
 
 impl Document {
+    /// The variables a person or an agent can pick, list and use: every variable that is not soft-deleted.
+    pub fn live_variables(&self) -> impl Iterator<Item = &Variable> {
+        self.variables.values().filter(|v| !v.is_soft_deleted())
+    }
+
     /// Mode in effect for `collection` at `node`: the nearest explicit choice
     /// on the node or an ancestor, else the collection default.
     pub fn variable_mode(&self, node: NodeId, collection: &str) -> Option<String> {
@@ -198,18 +223,40 @@ impl Document {
     /// Resolves a variable to a concrete value as seen from `node`, following
     /// aliases (each alias resolves in its own collection's mode at `node`).
     pub fn resolve_variable(&self, node: NodeId, variable: &str) -> Option<VariableValue> {
+        self.resolve_variable_with_modes(node, variable, &[])
+    }
+
+    /// Resolves a variable to a concrete value as seen from `node`, with `mode_overrides`
+    /// (`(collection_id, mode_id)`) taking precedence over `node`'s own mode choices.
+    pub(crate) fn resolve_variable_with_modes(&self, node: NodeId, variable: &str, mode_overrides: &[(&str, &str)]) -> Option<VariableValue> {
         let mut id = variable.to_string();
         for _ in 0..MAX_ALIAS_DEPTH {
             let v = self.variables.get(&id)?;
-            let mode = self.variable_mode(node, &v.collection)?;
-            let coll = self.variable_collections.get(&v.collection)?;
-            let value = self.resolve_multi_axis_value(node, v, &mode).or_else(|| v.values.get(&mode)).or_else(|| v.values.get(&coll.default_mode))?;
+            let value = match self.node_extension_value(node, v, mode_overrides) {
+                Some(extended) => extended,
+                None => {
+                    let mode = self.variable_mode_with_overrides(node, &v.collection, mode_overrides)?;
+                    let coll = self.variable_collections.get(&v.collection)?;
+                    self.resolve_multi_axis_value_with_modes(node, v, &mode, mode_overrides)
+                        .or_else(|| v.values.get(&mode))
+                        .or_else(|| v.values.get(&coll.default_mode))?
+                        .clone()
+                }
+            };
             match value {
-                VariableValue::Alias(next) => id = next.clone(),
-                other => return Some(other.clone()),
+                VariableValue::Alias(next) => id = next,
+                other => return Some(other),
             }
         }
         None
+    }
+
+    fn variable_mode_with_overrides(&self, node: NodeId, collection: &str, mode_overrides: &[(&str, &str)]) -> Option<String> {
+        let _coll = self.variable_collections.get(collection)?;
+        if let Some(&(_, m)) = mode_overrides.iter().find(|(c, _)| *c == collection) {
+            return Some(m.to_string());
+        }
+        self.variable_mode(node, collection)
     }
 
     /// Resolves a variable in its collection's default mode (following aliases in their
@@ -251,11 +298,18 @@ impl Document {
         self.style_meta.get(sk)?.bindings.get(property).map(String::as_str)
     }
 
-    fn resolve_multi_axis_value<'a>(&self, node: NodeId, v: &'a Variable, primary_mode: &str) -> Option<&'a VariableValue> {
+    fn resolve_multi_axis_value_with_modes<'a>(
+        &self,
+        node: NodeId,
+        v: &'a Variable,
+        primary_mode: &str,
+        mode_overrides: &[(&str, &str)],
+    ) -> Option<&'a VariableValue> {
         if !v.values.keys().any(|k| k.contains('+')) {
             return None;
         }
-        let active_modes: Vec<String> = self.variable_collections.keys().filter_map(|cid| self.variable_mode(node, cid)).collect();
+        let active_modes: Vec<String> =
+            self.variable_collections.keys().filter_map(|cid| self.variable_mode_with_overrides(node, cid, mode_overrides)).collect();
         let default_modes: Vec<String> = self.variable_collections.values().map(|c| c.default_mode.clone()).collect();
 
         let mut best: Option<(usize, bool, &'a VariableValue)> = None;
@@ -353,6 +407,47 @@ mod tests {
         let (mut d, _, rect) = setup();
         d.variables.get_mut("base").unwrap().values.insert("light".into(), VariableValue::Alias("bg".into()));
         assert_eq!(d.bound_value(rect, "fills/0"), None);
+    }
+
+    fn mark_soft_deleted(d: &mut Document, id: &str) {
+        d.variables.get_mut(id).unwrap().extensions.insert(SOFT_DELETED_EXTENSION_KEY.into(), serde_json::Value::Bool(true));
+    }
+
+    #[test]
+    fn a_variable_is_live_unless_marked_soft_deleted() {
+        let (mut d, _, _) = setup();
+        assert!(!d.variables["base"].is_soft_deleted());
+        assert_eq!(d.live_variables().map(|v| v.id.as_str()).collect::<Vec<_>>(), ["base", "bg"]);
+
+        mark_soft_deleted(&mut d, "base");
+        assert!(d.variables["base"].is_soft_deleted());
+        assert_eq!(d.live_variables().map(|v| v.id.as_str()).collect::<Vec<_>>(), ["bg"]);
+
+        // Only the exact marker counts: another value under the key, or another key, leaves the variable live.
+        d.variables.get_mut("base").unwrap().extensions.insert(SOFT_DELETED_EXTENSION_KEY.into(), serde_json::Value::Bool(false));
+        assert!(!d.variables["base"].is_soft_deleted());
+        d.variables.get_mut("base").unwrap().extensions.insert(SOFT_DELETED_EXTENSION_KEY.into(), serde_json::json!("yes"));
+        assert!(!d.variables["base"].is_soft_deleted());
+        d.variables.get_mut("base").unwrap().extensions.clear();
+        d.variables.get_mut("base").unwrap().extensions.insert("org.designos.other".into(), serde_json::Value::Bool(true));
+        assert!(!d.variables["base"].is_soft_deleted());
+    }
+
+    #[test]
+    fn a_soft_deleted_variable_still_resolves_but_is_not_publishable() {
+        let (mut d, _, rect) = setup();
+        mark_soft_deleted(&mut d, "base");
+        assert_eq!(d.bound_value(rect, "fills/0"), Some(VariableValue::Color(Color::WHITE)), "bindings and aliases still resolve through it");
+        assert!(d.variables["bg"].is_publishable());
+        assert!(!d.variables["base"].is_publishable());
+    }
+
+    #[test]
+    fn a_collection_is_soft_deleted_only_with_the_marker() {
+        let (mut d, _, _) = setup();
+        assert!(!d.variable_collections["c1"].is_soft_deleted());
+        d.variable_collections.get_mut("c1").unwrap().extensions.insert(SOFT_DELETED_EXTENSION_KEY.into(), serde_json::Value::Bool(true));
+        assert!(d.variable_collections["c1"].is_soft_deleted());
     }
 
     #[test]

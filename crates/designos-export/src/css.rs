@@ -1,14 +1,24 @@
 //! Figma Dev Mode style CSS for a node.
 
 use crate::codegen::{web_sizes, Dim, Parent};
+use crate::grid_stroke::{stroke_is_drawn, GridStroke, StrokeModel};
 use crate::svg::blend_css;
-use crate::util::{css_color, num, num2};
+use crate::util::{css_color_in, num, num2, ColorFormat};
 use designos_doc::*;
 
 /// CSS declarations (`prop: value;`, one per line) describing `node` the way
 /// Figma's Dev Mode inspect panel prints them.
 pub fn css_for(doc: &Document, node: NodeId) -> String {
+    css_for_with(doc, node, ColorFormat::Hex)
+}
+
+/// Like [`css_for`] with an explicit [`ColorFormat`].
+pub fn css_for_with(doc: &Document, node: NodeId, fmt: ColorFormat) -> String {
     let Some(n) = doc.get(node) else { return String::new() };
+    if matches!(n.kind, NodeKind::Connector(_)) {
+        return String::new();
+    }
+    let profile = doc.color_profile;
     let mut out: Vec<String> = Vec::new();
     let mut push = |p: &str, v: String| out.push(format!("{p}: {v};"));
 
@@ -113,21 +123,33 @@ pub fn css_for(doc: &Document, node: NodeId) -> String {
     }
 
     // auto layout container
+    let grid_stroke = crate::grid_stroke::grid_stroke_of(doc, n);
     if let Some(al) = own_al {
-        let [t, r, b, l] = al.padding;
+        let extra = grid_stroke.map_or([0.0; 4], |g| g.pad_extra);
+        let [t, r, b, l] =
+            std::array::from_fn(|i| if grid_stroke.is_some_and(|g| g.adjusts_padding(i)) { (al.padding[i] + extra[i]).max(0.0) } else { al.padding[i] });
         if t + r + b + l > 0.0 {
             push("padding", box_shorthand(t, r, b, l));
         }
         if al.direction == LayoutDirection::Grid {
+            let border_takes_space = grid_stroke.is_some_and(|g| g.border());
+            if al.effective_padding(&n.stroke).iter().any(|&v| v > 0.0) || crate::codegen::padding_is_bound(doc, n) || border_takes_space {
+                push("box-sizing", "border-box".into());
+            }
             let cols = crate::codegen::grid_column_count(al);
-            push("grid-template-columns", crate::codegen::grid_tracks_css(&al.grid_col_tracks, cols));
-            if al.grid_rows > 0 {
-                push("grid-template-rows", crate::codegen::grid_tracks_css(&al.grid_row_tracks, al.grid_rows as usize));
+            let col_tracks = crate::codegen::resolved_grid_col_tracks(doc, n, al);
+            push("grid-template-columns", crate::codegen::grid_tracks_css(&col_tracks, cols));
+            let (row_tracks, row_count) = crate::codegen::resolved_grid_row_tracks(doc, n, al);
+            if row_count > 0 {
+                push("grid-template-rows", crate::codegen::grid_tracks_css(&row_tracks, row_count));
             }
             let col = al.item_spacing;
-            let row = if al.counter_spacing > 0.0 { al.counter_spacing } else { al.item_spacing };
-            if row > 0.0 || col > 0.0 {
+            let row = crate::codegen::grid_row_gap_px(doc, n, al);
+            if row > 0.0 || col > 0.0 || crate::codegen::grid_gap_is_bound(doc, n) {
                 push("gap", if (row - col).abs() < 1e-4 { format!("{}px", num(row)) } else { format!("{}px {}px", num(row), num(col)) });
+            }
+            if crate::codegen::grid_packs_auto_rows(doc, n, al) {
+                push("align-content", "start".into());
             }
         } else {
             if al.direction == LayoutDirection::Vertical {
@@ -174,23 +196,23 @@ pub fn css_for(doc: &Document, node: NodeId) -> String {
 
     // text block
     if let NodeKind::Text(t) = &n.kind {
-        text_block(t, &mut out);
+        text_block(t, &mut out, profile, fmt);
     }
 
     // background
     let fills: Vec<&Paint> = match &n.kind {
         NodeKind::Text(_) => Vec::new(),
-        _ => n.fills.iter().filter(|p| p.visible && p.opacity > 0.0).collect(),
+        _ => n.fills.iter().filter(|p| p.visible && p.opacity > 0.0 && !matches!(p.kind, PaintKind::Shader(_))).collect(),
     };
     let mut push = |p: &str, v: String| out.push(format!("{p}: {v};"));
     if !fills.is_empty() && !matches!(n.kind, NodeKind::Line) {
         // CSS lists the top layer first; fills are stored bottom to top.
-        let layers: Vec<String> = fills.iter().rev().map(|p| paint_css(p, n.size)).collect();
+        let layers: Vec<String> = fills.iter().rev().map(|p| paint_css_with(p, n.size, profile, fmt)).collect();
         push("background", layers.join(", "));
     }
 
     // border / outline
-    border(n, &mut out);
+    border(n, &mut out, grid_stroke, profile, fmt);
     let mut push = |p: &str, v: String| out.push(format!("{p}: {v};"));
 
     // radius
@@ -212,15 +234,26 @@ pub fn css_for(doc: &Document, node: NodeId) -> String {
     // effects
     let mut shadows = Vec::new();
     let mut text_shadows = Vec::new();
+    if let (Some(g), Some(p)) = (grid_stroke.filter(|g| g.model == StrokeModel::Shadow), crate::grid_stroke::drawn_paint(&n.stroke)) {
+        let color = crate::codegen::stroke_color_token(doc, n, fmt).unwrap_or_else(|| solid_or_first(p, profile, fmt));
+        shadows.extend(g.shadow_xy(doc, n, true, fmt).map(|(x, y)| format!("inset {x} {y} 0 0 {color}")));
+    }
     for e in &n.effects {
         match e {
             Effect::DropShadow { color, offset, radius, spread, visible: true, .. } => {
-                let c = css_color(color, 1.0);
+                let c = css_color_in(profile, fmt, color, 1.0);
                 shadows.push(format!("{}px {}px {}px {}px {c}", num(offset.x), num(offset.y), num(*radius), num(*spread)));
                 text_shadows.push(format!("{}px {}px {}px {c}", num(offset.x), num(offset.y), num(*radius)));
             }
-            Effect::InnerShadow { color, offset, radius, spread, visible: true } => {
-                shadows.push(format!("inset {}px {}px {}px {}px {}", num(offset.x), num(offset.y), num(*radius), num(*spread), css_color(color, 1.0)));
+            Effect::InnerShadow { color, offset, radius, spread, visible: true, .. } => {
+                shadows.push(format!(
+                    "inset {}px {}px {}px {}px {}",
+                    num(offset.x),
+                    num(offset.y),
+                    num(*radius),
+                    num(*spread),
+                    css_color_in(profile, fmt, color, 1.0)
+                ));
             }
             _ => {}
         }
@@ -248,7 +281,7 @@ pub fn css_for(doc: &Document, node: NodeId) -> String {
     if let Some(b) = blend_css(n.blend) {
         push("mix-blend-mode", b.into());
     }
-    crate::codegen::apply_css_vars(doc, n, &mut out);
+    crate::codegen::apply_css_vars(doc, n, &mut out, fmt);
     out.join("\n")
 }
 
@@ -269,17 +302,22 @@ fn corners_shorthand(r: [f32; 4]) -> String {
     box_shorthand(r[0], r[1], r[2], r[3])
 }
 
-fn stop_list(stops: &[GradientStop], opacity: f32, pos: impl Fn(f32) -> String) -> String {
+fn stop_list(stops: &[GradientStop], opacity: f32, profile: ColorProfile, fmt: ColorFormat, pos: impl Fn(f32) -> String) -> String {
     let mut s = stops.to_vec();
     s.sort_by(|a, b| a.pos.partial_cmp(&b.pos).unwrap_or(std::cmp::Ordering::Equal));
-    s.iter().map(|g| format!("{} {}", css_color(&g.color, opacity), pos(g.pos))).collect::<Vec<_>>().join(", ")
+    s.iter().map(|g| format!("{} {}", css_color_in(profile, fmt, &g.color, opacity), pos(g.pos))).collect::<Vec<_>>().join(", ")
 }
 
 /// A fill as a CSS `<background>` layer.
 pub fn paint_css(p: &Paint, size: Vec2) -> String {
+    paint_css_with(p, size, ColorProfile::Srgb, ColorFormat::Hex)
+}
+
+/// Like [`paint_css`] with an explicit [`ColorProfile`] and [`ColorFormat`].
+pub fn paint_css_with(p: &Paint, size: Vec2, profile: ColorProfile, fmt: ColorFormat) -> String {
     match &p.kind {
-        PaintKind::Solid(c) => css_color(c, p.opacity),
-        PaintKind::LinearGradient { handles, stops } => linear_css(handles, stops, size, p.opacity),
+        PaintKind::Solid(c) => css_color_in(profile, fmt, c, p.opacity),
+        PaintKind::LinearGradient { handles, stops } => linear_css(handles, stops, size, p.opacity, profile, fmt),
         PaintKind::RadialGradient { handles, stops } | PaintKind::DiamondGradient { handles, stops } => {
             let [h0, h1, h2] = *handles;
             let (w, h) = (size.x.max(1e-3), size.y.max(1e-3));
@@ -291,7 +329,7 @@ pub fn paint_css(p: &Paint, size: Vec2) -> String {
                 num2(ry),
                 num2(h0.x * 100.0),
                 num2(h0.y * 100.0),
-                stop_list(stops, p.opacity, |t| format!("{}%", num2(t * 100.0)))
+                stop_list(stops, p.opacity, profile, fmt, |t| format!("{}%", num2(t * 100.0)))
             )
         }
         PaintKind::AngularGradient { handles, stops } => {
@@ -303,10 +341,10 @@ pub fn paint_css(p: &Paint, size: Vec2) -> String {
                 num2(from),
                 num2(h0.x * 100.0),
                 num2(h0.y * 100.0),
-                stop_list(stops, p.opacity, |t| format!("{}deg", num2(t * 360.0)))
+                stop_list(stops, p.opacity, profile, fmt, |t| format!("{}deg", num2(t * 360.0)))
             )
         }
-        PaintKind::Image { image_ref, scale_mode } => {
+        PaintKind::Image { image_ref, scale_mode, .. } => {
             let fit = match scale_mode {
                 ImageScaleMode::Fill | ImageScaleMode::Crop => "50% / cover no-repeat",
                 ImageScaleMode::Fit => "50% / contain no-repeat",
@@ -314,17 +352,18 @@ pub fn paint_css(p: &Paint, size: Vec2) -> String {
             };
             format!("url(<{image_ref}>) lightgray {fit}")
         }
+        PaintKind::Shader(_) => String::new(),
     }
 }
 
-fn linear_css(handles: &[Vec2; 3], stops: &[GradientStop], size: Vec2, opacity: f32) -> String {
+fn linear_css(handles: &[Vec2; 3], stops: &[GradientStop], size: Vec2, opacity: f32, profile: ColorProfile, fmt: ColorFormat) -> String {
     let (w, h) = (size.x, size.y);
     let p0 = (handles[0].x * w, handles[0].y * h);
     let p1 = (handles[1].x * w, handles[1].y * h);
     let (dx, dy) = (p1.0 - p0.0, p1.1 - p0.1);
     let len = dx.hypot(dy);
     if len < 1e-4 {
-        return stops.first().map(|s| css_color(&s.color, opacity)).unwrap_or_else(|| "transparent".into());
+        return stops.first().map(|s| css_color_in(profile, fmt, &s.color, opacity)).unwrap_or_else(|| "transparent".into());
     }
     let ang = dx.atan2(-dy);
     let (sx, sy) = (ang.sin(), -ang.cos());
@@ -338,58 +377,84 @@ fn linear_css(handles: &[Vec2; 3], stops: &[GradientStop], size: Vec2, opacity: 
         let v = if line_len > 1e-4 { along / line_len + 0.5 } else { t };
         format!("{}%", num2(v * 100.0))
     };
-    format!("linear-gradient({}deg, {})", num2(deg), stop_list(stops, opacity, pos))
+    format!("linear-gradient({}deg, {})", num2(deg), stop_list(stops, opacity, profile, fmt, pos))
 }
 
-fn border(n: &Node, out: &mut Vec<String>) {
+/// Whether a stroke is a CSS border (it takes layout space) rather than an outline.
+///
+/// A grid frame follows [`GridStroke::border`]. Every other node uses one rule: an Inside stroke is
+/// a border, and a Center or Outside stroke is an outline. The outline keeps the box size, so the
+/// stroke sits where the canvas draws it and the content does not shift.
+pub(crate) fn stroke_as_border(n: &Node, grid: Option<GridStroke>) -> bool {
+    grid.map_or(n.stroke.align == StrokeAlign::Inside, |g| g.border())
+}
+
+/// Stroke declarations. `grid` carries the model chosen for a grid frame (see [`GridStroke`]); every
+/// other node keeps one rule: an Inside stroke is a border, a Center or Outside one an outline.
+fn border(n: &Node, out: &mut Vec<String>, grid: Option<GridStroke>, profile: ColorProfile, fmt: ColorFormat) {
     let st = &n.stroke;
-    let Some(p) = st.paints.iter().find(|p| p.visible && p.opacity > 0.0) else { return };
-    if st.weight <= 0.0 && st.side_weights.is_none() {
+    let Some(p) = st.paints.iter().find(|p| p.visible && p.opacity > 0.0 && !matches!(p.kind, PaintKind::Shader(_))) else { return };
+    if !stroke_is_drawn(n) {
         return;
+    }
+    if let Some(g) = grid.filter(|g| g.model == StrokeModel::Shadow) {
+        if let Some(note) = g.limit_note {
+            out.push(format!("/* {note} */"));
+        }
+        return; // drawn as inset shadows with the other effects
     }
     let mut push = |p: &str, v: String| out.push(format!("{p}: {v};"));
     let style = if st.dashes.iter().any(|d| *d > 0.0) { "dashed" } else { "solid" };
     if matches!(n.kind, NodeKind::Text(_)) {
         push("-webkit-text-stroke-width", format!("{}px", num(st.weight)));
-        push("-webkit-text-stroke-color", solid_or_first(p));
+        push("-webkit-text-stroke-color", solid_or_first(p, profile, fmt));
         return;
     }
     let gradient = !matches!(p.kind, PaintKind::Solid(_));
-    let color = if gradient { "transparent".to_string() } else { solid_or_first(p) };
+    let color = if gradient { "transparent".to_string() } else { solid_or_first(p, profile, fmt) };
     if matches!(n.kind, NodeKind::Line) {
-        push("border-top", format!("{}px {style} {}", num(st.weight), solid_or_first(p)));
+        push("border-top", format!("{}px {style} {}", num(st.weight), solid_or_first(p, profile, fmt)));
         return;
     }
-    match (st.align, st.side_weights) {
-        (StrokeAlign::Inside, Some([t, r, b, l])) => {
-            push("border-width", box_shorthand(t, r, b, l));
-            push("border-style", style.into());
-            push("border-color", color);
-        }
-        (StrokeAlign::Inside, None) => push("border", format!("{}px {style} {color}", num(st.weight))),
-        (align, _) => {
-            // The box keeps its size; outline draws outside it, shifted in for centered strokes.
-            push("outline", format!("{}px {style} {color}", num(st.weight)));
-            let off = if align == StrokeAlign::Center { -st.weight / 2.0 } else { 0.0 };
-            if off != 0.0 {
-                push("outline-offset", format!("{}px", num(off)));
-            }
+    let side_bindings = ["strokeTopWeight", "strokeRightWeight", "strokeBottomWeight", "strokeLeftWeight"];
+    let as_border = stroke_as_border(n, grid);
+    if as_border && st.align == StrokeAlign::Inside && (st.side_weights.is_some() || side_bindings.iter().any(|key| n.variables.bindings.contains_key(*key))) {
+        let [t, r, b, l] = st.side_weights.unwrap_or([st.weight; 4]);
+        push("border-width", box_shorthand(t, r, b, l));
+        push("border-style", style.into());
+        push("border-color", color);
+    } else if as_border {
+        push("border", format!("{}px {style} {color}", num(st.weight)));
+    } else {
+        // The box keeps its size; outline draws outside it, shifted in for centered strokes. A grid
+        // frame the solver does not inset also draws an Inside stroke this way, shifted in by its width.
+        push("outline", format!("{}px {style} {color}", num(st.weight)));
+        let off = match st.align {
+            StrokeAlign::Center => -st.weight / 2.0,
+            StrokeAlign::Inside => -st.weight,
+            StrokeAlign::Outside => 0.0,
+        };
+        let bound_inward = st.align != StrokeAlign::Outside && n.variables.bindings.contains_key("strokeWeight");
+        if off != 0.0 || bound_inward {
+            push("outline-offset", format!("{}px", num(off)));
         }
     }
-    if gradient && st.align == StrokeAlign::Inside {
-        push("border-image-source", paint_css(p, n.size));
+    if gradient && as_border && st.align == StrokeAlign::Inside {
+        push("border-image-source", paint_css_with(p, n.size, profile, fmt));
         push("border-image-slice", "1".into());
     }
 }
 
-fn solid_or_first(p: &Paint) -> String {
+fn solid_or_first(p: &Paint, profile: ColorProfile, fmt: ColorFormat) -> String {
     match &p.kind {
-        PaintKind::Solid(c) => css_color(c, p.opacity),
+        PaintKind::Solid(c) => css_color_in(profile, fmt, c, p.opacity),
         PaintKind::LinearGradient { stops, .. }
         | PaintKind::RadialGradient { stops, .. }
         | PaintKind::AngularGradient { stops, .. }
-        | PaintKind::DiamondGradient { stops, .. } => stops.first().map(|s| css_color(&s.color, p.opacity)).unwrap_or_else(|| "transparent".into()),
-        PaintKind::Image { .. } => "transparent".into(),
+        | PaintKind::DiamondGradient { stops, .. } => {
+            stops.first().map(|s| css_color_in(profile, fmt, &s.color, p.opacity)).unwrap_or_else(|| "transparent".into())
+        }
+        PaintKind::Image { .. } | PaintKind::Shader(_) => "transparent".into(),
     }
 }
 
@@ -455,13 +520,13 @@ fn distributes_space(a: LayoutAlign) -> bool {
     matches!(a, LayoutAlign::SpaceBetween | LayoutAlign::SpaceAround | LayoutAlign::SpaceEvenly)
 }
 
-fn text_block(t: &TextProps, out: &mut Vec<String>) {
+fn text_block(t: &TextProps, out: &mut Vec<String>, profile: ColorProfile, fmt: ColorFormat) {
     let st = &t.style;
-    if let Some(p) = st.fills.iter().find(|p| p.visible && p.opacity > 0.0) {
+    if let Some(p) = st.fills.iter().find(|p| p.visible && p.opacity > 0.0 && !matches!(p.kind, PaintKind::Shader(_))) {
         match &p.kind {
-            PaintKind::Solid(c) => out.push(format!("color: {};", css_color(c, p.opacity))),
+            PaintKind::Solid(c) => out.push(format!("color: {};", css_color_in(profile, fmt, c, p.opacity))),
             _ => {
-                out.push(format!("background: {};", paint_css(p, Vec2::new(1.0, 1.0))));
+                out.push(format!("background: {};", paint_css_with(p, Vec2::new(1.0, 1.0), profile, fmt)));
                 out.push("background-clip: text;".into());
                 out.push("-webkit-background-clip: text;".into());
                 out.push("-webkit-text-fill-color: transparent;".into());
@@ -520,6 +585,7 @@ mod tests {
                     spread: 0.0,
                     visible: true,
                     show_behind: false,
+                    blend: Default::default(),
                 },
                 Effect::LayerBlur { radius: 10.0, visible: true },
             ];
@@ -529,6 +595,192 @@ mod tests {
             css_for(&d, id),
             "width: 200px;\nheight: 100px;\nbackground: #FFF;\nborder: 1px solid #E5E5E5;\nborder-radius: 8px;\nbox-shadow: 0px 4px 4px 0px rgba(0, 0, 0, 0.25);\nfilter: blur(5px);\nopacity: 0.5;"
         );
+    }
+
+    #[test]
+    fn bound_stroke_weight_exports_resolved_css_width() {
+        let mut d = Document::new("stroke");
+        let page = d.add_page("p");
+        d.variable_collections.insert(
+            "tokens".into(),
+            VariableCollection {
+                id: "tokens".into(),
+                name: "Tokens".into(),
+                modes: vec![VariableMode { id: "default".into(), name: "Default".into() }],
+                default_mode: "default".into(),
+                variables: vec!["stroke".into()],
+                key: None,
+                source_library_key: None,
+                extensions: Default::default(),
+            },
+        );
+        d.variables.insert(
+            "stroke".into(),
+            Variable {
+                id: "stroke".into(),
+                name: "Stroke/Width".into(),
+                collection: "tokens".into(),
+                kind: VariableKind::Number,
+                values: [("default".into(), VariableValue::Number(6.0))].into(),
+                description: String::new(),
+                scopes: vec![],
+                hidden_from_publishing: false,
+                key: None,
+                code_syntax: Default::default(),
+                extensions: Default::default(),
+                mode_extensions: Default::default(),
+            },
+        );
+        let id = d.alloc_id();
+        let mut n = Node::rectangle(id, Rect::new(0.0, 0.0, 100.0, 50.0));
+        n.fills.clear();
+        n.stroke.paints = vec![Paint::solid(Color::BLACK)];
+        n.stroke.weight = 2.0;
+        n.variables.bindings.insert("strokeWeight".into(), "stroke".into());
+        let id = d.insert(page, n).unwrap();
+        assert_eq!(css_for(&d, id), "width: 100px;\nheight: 50px;\nborder: var(--Stroke-Width, 6px) solid #000;", "stored width must not leak into CSS");
+    }
+
+    #[test]
+    fn bound_side_stroke_weights_export_resolved_border_widths() {
+        let mut d = Document::new("stroke-sides");
+        let page = d.add_page("p");
+        d.variable_collections.insert(
+            "tokens".into(),
+            VariableCollection {
+                id: "tokens".into(),
+                name: "Tokens".into(),
+                modes: vec![VariableMode { id: "default".into(), name: "Default".into() }],
+                default_mode: "default".into(),
+                variables: vec!["top".into(), "right".into(), "bottom".into(), "left".into()],
+                key: None,
+                source_library_key: None,
+                extensions: Default::default(),
+            },
+        );
+        for (id, name, value) in [("top", "Stroke/Top", 6.0), ("right", "Stroke/Right", 7.0), ("bottom", "Stroke/Bottom", 8.0), ("left", "Stroke/Left", 9.0)] {
+            d.variables.insert(
+                id.into(),
+                Variable {
+                    id: id.into(),
+                    name: name.into(),
+                    collection: "tokens".into(),
+                    kind: VariableKind::Number,
+                    values: [("default".into(), VariableValue::Number(value))].into(),
+                    description: String::new(),
+                    scopes: vec![],
+                    hidden_from_publishing: false,
+                    key: None,
+                    code_syntax: Default::default(),
+                    extensions: Default::default(),
+                    mode_extensions: Default::default(),
+                },
+            );
+        }
+        let id = d.alloc_id();
+        let mut n = Node::rectangle(id, Rect::new(0.0, 0.0, 100.0, 50.0));
+        n.fills.clear();
+        n.stroke.paints = vec![Paint::solid(Color::BLACK)];
+        n.stroke.weight = 2.0;
+        n.stroke.side_weights = Some([2.0, 3.0, 4.0, 5.0]);
+        for (key, var) in [("strokeTopWeight", "top"), ("strokeRightWeight", "right"), ("strokeBottomWeight", "bottom"), ("strokeLeftWeight", "left")] {
+            n.variables.bindings.insert(key.into(), var.into());
+        }
+        let id = d.insert(page, n).unwrap();
+        assert_eq!(css_for(&d, id), "width: 100px;\nheight: 50px;\nborder-width: var(--Stroke-Top, 6px) var(--Stroke-Right, 7px) var(--Stroke-Bottom, 8px) var(--Stroke-Left, 9px);\nborder-style: solid;\nborder-color: #000;", "stored side widths must not leak into CSS");
+    }
+
+    #[test]
+    fn bound_center_stroke_uses_resolved_width_for_outline_offset() {
+        let mut d = Document::new("stroke-center");
+        let page = d.add_page("p");
+        d.variable_collections.insert(
+            "tokens".into(),
+            VariableCollection {
+                id: "tokens".into(),
+                name: "Tokens".into(),
+                modes: vec![VariableMode { id: "default".into(), name: "Default".into() }],
+                default_mode: "default".into(),
+                variables: vec!["stroke".into()],
+                key: None,
+                source_library_key: None,
+                extensions: Default::default(),
+            },
+        );
+        d.variables.insert(
+            "stroke".into(),
+            Variable {
+                id: "stroke".into(),
+                name: "Stroke/Width".into(),
+                collection: "tokens".into(),
+                kind: VariableKind::Number,
+                values: [("default".into(), VariableValue::Number(6.0))].into(),
+                description: String::new(),
+                scopes: vec![],
+                hidden_from_publishing: false,
+                key: None,
+                code_syntax: Default::default(),
+                extensions: Default::default(),
+                mode_extensions: Default::default(),
+            },
+        );
+        let id = d.alloc_id();
+        let mut n = Node::rectangle(id, Rect::new(0.0, 0.0, 100.0, 50.0));
+        n.fills.clear();
+        n.stroke.paints = vec![Paint::solid(Color::BLACK)];
+        n.stroke.weight = 2.0;
+        n.stroke.align = StrokeAlign::Center;
+        n.variables.bindings.insert("strokeWeight".into(), "stroke".into());
+        let id = d.insert(page, n).unwrap();
+        assert_eq!(
+            css_for(&d, id),
+            "width: 100px;\nheight: 50px;\noutline: var(--Stroke-Width, 6px) solid #000;\noutline-offset: calc(-0.5 * var(--Stroke-Width, 6px));",
+            "centered outline offset must follow the bound width",
+        );
+    }
+
+    #[test]
+    fn zero_stored_stroke_width_with_binding_is_not_dropped() {
+        let mut d = Document::new("stroke-zero");
+        let page = d.add_page("p");
+        d.variable_collections.insert(
+            "tokens".into(),
+            VariableCollection {
+                id: "tokens".into(),
+                name: "Tokens".into(),
+                modes: vec![VariableMode { id: "default".into(), name: "Default".into() }],
+                default_mode: "default".into(),
+                variables: vec!["stroke".into()],
+                key: None,
+                source_library_key: None,
+                extensions: Default::default(),
+            },
+        );
+        d.variables.insert(
+            "stroke".into(),
+            Variable {
+                id: "stroke".into(),
+                name: "Stroke/Width".into(),
+                collection: "tokens".into(),
+                kind: VariableKind::Number,
+                values: [("default".into(), VariableValue::Number(6.0))].into(),
+                description: String::new(),
+                scopes: vec![],
+                hidden_from_publishing: false,
+                key: None,
+                code_syntax: Default::default(),
+                extensions: Default::default(),
+                mode_extensions: Default::default(),
+            },
+        );
+        let id = d.alloc_id();
+        let mut n = Node::rectangle(id, Rect::new(0.0, 0.0, 100.0, 50.0));
+        n.fills.clear();
+        n.stroke.paints = vec![Paint::solid(Color::BLACK)];
+        n.stroke.weight = 0.0;
+        n.variables.bindings.insert("strokeWeight".into(), "stroke".into());
+        let id = d.insert(page, n).unwrap();
+        assert_eq!(css_for(&d, id), "width: 100px;\nheight: 50px;\nborder: var(--Stroke-Width, 6px) solid #000;");
     }
 
     #[test]
@@ -737,7 +989,7 @@ mod tests {
 
         assert_eq!(
             css_for(&d, grid_id),
-            "display: grid;\nwidth: 480px;\nheight: 200px;\npadding: 12px 16px;\ngrid-template-columns: minmax(0, 1fr) 120px auto;\ngrid-template-rows: 80px auto;\ngap: 24px 16px;\noverflow: hidden;"
+            "display: grid;\nwidth: 480px;\nheight: 200px;\npadding: 12px 16px;\nbox-sizing: border-box;\ngrid-template-columns: minmax(0, 1fr) 120px auto;\ngrid-template-rows: 80px auto;\ngap: 24px 16px;\nalign-content: start;\noverflow: hidden;"
         );
         assert_eq!(css_for(&d, pinned_id), "grid-column: 2 / span 2;\ngrid-row: 1 / span 1;\nwidth: 200px;\nheight: 80px;");
         assert_eq!(css_for(&d, span_only_id), "grid-column: span 2;\nwidth: 180px;\nheight: 60px;");
@@ -881,7 +1133,7 @@ mod tests {
     }
 
     #[test]
-    fn hugging_grid_exports_the_solved_height_with_template_rows() {
+    fn hugging_grid_exports_the_solved_height_with_content_sized_rows() {
         use crate::codegen::fixture;
         let al = AutoLayout { grid_columns: 2, grid_rows: 2, primary_sizing: Sizing::Fixed, counter_sizing: Sizing::Hug, ..Default::default() };
         let (mut d, grid) = fixture::grid_frame(al, Vec2::new(300.0, 500.0));
@@ -890,7 +1142,10 @@ mod tests {
         }
         d.relayout_subtree(grid);
         assert_eq!(d.get(grid).unwrap().size, Vec2::new(300.0, 70.0), "rows take their tallest child");
-        solved_grid_css(&d, grid, 2, 2);
+        // The solver sizes a Flex row by its content (20 and 50), which `1fr` rows of the 70px box would
+        // not: they would both be 35px. So the rows are the content-sized implicit ones, with no template.
+        let css = solved_grid_template(&d, grid, "repeat(2, minmax(0, 1fr))", None);
+        assert!(!css.contains("grid-template-rows") && css.contains("align-content: start;"), "{css}");
     }
 
     #[test]
@@ -915,7 +1170,7 @@ mod tests {
         let css = css_for(&d, grid);
         assert_eq!(
             css,
-            "display: grid;\nwidth: 300px;\nheight: 200px;\ngrid-template-columns: repeat(2, minmax(0, 1fr));\ngrid-template-rows: repeat(2, minmax(0, 1fr));"
+            "display: grid;\nwidth: 300px;\nheight: 200px;\ngrid-template-columns: repeat(2, minmax(0, 1fr));\ngrid-template-rows: repeat(2, minmax(0, 1fr));\nalign-content: start;"
         );
     }
 
@@ -1176,5 +1431,92 @@ mod tests {
         let css = css_for(&d, rect);
         assert!(!css.contains("width:"), "horizontal Fill in grid omits width: {css}");
         assert!(css.contains("height: 20px;"), "{css}");
+    }
+
+    #[test]
+    fn color_format_setting_changes_css_and_tailwind_while_default_stays_unchanged() {
+        let (d, id) = doc_with(|d, page| {
+            let i = d.alloc_id();
+            let mut n = Node::rectangle(i, Rect::new(0.0, 0.0, 120.0, 60.0));
+            n.fills = vec![Paint::solid(Color::rgb(255, 0, 0))];
+            n.stroke.paints = vec![Paint { opacity: 0.25, ..Paint::solid(Color::rgb(255, 0, 0)) }];
+            n.stroke.weight = 1.0;
+            d.insert(page, n).unwrap();
+        });
+
+        let css_default = css_for(&d, id);
+        let css_hex = css_for_with(&d, id, ColorFormat::Hex);
+        assert_eq!(css_default, css_hex, "default css_for must match ColorFormat::Hex");
+        assert!(css_hex.contains("background: #F00;"), "{css_hex}");
+        assert!(css_hex.contains("border: 1px solid rgba(255, 0, 0, 0.25);"), "{css_hex}");
+
+        let css_rgb = css_for_with(&d, id, ColorFormat::Rgb);
+        assert!(css_rgb.contains("background: rgb(255 0 0);"), "{css_rgb}");
+        assert!(css_rgb.contains("border: 1px solid rgb(255 0 0 / 0.25);"), "{css_rgb}");
+
+        let css_oklch = css_for_with(&d, id, ColorFormat::Oklch);
+        assert!(css_oklch.contains("background: oklch(62.8% 0.26 29.23);"), "{css_oklch}");
+        assert!(css_oklch.contains("border: 1px solid oklch(62.8% 0.26 29.23 / 0.25);"), "{css_oklch}");
+
+        let tw_default = crate::tailwind_for(&d, id);
+        let tw_hex = crate::tailwind_for_with(&d, id, ColorFormat::Hex);
+        assert_eq!(tw_default, tw_hex, "default tailwind_for must match ColorFormat::Hex");
+        assert!(tw_hex.contains("bg-[#FF0000]"), "{tw_hex}");
+
+        let tw_rgb = crate::tailwind_for_with(&d, id, ColorFormat::Rgb);
+        assert!(tw_rgb.contains("bg-[rgb(255_0_0)]"), "{tw_rgb}");
+        assert!(tw_rgb.contains("border-[rgb(255_0_0_/_0.25)]"), "{tw_rgb}");
+
+        let tw_oklch = crate::tailwind_for_with(&d, id, ColorFormat::Oklch);
+        assert!(tw_oklch.contains("bg-[oklch(62.8%_0.26_29.23)]"), "{tw_oklch}");
+        assert!(tw_oklch.contains("border-[oklch(62.8%_0.26_29.23_/_0.25)]"), "{tw_oklch}");
+
+        // CodeLanguage::generate respects CodeLanguageOptions::color_format
+        assert_eq!(crate::CodeLanguage::Css.generate(&d, id, ColorFormat::Oklch), css_oklch);
+        assert_eq!(crate::CodeLanguage::Tailwind.generate(&d, id, ColorFormat::Oklch), tw_oklch);
+    }
+
+    #[test]
+    fn display_p3_document_emits_color_display_p3_outside_srgb_and_srgb_never_does() {
+        let (mut d, id) = doc_with(|d, page| {
+            let i = d.alloc_id();
+            let mut n = Node::rectangle(i, Rect::new(0.0, 0.0, 120.0, 60.0));
+            // Pure primary red (1, 0, 0) in Display P3 is outside sRGB; white (1, 1, 1) is inside sRGB.
+            n.fills = vec![Paint::solid(Color { r: 1.0, g: 0.0, b: 0.0, a: 1.0 })];
+            n.stroke.paints = vec![Paint::solid(Color::WHITE)];
+            n.stroke.weight = 1.0;
+            n.effects = vec![Effect::DropShadow {
+                color: Color { r: 0.0, g: 1.0, b: 0.0, a: 0.5 },
+                offset: Vec2::new(0.0, 2.0),
+                radius: 4.0,
+                spread: 0.0,
+                visible: true,
+                show_behind: false,
+                blend: Default::default(),
+            }];
+            d.insert(page, n).unwrap();
+        });
+
+        // In an sRGB document, color(display-p3 ...) is never emitted.
+        assert_eq!(d.color_profile, ColorProfile::Srgb);
+        for fmt in ColorFormat::ALL {
+            let srgb_css = css_for_with(&d, id, fmt);
+            assert!(!srgb_css.contains("display-p3"), "sRGB document must never emit display-p3 in {fmt:?}: {srgb_css}");
+        }
+
+        // In a Display P3 document, colours outside sRGB emit color(display-p3 r g b), while in-gamut white stays #FFF.
+        d.color_profile = ColorProfile::DisplayP3;
+        let p3_css = css_for(&d, id);
+        assert!(p3_css.contains("background: color(display-p3 1 0 0);"), "{p3_css}");
+        assert!(p3_css.contains("border: 1px solid #FFF;"), "in-sRGB white in P3 doc stays #FFF: {p3_css}");
+        assert!(p3_css.contains("box-shadow: 0px 2px 4px 0px color(display-p3 0 1 0 / 0.5);"), "{p3_css}");
+
+        let p3_tw = crate::tailwind_for(&d, id);
+        assert!(p3_tw.contains("bg-[color(display-p3_1_0_0)]"), "{p3_tw}");
+        assert!(p3_tw.contains("border-[#FFFFFF]"), "{p3_tw}");
+
+        // Choosing OKLCH in a Display P3 document emits wide-gamut oklch(...) values.
+        let p3_oklch = css_for_with(&d, id, ColorFormat::Oklch);
+        assert!(p3_oklch.contains("background: oklch(64.86% 0.3 28.96);"), "{p3_oklch}");
     }
 }
